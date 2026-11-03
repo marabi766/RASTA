@@ -42,21 +42,39 @@ exports[`AppShell the full shell (ltr) 1`] = `
     >
       <nav
         aria-label="ناوبری اصلی"
-        class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+        class="flex flex-col gap-1 border-b border-border bg-surface-raised p-3 md:border-b-0 md:border-e"
       >
-        <a
-          aria-current="page"
-          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
-          href="/assets"
+        <button
+          aria-controls="sidebar-links"
+          aria-expanded="false"
+          class="flex items-center justify-between gap-2 rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-content focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus md:hidden"
+          type="button"
         >
-          ماشین‌آلات
-        </a>
-        <a
-          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
-          href="/orders"
+          منوی ناوبری
+          <span
+            aria-hidden="true"
+          >
+            ▾
+          </span>
+        </button>
+        <div
+          class="flex-col gap-1 md:flex hidden"
+          id="sidebar-links"
         >
-          سفارش‌ها
-        </a>
+          <a
+            aria-current="page"
+            class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+            href="/assets"
+          >
+            ماشین‌آلات
+          </a>
+          <a
+            class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+            href="/orders"
+          >
+            سفارش‌ها
+          </a>
+        </div>
       </nav>
       <main
         class="flex flex-1 flex-col gap-6 p-4 md:p-6"
@@ -127,21 +145,39 @@ exports[`AppShell the full shell (rtl) 1`] = `
     >
       <nav
         aria-label="ناوبری اصلی"
-        class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+        class="flex flex-col gap-1 border-b border-border bg-surface-raised p-3 md:border-b-0 md:border-e"
       >
-        <a
-          aria-current="page"
-          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
-          href="/assets"
+        <button
+          aria-controls="sidebar-links"
+          aria-expanded="false"
+          class="flex items-center justify-between gap-2 rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-content focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus md:hidden"
+          type="button"
         >
-          ماشین‌آلات
-        </a>
-        <a
-          class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
-          href="/orders"
+          منوی ناوبری
+          <span
+            aria-hidden="true"
+          >
+            ▾
+          </span>
+        </button>
+        <div
+          class="flex-col gap-1 md:flex hidden"
+          id="sidebar-links"
         >
-          سفارش‌ها
-        </a>
+          <a
+            aria-current="page"
+            class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+            href="/assets"
+          >
+            ماشین‌آلات
+          </a>
+          <a
+            class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+            href="/orders"
+          >
+            سفارش‌ها
+          </a>
+        </div>
       </nav>
       <main
         class="flex flex-1 flex-col gap-6 p-4 md:p-6"
@@ -374,21 +410,39 @@ exports[`Sidebar with a current item (ltr) 1`] = `
 >
   <nav
     aria-label="ناوبری اصلی"
-    class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+    class="flex flex-col gap-1 border-b border-border bg-surface-raised p-3 md:border-b-0 md:border-e"
   >
-    <a
-      aria-current="page"
-      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
-      href="/assets"
+    <button
+      aria-controls="sidebar-links"
+      aria-expanded="false"
+      class="flex items-center justify-between gap-2 rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-content focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus md:hidden"
+      type="button"
     >
-      ماشین‌آلات
-    </a>
-    <a
-      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
-      href="/orders"
+      منوی ناوبری
+      <span
+        aria-hidden="true"
+      >
+        ▾
+      </span>
+    </button>
+    <div
+      class="flex-col gap-1 md:flex hidden"
+      id="sidebar-links"
     >
-      سفارش‌ها
-    </a>
+      <a
+        aria-current="page"
+        class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+        href="/assets"
+      >
+        ماشین‌آلات
+      </a>
+      <a
+        class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+        href="/orders"
+      >
+        سفارش‌ها
+      </a>
+    </div>
   </nav>
 </div>
 `;
@@ -399,21 +453,39 @@ exports[`Sidebar with a current item (rtl) 1`] = `
 >
   <nav
     aria-label="ناوبری اصلی"
-    class="flex flex-col gap-1 border-e border-border bg-surface-raised p-3"
+    class="flex flex-col gap-1 border-b border-border bg-surface-raised p-3 md:border-b-0 md:border-e"
   >
-    <a
-      aria-current="page"
-      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
-      href="/assets"
+    <button
+      aria-controls="sidebar-links"
+      aria-expanded="false"
+      class="flex items-center justify-between gap-2 rounded-md border border-border-strong px-3 py-2 text-sm font-medium text-content focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus md:hidden"
+      type="button"
     >
-      ماشین‌آلات
-    </a>
-    <a
-      class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
-      href="/orders"
+      منوی ناوبری
+      <span
+        aria-hidden="true"
+      >
+        ▾
+      </span>
+    </button>
+    <div
+      class="flex-col gap-1 md:flex hidden"
+      id="sidebar-links"
     >
-      سفارش‌ها
-    </a>
+      <a
+        aria-current="page"
+        class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors bg-accent text-accent-text font-medium"
+        href="/assets"
+      >
+        ماشین‌آلات
+      </a>
+      <a
+        class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors text-content-muted hover:bg-surface-sunken hover:text-content"
+        href="/orders"
+      >
+        سفارش‌ها
+      </a>
+    </div>
   </nav>
 </div>
 `;

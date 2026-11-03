@@ -1,9 +1,18 @@
-# Configuration disclosure inventory (task 1202, PR A)
+# Configuration disclosure inventory (tasks 1202 / 1218)
 
 PR A covers storage/endpoint SDK diagnostics and database connection boundaries (items 1+2).
-PR B is the required follow-up for reporting sinks and their blanket guard (items 3+4).
-The remaining entries below are not safety exemptions or a claim that the class is closed.
-PR B can start from main: it must classify failures at its sinks independently of PR A.
+Task 1218's first reporting slice covers the seven service CLI rejection handlers,
+both outbox B2 rejection/cleanup paths, and the Temporal deployment gate's child
+stderr/JSON/stack and returned text. It uses `commandFailure` in `@rasta/config`:
+a fresh closed message and the same registered-code sanitizer as #546. Unknown
+errors, subclasses, names, getters, causes and string coercion do not bypass it.
+Refusals no longer repeat even locally constructed error messages. Reports of
+prior committed batches remain; a refusal never asserts that nothing changed.
+
+**The disclosure class remains open.** The size rule requires a stacked follow-up
+for the broad script audit and blanket sink guard. This slice adds sentinel
+regressions, not a blanket guard. No existing inventory entry is grandfathered
+as safe. The remaining entries below are not safety exemptions.
 
 ## Boundaries covered by PR A
 
@@ -40,21 +49,59 @@ All 16 service factories are covered; each is probed through the actual built ge
 - `services/procurement-service/src/prisma/prisma.service.ts:58` — `DATABASE_URL_PROCUREMENT`.
 - `services/supplier-service/src/prisma/prisma.service.ts:96` — `DATABASE_URL_SUPPLIER`.
 
-## Reporting follow-up: every service CLI sink found
+## Service CLI rejection reporters covered by task 1218
 
-These seven handlers stay unchanged in PR A. Their original error exits remain in force; PR B must reduce every foreign failure, including cleanup failures, without claiming prior batches rolled back.
+All seven final rejection handlers use the shared closed sanitizer. Actual built
+entry points are exercised with failures before work, during the command and
+at cleanup. Asset/fleet drain checks also prove drained 0 and undrained 1.
+This covers rejection reporting; successful report fields and SDK side-channel
+logging still belong in the broader provenance audit below.
 
-| Sink                                                                            | Error exit | Disposition                                                    |
-| ------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------- |
-| `services/fleet-service/src/fleet/clear-transferred.cli.ts:66`                  | 2          | PR B: fixed reporting and regression/mutant coverage required. |
-| `services/fleet-service/src/fleet/drain-check.cli.ts:66`                        | 2          | PR B: fixed reporting and regression/mutant coverage required. |
-| `services/identity-service/src/keycloak/projection.cli.ts:122`                  | 2          | PR B: fixed reporting and regression/mutant coverage required. |
-| `services/asset-service/src/insurance/reproject.cli.ts:67`                      | 2          | PR B: fixed reporting and regression/mutant coverage required. |
-| `services/asset-service/src/insurance/drain-check.cli.ts:52`                    | 2          | PR B: fixed reporting and regression/mutant coverage required. |
-| `services/asset-service/src/outbox/flush.cli.ts:109`                            | 2          | PR B: fixed reporting and regression/mutant coverage required. |
-| `services/economic-service/src/transaction/resolved-dispute-backfill.cli.ts:44` | 1          | PR B: fixed reporting and regression/mutant coverage required. |
+| Sink                                                                            | Error exit | Disposition                                               |
+| ------------------------------------------------------------------------------- | ---------- | --------------------------------------------------------- |
+| `services/fleet-service/src/fleet/clear-transferred.cli.ts:66`                  | 2          | Closed rejection reporter; sentinel and exit regressions. |
+| `services/fleet-service/src/fleet/drain-check.cli.ts:66`                        | 2          | Closed rejection reporter; sentinel and exit regressions. |
+| `services/identity-service/src/keycloak/projection.cli.ts:122`                  | 2          | Closed rejection reporter; sentinel and exit regressions. |
+| `services/asset-service/src/insurance/reproject.cli.ts:67`                      | 2          | Closed rejection reporter; sentinel and exit regressions. |
+| `services/asset-service/src/insurance/drain-check.cli.ts:52`                    | 2          | Closed rejection reporter; sentinel and exit regressions. |
+| `services/asset-service/src/outbox/flush.cli.ts:109`                            | 2          | Closed rejection reporter; sentinel and exit regressions. |
+| `services/economic-service/src/transaction/resolved-dispute-backfill.cli.ts:44` | 1          | Closed rejection reporter; sentinel and exit regressions. |
 
-Asset/fleet drain-check still distinguish drained (0), undrained (1), and error (2). Economic backfill still exits 1 on failure. No CLI source or exit decision is changed in PR A.
+Asset/fleet drain-check still distinguish drained (0), undrained (1), and error (2). Economic backfill still exits 1 on failure. Task 1218 preserves these service CLI exit decisions.
+
+## Named script reporters covered by task 1218
+
+- Both B2 CLIs: global and per-service failures use `commandFailure`. A cleanup
+  failure emits a scoped `refused` event with `phase: cleanup`, counts that
+  service as refused exactly once, attempts the later services, emits the final
+  summary and exits 1. A preceding `done` or verified vacuum records work that
+  happened; the summary determines the overall outcome. Cleanup can follow an
+  earlier refusal, so two diagnostic events may describe one refused service.
+- Temporal gate: child stderr and arbitrary JSON, poller/activity identifiers,
+  task-queue values and unexpected error stacks are withheld. Fixed shape
+  diagnostics and validated numeric counts remain. The gate still refuses
+  malformed/ambiguous replies. Per the explicit task-1218 exit contract, both
+  confirmed blockers and unverifiable errors exit 1 (main previously used 2
+  for the latter); success is 0.
+
+## Required stacked follow-up: broader inventory and blanket guard
+
+The following historical task-1202 sweep remains open except for the named
+rejection paths above. Its line numbers identify that snapshot, not current
+source positions. A task-1218 sibling sweep also found 247 direct output /
+inherited-stdio candidates in non-test `scripts/*.mjs`, 98 candidates in CLI /
+seed / main sources, and 57 shell / workflow / Dockerfile surfaces. These are
+search candidates, not 402 confirmed disclosures or a complete provenance proof.
+
+The follow-up must audit **all** dynamic output, including successful report
+fields, loggers, aliases/computed accesses, child pipes and inherited/file
+stdio, across JS/CJS/MJS/TS/TSX, shell, workflows and package command dispatch.
+Kafka free-text/metadata, seed/bootstrap failures, Prisma/psql/Docker wrappers,
+backup/restore and evidence tools remain open. It must install a fail-closed
+blanket guard with adversarial mutants, reject unknown sinks/escapes, prove
+safe output provenance without a permissive baseline, and preserve operational
+outcomes and exit contracts. Neither the sentinel suite here nor the existing
+URL-parser guard provides that blanket coverage.
 
 ## Script reporting sweep
 
@@ -110,8 +157,8 @@ rg -n '(error|err|e)\.message|String\((error|err|e)\)|\.stderr|\.stack' scripts 
 | `scripts/backup-restore-drill-test-support.mjs:689`         | Test-only process/fixture diagnostics; keep failure evidence for assertions.                                |
 | `scripts/check-kafka-credential-scope.mjs:34`               | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/progress.mjs:18`                                   | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
-| `scripts/outbox-b2-backfill.mjs:229`                        | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
-| `scripts/outbox-b2-backfill.mjs:253`                        | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
+| `scripts/outbox-b2-backfill.mjs:229`                        | Task 1218 closes rejection text/cleanup; successful output provenance remains for the blanket audit.        |
+| `scripts/outbox-b2-backfill.mjs:253`                        | Task 1218 closes rejection text/cleanup; successful output provenance remains for the blanket audit.        |
 | `scripts/container-scope-lib.mjs:90`                        | Comment only; no runtime output.                                                                            |
 | `scripts/container-scope-lib.mjs:92`                        | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/run-test-phases.mjs:36`                            | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
@@ -119,16 +166,16 @@ rg -n '(error|err|e)\.message|String\((error|err|e)\)|\.stderr|\.stack' scripts 
 | `scripts/progress-schema.mjs:25`                            | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/container-scope.mjs:84`                            | Fixed literal argument/test-count refusal; no foreign diagnostic.                                           |
 | `scripts/verify-security-event-outbox-migration.mjs:168`    | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
-| `scripts/marketplace-saga-drain-check.mjs:70`               | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
-| `scripts/marketplace-saga-drain-check.mjs:245`              | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
+| `scripts/marketplace-saga-drain-check.mjs:70`               | Task 1218 closes rejection text/cleanup; successful output provenance remains for the blanket audit.        |
+| `scripts/marketplace-saga-drain-check.mjs:245`              | Task 1218 closes rejection text/cleanup; successful output provenance remains for the blanket audit.        |
 | `scripts/verify-grafana-dashboard-isolation-lib.mjs:35`     | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/verify-grafana-dashboard-isolation-lib.mjs:39`     | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/verify-test-independence.mjs:141`                  | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/verify-test-independence.mjs:152`                  | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/verify-test-independence.mjs:224`                  | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/verify-test-independence.mjs:234`                  | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
-| `scripts/outbox-b2-vacuum.mjs:168`                          | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
-| `scripts/outbox-b2-vacuum.mjs:182`                          | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
+| `scripts/outbox-b2-vacuum.mjs:168`                          | Task 1218 closes rejection text/cleanup; successful output provenance remains for the blanket audit.        |
+| `scripts/outbox-b2-vacuum.mjs:182`                          | Task 1218 closes rejection text/cleanup; successful output provenance remains for the blanket audit.        |
 | `scripts/check-unit-step-concurrency-lib.mjs:705`           | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/check-unit-step-concurrency-lib.mjs:901`           | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/check-unit-step-concurrency-lib.mjs:909`           | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
@@ -202,7 +249,7 @@ rg -n '(error|err|e)\.message|String\((error|err|e)\)|\.stderr|\.stack' scripts 
 | `scripts/outbox-b2-lib.mjs:746`                             | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 | `scripts/aggregation-campaign-workflow-lib.mjs:292`         | PR B provenance audit/reduction required; deferred by the prescribed 1+2 / 3+4 split, not exempted as safe. |
 
-PR B must also cover indirect Temporal child JSON/stack at `scripts/marketplace-saga-drain-check.mjs:92,:245`, not only stderr, and first-connection/cleanup failures in both outbox B2 CLIs. Preserve fail-closed deployment gates, partial-work reporting, and all exits (outbox B2 and saga gate errors: 1).
+Task 1218 covers indirect Temporal child JSON/stack and B2 first-failure/cleanup reporting as described above. All other unproven script reporting paths in this snapshot remain open for the stacked follow-up.
 
 ## Preserved business behavior
 

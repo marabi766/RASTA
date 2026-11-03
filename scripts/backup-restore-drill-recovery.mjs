@@ -720,16 +720,31 @@ export function inspectProcessGroup(
  * bounded wait) or 'unknown' (not proven ours, or not fully inspectable: nothing is signalled).
  * Never matches on a name or command line. Journal groups and report groups go through here alike.
  */
+const GROUP_INSPECTION_WAIT_MS = 100;
+const GROUP_INSPECTION_BACKOFF_MS = 10;
+
 export async function recoverProcessGroups(
   pgids,
   id,
-  { reap = reapProcessGroup, ...inspect } = {},
+  {
+    reap = reapProcessGroup,
+    inspectGroup = inspectProcessGroup,
+    now = () => performance.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    ...inspect
+  } = {},
 ) {
   const outcome = { gone: [], reaped: [], unknown: [], orphan: [] };
   for (const pgid of pgids) {
-    const state = inspectProcessGroup(pgid, id, inspect);
+    const deadline = now() + GROUP_INSPECTION_WAIT_MS;
+    let state = inspectGroup(pgid, id, inspect);
+    while (state === 'unknown' && now() < deadline) {
+      await sleep(Math.min(GROUP_INSPECTION_BACKOFF_MS, Math.max(0, deadline - now())));
+      if (now() >= deadline) break;
+      state = inspectGroup(pgid, id, inspect);
+    }
     if (state === 'gone') outcome.gone.push(pgid);
-    else if (state === 'unknown') outcome.unknown.push(pgid);
+    else if (state !== 'proven') outcome.unknown.push(pgid);
     else {
       const result = await reap(pgid);
       outcome[result === 'orphan' ? 'orphan' : result === 'gone' ? 'gone' : 'reaped'].push(pgid);

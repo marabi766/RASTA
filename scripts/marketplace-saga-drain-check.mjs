@@ -13,7 +13,7 @@
  *      and after; a (workflow id, run id) listed twice is unverifiable);
  *   3. not one of them has a pending activity (`workflow describe`, each
  *      listed run exactly once: visibility does not index pending activities).
- * Exit 1: a poller or a pending activity was found. Exit 2: anything could not
+ * Exit 1: a poller or a pending activity was found, or anything could not
  * be checked — a missing setting, the CLI absent or failing, output it does
  * not recognise. Both block the deployment; there is no exception.
  *
@@ -34,6 +34,7 @@
  * an API key: the `temporal` CLI's own TEMPORAL_* variables, inherited.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
+import { commandFailure, clientFailureCode } from '../packages/config/src/command-failure.js';
 import { spawnSync } from 'node:child_process';
 
 const QUERY = 'WorkflowType="orderSaga" AND ExecutionStatus="Running"';
@@ -50,7 +51,7 @@ function setting(name) {
 }
 
 /** A spawn failure's errno name (`ENOENT`, `EACCES`, …), or a fixed word for anything else. */
-const spawnCode = (error) => (/^E[A-Z0-9]+$/.test(error?.code ?? '') ? error.code : 'spawn error');
+const spawnCode = clientFailureCode;
 
 function temporal(cli, args) {
   const result = spawnSync(cli, args, {
@@ -67,8 +68,7 @@ function temporal(cli, args) {
     );
   }
   if (result.status !== 0) {
-    const detail = result.stderr.trim().split('\n').at(-1) ?? '';
-    throw new Unverifiable(`${command} exited ${result.status ?? result.signal}: ${detail}`);
+    throw new Unverifiable(`${command} failed; child diagnostics withheld`);
   }
   try {
     return JSON.parse(result.stdout);
@@ -89,7 +89,7 @@ function countRunning(cli, common) {
   ]);
   const count = countOf(answer);
   if (count === null) {
-    throw new Unverifiable(`temporal workflow count: not a count: ${JSON.stringify(answer)}`);
+    throw new Unverifiable('temporal workflow count: not a count');
   }
   return count;
 }
@@ -131,11 +131,8 @@ function check() {
   ) {
     throw new Unverifiable('temporal task-queue describe: no poller list in its answer');
   }
-  for (const poller of queue.pollers ?? []) {
-    blockers.push(
-      `task queue ${taskQueue} has a poller ${poller.identity ?? '?'} ` +
-        `(${poller.taskQueueType ?? '?'}, last seen ${poller.lastAccessTime ?? '?'})`,
-    );
+  for (let i = 0; i < (queue.pollers ?? []).length; i += 1) {
+    blockers.push('task queue has an active poller; details withheld');
   }
 
   const before = countRunning(cli, common);
@@ -167,7 +164,7 @@ function check() {
     }
     const identity = JSON.stringify([workflowId, runId]);
     if (seen.has(identity)) {
-      throw new Unverifiable(`temporal workflow list: ${workflowId} ${runId} is listed twice`);
+      throw new Unverifiable('temporal workflow list: an execution is listed twice');
     }
     seen.add(identity);
     executions.push({ workflowId, runId });
@@ -205,22 +202,14 @@ function check() {
       info?.type?.name !== 'orderSaga' ||
       !Array.isArray(pending)
     ) {
-      throw new Unverifiable(
-        `temporal workflow describe ${workflowId} ${runId}: not a description of that run`,
-      );
+      throw new Unverifiable('temporal workflow describe: not a description of that run');
     }
     const queueOfRun = described.executionConfig?.taskQueue?.name;
     if (queueOfRun !== taskQueue) {
-      throw new Unverifiable(
-        `${workflowId} runs on task queue ${JSON.stringify(queueOfRun)}, not ${taskQueue}: ` +
-          'its pollers were not checked',
-      );
+      throw new Unverifiable('workflow runs on an unchecked task queue; details withheld');
     }
-    for (const activity of pending) {
-      blockers.push(
-        `${workflowId} has a pending activity ${activity?.activityType?.name ?? '?'} ` +
-          `(${activity?.state ?? '?'}, attempt ${activity?.attempt ?? '?'})`,
-      );
+    for (let i = 0; i < pending.length; i += 1) {
+      blockers.push('workflow has a pending activity; details withheld');
     }
   }
 
@@ -242,7 +231,7 @@ try {
     `marketplace saga drain check: OK — no poller, ${running} running order saga(s), no pending activity`,
   );
 } catch (error) {
-  const reason = error instanceof Unverifiable ? error.message : String(error?.stack ?? error);
+  const reason = error instanceof Unverifiable ? error.message : commandFailure(error);
   console.error(`marketplace saga drain check: cannot verify — deployment blocked: ${reason}`);
-  process.exit(2);
+  process.exit(1);
 }

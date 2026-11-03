@@ -15,6 +15,9 @@ import type { ReactNode } from 'react';
  * focusable element with none is announced as nothing. A `group` rather than a
  * `region`: a page of tables would otherwise become a page of landmarks.
  *
+ * It shows that it scrolls: `.table-scroll` (`app/globals.css`) draws a soft
+ * shadow on each edge that still has columns out of view, with no script.
+ *
  * The scrolling is horizontal only, so the direction is the reading direction:
  * in a right-to-left page the first column starts at the right edge and the
  * rest is reached by scrolling left, with no per-direction code here.
@@ -30,7 +33,7 @@ export function TableScroll({ label, children }: { label: string; children: Reac
       // the overflowing columns are unreachable without a pointer.
       // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
       tabIndex={0}
-      className="overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+      className="table-scroll overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
     >
       {children}
     </div>

@@ -1,5 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
 
+import {
+  LAYOUT_GATEWAY_PORT,
+  LAYOUT_ORIGIN,
+  LAYOUT_PORT,
+  layoutSessionSecret,
+} from './e2e/layout/constants';
+
 /**
  * Browser tests for the portal.
  *
@@ -16,6 +23,13 @@ import { defineConfig, devices } from '@playwright/test';
 /** The specs that also run at a phone's viewport: read-only, see the project. */
 const MOBILE_SPECS =
   /(accessibility|tenant-isolation|asset-lifecycle|asset-records|asset-documents-availability|inventory-commands)\.spec\.ts$/;
+
+/**
+ * The phone-layout suite (`e2e/mobile-layout.spec.ts`) runs against its own copy
+ * of the portal and a fixture gateway, not the live stack: its project below,
+ * its two `webServer` entries at the end. Every other project ignores it.
+ */
+const LAYOUT_SPEC = /mobile-layout\.spec\.ts$/;
 
 export default defineConfig({
   testDir: './e2e',
@@ -35,7 +49,14 @@ export default defineConfig({
     timezoneId: 'Asia/Tehran',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] }, testIgnore: LAYOUT_SPEC },
+    {
+      // Populated pages at explicit 360, 390 and 1280 px widths, with no live
+      // stack (see LAYOUT_SPEC). The viewport is set by the spec itself.
+      name: 'layout',
+      use: { ...devices['Desktop Chrome'], baseURL: LAYOUT_ORIGIN },
+      testMatch: LAYOUT_SPEC,
+    },
     {
       // The same Chromium at a phone's size and with touch: Pixel 5, 393×851.
       // docs/16 § 16.3 makes this portal mobile-first (a dehyari operator at a
@@ -60,15 +81,50 @@ export default defineConfig({
       testMatch: MOBILE_SPECS,
     },
   ],
-  webServer: {
-    // A production build in CI, the dev server locally. They are different
-    // programs: the dev server compiles on demand and tolerates things the
-    // build refuses, so a browser job running against it would pass on code
-    // that could not ship. Locally the compile-on-demand is what makes the
-    // suite usable while writing a screen.
-    command: process.env.CI ? 'pnpm run start' : 'pnpm run dev',
-    url: 'http://localhost:3200',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-  },
+  webServer: [
+    {
+      // Production mode everywhere, from ONE `next build`. The layout suite's
+      // portal below is always `next start`, and `next dev` empties `.next`
+      // (BUILD_ID included) when it starts: a dev server here made the second
+      // portal unable to start on any local run (PR #574 review, F1). So
+      // locally this entry builds first and then starts, and CI, which has
+      // already built, only starts. Both portals thus read the same finished
+      // build. A hand-run `pnpm dev` beside this suite has the same effect:
+      // stop it first, or the layout portal reports a missing production build.
+      // The price is a build per local run instead of compile-on-demand; the
+      // gain is that the suite checks the code that ships.
+      command: process.env.CI ? 'pnpm run start' : 'pnpm run build && pnpm run start',
+      url: 'http://localhost:3200',
+      reuseExistingServer: !process.env.CI,
+      // A cold build is part of a local start.
+      timeout: process.env.CI ? 120_000 : 360_000,
+    },
+    {
+      // The fixture gateway for the layout suite: populated pages, no live stack.
+      command: 'node e2e/layout/mock-gateway.mjs',
+      url: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/health`,
+      env: { LAYOUT_GATEWAY_PORT: String(LAYOUT_GATEWAY_PORT) },
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+    },
+    {
+      // A second copy of the portal, pointed at the fixture gateway. Always a
+      // production start on the build the entry above provides (CI has already
+      // run it; locally that entry builds): it shares `.next` with the first
+      // portal, so neither may be a dev server.
+      command: `pnpm exec next start --port ${LAYOUT_PORT}`,
+      url: `${LAYOUT_ORIGIN}/login`,
+      env: {
+        API_GATEWAY_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}`,
+        OIDC_ISSUER_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/realms/layout`,
+        OIDC_CLIENT_ID: 'rasta-web',
+        WEB_PUBLIC_ORIGIN: LAYOUT_ORIGIN,
+        WEB_COOKIE_SECURE: 'false',
+        WEB_SESSION_SECRET: layoutSessionSecret(),
+        WEB_REDIS_URL: process.env.WEB_REDIS_URL ?? 'redis://localhost:6379',
+      },
+      reuseExistingServer: false,
+      timeout: 120_000,
+    },
+  ],
 });
