@@ -1,3 +1,4 @@
+import { ownText } from '@/lib/own-key';
 import type { SupplierSummary } from '@/server/suppliers';
 
 /**
@@ -33,7 +34,8 @@ export const OFFER_SUPPLIER_STATE_LABELS: Readonly<Record<OfferSupplierState, st
 export const OFFER_SUPPLIER_NAME_UNKNOWN = 'نام تأمین‌کننده در دسترس نیست';
 
 export function offerSupplierStateLabel(state: OfferSupplierState): string {
-  return OFFER_SUPPLIER_STATE_LABELS[state];
+  // Fail closed: a state this portal has no word for reads as UNKNOWN, never as a prototype member.
+  return ownText(OFFER_SUPPLIER_STATE_LABELS, state) ?? OFFER_SUPPLIER_STATE_LABELS.UNKNOWN;
 }
 
 /** `supplier` is undefined when the directory read failed or did not list the organization. */
