@@ -5,6 +5,7 @@ import tseslint from 'typescript-eslint';
 // The services' rule itself, not a copy: zod 4's `.default()` skips parsing;
 // `.prefault()` is zod 3's (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F2).
 import noZodDefault from '../../scripts/no-zod-default-rule.mjs';
+import zodCoercion from '../../scripts/zod-coercion-rule.mjs';
 // The internal-token source boundary, restated with this config's own parser
 // (PR #423 follow-up 1): the root config cannot be imported here.
 import internalTokenSource from '../../scripts/internal-token-source-rule.mjs';
@@ -52,8 +53,10 @@ export default tseslint.config(
     },
   },
   {
-    plugins: { zod: { rules: { 'no-default': noZodDefault } } },
-    rules: { 'zod/no-default': 'error' },
+    files: ['**/*.{ts,tsx,js,jsx,mjs,cjs}'],
+    languageOptions: { parserOptions: { ecmaFeatures: { jsx: true } } },
+    plugins: { zod: { rules: { 'no-default': noZodDefault, 'coercion-boundary': zodCoercion } } },
+    rules: { 'zod/no-default': 'error', 'zod/coercion-boundary': 'error' },
   },
   {
     // Every file this config lints; typed through tsconfig.json where it covers
@@ -116,26 +119,6 @@ export default tseslint.config(
       // its own yet, so the browser console is allowed only for real failures.
       'no-console': ['error', { allow: ['error'] }],
       '@typescript-eslint/no-explicit-any': 'error',
-      // The services' rule, restated (importing the root config here would load
-      // typescript-eslint from two roots): only `env.ts` may use `z.coerce`.
-      'no-restricted-syntax': [
-        'error',
-        {
-          selector: "MemberExpression[object.name='z'][property.name='coerce']",
-          message:
-            'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
-        },
-        {
-          selector:
-            "ImportDeclaration[source.value=/^zod/] ImportSpecifier[imported.name='coerce']",
-          message:
-            'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
-        },
-      ],
     },
-  },
-  {
-    files: ['**/env.ts'],
-    rules: { 'no-restricted-syntax': 'off' },
   },
 );
