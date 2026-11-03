@@ -1,4 +1,4 @@
-import { Alert, Button, ButtonLink, PageHeader } from '@/ui';
+import { Alert, Button, ButtonLink, PageHeader, ThemeSwitch } from '@/ui';
 
 /**
  * What a person sees when they are signed in with a session pinned to **no**
@@ -34,6 +34,10 @@ export function NoOrganizationScreen({ csrfToken }: { readonly csrfToken: string
           {NO_ORGANIZATION_LOGOUT}
         </Button>
       </form>
+      {/* No shell here, so no top bar to hold the light / dark switch. */}
+      <div className="flex">
+        <ThemeSwitch />
+      </div>
     </main>
   );
 }

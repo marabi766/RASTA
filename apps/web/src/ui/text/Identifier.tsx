@@ -22,9 +22,40 @@ import { withoutBidiControls } from '@/lib/format';
  * The monospace family is the other half of docs/16 § 16.3's font rule —
  * identifiers and codes are read character by character, and a proportional
  * face makes `1`, `l` and `I` harder to tell apart than they need to be.
+ *
+ * **Monospace is for Latin codes only.** A monospace face has no Persian
+ * letters of its own, so the browser falls back glyph by glyph to another font
+ * and the joined script comes apart into isolated letters (the licence class
+ * «پایه دوم» in the drivers list, demo run 2026-10-24). Whether a value is a
+ * code is decided from the value, not from the call site, and fail-closed:
+ * the face is applied only when every child is text that is plain printable
+ * ASCII after the bidi controls are dropped. Anything else — Persian letters
+ * or digits, any other script, an element whose text cannot be inspected —
+ * is shown in the surrounding face, still isolated and sanitised.
  */
 export function Identifier({ children }: { children: ReactNode }) {
-  return <IsolatedText className="font-mono">{children}</IsolatedText>;
+  return (
+    <IsolatedText className={isLatinCode(children) ? 'font-mono' : undefined}>
+      {children}
+    </IsolatedText>
+  );
+}
+
+/** Printable ASCII only: the characters every monospace face really has. */
+const LATIN_CODE = /^[ -~]*$/;
+
+/**
+ * True only when the whole of `children` is text that is provably a Latin
+ * code: strings and numbers made of printable ASCII, once the bidi controls
+ * (which `IsolatedText` drops before display) are removed. An element, a
+ * boolean or anything else cannot be inspected, so it is not a code.
+ */
+function isLatinCode(children: ReactNode): boolean {
+  return Children.toArray(children).every(
+    (child) =>
+      (typeof child === 'string' || typeof child === 'number') &&
+      LATIN_CODE.test(withoutBidiControls(String(child))),
+  );
 }
 
 /**

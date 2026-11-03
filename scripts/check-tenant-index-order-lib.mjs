@@ -375,6 +375,11 @@ export const EXEMPTIONS = {
     },
   },
   marketplace: {
+    ix_order_saga_start_due: {
+      index: 'order (saga_start_next_attempt_at, id)',
+      reason:
+        'SagaStartStore.claim scans the platform queue of pending intents across buyers with no request tenant (ADR-039/050); the partial index orders its bounded keyset queue, persisted organization_id and a fresh claim token fence every acknowledgment; buyer reads retain ix_order_org_status',
+    },
     ix_return_request_supplier: {
       index: 'return_request (supplier_organization_id, id)',
       reason:

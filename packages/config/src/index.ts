@@ -106,3 +106,5 @@ export {
   assertTemporalDiagnosticsSafe,
   protectRedisReadyCheck,
 } from './sdk-diagnostics';
+
+export { clientFailureCode, commandFailure } from './command-failure';

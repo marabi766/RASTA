@@ -23,6 +23,8 @@ export {
   formatJalaliDate,
   formatJalaliDateLong,
   formatJalaliDateTime,
+  jalaliOfCalendarDay,
+  jalaliOfWallClock,
 } from './datetime';
 export type { DateFormatOptions } from './datetime';
 

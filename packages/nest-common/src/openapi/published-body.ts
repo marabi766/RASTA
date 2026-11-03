@@ -60,7 +60,13 @@ export function publishedResponseSchemaOf(
   const operation = (document.paths?.[path] as Record<string, unknown> | undefined)?.[
     method.toLowerCase()
   ] as { responses?: Record<string, { content?: Record<string, { schema?: Schema }> }> };
-  const schema = operation?.responses?.[String(status)]?.content?.['application/json']?.schema;
+  const explicit =
+    operation?.responses?.[String(status)] ??
+    operation?.responses?.[`${Math.floor(status / 100)}XX`];
+  // OpenAPI's default response is JSON metadata, not Zod's unparsed default() method.
+  // eslint-disable-next-line zod/no-default
+  const response = explicit ?? operation?.responses?.default;
+  const schema = response?.content?.['application/json']?.schema;
   if (!schema) throw new Error(`${method} ${path} documents no JSON body for ${status}`);
   return schema;
 }
@@ -181,7 +187,7 @@ function check(
 
 // ---- the error envelope ---------------------------------------------------------------------
 
-const METHODS = new Set(['get', 'put', 'post', 'patch', 'delete', 'head', 'options']);
+const METHODS = new Set(['get', 'put', 'post', 'patch', 'delete', 'head', 'options', 'trace']);
 
 export interface PublishedErrorResponse {
   /** `POST /v1/things`. */
@@ -200,7 +206,7 @@ export function publishedErrorResponses(document: PublishedDocument): PublishedE
       if (!METHODS.has(method)) continue;
       const responses = (operation as { responses?: Record<string, unknown> }).responses ?? {};
       for (const [status, response] of Object.entries(responses)) {
-        if (status !== 'default' && !(Number(status) >= 400)) continue;
+        if (status !== 'default' && !/^[45][0-9X]{2}$/.test(status)) continue;
         const schema = (response as { content?: Record<string, { schema?: Schema }> }).content?.[
           'application/json'
         ]?.schema;
@@ -320,13 +326,16 @@ function exceptionsAnswering(status: number): { name: string; exception: unknown
 function listedReasons(schema: Schema): { area: string; code: string }[] {
   const item = (schema.properties as Record<string, Schema> | undefined)?.details?.items as
     Schema | undefined;
-  const properties = item?.properties as Record<string, Schema> | undefined;
   const valuesOf = (property?: Schema): string[] =>
     property && 'const' in property
       ? [String(property.const)]
       : ((property?.enum as string[] | undefined) ?? []);
-  const codes = valuesOf(properties?.code);
-  return valuesOf(properties?.path).flatMap((area) => codes.map((code) => ({ area, code })));
+  const variants = (item?.anyOf as Schema[] | undefined) ?? [item];
+  return variants.flatMap((variant) => {
+    const properties = variant?.properties as Record<string, Schema> | undefined;
+    const codes = valuesOf(properties?.code);
+    return valuesOf(properties?.path).flatMap((area) => codes.map((code) => ({ area, code })));
+  });
 }
 
 export interface EnvelopeOptions {
@@ -366,7 +375,7 @@ export function errorEnvelopeProblems(
       problems.push(`${at}: documents no JSON body`);
       continue;
     }
-    const answered = status === 'default' ? [400, 500] : [Number(status)];
+    const answered = status === 'default' ? [400, 500] : [Number(status.replaceAll('X', '0'))];
     const probes: { name: string; exception: unknown }[] = answered.flatMap(exceptionsAnswering);
 
     for (const { area, code } of listedReasons(resolve(document, schema))) {
@@ -399,6 +408,79 @@ export function errorEnvelopeProblems(
       }
     }
   }
+  return problems;
+}
+
+export interface PublishedProbeException {
+  service: string;
+  path: string;
+  status: 503;
+  /** Raw bodies returned by the real probe controller, not hand-written fixtures. */
+  bodies: readonly unknown[];
+}
+
+/** D-121: explicit exceptions only; every other response must name the shared envelope. */
+export function probeExceptionProblems(
+  document: PublishedDocument,
+  service: string,
+  exceptions: readonly PublishedProbeException[],
+): string[] {
+  const problems = errorEnvelopeProblems(document);
+  for (const [path, item] of Object.entries(document.paths ?? {})) {
+    for (const [method, operation] of Object.entries(item as Record<string, unknown>)) {
+      if (!METHODS.has(method)) continue;
+      if (
+        !Object.hasOwn(
+          (operation as { responses?: Record<string, unknown> }).responses ?? {},
+          'default',
+        )
+      ) {
+        problems.push(`${method.toUpperCase()} ${path}: no default error response`);
+      }
+    }
+  }
+  const expected = new Map(exceptions.map((entry) => [`GET ${entry.path} ${entry.status}`, entry]));
+  if (expected.size !== exceptions.length) problems.push('duplicate probe exception');
+  for (const entry of exceptions) {
+    if (entry.service !== service)
+      problems.push(`exception belongs to ${entry.service}, not ${service}`);
+    if (!entry.bodies.length) problems.push(`${entry.path}: no real probe bodies`);
+  }
+  for (const { operation, status, schema } of publishedErrorResponses(document)) {
+    const at = `${operation} ${status}`;
+    const exception = expected.get(at);
+    if (!exception) {
+      if (JSON.stringify(schema) !== JSON.stringify({ $ref: '#/components/schemas/ApiError' })) {
+        problems.push(`${at}: does not use the shared envelope`);
+      }
+      continue;
+    }
+    expected.delete(at);
+    const options = schema?.anyOf as Schema[] | undefined;
+    const health = options?.[1];
+    if (
+      options?.length !== 2 ||
+      options[0]?.$ref !== '#/components/schemas/ApiError' ||
+      typeof health?.description !== 'string' ||
+      !health.description.includes('D-121')
+    ) {
+      problems.push(`${at}: missing explicit health schema and exception reason`);
+      continue;
+    }
+    for (const body of exception.bodies) {
+      for (const problem of validatePublishedBody(document, health, body)) {
+        problems.push(`${at}: ${problem}`);
+      }
+      const record = body as Record<string, unknown>;
+      if (
+        !validatePublishedBody(document, health, { ...record, injected: true }).length ||
+        !validatePublishedBody(document, health, {}).length
+      ) {
+        problems.push(`${at}: health schema is not closed`);
+      }
+    }
+  }
+  for (const at of expected.keys()) problems.push(`${at}: exception has no published response`);
   return problems;
 }
 

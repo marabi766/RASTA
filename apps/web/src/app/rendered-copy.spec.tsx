@@ -5,18 +5,15 @@ import { HELD_MESSAGE as ORDER_HELD } from './marketplace/[productId]/PlaceOrder
 import { HELD_MESSAGE as DISPUTE_HELD } from './transactions/[id]/DisputeCommandForm';
 import { QUARANTINE_CONFIRM, QUARANTINE_CONTINUE, QuarantineGate } from './UnresolvedQuarantine';
 import type { QuarantineSource } from '@/lib/unresolved-tenancy';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
- * The pre-review rule on Persian text (item 19), checked on what a person
- * reads — the screens this round adds, rendered, text and attributes alike —
- * not on the source lines: no U+0654 (the hamza above) and none of the hamza
- * letters U+0623, U+0625, U+0624, U+0626. Every character is named by its
- * number, so this file holds none of them.
+ * Persian text on what a person reads — the screens this round adds, rendered,
+ * text and attributes alike — not on the source lines: standard orthography,
+ * hamza included (owner decision B, 2026-10-24, which replaced the earlier ban
+ * on hamza letters): no hamza-less spelling and no combining hamza on alef, waw
+ * or yeh (`test/orthography.ts`).
  */
-
-const FORBIDDEN = [0x0654, 0x0623, 0x0625, 0x0624, 0x0626].map((code) =>
-  String.fromCodePoint(code),
-);
 
 /** Every text node and every attribute value under `root`. */
 function rendered(root: HTMLElement): string {
@@ -58,7 +55,7 @@ it.each([
   ['the quarantine warning after a failed acknowledgement', () => <FailedAcknowledgement />],
   ['the order form held by another order', () => <p>{ORDER_HELD}</p>],
   ['the dispute form held by another command', () => <p>{DISPUTE_HELD}</p>],
-])('%s, as rendered, has no U+0654 and no hamza letter', async (name, screen) => {
+])('%s, as rendered, is in standard orthography', async (name, screen) => {
   const { container } = render(screen());
   await act(async () => undefined);
   if (name.includes('failed acknowledgement')) {
@@ -68,5 +65,5 @@ it.each([
   }
   const text = rendered(container);
   expect(text.length).toBeGreaterThan(100);
-  expect(FORBIDDEN.filter((character) => text.includes(character))).toEqual([]);
+  expect(nonStandardSpelling(text)).toBeNull();
 });
