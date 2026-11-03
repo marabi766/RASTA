@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 import { loadEconomicEnv, SERVICE_NAME } from '../config/env';
@@ -41,7 +41,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (error: unknown) => {
-    process.stderr.write(`${String(error)}\n`);
+    process.stderr.write(`${commandFailure(error)}\n`);
     process.exit(1);
   },
 );

@@ -59,7 +59,7 @@ describe('the supplier qualification column', () => {
     ['SUBMITTED', 'ارسال‌شده'],
     ['APPROVED', 'تأییدشده'],
     ['REJECTED', 'ردشده'],
-    ['UNAVAILABLE', 'هنوز فعال نیست'],
+    ['UNAVAILABLE', 'بررسی بازار در دسترس نیست'],
   ])('says %s in Persian', (state, label) => {
     const { getByText, container } = render_(undefined, {
       kind: 'OK',
@@ -107,9 +107,11 @@ describe('the offers table', () => {
   });
 
   it('never renders the qualification as a check nobody performed', () => {
-    const { getByText, queryByText } = render_();
-    expect(getByText('هنوز فعال نیست')).toBeInTheDocument();
+    const { getByText, queryByText, container } = render_();
+    expect(getByText('بررسی بازار در دسترس نیست')).toBeInTheDocument();
     expect(queryByText('تأییدشده')).toBeNull();
+    // Neutral: not a verdict on the supplier, not a promise that it will change.
+    expect(container.textContent).not.toMatch(/هنوز|فعال نیست|رد شد|فاقد صلاحیت|بی‌صلاحیت/);
   });
 
   it('shows an empty offer list as empty, not as an error', () => {

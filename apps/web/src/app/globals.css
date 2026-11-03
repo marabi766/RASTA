@@ -372,3 +372,29 @@
     }
   }
 }
+
+/*
+ * Scroll shadows for `TableScroll`: a soft edge on whichever side still has
+ * columns out of view, so a table that scrolls inside its box *looks* like it
+ * does (demo run 2026-10-24, defect 5: the offers table's last column was cut
+ * off with nothing to say there was more).
+ *
+ * No script. The two cover gradients are `local` (they move with the content
+ * and hide the shadow once an end is reached); the two shadows are `scroll`
+ * (they stay on the box edge). The cover is the card's surface, which is what
+ * every table sits on. Physical `left`/`right` on purpose: both ends are drawn
+ * at once, so there is no direction to mirror.
+ */
+@layer components {
+  .table-scroll {
+    background:
+      linear-gradient(to right, var(--color-surface-raised) 30%, transparent) left center / 2rem
+        100% no-repeat local,
+      linear-gradient(to left, var(--color-surface-raised) 30%, transparent) right center / 2rem
+        100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, oklch(0 0 0 / 0.22), transparent) left center /
+        0.75rem 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, oklch(0 0 0 / 0.22), transparent) right center /
+        0.75rem 100% no-repeat scroll;
+  }
+}
