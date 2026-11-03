@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { commandFailure } from '../packages/config/src/command-failure.js';
 // -----------------------------------------------------------------------------
 // ADR-051 Phase B2 — the outbox maintenance the backfill cannot do (D-045).
 //
@@ -151,25 +152,33 @@ async function main() {
   let refused = 0;
   for (const service of services) {
     let db;
+    let outcome = 'refused';
     try {
       const key = `${databaseUrlKey(service)}_MIGRATOR`;
       const url = process.env[key];
       if (!url) refuse(`${key} is not set (see .env.migrator.example).`);
       db = prismaPort(service, url);
       const result = await vacuumService({ service, db });
-      verified += 1;
+      outcome = 'verified';
       emit({ type: 'vacuum', service, status: 'verified', ...result });
     } catch (error) {
-      refused += 1;
-      // The message only: never the stack, which can carry the datasource.
+      outcome = 'refused';
+      // Foreign diagnostics and Error subclasses are untrusted; retain only registered codes.
       emit({
         type: 'refused',
         service,
-        reason: error instanceof B2RefusalError ? error.message : String(error.message ?? error),
+        reason: commandFailure(error),
       });
     } finally {
-      await db?.close();
+      try {
+        await db?.close();
+      } catch (error) {
+        outcome = 'refused';
+        emit({ type: 'refused', service, phase: 'cleanup', reason: commandFailure(error) });
+      }
     }
+    if (outcome === 'verified') verified += 1;
+    else refused += 1;
   }
   emit({ type: 'summary', services: services.length, verified, refused });
   return refused === 0 ? 0 : 1;
@@ -179,7 +188,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? '')).href) {
   process.exitCode = await main().catch((error) => {
     emit({
       type: 'refused',
-      reason: error instanceof B2RefusalError ? error.message : String(error.message ?? error),
+      reason: commandFailure(error),
     });
     return 1;
   });

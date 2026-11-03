@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -30,7 +30,7 @@ import {
  * itself, before it reads a row or calls Keycloak (D-045, Codex on #177):
  * pointed at the migrator, it would otherwise read identity data and write
  * Keycloak attributes as the database owner. A refusal exits 2, naming the
- * role, never the URL.
+ * failure code, never the URL.
  */
 async function main(): Promise<number> {
   const mode = process.argv[2];
@@ -119,7 +119,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${commandFailure(error)}\n`);
     process.exit(2);
   },
 );
