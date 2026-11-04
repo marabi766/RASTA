@@ -108,6 +108,9 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
   const offset = raw && name?.startsWith('_') && ['transform'].includes(api) ? 1 : 0;
   return {
     slot: CALLBACK_APIS.has(api) ? offset : undefined,
+    guardOptions: receiverSchema
+      ? { min: 1, max: 1, length: 1, regex: 1, refine: 1, nonempty: 0 }[api]
+      : undefined,
     fields: ['clone', 'constructor'].includes(api)
       ? name === 'clone' && !receiverSchema
         ? 1
@@ -585,6 +588,38 @@ export default {
         // Follow local helper bodies; opaque helpers cannot prove that conversion
         // is guarded. Only the audited Number helper may call Number itself.
         const strict = factory.name === 'preprocess';
+        // Only metadata may accompany a proof of a schema's output type.
+        // Checks/when callbacks can rewrite a value after primitive validation.
+        const proofOptions = (raw) => {
+          const value = unwrap(raw);
+          if (
+            !value ||
+            globalName(value, 'undefined') ||
+            typeof constant(value) === 'string' ||
+            value.type === 'TemplateLiteral'
+          )
+            return true;
+          return (
+            value.type === 'ObjectExpression' &&
+            value.properties.every(
+              (prop) =>
+                prop.type === 'Property' &&
+                prop.kind === 'init' &&
+                ([
+                  'error',
+                  'errorMap',
+                  'message',
+                  'description',
+                  'required_error',
+                  'invalid_type_error',
+                  'abort',
+                  'path',
+                  'params',
+                ].includes(key(prop)) ||
+                  (key(prop) === 'coerce' && constant(prop.value) === false)),
+            )
+          );
+        };
         const stringInput = (
           raw = api.fields === undefined
             ? (factory.receiver ?? unwrap(node.callee)?.object)
@@ -613,22 +648,10 @@ export default {
             )
           )
             return stringInput(unwrap(schema.callee)?.object, seen, kind);
-          if (api?.receiverSchema && api.name === 'refine' && schema.arguments[1]) {
-            const opts = unwrap(schema.arguments[1]);
-            if (
-              opts.type !== 'Literal' &&
-              (opts.type !== 'ObjectExpression' ||
-                opts.properties.some(
-                  (prop) =>
-                    prop.type === 'SpreadElement' ||
-                    key(prop) === 'when' ||
-                    key(prop) === '__proto__' ||
-                    key(prop) === undefined ||
-                    ['get', 'set'].includes(prop.kind),
-                ))
-            )
-              return false;
-          }
+          const optionSlot =
+            callbackSignature(api).guardOptions ??
+            (api?.raw && api.name === 'array' ? 1 : optionsIndex(api));
+          if (optionSlot >= 0 && !proofOptions(schema.arguments[optionSlot])) return false;
           if (api?.name === 'pipe')
             return stringInput(schema.arguments[api.receiverSchema ? 0 : 1], seen, kind);
           if (api?.raw && api.name === kind) return true;
