@@ -1149,6 +1149,87 @@ test('review N1: a write that also reads is a read, and the write beside a read 
 
 // A computed key that is provably a number, a bigint or a symbol names neither the controller nor
 // the timer; anything not provable could, and fails closed.
+/** The spec's numeric function members of `Math` (ES2025 + f16round, sumPrecise) — FU-001. */
+const FU001_MATH_FUNCTIONS = [
+  'abs',
+  'acos',
+  'acosh',
+  'asin',
+  'asinh',
+  'atan',
+  'atan2',
+  'atanh',
+  'cbrt',
+  'ceil',
+  'clz32',
+  'cos',
+  'cosh',
+  'exp',
+  'expm1',
+  'f16round',
+  'floor',
+  'fround',
+  'hypot',
+  'imul',
+  'log',
+  'log10',
+  'log1p',
+  'log2',
+  'max',
+  'min',
+  'pow',
+  'random',
+  'round',
+  'sign',
+  'sin',
+  'sinh',
+  'sqrt',
+  'sumPrecise',
+  'tan',
+  'tanh',
+  'trunc',
+];
+const FU001_WELL_KNOWN_SYMBOLS = [
+  'asyncDispose',
+  'asyncIterator',
+  'dispose',
+  'hasInstance',
+  'isConcatSpreadable',
+  'iterator',
+  'match',
+  'matchAll',
+  'metadata',
+  'replace',
+  'search',
+  'species',
+  'split',
+  'toPrimitive',
+  'toStringTag',
+  'unscopables',
+];
+/**
+ * Calls/members of `Math` and `Symbol` that are NOT numbers / symbols (FU-001): each could
+ * be or build a name (`Math.constructor('AbortController')` is a String object whose key is
+ * that name), so each is refused.
+ */
+const FU001_NOT_PROVEN = {
+  'Math.toString()': 'Math.toString()',
+  'Math.toLocaleString()': 'Math.toLocaleString()',
+  'Math.valueOf()': 'Math.valueOf()',
+  'Math.constructor builds the name': 'Math.constructor("AbortController")',
+  'Math.hasOwnProperty()': 'Math.hasOwnProperty(x)',
+  'Math.propertyIsEnumerable()': 'Math.propertyIsEnumerable(x)',
+  'Math.isPrototypeOf()': 'Math.isPrototypeOf(x)',
+  'Math.__lookupGetter__()': 'Math.__lookupGetter__(x)',
+  'an unknown Math member': 'Math.notAFunction(x)',
+  'Symbol.name is a string': 'Symbol.name',
+  'Symbol.for, not called': 'Symbol.for',
+  'Symbol.keyFor, not called': 'Symbol.keyFor',
+  'Symbol.prototype': 'Symbol.prototype',
+  'Symbol.constructor': 'Symbol.constructor',
+  'Symbol.length': 'Symbol.length',
+  'an unknown Symbol member': 'Symbol.notWellKnown',
+};
 const NOT_NAMES = {
   zero: '0',
   'negative literal': '-1',
@@ -1196,6 +1277,9 @@ const NOT_NAMES = {
   'symbol.for': 'Symbol.for("x")',
   'well-known symbol': 'Symbol.iterator',
   'conditional of symbols': 'c ? Symbol.iterator : Symbol.asyncIterator',
+  // FU-001: every numeric function member of `Math`, every well-known symbol.
+  ...Object.fromEntries(FU001_MATH_FUNCTIONS.map((f) => [`Math.${f}`, `Math.${f}(x)`])),
+  ...Object.fromEntries(FU001_WELL_KNOWN_SYMBOLS.map((w) => [`Symbol.${w}`, `Symbol.${w}`])),
 };
 // Aliases: a constant holding a provable key inherits it.
 const NOT_NAME_ALIASES = {
@@ -1239,6 +1323,7 @@ const MAY_BE_NAMES = {
   'logical not of a variable': '!x',
   'Symbol description': 'Symbol("x").description',
   'symbol key description': 'Symbol.keyFor(s)',
+  ...FU001_NOT_PROVEN,
 };
 const MAY_BE_NAME_ALIASES = {
   'let reassigned': 'let n = 1; n = pick();',
@@ -1884,4 +1969,92 @@ test('the decision is on the canonical path: the same files reached through a li
     rmSync(join(outside, 'repo'), { force: true });
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------------------
+// FU-001 (review of #536): a logical assignment is worth the right side OR the value its
+// target already held, and only the numeric members of `Math` / the well-known symbols are
+// proof that a key names no global.
+// ---------------------------------------------------------------------------------------
+const LOGICAL_OPERATORS = ['||=', '&&=', '??='];
+// Each place a value is read; `SRC` is the logical assignment whose LEFT side holds the host.
+const FU001_LOGICAL_READS = {
+  'member read': ['let g = globalThis; export const v = (g OP other)[k];', [BY_NAME]],
+  'member read, chained': [
+    'let g = globalThis; let h; export const v = (h = g OP other)[k];',
+    [BY_NAME],
+  ],
+  'alias of the result': [
+    'let g = globalThis; const h = (g OP other); export const v = h[k];',
+    [BY_NAME],
+  ],
+  'declaration pattern': [
+    'let g = globalThis; const { [k]: C } = (g OP other); export { C };',
+    [BY_NAME],
+  ],
+  'assignment pattern': ['let g = globalThis; let C; ({ [k]: C } = (g OP other));', [BY_NAME]],
+  'controller by member': [
+    'let g = globalThis; export const c = new (g OP other).AbortController();',
+    ['controller'],
+  ],
+  'timer by member': [
+    'let g = globalThis; (g OP other).setTimeout(() => c.abort(), 1);',
+    ['timerAbort'],
+  ],
+  'timer destructured from the result': [
+    'let g = globalThis; const { setTimeout: later } = (g OP other); later(() => c.abort(), 1);',
+    ['timerAbort'],
+  ],
+  'timers module kept on the left': [
+    "let t = require('node:timers'); (t OP other).setTimeout(() => c.abort(), 1);",
+    ['timerAbort'],
+  ],
+};
+test('FU-001: a logical assignment keeps the value its target held — every operator, every read', () => {
+  for (const op of LOGICAL_OPERATORS) {
+    for (const [label, [template, ids]] of Object.entries(FU001_LOGICAL_READS)) {
+      const code = template.replace('OP', op);
+      assert.deepEqual(found(code), [...ids].sort(), `${op} / ${label}: ${code}`);
+    }
+  }
+});
+test('FU-001: a logical assignment of values that are never the global object is still allowed', () => {
+  for (const op of LOGICAL_OPERATORS) {
+    for (const code of [
+      `let s = 1; export const v = (s ${op} 2)[k];`,
+      `let o = { a: 1 }; export const v = (o ${op} other).a;`,
+      `let s = "a"; const { [k]: C } = (s ${op} "b"); export { C };`,
+    ]) {
+      allowed(code);
+    }
+  }
+});
+
+test('FU-001: only the numeric members of Math and the well-known symbols prove a key', () => {
+  for (const [position, build] of Object.entries(KEY_POSITIONS)) {
+    for (const f of FU001_MATH_FUNCTIONS) {
+      allowed(build(`Math.${f}(x)`, ''));
+    }
+    for (const w of FU001_WELL_KNOWN_SYMBOLS) allowed(build(`Symbol.${w}`, ''));
+    for (const [label, key] of Object.entries(FU001_NOT_PROVEN)) {
+      assert.ok(
+        found(build(key, '')).includes(BY_NAME),
+        `${position} / ${label}: ${build(key, '')}`,
+      );
+    }
+  }
+});
+test('FU-001: the Math list is what the runtime says — each present member returns a number', () => {
+  for (const f of FU001_MATH_FUNCTIONS) {
+    if (typeof Math[f] !== 'function') continue; // newer than this runtime (f16round, sumPrecise)
+    const value = f === 'sumPrecise' ? Math[f]([1, 2]) : Math[f](1, 2);
+    assert.equal(typeof value, 'number', `Math.${f}`);
+  }
+  for (const w of FU001_WELL_KNOWN_SYMBOLS) {
+    if (Symbol[w] !== undefined) assert.equal(typeof Symbol[w], 'symbol', `Symbol.${w}`);
+  }
+  // The proven-not cases really are not numbers / symbols.
+  assert.equal(typeof Math.toString(), 'string');
+  assert.equal(String(Math.constructor('AbortController')), 'AbortController');
+  assert.equal(typeof Symbol.name, 'string');
 });

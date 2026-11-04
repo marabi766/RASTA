@@ -83,7 +83,8 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  *     target — one resolver, each in terms of the other). A name; a variable holds EVERY
  *     value written to it (`let g; g = globalThis`); the right side of a declaration or
  *     assignment, so a CHAIN (`({ [k]: C } = g = globalThis)`) is worth its right-most value;
- *     a sequence, a conditional, a logical expression, a type assertion; a spread copy; a
+ *     a sequence, a conditional, a logical expression, a logical assignment (`g ||= x` is worth
+ *     `x` or what `g` already held), a type assertion; a spread copy; a
  *     member of a literal object or array (`box.g[k]`, `list[0][k]`) or of the global
  *     (`globalThis.global`); a default (`function f({ [k]: C } = globalThis)`); a `for…of`
  *     head over a literal array; a nested pattern over a literal object or array; an object
@@ -108,10 +109,12 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  *     targets), a `for…in`/`for…of` target, `delete g[k]`.
  *   - **What is not a name** (`keyKind`). Only a key PROVABLY numeric, bigint or
  *     symbol: numeric/bigint literals, unary `+ - ~` and arithmetic/bitwise of provable
- *     numerics, `NaN`/`Infinity`, `Number(…)`/`BigInt(…)`, `Math.<fn>(…)`,
- *     `Number.parseInt/parseFloat(…)`, `Math.PI` / `Number.MAX_SAFE_INTEGER`-style
- *     constants — these identifiers only when they resolve to the unshadowed global —
- *     `Symbol(…)`, `Symbol.for(…)`, `Symbol.<x>`, a constant alias of any of these, a
+ *     numerics, `NaN`/`Infinity`, `Number(…)`/`BigInt(…)`, a numeric `Math.<fn>(…)` (the
+ *     specification's function members only — not `Math.toString()` or
+ *     `Math.constructor(…)`), `Number.parseInt/parseFloat(…)`, `Math.PI` /
+ *     `Number.MAX_SAFE_INTEGER`-style constants — these identifiers only when they resolve
+ *     to the unshadowed global — `Symbol(…)`, `Symbol.for(…)`, a well-known
+ *     `Symbol.<x>` (not `Symbol.name`), a constant alias of any of these, a
  *     conditional whose branches both are. Everything else (`x - 1`, `-x`, `String(1)`, a
  *     shadowed `Number`) could name a global and is refused.
  * - **Allowed:** `AbortSignal.timeout(…)` (no timer to clear; the deadline
@@ -237,6 +240,75 @@ const NUMBER_CONSTANTS = new Set([
   'NaN',
   'NEGATIVE_INFINITY',
   'POSITIVE_INFINITY',
+]);
+/**
+ * `Math.<f>(…)` calls that return a number whatever they are given: the function members
+ * of the specification's `Math` (ES2025, plus `f16round` / `sumPrecise`), and nothing else.
+ * `Math` is an ordinary object, so `Math.toString()`, `Math.valueOf()`,
+ * `Math.constructor('AbortController')` and `Math.hasOwnProperty(x)` are calls too — a
+ * string, an object, a boolean — and an unknown name proves nothing (FU-001).
+ */
+const MATH_FUNCTIONS = new Set([
+  'abs',
+  'acos',
+  'acosh',
+  'asin',
+  'asinh',
+  'atan',
+  'atan2',
+  'atanh',
+  'cbrt',
+  'ceil',
+  'clz32',
+  'cos',
+  'cosh',
+  'exp',
+  'expm1',
+  'f16round',
+  'floor',
+  'fround',
+  'hypot',
+  'imul',
+  'log',
+  'log10',
+  'log1p',
+  'log2',
+  'max',
+  'min',
+  'pow',
+  'random',
+  'round',
+  'sign',
+  'sin',
+  'sinh',
+  'sqrt',
+  'sumPrecise',
+  'tan',
+  'tanh',
+  'trunc',
+]);
+/**
+ * The well-known symbols: the members of the global `Symbol` that are symbols. Any other
+ * member is not one (`Symbol.name` is a string, `Symbol.for` a function, `Symbol.prototype`
+ * an object) and is not proof (FU-001, the sibling of {@link MATH_FUNCTIONS}).
+ */
+const WELL_KNOWN_SYMBOLS = new Set([
+  'asyncDispose',
+  'asyncIterator',
+  'dispose',
+  'hasInstance',
+  'isConcatSpreadable',
+  'iterator',
+  'match',
+  'matchAll',
+  'metadata',
+  'replace',
+  'search',
+  'species',
+  'split',
+  'toPrimitive',
+  'toStringTag',
+  'unscopables',
 ]);
 /** `Number.<f>(…)` calls that return a number whatever they are given. */
 const NUMBER_PARSERS = new Set(['parseFloat', 'parseInt']);
@@ -378,7 +450,7 @@ export default {
           if (callee.type === 'MemberExpression' && !callee.computed) {
             const method = callee.property.name;
             const owner = unwrapped(callee.object);
-            if (isUnshadowedGlobal(owner, 'Math')) return 'numeric';
+            if (isUnshadowedGlobal(owner, 'Math') && MATH_FUNCTIONS.has(method)) return 'numeric';
             if (isUnshadowedGlobal(owner, 'Number') && NUMBER_PARSERS.has(method)) {
               return 'numeric';
             }
@@ -395,8 +467,10 @@ export default {
           return undefined;
         }
         case 'MemberExpression': {
-          if (isUnshadowedGlobal(at.object, 'Symbol')) return 'symbol';
           const member = at.computed ? undefined : at.property.name;
+          if (isUnshadowedGlobal(at.object, 'Symbol') && WELL_KNOWN_SYMBOLS.has(member)) {
+            return 'symbol';
+          }
           if (isUnshadowedGlobal(at.object, 'Math') && MATH_CONSTANTS.has(member)) return 'numeric';
           if (isUnshadowedGlobal(at.object, 'Number') && NUMBER_CONSTANTS.has(member)) {
             return 'numeric';
@@ -636,8 +710,11 @@ export default {
       const next = (child) => valuesOf(child, run, depth + 1);
       switch (at.type) {
         case 'AssignmentExpression':
-          // `a = b = globalThis`: an assignment is worth its right side.
-          if (at.operator === '=' || LOGICAL_ASSIGNMENTS.has(at.operator)) return next(at.right);
+          // `a = b = globalThis`: a plain assignment is worth its right side.
+          if (at.operator === '=') return next(at.right);
+          // `g ||= x`, `g &&= x`, `g ??= x`: worth the right side OR the value the target
+          // already held (it is kept when it short-circuits) — both, fail closed (FU-001).
+          if (LOGICAL_ASSIGNMENTS.has(at.operator)) return [...next(at.left), ...next(at.right)];
           return only('other'); // arithmetic compound assignment
         case 'SequenceExpression':
           return next(at.expressions.at(-1));
