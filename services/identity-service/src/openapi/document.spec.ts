@@ -17,6 +17,7 @@ import {
   DocumentationModule,
   buildDocumentationApp,
   identityRouteDocument,
+  IDENTITY_PROBE_EXCEPTIONS,
   buildIdentityOpenApiDocument,
   formatDocument,
 } from './document';
@@ -63,6 +64,7 @@ describe('identity-service published errors (D-121)', () => {
     expect(
       await routeErrorProblems(app, document, {
         declared: identityRouteDocument(app),
+        probeExceptions: IDENTITY_PROBE_EXCEPTIONS,
         send,
       }),
     ).toEqual([]);

@@ -4,6 +4,7 @@ import { RastaError } from '../errors/rasta-error';
 import { publishedApiErrorSchema } from './api-error';
 import { healthProbeErrorSchema, publishApiErrors } from './error-document';
 import {
+  errorEnvelopeProblems,
   probeExceptionProblems,
   realFilterResponse,
   realRoutesOf,
@@ -17,7 +18,11 @@ import { toJsonSchema } from './zod-schema';
 
 const typedRefusal = publishedApiErrorSchema.extend({
   details: z
-    .array(z.object({ path: z.literal('thing'), code: z.literal('LOCKED'), message: z.string() }))
+    .array(
+      z
+        .object({ path: z.literal('thing'), code: z.literal('LOCKED'), message: z.string() })
+        .strict(),
+    )
     .optional(),
 });
 const TYPED_REF = { $ref: '#/components/schemas/ThingRefusal' };
@@ -47,13 +52,23 @@ function refusal(area: string, code: string): RastaError {
   return new RastaError('CONFLICT', 'Refused', { details: [{ path: area, code, message: 'x' }] });
 }
 
-/** An Express-shaped router holding `routes` (`METHOD path`, Express syntax). */
-function appOf(routes: string[]): RoutedApplication {
-  const stack = routes.map((entry) => {
-    const [method, path] = entry.split(' ');
-    return { route: { path, methods: { [method!.toLowerCase()]: true } } };
-  });
-  return { getHttpAdapter: () => ({ getInstance: () => ({ router: { stack: [{}, ...stack] } }) }) };
+const BEFORE = ['<anonymous>', 'bound use', 'jsonParser', 'urlencodedParser'].map((name) => ({
+  name,
+}));
+const AFTER = [{ name: '<anonymous>' }, { name: '<anonymous>' }];
+
+/** An Express-shaped router as Nest builds it, holding `routes` (`METHOD path`, Express syntax). */
+function appOf(routes: string[], extra: { at: number; layer: object }[] = []): RoutedApplication {
+  const stack: object[] = [
+    ...BEFORE,
+    ...routes.map((entry) => {
+      const [method, path] = entry.split(' ');
+      return { name: 'handle', route: { path, methods: { [method!.toLowerCase()]: true } } };
+    }),
+    ...AFTER,
+  ];
+  for (const { at, layer } of extra) stack.splice(at, 0, layer);
+  return { getHttpAdapter: () => ({ getInstance: () => ({ router: { stack } }) }) };
 }
 
 const ROUTES = ['GET /things/:id', 'POST /things'];
@@ -186,16 +201,24 @@ describe('routeErrorProblems reads the real routes (FU-031)', () => {
     const probeSend = async (method: string, url: string) =>
       url === '/health/startup' ? { status: 503, body: health } : send(method, url);
     const routes = [...ROUTES, 'GET /health/startup'];
-    const published = publishApiErrors(withProbe(), {
-      'GET /health/startup 503': healthProbeErrorSchema('s', 'startup'),
-    });
+    const registry = { 'GET /health/startup 503': healthProbeErrorSchema('s', 'startup') };
+    const published = publishApiErrors(withProbe(), registry);
+    expect(
+      await routeErrorProblems(appOf(routes), published, {
+        declared: withProbe(),
+        probeExceptions: registry,
+        send: probeSend,
+        refusal,
+      }),
+    ).toEqual([]);
+    // r2 F3: the published D-121 branch alone authorizes nothing; only the registry does.
     expect(
       await routeErrorProblems(appOf(routes), published, {
         declared: withProbe(),
         send: probeSend,
         refusal,
       }),
-    ).toEqual([]);
+    ).toContain('GET /health/startup 503: no path');
     const problems = await routeErrorProblems(appOf(routes), publishApiErrors(withProbe()), {
       declared: withProbe(),
       send: probeSend,
@@ -213,7 +236,7 @@ describe('routeErrorProblems reads the real routes (FU-031)', () => {
       }),
     ).toEqual(['the application routes cannot be read']);
     expect(() => realRoutesOf(appOf(['GET /things{/:id}']))).toThrow('cannot be resolved');
-    expect(() => realRoutesOf(appOf([]))).toThrow('serves no route');
+    expect(() => realRoutesOf(appOf([]))).toThrow('cannot read');
     const silent = async () => {
       throw new Error('socket hang up');
     };
@@ -223,6 +246,128 @@ describe('routeErrorProblems reads the real routes (FU-031)', () => {
     const fine = async () => ({ status: 200, body: {} });
     expect(await check(ROUTES, undefined, { send: fine })).toContain(
       'no real route answered with an error body',
+    );
+  });
+});
+
+describe('every reference, mount and indirection is read or refused (FU-031 r2)', () => {
+  it('F1: refuses a referenced response at publication and at every reader', async () => {
+    const referenced = declared();
+    (referenced.paths!['/things/{id}'] as any).get.responses['409'] = {
+      $ref: '#/components/responses/Wrong',
+    };
+    expect(() => publishApiErrors(referenced)).toThrow('a referenced response');
+    const published = publishApiErrors(declared());
+    (published.paths!['/things/{id}'] as any).get.responses['409'] = {
+      $ref: '#/components/responses/Wrong',
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },
+    };
+    expect(() => probeExceptionProblems(published, 's', [], { refusal })).toThrow(
+      'a referenced response',
+    );
+    await expect(check(ROUTES, published)).rejects.toThrow('a referenced response');
+  });
+
+  it('F2: refuses a mounted router, a sub-application and a middleware among the routes', () => {
+    const router = { name: 'router', handle: { stack: [] } };
+    expect(() => realRoutesOf(appOf(ROUTES, [{ at: 4, layer: router }]))).toThrow('cannot read');
+    expect(() => realRoutesOf(appOf(ROUTES, [{ at: 5, layer: router }]))).toThrow(
+      'the routing layer router cannot be read',
+    );
+    const subApp = { name: 'mounted_app', handle: () => undefined };
+    expect(() => realRoutesOf(appOf(ROUTES, [{ at: 0, layer: subApp }]))).toThrow('cannot read');
+    const terminal = { name: '<anonymous>', handle: () => undefined };
+    expect(() => realRoutesOf(appOf(ROUTES, [{ at: 8, layer: terminal }]))).toThrow('cannot read');
+  });
+
+  it('F3: a declared schema that is not the envelope with narrowed details is refused', async () => {
+    const other = { type: 'object', properties: { status: { const: 'starting' } } };
+    const loose = (): PublishedDocument => {
+      const document = declared();
+      document.components!.schemas!.ThingRefusal = {
+        anyOf: [toJsonSchema(typedRefusal), { ...other, description: 'D-121' }],
+      };
+      return document;
+    };
+    expect(
+      probeExceptionProblems(publishApiErrors(loose()), 's', [], { declared: loose(), refusal }),
+    ).toContain('GET /things/{id} 409: does not use the shared envelope');
+    const healthOnThings = async () => ({
+      status: 409,
+      body: { status: 'starting' },
+    });
+    expect(
+      await routeErrorProblems(appOf(ROUTES), publishApiErrors(loose()), {
+        declared: loose(),
+        send: healthOnThings,
+        refusal,
+      }),
+    ).toContain('GET /things/01JD0000000000000000000000 409: no path');
+    const opened = (): PublishedDocument => {
+      const document = declared();
+      (document.components!.schemas!.ThingRefusal as any).required = ['path', 'timestamp'];
+      return document;
+    };
+    expect(
+      probeExceptionProblems(publishApiErrors(opened()), 's', [], { declared: opened(), refusal }),
+    ).toContain('GET /things/{id} 409: does not use the shared envelope');
+  });
+
+  it.each([
+    [
+      'an alias',
+      (s: any) => ({ ...s, Alias: TYPED_REF, root: { $ref: '#/components/schemas/Alias' } }),
+    ],
+    ['a root anyOf', (s: any) => ({ ...s, root: { anyOf: [TYPED_REF] } })],
+    [
+      'references at details, items, variant, path and code',
+      (s: any) => {
+        const typed = structuredClone(s.ThingRefusal);
+        const item = typed.properties.details.items;
+        return {
+          ...s,
+          Path: item.properties.path,
+          Code: item.properties.code,
+          Variant: {
+            ...item,
+            properties: {
+              ...item.properties,
+              path: { $ref: '#/components/schemas/Path' },
+              code: { $ref: '#/components/schemas/Code' },
+            },
+          },
+          Items: { anyOf: [{ $ref: '#/components/schemas/Variant' }] },
+          Details: { type: 'array', items: { $ref: '#/components/schemas/Items' } },
+          ThingRefusal: {
+            ...typed,
+            properties: { ...typed.properties, details: { $ref: '#/components/schemas/Details' } },
+          },
+          root: TYPED_REF,
+        };
+      },
+    ],
+  ])('F4: finds a typed reason behind %s', (_name, shape) => {
+    const document = declared();
+    const schemas = shape(document.components!.schemas);
+    const { root, ...components } = schemas;
+    document.components!.schemas = components;
+    (document.paths!['/things/{id}'] as any).get.responses['409'].content[
+      'application/json'
+    ].schema = root;
+    const published = publishApiErrors(document);
+    expect(probeExceptionProblems(published, 's', [])).toContain(
+      'GET /things/{id} 409: lists thing/LOCKED but no refusal producer was given',
+    );
+    expect(errorEnvelopeProblems(published, { refusal })).toEqual([]);
+  });
+
+  it('F4: refuses details whose reasons cannot be read', () => {
+    const document = declared();
+    const item = (document.components!.schemas!.ThingRefusal as any).properties.details.items;
+    item.properties.code = { type: 'string' };
+    item.required = ['path', 'message'];
+    expect(errorEnvelopeProblems(publishApiErrors(document), { refusal })).toContainEqual(
+      expect.stringContaining('GET /things/{id} 409: its typed reasons cannot be read'),
     );
   });
 });

@@ -17,6 +17,7 @@ import {
   DocumentationModule,
   buildDocumentationApp,
   organizationRouteDocument,
+  ORGANIZATION_PROBE_EXCEPTIONS,
   buildOrganizationOpenApiDocument,
   buildScopedOpenApiDocument,
   formatDocument,
@@ -62,6 +63,7 @@ describe('organization-service published errors (D-121)', () => {
     expect(
       await routeErrorProblems(app, document, {
         declared: organizationRouteDocument(app),
+        probeExceptions: ORGANIZATION_PROBE_EXCEPTIONS,
         send,
       }),
     ).toEqual([]);

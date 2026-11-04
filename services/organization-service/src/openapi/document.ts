@@ -1,7 +1,7 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
-import { publishApiErrors, healthProbeErrorSchema } from '@rasta/nest-common';
+import { publishApiErrors, healthProbeErrorSchema, type PublishedSchema } from '@rasta/nest-common';
 import { OrganizationController } from '../organization/organization.controller';
 import { OrganizationService } from '../organization/organization.service';
 import { z } from 'zod';
@@ -27,15 +27,18 @@ export function organizationRouteDocument(app: INestApplication, version = '0.1.
   );
 }
 
+/** D-121: the one registry of probe routes whose 503 is a health body, not the envelope. */
+export const ORGANIZATION_PROBE_EXCEPTIONS: Readonly<Record<string, PublishedSchema>> = {
+  'GET /health/ready 503': healthProbeErrorSchema('organization-service', 'ready'),
+  'GET /health/startup 503': healthProbeErrorSchema('organization-service', 'startup'),
+};
+
 /** The builder used by the real application and the documentation fixture. */
 export function buildOrganizationOpenApiDocument(
   app: INestApplication,
   version = '0.1.0',
 ): OpenAPIObject {
-  return publishApiErrors(organizationRouteDocument(app, version), {
-    'GET /health/ready 503': healthProbeErrorSchema('organization-service', 'ready'),
-    'GET /health/startup 503': healthProbeErrorSchema('organization-service', 'startup'),
-  });
+  return publishApiErrors(organizationRouteDocument(app, version), ORGANIZATION_PROBE_EXCEPTIONS);
 }
 
 /** Decorators only: no database, broker, credentials or external requests. */

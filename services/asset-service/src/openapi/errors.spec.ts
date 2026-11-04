@@ -17,6 +17,7 @@ import {
   DocumentationModule,
   buildDocumentationApp,
   assetRouteDocument,
+  ASSET_PROBE_EXCEPTIONS,
   buildAssetOpenApiDocument,
 } from './document';
 import { PrismaService } from '../prisma/prisma.service';
@@ -58,6 +59,7 @@ describe('asset-service published errors (D-121)', () => {
     expect(
       await routeErrorProblems(app, document, {
         declared: assetRouteDocument(app),
+        probeExceptions: ASSET_PROBE_EXCEPTIONS,
         send,
       }),
     ).toEqual([]);
