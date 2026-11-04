@@ -201,3 +201,62 @@ it('an always-ready chunk stream cannot starve the body deadline timer', async (
   });
   expect(chunks).toBeLessThan(ECONOMIC_RESPONSE_MAX_BYTES);
 });
+
+const streamed = (parts: Uint8Array[], status = 200) =>
+  new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const part of parts) controller.enqueue(part);
+        controller.close();
+      },
+    }),
+    { status },
+  );
+
+it('a small body allocates in proportion to what arrived, never the ceiling (FU-044)', async () => {
+  const sizes: number[] = [];
+  for (const name of ['alloc', 'allocUnsafe', 'allocUnsafeSlow'] as const) {
+    const original = Buffer[name].bind(Buffer);
+    jest.spyOn(Buffer, name).mockImplementation(((size: number, ...rest: never[]) => {
+      sizes.push(size);
+      return (original as (...args: unknown[]) => Buffer)(size, ...rest);
+    }) as never);
+  }
+  jest.spyOn(globalThis, 'fetch').mockResolvedValue(streamed([Buffer.from('{}')]));
+  await expect(client('http://economic.test', 1000).createObligation(INPUT)).resolves.toEqual({});
+  expect(Math.max(0, ...sizes)).toBeLessThan(1024);
+});
+
+it('a chunked body of exactly the ceiling is accepted; one byte more is refused', async () => {
+  const body = `"${'X'.repeat(ECONOMIC_RESPONSE_MAX_BYTES - 2)}"`;
+  const half = ECONOMIC_RESPONSE_MAX_BYTES / 2;
+  const parts = (text: string) => [Buffer.from(text.slice(0, half)), Buffer.from(text.slice(half))];
+  jest.spyOn(globalThis, 'fetch').mockResolvedValue(streamed(parts(body)));
+  await expect(client('http://economic.test', 1000).createObligation(INPUT)).resolves.toHaveLength(
+    ECONOMIC_RESPONSE_MAX_BYTES - 2,
+  );
+  jest.spyOn(globalThis, 'fetch').mockResolvedValue(streamed(parts(`${body} `)));
+  await expect(client('http://economic.test', 1000).createObligation(INPUT)).rejects.toMatchObject({
+    code: 'UPSTREAM_UNAVAILABLE',
+  });
+});
+
+it('a multi-byte character split across chunks decodes; invalid UTF-8 and an empty 200 are refused', async () => {
+  const text = Buffer.from('{"id":"ت"}');
+  jest
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(streamed([text.subarray(0, 8), text.subarray(8)]));
+  await expect(client('http://economic.test', 1000).createObligation(INPUT)).resolves.toEqual({
+    id: 'ت',
+  });
+  for (const parts of [[Uint8Array.of(0x22, 0xff, 0x22)], []]) {
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(streamed(parts));
+    await expect(
+      client('http://economic.test', 1000).createObligation(INPUT),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+  }
+  jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+  await expect(
+    client('http://economic.test', 1000).createObligation(INPUT),
+  ).resolves.toBeUndefined();
+});

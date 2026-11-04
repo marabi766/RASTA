@@ -51,7 +51,9 @@ async function readEconomicJson(response: Response, deadlineAt: number): Promise
     throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
   }
   const reader = response.body.getReader();
-  const bytes = Buffer.alloc(ECONOMIC_RESPONSE_MAX_BYTES);
+  // Memory follows the body actually received, never the ceiling (FU-044):
+  // chunks are kept as read and joined once, at exactly `size` bytes.
+  const chunks: Uint8Array[] = [];
   let size = 0;
   try {
     for (;;) {
@@ -59,12 +61,13 @@ async function readEconomicJson(response: Response, deadlineAt: number): Promise
       if (performance.now() >= deadlineAt) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
       const { done, value } = await reader.read();
       if (done) break;
+      // Refused before the chunk that would cross the ceiling is kept.
       if (value.byteLength > ECONOMIC_RESPONSE_MAX_BYTES - size)
         throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-      bytes.set(value, size);
+      chunks.push(value);
       size += value.byteLength;
     }
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, size));
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size));
     if (!text && response.status !== 204) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
     return text ? (JSON.parse(text) as unknown) : undefined;
   } finally {
