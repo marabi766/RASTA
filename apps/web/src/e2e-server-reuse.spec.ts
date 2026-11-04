@@ -1,9 +1,9 @@
 /**
  * @jest-environment node
  */
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import childProcess, { spawn, type ChildProcess } from 'node:child_process';
 import {
-  copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,422 +11,373 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import net, { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-  decideServerStart,
-  inspectPort,
-  planServerReuse,
-  portalProofPath,
-  readBuildId,
-  readRunMarker,
-  runMarkerFile,
-  type PortInspection,
-  type ServerEntry,
-} from '../e2e/server-reuse';
+import { OWNED_MARKER, serverStart } from '../e2e/server-reuse';
+
+/**
+ * TASK 325 (review of #675): the suite starts its servers through `e2e/own-server.mjs`, which says
+ * "ready" only while the server it launched is the sole holder of the port. These tests run the real
+ * launcher against real sockets (it needs Linux `ss` and `ps`, as CI and rasta-dev have).
+ */
 
 const WEB = join(__dirname, '..');
+const LAUNCHER = join(WEB, 'e2e', 'own-server.mjs');
 
-describe('decideServerStart (TASK 323: fail closed on a port that is already held)', () => {
-  const base = { name: 'portal', port: 3200 };
+const work = mkdtempSync(join(tmpdir(), 'own-server-spec-'));
+const held: Server[] = [];
+const launched: ChildProcess[] = [];
 
-  it('starts the server when nothing is listening', () => {
-    expect(decideServerStart({ ...base, occupied: false, occupant: 'nobody', own: false })).toEqual(
-      {
-        action: 'start',
-      },
-    );
-  });
-
-  it('reuses a listener the run proved is its own', () => {
-    expect(
-      decideServerStart({ ...base, occupied: true, occupant: 'pid 7 (next start)', own: true }),
-    ).toEqual({
-      action: 'reuse',
-    });
-  });
-
-  it('refuses a foreign listener and names the port and the process', () => {
-    const decision = decideServerStart({
-      ...base,
-      occupied: true,
-      occupant: 'pid 4242 (node next dev --port 3200)',
-      own: false,
-    });
-    expect(decision.action).toBe('refuse');
-    if (decision.action !== 'refuse') return;
-    expect(decision.message).toContain('Port 3200');
-    expect(decision.message).toContain('pid 4242 (node next dev --port 3200)');
-    expect(decision.message).toContain('cannot prove');
-  });
-
-  it('refuses a listener nobody could identify', () => {
-    const decision = decideServerStart({
-      ...base,
-      occupied: true,
-      occupant: 'a process that could not be identified',
-      own: false,
-    });
-    expect(decision.action).toBe('refuse');
-  });
-});
-
-describe('portalProofPath', () => {
-  const marker = { runId: 'run-1', buildId: 'build-1' };
-
-  it('asks for the manifest of the recorded build when run, marker and disk agree', () => {
-    expect(portalProofPath({ runId: 'run-1', marker, buildIdOnDisk: 'build-1' })).toBe(
-      '/_next/static/build-1/_buildManifest.js',
-    );
-  });
-
-  it.each([
-    ['no marker', { runId: 'run-1', marker: null, buildIdOnDisk: 'build-1' }],
-    ['no build on disk', { runId: 'run-1', marker, buildIdOnDisk: null }],
-    [
-      'an empty run id',
-      { runId: '', marker: { runId: '', buildId: 'build-1' }, buildIdOnDisk: 'build-1' },
-    ],
-    ['a marker from another run', { runId: 'run-2', marker, buildIdOnDisk: 'build-1' }],
-    [
-      'a build that was replaced since the marker',
-      { runId: 'run-1', marker, buildIdOnDisk: 'build-2' },
-    ],
-    [
-      'an empty recorded build',
-      { runId: 'run-1', marker: { runId: 'run-1', buildId: '' }, buildIdOnDisk: '' },
-    ],
-  ])('offers no proof for %s', (_name, input) => {
-    expect(portalProofPath(input)).toBeNull();
-  });
-
-  it('keeps a hostile build id inside one path segment', () => {
-    const path = portalProofPath({
-      runId: 'run-1',
-      marker: { runId: 'run-1', buildId: '../x?y' },
-      buildIdOnDisk: '../x?y',
-    });
-    expect(path).toBe('/_next/static/..%2Fx%3Fy/_buildManifest.js');
-  });
-});
-
-describe('planServerReuse', () => {
-  const free: PortInspection = {
-    occupied: false,
-    occupant: 'nobody',
-    status: null,
-    controlStatus: null,
-  };
-  const entries: Record<'portal' | 'gateway', ServerEntry> = {
-    portal: { name: 'portal', port: 3200, proofPath: '/_next/static/b/_buildManifest.js' },
-    gateway: { name: 'gateway', port: 3291 },
-  };
-  const inspecting =
-    (byPort: Record<number, PortInspection>) =>
-    (port: number): PortInspection =>
-      byPort[port] ?? free;
-
-  it('starts what is free and reuses nothing', () => {
-    expect(planServerReuse(entries, { ci: false, worker: false, inspect: inspecting({}) })).toEqual(
-      { portal: false, gateway: false },
-    );
-  });
-
-  it('reuses the portal only when the listener answers its proof path with 200', () => {
-    const own: PortInspection = {
-      occupied: true,
-      occupant: 'pid 1',
-      status: 200,
-      controlStatus: 404,
-    };
-    expect(
-      planServerReuse(entries, { ci: false, worker: false, inspect: inspecting({ 3200: own }) }),
-    ).toEqual({ portal: true, gateway: false });
-  });
-
-  it.each([404, 500, 302, null])(
-    'refuses a listener that answered %s to the proof path',
-    (status) => {
-      const foreign: PortInspection = {
-        occupied: true,
-        occupant: 'pid 99 (next dev)',
-        status,
-        controlStatus: 404,
-      };
-      expect(() =>
-        planServerReuse(entries, {
-          ci: false,
-          worker: false,
-          inspect: inspecting({ 3200: foreign }),
-        }),
-      ).toThrow(/Port 3200 \(portal\).*pid 99 \(next dev\)/);
-    },
-  );
-
-  it.each([200, 302, 500, null])(
-    'refuses a listener that answers the proof path 200 but a path no server has with %s (it says 200 to everything)',
-    (controlStatus) => {
-      const catchAll: PortInspection = {
-        occupied: true,
-        occupant: 'pid 8 (spa)',
-        status: 200,
-        controlStatus,
-      };
-      expect(() =>
-        planServerReuse(entries, {
-          ci: false,
-          worker: false,
-          inspect: inspecting({ 3200: catchAll }),
-        }),
-      ).toThrow(/Port 3200 \(portal\).*pid 8 \(spa\)/);
-    },
-  );
-
-  it('refuses a 200 when the run has no proof to ask for (nothing can vouch for the listener)', () => {
-    const answers: PortInspection = {
-      occupied: true,
-      occupant: 'pid 5 (mock)',
-      status: 200,
-      controlStatus: 404,
-    };
-    expect(() =>
-      planServerReuse(entries, {
-        ci: false,
-        worker: false,
-        inspect: inspecting({ 3291: answers }),
-      }),
-    ).toThrow(/Port 3291 \(gateway\).*pid 5 \(mock\)/);
-    expect(() =>
-      planServerReuse(
-        { portal: { name: 'portal', port: 3200, proofPath: null } },
-        { ci: false, worker: false, inspect: inspecting({ 3200: answers }) },
-      ),
-    ).toThrow(/Port 3200/);
-  });
-
-  it('names every refused port in one error', () => {
-    const held = (pid: number): PortInspection => ({
-      occupied: true,
-      occupant: `pid ${pid}`,
-      status: 404,
-      controlStatus: 404,
-    });
-    expect(() =>
-      planServerReuse(entries, {
-        ci: false,
-        worker: false,
-        inspect: inspecting({ 3200: held(1), 3291: held(2) }),
-      }),
-    ).toThrow(/Port 3200[^]*Port 3291/);
-  });
-
-  it('leaves CI alone: no inspection, never a reuse, even with an own-looking listener', () => {
-    const inspect = jest.fn(() => ({
-      occupied: true,
-      occupant: 'pid 1',
-      status: 200,
-      controlStatus: 404,
-    }));
-    expect(planServerReuse(entries, { ci: true, worker: false, inspect })).toEqual({
-      portal: false,
-      gateway: false,
-    });
-    expect(inspect).not.toHaveBeenCalled();
-  });
-
-  it('does not inspect or refuse in a worker, which starts no server', () => {
-    const inspect = jest.fn(() => ({
-      occupied: true,
-      occupant: 'pid 1',
-      status: 404,
-      controlStatus: 404,
-    }));
-    expect(planServerReuse(entries, { ci: false, worker: true, inspect })).toEqual({
-      portal: false,
-      gateway: false,
-    });
-    expect(inspect).not.toHaveBeenCalled();
-  });
-});
-
-describe('inspectPort against real sockets', () => {
-  const children: ChildProcess[] = [];
-
-  /** A server in ANOTHER process: inspectPort blocks this one while it probes. */
-  async function listener(
-    buildId: string,
-    catchAll = false,
-  ): Promise<{ port: number; pid: number }> {
-    const script = `
-      const http = require('node:http');
-      const server = http.createServer((req, res) => {
-        res.statusCode = ${catchAll} || req.url === '/_next/static/${buildId}/_buildManifest.js' ? 200 : 404;
-        res.end('x');
-      });
-      server.listen(0, '::', () => process.stdout.write(server.address().port + '\\n'));
-    `;
-    const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
-    children.push(child);
-    const port = await new Promise<number>((resolve, reject) => {
-      child.once('error', reject);
-      child.stdout!.once('data', (chunk: Buffer) => resolve(Number(chunk.toString().trim())));
-    });
-    return { port, pid: child.pid! };
-  }
-
-  afterAll(() => {
-    for (const child of children) child.kill();
-  });
-
-  it('finds a free port free', async () => {
-    const { port } = await listener('b');
-    children.pop()!.kill();
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(inspectPort(port, null)).toMatchObject({ occupied: false, status: null });
-  });
-
-  it('names the process that holds a port, and sees the proof path answer 200 only for its own build', async () => {
-    const { port, pid } = await listener('build-own');
-    const own = inspectPort(port, '/_next/static/build-own/_buildManifest.js');
-    expect(own).toMatchObject({ occupied: true, status: 200 });
-    expect(own.occupant).toContain(`pid ${pid}`);
-    const foreign = inspectPort(port, '/_next/static/build-other/_buildManifest.js');
-    expect(foreign).toMatchObject({ occupied: true, status: 404 });
-    expect(inspectPort(port, null)).toMatchObject({ occupied: true, status: null });
-  });
-
-  it('refuses end to end: a listener without this run’s build is a thrown, named refusal', async () => {
-    const { port, pid } = await listener('someone-elses-build');
-    expect(() =>
-      planServerReuse(
-        { portal: { name: 'portal', port, proofPath: '/_next/static/mine/_buildManifest.js' } },
-        { ci: false, worker: false, inspect: inspectPort },
-      ),
-    ).toThrow(new RegExp(`Port ${port} \\(portal\\).*pid ${pid}`));
-  });
-
-  it('treats a probe that fails as an occupied port it cannot name, and refuses', () => {
-    // Port 0 is not a port: the probe exits 2. Not knowing is not "free".
-    const unknown = inspectPort(0, null);
-    expect(unknown.occupied).toBe(true);
-    expect(unknown.occupant).toContain('the port probe failed');
-    expect(() =>
-      planServerReuse(
-        { portal: { name: 'portal', port: 0, proofPath: '/_next/static/mine/_buildManifest.js' } },
-        { ci: false, worker: false, inspect: inspectPort },
-      ),
-    ).toThrow(/Port 0 \(portal\).*the port probe failed/);
-  });
-
-  it('refuses end to end: a catch-all server that says 200 to every path', async () => {
-    const { port, pid } = await listener('mine', true);
-    expect(inspectPort(port, '/_next/static/mine/_buildManifest.js')).toMatchObject({
-      status: 200,
-      controlStatus: 200,
-    });
-    expect(() =>
-      planServerReuse(
-        { portal: { name: 'portal', port, proofPath: '/_next/static/mine/_buildManifest.js' } },
-        { ci: false, worker: false, inspect: inspectPort },
-      ),
-    ).toThrow(new RegExp(`Port ${port} \\(portal\\).*pid ${pid}`));
-  });
-
-  it('reuses end to end: the listener serves the build this run recorded', async () => {
-    const { port } = await listener('mine');
-    expect(
-      planServerReuse(
-        { portal: { name: 'portal', port, proofPath: '/_next/static/mine/_buildManifest.js' } },
-        { ci: false, worker: false, inspect: inspectPort },
-      ),
-    ).toEqual({ portal: true });
-  });
-});
-
-describe('the run marker', () => {
-  let dir: string;
-  const cleanup: string[] = [];
-
-  /** A copy of the web package's e2e script in a throwaway package, where it finds its own `.next`. */
-  function scratchPackage(buildId: string | null): string {
-    dir = mkdtempSync(join(tmpdir(), 'web-server-reuse-'));
-    mkdirSync(join(dir, 'e2e'));
-    copyFileSync(join(WEB, 'e2e/record-server-run.mjs'), join(dir, 'e2e/record-server-run.mjs'));
-    if (buildId !== null) {
-      mkdirSync(join(dir, '.next'));
-      writeFileSync(join(dir, '.next/BUILD_ID'), buildId);
+afterEach(async () => {
+  // The whole group: a killed launcher would leave its server behind.
+  for (const child of launched.splice(0)) {
+    try {
+      process.kill(-child.pid!, 'SIGKILL');
+    } catch {
+      // already gone
     }
-    return dir;
   }
-  const record = (pkg: string, port: string, runId: string | null) =>
-    spawnSync(process.execPath, [join(pkg, 'e2e/record-server-run.mjs'), port], {
-      encoding: 'utf8',
-      env: { ...process.env, WEB_E2E_RUN_ID: runId ?? '' },
+  await Promise.all(
+    held.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
+  );
+});
+afterAll(() => rmSync(work, { recursive: true, force: true }));
+
+async function until(what: string, check: () => boolean, ms = 10_000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+/** A listener in THIS process: not in the launcher's tree, so a foreign holder. */
+async function hold(port: number, host: string): Promise<void> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, resolve);
+  });
+  held.push(server);
+}
+
+async function ipv6Available(): Promise<boolean> {
+  try {
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '::1', resolve);
     });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  afterEach(() => {
-    for (const path of cleanup.splice(0)) rmSync(path, { force: true });
-    if (dir) rmSync(dir, { recursive: true, force: true });
+/** The server the launcher starts: records that it ran, optionally waits for a gate, then listens. */
+const SERVER = join(work, 'server.cjs');
+writeFileSync(
+  SERVER,
+  `
+  const fs = require('node:fs');
+  const [port, host, tag] = process.argv.slice(2);
+  const file = (name) => ${JSON.stringify(work)} + '/' + tag + '.' + name;
+  fs.writeFileSync(file('ran'), String(process.pid));
+  const listen = () => {
+    const server = require('node:net').createServer();
+    server.on('error', () => process.exit(1));
+    server.listen(Number(port), host, () => fs.writeFileSync(file('listening'), 'y'));
+    setInterval(() => { if (fs.existsSync(file('stop'))) process.exit(0); }, 25);
+  };
+  const gated = fs.existsSync(file('gate'));
+  if (!gated) listen();
+  else {
+    const wait = setInterval(() => { if (!fs.existsSync(file('gate'))) { clearInterval(wait); listen(); } }, 25);
+  }
+`,
+);
+
+interface Launch {
+  child: ChildProcess;
+  stdout: () => string;
+  stderr: () => string;
+  exit: () => number | null | undefined;
+  tag: string;
+  mark: (name: string) => void;
+  has: (name: string) => boolean;
+}
+
+let counter = 0;
+function launch(port: number, host = '127.0.0.1', opts: { gated?: boolean; path?: string } = {}) {
+  const tag = `t${++counter}`;
+  const file = (name: string) => join(work, `${tag}.${name}`);
+  // A gated server waits for its gate file to disappear: `mark('gate')` is the closed gate.
+  if (opts.gated) writeFileSync(file('gate'), '');
+  const child = spawn(process.execPath, [LAUNCHER, String(port)], {
+    cwd: WEB,
+    env: {
+      ...process.env,
+      ...(opts.path === undefined ? {} : { PATH: opts.path }),
+      OWN_SERVER_COMMAND: `"${process.execPath}" "${SERVER}" ${port} ${host} ${tag}`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  launched.push(child);
+  let out = '';
+  let err = '';
+  let code: number | null | undefined;
+  child.stdout!.on('data', (chunk: Buffer) => (out += chunk.toString()));
+  child.stderr!.on('data', (chunk: Buffer) => (err += chunk.toString()));
+  child.on('exit', (status) => (code = status));
+  const result: Launch = {
+    child,
+    tag,
+    stdout: () => out,
+    stderr: () => err,
+    exit: () => code,
+    mark: (name) => writeFileSync(file(name), ''),
+    has: (name) => existsSync(file(name)),
+  };
+  return result;
+}
+
+const READY = (port: number) => `${OWNED_MARKER} ${port}`;
+const open = (port: number, host: string) =>
+  new Promise<boolean>((resolve) => {
+    const probe = createServer();
+    probe.once('error', () => resolve(false)); // port still taken ⇒ the server is still alive
+    probe.listen(port, host, () => probe.close(() => resolve(true)));
   });
 
-  it('is written by the start step where runMarkerFile looks for it, and proves the run', () => {
-    const pkg = scratchPackage('build-abc\n');
-    cleanup.push(runMarkerFile(pkg, 39321));
-    expect(record(pkg, '39321', 'run-xyz').status).toBe(0);
-    const marker = readRunMarker(runMarkerFile(pkg, 39321));
-    expect(marker).toEqual({ runId: 'run-xyz', buildId: 'build-abc' });
-    expect(readBuildId(pkg)).toBe('build-abc');
+jest.setTimeout(30_000);
+
+describe('own-server.mjs (the suite’s only way to start a server locally)', () => {
+  it('says ready only once its own server holds the port, and takes the server down with it', async () => {
+    const port = await freePort();
+    const run = launch(port);
+    await until('the ready line', () => run.stdout().includes(READY(port)));
+    expect(run.has('listening')).toBe(true);
+    expect(run.exit()).toBeUndefined();
+    run.child.kill('SIGTERM');
+    await until('the launcher to exit', () => run.exit() !== undefined);
+    expect(await open(port, '127.0.0.1')).toBe(true); // the server went down with the launcher
+  });
+
+  it('does not say ready while its server has not bound the port yet', async () => {
+    const port = await freePort();
+    const run = launch(port, '127.0.0.1', { gated: true });
+    await until('the server to have been launched', () => run.has('ran'));
+    await new Promise((resolve) => setTimeout(resolve, 800)); // several polls with nothing listening
+    expect(run.stdout()).not.toContain(OWNED_MARKER);
+    rmSync(join(work, `${run.tag}.gate`));
+    await until('the ready line', () => run.stdout().includes(READY(port)));
+    expect(run.has('listening')).toBe(true);
+  });
+
+  // F1: the proof must cover every address the browser can reach, not the first one that answers.
+  it.each([['127.0.0.2'], ['::1']])(
+    'refuses when a foreign server holds the same port on another address (%s) while ours holds 127.0.0.1',
+    async (foreign) => {
+      if (foreign === '::1' && !(await ipv6Available())) {
+        // No IPv6 loopback on this machine: 127.0.0.2 above is the same rule on a second address.
+        return;
+      }
+      const port = await freePort();
+      const run = launch(port, '127.0.0.1', { gated: true });
+      await until('the server to have been launched', () => run.has('ran'));
+      await hold(port, foreign); // binds after the launcher's own check, before our server binds
+      rmSync(join(work, `${run.tag}.gate`));
+      await until('the launcher to refuse', () => run.exit() !== undefined);
+      expect(run.exit()).toBe(1);
+      expect(run.stdout()).not.toContain(OWNED_MARKER);
+      expect(run.stderr()).toContain(`port ${port} is held by a server this run did not start`);
+      expect(run.stderr()).toContain(`pid ${process.pid}`);
+      expect(await open(port, '127.0.0.1')).toBe(true); // our server was taken down too
+    },
+  );
+
+  // F2, first order: the foreign server is already there when the launch starts.
+  it('refuses a port that is already held, names the holder, and never runs the command', async () => {
+    const port = await freePort();
+    await hold(port, '127.0.0.1');
+    const run = launch(port);
+    await until('the launcher to refuse', () => run.exit() !== undefined);
+    expect(run.exit()).toBe(1);
+    expect(run.stderr()).toContain(`port ${port} is held by a server this run did not start`);
+    expect(run.stderr()).toContain(`pid ${process.pid}`);
+    expect(run.has('ran')).toBe(false);
+    expect(run.stdout()).not.toContain(OWNED_MARKER);
+  });
+
+  // F2, first order, the window: free at the launcher's check, taken before our server binds.
+  it('is not ready when a foreign server wins the bind after the check', async () => {
+    const port = await freePort();
+    const run = launch(port, '127.0.0.1', { gated: true });
+    await until('the server to have been launched', () => run.has('ran'));
+    await hold(port, '127.0.0.1');
+    rmSync(join(work, `${run.tag}.gate`));
+    await until('the launcher to exit', () => run.exit() !== undefined);
+    expect(run.exit()).not.toBe(0);
+    expect(run.stdout()).not.toContain(OWNED_MARKER);
+  });
+
+  // F2, second order: ready, and then our server goes away and a foreign one takes its place.
+  it('ends when its server exits, so a replacement cannot inherit the readiness', async () => {
+    const port = await freePort();
+    const run = launch(port);
+    await until('the ready line', () => run.stdout().includes(READY(port)));
+    run.mark('stop');
+    await until('the launcher to exit', () => run.exit() !== undefined);
+    await hold(port, '127.0.0.1');
+    expect(run.stdout().match(new RegExp(OWNED_MARKER, 'g'))).toHaveLength(1);
+  });
+
+  it('kills its server and fails when a foreign server appears on another address after ready', async () => {
+    const port = await freePort();
+    const run = launch(port);
+    await until('the ready line', () => run.stdout().includes(READY(port)));
+    await hold(port, '127.0.0.2');
+    await until('the launcher to refuse', () => run.exit() !== undefined);
+    expect(run.exit()).toBe(1);
+    expect(run.stderr()).toContain(`port ${port} is held by a server this run did not start`);
+    expect(await open(port, '127.0.0.1')).toBe(true);
+  });
+
+  // Fail closed: what cannot be listed is not proof of a free port or of ownership.
+  it('refuses, running nothing, when ss is not there to prove anything', async () => {
+    const port = await freePort();
+    const run = launch(port, '127.0.0.1', { path: join(work, 'no-such-bin') });
+    await until('the launcher to refuse', () => run.exit() !== undefined);
+    expect(run.exit()).toBe(1);
+    expect(run.stderr()).toContain('could not be read');
+    expect(run.has('ran')).toBe(false);
+  });
+
+  it('treats a socket whose owner ss cannot show as foreign', async () => {
+    const port = await freePort();
+    const bin = join(work, `bin-${port}`);
+    const fake = join(bin, 'ss');
+    mkdirSync(bin);
+    writeFileSync(fake, `#!/bin/sh\necho 'LISTEN 0 511 [::1]:${port} [::]:*'\n`, { mode: 0o755 });
+    const run = launch(port, '127.0.0.1', { path: `${bin}:/usr/bin:/bin` });
+    await until('the launcher to refuse', () => run.exit() !== undefined);
+    expect(run.exit()).toBe(1);
+    expect(run.stderr()).toContain('a process that could not be identified');
+    expect(run.has('ran')).toBe(false);
+  });
+});
+
+describe('the Playwright config (F3: reloads must not reject this run’s own servers)', () => {
+  type Entry = {
+    command: string;
+    url?: string;
+    wait?: { stdout: RegExp };
+    reuseExistingServer?: boolean;
+    env?: Record<string, string>;
+  };
+
+  async function loadConfig(ci: boolean): Promise<{ webServer: Entry[] }> {
+    const saved = { CI: process.env.CI, worker: process.env.TEST_WORKER_INDEX };
+    if (ci) process.env.CI = '1';
+    else delete process.env.CI;
+    delete process.env.TEST_WORKER_INDEX; // the UI-mode loader sets none
+    try {
+      let config: { webServer: Entry[] } | undefined;
+      await jest.isolateModulesAsync(async () => {
+        // The real package refuses to be required twice in one process.
+        jest.doMock('@playwright/test', () => ({
+          defineConfig: (value: unknown) => value,
+          devices: { 'Desktop Chrome': {}, 'Pixel 5': {} },
+        }));
+        config = (await import('../playwright.config')).default as unknown as {
+          webServer: Entry[];
+        };
+      });
+      return config!;
+    } finally {
+      if (saved.CI === undefined) delete process.env.CI;
+      else process.env.CI = saved.CI;
+      if (saved.worker !== undefined) process.env.TEST_WORKER_INDEX = saved.worker;
+    }
+  }
+
+  it('opens no socket and starts no process while it loads, so a reload sees nothing to refuse', async () => {
+    const spies = [
+      jest.spyOn(childProcess, 'spawnSync'),
+      jest.spyOn(childProcess, 'execFileSync'),
+      jest.spyOn(childProcess, 'execSync'),
+      jest.spyOn(childProcess, 'spawn'),
+      jest.spyOn(net, 'connect'),
+      jest.spyOn(net.Socket.prototype, 'connect'),
+    ];
+    try {
+      await expect(loadConfig(false)).resolves.toBeDefined();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it('never reuses a server, and locally waits for the launcher’s proof instead of a URL', async () => {
+    const local = (await loadConfig(false)).webServer;
+    expect(local).toHaveLength(3);
+    for (const entry of local) {
+      expect(entry.reuseExistingServer).toBe(false);
+      expect(entry.url).toBeUndefined();
+      expect(entry.command).toMatch(/^node e2e\/own-server\.mjs \d+$/);
+      expect(entry.env?.OWN_SERVER_COMMAND).toBeTruthy();
+      const port = /(\d+)$/.exec(entry.command)![1];
+      expect(entry.wait!.stdout.test(`${OWNED_MARKER} ${port}\n`)).toBe(true);
+      expect(entry.wait!.stdout.test(`${OWNED_MARKER} ${Number(port) + 1}\n`)).toBe(false);
+    }
+    expect(local.map((entry) => entry.env!.OWN_SERVER_COMMAND)).toEqual([
+      'pnpm run build && pnpm run start',
+      'node e2e/layout/mock-gateway.mjs',
+      expect.stringMatching(/^pnpm exec next start --port \d+$/),
+    ]);
+  });
+
+  it('keeps CI as it was: no launcher, the URL poll, no reuse', async () => {
+    const ci = (await loadConfig(true)).webServer;
+    expect(ci.map((entry) => entry.command)).toEqual([
+      'pnpm run start',
+      'node e2e/layout/mock-gateway.mjs',
+      expect.stringMatching(/^pnpm exec next start --port \d+$/),
+    ]);
+    for (const entry of ci) {
+      expect(entry.reuseExistingServer).toBe(false);
+      expect(entry.url).toBeTruthy();
+      expect(entry.wait).toBeUndefined();
+    }
+  });
+
+  it('serverStart refuses reuse in both modes', () => {
+    for (const ci of [true, false]) {
+      expect(serverStart({ ci, port: 1, command: 'x', url: 'http://localhost:1' })).toMatchObject({
+        reuseExistingServer: false,
+      });
+    }
+  });
+
+  it('pins the marker and the command variable the launcher and the config share', () => {
+    const launcher = readFileSync(LAUNCHER, 'utf8');
+    expect(launcher).toContain(`const MARKER = '${OWNED_MARKER}';`);
+    expect(launcher).toContain('process.env.OWN_SERVER_COMMAND');
     expect(
-      portalProofPath({ runId: 'run-xyz', marker, buildIdOnDisk: readBuildId(pkg) }),
-    ).not.toBeNull();
-    // The next run has a new id: the old marker proves nothing for it.
-    expect(
-      portalProofPath({ runId: 'run-next', marker, buildIdOnDisk: readBuildId(pkg) }),
-    ).toBeNull();
-  });
-
-  it('keys the marker by worktree and port', () => {
-    expect(runMarkerFile('/a/web', 3200)).not.toBe(runMarkerFile('/b/web', 3200));
-    expect(runMarkerFile('/a/web', 3200)).not.toBe(runMarkerFile('/a/web', 3201));
-  });
-
-  it('refuses without a run id and removes the marker an earlier run left', () => {
-    const pkg = scratchPackage('build-abc');
-    const file = runMarkerFile(pkg, 39322);
-    cleanup.push(file);
-    writeFileSync(file, JSON.stringify({ runId: 'old', buildId: 'build-abc' }));
-    const result = record(pkg, '39322', null);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('WEB_E2E_RUN_ID');
-    expect(readRunMarker(file)).toBeNull();
-  });
-
-  it('refuses without a build and writes no marker', () => {
-    const pkg = scratchPackage(null);
-    const file = runMarkerFile(pkg, 39323);
-    cleanup.push(file);
-    const result = record(pkg, '39323', 'run-1');
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('BUILD_ID');
-    expect(readRunMarker(file)).toBeNull();
-  });
-
-  it.each([
-    ['not json', 'nope'],
-    ['not an object', '"x"'],
-    ['null', 'null'],
-    ['no build id', '{"runId":"r"}'],
-    ['a numeric run id', '{"runId":1,"buildId":"b"}'],
-  ])('reads %s as no marker', (_name, text) => {
-    const pkg = scratchPackage('b');
-    const file = join(pkg, 'marker.json');
-    writeFileSync(file, text);
-    expect(readRunMarker(file)).toBeNull();
-  });
-
-  it('reads a missing marker file as no marker', () => {
-    expect(readRunMarker(join(tmpdir(), 'web-server-reuse-does-not-exist.json'))).toBeNull();
+      serverStart({ ci: false, port: 7, command: 'cmd', url: 'u' }).env.OWN_SERVER_COMMAND,
+    ).toBe('cmd');
   });
 });
 
@@ -452,7 +403,7 @@ describe('every Playwright config goes through the rule', () => {
     return found;
   }
 
-  it('lets no config with a webServer reuse a listener by anything but planServerReuse', () => {
+  it('lets no config with a webServer reuse a listener or start one outside serverStart', () => {
     const found = configs(root);
     expect(found.map((path) => path.slice(root.length + 1)).sort()).toEqual([
       'apps/web/playwright.config.ts',
@@ -461,27 +412,8 @@ describe('every Playwright config goes through the rule', () => {
     for (const path of found) {
       const text = readFileSync(path, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
       if (!/\bwebServer\b/.test(text)) continue;
-      expect(text).toContain('planServerReuse');
-      for (const use of text.matchAll(/reuseExistingServer\s*:\s*([^,\n]+)/g)) {
-        expect(use[1]).toMatch(/^reuse\.\w+$/);
-      }
+      expect(text).toContain('...serverStart(');
+      expect(text).not.toMatch(/reuseExistingServer\s*:/);
     }
-  });
-
-  it("feeds the web config's rule the real CI flag, the worker flag and the real probe, and records the build before it starts", () => {
-    const text = readFileSync(join(WEB, 'playwright.config.ts'), 'utf8').replace(
-      /\/\*[\s\S]*?\*\/|(?<![:\w])\/\/.*$/gm,
-      '',
-    );
-    expect(text).toContain('ci: Boolean(process.env.CI)');
-    expect(text).toContain('worker: process.env.TEST_WORKER_INDEX !== undefined');
-    expect(text).toContain('inspect: inspectPort');
-    // CI: start only, as before. Locally: build, then record which run built it, then start.
-    expect(text).toContain("process.env.CI\n        ? 'pnpm run start'");
-    expect(text).toMatch(
-      /pnpm run build && node e2e\/record-server-run\.mjs \$\{PORTAL_PORT\} && pnpm run start/,
-    );
-    // The run id the record step reads is the one the config proved against.
-    expect(text).toContain('env: { WEB_E2E_RUN_ID: runId }');
   });
 });

@@ -1,5 +1,3 @@
-import { randomBytes } from 'node:crypto';
-
 import { defineConfig, devices } from '@playwright/test';
 
 import {
@@ -8,14 +6,7 @@ import {
   LAYOUT_PORT,
   layoutSessionSecret,
 } from './e2e/layout/constants';
-import {
-  inspectPort,
-  planServerReuse,
-  portalProofPath,
-  readBuildId,
-  readRunMarker,
-  runMarkerFile,
-} from './e2e/server-reuse';
+import { serverStart } from './e2e/server-reuse';
 
 /**
  * Browser tests for the portal.
@@ -42,43 +33,15 @@ const MOBILE_SPECS =
 const LAYOUT_SPEC = /mobile-layout\.spec\.ts$/;
 
 /**
- * Which servers Playwright may reuse (`e2e/server-reuse.ts`, TASK 323). Reuse is
- * allowed only for a listener this run can prove it started: a hand-run
- * `next dev` on :3200, another worktree's portal or an earlier run's leftover
- * makes the config refuse at load, naming the port and the process, instead of
- * being silently reused with the build skipped. CI never reuses, as before.
- *
- * The run id is random, chosen once by the first process that loads this file
- * and inherited by the start command (which records it beside the BUILD_ID it
- * built) and by every later load of the config.
+ * No server is ever reused, and nothing is inspected while this file loads
+ * (`e2e/server-reuse.ts`, TASK 323 and 325): workers and UI mode's loader load it
+ * again, and a port that is free now can be taken before the server binds. Locally
+ * each entry starts through `e2e/own-server.mjs`, which reports it ready only
+ * while the server it launched is the sole holder of the port; CI, on a fresh
+ * machine, polls the URL as before.
  */
+const ci = Boolean(process.env.CI);
 const PORTAL_PORT = 3200;
-const webDir = __dirname;
-process.env.WEB_E2E_RUN_ID ||= randomBytes(16).toString('hex');
-const runId = process.env.WEB_E2E_RUN_ID;
-const reuse = planServerReuse(
-  {
-    portal: {
-      name: 'portal',
-      port: PORTAL_PORT,
-      proofPath: portalProofPath({
-        runId,
-        marker: readRunMarker(runMarkerFile(webDir, PORTAL_PORT)),
-        buildIdOnDisk: readBuildId(webDir),
-      }),
-    },
-    // Fixtures of this suite alone: nothing can prove a foreign one is ours, so
-    // a listener on either port is always refused.
-    gateway: { name: 'layout fixture gateway', port: LAYOUT_GATEWAY_PORT },
-    layoutPortal: { name: 'layout portal', port: LAYOUT_PORT },
-  },
-  {
-    ci: Boolean(process.env.CI),
-    // Playwright sets this in a worker, which loads the config again but starts no server.
-    worker: process.env.TEST_WORKER_INDEX !== undefined,
-    inspect: inspectPort,
-  },
-);
 
 export default defineConfig({
   testDir: './e2e',
@@ -142,23 +105,24 @@ export default defineConfig({
       // stop it first, or the layout portal reports a missing production build.
       // The price is a build per local run instead of compile-on-demand; the
       // gain is that the suite checks the code that ships.
-      // Locally the build is followed by a record of which run built it, which
-      // is what lets a later load of this config prove the listener is ours.
-      command: process.env.CI
-        ? 'pnpm run start'
-        : `pnpm run build && node e2e/record-server-run.mjs ${PORTAL_PORT} && pnpm run start`,
-      url: 'http://localhost:3200',
-      env: { WEB_E2E_RUN_ID: runId },
-      reuseExistingServer: reuse.portal,
+      ...serverStart({
+        ci,
+        port: PORTAL_PORT,
+        command: ci ? 'pnpm run start' : 'pnpm run build && pnpm run start',
+        url: 'http://localhost:3200',
+      }),
       // A cold build is part of a local start.
-      timeout: process.env.CI ? 120_000 : 360_000,
+      timeout: ci ? 120_000 : 360_000,
     },
     {
       // The fixture gateway for the layout suite: populated pages, no live stack.
-      command: 'node e2e/layout/mock-gateway.mjs',
-      url: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/health`,
-      env: { LAYOUT_GATEWAY_PORT: String(LAYOUT_GATEWAY_PORT) },
-      reuseExistingServer: reuse.gateway,
+      ...serverStart({
+        ci,
+        port: LAYOUT_GATEWAY_PORT,
+        command: 'node e2e/layout/mock-gateway.mjs',
+        url: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/health`,
+        env: { LAYOUT_GATEWAY_PORT: String(LAYOUT_GATEWAY_PORT) },
+      }),
       timeout: 30_000,
     },
     {
@@ -166,18 +130,21 @@ export default defineConfig({
       // production start on the build the entry above provides (CI has already
       // run it; locally that entry builds): it shares `.next` with the first
       // portal, so neither may be a dev server.
-      command: `pnpm exec next start --port ${LAYOUT_PORT}`,
-      url: `${LAYOUT_ORIGIN}/login`,
-      env: {
-        API_GATEWAY_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}`,
-        OIDC_ISSUER_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/realms/layout`,
-        OIDC_CLIENT_ID: 'rasta-web',
-        WEB_PUBLIC_ORIGIN: LAYOUT_ORIGIN,
-        WEB_COOKIE_SECURE: 'false',
-        WEB_SESSION_SECRET: layoutSessionSecret(),
-        WEB_REDIS_URL: process.env.WEB_REDIS_URL ?? 'redis://localhost:6379',
-      },
-      reuseExistingServer: reuse.layoutPortal,
+      ...serverStart({
+        ci,
+        port: LAYOUT_PORT,
+        command: `pnpm exec next start --port ${LAYOUT_PORT}`,
+        url: `${LAYOUT_ORIGIN}/login`,
+        env: {
+          API_GATEWAY_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}`,
+          OIDC_ISSUER_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/realms/layout`,
+          OIDC_CLIENT_ID: 'rasta-web',
+          WEB_PUBLIC_ORIGIN: LAYOUT_ORIGIN,
+          WEB_COOKIE_SECURE: 'false',
+          WEB_SESSION_SECRET: layoutSessionSecret(),
+          WEB_REDIS_URL: process.env.WEB_REDIS_URL ?? 'redis://localhost:6379',
+        },
+      }),
       timeout: 120_000,
     },
   ],

@@ -11,14 +11,17 @@ and nothing else, so they run anywhere and any number of times at once.
 ## The ports the suite owns (3200, 3201, 3291)
 
 Locally the suite builds the portal, starts it on :3200 and starts its own layout fixtures on
-:3201 and :3291. **It never reuses a server it did not start itself.** If something already
-holds one of those ports (a hand-run `pnpm dev`, another worktree's portal, a leftover from an
-earlier run), the config refuses at load and names the port and the process
-(`e2e/server-reuse.ts`, TASK 323): a reused dev server would skip the production build, and the
-fixture portal needs the production `BUILD_ID`. Stop that process and run again. The proof is a
-per-run id that the start step records beside the BUILD_ID it built, and a listener that serves
-exactly that build; a CI run is not inspected and never reuses, as before. (`playwright test
---list` loads the config too, so it refuses as well while a foreign server holds :3200.)
+:3201 and :3291. **It never reuses a server, and a server counts as ready only while it is the
+only holder of its port.** Each is started through `e2e/own-server.mjs` (`e2e/server-reuse.ts`,
+TASK 323 and 325): before the command runs, any listener on the port — IPv4 or IPv6, any
+address — is refused by name; while the server lives, every listening socket of the port must
+belong to the process tree the launcher started, or the launcher kills the server and fails.
+Playwright waits for the launcher's `RASTA_E2E_OWNED <port>` line instead of polling a URL. A
+hand-run `pnpm dev`, another worktree's portal or a leftover from an earlier run therefore stops
+the run with the port and the process named; stop it and run again. Nothing is inspected while
+the config loads, so workers and UI mode's loader load it freely. It needs Linux `ss` and `ps`;
+without them nothing can be proved and the launcher refuses. CI starts its servers on a fresh
+machine with the URL poll, as before.
 
 ## Live-stack scenarios — need the whole stack, and **one run per stack**
 
