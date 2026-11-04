@@ -3460,7 +3460,9 @@ test('callback helper source inputs refuse any missing reviewed source', async (
     const global = new Set([...hashed.global].filter((file) => file !== path));
     const problems = exceptionReadProblems(found, { ...hashed, tasks, global });
     assert.ok(
-      problems.some((problem) => problem.includes(path)),
+      problems.some(
+        (problem) => problem.includes('scripts/zod-callback-helpers.mjs') && problem.includes(path),
+      ),
       path,
     );
   }
