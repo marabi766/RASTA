@@ -8,6 +8,8 @@ import {
   MAX_FOLLOW_BATCH_SIZE,
   DEFAULT_MAX_LIVE_DEMANDS,
   MAX_INVITEES_LIMIT,
+  MAX_QUOTATION_REVISIONS_LIMIT,
+  QUOTATION_RECEIPT_CHAIN_LIMIT,
   MAX_LIVE_DEMANDS_LIMIT,
 } from './env';
 import { procurementOperationBudgets } from './operation-budgets';
@@ -255,6 +257,19 @@ describe('the RFQ settings (ADR-070 § 3, § 4; plan PR 6)', () => {
     for (const bad of ['0', String(MAX_INVITEES_LIMIT + 1)]) {
       expect(() => load({ PROCUREMENT_RFQ_MAX_INVITEES: bad })).toThrow(
         /PROCUREMENT_RFQ_MAX_INVITEES/,
+      );
+    }
+  });
+
+  it('lets a quotation have 10 sealed revisions by default, 1 to 20: the most invitees at the most revisions fill exactly the chain audit-service returns', () => {
+    expect(load().PROCUREMENT_QUOTATION_MAX_REVISIONS).toBe(10);
+    expect(MAX_QUOTATION_REVISIONS_LIMIT * MAX_INVITEES_LIMIT).toBe(QUOTATION_RECEIPT_CHAIN_LIMIT);
+    expect(
+      load({ PROCUREMENT_QUOTATION_MAX_REVISIONS: '20' }).PROCUREMENT_QUOTATION_MAX_REVISIONS,
+    ).toBe(20);
+    for (const bad of ['0', '21', '1.5']) {
+      expect(() => load({ PROCUREMENT_QUOTATION_MAX_REVISIONS: bad })).toThrow(
+        /PROCUREMENT_QUOTATION_MAX_REVISIONS/,
       );
     }
   });
