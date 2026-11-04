@@ -20,6 +20,22 @@ const window = {
   totalQuantity: 12,
 };
 
+const QUOTATION = 'QOT_01JABCDEFGHJKMNPQRSTVWXYZ4';
+
+/** A quotation's receipt as published: digests and identifiers, never a price, answer or note. */
+const QUOTATION_RECEIPT = {
+  rfqId: RFQ,
+  quotationId: QUOTATION,
+  organizationId: 'ORG_BUYER',
+  supplierOrganizationId: 'ORG_01JABCDEFGHJKMNPQRSTVWXYZ1',
+  receivedAt: AT,
+  contentCommitment: 'c'.repeat(64),
+  ciphertextSha256: 'd'.repeat(64),
+  previousReceipt: 'e'.repeat(64),
+  receipt: 'f'.repeat(64),
+  submittedBy: 'USR_2',
+};
+
 /** SHA-256 of the empty string: the digest of a window that ended with no live demand. */
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
@@ -127,14 +143,29 @@ const PUBLISHED: Record<ProcurementEventName, Record<string, unknown>> = {
     cancelledBy: 'USR_1',
     cancelledAt: AT,
   },
+  QUOTATION_SUBMITTED: { ...QUOTATION_RECEIPT, revision: 1 },
+  QUOTATION_REVISED: { ...QUOTATION_RECEIPT, revision: 2 },
+  QUOTATION_WITHDRAWN: {
+    rfqId: RFQ,
+    quotationId: QUOTATION,
+    organizationId: 'ORG_BUYER',
+    supplierOrganizationId: 'ORG_01JABCDEFGHJKMNPQRSTVWXYZ1',
+    revision: 2,
+    withdrawnBy: 'USR_2',
+    withdrawnAt: AT,
+  },
 };
 
 /** What each event is keyed by: the aggregation, a setting's organization, an RFQ's id. */
 const KEY_OF = (name: ProcurementEventName): string =>
-  name === 'AGGREGATION_SETTING_CHANGED' ? 'ORG_BUYER' : name.startsWith('RFQ_') ? RFQ : 'AGG_1';
+  name === 'AGGREGATION_SETTING_CHANGED'
+    ? 'ORG_BUYER'
+    : name.startsWith('RFQ_') || name.startsWith('QUOTATION_')
+      ? RFQ
+      : 'AGG_1';
 
-describe('the procurement events (ADR-070 § 9, PRs 1 to 3 and 6)', () => {
-  it('are the demand’s two, the four of a window’s end, the cancellation, the setting and the RFQ’s three, each with a schema and an aggregate', () => {
+describe('the procurement events (ADR-070 § 9, PRs 1 to 3, 6 and 8)', () => {
+  it('are the demand’s two, the four of a window’s end, the cancellation, the setting, the RFQ’s three and the quotation’s three, each with a schema and an aggregate', () => {
     const names = [
       'DEMAND_SUBMITTED',
       'DEMAND_WITHDRAWN',
@@ -147,6 +178,9 @@ describe('the procurement events (ADR-070 § 9, PRs 1 to 3 and 6)', () => {
       'RFQ_ISSUED',
       'RFQ_CLOSED',
       'RFQ_CANCELLED',
+      'QUOTATION_SUBMITTED',
+      'QUOTATION_REVISED',
+      'QUOTATION_WITHDRAWN',
     ];
     expect(Object.keys(PROCUREMENT_EVENTS)).toEqual(names);
     expect(Object.keys(PROCUREMENT_EVENT_SCHEMAS)).toEqual(names);

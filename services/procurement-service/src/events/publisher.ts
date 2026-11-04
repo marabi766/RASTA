@@ -119,6 +119,7 @@ export const ID_PREFIX = {
   rfq: ID_PREFIXES.rfq,
   /** An RFQ's sealing key pair (the shape of construction's `TKY`): this service's own. */
   rfqKey: 'RFK',
+  quotation: ID_PREFIXES.quotation,
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

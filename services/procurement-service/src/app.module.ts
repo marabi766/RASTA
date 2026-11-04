@@ -58,6 +58,9 @@ import { RfqClose } from './rfq/rfq-close';
 import { RfqService } from './rfq/rfq.service';
 import { RfqCloseService } from './rfq/rfq-close.service';
 import { RfqCloseSweeper } from './rfq/rfq-close.sweeper';
+import { QuotationController } from './quotation/quotation.controller';
+import { QuotationRepository } from './quotation/quotation.repository';
+import { QuotationService } from './quotation/quotation.service';
 import { SupplierStandingClient } from './rfq/supplier-standing.client';
 import { EnvKekProvider } from './rfq/key-provider';
 import { loadProcurementEnv, SERVICE_NAME, type ProcurementEnv } from './config/env';
@@ -96,6 +99,7 @@ import {
     AggregationController,
     AggregationRfqController,
     RfqController,
+    QuotationController,
     AggregationSettingController,
     HealthController,
     MetricsController,
@@ -178,6 +182,9 @@ import {
       useFactory: (env: ProcurementEnv) =>
         new EnvKekProvider(env.PROCUREMENT_RFQ_KEKS, env.PROCUREMENT_RFQ_KEK_CURRENT),
     },
+    // ADR-070 § 4, plan PR 8: an invited supplier's sealed quotation and the RFQ's receipt chain.
+    QuotationRepository,
+    QuotationService,
     {
       provide: RfqCloseSweeper,
       inject: [RfqRepository, RfqCloseService, ENV],
