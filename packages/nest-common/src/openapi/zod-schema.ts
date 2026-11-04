@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
+import { publishedIsoDateTimeZone } from '@rasta/contracts';
 
 /**
  * Converts the Zod schemas a service validates with into JSON Schema, so its
@@ -98,7 +99,12 @@ export function toJsonSchema(schema: z.ZodType): JsonSchema {
       ? convert(defOf(schema))
       : { type: 'boolean', default: queryBooleanDefaultValue };
 
-  return description ? { ...base, description } : base;
+  if (!description) return base;
+  // A schema's own words come first; a bound its format carries (FU-035) is kept after them.
+  return {
+    ...base,
+    description: base.description ? `${description} ${String(base.description)}` : description,
+  };
 }
 
 /** The bounds a `codePointLength` check on `def` publishes, if any. */
@@ -222,13 +228,13 @@ const STRING_FORMATS: Record<string, string> = {
 function stringSchema(def: any): JsonSchema {
   const out: JsonSchema = { type: 'string' };
 
-  for (const { check: marked, def: check } of checkDefs(def)) {
+  for (const { check: instance, def: check } of checkDefs(def)) {
     // A refinement that applies one anchored pattern says so on itself
     // (`prefixedIdSchema` in `@rasta/contracts`, FU-073): its runtime issue
     // stays zod 3's `custom`, and the identifier is published as the pattern it
     // is tested against rather than as any string. A flagged pattern cannot be
     // carried by `pattern` faithfully, and is not published.
-    const published = marked[PUBLISHED_PATTERN];
+    const published = instance[PUBLISHED_PATTERN];
     if (published instanceof RegExp && published.flags === '') out.pattern = published.source;
     if (check.check === 'min_length') out.minLength = check.minimum;
     if (check.check === 'max_length') out.maxLength = check.maximum;
@@ -239,6 +245,13 @@ function stringSchema(def: any): JsonSchema {
     // runs rather than a re-spelling of it. Only a `.regex()` publishes its
     // pattern: a format's pattern is zod's implementation of it.
     if (check.format === 'regex') out.pattern = (check.pattern as RegExp).source;
+    // `format: date-time` admits offsets the platform's `isoDateTime()` refuses (RFC 3339 allows
+    // ±23:59; the UTC-only form takes none), so its accepted zone is published with it (FU-035).
+    const zone = publishedIsoDateTimeZone(instance);
+    if (zone) {
+      out.pattern = zone.pattern;
+      out.description = zone.description;
+    }
   }
 
   return out;

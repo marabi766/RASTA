@@ -1,5 +1,5 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { ModulesContainer, NestFactory, Reflector } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
@@ -8,6 +8,7 @@ import {
   listTenderApprovalsQuerySchema,
 } from '../tender/tender-approval.dto';
 import {
+  ALLOW_SERVICE_KEY,
   publishedApiErrorSchema as apiErrorSchema,
   isOptionalField,
   objectShapeOf,
@@ -723,6 +724,72 @@ const DESCRIPTION =
   'publication, bids and evaluation follow, and the planned surface is in ' +
   'docs/api/construction-service.tender.planned.openapi.json.';
 
+/**
+ * Every route carrying `@AllowService`, and what else is true of it that no decorator states.
+ * `users`: whether a user (bearer) token may also call it — `refused` is enforced in the
+ * service (`completion-fact.ts`), not by the guard. The token requirement itself is derived
+ * from the decorator (FU-008); this table only completes it, and the generator refuses to run
+ * when a route has `@AllowService` but no entry here, or an entry but no `@AllowService`.
+ */
+export const SERVICE_ROUTES: Record<
+  string,
+  {
+    users: 'accepted' | 'refused';
+    /** Appended to the derived service-token sentence of the 403. */
+    serviceNote?: string;
+    /** A status's text replaced (`null`: not documented on this route). */
+    errors?: Partial<Record<string, string | null>>;
+  }
+> = {
+  'GET /v1/internal/projects/{id}/completion': {
+    users: 'refused',
+    serviceNote: 'A service token signed for no tenant is SERVICE_TENANT_CONTEXT_INVALID as well.',
+    errors: {
+      400: null,
+      404: 'Project not found in the signed tenant; the same response for missing and other-tenant projects.',
+    },
+  },
+  'GET /v1/tenders/{id}/award': { users: 'accepted' },
+};
+
+/**
+ * `operationId` → the services its handler's `@AllowService` admits (`undefined`: none), read
+ * with the same precedence as `AuthGuard` (handler over class). Fails closed: an operation whose
+ * handler cannot be found, or an empty allowlist (which admits every service), throws.
+ */
+export function serviceCallersByOperation(
+  app: INestApplication,
+  operationIds: readonly string[],
+): Map<string, readonly string[] | undefined> {
+  type Target = Parameters<Reflector['getAllAndOverride']>[1][number];
+  const handlers = new Map<string, [Target, Target]>();
+  for (const nestModule of app.get(ModulesContainer).values()) {
+    for (const { metatype } of nestModule.controllers.values()) {
+      if (typeof metatype !== 'function') continue;
+      for (const name of Object.getOwnPropertyNames(metatype.prototype)) {
+        const handler: unknown = metatype.prototype[name];
+        if (name === 'constructor' || typeof handler !== 'function') continue;
+        const id = `${metatype.name}_${name}`;
+        const seen = handlers.get(id);
+        if (seen && seen[0] !== handler) throw new Error(`OpenAPI: two handlers named ${id}`);
+        handlers.set(id, [handler, metatype]);
+      }
+    }
+  }
+  const reflector = new Reflector();
+  const result = new Map<string, readonly string[] | undefined>();
+  for (const operationId of operationIds) {
+    const found = handlers.get(operationId.replace(/_v\d+$/, ''));
+    if (!found) throw new Error(`OpenAPI: no handler found for operation ${operationId}`);
+    const allowed = reflector.getAllAndOverride<string[] | undefined>(ALLOW_SERVICE_KEY, found);
+    if (allowed?.length === 0) {
+      throw new Error(`OpenAPI: ${operationId} has an empty @AllowService; name its callers`);
+    }
+    result.set(operationId, allowed);
+  }
+  return result;
+}
+
 /** Builds the finished document for a booted application. */
 export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPIObject {
   const document = SwaggerModule.createDocument(
@@ -735,7 +802,14 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
       .addApiKey({ type: 'apiKey', in: 'header', name: 'X-Internal-Token' }, 'internalToken')
       .build(),
   );
-  return enrichOpenApiDocument(document);
+  const operationIds = Object.values(document.paths ?? {}).flatMap((item) =>
+    Object.values(item).flatMap((operation) =>
+      isOperation(operation) && typeof operation.operationId === 'string'
+        ? [operation.operationId]
+        : [],
+    ),
+  );
+  return enrichOpenApiDocument(document, serviceCallersByOperation(app, operationIds));
 }
 
 /**
@@ -786,7 +860,10 @@ export async function buildDocumentationApp(): Promise<INestApplication> {
   return app;
 }
 
-export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
+export function enrichOpenApiDocument(
+  document: OpenAPIObject,
+  serviceCallers: ReadonlyMap<string, readonly string[] | undefined>,
+): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
@@ -797,11 +874,29 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
+      // From the handler's `@AllowService`, never from the path (FU-008). Unknown ⇒ throw.
+      const id = operation.operationId;
+      if (typeof id !== 'string' || !serviceCallers.has(id)) {
+        throw new Error(`OpenAPI: ${key} has no reflected @AllowService metadata`);
+      }
+      const services = serviceCallers.get(id);
+      const serviceRoute = SERVICE_ROUTES[key];
+      if ((services === undefined) !== (serviceRoute === undefined)) {
+        throw new Error(`OpenAPI: ${key} and SERVICE_ROUTES disagree about @AllowService`);
+      }
       // `addBearerAuth()` declares the scheme; it does not apply it. Without
-      // this the contract would describe endpoints anybody can call.
-      operation.security ??= path.startsWith('/v1/internal/')
-        ? [{ internalToken: [] }]
-        : [{ bearer: [] }];
+      // this the contract would describe endpoints anybody can call. Assigned, not
+      // defaulted: a Swagger decorator never outranks the guard's own metadata.
+      operation.security = [
+        ...(serviceRoute?.users === 'refused' ? [] : [{ bearer: [] }]),
+        ...(services ? [{ internalToken: [] }] : []),
+      ];
+      const serviceRefusal = services
+        ? `${serviceRoute?.users === 'refused' ? 'Every user token is refused. ' : ''}` +
+          `A service token is accepted only from ${services.join(', ')}; any other service is refused. ` +
+          'An X-Organization-Id that differs from the signed tenant is SERVICE_TENANT_CONTEXT_INVALID.' +
+          (serviceRoute?.serviceNote ? ` ${serviceRoute.serviceNote}` : '')
+        : undefined;
 
       // The header is read with `@Headers`, which Nest documents as a required
       // parameter with no schema. Replaced with the truth: optional, bounded.
@@ -876,7 +971,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       }
 
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
-        if (status === '400' && path.startsWith('/v1/internal/')) continue;
+        const override = serviceRoute?.errors?.[status];
+        if (override === null) continue;
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
         if (
@@ -899,11 +995,12 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         }
         operation.responses[status] ??= {
           description:
-            path.startsWith('/v1/internal/') && status === '403'
-              ? 'Every user token and every service except contract-service is refused. A missing signed tenant or a conflicting organization header is SERVICE_TENANT_CONTEXT_INVALID.'
-              : path.startsWith('/v1/internal/') && status === '404'
-                ? 'Project not found in the signed tenant; the same response for missing and other-tenant projects.'
-                : description,
+            override ??
+            (status === '403' && serviceRefusal
+              ? serviceRoute?.users === 'refused'
+                ? serviceRefusal
+                : `${description} On this route, unlike the rest, service tokens are not all refused: ${serviceRefusal}`
+              : description),
           ...(status === '409' && IDEMPOTENT.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
@@ -962,6 +1059,7 @@ export function formatDocument(document: OpenAPIObject, filePath: string): strin
 interface MutableOperation {
   requestBody?: unknown;
   parameters?: unknown[];
+  operationId?: string;
   responses?: Record<string, unknown>;
   security?: Record<string, string[]>[];
 }
