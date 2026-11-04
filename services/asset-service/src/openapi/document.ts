@@ -1,7 +1,7 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
-import { publishApiErrors, healthProbeErrorSchema } from '@rasta/nest-common';
+import { publishApiErrors, healthProbeErrorSchema, type PublishedSchema } from '@rasta/nest-common';
 import { AssetController } from '../asset/asset.controller';
 import { AssetInternalController, TransferRecordService } from '../asset/transfer-record';
 import { AssetSnapshotService } from '../asset/asset-snapshot';
@@ -14,27 +14,32 @@ import { HealthController, MetricsController } from '../health/health.controller
 import { PrismaService } from '../prisma/prisma.service';
 import { KafkaEventPublisher } from '../outbox/kafka.publisher';
 
+/** What the routes themselves declare, before the shared error envelope is published. */
+export function assetRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
+  return SwaggerModule.createDocument(
+    app,
+    new DocumentBuilder()
+      .setTitle('Rasta — Asset Service')
+      .setDescription(
+        'The asset is the centre of the platform, not the user. Every machine ' +
+          'carries an electronic dossier assembled from the events other services ' +
+          'publish about it — usage, maintenance, insurance, cost and location.',
+      )
+      .setVersion(version)
+      .addBearerAuth()
+      .build(),
+  );
+}
+
+/** D-121: the one registry of probe routes whose 503 is a health body, not the envelope. */
+export const ASSET_PROBE_EXCEPTIONS: Readonly<Record<string, PublishedSchema>> = {
+  'GET /health/ready 503': healthProbeErrorSchema('asset-service', 'ready'),
+  'GET /health/startup 503': healthProbeErrorSchema('asset-service', 'startup'),
+};
+
 /** The builder used by the real application and the documentation fixture. */
 export function buildAssetOpenApiDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
-  return publishApiErrors(
-    SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — Asset Service')
-        .setDescription(
-          'The asset is the centre of the platform, not the user. Every machine ' +
-            'carries an electronic dossier assembled from the events other services ' +
-            'publish about it — usage, maintenance, insurance, cost and location.',
-        )
-        .setVersion(version)
-        .addBearerAuth()
-        .build(),
-    ),
-    {
-      'GET /health/ready 503': healthProbeErrorSchema('asset-service', 'ready'),
-      'GET /health/startup 503': healthProbeErrorSchema('asset-service', 'startup'),
-    },
-  );
+  return publishApiErrors(assetRouteDocument(app, version), ASSET_PROBE_EXCEPTIONS);
 }
 
 /** Decorators only: no database, broker, credentials or external requests. */
