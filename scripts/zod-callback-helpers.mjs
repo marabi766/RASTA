@@ -120,8 +120,8 @@ const resolvedSource = (root, modulePath) => {
 };
 // Compiler configuration is part of resolution: do not assume that @/ still
 // points at apps/web/src, or that a workspace has no moduleSuffixes override.
-const resolvedImport = (root, specifier, importer) => {
-  const config = ts.findConfigFile(dirname(importer), ts.sys.fileExists);
+const resolvedImport = (root, specifier, importer, configImporter = importer) => {
+  const config = ts.findConfigFile(dirname(configImporter), ts.sys.fileExists);
   const parsed =
     config &&
     ts.getParsedCommandLineOfConfigFile(
@@ -142,18 +142,18 @@ const resolvedImport = (root, specifier, importer) => {
   return result && relative(root, result.resolvedFileName).replaceAll('\\', '/');
 };
 export function verifiedCallbackHelper(root, modulePath, name, importer) {
-  if (importer && modulePath !== '@rasta/contracts') {
-    const exact = resolvedImport(root, modulePath, importer);
-    if (!exact || resolvedSource(root, exact) !== exact) return undefined;
-    modulePath = exact;
-  }
-  const exact = modulePath === '@rasta/contracts' ? modulePath : resolvedSource(root, modulePath);
-  const helper = helpers.find(
-    ([path, file, names]) =>
-      (path === '@rasta/contracts' ? path === exact : file === exact) && names.includes(name),
-  );
-  if (!helper) return undefined;
   try {
+    if (importer && modulePath !== '@rasta/contracts') {
+      const exact = resolvedImport(root, modulePath, importer);
+      if (!exact || resolvedSource(root, exact) !== exact) return undefined;
+      modulePath = exact;
+    }
+    const exact = modulePath === '@rasta/contracts' ? modulePath : resolvedSource(root, modulePath);
+    const helper = helpers.find(
+      ([path, file, names]) =>
+        (path === '@rasta/contracts' ? path === exact : file === exact) && names.includes(name),
+    );
+    if (!helper) return undefined;
     const files = [
       helper[1],
       ...(helper[0] === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
@@ -173,6 +173,38 @@ export function verifiedCallbackHelper(root, modulePath, name, importer) {
         .digest('hex') !== 'a76c167fba032bba883f75d9a931a6fe60af0946c12b0bca63df1600aca74f12'
     )
       files.push('apps/web/src/lib/form-issues.ts');
+    // A pinned dependency must also be the dependency the compiler selects.
+    // Its source bytes alone cannot authenticate a moduleSuffixes/paths shadow.
+    if (importer)
+      for (const file of files) {
+        const ast = ts.createSourceFile(
+          file,
+          readFileSync(resolve(root, file), 'utf8'),
+          ts.ScriptTarget.Latest,
+        );
+        for (const statement of ast.statements) {
+          const specifier = statement.moduleSpecifier?.text;
+          if (typeof specifier !== 'string') continue;
+          const logical = specifier.startsWith('.')
+            ? relative(root, resolve(dirname(resolve(root, file)), specifier))
+            : specifier.startsWith('@/')
+              ? 'apps/web/src/' + specifier.slice(2)
+              : undefined;
+          const expected = files.find((path) =>
+            [
+              path,
+              path.replace(/\.ts$/, '.js'),
+              path.replace(/\.ts$/, ''),
+              path.replace(/\/index\.ts$/, ''),
+            ].includes(logical),
+          );
+          if (
+            expected &&
+            resolvedImport(root, specifier, resolve(root, file), importer) !== expected
+          )
+            return undefined;
+        }
+      }
     if (
       files.some(
         (path) =>

@@ -990,6 +990,26 @@ it('FU-069b respects compiler aliases and module suffixes', () => {
       verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
       undefined,
     );
+    cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
+      recursive: true,
+    });
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/form-issues.ts'),
+      join(root, 'apps/web/src/lib/form-issues.ts'),
+    );
+    appendFileSync(
+      join(root, 'apps/web/src/lib/format/digits.evil.ts'),
+      'export const toLatinDigits=Number;',
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, '@/lib/format', 'toLatinDigits', importer),
+      undefined,
+    );
+    writeFileSync(config, '{');
+    assert.equal(
+      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
+      undefined,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
