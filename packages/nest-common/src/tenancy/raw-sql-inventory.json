@@ -2493,6 +2493,13 @@
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
+    "line": 130,
+    "hash": "8a1e49d27272963b31ca321f3d3929e1d9982d9df17e107dd7bc091a9c7a982d",
+    "occurrence": 0,
+    "decision": "platform-wide: external codes are unique across the whole registry (ux_organization_external_code_key, FU-084); returns only the holder's id, and the caller is a write already authorized for its target"
+  },
+  {
+    "file": "services/organization-service/src/organization/organization.repository.ts",
     "line": 145,
     "hash": "617c20175b27dc0da91e2f30b1dcbf667be334084ae7c159c7699d2045c2d581",
     "occurrence": 0,
