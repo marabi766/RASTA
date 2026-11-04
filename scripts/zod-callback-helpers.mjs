@@ -60,7 +60,7 @@ const pins = {
   'packages/contracts/src/common/iso-datetime.ts':
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
   'packages/contracts/src/index.ts':
-    '5eb74d3686113d4579135376d1626bdad64abbf2b13b291d80de3d73998f514e',
+    'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
   'apps/web/src/lib/format/codepoints.ts':
