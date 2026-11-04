@@ -488,7 +488,8 @@ describe('the window of an aggregation', () => {
           SELECT count(*) AS blocked FROM pg_stat_activity
            WHERE ${holderPid}::int = ANY(pg_blocking_pids(pid))`;
         if (Number(row?.blocked ?? 0) > 0) break;
-        if (Date.now() > parkDeadline) throw new Error('the request never waited on the window lock');
+        if (Date.now() > parkDeadline)
+          throw new Error('the request never waited on the window lock');
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       clock.set(new Date(T0.getTime() + 10 * HOUR));
