@@ -10,17 +10,19 @@
 >
 > **دور ۳ (2026-11-03):** دو یافته‌ی Codex دور ۲ (`~/rasta-audit/reviews/PR-362-r2.md`): حصار PR 1a به «پذیرش برای Commit» با دو
 > ساعت مستقل باریک شد (ADR-072 § ۵ (۳))، و بودجه‌ی تراکنش‌های تحت دامنه برای هر هفت سرویس نوشته‌کننده (پایین).
+>
+> **دور ۵ (2026-11-04):** یافته‌ی Codex دور ۴ (`~/rasta-audit/reviews/PR-362-r4.md`): داور پذیرش از Node به گزاره‌ی پایگاه داده درون خود `COMMIT` رفت؛ هر نویسنده یک Migration می‌گیرد (پایین).
 
 **اندازه:** `S` ≈ تا ۳۰۰ خط تغییر با آزمون؛ `M` ≈ ۳۰۰ تا ۹۰۰؛ `L` ≈ ۹۰۰ تا ۲۰۰۰ (همان مقیاس برنامهٔ ADR-071). امتیاز برآوردی
-کنار هر برش است؛ جمع (۴۵؛ دور ۱: ۳۶) برای هیچ قلم Backlogی نیست — **ساختن قلم و برآورد با مدیر پروژه است**؛ این سند `backlog.json` را تغییر
+کنار هر برش است؛ جمع (۴۶؛ دور ۱: ۳۶) برای هیچ قلم Backlogی نیست — **ساختن قلم و برآورد با مدیر پروژه است**؛ این سند `backlog.json` را تغییر
 نمی‌دهد.
 
 ## نقشه
 
 | PR  | سرویس / عنوان                                                                                                                                                    | اندازه | امتیاز | وابسته به |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------ | --------- |
-| 0   | طراحی: ADR-072، Q-144 تا Q-147، D-061 (همین؛ دور ۳)                                                                                                              | S      | ۱      | —         |
-| 1a  | `nest-common` و `contracts`: `@AllowService` بی نام = خطا و رد (نه Wildcard)، `GovernanceClient` مشترک، نام و Schema ـِ دو رویداد، `ID_PREFIXES.unionMembership` | M      | ۳      | 0         |
+| 0   | طراحی: ADR-072، Q-144 تا Q-147، D-061 (همین؛ دور ۵)                                                                                                              | S      | ۱      | —         |
+| 1a  | `nest-common` و `contracts`: `@AllowService` بی نام = خطا و رد (نه Wildcard)، `GovernanceClient` مشترک، نام و Schema ـِ دو رویداد، `ID_PREFIXES.unionMembership` | M      | ۴      | 0         |
 | 1b  | `audit-service`: Projection ـِ رویداد عضویت (`UnionMembership/{membershipId}`)؛ **پیش از PR 1 مستقر می‌شود**                                                     | S      | ۱      | 1a        |
 | 1   | `organization-service`: جدول عضویت، API، رویدادها، دید و نوشتن در `G`، پرسش درونی تکی و دسته‌ای، Seed                                                            | L      | ۸      | 1a، 1b    |
 | 2   | `economic-service` — **نخست از چهار** (داده‌ی مالی)                                                                                                              | M      | ۵      | 1         |
@@ -37,16 +39,31 @@ PR 1a نخست؛ PR 1b و PR 1 پس از آن، و **PR 1b پیش از PR 1 مس
 ADR-072 § ۳). PR 3، 4 و 5 پس از ادغام PR 2 و موازی؛ PR 6 تا 9 پس از PR 1 و موازی با بقیه. **ترتیب استقرار** همان ترتیب ادغام
 است، با یک گام عملیاتی میان PR 1 و PR 2 (پایین). امتیازهای دور ۲: PR 1a و 1b تازه (۳ + ۱)، PR 2 از ۳ به ۵ (شش فرمان مثبت، شش
 بازپخش، حصار)، PR 4 از ۳ به ۴ (تکه‌بندی صف، `404` یکسان، یادداشت به‌ازای ردیف)، PR 8 و 9 هرکدام از ۳ به ۴ (پرسش سیاست به درون
-تراکنش اثر).
+تراکنش اثر). دور ۵: PR 1a از ۳ به ۴ (Migration ـِ الگو و آزمون‌های PostgreSQL واقعی).
 
 **قاعده‌های مشترک هر PR مصرف‌کننده (2 تا 9؛ ADR-072 § ۴، § ۵):** `GovernanceClient` از PR 1a و نام سرویس در
 `GOVERNANCE_CALLERS`؛ امضای مستأجر فقط از سازمان فعال (واگذاری مستقیم) یا نویسنده‌ی ذخیره‌شده‌ی سیاست؛ پرسش پیش از تراکنش فقط رد
-زودهنگام، و پرسش تعیین‌کننده درون تراکنش اثر پس از قفل‌ها، تراکنش فقط با `governedTransaction` و `fence(tx)` به‌عنوان آخرین Statement؛
+زودهنگام، و پرسش تعیین‌کننده درون تراکنش اثر پس از قفل‌ها، تراکنش فقط با `governedTransaction`، لنگر پس از آخرین قفل و پیش از نخستین پرسش تعیین‌کننده و `fence(tx)` به‌عنوان آخرین Statement؛
 خواندن با سنجش سن پاسخ؛ ناتوانی یا `EXPIRED` روی هدف ذخیره‌شده ← همان `404` ـِ ناموجود؛ `COMMIT_UNKNOWN` هرگز رد یا `EXPIRED`
 نیست؛ هر کدام با آزمون در همان PR.
 
+**گزاره‌ی پذیرش در هر هفت نویسنده (Codex r4 یافته‌ی ۱؛ ADR-072 § ۵ (۳)).** هر PR زیر همان Migration ـِ الگوی PR 1a را با `down.sql` به پایگاه داده‌ی خودش می‌افزاید: جدول
+`governed_admission`، `trg_governed_admission_deadline` و توابع لنگر و `fence`. با قرارداد D-045: مالک Migrator است، Trigger بی `SECURITY DEFINER` (هیچ Migration ـِ مخزن آن را ندارد)؛
+`ENABLE ALWAYS`؛ حق DML از Default Privileges (در supplier با `GRANT` ـِ همان Migration، حالت `migration`)؛ جدول ستون مستأجر ندارد (دلیلش برای `check:tenant-index-order` در همان PR). Migration پیش از کد مستقر می‌شود؛ ترتیب نادرست امن است: کد بی Migration در لنگر
+خطا می‌گیرد و پرسشی نمی‌فرستد. برگشت: Revert ـِ کد و سپس `down.sql`. آزمون هر PR: `COMMIT` ـِ دیر یک نوشتن واقعی همان سرویس ← `RG072`، `EXPIRED` و هیچ اثر.
+
+| نویسنده (PR)     | نوشتن‌ها                                    | Trigger معوق موجود که سنجش باید پس از آن‌ها بیاید          | نکته‌ی همان نویسنده                                                                                                                                                                       |
+| ---------------- | ------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| economic (2)     | شش فرمان مالی                               | `trg_journal_balanced`، `trg_journal_has_entries`          | Savepoint ـِ `settlement_priced` (پایین، PR 2)؛ رد در `COMMIT` ← دفتر، کیف پول و Outbox بی‌تغییر                                                                                          |
+| document (3)     | تغییر و حذف سند                             | ندارد                                                      | —                                                                                                                                                                                         |
+| supplier (4)     | `decide`، `suspend`، `reinstate`            | `trg_performance_*` (چهار تا)                              | `GRANT` جدول در خود Migration                                                                                                                                                             |
+| marketplace (5)  | حل اختلاف، ویرایش پیشنهاد                   | `tg_return_request_history_check`                          | `MAX_AGE` پیش‌فرض ۴٬۰۰۰                                                                                                                                                                   |
+| identity (6)     | چهار مسیر Provisioning                      | ندارد                                                      | پرسش تعیین‌کننده پس از Adoption؛ رد در `COMMIT` ← هیچ اعطا؛ در مسیر ساخته‌شده `projectAfterCommit` اجرا نمی‌شود، و در مسیر Adoption فقط `.catch` ـِ `:1491` حساب را بی‌پیوند تأیید می‌کند |
+| construction (8) | گشودن دور، ساختن و تغییر سیاست              | `tg_tender_*`، `tg_award_*` (پنج تا)                       | —                                                                                                                                                                                         |
+| contract (9)     | امضا؛ ساختن و تغییر سیاست؛ ارسال صورت‌وضعیت | `tg_statement_*`، `tg_amendment_total_consistent` (هشت تا) | —                                                                                                                                                                                         |
+
 **بودجه‌ی تراکنش‌های تحت دامنه (Codex r2 یافته‌ی ۲؛ ADR-072 § ۵ (۳)).** مهلت = `max(مهلت امروز، MAX_AGE + GRACE + 5000)`، با
-پیش‌فرض‌ها ۱۲٬۰۰۰؛ `governedTransaction` آن را صریح به `$transaction` می‌دهد، و یک ورودی `governedWriteOperationBudget(env)` (PR 1a،
+Timeout پرسش ۳٬۰۰۰ برابر ۱۲٬۰۰۰ (marketplace با ۲٬۰۰۰: ۱۱٬۰۰۰)؛ `governedTransaction` آن را صریح به `$transaction` می‌دهد، و یک ورودی `governedWriteOperationBudget(env)` (PR 1a،
 `@rasta/config`) به `*OperationBudgets` ـِ سرویس افزوده می‌شود تا `loadEnv` هر `DATABASE_STATEMENT_TIMEOUT_MS` ـِ نه بالاتر از آن
 را رد کند. آزمون هر PR: `env.spec` (پیکربندی پیش‌فرض بالا می‌آید؛ بودجه در فهرست است؛ کمترین و بیشترین Timeout پرسش)، و Spy روی
 `$transaction` که هر نوشتن تحت دامنه گزینه‌ی `timeout` ـِ همین مقدار را می‌دهد.
@@ -56,9 +73,9 @@ ADR-072 § ۳). PR 3، 4 و 5 پس از ادغام PR 2 و موازی؛ PR 6 ت�
 | economic (2)     | شش فرمان مالی                                                              | `CONTENTION_TRANSACTION_TIMEOUT_MS` ۶۰٬۰۰۰ (`prisma.service.ts:184`)                           | بی‌تغییر ۶۰٬۰۰۰ (≥ ۳۰٬۰۰۰ + ۹٬۰۰۰ برای هر Timeout پرسش مجاز)                                          | گزینه‌های Contention از راه `governedTransaction`                                  |
 | document (3)     | تغییر و حذف سند                                                            | پیش‌فرض Prisma ۵٬۰۰۰ (`prisma.service.ts:149`، بی گزینه) — **با قاعده‌ی دور ۲ رد**             | `DOCUMENT_ORGANIZATION_REQUEST_TIMEOUT_MS + 9000` (۱۲٬۰۰۰)                                            | `transaction(fn, { timeoutMs })` به `prisma.service.ts` (همان شکل contract `:144`) |
 | supplier (4)     | `decide`، `suspend`، `reinstate`                                           | پیش‌فرض Prisma ۵٬۰۰۰ (`prisma.service.ts:183`) — **رد**                                        | `SUPPLIER_ORGANIZATION_REQUEST_TIMEOUT_MS + 9000` (۱۲٬۰۰۰)                                            | همان                                                                               |
-| marketplace (5)  | حل اختلاف، ویرایش پیشنهاد                                                  | پیش‌فرض Prisma ۵٬۰۰۰ (`prisma.service.ts:146`) — **رد**                                        | `MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS + 9000` (۱۲٬۰۰۰)                                         | همان                                                                               |
+| marketplace (5)  | حل اختلاف، ویرایش پیشنهاد                                                  | پیش‌فرض Prisma ۵٬۰۰۰ (`prisma.service.ts:146`) — **رد**                                        | `MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS + 9000` (۱۱٬۰۰۰)                                         | همان                                                                               |
 | identity (6)     | `createUser`، `addMembership`، `approveRegistration`، `rejectRegistration` | ۶۵٬۰۰۰ (`USER_LOCK_TRANSACTION_OPTIONS`، `APPROVAL_TRANSACTION_OPTIONS`)                       | بی‌تغییر ۶۵٬۰۰۰                                                                                       | گزینه‌های موجود از راه `governedTransaction`                                       |
-| construction (8) | گشودن دور، ساختن و تغییر سیاست                                             | `CONSTRUCTION_TRANSACTION_TIMEOUT_MS` (۵٬۰۰۰ تا ۶۰٬۰۰۰، پیش‌فرض ۱۵٬۰۰۰)                        | `max(آن، CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS + 9000)` (۱۵٬۰۰۰)                               | `timeoutMs` ـِ موجود `prisma.service.ts:165`                                       |
+| construction (8) | گشودن دور، ساختن و تغییر سیاست                                             | `CONSTRUCTION_TRANSACTION_TIMEOUT_MS` (۵٬۰۰۰ تا ۶۰٬۰۰۰، پیش‌فرض ۱۵٬۰۰۰)                        | `max(آن، CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS + 9000)` (۱۵٬۰۰۰)                               | `timeoutMs` ـِ موجود `prisma.service.ts:166`                                       |
 | contract (9)     | امضا؛ ساختن و تغییر سیاست؛ ارسال صورت‌وضعیت                                | امضا `signingTransactionTimeoutMs` (Timeout پرسش + ۱۰٬۰۰۰)؛ بقیه پیش‌فرض Prisma ۵٬۰۰۰ — **رد** | امضا بی‌تغییر (۱۳٬۰۰۰)؛ سیاست و صورت‌وضعیت `CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS + 9000` (۱۲٬۰۰۰) | `timeoutMs` ـِ موجود `prisma.service.ts:144`                                       |
 
 audit فقط می‌خواند (بی تراکنش نوشتن، بی `fence`). مهلت بلندتر قفل‌ها را بیشتر نگه نمی‌دارد مگر پرسش کند باشد، که آن هم پس از
@@ -84,33 +101,28 @@ PR 2، 3، 4 و 5 دید اتحادیه را **همان لحظهٔ استقرا�
 - **`GovernanceClient`** (ADR-072 § ۵): تکی و دسته‌ای؛ بسته در خطا با همان قرارداد `organization-hierarchy.ts` ـِ economic؛ کران
   پاسخ تکی ۱ KiB و هر تکه ۸ KiB؛ یکتاسازی و تکه‌های ۵۰ تایی، حداکثر ۵ هم‌زمان، **یک ددلاین کل**؛ سنجش هر `id` در برابر تکه‌ی
   درخواستی، بی تکرار؛ هر شکست ← کل `503`/`504`، هرگز نتیجه‌ی جزئی. امضای مستأجر فقط از ورودی صریح `scopeOrganizationId` (سازمان
-  فعال یا نویسنده‌ی سیاست)، هم برای Claim و هم برای سرآیند. **`governedTransaction` و حصار پذیرش** (ADR-072 § ۵ (۳)، بازنویسی دور ۳): Wrapper تراکنش با مهلت صریح
-  (`max(مهلت امروز، MAX_AGE + GRACE + 5000)`)، `governedWriteOperationBudget(env)` در `@rasta/config`؛ پیش از فرستادن پرسش
-  `askedMono` (`process.hrtime.bigint()`) و سپس `askedDb` (`clock_timestamp()`)؛ لنگر همان نخستین پرسش تراکنش؛ یک گزاره‌ی `assessElapsed` (بازنویسی دور ۴) با نتیجه‌ی
-  `OK`|`ELAPSED`|`CLOCK_DIVERGENCE`|`UNVERIFIED` و `GOVERNANCE_CLOCK_DIVERGENCE_MS` = ۱۰۰؛ `fence(tx)` ـِ آخرین Statement تفاضل ساعت
-  پایگاه داده را برمی‌گرداند و `idle_in_transaction_session_timeout` را `GRACE` می‌کند (پشتیبان، نه جزء ادعای پذیرش)؛ سپس ساعت ۱؛ پذیرش فقط اگر
-  `assessElapsed(..., MAX_AGE)` برابر `OK` و دست‌کم `GRACE` از مهلت تراکنش مانده؛ وگرنه خطا پیش از `COMMIT` (`EXPIRED`).
-  `statement_timeout` روی `COMMIT` گذاشته نمی‌شود. طبقه‌بندی بر پایه‌ی مرحله: پس از `COMMIT` موفق، مشاهده‌ی پایان بیرون از تراکنش
-  (`clock_timestamp() - askedDb` با مهلت `GRACE`، سپس ساعت ۱) و `assessElapsed(..., MAX_AGE + GRACE)` با `slack` ـِ رفت‌وبرگشت‌ها: `COMMITTED`، یا `COMMITTED_LATE`
-  با `reason` (پاسخ موفق)؛ `COMMIT_UNKNOWN` (هر خطای پس از پذیرش، پاسخ خطای پایگاه داده‌ی امروز، هرگز `EXPIRED`/`403`/`404`). هر کران
-  فقط زیر فرض تداوم § ۵ (۳) است؛ Suspend میزبان بیرون از ضمانت است و باقی‌مانده‌اش همان‌جا نوشته شده. `fence` فقط روی `tx` ـِ ساخته‌ی
-  Wrapper (نوع Brand‌شده و خطای زمان اجرا)؛ پرسیده و بی `fence` ← `EXPIRED`؛ Statement پس از `fence` ← خطا؛ نپرسیده ← `fence` بی‌اثر و بی
+  فعال یا نویسنده‌ی سیاست)، هم برای Claim و هم برای سرآیند. **`governedTransaction` و حصار پذیرش** (ADR-072 § ۵ (۳)، بازنویسی دور ۵): Wrapper تراکنش با مهلت صریح
+  (`max(مهلت امروز، MAX_AGE + GRACE + 5000)`)، `governedWriteOperationBudget(env)` در `@rasta/config`؛ **Migration ـِ الگو** (`governed_admission`، `trg_governed_admission_deadline`، لنگر، `fence`) که هر نویسنده در PR خودش می‌افزاید.
+  دو پرسش جدا: زودهنگام (بی لنگر) و تعیین‌کننده. پس از آخرین قفل و پیش از نخستین پرسش تعیین‌کننده `askedMono` (`process.hrtime.bigint()`) و سپس لنگر، که `asked_db` و `deadline` را از یک نمونه می‌سازد و Trigger را می‌سنجد. گزاره‌ی `assessElapsed({ elapsedDb, elapsedMono }, limit)` با نتیجه‌ی
+  `OK`|`ELAPSED`|`DB_CLOCK_SUSPECT`|`UNVERIFIED`؛ `fence(tx)` ـِ آخرین Statement سنجش را دوباره در صف می‌گذارد، نبود ردیف را با `RG073` و گذشتن مهلت را با `RG072` رد می‌کند،
+  `idle_in_transaction_session_timeout` را `GRACE` می‌کند (فقط آزادی قفل‌ها) و تفاضل ساعت پایگاه داده را برمی‌گرداند؛ سپس ساعت ۱؛ Callback فقط اگر `assessElapsed(..., MAX_AGE)` برابر `OK` و دست‌کم `GRACE` از
+  مهلت تراکنش مانده برمی‌گردد؛ وگرنه خطا پیش از `COMMIT` (`EXPIRED`). **داور خود `COMMIT` است:** Trigger معوق پس از همه‌ی Triggerهای معوق دیگر `clock_timestamp() > deadline` را رد می‌کند. طبقه‌بندی بر پایه‌ی مرحله: پاسخ `COMMIT` با متن ثابت `ERROR: RG072` ←
+  `EXPIRED`، در یک تابع (Prisma در `COMMIT` فقط متن پیام را می‌دهد)؛ هر خطای دیگر پس از فرستادن `COMMIT` ← `COMMIT_UNKNOWN` (پاسخ خطای پایگاه داده‌ی امروز، هرگز `EXPIRED`/`403`/`404`)؛ پس از `COMMIT` موفق، مشاهده‌ی پایان بیرون از تراکنش
+  (`clock_timestamp() - asked_db` با مهلت `GRACE`، سپس ساعت ۱) و `assessElapsed(..., MAX_AGE + GRACE)`: `COMMITTED`، یا `COMMITTED_LATE` با `reason` به زمان پایگاه داده (پاسخ موفق). روی `COMMIT` هیچ `statement_timeout`ی گذاشته نمی‌شود و به آن نمی‌رسد؛
+  باقی‌مانده‌ها (ساعت میزبان پایگاه داده، تأخیر پس از گزاره) همان‌جا در ADR نوشته شده‌اند. `fence` فقط روی `tx` ـِ ساخته‌ی
+  Wrapper (نوع Brand‌شده و خطای زمان اجرا)؛ پرسیده و بی `fence`، یا پرسش زودهنگام بی پرسش تعیین‌کننده، یا شکست لنگر یا `fence` که Callback گرفته ← `EXPIRED`؛ `fence` هنگام Statement در پرواز، و Statement پس از `fence` ← خطا؛ نپرسیده ← بی لنگر، `fence` بی‌اثر و بی
   مشاهده؛ هیچ سرویسی خودش ساعت نمی‌سنجد. برای خواندن، سن با ساعت Monotonic. متریک
   `..._governance_client_total{outcome}` و `..._governed_commit_total{outcome, reason}`.
 - **`contracts`:** دو نام رویداد با Schema ـِ Payload (ADR-072 § ۳)، `PARTITION_SCOPE_OF`، `ID_PREFIXES.unionMembership = 'UMB'`،
   و Schema ـِ دو پاسخ درونی. هیچ تولیدکننده‌ای هنوز نیست.
 - **آزمون‌ها:** Unit ـِ گارد و Client در برابر سرور جعلی (۵۰۳، ۵۰۴، `404` بی بدنه، بدنه‌ی بزرگ، `basis` ناشناخته، `id` ناخواسته یا
-  تکراری، یک تکه‌ی کند، ۲۰۰ شناسه با تکرار ← ۴ تکه)؛ Unit ـِ حصار پذیرش با ساعت‌های تزریق‌شده (ساعت ۱ کهنه و
-  ساعت ۲ تازه — نمونه‌ی Codex r2: ۲۰ ثانیه واقعی، ۲ ثانیه در پایگاه داده — ← `EXPIRED`؛ برعکس ← `EXPIRED`؛ تفاضل منفی ← `EXPIRED`؛
-  `elapsedDb - elapsedMono` بیش از آستانه ← `EXPIRED`؛ خطای نرخ در بزرگ‌ترین حد ← `OK`؛ کمتر از `GRACE` مانده ← `EXPIRED`؛ در هر
-  `EXPIRED` هیچ `COMMIT`ی فرستاده نشده)؛ طبقه‌بندی مرحله (خطای تزریق‌شده پس از پذیرش ← `COMMIT_UNKNOWN`؛ `COMMIT` کند ← `COMMITTED_LATE`
-  و موفق؛ شکست یا مهلت مشاهده ← `COMMITTED_LATE` با `UNVERIFIED` و موفق)؛ `fence` روی `tx` ـِ خام ← خطا؛ `governedWriteOperationBudget`
-  برای کمترین و بیشترین Timeout پرسش؛ یکپارچگی روی PostgreSQL (پاسخ کهنه ← Rollback و هیچ ردیف؛ قطع اتصال پس از پذیرش ←
-  `COMMIT_UNKNOWN`). **دو رد درهم‌تنیده‌ی Codex r3، روی PostgreSQL واقعی با توقف تزریق‌شده‌ی ساعت ۱ در میان نمونه‌ها:** (۱) نمونه ۴٬۹۰۰،
-  توقف ۱٬۵۰۰، پذیرش در ۶٬۴۰۰ ← پذیرفته (باقی‌مانده‌ی نوشته‌شده، سنجاق‌شده) و `COMMITTED_LATE` با `CLOCK_DIVERGENCE`؛ همان با توقف بیش از
-  `GRACE` ← نشست بسته، هیچ ردیف، `COMMIT_UNKNOWN`؛ (۲) توقف ۴٬۰۰۰ هنگام `COMMIT` (ساعت ۱ ۴٬۰۱۰، واقعی ۸٬۰۱۰، حد ۷٬۰۰۰) ←
-  `COMMITTED_LATE` با `ELAPSED`؛ توقف پیش از آخرین نمونه ← `EXPIRED` و هیچ ردیف؛ `askedDb` کند ۱٬۴۰۰ و سپس توقف ۱٬۵۰۰ ← `COMMITTED_LATE` با
-  `UNVERIFIED`؛ پرسیده و بی `fence`، Statement پس از `fence`، پرسش دوم (لنگر همان اول)، و نپرسیده (بی سنجش).
+  تکراری، یک تکه‌ی کند، ۲۰۰ شناسه با تکرار ← ۴ تکه)؛ `fence` روی `tx` ـِ خام ← خطا؛ `governedWriteOperationBudget` برای کمترین و بیشترین Timeout پرسش؛ Unit ـِ گزاره با ساعت‌های تزریق‌شده (نمونه‌ی Codex r2: ۲۰ ثانیه
+  واقعی، ۲ ثانیه در پایگاه داده ← `DB_CLOCK_SUSPECT` و `EXPIRED`؛ تفاضل منفی ← `UNVERIFIED` و `EXPIRED`؛ کمتر از `GRACE` مانده ← `EXPIRED`؛ در هر رد، هیچ `COMMIT`ی فرستاده نشده)؛
+  شکست یا مهلت مشاهده ← `COMMITTED_LATE` با `UNVERIFIED` و موفق. **یکپارچگی روی PostgreSQL واقعی با نقش زمان اجرا (نه مالک) و Prisma واقعی، با `SIGSTOP` واقعی میان نمونه و مصرف، مانند بازبین:** رد Codex r4 (نمونه‌ها ~۴٬۹۰۰،
+  توقف ۱٬۵۰۰، `assessElapsed` همان `OK`) ← `COMMIT` با `RG072`، `EXPIRED`، هیچ ردیف؛ همان توقف درون مهلت ← `COMMITTED`؛ توقف بیش از `GRACE` ← نشست بسته (`P1017`)، هیچ ردیف، `COMMIT_UNKNOWN`؛ توقف پیش از `fence` ← `RG072` از `fence`؛
+  توقف پس از فرستادن `COMMIT` ← `COMMITTED_LATE` با `ELAPSED`؛ پایگاه داده‌ی ایستاده پیش از خواندن `COMMIT` ← `RG072`؛ Trigger معوق کند مصرف‌کننده ← `RG072`؛ بی `fence` و دیر ← `RG072`؛ Savepoint برگشته و `SET CONSTRAINTS ALL IMMEDIATE` ← `RG073`؛
+  Trigger خاموش یا Migration نرسیده ← `RG073` و پرسش فرستاده نشده؛ انتظار قفل پیش از لنگر ← `COMMITTED`؛ `SET CONSTRAINTS ALL IMMEDIATE` پس از `fence` ← خطای مهر Wrapper؛ همین رشته یک بار از PgBouncer در Transaction Pooling (`docs/11` خط ۵۰): پیام `RG072` و `COMMIT_UNKNOWN` همان بمانند؛ نقش زمان اجرا نمی‌تواند Trigger را خاموش کند؛ `SERIALIZABLE`؛ جدول پس از هر Commit تهی؛ پیام `RG072` از `COMMIT` در Prisma نصب‌شده سنجاق (ارتقای Prisma آن را می‌شکند، نه ضمانت را).
+  **باقی‌مانده، سنجاق‌شده:** انتظار Replication همگام پس از گزاره ← ردیف نادیدنی در انتظار، `COMMITTED_LATE` با `ELAPSED` پس از لغو؛ `statement_timeout` به `COMMIT` نمی‌رسد. پرسش دوم لنگر را عوض نمی‌کند؛ پرسیده و بی `fence`؛ `RG073` ـِ گرفته‌شده در Callback ← `EXPIRED`، نه موفق؛ Statement پس از `fence`؛ نپرسیده (بی سنجش).
 - **برگشت:** Revert؛ هیچ مصرف‌کننده‌ای هنوز به Client وابسته نیست. Revert ـِ بخش گارد فقط اگر هیچ سرویسی فهرست تهی نداشته باشد.
 
 ### PR 1b — `audit-service`: Projection ـِ رویداد عضویت (`S`)
@@ -171,7 +183,8 @@ PR 2، 3، 4 و 5 دید اتحادیه را **همان لحظهٔ استقرا�
   بیرون ← همان `404`.
 - `canActFinanciallyFor` و `reconfirmFinancialAuthority`: `UNION_SUBTREE` ← `UNION_GOVERNED`، `basis` و `askedAt` در
   `recordFinancialCommand` و ستون‌های ثبت (اگر ستون `basis`ی هست؛ وگرنه فقط Log، مانند امروز برای پنج فرمان — S-06). حصار
-  (`fence(tx)`) آخرین Statement تراکنش هر شش فرمان؛ `GOVERNANCE_ANSWER_MAX_AGE_MS` در `operation-budgets.ts`.
+  (`fence(tx)`) آخرین Statement تراکنش هر شش فرمان؛ `GOVERNANCE_ANSWER_MAX_AGE_MS` در `operation-budgets.ts`. **لنگر:** پرسش `settlement.service.ts:200` و `transaction.service.ts:564` زودهنگام‌اند؛ لنگر در پرسش پس از قفل کیف پول (`:293`، پس از `RELEASE` ـِ `settlement_priced`). مسیر رد `NoActiveRuleRefusal` (`:149`): پس از `ROLLBACK TO` و پیش از `recordRefusal`
+  پرسش تعیین‌کننده، لنگر و `fence`. آزمون: همین مسیر با `UNION_ADMIN` ← `422` با رکورد؛ عضویت پایان‌یافته ← همان رد دامنه، بی رکورد؛ دیر ← `EXPIRED`؛ کیف پول پرمنازعه: انتظار قفل بیش از `MAX_AGE` ← موفق، نه `EXPIRED`. `settlement.service.ts:169` ـِ «funds remain held» برای `COMMIT_UNKNOWN` نوشته نمی‌شود.
 - **بی‌تغییر، با آزمون** (افزوده‌ی A): `refuseStatementWithdrawal` (`transaction.service.ts:742`، `:894`) و
   `assertMayDisputeDirectly` (`access.ts:535`–`:543`) در همان ترتیب `authorizeAct`.
 - تراز آزمایشی (`ledger.controller.ts:139`، `:148`) و برگشت سند (`:121`، `journal-reversal.service.ts:77`): `@Roles('SYSTEM_ADMIN')`؛
@@ -182,8 +195,8 @@ PR 2، 3، 4 و 5 دید اتحادیه را **همان لحظهٔ استقرا�
   تراکنشی که هر فرمان برایش مجاز است (نه تعهد سفارش برای اعتراض، نه تعهد صورت‌وضعیت برای لغو و بازپرداخت). **منفی:** بیرون از
   `G` ← `403`؛ درون `G` ولی تعهد صورت‌وضعیت ← رد `refuseStatementWithdrawal`، تعهد سفارش ← رد `assertMayDisputeDirectly`.
   **بازپخش** (افزوده‌ی B): هر شش فرمان با `Idempotency-Key`، پایان عضویت، بازپخش ← بدنه‌ی رد درخواست تازه (`404` اگر هیچ طرف دیدنی نیست، وگرنه `403`)؛ شمار ردیف‌های دفتر،
-  موجودی کیف پول‌ها و ردیف‌های Outbox پیش و پس برابر. **کران:** پایان عضویت میان پرسش و حصار، و تأخیر بیش از `MAX_AGE` ←
-  Rollback. E2E: `economic/02-critical-path.e2e-spec.ts:295`، `economic/03-authorization.e2e-spec.ts:84` (به‌علاوه‌ی مورد
+  موجودی کیف پول‌ها و ردیف‌های Outbox پیش و پس برابر. **کران:** پایان عضویت میان پرسش و حصار، و تأخیر بیش از `MAX_AGE`، از جمله پیش از رسیدن `COMMIT` (`RG072`) ←
+  Rollback، با همان سنجش دفتر، کیف پول و Outbox. E2E: `economic/02-critical-path.e2e-spec.ts:295`، `economic/03-authorization.e2e-spec.ts:84` (به‌علاوه‌ی مورد
   `ORG.outside`)، `marketplace/01-order-critical-path.e2e-spec.ts:306`، `:318` (ADR-072 § ۷).
 - **اسناد:** `docs/10` (هرجا اتحادیه تراز را می‌خواند)، `docs/09` § ۹٫۳ پانویس ¹ برای economic.
 
@@ -194,7 +207,7 @@ PR 2، 3، 4 و 5 دید اتحادیه را **همان لحظهٔ استقرا�
 - Client تازهٔ organization (همان قرارداد economic)؛ `ORGANIZATION_SERVICE_URL`، `DOCUMENT_ORGANIZATION_REQUEST_TIMEOUT_MS`؛
   `turbo.json`/Compose/CI env (همان نگهبان‌های `test:service-env-turbo`).
 - **آزمون‌ها:** Helperهای `test/api-helpers.ts` و یکپارچگی خواندن/حذف سند عضو، `ORG-DEH-0003` و ناتوانی.
-- تغییر و حذف سند: پرسش دوباره درون تراکنش پس از قفل ردیف سند، با `fence(tx)`؛ خواندن: پرسش پس از خواندن ردیف و سنجش سن پاسخ
+- تغییر و حذف سند: پرسش دوباره درون تراکنش پس از قفل ردیف سند، با `fence(tx)` (`remove` ـِ `document.service.ts:529` امروز فقط `expectedVersion` دارد و این PR قفل ردیف را می‌افزاید)؛ خواندن: پرسش پس از خواندن ردیف و سنجش سن پاسخ
   پیش از فرستادن (ADR-072 § ۵ (۳)، (۴)).
 
 ### PR 4 — `supplier-service` (`M`)
@@ -244,7 +257,7 @@ PR 2، 3، 4 و 5 دید اتحادیه را **همان لحظهٔ استقرا�
 - Boot: `USER_PROVISIONING_CROSS_ORG_ROLES` جز `SYSTEM_ADMIN` ← خطای پیکربندی.
 - **آزمون‌ها:** `provisioning-scope.spec.ts`، یکپارچگی چهار مسیر با عضو، فرزند عضو، `ORG-DEH-0003`، ناموجود و ناتوانی؛ آزمون
   Oracle (`approve` روی ثبت‌نام بیرون از `G`، ناموجود و هنگام ناتوانی ← بدنه‌ی یکسان)؛ پایان عضویت میان پرسش زودهنگام و تراکنش
-  Commit ← Rollback، حساب غیرفعال، هیچ اعطا، بازتلاش همان کلید ← رد.
+  Commit ← Rollback، حساب غیرفعال، هیچ اعطا، بازتلاش همان کلید ← رد؛ رد `RG072` در خود `COMMIT` ← همان، و `projectAfterCommit` اجرا نشده.
 - **اسناد:** `docs/24` Q-61 «پیاده»، `docs/09` (identity).
 
 ### PR 7 — `audit-service` (`M`)
@@ -262,7 +275,7 @@ PR 2، 3، 4 و 5 دید اتحادیه را **همان لحظهٔ استقرا�
 - `src/organization/organization-directory.ts` ← `GovernanceClient`؛ `basis`، نسخه و `askedAt` جایی ثبت می‌شوند که نسخه امروز ثبت
   می‌شود. امضای مستأجر: واگذاری مستقیم با سازمان فعال، اعتبار سیاست با `policy.authorOrganizationId` (ADR-072 § ۴).
 - **پرسش اعتبار نویسنده‌ی سیاست برای هر فراخوان** (یافته‌ی ۴): `confirmGoverningPolicy` (`approval.service.ts:319`–`:330`) از
-  `prisma.client` به درون تراکنش گشودن دور، پس از قفل سیاست، با `fence(tx)`؛ ساختن و تغییر سیاست (`policy.service.ts:127`، `:212`،
+  `prisma.client` به درون تراکنش گشودن دور، پس از قفل سیاست، با `fence(tx)`؛ تعلیق شاخه‌ی `!within` (`approval.service.ts:336`) **پس از Rollback** می‌آید، مانند `contract.service.ts:304`، چون `suspend` روی اتصال دوم همان قفل مشاوره‌ای را می‌خواهد و تا Timeout می‌ماند؛ ساختن و تغییر سیاست (`policy.service.ts:127`، `:212`،
   `:268`) دوباره درون تراکنش پس از قفل جایگاه سیاست.
 - Consumer موجود (`src/events/organization-moved.consumer.ts`) `ORGANIZATION_UNION_MEMBERSHIP_ENDED` را هم می‌خواند — فقط
   `memberOrganizationId`، به‌عنوان محرک همان بازپرسی `policy-suspension.service.ts`؛ متریک‌ها برچسب رویداد می‌گیرند.
