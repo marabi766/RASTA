@@ -716,40 +716,126 @@ const PATCHES = {
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL('../package.json', SAGA_SOURCE), 'utf8'));
+const WORKFLOWS_FILE = 'temporal/workflows.ts';
+// Prisma's output is machine-written and git-ignored, so CI does not have it.
+const scannedFiles = (files) =>
+  files
+    .filter((file) => !file.startsWith('generated/prisma/') && /\.[cm]?[jt]sx?$/.test(file))
+    .filter((file) => !file.endsWith('.spec.ts'))
+    .map((file) => {
+      // Read as TypeScript below: another kind of source would be misread or missed.
+      assert.ok(file.endsWith('.ts') && !file.endsWith('.d.ts'), `unscannable file: ${file}`);
+      return file;
+    });
 const sagaSources = () =>
-  readdirSync(SAGA_SOURCE, { recursive: true })
-    .filter((file) => file.endsWith('.ts') && !file.endsWith('.spec.ts'))
-    .map((file) => readFileSync(new URL(file, SAGA_SOURCE), 'utf8'));
+  scannedFiles(readdirSync(SAGA_SOURCE, { recursive: true })).map((file) =>
+    readFileSync(new URL(file, SAGA_SOURCE), 'utf8'),
+  );
 const parsed = (source) => ts.createSourceFile('saga.ts', source, ts.ScriptTarget.Latest, true);
 const eachNode = (node, visit) => {
   visit(node);
   ts.forEachChild(node, (child) => eachNode(child, visit));
 };
 const WORKFLOW_MODULE = '@temporalio/workflow';
+// What the saga may import from the SDK. Read the SDK before adding one: some
+// record a marker of their own. `condition` does, on a zero timeout (see below).
+const WORKFLOW_IMPORTS = new Set(
+  `ActivityFailure ActivityOptions ApplicationFailure CancellationScope condition continueAsNew
+   defineQuery defineSignal deprecatePatch isCancellation patched proxyActivities setHandler sleep
+   workflowInfo`.split(/\s+/),
+);
+// The SDK's other ways to a marker, which the gate refuses, and what reaches them unseen.
+const REFUSED_NAMES =
+  'proxyLocalActivities scheduleLocalActivity patchInternal __TEMPORAL_ACTIVATOR__ globalThis eval Function';
+// `condition(fn, 0)` records `__sdk_internal_patch_number:1` (SDK workflow.js:901). This
+// is the one timeout proven non-zero: a client sends hours of at least 1 (env.ts:174).
+const RECHECK = '(input.recheckIntervalHours ?? DEFAULT_RECHECK_HOURS) * HOUR';
+
+/**
+ * The compiler's own binder and checker over this one file: a name means what
+ * its scope says, not what some declaration of that spelling holds. No imports
+ * are followed, so what lives in another file stays unresolved and is refused.
+ * The target is the run time's scoping: a parameter default does not see the body.
+ */
+function checkerOf(file) {
+  const host = ts.createCompilerHost({});
+  host.getSourceFile = (name) => (name === file.fileName ? file : undefined);
+  const target = ts.ScriptTarget.Latest;
+  const options = { noLib: true, noResolve: true, types: [], strict: true, target };
+  return ts.createProgram({ rootNames: [file.fileName], options, host }).getTypeChecker();
+}
+
+/** The initializer of the `const` this identifier binds to; anything else is unproven. */
+function constInitializer(argument, checker) {
+  if (!argument || !ts.isIdentifier(argument)) return null;
+  const declaration = checker().getSymbolAtLocation(argument)?.valueDeclaration;
+  if (!declaration || !ts.isVariableDeclaration(declaration)) return null;
+  const flags = ts.getCombinedNodeFlags(declaration);
+  const isConst = (flags & ts.NodeFlags.BlockScoped) === ts.NodeFlags.Const;
+  if (!isConst || flags & ts.NodeFlags.Ambient) return null;
+  return declaration.initializer ?? null;
+}
+
+/** A patch id is a string literal, or the one `const` that holds one; nothing else is proven. */
+function patchIdOf(argument, checker) {
+  if (ts.isStringLiteralLike(argument)) return argument.text;
+  const initializer = constInitializer(argument, checker);
+  return initializer && ts.isStringLiteralLike(initializer) ? initializer.text : null;
+}
+
+/** What could add to a scanned interface, or to the compile, from outside the scan. */
+function assertAddsNothingElsewhere(name, source) {
+  assert.ok(!name.endsWith('.d.ts'), `unscannable declaration file: ${name}`);
+  const file = parsed(source);
+  const { referencedFiles, typeReferenceDirectives, libReferenceDirectives } = file;
+  const references = [referencedFiles, typeReferenceDirectives, libReferenceDirectives].flat();
+  assert.equal(references.length, 0, 'unscannable reference directive');
+  eachNode(file, (node) => {
+    assert.ok(!ts.isModuleDeclaration(node), 'unscannable module or namespace declaration');
+  });
+}
 
 /** Every patch id in `sources`; any use it cannot read as a plain call throws. */
 function patchIdsIn(sources) {
   const ids = new Set();
   for (const source of sources) {
     const file = parsed(source);
-    const constants = new Map();
+    let bound;
+    const checker = () => (bound ??= checkerOf(file));
     eachNode(file, (node) => {
-      if (ts.isVariableDeclaration(node) && node.initializer) {
-        const value = ts.isStringLiteralLike(node.initializer) ? node.initializer.text : null;
-        const name = node.name.getText();
-        constants.set(name, new Set([...(constants.get(name) ?? []), value]));
-      }
-    });
-    eachNode(file, (node) => {
+      // A computed module name reads as nothing below.
+      const dynamic =
+        ts.isCallExpression(node) && ['import', 'require'].includes(node.expression.getText());
+      assert.ok(!dynamic, 'unscannable dynamic import');
       if (!ts.isIdentifier(node) && !ts.isStringLiteralLike(node)) return;
       const { parent } = node;
+      assert.ok(
+        node.text === WORKFLOW_MODULE || !node.text.includes(WORKFLOW_MODULE),
+        'unscannable SDK path',
+      );
+      // Specs are not scanned, so production must not load one.
+      assert.ok(!/\.spec(\.[cm]?[jt]s)?$/.test(node.text), 'unscannable import of a spec');
       if (node.text === WORKFLOW_MODULE) {
         // Named imports only: a namespace, a default or a re-export hides names.
-        const bindings = ts.isImportDeclaration(parent) && parent.importClause?.namedBindings;
+        const clause = ts.isImportDeclaration(parent) ? parent.importClause : undefined;
+        const bindings = clause?.name ? undefined : clause?.namedBindings;
         assert.ok(bindings && ts.isNamedImports(bindings), 'unscannable use of the workflow API');
+        for (const { propertyName, name } of bindings.elements) {
+          const known = !propertyName && WORKFLOW_IMPORTS.has(name.text);
+          assert.ok(known, `unreviewed workflow API: ${name.text}`);
+        }
       }
-      // The SDK's other marker: the gate refuses every marker but `core_patch`.
-      assert.notEqual(node.text, 'proxyLocalActivities', 'local activities record a marker');
+      assert.ok(!REFUSED_NAMES.split(' ').includes(node.text), `refused name: ${node.text}`);
+      if (node.text === 'condition') {
+        if (ts.isImportSpecifier(parent)) return;
+        const isCall =
+          ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node;
+        assert.ok(isCall, 'unscannable use of condition');
+        const [, timeout, ...others] = parent.arguments;
+        const proven = constInitializer(timeout, checker)?.getText() === RECHECK;
+        assert.ok(others.length === 0 && (!timeout || proven), 'condition timeout may be zero');
+        return;
+      }
       if (node.text !== 'patched' && node.text !== 'deprecatePatch') return;
       if (ts.isImportSpecifier(parent) && !parent.propertyName) return;
       assert.ok(
@@ -757,13 +843,8 @@ function patchIdsIn(sources) {
         `unscannable use of ${node.text}`,
       );
       const [argument] = parent.arguments;
-      const values = argument && constants.get(argument.getText());
-      const id = ts.isStringLiteralLike(argument)
-        ? argument.text
-        : values?.size === 1
-          ? [...values][0]
-          : null;
-      assert.ok(parent.arguments.length === 1 && id, `patch id cannot be resolved: ${node.text}`);
+      const id = parent.arguments.length === 1 && patchIdOf(argument, checker);
+      assert.ok(id, `patch id cannot be resolved: ${node.text}`);
       ids.add(id);
     });
   }
@@ -794,6 +875,25 @@ test('the source scan refuses what it cannot read, so a marker cannot hide from 
     ],
     ['via-constant', 'direct', 'between-comment-marks'],
   );
+  // The same spelling in two scopes is two ids, each where the compiler binds it.
+  assert.deepEqual(
+    [
+      ...patchIdsIn([
+        "function a() { const P = 'one'; patched(P); }\nfunction b() { const P = 'two'; patched(P); }",
+        "const Q = 'outer'; { const Q = 'inner'; patched(Q); }",
+      ]),
+    ],
+    ['one', 'two', 'inner'],
+  );
+  assert.deepEqual(
+    [...patchIdsIn(['condition(fn);', `const ms = ${RECHECK};\ncondition(fn, ms);`])],
+    [],
+  );
+  // A parameter default does not see the body's binding at run time, nor here.
+  assert.deepEqual(
+    [...patchIdsIn(["const P = 'outer'; function f(a = patched(P)) { const P = 'body'; }"])],
+    ['outer'],
+  );
   for (const source of [
     "import { patched as p } from 'x';",
     'const p = patched;',
@@ -804,15 +904,122 @@ test('the source scan refuses what it cannot read, so a marker cannot hide from 
     `import wf from '${WORKFLOW_MODULE}';`,
     `export * from '${WORKFLOW_MODULE}';`,
     `const wf = require('${WORKFLOW_MODULE}');`,
-    "function a() { const P = 'one'; patched(P); }\nfunction b() { const P = 'two'; patched(P); }",
     "patched('one', 'two');",
     'patched();',
     'patched(computed());',
     'patched(unresolved);',
     'deprecatePatch(unresolved);',
     'proxyLocalActivities({});',
+    `import { uuid4 } from '${WORKFLOW_MODULE}';`,
+    `import { default as wf } from '${WORKFLOW_MODULE}';`,
+    `import wf, { sleep } from '${WORKFLOW_MODULE}';`,
+    `import * as wf from '${WORKFLOW_MODULE}/lib/workflow';`,
+    "wf.scheduleLocalActivity('x', []);",
+    "activator.patchInternal('hidden', false);",
+    "x['__TEMPORAL_ACTIVATOR__'];",
+    "(globalThis as any)['__TEMPORAL_' + 'ACTIVATOR__'];",
+    "(0, eval)('code');",
+    "new Function('code');",
+    "import('@temporalio/' + name);",
+    "require('@temporalio/' + name);",
+    `import * as wf from '../../node_modules/${WORKFLOW_MODULE}';`,
+    "import { mark } from './mark.spec';",
+    `import { condition as sleep } from '${WORKFLOW_MODULE}';`,
+    'const wait = condition;',
+    'condition(fn, 0);',
+    'const ms = 0;\ncondition(fn, ms);',
+    `let ms = ${RECHECK};\ncondition(fn, ms);`,
+    `const ms = Math.max(0, ${RECHECK});\ncondition(fn, ms);`,
+    `const ms = ${RECHECK};\ncondition(fn, ms, opts);`,
   ]) {
-    assert.throws(() => patchIdsIn([source]), undefined, source);
+    assert.throws(() => patchIdsIn([source]), assert.AssertionError, source);
+  }
+});
+
+// Review of #728 r1: these passed the scan, which took the initializer of any
+// variable of that spelling, while the saga recorded another marker at run time.
+const KNOWN_ID = 'order-saga-durable-rollover-v1';
+const HIDDEN_IDS = {
+  'a reassigned variable': (call) => `let P = '${KNOWN_ID}';\nP = 'future';\n${call}(P);`,
+  'a shadowing parameter': (call) =>
+    `const P = '${KNOWN_ID}';\nfunction step(P: string) { ${call}(P); }\nstep('future');`,
+  'an uninitialized shadowing variable': (call) =>
+    `const P = '${KNOWN_ID}';\nfunction step() { let P: string; P = 'future'; ${call}(P); }`,
+};
+for (const [name, source] of Object.entries(HIDDEN_IDS)) {
+  for (const call of ['patched', 'deprecatePatch']) {
+    test(`the source scan refuses ${call}() of ${name}`, () => {
+      assert.throws(() => patchIdsIn([source(call)]), /patch id cannot be resolved/);
+    });
+  }
+}
+
+test('a patch id is only ever a literal or the one const holding one', () => {
+  for (const binding of [
+    "let P = 'x';",
+    "var P = 'x';",
+    'let P;',
+    "declare const P = 'x';",
+    "const P = 'x' as string;",
+    'const P = `x${y}`;',
+    "const P = 'x' + 'y';",
+    "const Q = 'x'; const P = Q;",
+    "const { P = 'x' } = o;",
+    "const [P = 'x'] = o;",
+    "using P = 'x';",
+    "await using P = 'x';",
+    "for (const P of ['x']) patched(P);",
+    'try {} catch (P) { patched(P); }',
+    'function P() {}',
+    'enum P { x }',
+    "import { P } from './elsewhere';",
+  ]) {
+    const source = `${binding}\npatched(P);`;
+    assert.throws(() => patchIdsIn([source]), /patch id cannot be resolved/, source);
+  }
+  for (const argument of ['...P', "('x')", "'x' as string", 'o.P', '`x${y}`']) {
+    const source = `const P = 'x';\npatched(${argument});`;
+    assert.throws(() => patchIdsIn([source]), /patch id cannot be resolved/, source);
+  }
+  for (const file of ['a.js', 'a.mjs', 'a.tsx', 'a.d.ts', 'temporal/a.js', 'generated/a.js']) {
+    assert.throws(() => scannedFiles([file]), /unscannable file/, file);
+  }
+  assert.deepEqual(scannedFiles(['a.ts', 'a.spec.ts', 'generated/prisma/a.js', 'a.json', 'dir']), [
+    'a.ts',
+  ]);
+});
+
+function assertServiceAddsNothing(listing, read) {
+  const outsideScan = /^(node_modules|dist|src\/generated\/prisma)\//;
+  const files = listing.filter((file) => /\.[cm]?ts$/.test(file) && !outsideScan.test(file));
+  // The specs too: a production import of one would apply what it declares.
+  assert.ok(files.includes(`src/${WORKFLOWS_FILE}`) && files.some((f) => f.endsWith('.spec.ts')));
+  for (const file of files) assertAddsNothingElsewhere(file, read(file));
+}
+
+test('nothing in the service adds to a scanned interface from outside the scan', () => {
+  const service = new URL('../', SAGA_SOURCE);
+  assertServiceAddsNothing(readdirSync(service, { recursive: true }), (file) =>
+    readFileSync(new URL(file, service), 'utf8'),
+  );
+  for (const file of ['test/a.spec.ts', 'src/generated/a.ts', 'dev/a.ts']) {
+    const listing = [`src/${WORKFLOWS_FILE}`, 'src/b.spec.ts', file];
+    const read = (name) => (name === file ? 'declare global {}' : '');
+    assert.throws(() => assertServiceAddsNothing(listing, read), /module or namespace/, file);
+  }
+  for (const source of [
+    "declare module './temporal/workflows' { interface SagaResume { future: string } }",
+    'declare global { interface SagaResume { future: string } }',
+    'namespace N { export const x = 1; }',
+  ]) {
+    assert.throws(() => assertAddsNothingElsewhere('a.ts', source), /module or namespace/, source);
+  }
+  for (const directive of ['path="../a.d.ts"', 'types="a"', 'lib="dom"']) {
+    const source = `/// <reference ${directive} />\nexport {};`;
+    assert.throws(() => assertAddsNothingElsewhere('a.ts', source), /reference directive/, source);
+  }
+  for (const name of ['test/a.d.ts', 'b.d.ts']) {
+    assert.throws(() => assertAddsNothingElsewhere(name, ''), /declaration file/, name);
   }
 });
 
@@ -875,36 +1082,116 @@ test('a continuation carries its writer protocol before its first marker', () =>
   assert.equal(run(before, targetOf(1)).status, 0);
 });
 
-/** The members of an interface in the saga's own source. */
-function fieldsOf(name) {
-  const fields = [];
-  eachNode(parsed(readFileSync(new URL('temporal/workflows.ts', SAGA_SOURCE), 'utf8')), (node) => {
-    if (ts.isInterfaceDeclaration(node) && node.name.text === name) {
-      fields.push(...node.members.map((member) => member.name.getText()));
-    }
-  });
-  assert.ok(fields.length > 0, `no interface ${name}`);
-  return fields;
+/**
+ * The property signatures a type node stands for, read only from syntax whose
+ * meaning cannot depend on anything outside this file: this file's own plain
+ * interfaces and type literals, `extends` and `&`. This one-file checker gets the
+ * rest wrong (a conditional on an import or a lib type, an overload, a generic),
+ * so all else is refused rather than evaluated.
+ */
+function membersOf(checker, node, what) {
+  const refuse = () => assert.fail(`cannot enumerate ${what}: ${node.getText()}`);
+  const listed = (members) =>
+    members.map((member) =>
+      ts.isPropertySignature(member) && ts.isIdentifier(member.name) ? member : refuse(),
+    );
+  if (ts.isIntersectionTypeNode(node)) {
+    return node.types.flatMap((part) => membersOf(checker, part, what));
+  }
+  if (ts.isTypeLiteralNode(node)) return listed(node.members);
+  const name = ts.isTypeReferenceNode(node)
+    ? node.typeName
+    : ts.isExpressionWithTypeArguments(node)
+      ? node.expression
+      : null;
+  if (!name || !ts.isIdentifier(name)) refuse();
+  const declarations = checker.getSymbolAtLocation(name)?.declarations ?? [];
+  const plain = (found) => ts.isInterfaceDeclaration(found) && !found.typeParameters;
+  if (declarations.length === 0 || !declarations.every(plain)) refuse();
+  return declarations.flatMap(({ members, heritageClauses = [] }) => [
+    ...listed(members),
+    ...heritageClauses
+      .flatMap((clause) => [...clause.types])
+      .flatMap((base) => membersOf(checker, base, what)),
+  ]);
 }
 
-test('every field the saga continues with needs its protocol, and any other is refused', () => {
-  const RESUME_FIELDS = {
-    status: 1,
-    mirroredDispute: 1,
-    mirroredEconomicDispute: 1,
-    waitingIn: 1,
-    nextReminderAt: 1,
-    activitySequence: 1,
-    reminderDue: 2,
+/** Every field `orderSaga` in `source` takes, read from its one declaration, not a name. */
+function sagaFields(source) {
+  const file = parsed(source);
+  const checker = checkerOf(file);
+  const [saga, ...overloads] = file.statements.filter(
+    (node) => ts.isFunctionDeclaration(node) && node.name?.text === 'orderSaga',
+  );
+  const isExport = ({ kind }) => kind === ts.SyntaxKind.ExportKeyword;
+  const isDefault = ({ kind }) => kind === ts.SyntaxKind.DefaultKeyword;
+  assert.ok(
+    saga?.modifiers?.some(isExport) && !saga.modifiers.some(isDefault),
+    'no exported orderSaga',
+  );
+  const [parameter, ...others] = saga.parameters;
+  assert.ok(
+    overloads.length === 0 &&
+      others.length === 0 &&
+      parameter?.type &&
+      !parameter.dotDotDotToken &&
+      !parameter.questionToken &&
+      !parameter.initializer,
+    'orderSaga must take exactly one input',
+  );
+  const input = membersOf(checker, parameter.type, 'the saga input');
+  const resumes = input.filter((member) => member.name.text === 'resume');
+  assert.ok(resumes.length === 1 && resumes[0].type, 'the saga input must have one typed resume');
+  const names = (members) => members.map((member) => member.name.text);
+  return {
+    input: names(input),
+    resume: names(membersOf(checker, resumes[0].type, 'the saga resume')),
   };
-  assert.ok(Math.max(...Object.values(RESUME_FIELDS)) <= manifest.marketplaceSagaProtocol);
-  for (const field of fieldsOf('SagaResume')) {
+}
+
+const RESUME_FIELDS = {
+  status: 1,
+  mirroredDispute: 1,
+  mirroredEconomicDispute: 1,
+  waitingIn: 1,
+  nextReminderAt: 1,
+  activitySequence: 1,
+  reminderDue: 2,
+};
+
+function assertResumeFieldsKnown(fields) {
+  for (const field of fields) {
     const protocol = RESUME_FIELDS[field];
     assert.ok(protocol, `gate test does not know resume.${field}`);
     const known = withHistory(history({ resume: { [field]: 1 } }));
     assert.equal(run(known, targetOf(protocol)).status, 0, `gate does not know resume.${field}`);
     assert.equal(run(known, targetOf(protocol - 1)).status, 1, `resume.${field} needs ${protocol}`);
   }
+}
+
+function assertInputFieldsKnown(fields) {
+  for (const field of fields.filter((name) => name !== 'resume')) {
+    const known = withHistory(history({ [field]: 1 }));
+    assert.equal(run(known, targetOf(0)).status, 0, `gate does not know input.${field}`);
+  }
+}
+
+/** The saga's own source with `edits` applied; each must actually change it. */
+function sagaSourceWith(...edits) {
+  let source = readFileSync(new URL(WORKFLOWS_FILE, SAGA_SOURCE), 'utf8');
+  for (const [from, to] of edits) {
+    assert.ok(source.includes(from), `the saga source no longer has: ${from}`);
+    source = source.replace(from, to);
+  }
+  return source;
+}
+
+test('every field the saga continues with needs its protocol, and any other is refused', () => {
+  const { resume: fields } = sagaFields(sagaSourceWith());
+  // A scan that stopped finding them would pass everything below.
+  assert.deepEqual(fields.toSorted(), Object.keys(RESUME_FIELDS).toSorted());
+  assert.ok(Math.max(...Object.values(RESUME_FIELDS)) <= manifest.marketplaceSagaProtocol);
+  assertResumeFieldsKnown(fields);
   for (const resume of [{ another: 1 }, null, []]) {
     const result = run(withHistory(history({ resume })), targetOf(LATEST));
     assert.equal(result.status, 1);
@@ -913,16 +1200,106 @@ test('every field the saga continues with needs its protocol, and any other is r
 });
 
 test('every field a saga starts with is known, and any other is refused', () => {
-  const fields = fieldsOf('OrderSagaInput').filter((field) => field !== 'resume');
-  assert.ok(fields.includes('orderId'));
-  for (const field of fields) {
-    const known = withHistory(history({ [field]: 1 }));
-    assert.equal(run(known, targetOf(0)).status, 0, `gate does not know input.${field}`);
-  }
+  const { input: fields } = sagaFields(sagaSourceWith());
+  assert.ok(fields.includes('orderId') && fields.includes('resume'));
+  assertInputFieldsKnown(fields);
   const unknown = run(withHistory(history({ anotherField: 1 })), targetOf(LATEST));
   assert.equal(unknown.status, 1);
   assert.match(unknown.stderr, /invalid start input/);
 });
+
+// Review of #728 r1: `extends` added a field the inventory, which read only the
+// members written in the interface's own body, never saw.
+const RESUME = 'export interface SagaResume {';
+const INPUT = 'export interface OrderSagaInput {';
+const PROP = 'resume?: SagaResume;';
+const ARG = 'orderSaga(input: OrderSagaInput)';
+const ADD = [RESUME, `interface Added { futureField: string }\n${RESUME}`];
+const viaBase = (base) => `export interface SagaResume extends ${base} {`;
+const FN = ARG.replace('orderSaga', 'function orderSaga');
+const ONE = /exactly one input/;
+const onResume = (declared, type) => [
+  ADD,
+  [RESUME, `${declared}\n${RESUME}`],
+  [PROP, `resume?: ${type};`],
+];
+const IMPORT = "import type { F } from './f';";
+const EITHER = (on) => `string extends ${on} ? SagaResume : SagaResume & Added;`;
+const PICK = 'function f(x: string): SagaResume;\nfunction f(x: number): Added;\nconst r = f(v);';
+
+test('SagaResume extends Added: the inherited field fails the inventory', () => {
+  const { resume } = sagaFields(sagaSourceWith(ADD, [RESUME, viaBase('Added')]));
+  assert.ok(resume.includes('futureField'));
+  assert.throws(() => assertResumeFieldsKnown(resume), /does not know resume\.futureField/);
+});
+
+test('OrderSagaInput extends Added: the inherited field fails the inventory', () => {
+  const extended = [INPUT, 'export interface OrderSagaInput extends Added {'];
+  const { input } = sagaFields(sagaSourceWith(ADD, extended));
+  assert.ok(input.includes('futureField'));
+  assert.throws(() => assertInputFieldsKnown(input), /does not know input\.futureField/);
+});
+
+for (const [name, side, edits] of [
+  ['a chain', 'resume', [ADD, [RESUME, `interface Mid extends Added {}\n${viaBase('Mid')}`]]],
+  ['a merged declaration', 'resume', [[RESUME, `${RESUME} futureField: string }\n${RESUME}`]]],
+  ['an intersected property', 'resume', [ADD, [PROP, 'resume?: SagaResume & Added;']]],
+  ['another type on the property', 'resume', [ADD, [PROP, 'resume?: Added;']]],
+  ['an intersected signature', 'input', [ADD, [ARG, 'orderSaga(input: OrderSagaInput & Added)']]],
+]) {
+  test(`the field inventory sees a field added by ${name}`, () => {
+    assert.ok(sagaFields(sagaSourceWith(...edits))[side].includes('futureField'));
+  });
+}
+
+for (const [name, edits, reason = /cannot enumerate the saga (input|resume)/] of [
+  ['an imported base', [[RESUME, `import type { O } from './o';\n${viaBase('O')}`]]],
+  ['a missing base', [[RESUME, viaBase('Missing')]]],
+  ['an index signature', [[RESUME, `${RESUME}\n  [field: string]: unknown;`]]],
+  ['a computed member', [[RESUME, `const KEY = 'x';\n${RESUME}\n  [KEY]: string;`]]],
+  ['a union', [ADD, [PROP, 'resume?: SagaResume | Added;']]],
+  ['a mapped type', [[PROP, "resume?: { [K in 'x']: string };"]]],
+  ['an untyped property', [[PROP, 'resume?: any;']]],
+  ['an untyped input', [[ARG, 'orderSaga(input: any)']]],
+  ['a second parameter', [[ARG, `${ARG.slice(0, -1)}, more: string)`]], /exactly one input/],
+  ['no export', [['export async function orderSaga', 'async function orderSaga']], /no exported/],
+  [
+    'a default export',
+    [['export async function orderSaga', 'export default async function orderSaga']],
+    /no exported/,
+  ],
+  // The real compile lists futureField in the first four; this one-file checker did not.
+  ['a conditional on an import', onResume(`${IMPORT} type C = ${EITHER('F')}`, 'C')],
+  ['a conditional on a lib type', onResume(`type C = ${EITHER("Lowercase<'A'>")}`, 'C')],
+  ['a conditional base', [ADD, [RESUME, `type C = ${EITHER('F')}\n${viaBase('C')}`]]],
+  ['an overload picked by an import', onResume(`${IMPORT} ${PICK}`, 'typeof r')],
+  [
+    'an overloaded saga',
+    [[`export async ${FN}`, `export async ${FN}: string;\nexport async ${FN}`]],
+    ONE,
+  ],
+  ['a lib type on a base', [ADD, [RESUME, viaBase('Partial<Added>')]]],
+  ['a generic base', [[RESUME, `interface G<T> { f: T }\n${viaBase('G')}`]]],
+  [
+    'a type parameter',
+    [ADD, [INPUT, `${INPUT.slice(0, -2)}<T = Added> {`], [PROP, `${PROP.slice(0, -1)} & T;`]],
+  ],
+  ['a generic saga', [[ARG, 'orderSaga<T extends OrderSagaInput>(input: T)']]],
+  ['a class base', [[RESUME, `class C { futureField = 1 }\n${viaBase('C')}`]]],
+  ['an optional input', [[ARG, 'orderSaga(input?: OrderSagaInput)']], ONE],
+  ['a rest input', [[ARG, 'orderSaga(...input: [OrderSagaInput])']], ONE],
+  ['a default input', [[ARG, 'orderSaga(input: OrderSagaInput = o)']], ONE],
+  [
+    'two resumes',
+    [[ARG, 'orderSaga(input: OrderSagaInput & { resume?: Added })']],
+    /one typed resume/,
+  ],
+]) {
+  test(`the field inventory refuses ${name}`, () => {
+    const source = sagaSourceWith(...edits);
+    assert.throws(() => sagaFields(source), reason);
+  });
+}
 
 // The SDK's own marker, not this file's idea of one: a saga run at #625's head
 // (`dfa48a55`) against Temporal's test server, saved with `historyToJSON`.
