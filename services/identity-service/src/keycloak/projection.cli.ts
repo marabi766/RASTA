@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure, markRefusal } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -16,6 +16,9 @@ import {
   tearDownProjectionCommand,
   type ProjectionCommandMode,
 } from './projection.command';
+
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
 
 /**
  * `pnpm --filter @rasta/identity-service keycloak:reconcile` / `keycloak:backfill`.
@@ -35,7 +38,7 @@ import {
 async function main(): Promise<number> {
   const mode = process.argv[2];
   if (mode !== 'reconcile' && mode !== 'backfill') {
-    throw new Error('usage: projection.cli.ts <reconcile|backfill>');
+    throw usage('usage: projection.cli.ts <reconcile|backfill>');
   }
 
   assertNoMigratorCredentials(process.env);

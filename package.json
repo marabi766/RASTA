@@ -38,7 +38,7 @@
     "test:prepush-scope": "node --test --test-timeout=300000 scripts/prepush-scope.test.mjs",
     "test:unit-step-concurrency": "node --test --test-timeout=540000 --import ./scripts/test-stall-watchdog.mjs scripts/check-unit-step-concurrency.test.mjs scripts/test-stall-watchdog.test.mjs && node scripts/check-unit-step-concurrency.mjs",
     "test:credential-fetch": "node --test --test-timeout=300000 scripts/credential-fetch.test.mjs",
-    "test:config-disclosure": "node --test --test-timeout=300000 scripts/config-disclosure.test.mjs scripts/command-disclosure.test.mjs",
+    "test:config-disclosure": "node --test --test-timeout=300000 scripts/config-disclosure.test.mjs scripts/command-disclosure.test.mjs scripts/command-refusal-codes.test.mjs",
     "test:service-boundaries-lib": "node --test --test-timeout=300000 scripts/check-service-boundaries.test.mjs",
     "check:service-boundaries": "node scripts/check-service-boundaries.mjs",
     "kafka:acl:generate": "pnpm --filter @rasta/contracts build && node scripts/kafka-acl-generate.mjs",
