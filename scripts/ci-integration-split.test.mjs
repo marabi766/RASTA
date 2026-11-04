@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -202,13 +203,12 @@ const workspaceFixture = (t) => {
   };
   put('pnpm-workspace.yaml', {
     packages: [
-      '.',
       'apps/*',
       'services/*',
       'packages/*',
       'tests/*',
-      'extensions/**',
-      '!extensions/excluded',
+      'extensions/*/*',
+      '!extensions/nested/excluded',
     ],
   });
   put('package.json', {
@@ -218,7 +218,7 @@ const workspaceFixture = (t) => {
   for (const group of ['apps', 'services', 'packages', 'tests', 'extensions/nested']) {
     put(`${group}/member/package.json`, { name: group, scripts: { 'test:integration': 'jest' } });
   }
-  put('extensions/excluded/package.json', {
+  put('extensions/nested/excluded/package.json', {
     name: 'excluded',
     scripts: { 'test:integration': 'jest' },
   });
@@ -235,7 +235,7 @@ test('discovery follows configured roots, exclusions and new manifests independe
   const packages = ['apps', 'services', 'packages', 'tests', 'extensions/nested'].sort();
   assert.deepEqual(discoverIntegrationPackages(root), packages);
   assert.deepEqual(integrationPartitionProblems({ suites: packages }, root), []);
-  put('extensions/added/package.json', {
+  put('extensions/nested/added/package.json', {
     name: 'new-workspace',
     scripts: { 'test:integration': 'jest' },
   });
@@ -317,6 +317,138 @@ test('workspace reader fails closed on a missing, malformed or empty workspace f
   }
   rmSync(resolve(root, 'pnpm-workspace.yaml'));
   assert.throws(() => workspaceDirectories(root));
+});
+
+/** pnpm's own answer: the members it would run `-r` over, relative to `root` (root excluded). */
+const pnpmMembers = (root) => {
+  const run = spawnSync('pnpm', ['ls', '-r', '--depth=-1', '--json'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert.equal(run.status, 0, `pnpm ls failed: ${run.stderr}`);
+  return JSON.parse(run.stdout)
+    .map((project) => relative(root, project.path).split('\\').join('/'))
+    .filter((directory) => directory !== '')
+    .sort();
+};
+
+const declare = (root, patterns) =>
+  writeFileSync(resolve(root, 'pnpm-workspace.yaml'), JSON.stringify({ packages: patterns }));
+
+const manifest = (root, directory, file = 'package.json', text) => {
+  mkdirSync(resolve(root, directory), { recursive: true });
+  writeFileSync(resolve(root, directory, file), text ?? JSON.stringify({ name: directory }));
+};
+
+test('workspace reader equals the locally installed pnpm on the real repository', () => {
+  assert.deepEqual(workspaceDirectories(ROOT), pnpmMembers(ROOT));
+});
+
+test('workspace reader equals pnpm on every supported form (names, *, !exclusions, dot, node_modules)', (t) => {
+  const { root } = workspaceFixture(t);
+  manifest(root, 'apps/.hidden');
+  manifest(root, 'apps/node_modules/dependency');
+  mkdirSync(resolve(root, 'apps/no-manifest'));
+  manifest(root, 'literal/one/deep');
+  declare(root, [
+    'apps/*',
+    'literal/one/deep',
+    'extensions/*/*',
+    '!extensions/nested/excluded',
+    '!apps/no-integration',
+  ]);
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
+  assert.ok(workspaceDirectories(root).includes('literal/one/deep'));
+  assert.ok(!workspaceDirectories(root).includes('apps/no-integration'));
+  declare(root, ['apps/*', 'services/*', 'packages/*', 'tests/*', 'extensions/*/*']);
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
+});
+
+test('workspace reader refuses every pattern form it does not implement, alone or mixed with supported ones', (t) => {
+  const { root } = workspaceFixture(t);
+  const unsupported = [
+    '!(apps)/*', // leading extglob: a positive pattern in pnpm, not an exclusion
+    '!!apps/*',
+    '@(apps|tests)/*',
+    '+(apps)/*',
+    '?(apps)/*',
+    '*(apps)/*',
+    'apps/**',
+    '**',
+    '**/member',
+    '{apps,tests}/*',
+    'apps/{member,other}',
+    'apps/[a]*',
+    'a?ps/*',
+    'ap*/*',
+    '*s/*',
+    '.',
+    './apps/*',
+    'apps/.',
+    'apps//member',
+    'apps/*/',
+    'apps/.hidden',
+    '!apps/**',
+    '!{apps,tests}/*',
+  ];
+  const supported = ['apps/*', 'services/*', 'packages/*', 'tests/*'];
+  for (const pattern of unsupported) {
+    for (const list of [[pattern], [...supported, pattern], [pattern, ...supported]]) {
+      declare(root, list);
+      assert.throws(
+        () => workspaceDirectories(root),
+        /unsupported workspace package pattern/,
+        JSON.stringify(list),
+      );
+    }
+  }
+  // The incomplete answer the old reader returned for the first form.
+  declare(root, ['apps/*', '!(apps)/*']);
+  assert.throws(() => workspaceManifestFiles(root), /unsupported workspace package pattern/);
+});
+
+test('workspace reader refuses a symbolic-link candidate pnpm would follow', (t) => {
+  const { root } = workspaceFixture(t);
+  declare(root, ['apps/*', 'packages/*']);
+  manifest(root, 'elsewhere/linked');
+  symlinkSync('../elsewhere/linked', resolve(root, 'packages/linked'), 'dir');
+  assert.ok(pnpmMembers(root).includes('packages/linked'), 'pnpm follows the link');
+  assert.throws(() => workspaceDirectories(root), /packages\/linked is a symbolic link/);
+  rmSync(resolve(root, 'packages/linked'));
+  // A dangling link, a link to a file, and a link used as a literal path segment.
+  symlinkSync('../nowhere', resolve(root, 'packages/dangling'));
+  assert.throws(() => workspaceDirectories(root), /packages\/dangling is a symbolic link/);
+  rmSync(resolve(root, 'packages/dangling'));
+  symlinkSync('../package.json', resolve(root, 'packages/file-link'));
+  assert.throws(() => workspaceDirectories(root), /packages\/file-link is a symbolic link/);
+  rmSync(resolve(root, 'packages/file-link'));
+  symlinkSync('elsewhere', resolve(root, 'group'), 'dir');
+  declare(root, ['apps/*', 'group/linked']);
+  assert.throws(() => workspaceDirectories(root), /group is a symbolic link/);
+  // Exclusions walk the same way.
+  declare(root, ['apps/*', '!group/linked']);
+  assert.throws(() => workspaceDirectories(root), /group is a symbolic link/);
+  rmSync(resolve(root, 'group'));
+  declare(root, ['apps/*', 'packages/*']);
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
+});
+
+test('workspace reader refuses a candidate whose manifest is not package.json', (t) => {
+  const { root } = workspaceFixture(t);
+  declare(root, ['apps/*', 'packages/*']);
+  manifest(root, 'packages/yaml', 'package.yaml', 'name: yaml\n');
+  assert.ok(pnpmMembers(root).includes('packages/yaml'), 'pnpm reads package.yaml');
+  assert.throws(() => workspaceDirectories(root), /packages\/yaml has package\.yaml/);
+  rmSync(resolve(root, 'packages/yaml'), { recursive: true });
+  manifest(root, 'packages/json5', 'package.json5', '{name: "json5"}');
+  assert.ok(pnpmMembers(root).includes('packages/json5'), 'pnpm reads package.json5');
+  assert.throws(() => workspaceDirectories(root), /packages\/json5 has package\.json5/);
+  // Next to a package.json it is still a second, unread manifest.
+  manifest(root, 'packages/json5', 'package.json');
+  assert.throws(() => workspaceDirectories(root), /packages\/json5 has package\.json5/);
+  rmSync(resolve(root, 'packages/json5'), { recursive: true });
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
 });
 
 test('the committed workflow passes', () => {
