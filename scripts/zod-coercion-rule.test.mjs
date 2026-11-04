@@ -363,7 +363,10 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 it('reviewed ISO check refuses contracts barrel drift', () => {
   const root = mkdtempSync(join(tmpdir(), 'rasta-zod-contract-check-'));
   try {
-    for (const file of ['packages/contracts/src/index.ts', 'packages/contracts/src/common/iso-datetime.ts'])
+    for (const file of [
+      'packages/contracts/src/index.ts',
+      'packages/contracts/src/common/iso-datetime.ts',
+    ])
       cpSync(join(ROOT, file), join(root, file));
     assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), 'check');
     appendFileSync(join(root, 'packages/contracts/src/index.ts'), '\n// changed barrel\n');
