@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   NONCE_BYTES,
   SealingError,
@@ -90,6 +90,53 @@ describe('EnvKekProvider (RFQ keys)', () => {
     expect(none.configured).toBe(false);
     expect(codeOf(() => none.wrap(der, CONTEXT))).toBe('KEY_UNAVAILABLE');
     expect(codeOf(() => none.unwrap(wrapped, CONTEXT))).toBe('KEY_UNAVAILABLE');
+  });
+});
+
+describe('the keyed request digest of a quotation command (plan PR 8)', () => {
+  const provider = new EnvKekProvider(`v1:${K1}`, 'v1');
+  const supplier = { organizationId: 'ORG_S', userId: 'USR_1' };
+  const PRICE = '{"content":{"unitPriceMinor":"12345"}}';
+
+  it('recognises the same request of the same person, salted so no two digests compare', () => {
+    const first = provider.requestDigest(supplier, PRICE);
+    const second = provider.requestDigest(supplier, PRICE);
+    expect(first).not.toBe(second);
+    expect(provider.matchesRequestDigest(first, supplier, PRICE)).toBe(true);
+    expect(provider.matchesRequestDigest(second, supplier, PRICE)).toBe(true);
+  });
+
+  it('holds neither the price nor a plain hash of it, and is bound to the organization and the user', () => {
+    const digest = provider.requestDigest(supplier, PRICE);
+    expect(digest).toMatch(/^hmac-v1:v1:[0-9a-f]{64}:[0-9a-f]{64}$/);
+    // Shape only: a salted MAC, never the SHA-256 of the request a backup reader could recompute.
+    expect(digest.split(':')[3]).not.toBe(createHash('sha256').update(PRICE).digest('hex'));
+    expect(provider.matchesRequestDigest(digest, { ...supplier, userId: 'USR_2' }, PRICE)).toBe(
+      false,
+    );
+    expect(
+      provider.matchesRequestDigest(digest, { ...supplier, organizationId: 'ORG_T' }, PRICE),
+    ).toBe(false);
+    expect(provider.matchesRequestDigest(digest, supplier, PRICE.replace('12345', '12346'))).toBe(
+      false,
+    );
+  });
+
+  it('keeps recognising across a rotation while the old KEK is kept; anything malformed is no match', () => {
+    const digest = provider.requestDigest(supplier, PRICE);
+    const rotated = new EnvKekProvider(`v1:${K1},v2:${K2}`, 'v2');
+    expect(rotated.matchesRequestDigest(digest, supplier, PRICE)).toBe(true);
+    expect(new EnvKekProvider(`v2:${K2}`, 'v2').matchesRequestDigest(digest, supplier, PRICE)).toBe(
+      false,
+    );
+    for (const bad of ['', 'sha256:x', `${digest}:extra`, digest.replace('hmac-v1', 'hmac-v2')]) {
+      expect(provider.matchesRequestDigest(bad, supplier, PRICE)).toBe(false);
+    }
+  });
+
+  it('with no KEK, digests nothing: KEY_UNAVAILABLE, never an unkeyed fallback', () => {
+    const none = new EnvKekProvider(undefined, undefined);
+    expect(codeOf(() => none.requestDigest(supplier, PRICE))).toBe('KEY_UNAVAILABLE');
   });
 });
 
