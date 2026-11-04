@@ -86,21 +86,31 @@ PR 2، 3، 4 و 5 دید اتحادیه را **همان لحظهٔ استقرا�
   درخواستی، بی تکرار؛ هر شکست ← کل `503`/`504`، هرگز نتیجه‌ی جزئی. امضای مستأجر فقط از ورودی صریح `scopeOrganizationId` (سازمان
   فعال یا نویسنده‌ی سیاست)، هم برای Claim و هم برای سرآیند. **`governedTransaction` و حصار پذیرش** (ADR-072 § ۵ (۳)، بازنویسی دور ۳): Wrapper تراکنش با مهلت صریح
   (`max(مهلت امروز، MAX_AGE + GRACE + 5000)`)، `governedWriteOperationBudget(env)` در `@rasta/config`؛ پیش از فرستادن پرسش
-  `askedMono` (`process.hrtime.bigint()`) و `askedDb` (`clock_timestamp()`)؛ `fence(tx)` ـِ آخرین Statement تفاضل ساعت پایگاه داده را
-  برمی‌گرداند و `idle_in_transaction_session_timeout` را `GRACE` می‌کند (فقط پشتیبان)؛ پذیرش فقط اگر `0 ≤ elapsedDb ≤ MAX_AGE`،
-  `elapsedMono ≤ MAX_AGE` و دست‌کم `GRACE` از مهلت تراکنش مانده؛ وگرنه خطا پیش از `COMMIT` (`EXPIRED`). `statement_timeout` روی
-  `COMMIT` گذاشته نمی‌شود. طبقه‌بندی بر پایه‌ی مرحله: `COMMITTED`، `COMMITTED_LATE` (پایان پس از `MAX_AGE + GRACE`، پاسخ موفق)،
-  `COMMIT_UNKNOWN` (هر خطای پس از پذیرش، پاسخ خطای پایگاه داده‌ی امروز، هرگز `EXPIRED`/`403`/`404`). `fence` فقط روی `tx` ـِ ساخته‌ی
-  Wrapper (نوع Brand‌شده و خطای زمان اجرا). برای خواندن، سن با ساعت Monotonic. متریک `..._governance_client_total{outcome}` و
-  `..._governed_commit_total{outcome}`.
+  `askedMono` (`process.hrtime.bigint()`) و سپس `askedDb` (`clock_timestamp()`)؛ لنگر همان نخستین پرسش تراکنش؛ یک گزاره‌ی `assessElapsed` (بازنویسی دور ۴) با نتیجه‌ی
+  `OK`|`ELAPSED`|`CLOCK_DIVERGENCE`|`UNVERIFIED` و `GOVERNANCE_CLOCK_DIVERGENCE_MS` = ۱۰۰؛ `fence(tx)` ـِ آخرین Statement تفاضل ساعت
+  پایگاه داده را برمی‌گرداند و `idle_in_transaction_session_timeout` را `GRACE` می‌کند (پشتیبان، نه جزء ادعای پذیرش)؛ سپس ساعت ۱؛ پذیرش فقط اگر
+  `assessElapsed(..., MAX_AGE)` برابر `OK` و دست‌کم `GRACE` از مهلت تراکنش مانده؛ وگرنه خطا پیش از `COMMIT` (`EXPIRED`).
+  `statement_timeout` روی `COMMIT` گذاشته نمی‌شود. طبقه‌بندی بر پایه‌ی مرحله: پس از `COMMIT` موفق، مشاهده‌ی پایان بیرون از تراکنش
+  (`clock_timestamp() - askedDb` با مهلت `GRACE`، سپس ساعت ۱) و `assessElapsed(..., MAX_AGE + GRACE)` با `slack` ـِ رفت‌وبرگشت‌ها: `COMMITTED`، یا `COMMITTED_LATE`
+  با `reason` (پاسخ موفق)؛ `COMMIT_UNKNOWN` (هر خطای پس از پذیرش، پاسخ خطای پایگاه داده‌ی امروز، هرگز `EXPIRED`/`403`/`404`). هر کران
+  فقط زیر فرض تداوم § ۵ (۳) است؛ Suspend میزبان بیرون از ضمانت است و باقی‌مانده‌اش همان‌جا نوشته شده. `fence` فقط روی `tx` ـِ ساخته‌ی
+  Wrapper (نوع Brand‌شده و خطای زمان اجرا)؛ پرسیده و بی `fence` ← `EXPIRED`؛ Statement پس از `fence` ← خطا؛ نپرسیده ← `fence` بی‌اثر و بی
+  مشاهده؛ هیچ سرویسی خودش ساعت نمی‌سنجد. برای خواندن، سن با ساعت Monotonic. متریک
+  `..._governance_client_total{outcome}` و `..._governed_commit_total{outcome, reason}`.
 - **`contracts`:** دو نام رویداد با Schema ـِ Payload (ADR-072 § ۳)، `PARTITION_SCOPE_OF`، `ID_PREFIXES.unionMembership = 'UMB'`،
   و Schema ـِ دو پاسخ درونی. هیچ تولیدکننده‌ای هنوز نیست.
 - **آزمون‌ها:** Unit ـِ گارد و Client در برابر سرور جعلی (۵۰۳، ۵۰۴، `404` بی بدنه، بدنه‌ی بزرگ، `basis` ناشناخته، `id` ناخواسته یا
   تکراری، یک تکه‌ی کند، ۲۰۰ شناسه با تکرار ← ۴ تکه)؛ Unit ـِ حصار پذیرش با ساعت‌های تزریق‌شده (ساعت ۱ کهنه و
   ساعت ۲ تازه — نمونه‌ی Codex r2: ۲۰ ثانیه واقعی، ۲ ثانیه در پایگاه داده — ← `EXPIRED`؛ برعکس ← `EXPIRED`؛ تفاضل منفی ← `EXPIRED`؛
-  کمتر از `GRACE` مانده ← `EXPIRED`؛ در هر `EXPIRED` هیچ `COMMIT`ی فرستاده نشده)؛ طبقه‌بندی مرحله (خطای تزریق‌شده پس از پذیرش ←
-  `COMMIT_UNKNOWN`؛ `COMMIT` کند ← `COMMITTED_LATE` و موفق)؛ `fence` روی `tx` ـِ خام ← خطا؛ `governedWriteOperationBudget` برای کمترین
-  و بیشترین Timeout پرسش؛ یکپارچگی روی PostgreSQL (پاسخ کهنه ← Rollback و هیچ ردیف؛ قطع اتصال پس از پذیرش ← `COMMIT_UNKNOWN`).
+  `elapsedDb - elapsedMono` بیش از آستانه ← `EXPIRED`؛ خطای نرخ در بزرگ‌ترین حد ← `OK`؛ کمتر از `GRACE` مانده ← `EXPIRED`؛ در هر
+  `EXPIRED` هیچ `COMMIT`ی فرستاده نشده)؛ طبقه‌بندی مرحله (خطای تزریق‌شده پس از پذیرش ← `COMMIT_UNKNOWN`؛ `COMMIT` کند ← `COMMITTED_LATE`
+  و موفق؛ شکست یا مهلت مشاهده ← `COMMITTED_LATE` با `UNVERIFIED` و موفق)؛ `fence` روی `tx` ـِ خام ← خطا؛ `governedWriteOperationBudget`
+  برای کمترین و بیشترین Timeout پرسش؛ یکپارچگی روی PostgreSQL (پاسخ کهنه ← Rollback و هیچ ردیف؛ قطع اتصال پس از پذیرش ←
+  `COMMIT_UNKNOWN`). **دو رد درهم‌تنیده‌ی Codex r3، روی PostgreSQL واقعی با توقف تزریق‌شده‌ی ساعت ۱ در میان نمونه‌ها:** (۱) نمونه ۴٬۹۰۰،
+  توقف ۱٬۵۰۰، پذیرش در ۶٬۴۰۰ ← پذیرفته (باقی‌مانده‌ی نوشته‌شده، سنجاق‌شده) و `COMMITTED_LATE` با `CLOCK_DIVERGENCE`؛ همان با توقف بیش از
+  `GRACE` ← نشست بسته، هیچ ردیف، `COMMIT_UNKNOWN`؛ (۲) توقف ۴٬۰۰۰ هنگام `COMMIT` (ساعت ۱ ۴٬۰۱۰، واقعی ۸٬۰۱۰، حد ۷٬۰۰۰) ←
+  `COMMITTED_LATE` با `ELAPSED`؛ توقف پیش از آخرین نمونه ← `EXPIRED` و هیچ ردیف؛ `askedDb` کند ۱٬۴۰۰ و سپس توقف ۱٬۵۰۰ ← `COMMITTED_LATE` با
+  `UNVERIFIED`؛ پرسیده و بی `fence`، Statement پس از `fence`، پرسش دوم (لنگر همان اول)، و نپرسیده (بی سنجش).
 - **برگشت:** Revert؛ هیچ مصرف‌کننده‌ای هنوز به Client وابسته نیست. Revert ـِ بخش گارد فقط اگر هیچ سرویسی فهرست تهی نداشته باشد.
 
 ### PR 1b — `audit-service`: Projection ـِ رویداد عضویت (`S`)
