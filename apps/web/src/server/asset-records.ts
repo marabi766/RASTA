@@ -15,6 +15,7 @@ import { INSPECTION_RESULTS } from '@/lib/asset-fields';
 import {
   IRR,
   MoneyInputError,
+  moneyInputMessage,
   normalizePersianText,
   parseMoneyInput,
   toPersianDigits,
@@ -30,6 +31,7 @@ import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Insurance policies and technical inspections of a machine, through the
@@ -220,10 +222,11 @@ export function validityWindowOf(from: string, to: string, now: Date): ValidityW
 
 export const fa = (value: number): string => toPersianDigits(String(value));
 
-export const UNSUPPORTED_CHARACTERS =
-  'نویسهٔ غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و علائم معمول مجازند';
-export const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
-export const DATE_MESSAGE = 'تاریخ معتبر نیست';
+export const UNSUPPORTED_CHARACTERS = formMessage(
+  'نویسهٔ غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و علائم معمول مجازند',
+);
+export const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد');
+export const DATE_MESSAGE = formMessage('تاریخ معتبر نیست');
 
 /** The service's `displayText(min, max)`: name-like text in its character set. */
 export const displayText = (label: string, min: number, max: number) =>
@@ -233,9 +236,9 @@ export const displayText = (label: string, min: number, max: number) =>
     .pipe(
       z
         .string()
-        .min(1, `${label} را وارد کنید`)
-        .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .min(1, formMessage(`${label} را وارد کنید`))
+        .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .regex(ASSET_DISPLAY_TEXT, UNSUPPORTED_CHARACTERS),
     );
 
@@ -247,10 +250,10 @@ const optionalDisplayText = (label: string, min: number, max: number) =>
     .pipe(
       z
         .string()
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine(
           (value) => value === '' || value.length >= min,
-          `${label} دست‌کم ${fa(min)} نویسه باشد`,
+          formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`),
         )
         .refine((value) => value === '' || ASSET_DISPLAY_TEXT.test(value), UNSUPPORTED_CHARACTERS),
     )
@@ -268,16 +271,16 @@ const documentNumber = (label: string, min: number, max: number) =>
   z
     .string()
     .trim()
-    .min(1, `${label} را وارد کنید`)
-    .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-    .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+    .min(1, formMessage(`${label} را وارد کنید`))
+    .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+    .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
     .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE);
 
 /** A calendar day, as the Tehran-midnight instant the service takes. */
 export const requiredDate = (label: string) =>
   z.string().transform((raw, ctx): string => {
     if (raw.trim() === '') {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} را وارد کنید` });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: formMessage(`${label} را وارد کنید`) });
       return z.NEVER;
     }
     const iso = localDateToIso(raw);
@@ -298,17 +301,26 @@ const optionalRials = (label: string) =>
       minor = parseMoneyInput(text, IRR);
     } catch (cause) {
       if (cause instanceof MoneyInputError) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: cause.message });
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: moneyInputMessage(cause.failure, IRR),
+        });
         return z.NEVER;
       }
       throw cause;
     }
     if (minor < 0n) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} نمی‌تواند منفی باشد` });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: formMessage(`${label} نمی‌تواند منفی باشد`),
+      });
       return z.NEVER;
     }
     if (minor > BigInt(MAX_AMOUNT_MINOR)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} بیش از حد بزرگ است` });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: formMessage(`${label} بیش از حد بزرگ است`),
+      });
       return z.NEVER;
     }
     return minor.toString();
@@ -327,7 +339,7 @@ export const RECORD_BOUNDS = {
   notes: { max: 1000 },
 } as const;
 
-export const END_NOT_AFTER_START_MESSAGE = 'تاریخ پایان باید پس از تاریخ شروع باشد';
+export const END_NOT_AFTER_START_MESSAGE = formMessage('تاریخ پایان باید پس از تاریخ شروع باشد');
 
 export function recordPolicyFormValues(form: FormData): RecordPolicyFormValues {
   return readFields(form, RECORD_POLICY_FIELDS);
@@ -350,7 +362,7 @@ export const recordPolicyFormSchema = z
       RECORD_BOUNDS.insurerName.max,
     ),
     coverage: z.enum(POLICY_COVERAGES, {
-      error: 'نوع پوشش را از فهرست انتخاب کنید',
+      error: formMessage('نوع پوشش را از فهرست انتخاب کنید'),
     }),
     premium: optionalRials('حق بیمه'),
     insuredValue: optionalRials('سرمایهٔ بیمه'),
@@ -392,7 +404,7 @@ export const recordInspectionFormSchema = z
     inspectedAt: requiredDate('تاریخ معاینه'),
     validTo: requiredDate('تاریخ پایان اعتبار'),
     result: z.enum(INSPECTION_RESULTS, {
-      error: 'نتیجهٔ معاینه را از فهرست انتخاب کنید',
+      error: formMessage('نتیجهٔ معاینه را از فهرست انتخاب کنید'),
     }),
     // The service's `plainText()`: the person's own words, as typed, less the
     // invisible direction controls.
@@ -402,7 +414,10 @@ export const recordInspectionFormSchema = z
       .pipe(
         z
           .string()
-          .max(RECORD_BOUNDS.notes.max, `یادداشت حداکثر ${fa(RECORD_BOUNDS.notes.max)} نویسه است`)
+          .max(
+            RECORD_BOUNDS.notes.max,
+            formMessage(`یادداشت حداکثر ${fa(RECORD_BOUNDS.notes.max)} نویسه است`),
+          )
           .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
       )
       .transform((value) => (value === '' ? undefined : value)),
@@ -413,7 +428,7 @@ export const recordInspectionFormSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['validTo'],
-        message: 'تاریخ پایان اعتبار باید پس از تاریخ معاینه باشد',
+        message: formMessage('تاریخ پایان اعتبار باید پس از تاریخ معاینه باشد'),
       });
     }
   })

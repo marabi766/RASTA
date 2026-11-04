@@ -18,6 +18,7 @@ import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Writing to asset-service through the gateway (ADR-058 § 3, ADR-059 § 3).
@@ -65,8 +66,10 @@ export function canManageAssets(roles: readonly string[]): boolean {
  */
 export const ASSET_DISPLAY_TEXT = DISPLAY_TEXT_PATTERN;
 
-const UNSUPPORTED_CHARACTERS = 'نویسهٔ غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و علائم معمول مجازند';
-const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+const UNSUPPORTED_CHARACTERS = formMessage(
+  'نویسهٔ غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و علائم معمول مجازند',
+);
+const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد');
 
 /** A number inside a message the person reads: Persian digits, at the edge of the layer. */
 const fa = (value: number): string => toPersianDigits(String(value));
@@ -79,8 +82,13 @@ const requiredDisplayText = (label: string, min: number, max: number) =>
     .pipe(
       z
         .string()
-        .min(min, min === 1 ? `${label} را وارد کنید` : `${label} دست‌کم ${fa(min)} نویسه باشد`)
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .min(
+          min,
+          min === 1
+            ? formMessage(`${label} را وارد کنید`)
+            : formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`),
+        )
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .regex(ASSET_DISPLAY_TEXT, UNSUPPORTED_CHARACTERS),
     );
 
@@ -103,7 +111,7 @@ const modelText = z
   .pipe(
     z
       .string()
-      .max(MODEL_MAX, `مدل حداکثر ${fa(MODEL_MAX)} نویسه است`)
+      .max(MODEL_MAX, formMessage(`مدل حداکثر ${fa(MODEL_MAX)} نویسه است`))
       .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
   );
 
@@ -115,7 +123,7 @@ const optionalDisplayText = (label: string, max: number) =>
     .pipe(
       z
         .string()
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine((value) => value === '' || ASSET_DISPLAY_TEXT.test(value), UNSUPPORTED_CHARACTERS),
     );
 
@@ -135,12 +143,14 @@ const identifierText = (label: string, max: number) =>
     .string()
     .trim()
     .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
-    .pipe(z.string().max(max, `${label} حداکثر ${fa(max)} نویسه است`));
+    .pipe(z.string().max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`)));
 
 /** Sent as the service bounds it; calendar is not interpreted (see PR notes). */
 const MANUFACTURE_YEAR_MIN = 1300;
 const MANUFACTURE_YEAR_MAX = 2100;
-const MANUFACTURE_YEAR_MESSAGE = `سال ساخت باید عددی چهاررقمی بین ${fa(MANUFACTURE_YEAR_MIN)} و ${fa(MANUFACTURE_YEAR_MAX)} باشد`;
+const MANUFACTURE_YEAR_MESSAGE = formMessage(
+  `سال ساخت باید عددی چهاررقمی بین ${fa(MANUFACTURE_YEAR_MIN)} و ${fa(MANUFACTURE_YEAR_MAX)} باشد`,
+);
 
 /**
  * A year, typed in either digit set. Digits are converted on the way in
@@ -213,19 +223,22 @@ export function registerAssetFormValues(form: FormData): RegisterAssetFormValues
 export const registerAssetFormSchema = z
   .object({
     name: requiredDisplayText('نام', 2, 200),
-    type: z.enum(ASSET_TYPES, { error: 'نوع ماشین را انتخاب کنید' }),
+    type: z.enum(ASSET_TYPES, { error: formMessage('نوع ماشین را انتخاب کنید') }),
     assetTag: identifierText('شمارهٔ دارایی', 64).transform(blankTo(undefined)),
     manufacturer: optionalDisplayText('سازنده', 120).transform(blankTo(undefined)),
     model: modelText.transform(blankTo(undefined)),
     serialNumber: identifierText('شمارهٔ سریال', 120)
-      .refine((value) => value === '' || value.length >= 3, 'شمارهٔ سریال دست‌کم ۳ نویسه باشد')
+      .refine(
+        (value) => value === '' || value.length >= 3,
+        formMessage('شمارهٔ سریال دست‌کم ۳ نویسه باشد'),
+      )
       .transform(blankTo(undefined)),
     manufactureYear: yearOrBlank<undefined>(undefined),
     siteName: optionalDisplayText('محل', 200).transform(blankTo(undefined)),
     addressLine: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(500, 'نشانی حداکثر ۵۰۰ نویسه است'))
+      .pipe(z.string().max(500, formMessage('نشانی حداکثر ۵۰۰ نویسه است')))
       .transform(blankTo(undefined)),
   })
   .strict()

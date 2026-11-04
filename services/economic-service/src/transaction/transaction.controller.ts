@@ -244,10 +244,14 @@ export class TransactionController {
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN')
   @AllowService('marketplace-service')
   @ApiOperation({
-    summary: 'Resolve a dispute back into the settlement queue',
+    summary: 'Resolve a dispute back to where its settlement authority stands',
     description:
-      'Records who decided and what they decided, and unblocks settlement. It does not settle: ' +
-      'releasing the money stays a separate, deliberate act. ' +
+      'Records who decided and what they decided, and lifts the dispute. It does not settle, ' +
+      'and it does not authorise: the transaction returns to PENDING_SETTLEMENT when its ' +
+      'settlement was authorised (or nothing was ever held), and to HELD when its funds are ' +
+      'escrowed and no authorisation is recorded — an order’s obligation disputed before its ' +
+      'buyer confirmed receipt waits for that receipt again (D-083). Releasing the money stays ' +
+      'a separate, deliberate act. ' +
       'Reachable by marketplace-service, whose order saga mirrors a dispute onto the ' +
       'transaction and must be able to mirror the resolution back — otherwise a dispute ' +
       'decided in the supplier’s favour could never settle. The decision itself is still a ' +

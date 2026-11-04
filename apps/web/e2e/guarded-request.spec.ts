@@ -1,6 +1,6 @@
-import { RedirectRefusedError, withRedirectProbe } from '@rasta/testing';
+import { REQUEST_CONTEXT_ROUTES, RedirectRefusedError, withRedirectProbe } from '@rasta/testing';
 
-import { expect, test } from './expect';
+import { expect, test, type APIRequestContext } from './expect';
 
 /**
  * The API request contexts this suite hands to specs refuse redirects (Q-155,
@@ -37,5 +37,37 @@ test.describe('guarded API request contexts', () => {
         await context.dispose();
       }
     });
+  }
+
+  // These contexts never pass through guardRequestContext's proxy.
+  for (const [route, reach] of Object.entries(REQUEST_CONTEXT_ROUTES)) {
+    for (const status of [307, 308]) {
+      for (const holderName of ['page', 'context'] as const) {
+        test(`${holderName}.request via ${route} refuses ${status}`, async ({ page, context }) => {
+          const api = reach(holderName === 'page' ? page : context) as APIRequestContext;
+          for (const method of [
+            'post',
+            'put',
+            'patch',
+            'delete',
+            'get',
+            'head',
+            'fetch',
+          ] as const) {
+            await withRedirectProbe({ body: { ok: true }, status }, async (probe) => {
+              await expect(
+                api[method](probe.baseUrl, {
+                  headers: { authorization: 'Bearer route-sentinel' },
+                  ...(method === 'head' ? {} : { data: 'route-sentinel' }),
+                  maxRedirects: 9,
+                }),
+              ).rejects.toBeInstanceOf(RedirectRefusedError);
+              expect(probe.sent).toHaveLength(1);
+              expect(probe.target).toHaveLength(0);
+            });
+          }
+        });
+      }
+    }
   }
 });

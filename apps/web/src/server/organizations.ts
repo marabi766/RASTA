@@ -15,6 +15,7 @@ import { webServerEnv } from './env';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export type { ReadResult };
 
@@ -99,7 +100,7 @@ export function updateOrganizationFormValues(form: FormData): UpdateOrganization
  */
 export const updateOrganizationFormSchema = z
   .object({
-    name: z.string().trim().min(1, 'نام سازمان را وارد کنید').max(200),
+    name: z.string().trim().min(1, formMessage('نام سازمان را وارد کنید')).max(200),
     shortName: z
       .string()
       .trim()

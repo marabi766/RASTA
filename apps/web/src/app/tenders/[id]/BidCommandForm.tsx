@@ -43,6 +43,7 @@ import {
 import type { Binding } from '@/lib/unresolved-tenancy';
 import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
+import { ownText } from '@/lib/own-key';
 
 /**
  * One bid command this contractor may issue on a tender — submitting the
@@ -390,7 +391,7 @@ const REFUSAL_MESSAGES: Record<Extract<BidFormState, { kind: 'REFUSED' }>['reaso
 /** A 403's closed reasons in fixed words; the first one this portal has words for. */
 export function forbiddenText(reasons: readonly string[]): string | null {
   for (const reason of reasons) {
-    const text = BID_REFUSAL_TEXT[reason];
+    const text = ownText(BID_REFUSAL_TEXT, reason);
     if (text) return text;
   }
   return null;

@@ -590,7 +590,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     projectId = (created.body as { id: string }).id;
 
     const need = await author.post(`/v1/projects/${projectId}/needs`, {
-      body: { title: 'Contractor', description: 'Resurfacing works, two kilometres' },
+      body: {
+        expectedProjectVersion: (created.body as { version: number }).version,
+        title: 'Contractor',
+        description: 'Resurfacing works, two kilometres',
+      },
     });
     expect(need.status, JSON.stringify(need.body)).toBe(201);
     expect(
@@ -598,7 +602,10 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
         await author.post(
           `/v1/projects/${projectId}/needs/${(need.body as { id: string }).id}/submit`,
           {
-            body: { expectedVersion: 1 },
+            body: {
+              expectedProjectVersion: (created.body as { version: number }).version,
+              expectedVersion: 1,
+            },
           },
         )
       ).status,

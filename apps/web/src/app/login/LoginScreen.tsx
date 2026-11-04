@@ -1,4 +1,5 @@
 import { Alert, ButtonLink, PageHeader, ThemeSwitch } from '@/ui';
+import { ownText } from '@/lib/own-key';
 
 /**
  * What a signed-out visitor sees (docs/16 § 16.6, `/login`).
@@ -35,7 +36,7 @@ export function LoginScreen({ reason, returnTo }: { reason?: string; returnTo?: 
   // An unknown code renders nothing rather than being echoed back. Whatever
   // arrives in a query string is somebody else's text until this map has
   // agreed to it.
-  const message = reason ? LOGIN_REASONS[reason] : undefined;
+  const message = ownText(LOGIN_REASONS, reason);
 
   // `returnTo` is already `safeReturnTo`'d by the route before it reaches
   // this component (this stays a plain function of its props, per the note

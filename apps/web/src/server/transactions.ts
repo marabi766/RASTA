@@ -9,7 +9,7 @@ import {
   DISPUTE_COMMANDS,
   DISPUTE_FIELD_LIMITS as LIMITS,
   DISPUTE_FROM_STATES,
-  DISPUTE_TARGET_STATE,
+  DISPUTE_TARGET_STATES,
   NEVER_ROLE,
   PLATFORM_ROLES,
   disputedThroughOrder,
@@ -26,6 +26,7 @@ import { utcInstant } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export type { ReadResult };
 
@@ -235,8 +236,14 @@ const textSchema = (field: DisputeField, what: string, why: string) =>
   z
     .string()
     .trim()
-    .min(LIMITS[field].min, `${what} را دست‌کم در ${digits(LIMITS[field].min)} نویسه بنویسید${why}`)
-    .max(LIMITS[field].max, `${what} نباید بیش از ${digits(LIMITS[field].max)} نویسه باشد`);
+    .min(
+      LIMITS[field].min,
+      formMessage(`${what} را دست‌کم در ${digits(LIMITS[field].min)} نویسه بنویسید${why}`),
+    )
+    .max(
+      LIMITS[field].max,
+      formMessage(`${what} نباید بیش از ${digits(LIMITS[field].max)} نویسه باشد`),
+    );
 
 const COMMAND_SCHEMAS = {
   DISPUTE: z.object({
@@ -328,13 +335,13 @@ export const DISPUTE_FIELD_MAPPING: FieldMapping<DisputeField> = {
 };
 
 /**
- * What a confirmed answer must look like: this transaction, in the state the
+ * What a confirmed answer must look like: this transaction, in a state the
  * command leads to. A replay answers with the stored result, which is that same
  * state, so a 2xx that shows anything else cannot be told from "maybe" and is
  * unconfirmed (`writeThroughGateway`).
  */
 const answerSchema = (transactionId: string, command: DisputeCommand) =>
-  z.object({ id: z.literal(transactionId), status: z.literal(DISPUTE_TARGET_STATE[command]) });
+  z.object({ id: z.literal(transactionId), status: z.enum(DISPUTE_TARGET_STATES[command]) });
 
 export type DisputeCommandResult = Exclude<
   WriteResult<{ id: string; status: string }, DisputeField>,

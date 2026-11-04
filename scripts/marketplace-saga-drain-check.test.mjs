@@ -28,7 +28,7 @@ const scenario = JSON.parse(readFileSync(process.env.FAKE_TEMPORAL_SCENARIO, 'ut
 const args = process.argv.slice(2);
 const keyOf = (a) => {
   const key = a[0] + ' ' + a[1];
-  return key === 'workflow describe' ? key + ' ' + a[a.indexOf('--workflow-id') + 1] : key;
+  return ['workflow describe', 'workflow show'].includes(key) ? key + ' ' + a[a.indexOf('--workflow-id') + 1] : key;
 };
 appendFileSync(process.env.FAKE_TEMPORAL_CALLS, JSON.stringify(args) + '\\n');
 const key = keyOf(args);
@@ -62,6 +62,7 @@ const description = (id, pendingActivities) => ({
     execution: { workflowId: `order-${id}`, runId: `run-${id}` },
     type: { name: 'orderSaga' },
     status: 'WORKFLOW_EXECUTION_STATUS_RUNNING',
+    historyLength: '1',
   },
   ...(pendingActivities === undefined ? {} : { pendingActivities }),
 });
@@ -72,6 +73,40 @@ const pendingHold = {
   attempt: 1,
 };
 
+const payload = (value) => ({
+  metadata: { encoding: 'anNvbi9wbGFpbg==' },
+  data: Buffer.from(JSON.stringify(value)).toString('base64'),
+});
+const legacyStart = JSON.parse(
+  readFileSync(
+    new URL(
+      '../services/marketplace-service/src/temporal/fixtures/pre-rollover.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+).events[0];
+const history = (input = {}, markers = []) => ({
+  events: [
+    {
+      ...legacyStart,
+      workflowExecutionStartedEventAttributes: {
+        ...legacyStart.workflowExecutionStartedEventAttributes,
+        taskQueue: { name: 'rasta-order' },
+        input: { payloads: [payload(input)] },
+      },
+    },
+    ...markers.map((value, i) => ({
+      eventId: String(i + 2),
+      eventType: 'EVENT_TYPE_MARKER_RECORDED',
+      markerRecordedEventAttributes: {
+        markerName: 'core_patch',
+        details: { 'patch-data': { payloads: [payload(value)] } },
+      },
+    })),
+  ],
+});
+
 /** Two running sagas, neither with a pending activity, no poller. */
 function drained() {
   return {
@@ -80,6 +115,8 @@ function drained() {
     'workflow list': { stdout: [execution('A'), execution('B')] },
     'workflow describe order-A': { stdout: description('A') },
     'workflow describe order-B': { stdout: description('B', []) },
+    'workflow show order-A': { stdout: history() },
+    'workflow show order-B': { stdout: history() },
   };
 }
 
@@ -89,7 +126,19 @@ const SETTINGS = {
   MARKETPLACE_TEMPORAL_TASK_QUEUE: 'rasta-order',
 };
 
-function run(scenario, { settings = SETTINGS, cli } = {}) {
+const TARGET_NAME = '@rasta/marketplace-service';
+// Unmodified origin/main eae31b07 manifest: real pre-protocol target release.
+const legacyTarget = JSON.parse(
+  readFileSync(
+    new URL('./fixtures/marketplace-pre-protocol-package.json', import.meta.url),
+    'utf8',
+  ),
+);
+
+function run(
+  scenario,
+  { settings = SETTINGS, cli, target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 } } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'saga-drain-'));
   try {
     const fake = join(dir, 'temporal.mjs');
@@ -97,7 +146,13 @@ function run(scenario, { settings = SETTINGS, cli } = {}) {
     chmodSync(fake, 0o755);
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify(scenario));
     writeFileSync(join(dir, 'calls.jsonl'), '');
-    const env = { PATH: process.env.PATH, ...settings, TEMPORAL_CLI: cli ?? fake };
+    writeFileSync(join(dir, 'target.json'), JSON.stringify(target));
+    const env = {
+      MARKETPLACE_TARGET_PACKAGE_JSON: join(dir, 'target.json'),
+      PATH: process.env.PATH,
+      ...settings,
+      TEMPORAL_CLI: cli ?? fake,
+    };
     env.FAKE_TEMPORAL_SCENARIO = join(dir, 'scenario.json');
     env.FAKE_TEMPORAL_CALLS = join(dir, 'calls.jsonl');
     const result = spawnSync(process.execPath, [SCRIPT], { env, encoding: 'utf8' });
@@ -134,6 +189,18 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
     ],
     [
       'workflow',
+      'show',
+      ...common,
+      '--workflow-id',
+      'order-A',
+      '--run-id',
+      'run-A',
+      '--output',
+      'json',
+      '--no-json-shorthand-payloads',
+    ],
+    [
+      'workflow',
       'describe',
       ...common,
       '--workflow-id',
@@ -142,6 +209,18 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
       'run-B',
       '--output',
       'json',
+    ],
+    [
+      'workflow',
+      'show',
+      ...common,
+      '--workflow-id',
+      'order-B',
+      '--run-id',
+      'run-B',
+      '--output',
+      'json',
+      '--no-json-shorthand-payloads',
     ],
     ['workflow', 'count', ...common, '--query', QUERY, '--output', 'json'],
   ]);
@@ -467,3 +546,95 @@ for (const sentinel of SENTINELS) {
     });
   }
 }
+
+for (const [name, recorded] of Object.entries({
+  'unstarted continuation': history({
+    resume: { mirroredDispute: 'DSP', status: { remindersRecorded: 7, settlementAttempts: 3 } },
+  }),
+  'patched history': history({}, [{ id: 'order-saga-durable-rollover-v1', deprecated: false }]),
+})) {
+  test(`forward-only boundary: refuses incompatible target for ${name} without pending activity`, () => {
+    const scenario = drained();
+    scenario['workflow show order-A'].stdout = recorded;
+    scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
+      recorded.events.length,
+    );
+    const refused = run(scenario, { target: { name: TARGET_NAME, marketplaceSagaProtocol: 0 } });
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /incompatible target build/);
+    const legacyRefused = run(scenario, { target: legacyTarget });
+    assert.equal(legacyRefused.status, 1);
+    assert.match(legacyRefused.stderr, /incompatible target build/);
+    assert.equal(run(scenario).status, 0);
+  });
+}
+
+test('legacy-only histories accept an explicitly declared legacy target', () => {
+  assert.equal(
+    run(drained(), { target: { name: TARGET_NAME, marketplaceSagaProtocol: 0 } }).status,
+    0,
+  );
+});
+
+test('legacy-only histories accept the unmodified origin/main pre-protocol target', () => {
+  assert.equal(legacyTarget.name, TARGET_NAME);
+  assert.equal(Object.hasOwn(legacyTarget, 'marketplaceSagaProtocol'), false);
+  const result = run(drained(), { target: legacyTarget });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /OK — no poller/);
+});
+
+for (const value of ['1', '0', 2, -1, 0.5, null, false, {}, []]) {
+  test(`refuses malformed or unknown target protocol ${JSON.stringify(value)} before querying`, () => {
+    const result = run(drained(), {
+      target: { name: TARGET_NAME, marketplaceSagaProtocol: value },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /compatibility declaration is unsupported/);
+    assert.deepEqual(result.calls, []);
+  });
+}
+for (const target of [
+  { name: '@rasta/economic-service', marketplaceSagaProtocol: 1 },
+  { name: '@rasta/economic-service' },
+  { marketplaceSagaProtocol: 1 },
+  {},
+  null,
+  [],
+]) {
+  test(`refuses wrong or missing target manifest name ${JSON.stringify(target)} before querying`, () => {
+    const result = run(drained(), { target });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /target manifest is not marketplace-service/);
+    assert.deepEqual(result.calls, []);
+  });
+}
+test('refuses unreadable or omitted target manifest', () => {
+  for (const path of ['', '/nonexistent/target.json']) {
+    assert.equal(
+      run(drained(), { settings: { ...SETTINGS, MARKETPLACE_TARGET_PACKAGE_JSON: path } }).status,
+      1,
+    );
+  }
+});
+test('refuses unreadable histories, inputs and compatibility markers', () => {
+  const unreadable = history();
+  unreadable.events[0].workflowExecutionStartedEventAttributes.input.payloads = [{}];
+  for (const bad of [
+    {},
+    { events: [] },
+    unreadable,
+    history({}, [null]),
+    history({}, [{ id: 'unknown', deprecated: false }]),
+    history({}, [{ id: 'order-saga-durable-rollover-v1' }]),
+  ]) {
+    const scenario = { ...drained(), 'workflow show order-A': { stdout: bad } };
+    scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
+      bad.events?.length,
+    );
+    assert.equal(run(scenario).status, 1);
+  }
+  const truncated = drained();
+  truncated['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = '2';
+  assert.equal(run(truncated).status, 1);
+});
