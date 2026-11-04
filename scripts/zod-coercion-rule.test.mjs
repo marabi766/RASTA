@@ -592,6 +592,8 @@ const containerPaths = [
   `z.set(z.number()).def.valueType`,
   `z.pipe(z.number(),z.number()).def.in`,
   `z.any().safeParse(z.number()).data`,
+  `z.any().safeParse({...{n:z.number()},...{m:z.string()}}).data.n`,
+  `z.any().safeParse({[(()=>'n')()]:z.number()}).data.n`,
 ];
 const containerProbes = containerPaths.flatMap((path) => [
   ['zod', `const s=${path}.clone({coerce:true});`],

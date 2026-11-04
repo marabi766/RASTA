@@ -269,11 +269,12 @@ export default {
         return { opaque: true };
       if (result.container) {
         if (result.container === 'literal')
-          return (
+          return mergeOrigins(
             result.children.get(name) ??
-            result.children.get(String(name)) ??
-            result.children.get(Number(name)) ??
-            (result.spread && access(result.spread, name))
+              result.children.get(String(name)) ??
+              result.children.get(Number(name)),
+            result.children.get(undefined),
+            result.spread && access(result.spread, name),
           );
         if (result.container === 'map')
           return name === 'get' ? { elementMethod: true } : { opaque: true };
@@ -404,7 +405,7 @@ export default {
           if (!entry) continue;
           const child = origin(entry.argument ?? entry.value ?? entry, seen);
           if (!child?.raw && !child?.schema && !child?.container) continue;
-          if (entry.type === 'SpreadElement') spread = child;
+          if (entry.type === 'SpreadElement') spread = mergeOrigins(spread, child);
           else children.set(node.type === 'ObjectExpression' ? key(entry) : index, child);
         }
         if (children.size || spread) return { container: 'literal', children, spread };
