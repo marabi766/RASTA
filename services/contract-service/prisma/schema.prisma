@@ -365,6 +365,18 @@ model Milestone {
 // Statements and deductions (CON-003 PR 4, ADR-068 § 5, docs/24 Q-96 and Q-97)
 // ---------------------------------------------------------------------------
 
+enum DeductionRuleChangeKind {
+  CREATE
+  RETIRE
+}
+
+enum DeductionRuleChangeStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
 /// `src/statement/statement.state-machine.ts`. The ADR-068 § 5 lifecycle, and SETTLED (§ 6 (3), CON-003
 /// PR 6c): an APPROVED statement moves to SETTLED on economic-service's confirmation and to nothing
 /// else. SETTLED was added with `ADD VALUE`; its `down.sql` rebuilds the type without it.
@@ -392,11 +404,57 @@ model DeductionRule {
   createdBy String    @map("created_by")
   retiredAt DateTime? @map("retired_at") @db.Timestamptz(3)
 
+  /// The approved change this rule came from; NULL only for a rule from before CON-003-1. A plain
+  /// column on purpose: the composite foreign key to the change is SQL-only (see below).
+  approvedChangeId String? @map("approved_change_id")
+
   applied StatementDeduction[]
 
   // SQL-only: `ux_deduction_rule_name_active` — one rule in force per (organization, name).
+  // SQL-only: `deduction_rule_approved_change_fkey`, (organization_id, approved_change_id).
+  // SQL-only: `tg_deduction_rule_insert` — a rule comes only from the approved change that says it.
   @@unique([organizationId, id], map: "ux_deduction_rule_org_id")
+  @@unique([organizationId, approvedChangeId], map: "ux_deduction_rule_approved_change")
   @@map("deduction_rule")
+}
+
+/// One proposed change to an employer's deduction rules, under four eyes (CON-003-1, Q-125, D-115).
+/// `deduction_rule` stays the rules in force; only an APPROVED change moves it, in the same
+/// transaction. The lifecycle is `deduction-rule-change.state-machine.ts`, kept by the database.
+model DeductionRuleChange {
+  id             String                  @id
+  organizationId String                  @map("organization_id")
+  kind           DeductionRuleChangeKind
+
+  // CREATE: what the rule will be.
+  name   String?
+  rateBp Int?    @map("rate_bp")
+  base   String?
+
+  // RETIRE: the rule, and why. A plain column on purpose: its composite foreign key is SQL-only.
+  deductionRuleId String? @map("deduction_rule_id")
+  reason          String?
+
+  status DeductionRuleChangeStatus @default(PENDING_APPROVAL)
+
+  proposedAt        DateTime @map("proposed_at") @db.Timestamptz(3)
+  proposedBy        String   @map("proposed_by")
+  proposedByIssuer  String   @map("proposed_by_issuer")
+  proposedBySubject String   @map("proposed_by_subject")
+
+  decidedAt        DateTime? @map("decided_at") @db.Timestamptz(3)
+  decidedBy        String?   @map("decided_by")
+  decidedByIssuer  String?   @map("decided_by_issuer")
+  decidedBySubject String?   @map("decided_by_subject")
+  decisionReason   String?   @map("decision_reason")
+
+  version Int @default(1)
+
+  // SQL-only: `deduction_rule_change_rule_fkey`, (organization_id, deduction_rule_id).
+  // SQL-only: `ux_deduction_rule_change_pending_create`, `ux_deduction_rule_change_pending_retire`.
+  // SQL-only: `ck_deduction_rule_change_four_eyes` and the guards of the lifecycle.
+  @@unique([organizationId, id], map: "ux_deduction_rule_change_org_id")
+  @@map("deduction_rule_change")
 }
 
 /// A statement of work on a SIGNED contract, made by the contractor (ADR-068 § 5).

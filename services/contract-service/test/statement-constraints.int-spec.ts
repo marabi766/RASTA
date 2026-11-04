@@ -1,8 +1,10 @@
 import { ulid } from 'ulid';
+import { PrismaClient } from '../src/generated/prisma';
 import {
   activatePolicy,
   cleanup,
   newOrganizationId,
+  ownerDatabaseUrl,
   wire,
   type SuiteStep,
   type Wiring,
@@ -30,6 +32,21 @@ describe('the database keeps the statements and their deductions', () => {
     );
   const refuses = (promise: Promise<unknown>, pattern: RegExp) =>
     expect(promise).rejects.toThrow(pattern);
+  /** One statement through the owner connection with the rule's insert guard lifted, then rolled back. */
+  const asOwnerWithoutInsertGuard = async (sql: string) => {
+    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await owner.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "deduction_rule" DISABLE TRIGGER "tg_deduction_rule_insert"',
+        );
+        await tx.$executeRawUnsafe(sql);
+        throw new Error('rolled back: the statement was not refused');
+      });
+    } finally {
+      await owner.$disconnect();
+    }
+  };
 
   beforeAll(() => {
     w = wire();
@@ -55,11 +72,40 @@ describe('the database keeps the statements and their deductions', () => {
                 'system', 'COR_1', now())`);
     return { id, org, contractor };
   };
+  /** A rule in force, the one way there is: from a change another person approves (CON-003-1). */
   const rule = async (org: string, rateBp: number, name = `Rule ${ulid()}`) => {
     const id = `DDR_${ulid()}`;
-    await exec(`INSERT INTO deduction_rule (id, organization_id, name, rate_bp, base, created_at, created_by)
-                VALUES ('${id}', '${org}', '${name}', ${rateBp}, 'GROSS', now(), 'USR_CONFIG')`);
+    const change = `DRC_${ulid()}`;
+    await atomically(
+      `INSERT INTO deduction_rule_change
+         (id, organization_id, kind, name, rate_bp, base, proposed_at, proposed_by,
+          proposed_by_issuer, proposed_by_subject)
+       VALUES ('${change}', '${org}', 'CREATE', '${name}', ${rateBp}, 'GROSS', now(), 'USR_CONFIG',
+               'iss', 'sub-config')`,
+      `UPDATE deduction_rule_change
+          SET status = 'APPROVED', decided_at = now(), decided_by = 'USR_APPROVER',
+              decided_by_issuer = 'iss', decided_by_subject = 'sub-approver', version = 2
+        WHERE id = '${change}'`,
+      `INSERT INTO deduction_rule
+         (id, organization_id, name, rate_bp, base, created_at, created_by, approved_change_id)
+       VALUES ('${id}', '${org}', '${name}', ${rateBp}, 'GROSS', now(), 'USR_CONFIG', '${change}')`,
+    );
     return id;
+  };
+  /** The one way a rule leaves force: a RETIRE change another person approves (CON-003-1). */
+  const retire = async (org: string, id: string) => {
+    const change = `DRC_${ulid()}`;
+    await atomically(
+      `INSERT INTO deduction_rule_change
+         (id, organization_id, kind, deduction_rule_id, reason, proposed_at, proposed_by,
+          proposed_by_issuer, proposed_by_subject)
+       VALUES ('${change}', '${org}', 'RETIRE', '${id}', 'retired', now(), 'USR_CONFIG', 'iss', 'sub-config')`,
+      `UPDATE deduction_rule_change
+          SET status = 'APPROVED', decided_at = now(), decided_by = 'USR_APPROVER',
+              decided_by_issuer = 'iss', decided_by_subject = 'sub-approver', version = 2
+        WHERE id = '${change}'`,
+      `UPDATE deduction_rule SET retired_at = now() WHERE id = '${id}'`,
+    );
   };
   /**
    * A statement row. `totals.lineCount` and `totals.deductionCount` are the parts it says it is
@@ -318,7 +364,7 @@ describe('the database keeps the statements and their deductions', () => {
       /statement_deduction_organization_id_deduction_rule_id_fkey|ck_statement_deduction_configured/,
     );
     // A retired rule.
-    await exec(`UPDATE deduction_rule SET retired_at = now() WHERE id = '${retention}'`);
+    await retire(c.org, retention);
     const r = `STM_${ulid()}`;
     await refuses(
       atomically(
@@ -722,9 +768,13 @@ describe('the database keeps the statements and their deductions', () => {
   it('a deduction rule is whole basis points of the gross, one in force per name, never changed or removed — only retired, once', async () => {
     const org = newOrganizationId();
     organizations.push(org);
+    // These reach the column checks past the rule's own guard, as the owner: what a change approved
+    // says always fits them (`ck_deduction_rule_change_*`), so no runtime path can fail them.
     const insert = (name: string, rateBp: number, base = 'GROSS') =>
-      exec(`INSERT INTO deduction_rule (id, organization_id, name, rate_bp, base, created_at, created_by)
-            VALUES ('DDR_${ulid()}', '${org}', '${name}', ${rateBp}, '${base}', now(), 'USR_CONFIG')`);
+      asOwnerWithoutInsertGuard(
+        `INSERT INTO deduction_rule (id, organization_id, name, rate_bp, base, created_at, created_by)
+         VALUES ('DDR_${ulid()}', '${org}', '${name}', ${rateBp}, '${base}', now(), 'USR_CONFIG')`,
+      );
     for (const rate of [0, 10_001, -1])
       await refuses(insert('Bad rate', rate), /ck_deduction_rule_rate/);
     await refuses(insert('Net based', 100, 'NET'), /ck_deduction_rule_rate/);
@@ -732,7 +782,7 @@ describe('the database keeps the statements and their deductions', () => {
     await refuses(insert('a‮b', 100), /ck_deduction_rule_name/);
     const id = await rule(org, 250, 'Tax');
     // `ux_deduction_rule_name_active`, which the driver reports by its key.
-    await refuses(insert('Tax', 300), /Key \(organization_id, name\)/);
+    await refuses(rule(org, 300, 'Tax'), /Key \(organization_id, name\)/);
     await refuses(
       exec(`UPDATE deduction_rule SET rate_bp = 300 WHERE id = '${id}'`),
       /ck_deduction_rule_immutable/,
@@ -741,12 +791,12 @@ describe('the database keeps the statements and their deductions', () => {
       exec(`DELETE FROM deduction_rule WHERE id = '${id}'`),
       /ck_deduction_rule_not_erasable/,
     );
-    await exec(`UPDATE deduction_rule SET retired_at = now() WHERE id = '${id}'`);
+    await retire(org, id);
     await refuses(
       exec(`UPDATE deduction_rule SET retired_at = NULL WHERE id = '${id}'`),
       /ck_deduction_rule_immutable/,
     );
     // Retired, the name is free for the rule that replaces it.
-    await insert('Tax', 300);
+    await rule(org, 300, 'Tax');
   });
 });
