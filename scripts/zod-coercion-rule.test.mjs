@@ -666,3 +666,73 @@ for (const code of [
   `const meta=z.number().meta(); meta.clone({coerce:true});`,
 ])
   it(`F1 keeps containers distinct from data: ${code}`, () => assert.deepEqual(messages(code), []));
+
+for (const write of [
+  `({coerce:opts.coerce}={coerce:true});`,
+  `[opts.coerce]=[true];`,
+  `({coerce:opts.coerce=true}={});`,
+  `[opts.coerce=true]=[];`,
+  `for(opts.coerce of [true]){}`,
+  `for(opts.coerce in {true:1}){}`,
+  `for({coerce:opts.coerce} of [{coerce:true}]){}`,
+  `for([opts.coerce] of [[true]]){}`,
+  `for({x:opts.coerce=true} of [{}]){}`,
+  `for([opts.coerce] in {true:1}){}`,
+  `({opts}={opts:{coerce:true}});`,
+  `[opts]=[{coerce:true}];`,
+  `({opts={coerce:true}}={});`,
+  `for(opts of [{coerce:true}]){}`,
+  `opts.__proto__={coerce:true};`,
+])
+  it(`F2 write target: ${write}`, () =>
+    assert.ok(messages(`let opts={}; ${write} z.number(opts);`).length));
+for (const write of [
+  `allowed={includes:Number};`,
+  `allowed.includes=Number;`,
+  `allowed.includes=v=>Number(v);`,
+  `({includes:allowed.includes}={includes:Number});`,
+  `for(allowed.includes of [Number]){}`,
+  `const alias=allowed; alias.includes=Number;`,
+  `Object.assign(allowed,{includes:Number});`,
+  `const alias=allowed; mutate(alias);`,
+])
+  it(`F2 mutable helper: ${write}`, () =>
+    assert.ok(
+      messages(`let allowed=[]; ${write} z.preprocess(v=>allowed.includes(v),z.number());`).length,
+    ));
+for (const pattern of ['{opts}', '{opts={coerce:true}}', '[opts={coerce:true}]'])
+  it(`F2 binding pattern: ${pattern}`, () =>
+    assert.ok(messages(`const ${pattern}={}; z.number(opts);`).length));
+it('F2 immutable array helper', () =>
+  assert.deepEqual(
+    messages(`const allowed=[]; z.preprocess(v=>allowed.includes(v),z.boolean());`),
+    [],
+  ));
+
+for (const code of [
+  `let n; ({n=z.number()}={}); n.clone({coerce:true});`,
+  `let n; [n=z.number()]=[]; n.clone({coerce:true});`,
+  `const {n=z.number()}={}; n.clone({coerce:true});`,
+  `const [n=z.number()]=[]; n.clone({coerce:true});`,
+  `let f; [f]=[z.number]; f({coerce:true});`,
+  `let f; ({f=z.number}={}); f({coerce:true});`,
+  `let n; for(n of [z.number()]){} n.clone({coerce:true});`,
+  `for(const n of [z.number()]){n.clone({coerce:true});}`,
+  `for(const [n] of [[z.number()]]){n.clone({coerce:true});}`,
+  `for(const {n=z.number()} of [{}]){n.clone({coerce:true});}`,
+  `let n; for({n} of [{n:z.number()}]){} n.clone({coerce:true});`,
+  `for(const n of z.union([z.number(),z.string()]).options){n.clone({coerce:true});}`,
+  `const allowed=[]; allowed.reverse=Number; z.preprocess(v=>allowed.reverse(v),z.number());`,
+])
+  it(`F2 binding provenance: ${code}`, () =>
+    assert.ok(messages(code).some((m) => m.ruleId === 'boundary/coercion')));
+
+for (const code of [
+  `let n=z.number(); n.clone({coerce:true}); n={x:z.number()};`,
+  `let n=z.number(); n={x:z.number()}; n.x.clone({coerce:true});`,
+  `let n={x:z.number()}; n=z.number(); n.clone({coerce:true});`,
+  `const allowed=/x/; allowed.test=Number; z.preprocess(v=>allowed.test(v),z.number());`,
+  `const allowed=new Date(); allowed.getTime=Number; z.preprocess(v=>allowed.getTime(v),z.number());`,
+])
+  it(`F2 safety alternatives: ${code}`, () =>
+    assert.ok(messages(code).some((m) => m.ruleId === 'boundary/coercion')));
