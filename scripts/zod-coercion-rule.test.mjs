@@ -736,3 +736,61 @@ for (const code of [
 ])
   it(`F2 safety alternatives: ${code}`, () =>
     assert.ok(messages(code).some((m) => m.ruleId === 'boundary/coercion')));
+
+for (const slot of [
+  ...['number', ...formats].map((name) => (value) => `z.${name}(${value});`),
+  (value) => `z.int(${value});`,
+  (value) => `z.number().clone(${value});`,
+  (value) => `z.clone(z.number(),${value});`,
+  (value) => `z.core._int(z.ZodNumberFormat,${value});`,
+  (value) => `z.hash('sha256',${value});`,
+  (value) => `z.stringFormat('custom',/x/,${value});`,
+  (value) => `z.core._hash(z.ZodCustomStringFormat,'sha256',${value});`,
+  (value) => `z.core._stringFormat(z.ZodCustomStringFormat,'custom',/x/,${value});`,
+  (value) => `z.ZodNumber.create(${value});`,
+  (value) => `z.string(${value}).transform(Number);`,
+])
+  for (const value of [
+    'undefined',
+    'void 0',
+    'void false',
+    'absence',
+    'alias',
+    '{...undefined}',
+    '{...absence}',
+    '{...void 0}',
+  ])
+    it(`F4 optional absence: ${slot(value)}`, () =>
+      assert.deepEqual(
+        messages(`const absence=undefined; const alias=absence; ${slot(value)}`),
+        [],
+      ));
+for (const code of [
+  `for(const options of [{coerce:true}]){z.number(options);}`,
+  `for(const options of [{coerce:true}]){const absence=options;z.number().clone(absence);}`,
+  `const undefined={}; z.number(undefined);`,
+  `function f(undefined){z.number(undefined);}`,
+  `const undefined={coerce:true}; z.int(undefined);`,
+  `function f(undefined){const absence=undefined; z.number().clone(absence);}`,
+  `function f(undefined){z.number({...undefined});}`,
+  `let absence=undefined; absence={coerce:true}; z.number(absence);`,
+])
+  it(`F4 shadowed or mutable absence: ${code}`, () => assert.ok(messages(code).length));
+
+for (const expression of [
+  'z.number(undefined)',
+  'z.int(undefined)',
+  'z.number(void 0)',
+  'z.number().clone(undefined)',
+  'z.number(absence)',
+  'z.number({...undefined})',
+])
+  it(`F4 executable absence: ${expression}`, () => {
+    assert.deepEqual(messages(`const absence=undefined; ${expression};`), []);
+    const result = runInNewContext(
+      `const absence=undefined; const s=${expression}; [s.parse(42),s.safeParse(true).success];`,
+      { z: contractsRequire('zod') },
+    );
+    assert.equal(result[0], 42);
+    assert.equal(result[1], false);
+  });

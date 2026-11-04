@@ -508,11 +508,32 @@ export default {
         return parent.type === 'MemberExpression' && parent.object === ref.identifier;
       });
     };
+    const absent = (raw, seen = new Set()) => {
+      const node = unwrap(raw);
+      if (!node || globalName(node, 'undefined')) return true;
+      if (node.type === 'UnaryExpression' && node.operator === 'void') return true;
+      if (node.type !== 'Identifier') return false;
+      const binding = variable(node),
+        def = binding?.defs[0];
+      return (
+        def?.type === 'Variable' &&
+        def.parent.kind === 'const' &&
+        def.node.id.type === 'Identifier' &&
+        !!def.node.init &&
+        !seen.has(binding) &&
+        !binding.references.some((ref) => ref.isWrite() && !ref.init) &&
+        absent(def.node.init, new Set([...seen, binding]))
+      );
+    };
     const options = (raw, seen = new Set(), requireKnown = false) => {
       const node = unwrap(raw);
-      if (!node || seen.has(node)) return;
+      if (absent(node) || seen.has(node)) return;
       seen.add(node);
       if (node.type === 'Identifier') {
+        if (requireKnown && node.name === 'undefined') {
+          report(node);
+          return;
+        }
         const binding = variable(node),
           def = binding?.defs[0];
         if (requireKnown && def?.type === 'Variable' && def.node.id.type !== 'Identifier')
@@ -691,7 +712,7 @@ export default {
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
         const fields = (raw, seen = new Set()) => {
           const definition = unwrap(raw);
-          if (!definition || seen.has(definition)) return;
+          if (absent(definition) || seen.has(definition)) return;
           seen.add(definition);
           if (definition.type === 'Identifier') {
             const binding = variable(definition),
@@ -730,6 +751,7 @@ export default {
             return;
           }
           for (const prop of definition.properties) {
+            if (prop.type === 'SpreadElement' && absent(prop.argument)) continue;
             if (
               prop.type === 'SpreadElement' ||
               key(prop) === undefined ||
@@ -777,8 +799,7 @@ export default {
         const proofOptions = (raw) => {
           const value = unwrap(raw);
           if (
-            !value ||
-            globalName(value, 'undefined') ||
+            absent(value) ||
             typeof constant(value) === 'string' ||
             value.type === 'TemplateLiteral' ||
             (value.type === 'CallExpression' &&
@@ -791,20 +812,21 @@ export default {
             value.type === 'ObjectExpression' &&
             value.properties.every(
               (prop) =>
-                prop.type === 'Property' &&
-                prop.kind === 'init' &&
-                ([
-                  'error',
-                  'errorMap',
-                  'message',
-                  'description',
-                  'required_error',
-                  'invalid_type_error',
-                  'abort',
-                  'path',
-                  'params',
-                ].includes(key(prop)) ||
-                  (key(prop) === 'coerce' && constant(prop.value) === false)),
+                (prop.type === 'SpreadElement' && absent(prop.argument)) ||
+                (prop.type === 'Property' &&
+                  prop.kind === 'init' &&
+                  ([
+                    'error',
+                    'errorMap',
+                    'message',
+                    'description',
+                    'required_error',
+                    'invalid_type_error',
+                    'abort',
+                    'path',
+                    'params',
+                  ].includes(key(prop)) ||
+                    (key(prop) === 'coerce' && constant(prop.value) === false))),
             )
           );
         };
