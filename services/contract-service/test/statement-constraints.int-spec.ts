@@ -780,9 +780,14 @@ describe('the database keeps the statements and their deductions', () => {
     await refuses(insert('Net based', 100, 'NET'), /ck_deduction_rule_rate/);
     await refuses(insert('  ', 100), /ck_deduction_rule_name/);
     await refuses(insert('a‮b', 100), /ck_deduction_rule_name/);
+    // A rule from before CON-003-1 reaches this only as the migration validates it.
+    await refuses(insert('Tax\u034f', 100), /ck_deduction_rule_name_canonical/);
     const id = await rule(org, 250, 'Tax');
     // `ux_deduction_rule_name_active`, which the driver reports by its key.
-    await refuses(rule(org, 300, 'Tax'), /Key \(organization_id, name\)/);
+    await refuses(
+      rule(org, 300, 'Tax'),
+      /Key \(organization_id, deduction_rule_name_key\(name\)\)/,
+    );
     await refuses(
       exec(`UPDATE deduction_rule SET rate_bp = 300 WHERE id = '${id}'`),
       /ck_deduction_rule_immutable/,

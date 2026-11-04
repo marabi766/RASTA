@@ -2959,6 +2959,8 @@ export const EXPECTED = {
       'deduction_rule_change_guard',
       'deduction_rule_change_effect',
       'deduction_rule_insert_guard',
+      'deduction_rule_name_is_canonical',
+      'deduction_rule_name_key',
     ],
     indexes: [
       'ux_contract_org_tender',
@@ -3020,6 +3022,7 @@ export const EXPECTED = {
       'ck_deduction_rule_change_version',
       'ck_deduction_rule_change_four_eyes',
       'ck_deduction_rule_change_withdrawn_by_proposer',
+      'ck_deduction_rule_name_canonical',
     ],
   },
   /**

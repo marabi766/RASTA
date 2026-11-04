@@ -23,7 +23,8 @@
 --     and blank by JavaScript's `trim`, which `compareActors` reads as absent, is refused too;
 --   * only the proposer withdraws (`compareActors` reading SAME): someone else ending a proposal
 --     rejects it, and a rejection says why;
---   * one pending CREATE per (organization, name) and one pending RETIRE per rule;
+--   * a name has one form, and names are compared by one key: see "the name of a rule";
+--   * one pending CREATE per (organization, name key) and one pending RETIRE per rule;
 --   * every foreign key names the organization, so a change cannot reach another employer's rule.
 --
 -- A CREATE named like a rule in force may be proposed: replacing a rule is a RETIRE and a CREATE,
@@ -32,13 +33,44 @@
 --
 -- `deduction_rule.approved_change_id` is NULL only for a rule written before this migration. No
 -- route ever wrote one, so no deployment should hold any; one that does keeps it in force, and
--- retires it through a RETIRE change like any other.
+-- retires it through a RETIRE change like any other. Only a name outside the one form below stops
+-- this migration.
 --
 -- This migration opens no route and writes no row (CON-003-2 opens them). Every instant is
 -- TIMESTAMPTZ(3) (D-048).
 --
 --   transitions: PENDING_APPROVAL>APPROVED PENDING_APPROVAL>REJECTED PENDING_APPROVAL>WITHDRAWN
 -- =============================================================================
+
+-- ---- the name of a rule ------------------------------------------------------
+--
+-- One form, shared with `src/deduction/deduction-rule-name.ts`: what is not provably in it is refused
+-- by naming what is allowed, so a character Unicode adds tomorrow, or one nobody listed, stays out.
+-- `test/deduction-rule-change.int-spec.ts` runs both over every code point and fails if they differ.
+--
+--   * printable ASCII, the Persian alphabet with its hamza letters, and ، ؛ ؟ ٪ « ». Digits are Latin
+--     (CLAUDE.md); the Arabic ي ى ك, tatweel and presentation forms are not the form (the application
+--     folds them first), nor is any other script, so a lookalike cannot be spelled at all;
+--   * one space between words;
+--   * the only mark is the U+0654 of «ـهٔ», only after heh;
+--   * the only invisible character is the half-space (U+200C), only between Persian letters.
+CREATE FUNCTION "deduction_rule_name_is_canonical"("candidate" TEXT) RETURNS BOOLEAN
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE
+  RETURN length("candidate") BETWEEN 1 AND 200
+    AND "candidate" ~ U&'^[\0020-\007E\00AB\00BB\060C\061B\061F\066A\0621-\063A\0641\0642\0644-\0648\067E\0686\0698\06A9\06AF\06CC\0654\200C]+$'
+    AND "candidate" !~ U&'^[\0020\200C]|[\0020\200C]$|[\0020\200C]{2}'
+    AND "candidate" !~ U&'(^|[^\0647])\0654'
+    AND "candidate" !~ U&'(^|[^\0621-\063A\0641\0642\0644-\0648\067E\0686\0698\06A9\06AF\06CC\0654])\200C|\200C($|[^\0621-\063A\0641\0642\0644-\0648\067E\0686\0698\06A9\06AF\06CC])';
+
+-- What makes two names one name. A half-space changes nothing a person can rely on seeing: after
+-- ر or ا it does not even change the drawing. Both uniqueness indexes compare this, not the bytes.
+CREATE FUNCTION "deduction_rule_name_key"("canonical_name" TEXT) RETURNS TEXT
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE
+  RETURN replace("canonical_name", U&'\200C', '');
+
+-- A CHECK or an index runs these as whoever writes the row.
+GRANT EXECUTE ON FUNCTION "deduction_rule_name_is_canonical"(TEXT) TO rasta_contract;
+GRANT EXECUTE ON FUNCTION "deduction_rule_name_key"(TEXT) TO rasta_contract;
 
 -- CreateEnum
 CREATE TYPE "DeductionRuleChangeKind" AS ENUM ('CREATE', 'RETIRE');
@@ -77,7 +109,7 @@ CREATE TABLE "deduction_rule_change" (
 CREATE UNIQUE INDEX "ux_deduction_rule_change_org_id"
   ON "deduction_rule_change"("organization_id", "id");
 CREATE UNIQUE INDEX "ux_deduction_rule_change_pending_create"
-  ON "deduction_rule_change"("organization_id", "name")
+  ON "deduction_rule_change"("organization_id", "deduction_rule_name_key"("name"))
   WHERE "status" = 'PENDING_APPROVAL' AND "kind" = 'CREATE';
 CREATE UNIQUE INDEX "ux_deduction_rule_change_pending_retire"
   ON "deduction_rule_change"("organization_id", "deduction_rule_id")
@@ -107,15 +139,9 @@ ALTER TABLE "deduction_rule_change" ADD CONSTRAINT "ck_deduction_rule_change_kin
              AND "deduction_rule_id" IS NOT NULL AND "reason" IS NOT NULL));
 
 -- At least the limits of `ck_deduction_rule_name` and `ck_deduction_rule_rate`, so an approved change
--- always fits its rule. PostgreSQL's length() counts code points. `ux_deduction_rule_name_active`
--- compares bytes, so a name a person cannot tell from another would hold a second rule: the only blank
--- is one space between words, and the only invisible character is the zero-width non-joiner Persian
--- needs, also only between words. No controls, other blanks, or format characters.
+-- always fits its rule. The name is in its one form before anything compares it.
 ALTER TABLE "deduction_rule_change" ADD CONSTRAINT "ck_deduction_rule_change_name"
-  CHECK ("name" IS NULL
-         OR (length("name") BETWEEN 1 AND 200
-             AND "name" !~ U&'[\0001-\001F\007F-\00A0\00AD\061C\1680\180E\2000-\200B\200D-\200F\2028-\202F\205F-\2064\2066-\206F\3000\FEFF]'
-             AND "name" !~ U&'^[\0020\200C]|[\0020\200C]$|[\0020\200C]{2}'));
+  CHECK ("name" IS NULL OR "deduction_rule_name_is_canonical"("name"));
 
 ALTER TABLE "deduction_rule_change" ADD CONSTRAINT "ck_deduction_rule_change_rate"
   CHECK ("rate_bp" IS NULL OR ("rate_bp" >= 1 AND "rate_bp" <= 10000));
@@ -252,6 +278,17 @@ ALTER TABLE "deduction_rule" ADD COLUMN "approved_change_id" TEXT;
 -- CreateIndex
 CREATE UNIQUE INDEX "ux_deduction_rule_approved_change"
   ON "deduction_rule"("organization_id", "approved_change_id");
+
+-- The same form and the same key for what is in force. A new rule says its change's name; this is for
+-- a rule from before this migration: one not in the form stops the migration for a person to decide,
+-- since it could otherwise stand in force beside the same name.
+ALTER TABLE "deduction_rule" ADD CONSTRAINT "ck_deduction_rule_name_canonical"
+  CHECK ("deduction_rule_name_is_canonical"("name"));
+
+DROP INDEX "ux_deduction_rule_name_active";
+CREATE UNIQUE INDEX "ux_deduction_rule_name_active"
+  ON "deduction_rule"("organization_id", "deduction_rule_name_key"("name"))
+  WHERE "retired_at" IS NULL;
 
 ALTER TABLE "deduction_rule" ADD CONSTRAINT "deduction_rule_approved_change_fkey"
   FOREIGN KEY ("organization_id", "approved_change_id")

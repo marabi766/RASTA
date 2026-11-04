@@ -410,7 +410,8 @@ model DeductionRule {
 
   applied StatementDeduction[]
 
-  // SQL-only: `ux_deduction_rule_name_active` — one rule in force per (organization, name).
+  // SQL-only: `ux_deduction_rule_name_active` — one rule in force per (organization, name key).
+  // SQL-only: `ck_deduction_rule_name_canonical` — the one form of a name (deduction-rule-name.ts).
   // SQL-only: `deduction_rule_approved_change_fkey`, (organization_id, approved_change_id).
   // SQL-only: `tg_deduction_rule_insert` — a rule comes only from the approved change that says it.
   @@unique([organizationId, id], map: "ux_deduction_rule_org_id")

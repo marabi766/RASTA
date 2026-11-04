@@ -55,6 +55,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP INDEX IF EXISTS "ux_deduction_rule_name_active";
+CREATE UNIQUE INDEX "ux_deduction_rule_name_active" ON "deduction_rule"("organization_id", "name")
+  WHERE "retired_at" IS NULL;
+ALTER TABLE "deduction_rule" DROP CONSTRAINT IF EXISTS "ck_deduction_rule_name_canonical";
+
 ALTER TABLE "deduction_rule" DROP CONSTRAINT IF EXISTS "deduction_rule_approved_change_fkey";
 DROP INDEX IF EXISTS "ux_deduction_rule_approved_change";
 ALTER TABLE "deduction_rule" DROP COLUMN IF EXISTS "approved_change_id";
@@ -68,6 +73,8 @@ DROP TABLE IF EXISTS "deduction_rule_change";
 DROP FUNCTION IF EXISTS "deduction_rule_change_effect"();
 DROP FUNCTION IF EXISTS "deduction_rule_change_guard"();
 DROP FUNCTION IF EXISTS "deduction_rule_change_insert_guard"();
+DROP FUNCTION IF EXISTS "deduction_rule_name_key"(TEXT);
+DROP FUNCTION IF EXISTS "deduction_rule_name_is_canonical"(TEXT);
 
 DROP TYPE IF EXISTS "DeductionRuleChangeStatus";
 DROP TYPE IF EXISTS "DeductionRuleChangeKind";

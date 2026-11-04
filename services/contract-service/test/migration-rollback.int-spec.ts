@@ -1182,6 +1182,23 @@ describe('each down.sql, run whole with psql --file', () => {
       expect(functions(unused)).toBe(functions(previous));
     });
 
+    it('a rule from before the migration whose name is not in the one form stops it, for a person to decide', () => {
+      const schema = scratch(SETTLEMENT);
+      mustRun(schema, [
+        '-c',
+        `INSERT INTO "deduction_rule"
+           ("id", "organization_id", "name", "rate_bp", "base", "created_at", "created_by")
+         VALUES ('DDR_rb', 'ORG_E', U&'Tax\\034F', 500, 'GROSS', now(), 'USR_1')`,
+      ]);
+      const stopped = psql(schema, [
+        '--single-transaction',
+        '--file',
+        join(MIGRATIONS, RULE_CHANGES, 'migration.sql'),
+      ]);
+      expect(stopped.ok).toBe(false);
+      expect(stopped.out).toMatch(/ck_deduction_rule_name_canonical/);
+    });
+
     it('up → down → up over a rule from before the migration: it stays in force, and retires only through an approved change after the second up', () => {
       const legacy = `INSERT INTO "deduction_rule"
            ("id", "organization_id", "name", "rate_bp", "base", "created_at", "created_by")

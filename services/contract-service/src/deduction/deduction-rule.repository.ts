@@ -16,6 +16,7 @@ import {
   assertDeductionChangeTransition,
   type DeductionChangeState,
 } from './deduction-rule-change.state-machine';
+import { canonicalDeductionRuleName } from './deduction-rule-name';
 
 /**
  * Proposed changes to an employer's deduction rules, and their effect on the rules in force
@@ -83,15 +84,29 @@ export class DeductionRuleRepository {
     );
   }
 
-  /** `409` if a CREATE of this name is already pending for this organization. */
+  /**
+   * Stores the name in its one form (`deduction-rule-name.ts`). `400` if it has none; `409` if a
+   * CREATE of this name is already pending for this organization.
+   */
   async proposeCreate(
     tx: ExtendedPrismaClient,
     input: ProposeCreateInput,
   ): Promise<DeductionRuleChange> {
-    return this.insertProposal(tx, input.proposer, input.name, {
+    const name = canonicalDeductionRuleName(input.name);
+    if (name === null) {
+      throw RastaError.validation([
+        {
+          path: 'name',
+          code: 'not_canonical',
+          message:
+            'A deduction rule name is 1 to 200 Persian or printable ASCII characters, with no invisible characters',
+        },
+      ]);
+    }
+    return this.insertProposal(tx, input.proposer, name, {
       organizationId: input.organizationId,
       kind: 'CREATE',
-      name: input.name,
+      name,
       rateBp: input.rateBp,
       base: input.base,
       proposedAt: input.at,

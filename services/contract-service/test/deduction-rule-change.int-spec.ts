@@ -9,6 +9,10 @@ import {
   canTransitionDeductionChange,
 } from '../src/deduction/deduction-rule-change.state-machine';
 import {
+  canonicalDeductionRuleName,
+  isCanonicalDeductionRuleName,
+} from '../src/deduction/deduction-rule-name';
+import {
   RULE_APPROVER,
   RULE_PROPOSER,
   cleanup,
@@ -191,7 +195,7 @@ describe('deduction rule changes', () => {
       ])
         await refuses(propose(name), /ck_deduction_rule_change_name/);
       // The limit is code points, and the zero-width non-joiner Persian needs is no bidi control.
-      await propose('𝒳'.repeat(200));
+      await propose('ب'.repeat(200));
       await propose('حق‌بیمه');
       await refuses(
         exec(`INSERT INTO deduction_rule_change
@@ -370,6 +374,117 @@ describe('deduction rule changes', () => {
       }
     });
 
+    describe('the one form of a name, and the one key they are compared by (#677 r1 F1)', () => {
+      const LAST_CODE_POINT = 0x10ffff;
+      const isSurrogate = (cp: number) => cp >= 0xd800 && cp <= 0xdfff;
+      const quoted = (text: string) => `'${text.replace(/'/g, "''")}'`;
+
+      it.each([
+        ['alone', '', ''],
+        ['inside Latin', 'T', 'x'],
+        ['between Persian letters', 'ب', 'ب'],
+        ['after heh', 'ه', 'ب'],
+      ])(
+        'the application and PostgreSQL accept exactly the same code points %s',
+        async (_where, before, after) => {
+          const [row] = await w.prisma.client.$queryRawUnsafe<{ accepted: number[] }[]>(
+            `SELECT array_agg(cp ORDER BY cp) AS accepted
+               FROM generate_series(1, ${LAST_CODE_POINT}) cp
+              WHERE cp NOT BETWEEN 55296 AND 57343
+                AND deduction_rule_name_is_canonical(${quoted(before)} || chr(cp) || ${quoted(after)})`,
+          );
+          const accepted: number[] = [];
+          for (let cp = 1; cp <= LAST_CODE_POINT; cp += 1) {
+            if (isSurrogate(cp)) continue;
+            const candidate = `${before}${String.fromCodePoint(cp)}${after}`;
+            if (isCanonicalDeductionRuleName(candidate)) accepted.push(cp);
+          }
+          expect(accepted.length).toBeGreaterThan(90);
+          expect(row!.accepted).toEqual(accepted);
+        },
+        120_000,
+      );
+
+      it('the application and PostgreSQL agree on where a blank, a half-space and the mark may stand, and on the limit', async () => {
+        const answers: [string, boolean][] = [
+          ['', false],
+          ['x'.repeat(200), true],
+          ['x'.repeat(201), false],
+          ['ب'.repeat(200), true],
+          ['ب'.repeat(201), false],
+          ['a b', true],
+          ['a  b', false],
+          [' a', false],
+          ['a ', false],
+          ['ب\u200cب', true],
+          ['\u200cب', false],
+          ['ب\u200c', false],
+          ['ب\u200c\u200cب', false],
+          ['ب\u200c ب', false],
+          ['ب \u200cب', false],
+          ['a\u200cb', false],
+          ['1\u200cب', false],
+          ['خانه\u0654', true],
+          ['خانه\u0654\u200cها', true],
+          ['\u0654', false],
+          ['ا\u0654', false],
+          ['ه\u0654\u0654', false],
+        ];
+        for (const [candidate, canonical] of answers) {
+          const [row] = await w.prisma.client.$queryRawUnsafe<{ canonical: boolean }[]>(
+            'SELECT deduction_rule_name_is_canonical($1) AS canonical',
+            candidate,
+          );
+          expect([candidate, row!.canonical]).toEqual([candidate, canonical]);
+          expect([candidate, isCanonicalDeductionRuleName(candidate)]).toEqual([
+            candidate,
+            canonical,
+          ]);
+        }
+      });
+
+      it('a name a person cannot tell from another holds neither a second pending change nor a second rule', async () => {
+        const org = employer();
+        const proposed = 'حق\u200cبیمه';
+        const lookalike = 'حقبیمه';
+        const first = `DRC_${ulid()}`;
+        await exec(proposeCreateSql(org, first, proposed));
+        await refuses(
+          exec(proposeCreateSql(org, `DRC_${ulid()}`, lookalike)),
+          /Key \(organization_id, deduction_rule_name_key\(name\)\)/,
+        );
+        await atomically(
+          moveSql(first, 'APPROVED'),
+          ruleSql(org, `DDR_${ulid()}`, first, proposed),
+        );
+
+        // While that rule is in force, the other spelling may wait but never stands beside it.
+        const second = `DRC_${ulid()}`;
+        await exec(proposeCreateSql(org, second, lookalike));
+        await refuses(
+          atomically(moveSql(second, 'APPROVED'), ruleSql(org, `DDR_${ulid()}`, second, lookalike)),
+          /Key \(organization_id, deduction_rule_name_key\(name\)\)/,
+        );
+      });
+
+      it('what the review found accepted is refused by the column, in every range it swept', async () => {
+        const org = employer();
+        // prettier-ignore
+        const swept = [0x34f, 0x115f, 0x17b4, 0x180b, 0x2065, 0x3164, 0xfe0e, 0xfe0f, 0xffa0, 0xfff0,
+          0x1bca0, 0x1d173, 0xe0061, 0xe0100];
+        for (const cp of swept) {
+          await refuses(
+            exec(proposeCreateSql(org, `DRC_${ulid()}`, `Tax${String.fromCodePoint(cp)}`)),
+            /ck_deduction_rule_change_name/,
+          );
+        }
+        await refuses(
+          exec(proposeCreateSql(org, `DRC_${ulid()}`, 'T\u200cax')),
+          /ck_deduction_rule_change_name/,
+        );
+      });
+    });
+
     it('one pending CREATE per (organization, name), one pending RETIRE per rule; another organization or a decided change does not count', async () => {
       const org = employer();
       const name = uniqueName();
@@ -377,7 +492,7 @@ describe('deduction rule changes', () => {
       await exec(proposeCreateSql(org, first, name));
       await refuses(
         exec(proposeCreateSql(org, `DRC_${ulid()}`, name)),
-        /Key \(organization_id, name\)/,
+        /Key \(organization_id, deduction_rule_name_key\(name\)\)/,
       );
       await exec(proposeCreateSql(employer(), `DRC_${ulid()}`, name));
       await exec(moveSql(first, 'WITHDRAWN', { user: 'USR_P', subject: 'sub-p' }));
@@ -842,6 +957,38 @@ describe('deduction rule changes', () => {
       const rule = await inForce(org);
       await proposeRetire(org, rule.id);
       await expect(proposeRetire(org, rule.id)).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+    });
+
+    it('stores a name in its one form, and refuses one that has none before writing anything', async () => {
+      const org = employer();
+      const change = await proposeCreate(org, ' مالي\u0640ات  ك۱۰\r\n');
+      expect(change.name).toBe('مالیات ک10');
+      expect(change.name).toBe(canonicalDeductionRuleName(change.name!));
+
+      for (const name of ['Tax\u034f', 'T\u200cax', 'Tax\u{e0061}', 'a\u202eb', '', '  ']) {
+        await expect(proposeCreate(org, name)).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+      }
+      const [held] = await w.prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        'SELECT count(*)::int AS n FROM deduction_rule_change WHERE organization_id = $1',
+        org,
+      );
+      expect(held!.n).toBe(1);
+    });
+
+    it('two spellings of one name are a conflict, in words that do not depend on the driver, while pending and once in force', async () => {
+      const org = employer();
+      const spelled = 'حق\u200cبیمه';
+      const change = await proposeCreate(org, spelled);
+      // The same name from another keyboard, and with the half-space left out.
+      await expect(proposeCreate(org, 'حقبیمه')).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+      await expect(proposeCreate(org, 'حق\u200cبيمه')).rejects.toMatchObject({
+        code: 'ALREADY_EXISTS',
+      });
+      await approve(act(change));
+
+      const other = await proposeCreate(org, 'حقبیمه');
+      await expect(approve(act(other))).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+      expect(await statusOf(other)).toBe('PENDING_APPROVAL');
     });
 
     it('a CREATE named like a rule in force may wait, but is not approved until that rule is retired, and the refusal changes nothing', async () => {
