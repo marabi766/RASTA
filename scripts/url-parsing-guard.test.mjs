@@ -197,6 +197,12 @@ const ALLOWED = Object.freeze([
     reason: 'loads pinned KafkaJS transport and codec internals for the disposable-broker harness',
   },
   {
+    file: 'scripts/disclosure-jest-launches.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason:
+      'loads only the pinned typescript and yaml packages by literal name to inspect Jest launchers',
+  },
+  {
     file: 'scripts/run-test-phases.mjs',
     call: "createRequire(join(root, 'package.json'))",
     reason: 'resolves only turbo/package.json to select the installed test runner',

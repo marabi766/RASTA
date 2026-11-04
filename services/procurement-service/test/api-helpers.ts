@@ -1,4 +1,5 @@
 import { VersioningType, type INestApplication } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import {
   AUTH_OPTIONS,
@@ -16,6 +17,7 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService, type ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
+import { useProcurementBodyParser } from '../src/shared/body-parser';
 import { DatabaseClock } from '../src/shared/clock';
 import {
   AggregationWindowSweeper,
@@ -223,7 +225,10 @@ export async function startApi(
   let moduleRef: Awaited<ReturnType<typeof builder.compile>>;
   try {
     moduleRef = await builder.compile();
-    app = moduleRef.createNestApplication();
+    const created = moduleRef.createNestApplication<NestExpressApplication>();
+    app = created;
+    // Same as main.ts: the suites must meet the transport limit production has.
+    useProcurementBodyParser(created);
     // Same as main.ts: without it every `@Controller({ version: '1' })` route is mounted at a
     // path no client uses, and the whole suite would 404.
     app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
