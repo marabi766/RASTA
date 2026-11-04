@@ -153,6 +153,12 @@ export function verifiedCallbackHelper(root, modulePath, name, importer) {
       return undefined;
     if (importer && modulePath !== '@rasta/contracts') {
       const exact = resolvedImport(root, modulePath, importer);
+      if (
+        /\.[cm]?[jt]sx?$/.test(modulePath) &&
+        !modulePath.endsWith('.js') &&
+        extname(modulePath) !== extname(exact ?? '')
+      )
+        return undefined;
       if (!exact || resolvedSource(root, exact) !== exact) return undefined;
       modulePath = exact;
     }
