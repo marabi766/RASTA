@@ -452,3 +452,35 @@ for (const code of [
 
 it('F3 keeps a validated string receiver through a method alias', () =>
   assert.deepEqual(messages(`const f=z.string().transform; f(Number);`), []));
+
+// F3 codecs validate decode against `in` and encode against `out` independently.
+for (const code of [
+  `z.codec(z.unknown(),z.number(),{decode:Number,encode:v=>v});`,
+  `z.codec(z.number(),z.unknown(),{decode:v=>v,encode:Number});`,
+  `const f=async v=>Number(v); z.codec(z.unknown(),z.number(),{decode:f,encode:v=>v});`,
+  `z.codec(z.unknown(),z.number(),{decode:(v,n=Number(v))=>n,encode:v=>v});`,
+  `z.codec(z.number(),z.unknown(),{decode:v=>v,encode:(v,{n=Number(v)}={})=>n});`,
+  `const helper=(v,n=Number(v))=>n; z.codec(z.unknown(),z.number(),{decode:v=>helper(v),encode:v=>v});`,
+  `z.codec(z.string(),z.number(),getOptions());`,
+  `z.codec(z.string(),z.number(),{...getOptions()});`,
+  `const opts={decode:v=>v,encode:v=>v}; const alias=opts; alias.decode=Number; z.codec(z.unknown(),z.number(),opts);`,
+  `const opts={decode:v=>v,encode:v=>v}; Object.assign(opts,{encode:Number}); z.codec(z.unknown(),z.number(),opts);`,
+  `z.codec(z.unknown(),z.number(),{get decode(){return Number},encode:v=>v});`,
+  `z.codec(z.unknown(),z.number(),{decode:unknownHelper,encode:v=>v});`,
+  `z.unknown().pipe(z.codec(z.unknown(),z.number(),{decode:Number,encode:v=>v}));`,
+  ...['ZodCodec', 'ZodMiniCodec', 'core.$ZodCodec'].flatMap((type) => [
+    `new z.${type}({type:'pipe',in:z.unknown(),out:z.number(),transform:Number,reverseTransform:v=>v});`,
+    `new z.${type}({type:'pipe',in:z.number(),out:z.unknown(),transform:v=>v,reverseTransform:Number});`,
+  ]),
+  `z.ZodCodec.init({}, {type:'pipe',in:z.unknown(),out:z.number(),transform:Number,reverseTransform:v=>v});`,
+  `z.ZodCodec.create({type:'pipe',in:z.unknown(),out:z.number(),transform:v=>v,reverseTransform:Number});`,
+])
+  it(`F3 codec refuses: ${code}`, () => assert.ok(messages(code).length, code));
+for (const code of [
+  `z.codec(z.string(),z.number(),{decode:Number,encode:v=>v});`,
+  `z.codec(z.number(),z.string(),{decode:v=>v,encode:Number});`,
+  `const f=async v=>Number(v); z.codec(z.string(),z.number(),{decode:f,encode:v=>v});`,
+  `new z.ZodCodec({type:'pipe',in:z.string(),out:z.string(),transform:Number,reverseTransform:Number});`,
+  `z.codec(z.unknown(),z.unknown(),{decode:v=>v,encode:v=>v});`,
+])
+  it(`F3 codec preserves: ${code}`, () => assert.deepEqual(messages(code), []));

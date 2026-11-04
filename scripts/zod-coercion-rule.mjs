@@ -108,15 +108,18 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
   const offset = raw && name?.startsWith('_') && ['transform'].includes(api) ? 1 : 0;
   return {
     slot: CALLBACK_APIS.has(api) ? offset : undefined,
-    fields: ['clone', 'constructor'].includes(api)
-      ? name === 'clone' && !receiverSchema
-        ? 1
-        : 0
-      : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|CheckOverwrite)/.test(api)
-        ? init
-          ? 1
-          : 0
-        : undefined,
+    fields:
+      api === 'codec'
+        ? 2
+        : ['clone', 'constructor'].includes(api)
+          ? name === 'clone' && !receiverSchema
+            ? 1
+            : 0
+          : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|CheckOverwrite)/.test(api)
+            ? init
+              ? 1
+              : 0
+            : undefined,
   };
 };
 const unwrap = (node) => {
@@ -510,6 +513,7 @@ export default {
         if (index >= 0) options(node.arguments[index], new Set(), true);
         const api = callbackSignature(factory);
         const callbacks = [];
+        const callbackInputs = new Map();
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
         const fields = (raw, seen = new Set()) => {
           const definition = unwrap(raw);
@@ -561,7 +565,22 @@ export default {
               report(prop, 'preprocess');
               continue;
             }
-            if (['transform', 'preprocess', 'tx'].includes(key(prop))) callbacks.push(prop.value);
+            if (
+              ['transform', 'preprocess', 'tx', 'decode', 'encode', 'reverseTransform'].includes(
+                key(prop),
+              )
+            ) {
+              callbacks.push(prop.value);
+              if (factory.name === 'codec')
+                callbackInputs.set(prop.value, node.arguments[key(prop) === 'encode' ? 1 : 0]);
+              if (/Zod(?:Mini)?Codec$/.test(factory.name ?? factory.owner ?? ''))
+                callbackInputs.set(
+                  prop.value,
+                  definition.properties.find(
+                    (p) => key(p) === (key(prop) === 'reverseTransform' ? 'out' : 'in'),
+                  )?.value,
+                );
+            }
             if (key(prop) === 'effect') fields(prop.value, seen);
           }
         };
@@ -569,6 +588,7 @@ export default {
         if (!callbacks.length) return;
         let callback;
         let callbackFn;
+        let callbackInput;
         const localFunction = (raw) => {
           const value = unwrap(raw);
           if (value?.type !== 'Identifier') return value;
@@ -579,9 +599,10 @@ export default {
         // is guarded. Only the audited Number helper may call Number itself.
         const strict = factory.name === 'preprocess';
         const stringInput = (
-          raw = api.fields === undefined
-            ? (factory.receiver ?? unwrap(node.callee)?.object)
-            : undefined,
+          raw = callbackInput ??
+            (api.fields === undefined
+              ? (factory.receiver ?? unwrap(node.callee)?.object)
+              : undefined),
           seen = new Set(),
           kind = 'string',
         ) => {
@@ -917,6 +938,7 @@ export default {
         for (const raw of callbacks) {
           callback = unwrap(raw);
           callbackFn = localFunction(callback);
+          callbackInput = callbackInputs.get(raw);
           if (!callback) {
             report(node, 'preprocess');
             continue;
