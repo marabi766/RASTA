@@ -8,6 +8,7 @@ import {
   probeExceptionProblems,
   httpErrorBodyProblems,
   PROBE_TRACEPARENT,
+  routeErrorProblems,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import request from 'supertest';
@@ -15,6 +16,7 @@ import { AppModule } from '../app.module';
 import {
   DocumentationModule,
   buildDocumentationApp,
+  identityRouteDocument,
   buildIdentityOpenApiDocument,
   formatDocument,
 } from './document';
@@ -52,6 +54,20 @@ describe('identity-service published errors (D-121)', () => {
     await app.close();
   });
 
+  it('holds the routes the app really serves, and their real error answers, against the document (FU-031)', async () => {
+    const send = async (method: string, url: string) => {
+      const verb = method.toLowerCase() as 'get' | 'post' | 'put' | 'patch' | 'delete';
+      const response = await request(app.getHttpServer())[verb](url);
+      return { status: response.status, body: response.body as unknown };
+    };
+    expect(
+      await routeErrorProblems(app, document, {
+        declared: identityRouteDocument(app),
+        send,
+      }),
+    ).toEqual([]);
+  });
+
   it('documents every runtime controller (including excluded controllers)', () => {
     expect(Reflect.getMetadata('controllers', DocumentationModule)).toEqual(
       Reflect.getMetadata('controllers', AppModule),
@@ -77,15 +93,20 @@ describe('identity-service published errors (D-121)', () => {
       startupBodies.push(response.body);
     }
     expect(
-      probeExceptionProblems(document, 'identity-service', [
-        { service: 'identity-service', path: '/health/ready', status: 503, bodies: readyBodies },
-        {
-          service: 'identity-service',
-          path: '/health/startup',
-          status: 503,
-          bodies: startupBodies,
-        },
-      ]),
+      probeExceptionProblems(
+        document,
+        'identity-service',
+        [
+          { service: 'identity-service', path: '/health/ready', status: 503, bodies: readyBodies },
+          {
+            service: 'identity-service',
+            path: '/health/startup',
+            status: 503,
+            bodies: startupBodies,
+          },
+        ],
+        { declared: identityRouteDocument(app) },
+      ),
     ).toEqual([]);
   });
 

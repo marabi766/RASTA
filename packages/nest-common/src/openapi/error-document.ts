@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { publishedApiErrorSchema } from './api-error';
 import { toJsonSchema } from './zod-schema';
-import type { PublishedDocument, PublishedSchema } from './published-body';
+import { unresolvedRefs, type PublishedDocument, type PublishedSchema } from './published-body';
 
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace']);
 const ERROR_REF = { $ref: '#/components/schemas/ApiError' };
@@ -27,7 +27,21 @@ export function publishApiErrors<T extends PublishedDocument>(
       }
       for (const [status, response] of Object.entries(operation.responses)) {
         if (status !== 'default' && !/^[45][0-9X]{2}$/.test(status)) continue;
-        response.content = { 'application/json': { schema: ERROR_REF } };
+        if (response.content === undefined) {
+          response.content = { 'application/json': { schema: ERROR_REF } };
+          continue;
+        }
+        // FU-031: a route's own typed refusal (api-error.ts: `.extend({ details: … })`) is kept,
+        // not overwritten by the plain envelope. Anything that is not exactly one resolvable JSON
+        // schema is refused: a body the publisher cannot read is never published as-is.
+        const at = `${method.toUpperCase()} ${path} ${status}`;
+        const content = response.content as Record<string, { schema?: PublishedSchema }>;
+        const schema = content['application/json']?.schema;
+        if (Object.keys(content).length !== 1 || !schema) {
+          throw new Error(`${at}: declares an error body that is not one JSON schema`);
+        }
+        const missing = unresolvedRefs(document, schema);
+        if (missing.length) throw new Error(`${at}: unresolved ${missing.join(', ')}`);
       }
       const key = `${method.toUpperCase()} ${path} 503`;
       const health = probeExceptions[key];

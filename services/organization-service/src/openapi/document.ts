@@ -11,29 +11,31 @@ import { HealthController, MetricsController } from '../health/health.controller
 import { PrismaService } from '../prisma/prisma.service';
 import { KafkaEventPublisher } from '../outbox/kafka.publisher';
 
+/** What the routes themselves declare, before the shared error envelope is published. */
+export function organizationRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
+  return SwaggerModule.createDocument(
+    app,
+    new DocumentBuilder()
+      .setTitle('Rasta — Organization Service')
+      .setDescription(
+        'Generic, extensible organization model and hierarchy. Deliberately knows ' +
+          'nothing about dehyaris: an organization has a type, and the type is data.',
+      )
+      .setVersion(version)
+      .addBearerAuth()
+      .build(),
+  );
+}
+
 /** The builder used by the real application and the documentation fixture. */
 export function buildOrganizationOpenApiDocument(
   app: INestApplication,
   version = '0.1.0',
 ): OpenAPIObject {
-  return publishApiErrors(
-    SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — Organization Service')
-        .setDescription(
-          'Generic, extensible organization model and hierarchy. Deliberately knows ' +
-            'nothing about dehyaris: an organization has a type, and the type is data.',
-        )
-        .setVersion(version)
-        .addBearerAuth()
-        .build(),
-    ),
-    {
-      'GET /health/ready 503': healthProbeErrorSchema('organization-service', 'ready'),
-      'GET /health/startup 503': healthProbeErrorSchema('organization-service', 'startup'),
-    },
-  );
+  return publishApiErrors(organizationRouteDocument(app, version), {
+    'GET /health/ready 503': healthProbeErrorSchema('organization-service', 'ready'),
+    'GET /health/startup 503': healthProbeErrorSchema('organization-service', 'startup'),
+  });
 }
 
 /** Decorators only: no database, broker, credentials or external requests. */

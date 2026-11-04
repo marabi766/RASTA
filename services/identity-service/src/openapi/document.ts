@@ -17,12 +17,17 @@ import { PrismaService } from '../prisma/prisma.service';
 import { KafkaEventPublisher } from '../outbox/kafka.publisher';
 import { spawnSync } from 'node:child_process';
 
+/** What the routes themselves declare, before the shared error envelope is published. */
+export function identityRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
+  return SwaggerModule.createDocument(app, identityDocumentConfig(version));
+}
+
 /** The builder used by the real application and the documentation fixture. */
 export function buildIdentityOpenApiDocument(
   app: INestApplication,
   version = '0.1.0',
 ): OpenAPIObject {
-  return publishApiErrors(SwaggerModule.createDocument(app, identityDocumentConfig(version)), {
+  return publishApiErrors(identityRouteDocument(app, version), {
     'GET /health/ready 503': healthProbeErrorSchema('identity-service', 'ready'),
     'GET /health/startup 503': healthProbeErrorSchema('identity-service', 'startup', [
       'database',

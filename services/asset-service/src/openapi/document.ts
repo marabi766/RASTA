@@ -14,27 +14,29 @@ import { HealthController, MetricsController } from '../health/health.controller
 import { PrismaService } from '../prisma/prisma.service';
 import { KafkaEventPublisher } from '../outbox/kafka.publisher';
 
+/** What the routes themselves declare, before the shared error envelope is published. */
+export function assetRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
+  return SwaggerModule.createDocument(
+    app,
+    new DocumentBuilder()
+      .setTitle('Rasta — Asset Service')
+      .setDescription(
+        'The asset is the centre of the platform, not the user. Every machine ' +
+          'carries an electronic dossier assembled from the events other services ' +
+          'publish about it — usage, maintenance, insurance, cost and location.',
+      )
+      .setVersion(version)
+      .addBearerAuth()
+      .build(),
+  );
+}
+
 /** The builder used by the real application and the documentation fixture. */
 export function buildAssetOpenApiDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
-  return publishApiErrors(
-    SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — Asset Service')
-        .setDescription(
-          'The asset is the centre of the platform, not the user. Every machine ' +
-            'carries an electronic dossier assembled from the events other services ' +
-            'publish about it — usage, maintenance, insurance, cost and location.',
-        )
-        .setVersion(version)
-        .addBearerAuth()
-        .build(),
-    ),
-    {
-      'GET /health/ready 503': healthProbeErrorSchema('asset-service', 'ready'),
-      'GET /health/startup 503': healthProbeErrorSchema('asset-service', 'startup'),
-    },
-  );
+  return publishApiErrors(assetRouteDocument(app, version), {
+    'GET /health/ready 503': healthProbeErrorSchema('asset-service', 'ready'),
+    'GET /health/startup 503': healthProbeErrorSchema('asset-service', 'startup'),
+  });
 }
 
 /** Decorators only: no database, broker, credentials or external requests. */
