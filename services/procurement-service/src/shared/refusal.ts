@@ -16,6 +16,7 @@ export const REFUSAL_AREAS = {
   rfqIssue: 'RFQ cannot be issued',
   rfqClose: 'RFQ cannot be closed',
   rfqCancellation: 'RFQ cannot be cancelled',
+  quotation: 'Quotation refused',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -99,6 +100,34 @@ export const REFUSAL_REASONS = {
     CANCELLATION_CODE_NOT_ALLOWED: 422,
     /** AWARDED and CANCELLED are final. */
     RFQ_NOT_CANCELLABLE: 422,
+  },
+  /** Submitting, revising and withdrawing a quotation (ADR-070 § 4, plan PR 8). */
+  quotation: {
+    /**
+     * The RFQ is not PUBLISHED, or the database clock read after the RFQ's share lock is at or past
+     * `quotationClosingAt` (half-open, ADR-065 § 2) — or the database refused the write on its own
+     * clock (`ck_quotation_window`) after the service judged it inside. Nothing is written.
+     */
+    QUOTATION_WINDOW_CLOSED: 422,
+    /**
+     * `unitPriceMinor × totalQuantity` exceeds 2^63 − 1 (ADR-070 § 4, § 8): refused before the
+     * content is sealed, nothing written. The amount itself is never stated back.
+     */
+    QUOTATION_AMOUNT_OUT_OF_RANGE: 422,
+    /** An answer names a criterion the RFQ does not have. */
+    UNKNOWN_CRITERION: 422,
+    /** A criterion of the RFQ has no answer: a quotation answers each one (Q-120). */
+    CRITERION_UNANSWERED: 422,
+    /** The sealed content would exceed the sealing bound (256 KiB). */
+    QUOTATION_TOO_LARGE: 422,
+    /** The supplier holds no approved GOODS_SUPPLY qualification, or is suspended, now. */
+    SUPPLIER_NOT_ELIGIBLE: 422,
+    /** Only a SUBMITTED quotation is revised or withdrawn; a withdrawn one is final. */
+    QUOTATION_NOT_SUBMITTED: 422,
+    /** The quotation already has `PROCUREMENT_QUOTATION_MAX_REVISIONS` sealed revisions. */
+    QUOTATION_REVISION_LIMIT: 422,
+    /** The RFQ's chain holds the 10,000 links audit-service returns: one more could never be opened. */
+    QUOTATION_RECEIPT_LIMIT: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

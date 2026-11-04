@@ -31,6 +31,9 @@ export const AGGREGATE_OF = {
   RFQ_ISSUED: RFQ_AGGREGATE_TYPE,
   RFQ_CLOSED: RFQ_AGGREGATE_TYPE,
   RFQ_CANCELLED: RFQ_AGGREGATE_TYPE,
+  QUOTATION_SUBMITTED: RFQ_AGGREGATE_TYPE,
+  QUOTATION_REVISED: RFQ_AGGREGATE_TYPE,
+  QUOTATION_WITHDRAWN: RFQ_AGGREGATE_TYPE,
 } as const satisfies Record<ProcurementEventName, string>;
 
 /** The events keyed by the RFQ they concern (ADR-070 § 9: an RFQ and its quotations are one stream). */
@@ -38,6 +41,9 @@ const RFQ_KEYED: ReadonlySet<ProcurementEventName> = new Set([
   'RFQ_ISSUED',
   'RFQ_CLOSED',
   'RFQ_CANCELLED',
+  'QUOTATION_SUBMITTED',
+  'QUOTATION_REVISED',
+  'QUOTATION_WITHDRAWN',
 ]);
 
 export interface PartitionDecision {
