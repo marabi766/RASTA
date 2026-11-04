@@ -126,6 +126,8 @@ export interface DirectoryFilter {
   capability?: SupplierCapability;
   qualifiedFor?: SupplierCapability;
   status?: SupplierStatusName;
+  /** Only these organizations' profiles (FU-019). Absent = no narrowing. */
+  organizationIds?: readonly string[];
   cursor?: string;
   limit: number;
 }
@@ -493,6 +495,9 @@ export class SupplierRepository {
               ? {
                   qualifications: { some: { capability: filter.qualifiedFor, state: 'APPROVED' } },
                 }
+              : {}),
+            ...(filter.organizationIds
+              ? { organizationId: { in: [...filter.organizationIds] } }
               : {}),
             ...(filter.cursor ? { id: { gt: filter.cursor } } : {}),
           },
