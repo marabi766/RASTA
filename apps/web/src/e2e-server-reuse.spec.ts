@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { OWNED_MARKER, serverStart } from '../e2e/server-reuse';
+import { webServers } from '../e2e/web-servers';
 
 /**
  * TASK 325 (review of #675): the suite starts its servers through `e2e/own-server.mjs`, which says
@@ -280,40 +281,9 @@ describe('own-server.mjs (the suite’s only way to start a server locally)', ()
 });
 
 describe('the Playwright config (F3: reloads must not reject this run’s own servers)', () => {
-  type Entry = {
-    command: string;
-    url?: string;
-    wait?: { stdout: RegExp };
-    reuseExistingServer?: boolean;
-    env?: Record<string, string>;
-  };
+  const CONFIG = join(WEB, 'playwright.config.ts');
 
-  async function loadConfig(ci: boolean): Promise<{ webServer: Entry[] }> {
-    const saved = { CI: process.env.CI, worker: process.env.TEST_WORKER_INDEX };
-    if (ci) process.env.CI = '1';
-    else delete process.env.CI;
-    delete process.env.TEST_WORKER_INDEX; // the UI-mode loader sets none
-    try {
-      let config: { webServer: Entry[] } | undefined;
-      await jest.isolateModulesAsync(async () => {
-        // The real package refuses to be required twice in one process.
-        jest.doMock('@playwright/test', () => ({
-          defineConfig: (value: unknown) => value,
-          devices: { 'Desktop Chrome': {}, 'Pixel 5': {} },
-        }));
-        config = (await import('../playwright.config')).default as unknown as {
-          webServer: Entry[];
-        };
-      });
-      return config!;
-    } finally {
-      if (saved.CI === undefined) delete process.env.CI;
-      else process.env.CI = saved.CI;
-      if (saved.worker !== undefined) process.env.TEST_WORKER_INDEX = saved.worker;
-    }
-  }
-
-  it('opens no socket and starts no process while it loads, so a reload sees nothing to refuse', async () => {
+  it('opens no socket and starts no process while the servers are described, so a reload sees nothing to refuse', () => {
     const spies = [
       jest.spyOn(childProcess, 'spawnSync'),
       jest.spyOn(childProcess, 'execFileSync'),
@@ -323,34 +293,55 @@ describe('the Playwright config (F3: reloads must not reject this run’s own se
       jest.spyOn(net.Socket.prototype, 'connect'),
     ];
     try {
-      await expect(loadConfig(false)).resolves.toBeDefined();
+      webServers(false);
+      webServers(true);
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
   });
 
-  it('never reuses a server, and locally waits for the launcher’s proof instead of a URL', async () => {
-    const local = (await loadConfig(false)).webServer;
+  it('does nothing else at load: the config reaches no process, socket or probe module', () => {
+    const text = readFileSync(CONFIG, 'utf8').replace(/\/\*[\s\S]*?\*\/|(?<![:\w])\/\/.*$/gm, '');
+    expect(text).toContain('webServer: webServers(ci)');
+    for (const forbidden of [
+      'child_process',
+      'node:net',
+      'spawn',
+      'exec',
+      'inspect',
+      'probe',
+      'require(',
+      'TEST_WORKER_INDEX',
+    ]) {
+      expect(text).not.toContain(forbidden);
+    }
+    for (const [, from] of text.matchAll(/from '([^']+)'/g)) {
+      expect(from).toMatch(/^(?:@playwright\/|\.\/e2e\/layout\/constants$|\.\/e2e\/web-servers$)/);
+    }
+  });
+
+  it('never reuses a server, and locally waits for the launcher’s proof instead of a URL', () => {
+    const local = webServers(false);
     expect(local).toHaveLength(3);
     for (const entry of local) {
       expect(entry.reuseExistingServer).toBe(false);
       expect(entry.url).toBeUndefined();
       expect(entry.command).toMatch(/^node e2e\/own-server\.mjs \d+$/);
-      expect(entry.env?.OWN_SERVER_COMMAND).toBeTruthy();
+      expect(entry.env.OWN_SERVER_COMMAND).toBeTruthy();
       const port = /(\d+)$/.exec(entry.command)![1];
       expect(entry.wait!.stdout.test(`${OWNED_MARKER} ${port}\n`)).toBe(true);
       expect(entry.wait!.stdout.test(`${OWNED_MARKER} ${Number(port) + 1}\n`)).toBe(false);
     }
-    expect(local.map((entry) => entry.env!.OWN_SERVER_COMMAND)).toEqual([
+    expect(local.map((entry) => entry.env.OWN_SERVER_COMMAND)).toEqual([
       'pnpm run build && pnpm run start',
       'node e2e/layout/mock-gateway.mjs',
       expect.stringMatching(/^pnpm exec next start --port \d+$/),
     ]);
   });
 
-  it('keeps CI as it was: no launcher, the URL poll, no reuse', async () => {
-    const ci = (await loadConfig(true)).webServer;
+  it('keeps CI as it was: no launcher, the URL poll, no reuse', () => {
+    const ci = webServers(true);
     expect(ci.map((entry) => entry.command)).toEqual([
       'pnpm run start',
       'node e2e/layout/mock-gateway.mjs',
@@ -382,6 +373,12 @@ describe('the Playwright config (F3: reloads must not reject this run’s own se
 });
 
 describe('every Playwright config goes through the rule', () => {
+  it('describes every server of the web suite through serverStart, and none by hand', () => {
+    const text = readFileSync(join(WEB, 'e2e', 'web-servers.ts'), 'utf8');
+    expect(text.match(/\.\.\.serverStart\(/g)).toHaveLength(3);
+    expect(text).not.toMatch(/reuseExistingServer\s*:/);
+  });
+
   const SKIP = new Set([
     'node_modules',
     '.git',
@@ -412,7 +409,7 @@ describe('every Playwright config goes through the rule', () => {
     for (const path of found) {
       const text = readFileSync(path, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
       if (!/\bwebServer\b/.test(text)) continue;
-      expect(text).toContain('...serverStart(');
+      expect(text).toContain('webServer: webServers(');
       expect(text).not.toMatch(/reuseExistingServer\s*:/);
     }
   });
