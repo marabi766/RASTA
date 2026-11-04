@@ -57,6 +57,8 @@ const helpers = [
 ];
 // Published-parent and reviewed fixed-message formatter versions.
 const pins = {
+  'packages/contracts/package.json':
+    'c41dcef0f00effd6c0ab3790d31f2ac1d4f4941d4e61df358b537f3ce8269e59',
   'apps/web/src/lib/repair-order-fields.ts':
     'b80e6b6a0fccce159661427e3c1e0dce973c93e1837ea632d7b47533a9944b13',
   'packages/contracts/src/common/iso-datetime.ts':
@@ -143,6 +145,12 @@ const resolvedImport = (root, specifier, importer, configImporter = importer) =>
 };
 export function verifiedCallbackHelper(root, modulePath, name, importer) {
   try {
+    if (
+      importer &&
+      modulePath === '@rasta/contracts' &&
+      resolvedImport(root, modulePath, importer) !== 'packages/contracts/dist/index.d.ts'
+    )
+      return undefined;
     if (importer && modulePath !== '@rasta/contracts') {
       const exact = resolvedImport(root, modulePath, importer);
       if (!exact || resolvedSource(root, exact) !== exact) return undefined;
@@ -156,7 +164,9 @@ export function verifiedCallbackHelper(root, modulePath, name, importer) {
     if (!helper) return undefined;
     const files = [
       helper[1],
-      ...(helper[0] === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
+      ...(helper[0] === '@rasta/contracts'
+        ? ['packages/contracts/src/index.ts', 'packages/contracts/package.json']
+        : []),
       ...([
         'apps/web/src/lib/format',
         'apps/web/src/server/drivers',
@@ -208,7 +218,8 @@ export function verifiedCallbackHelper(root, modulePath, name, importer) {
     if (
       files.some(
         (path) =>
-          resolvedSource(root, path.replace(/\.[cm]?[jt]sx?$/, '')) !== path ||
+          (!path.endsWith('.json') &&
+            resolvedSource(root, path.replace(/\.[cm]?[jt]sx?$/, '')) !== path) ||
           ![pins[path]].flat().includes(
             createHash('sha256')
               .update(readFileSync(resolve(root, path)))

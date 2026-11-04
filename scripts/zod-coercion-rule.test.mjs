@@ -364,15 +364,22 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
   }
 });
 
-it('reviewed ISO check refuses contracts barrel drift', () => {
+it('FU-069b reviewed ISO check refuses contracts barrel or package entry drift', () => {
   const root = mkdtempSync(join(tmpdir(), 'rasta-zod-contract-check-'));
   try {
     for (const file of [
       'packages/contracts/src/index.ts',
       'packages/contracts/src/common/iso-datetime.ts',
+      'packages/contracts/package.json',
     ])
       cpSync(join(ROOT, file), join(root, file));
     assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), 'check');
+    appendFileSync(join(root, 'packages/contracts/package.json'), '\n');
+    assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), undefined);
+    cpSync(
+      join(ROOT, 'packages/contracts/package.json'),
+      join(root, 'packages/contracts/package.json'),
+    );
     appendFileSync(join(root, 'packages/contracts/src/index.ts'), '\n// changed barrel\n');
     assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), undefined);
   } finally {
@@ -947,8 +954,8 @@ it('FU-069b resolves exact sources and dependency siblings', () => {
 
 it('FU-069b respects compiler aliases and module suffixes', () => {
   const root = mkdtempSync(join(tmpdir(), 'rasta-zod-config-'));
-  const source = 'apps/web/src/lib/order-fields.ts';
-  const importer = join(root, 'apps/web/src/probe.ts');
+  const source = 'apps/web/src/lib/order-fields.ts',
+    importer = join(root, 'apps/web/src/probe.ts');
   const config = join(root, 'apps/web/tsconfig.json');
   const options = {
     module: 'esnext',
@@ -956,40 +963,26 @@ it('FU-069b respects compiler aliases and module suffixes', () => {
     baseUrl: '.',
     paths: { '@/*': ['./src/*'] },
   };
-  try {
-    cpSync(join(ROOT, source), join(root, source));
-    writeFileSync(config, JSON.stringify({ compilerOptions: options, include: ['src/**/*'] }));
-    assert.equal(
-      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
-      'predicate',
-    );
-    cpSync(join(ROOT, source), join(root, 'apps/web/src/alternate/order-fields.ts'));
+  const configure = (extra) =>
     writeFileSync(
       config,
-      JSON.stringify({
-        compilerOptions: { ...options, paths: { '@/lib/*': ['./src/alternate/*'] } },
-        include: ['src/**/*'],
-      }),
+      JSON.stringify({ compilerOptions: { ...options, ...extra }, include: ['src/**/*'] }),
     );
-    assert.equal(
-      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
-      undefined,
-    );
+  const proof = () =>
+    verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer);
+  try {
+    cpSync(join(ROOT, source), join(root, source));
+    configure({});
+    assert.equal(proof(), 'predicate');
+    cpSync(join(ROOT, source), join(root, 'apps/web/src/alternate/order-fields.ts'));
+    configure({ paths: { '@/lib/*': ['./src/alternate/*'] } });
+    assert.equal(proof(), undefined);
     appendFileSync(
       join(root, 'apps/web/src/lib/order-fields.evil.ts'),
       'export const isOrderCommand=Number;',
     );
-    writeFileSync(
-      config,
-      JSON.stringify({
-        compilerOptions: { ...options, moduleSuffixes: ['.evil', ''] },
-        include: ['src/**/*'],
-      }),
-    );
-    assert.equal(
-      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
-      undefined,
-    );
+    configure({ moduleSuffixes: ['.evil', ''] });
+    assert.equal(proof(), undefined);
     cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
       recursive: true,
     });
@@ -1006,10 +999,7 @@ it('FU-069b respects compiler aliases and module suffixes', () => {
       undefined,
     );
     writeFileSync(config, '{');
-    assert.equal(
-      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
-      undefined,
-    );
+    assert.equal(proof(), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

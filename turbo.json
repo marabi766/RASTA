@@ -97,6 +97,7 @@
         "$TURBO_ROOT$/apps/web/src/server/drivers.ts",
         "$TURBO_ROOT$/apps/web/src/server/usage.ts",
         "$TURBO_ROOT$/packages/contracts/src/common/iso-datetime.ts",
+        "$TURBO_ROOT$/packages/contracts/package.json",
         "$TURBO_ROOT$/packages/contracts/src/index.ts",
         "$TURBO_ROOT$/services/audit-service/src/audit/audit.cursor.ts",
         "$TURBO_ROOT$/apps/web/src/lib/form-issues.ts",
