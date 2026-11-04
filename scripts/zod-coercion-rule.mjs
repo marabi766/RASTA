@@ -120,6 +120,7 @@ const CALLBACK_APIS = new Set(['preprocess', 'transform', 'overwrite']);
 const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
   if (!raw && !receiverSchema) return {};
   const init = name === 'init';
+  const legacyCreate = name === 'create' && owner === 'ZodEffects';
   if (name === 'create' || init) name = owner;
   if (name === 'createWithPreprocess') return { slot: 0 };
   const api = name?.replace(/^_/, '');
@@ -137,7 +138,7 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
             ? 1
             : 0
           : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|CheckOverwrite)/.test(api)
-            ? init
+            ? init || legacyCreate
               ? 1
               : 0
             : undefined,
@@ -738,7 +739,7 @@ export default {
         const callbacks = [];
         const callbackInputs = new Map();
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
-        const fields = (raw, seen = new Set()) => {
+        const fields = (raw, seen = new Set(), input) => {
           const definition = unwrap(raw);
           if (absent(definition) || seen.has(definition)) return;
           seen.add(definition);
@@ -771,7 +772,7 @@ export default {
                 // The same audited definition slot may read an immutable object again.
               } else report(read, 'preprocess');
             }
-            fields(def.node.init, seen);
+            fields(def.node.init, seen, input);
             return;
           }
           if (definition.type !== 'ObjectExpression') {
@@ -795,6 +796,13 @@ export default {
               )
             ) {
               callbacks.push(prop.value);
+              if (
+                key(prop) === 'transform' &&
+                input &&
+                constant(definition.properties.find((p) => key(p) === 'type')?.value) ===
+                  'transform'
+              )
+                callbackInputs.set(prop.value, input);
               if (factory.name === 'codec')
                 callbackInputs.set(prop.value, node.arguments[key(prop) === 'encode' ? 1 : 0]);
               if (/Zod(?:Mini)?Codec$/.test(factory.name ?? factory.owner ?? ''))
@@ -805,10 +813,22 @@ export default {
                   )?.value,
                 );
             }
-            if (key(prop) === 'effect') fields(prop.value, seen);
+            if (key(prop) === 'effect')
+              fields(
+                prop.value,
+                seen,
+                definition.properties.find((p) => key(p) === 'schema')?.value,
+              );
           }
         };
-        if (api.fields !== undefined) fields(node.arguments[api.fields]);
+        if (api.fields !== undefined)
+          fields(
+            node.arguments[api.fields],
+            new Set(),
+            factory.name === 'create' && factory.owner === 'ZodEffects'
+              ? node.arguments[0]
+              : undefined,
+          );
         if (!callbacks.length) return;
         let callback;
         let callbackFn;
@@ -858,10 +878,25 @@ export default {
             )
           );
         };
+        // An inline downstream transform receives the upstream pipe output. A
+        // reusable schema has no single input proof and remains unproven here.
+        const pipeInput = () => {
+          let child = node;
+          while (child.parent && unwrap(child.parent) === child) child = child.parent;
+          const parent = child.parent;
+          if (parent?.type !== 'CallExpression') return undefined;
+          const pipe = origin(parent.callee);
+          if (pipe?.name !== 'pipe' || !(pipe.raw || pipe.receiverSchema)) return undefined;
+          return parent.arguments[pipe.receiverSchema ? 0 : 1] === child
+            ? pipe.receiverSchema
+              ? unwrap(parent.callee)?.object
+              : parent.arguments[0]
+            : undefined;
+        };
         const stringInput = (
           raw = callbackInput ??
             (api.fields === undefined
-              ? (factory.receiver ?? unwrap(node.callee)?.object)
+              ? (pipeInput() ?? factory.receiver ?? unwrap(node.callee)?.object)
               : undefined),
           seen = new Set(),
           kind = 'string',
@@ -1158,7 +1193,14 @@ export default {
                 ? unsafe(
                     args[position],
                     seen,
-                    [{ kind: kind === 'strings' ? 'string' : 'unknown' }],
+                    [
+                      {
+                        kind:
+                          kind === 'strings' || (kind === 'string' && name === 'replace')
+                            ? 'string'
+                            : 'unknown',
+                      },
+                    ],
                     parameters,
                   )
                 : false;

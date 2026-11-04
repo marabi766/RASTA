@@ -830,3 +830,27 @@ for (const expression of [
     assert.equal(result[0], 42);
     assert.equal(result[1], false);
   });
+
+// FU-070: callback input proofs follow the actual API argument signature.
+for (const code of [
+  `z.string().pipe(z.transform(Number));`,
+  `z.pipe(z.string(), z.transform(Number));`,
+  `z.string().trim().pipe((z.transform(v => Number(v))));`,
+  `z.pipe(z.string(), z.pipe(z.string(), z.transform(Number)));`,
+  `z.string().transform(v => v.replace(/x/g, s => s.toUpperCase()));`,
+  `z.string().transform(v => v.replace(/x/g, s => Number(s)));`,
+  `z.ZodEffects.create(z.string(), {type:'transform', transform:v=>v.trim()});`,
+  `z.ZodEffects.create(z.string(), {type:'transform', transform:Number});`,
+  `new z.ZodEffects({schema:z.string(),effect:{type:'transform',transform:Number}});`,
+])
+  it(`FU-070 valid callback: ${code}`, () => assert.deepEqual(messages(code), []));
+for (const code of [
+  `z.unknown().pipe(z.transform(Number));`,
+  `z.pipe(z.unknown(), z.transform(Number));`,
+  `const t=z.transform(Number); z.string().pipe(t); z.unknown().pipe(t);`,
+  `z.string().transform(v => v.replace(/x/g, (s, offset) => Number(offset)));`,
+  `z.unknown().transform(v => v.replace(/x/g, s => Number(s)));`,
+  `z.ZodEffects.create(z.unknown(), {type:'transform', transform:Number});`,
+  `z.ZodEffects.create(z.string(), {type:'preprocess', transform:Number});`,
+])
+  it(`FU-070 refuses unproven input: ${code}`, () => assert.ok(messages(code).length, code));
