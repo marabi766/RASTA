@@ -31,10 +31,7 @@
  * between the real call and its answer, when told to.
  */
 import './disposable-broker.mjs';
-import {
-  BROKER_DEFAULT_ALREADY_ABSENT,
-  withBrokerDefault as restoreBrokerDefault,
-} from './broker-default.mjs';
+import { withBrokerDefault as restoreBrokerDefault } from './broker-default.mjs';
 import { deleteBrokerDefault } from './broker-default-delete.mjs';
 import { connectionFor } from './kafka-acl-lib.mjs';
 import { readFileSync } from 'node:fs';
@@ -60,7 +57,9 @@ const RUN = randomUUID().slice(0, 8);
 const WORK = `/tmp/itest-limits-${RUN}`;
 const BIN = `${WORK}/bin`;
 const REAL = '/opt/kafka/bin';
-const ADMIN = ['--bootstrap-server', 'kafka:9094', '--command-config', '/tmp/admin.properties'];
+// Every broker-default read, SET and (via its cluster ID) DELETE goes here.
+const BOOTSTRAP = 'kafka:9094';
+const ADMIN = ['--bootstrap-server', BOOTSTRAP, '--command-config', '/tmp/admin.properties'];
 const BOUND = contracts.DLQ_ADDED_HEADERS_MAX_BYTES;
 const room = (sourceLimit) => contracts.deadLetterMessageMaxBytes(sourceLimit);
 const PLANNED = contracts.TOPIC_MESSAGE_MAX_BYTES;
@@ -249,6 +248,28 @@ async function brokerDefault() {
   return found[0];
 }
 
+/**
+ * The cluster that serves the broker-default reads and SETs above, resolved
+ * once through the same container endpoint. The direct DELETE must reach this
+ * cluster or refuse (FU-006); unresolved output refuses here.
+ */
+async function readSetClusterId() {
+  const run = await docker([
+    'exec',
+    CONTAINER,
+    `${REAL}/kafka-cluster.sh`,
+    'cluster-id',
+    '--bootstrap-server',
+    BOOTSTRAP,
+    '--config',
+    '/tmp/admin.properties',
+  ]);
+  const match = run.status === 0 ? /^Cluster ID: (\S+)\n?$/.exec(run.stdout) : null;
+  if (!match) throw new Error('BROKER_DEFAULT broker UNCONFIRMED');
+  return match[1];
+}
+const READ_SET_CLUSTER_ID = await readSetClusterId();
+
 async function setBrokerDefault(bytes) {
   const args = [
     '--alter',
@@ -262,9 +283,10 @@ async function setBrokerDefault(bytes) {
   if (bytes !== undefined) return kafka('kafka-configs.sh', args);
   // Incremental DELETE is idempotent and reaches Kafka even when a describe
   // is stale/absent. It preserves every other broker-default config.
-  return deleteBrokerDefault(
-    connectionFor('admin', process.env, (path) => readFileSync(path, 'utf8')),
-  );
+  return deleteBrokerDefault({
+    ...connectionFor('admin', process.env, (path) => readFileSync(path, 'utf8')),
+    clusterId: READ_SET_CLUSTER_ID,
+  });
 }
 
 /**
@@ -737,10 +759,11 @@ describe('create-topics.sh, max.message.bytes on a real broker', () => {
                 },
                 set: async (value) => {
                   writes += 1;
-                  const result =
-                    failure === 'absence-refusal' && writes > 1
-                      ? BROKER_DEFAULT_ALREADY_ABSENT
-                      : await setBrokerDefault(value);
+                  // A refused deletion never confirms compensation.
+                  if (failure === 'absence-refusal' && writes > 1) {
+                    throw new Error('deletion refused');
+                  }
+                  const result = await setBrokerDefault(value);
                   if (writes === 1 && failure === 'setup') throw new Error('setup response lost');
                   return result;
                 },

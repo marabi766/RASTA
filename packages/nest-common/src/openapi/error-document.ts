@@ -1,7 +1,12 @@
 import { z } from 'zod';
 import { publishedApiErrorSchema } from './api-error';
 import { toJsonSchema } from './zod-schema';
-import type { PublishedDocument, PublishedSchema } from './published-body';
+import {
+  errorResponseSchema,
+  unresolvedRefs,
+  type PublishedDocument,
+  type PublishedSchema,
+} from './published-body';
 
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace']);
 const ERROR_REF = { $ref: '#/components/schemas/ApiError' };
@@ -27,7 +32,17 @@ export function publishApiErrors<T extends PublishedDocument>(
       }
       for (const [status, response] of Object.entries(operation.responses)) {
         if (status !== 'default' && !/^[45][0-9X]{2}$/.test(status)) continue;
-        response.content = { 'application/json': { schema: ERROR_REF } };
+        // FU-031: a route's own typed refusal (api-error.ts: `.extend({ details: … })`) is kept,
+        // not overwritten by the plain envelope. A referenced response, or anything that is not
+        // exactly one resolvable JSON schema, is refused: never published as-is (r2 F1).
+        const at = `${method.toUpperCase()} ${path} ${status}`;
+        const schema = errorResponseSchema(response, at);
+        if (schema === undefined) {
+          response.content = { 'application/json': { schema: ERROR_REF } };
+          continue;
+        }
+        const missing = unresolvedRefs(document, schema);
+        if (missing.length) throw new Error(`${at}: unresolved ${missing.join(', ')}`);
       }
       const key = `${method.toUpperCase()} ${path} 503`;
       const health = probeExceptions[key];

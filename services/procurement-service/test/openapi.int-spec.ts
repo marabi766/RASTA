@@ -321,6 +321,94 @@ describe('the published OpenAPI contract (real application)', () => {
     documentedAs('POST', CANCEL_RFQ, await issuer.cancelRfq(missing.rfq, 1));
     documentedAs('POST', CANCEL_RFQ, await issuer.cancelRfq(rfqId, 2));
     documentedAs('POST', CANCEL_RFQ, await issuer.cancelRfq(rfqId, 3));
+
+    // A quotation (plan PR 8), on an RFQ whose deadline the database clock has not reached.
+    const PUT_QUOTATION = '/v1/rfqs/{id}/quotations/mine';
+    const WITHDRAW_QUOTATION = '/v1/rfqs/{id}/quotations/mine/withdraw';
+    const quotedProduct = newProductId();
+    clock.set(new Date('2031-01-01T08:00:00.000Z'));
+    const quoted = (await as.submit({ productId: quotedProduct, quantity: 4 })).body;
+    clock.set(new Date('2031-01-08T08:00:00.000Z'));
+    await as.submit({ productId: quotedProduct, quantity: 1 });
+    clock.set(new Date('2031-01-09T08:00:00.000Z'));
+    const toQuote = (await as.aggregation(quoted.aggregationId as string)).body;
+    const [quoting, down, slow] = [
+      supplier.organization(),
+      supplier.organization(),
+      supplier.organization(),
+    ];
+    organizations.push(quoting!, down!, slow!);
+    const quotedRfq = (
+      await issuer.issueRfq(
+        toQuote.id,
+        issueBody({
+          expectedVersion: toQuote.version,
+          quotationClosingAt: '2031-01-10T08:00:00.000Z',
+          invitedSupplierOrganizationIds: [quoting, down, slow],
+        }),
+      )
+    ).body.id as string;
+    supplier.set(down!, 'DOWN');
+    supplier.set(slow!, 'SLOW');
+    const quotationPath = `${RFQS}/${quotedRfq}/quotations/mine`;
+    const putAs = (organizationId: string | null, body: object, rfq = quotedRfq, k = key()) => {
+      const sent = anonymous().put(`${RFQS}/${rfq}/quotations/mine`).set('idempotency-key', k);
+      return (
+        organizationId === null
+          ? sent
+          : sent.set('authorization', `Bearer ${actor(organizationId, ['SUPPLIER'])}`)
+      ).send(body);
+    };
+    const quotation = (unitPriceMinor = '1000') => ({
+      content: { unitPriceMinor, answers: [{ criterionCode: 'Q', answer: 'good' }] },
+    });
+    documentedAs('PUT', PUT_QUOTATION, await putAs(quoting!, { content: {} }));
+    documentedAs('PUT', PUT_QUOTATION, await putAs(null, quotation()));
+    documentedAs(
+      'PUT',
+      PUT_QUOTATION,
+      await anonymous()
+        .put(quotationPath)
+        .set('authorization', `Bearer ${buyer(a)}`)
+        .set('idempotency-key', key())
+        .send(quotation()),
+    );
+    documentedAs('PUT', PUT_QUOTATION, await putAs(quoting!, quotation(), missing.rfq));
+    documentedAs('PUT', PUT_QUOTATION, await putAs(quoting!, quotation('9223372036854775807')));
+    documentedAs('PUT', PUT_QUOTATION, await putAs(down!, quotation()));
+    documentedAs('PUT', PUT_QUOTATION, await putAs(slow!, quotation()));
+    documentedAs('PUT', PUT_QUOTATION, await putAs(quoting!, quotation()));
+    documentedAs('PUT', PUT_QUOTATION, await putAs(quoting!, quotation()));
+
+    const withdrawAs = (organizationId: string | null, body: object, rfq = quotedRfq) => {
+      const sent = anonymous()
+        .post(`${RFQS}/${rfq}/quotations/mine/withdraw`)
+        .set('idempotency-key', key());
+      return (
+        organizationId === null
+          ? sent
+          : sent.set('authorization', `Bearer ${actor(organizationId, ['SUPPLIER'])}`)
+      ).send(body);
+    };
+    documentedAs('POST', WITHDRAW_QUOTATION, await withdrawAs(quoting!, {}));
+    documentedAs('POST', WITHDRAW_QUOTATION, await withdrawAs(null, { expectedRevision: 1 }));
+    documentedAs(
+      'POST',
+      WITHDRAW_QUOTATION,
+      await anonymous()
+        .post(`${quotationPath}/withdraw`)
+        .set('authorization', `Bearer ${buyer(a)}`)
+        .set('idempotency-key', key())
+        .send({ expectedRevision: 1 }),
+    );
+    documentedAs(
+      'POST',
+      WITHDRAW_QUOTATION,
+      await withdrawAs(quoting!, { expectedRevision: 1 }, missing.rfq),
+    );
+    documentedAs('POST', WITHDRAW_QUOTATION, await withdrawAs(quoting!, { expectedRevision: 5 }));
+    documentedAs('POST', WITHDRAW_QUOTATION, await withdrawAs(quoting!, { expectedRevision: 1 }));
+    documentedAs('POST', WITHDRAW_QUOTATION, await withdrawAs(quoting!, { expectedRevision: 1 }));
     clock.set(null);
 
     expect(problems).toEqual([]);
