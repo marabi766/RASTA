@@ -963,6 +963,12 @@ export default {
         const iterationStable = (fn) => {
           const resolved = localFunction(fn);
           if (!FUNCTION_TYPES.has(resolved?.type)) return !!(numeric(fn) || reviewedHelper(fn));
+          let argumentsAccess = false;
+          walk(resolved.body, (child) => {
+            if (child.type === 'Identifier' && child.name === 'arguments') argumentsAccess = true;
+          });
+          if (argumentsAccess || resolved.params.some((param) => param.type === 'RestElement'))
+            return false;
           const param = resolved.params[2];
           return !param || (param.type === 'Identifier' && stableElements(param));
         };
@@ -975,7 +981,10 @@ export default {
             } else if (step?.rest) {
               kind = ['string', 'strings'].includes(kind) ? 'strings' : 'array';
             } else {
-              kind = ['string', 'strings'].includes(kind) ? 'string' : undefined;
+              kind =
+                ['string', 'strings'].includes(kind) && /^(0|[1-9]\d*)$/.test(String(step))
+                  ? 'string'
+                  : undefined;
             }
           }
           return kind;
