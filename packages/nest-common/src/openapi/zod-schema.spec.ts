@@ -79,17 +79,18 @@ describe('toJsonSchema', () => {
    * published `{"nullable":true}` — no type, which AJV refuses — instead of a bounded string.
    */
   it('publishes a pipe between two schemas as its input type, with both constraints', () => {
-    const identifier = z
-      .string()
-      .regex(/^[a-z ]*$/)
-      .transform((value) => value.trim())
-      .pipe(z.string().min(1).max(64));
-    expect(toJsonSchema(identifier.nullable())).toEqual({
+    expect(
+      toJsonSchema(
+        z
+          .string()
+          .regex(/^[a-z ]*$/)
+          .pipe(z.string().min(1).max(64)),
+      ),
+    ).toEqual({
       type: 'string',
       pattern: '^[a-z ]*$',
       minLength: 1,
       maxLength: 64,
-      nullable: true,
     });
     expect(toJsonSchema(z.string().pipe(z.enum(['X'])))).toEqual({ type: 'string', enum: ['X'] });
     // The tighter bound of the two holds.
@@ -110,6 +111,42 @@ describe('toJsonSchema', () => {
     expect(toJsonSchema(z.string().pipe(z.number() as unknown as z.ZodString))).toEqual({
       type: 'string',
     });
+  });
+
+  /**
+   * FU-078 r2 F2: a JSON Schema validator checks the raw request text, so a bound the later schema
+   * applies to a transformed value is not a bound on what the client sends. `identifierText()`
+   * canonicalised then checked `max(64)`; merging that bound refused 67 raw characters the service
+   * accepted (tatweel padding) — the input's own schema is published, and nothing of the later one.
+   */
+  it('does not publish the later schema of a pipe whose input changes the value', () => {
+    const changed: Record<string, z.ZodType> = {
+      transform: z
+        .string()
+        .regex(/^[a-z ]*$/)
+        .transform((value) => value.replace(/ /g, ''))
+        .pipe(z.string().min(1).max(64)),
+      overwrite: z.string().trim().pipe(z.string().min(1).max(64)),
+      'nested transform': z
+        .string()
+        .transform((value) => value)
+        .optional()
+        .pipe(z.string().max(64).optional()),
+      'unknown kind': z.array(z.string()).pipe(z.array(z.string()).max(2)),
+    };
+    const published = Object.fromEntries(
+      Object.entries(changed).map(([kind, schema]) => [kind, toJsonSchema(schema.nullable())]),
+    );
+    expect(published).toEqual({
+      transform: { type: 'string', pattern: '^[a-z ]*$', nullable: true },
+      overwrite: { type: 'string', nullable: true },
+      'nested transform': { type: 'string', nullable: true },
+      'unknown kind': { type: 'array', items: { type: 'string' }, nullable: true },
+    });
+    // The value that reached the later schema is not the one a validator of the document sees.
+    const padded = 'abc' + ' '.repeat(64);
+    expect(changed.transform!.safeParse(padded).success).toBe(true);
+    expect(padded.length).toBeGreaterThan(64);
   });
 
   /**

@@ -23,6 +23,7 @@ import {
   decommissionSchema,
   updateAssetSchema,
 } from '../asset/dto';
+import { canonicalIdentifier } from '../asset/identifier';
 
 /**
  * The document this service actually serves.
@@ -255,10 +256,18 @@ describe('the character rule in the published request bodies', () => {
     for (;;) {
       if (current instanceof z.ZodOptional || current instanceof z.ZodNullable)
         current = current.unwrap() as z.ZodType;
-      // A refinement is a check on the string itself; a transform or preprocess is a pipe.
-      else if (current instanceof z.ZodPipe)
-        current = (current.in instanceof z.ZodTransform ? current.out : current.in) as z.ZodType;
-      else break;
+      // A refinement is a check on the string itself; a transform or preprocess is a pipe. A pipe
+      // between two schemas checks the value against both (`identifierText()`'s raw bound, then
+      // `plainText()`), so both sides' patterns are the field's.
+      else if (current instanceof z.ZodPipe) {
+        if (current.in instanceof z.ZodTransform) current = current.out as z.ZodType;
+        else if (current.out instanceof z.ZodTransform) current = current.in as z.ZodType;
+        else
+          return [
+            ...regexSources(current.in as z.ZodType),
+            ...regexSources(current.out as z.ZodType),
+          ];
+      } else break;
     }
     if (!(current instanceof z.ZodString)) return [];
     return (current.def.checks ?? []).flatMap((check) => {
@@ -520,6 +529,93 @@ describe('every validated input is published from its validator (FU-078)', () =>
       minLength: 1,
       maxLength: 64,
       nullable: true,
+    });
+  });
+
+  /**
+   * FU-078 r2 F2: the published identifier schemas, compiled by AJV, against the validating pipe the
+   * route really runs. Bounds the service applies to canonicalised text were published for the raw
+   * text: tatweel padding (67 characters, canonical 3) was refused by the document and accepted by
+   * the service. The published verdict must now be the runtime verdict, except for the one rule
+   * JSON Schema cannot state — the canonical form's own length, which the field's description gives
+   * — so `runtime === published && canonical within bounds`, for every probe of every field.
+   */
+  describe.each([
+    ['post /v1/assets', 'assetTag', 1, 64, { name: 'Loader one', type: 'LOADER' }],
+    ['post /v1/assets', 'serialNumber', 3, 120, { name: 'Loader one', type: 'LOADER' }],
+    ['patch /v1/assets/{id}', 'assetTag', 1, 64, { expectedVersion: 1 }],
+    [
+      'post /v1/assets/{id}/insurance-policies',
+      'policyNumber',
+      3,
+      64,
+      {
+        insurerName: 'Iran Insurance',
+        coverage: 'THIRD_PARTY',
+        validFrom: '2026-01-01T00:00:00Z',
+        validTo: '2027-01-01T00:00:00Z',
+      },
+    ],
+  ] as const)('%s %s', (route, field, min, max, base) => {
+    const probes: Record<string, string> = {
+      'shortest canonical': 'A'.repeat(min),
+      'longest canonical': 'A'.repeat(max),
+      'one too long': 'A'.repeat(max + 1),
+      'tatweel padding past the bound': 'abc' + '\u0640'.repeat(max),
+      'tatweel padding within the bound': 'abc' + '\u0640'.repeat(max - 3),
+      'whitespace padding past the bound': '  abc  ' + ' '.repeat(max),
+      'U+FDFA expanding past the bound': '\uFDFA'.repeat(Math.ceil((max + 1) / 18)),
+      'empty after canonicalisation': '\u0640'.repeat(min),
+      'Persian digits': '۱۲۳' + 'A'.repeat(max - 3),
+      'astral characters at the bound': '😀'.repeat(max),
+      'a bidi control': 'ab\u202Ec',
+    };
+    let accepts: (body: unknown) => boolean;
+    let pipe: ZodValidationPipe<z.ZodType>;
+    const runtime = (body: unknown) => {
+      try {
+        pipe.transform(body, { type: 'body' });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    beforeAll(() => {
+      const ajv = new Ajv({ strict: true, allErrors: true });
+      addFormats(ajv);
+      ajv.addVocabulary(['example', 'xml', 'externalDocs']);
+      accepts = ajv.compile(bodies[route] as object) as (body: unknown) => boolean;
+      const served = validated.filter(
+        (input) => input.kind === 'body' && operationOf(input.handler).route === route,
+      );
+      expect(served).toHaveLength(1);
+      pipe = new ZodValidationPipe(served[0]!.schema);
+    });
+
+    it('accepts the base body in both', () => {
+      const body = { ...base, [field]: probes['shortest canonical'] };
+      expect([accepts(body), runtime(body)]).toEqual([true, true]);
+    });
+
+    it.each(Object.keys(probes))('%s', (probe) => {
+      const raw = probes[probe]!;
+      const body = { ...base, [field]: raw };
+      const canonical = [...canonicalIdentifier(raw.trim())].length;
+      const published = accepts(body);
+      expect({ probe, runtime: runtime(body) }).toEqual({
+        probe,
+        runtime: published && canonical >= min && canonical <= max,
+      });
+      // The published bounds are the raw ones, enforced as published.
+      if ([...raw].length > max) expect(published).toBe(false);
+    });
+
+    it('publishes the canonical rule it cannot state as a schema', () => {
+      const published = (bodies[route] as { properties: Record<string, { description?: string }> })
+        .properties[field];
+      expect(published).toMatchObject({ type: 'string', minLength: min, maxLength: max });
+      expect(published?.description).toMatch(/after canonicalisation/);
     });
   });
 

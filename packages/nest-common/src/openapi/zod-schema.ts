@@ -186,7 +186,7 @@ function convert(def: any): JsonSchema {
     case 'pipe':
       if (defOf(def.out).type === 'transform') return toJsonSchema(def.in);
       if (defOf(def.in).type === 'transform') return toJsonSchema(def.out);
-      return pipeBetweenSchemas(toJsonSchema(def.in), toJsonSchema(def.out));
+      return pipeBetweenSchemas(def.in, def.out);
 
     default:
       return {};
@@ -198,18 +198,27 @@ const LOWER_BOUNDS = ['minLength', 'minimum', 'minItems'] as const;
 const UPPER_BOUNDS = ['maxLength', 'maximum', 'maxItems'] as const;
 
 /**
- * `.pipe()` between two schemas — `identifierText()` is `plainText()`, canonicalised by a
- * transform, piped into `z.string().min().max()`. A value is accepted only when it passes both, so
- * the input schema's type and constraints are published, and the later schema's constraints are
- * added where the two agree on the type (the tighter bound of a pair wins). This was `{}` (FU-078
- * r1 F2): under `.nullable()` that published `{"nullable":true}`, which is not a schema — "nullable"
- * cannot be used without "type" — and dropped a bounded string to "anything".
+ * `.pipe()` between two schemas. A value is accepted only when it passes both, so the input
+ * schema's type and constraints are published — never `{}` (FU-078 r1 F2: under `.nullable()` that
+ * published `{"nullable":true}`, which is not a schema).
  *
- * When the input says nothing (`z.unknown().pipe(…)`), the value reaching the later schema is the
- * input, so the later schema is what is published. When the two disagree on the type, the input
- * schema alone is published: it is what the client sends.
+ * The later schema's constraints are added only when the value reaching it IS the raw input: the
+ * input changes nothing on the way (no transform, no overwrite such as `.trim()`, no coercion) and
+ * the two agree on the type; the tighter bound of a pair wins. A JSON Schema validator checks the
+ * raw request text, so a bound the later schema applies to canonicalised text describes a different
+ * string: `identifierText()` NFKC-folds and strips tatweel before `z.string().max(64)`, and merging
+ * that bound published "67 characters is too long" for a value runtime accepts (FU-078 r2 F2).
+ * Anything the converter cannot prove value-preserving is treated as changing it (fail closed):
+ * the input schema alone is published, and a rule on the changed value belongs in a description.
+ *
+ * When the input says nothing (`z.unknown().pipe(…)`) and changes nothing, the later schema is
+ * what is published. When the two disagree on the type, the input schema alone is published: it
+ * is what the client sends.
  */
-function pipeBetweenSchemas(input: JsonSchema, output: JsonSchema): JsonSchema {
+function pipeBetweenSchemas(inSchema: z.ZodType, outSchema: z.ZodType): JsonSchema {
+  const input = toJsonSchema(inSchema);
+  if (changesValue(inSchema)) return input;
+  const output = toJsonSchema(outSchema);
   if (Object.keys(input).every((key) => key === 'description')) return { ...output, ...input };
   if (input.type === undefined || input.type !== output.type) return input;
   const merged: JsonSchema = { ...output, ...input };
@@ -224,6 +233,31 @@ function pipeBetweenSchemas(input: JsonSchema, output: JsonSchema): JsonSchema {
     }
   }
   return merged;
+}
+
+/** Types whose parse returns the raw input itself, unless a check on them overwrites it. */
+const VALUE_PRESERVING_TYPES = new Set([
+  'string',
+  'number',
+  'boolean',
+  'bigint',
+  'enum',
+  'literal',
+  'unknown',
+  'any',
+]);
+
+/**
+ * Whether parsing `schema` may hand on a value other than its raw input: a transform, an
+ * overwrite check (`.trim()`, `.toLowerCase()`, `.normalize()`), a coercion — or any type not known
+ * to preserve the value (objects strip keys, defaults substitute), which fails closed.
+ */
+function changesValue(schema: z.ZodType): boolean {
+  const def = defOf(schema);
+  if (def.type === 'pipe') return changesValue(def.in) || changesValue(def.out);
+  if (def.type === 'optional' || def.type === 'nullable') return changesValue(def.innerType);
+  if (!VALUE_PRESERVING_TYPES.has(def.type as string) || def.coerce === true) return true;
+  return checkDefs(def).some(({ def: check }) => check.check === 'overwrite');
 }
 
 function objectSchema(def: any): JsonSchema {

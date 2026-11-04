@@ -70,9 +70,30 @@ export const operationalStatusSchema = z.enum(OPERATIONAL_STATUSES);
  * A value that takes part in a uniqueness check: asset tag, serial number,
  * policy number. Canonicalised before the length check and before storage, so
  * lookups and the unique index see one spelling (audit L3-10).
+ *
+ * Bounded twice, because canonicalisation changes the length. The raw text as
+ * sent — before trimming — is `min`..`max` code points: that is the bound the
+ * OpenAPI document publishes, so a client validating the request text and the
+ * service agree on it (FU-078 r2 F2: tatweel padding shrank 67 characters to 3
+ * and passed, while the document refused it). The canonical form must then
+ * also be `min`..`max`: NFKC can expand a character (U+FDFA becomes 18), and
+ * removing tatweel or whitespace can shorten it below `min`. That second rule
+ * is on a value the client never sends, so JSON Schema cannot state it; the
+ * description does.
  */
 const identifierText = (min: number, max: number) =>
-  plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
+  z
+    .string()
+    .min(min)
+    .max(max)
+    .pipe(plainText())
+    .transform(canonicalIdentifier)
+    .pipe(z.string().min(min).max(max))
+    .describe(
+      `${min}–${max} characters (code points) as sent, and again after canonicalisation ` +
+        '(NFKC, Arabic ي/ك as Persian ی/ک, Persian and Arabic digits as 0–9, tatweel removed, ' +
+        'whitespace runs as one space, trimmed); a value outside either is VALIDATION_FAILED.',
+    );
 
 /**
  * How many top-level attributes `specifications` may carry. A spec sheet names
