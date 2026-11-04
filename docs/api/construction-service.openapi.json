@@ -2512,6 +2512,8 @@
                     "completedAt": {
                       "type": "string",
                       "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                       "nullable": true
                     },
                     "completedBy": {
@@ -7792,7 +7794,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8146,7 +8150,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8209,7 +8215,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8565,12 +8573,14 @@
                   "bidOpeningAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "Start of the bidding window, inclusive. UTC."
+                    "pattern": "Z$",
+                    "description": "Start of the bidding window, inclusive. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   },
                   "bidClosingAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC."
+                    "pattern": "Z$",
+                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   }
                 },
                 "required": ["title", "scopeOfWork"],
@@ -9283,13 +9293,15 @@
                   "bidOpeningAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "Start of the bidding window, inclusive. UTC.",
+                    "pattern": "Z$",
+                    "description": "Start of the bidding window, inclusive. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                     "nullable": true
                   },
                   "bidClosingAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC.",
+                    "pattern": "Z$",
+                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                     "nullable": true
                   }
                 },
@@ -9667,7 +9679,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -9741,7 +9755,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11181,7 +11197,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11267,7 +11285,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11485,7 +11505,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12183,7 +12205,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12467,7 +12491,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12540,7 +12566,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12937,7 +12965,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13162,7 +13192,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13417,7 +13449,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13490,7 +13524,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13710,7 +13746,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13889,7 +13927,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13979,7 +14019,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14146,7 +14188,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14230,7 +14274,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14374,7 +14420,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14448,7 +14496,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14501,7 +14551,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14541,7 +14593,8 @@
                   "proposedAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET /tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn."
+                    "pattern": "Z$",
+                    "description": "The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET /tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   }
                 },
                 "required": ["proposedAt"],
@@ -14731,7 +14784,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14909,7 +14964,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14987,7 +15044,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15199,7 +15258,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15272,7 +15333,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15508,7 +15571,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15598,7 +15663,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15818,7 +15885,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15891,7 +15960,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16278,7 +16349,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16341,7 +16414,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16685,7 +16760,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16780,7 +16857,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16878,7 +16957,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -17112,7 +17193,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -17477,7 +17560,9 @@
           },
           "timestamp": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "pattern": "Z$",
+            "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
           },
           "path": {
             "type": "string"
