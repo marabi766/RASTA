@@ -1,5 +1,6 @@
 import net from 'node:net';
 import type { Readable } from 'node:stream';
+import { BoundedBodyCollector } from '@rasta/nest-common';
 import {
   INSTREAM_COMMAND,
   INSTREAM_TERMINATOR,
@@ -319,11 +320,13 @@ export class ClamdClient {
     // answers is "how large is this reply", not "how much did the peer send".
     let received = 0;
     let answered = false;
-    const chunks: Buffer[] = [];
+    // Copied into one owned buffer, never kept per chunk: a peer sending its
+    // reply a byte at a time costs no more than one sending it whole (FU-081).
+    const replyBytes = new BoundedBodyCollector(MAX_REPLY_BYTES);
 
     /** Drops what has been buffered and ends the exchange. Never quotes it. */
     const refuseReply = (why: string): void => {
-      chunks.length = 0;
+      replyBytes.clear();
       fail(new ClamdError('PROTOCOL_ERROR', why));
     };
 
@@ -352,7 +355,7 @@ export class ClamdClient {
 
       if (terminator === -1) {
         received += chunk.length;
-        chunks.push(chunk);
+        if (!replyBytes.append(chunk)) refuseReply('the scanner reply could not be held');
         return;
       }
 
@@ -366,12 +369,15 @@ export class ClamdClient {
       }
 
       received += belongsToReply;
-      chunks.push(chunk);
+      if (!replyBytes.append(chunk)) {
+        refuseReply('the scanner reply could not be held');
+        return;
+      }
       answered = true;
-      settleReply(Buffer.concat(chunks).toString('latin1'));
+      settleReply(replyBytes.bytes().toString('latin1'));
       // Handed over as a string; retaining the buffers past that point keeps
       // the reply resident for the life of the exchange for no reason.
-      chunks.length = 0;
+      replyBytes.clear();
     };
 
     const onError = (error: Error): void => {

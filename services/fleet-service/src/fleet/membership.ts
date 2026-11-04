@@ -6,6 +6,7 @@ import {
   type InternalTokenService,
   InternalHttpClient,
   exchangeWithDeadline,
+  readCappedText,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -136,7 +137,7 @@ export class LiveMembershipClient implements MembershipSource {
         (response) =>
           // Anything but a plain 200 is refused unread: the boundary cancels the body.
           response.status === 200 && !response.redirected
-            ? readCapped(response, MAX_MEMBERSHIP_ANSWER_BYTES)
+            ? readCappedText(response, MAX_MEMBERSHIP_ANSWER_BYTES)
             : null,
       );
     } catch {
@@ -154,34 +155,6 @@ export class LiveMembershipClient implements MembershipSource {
     }
     return parsed.data.live;
   }
-}
-
-/**
- * The body as text, or `null` once it exceeds `limit` bytes (reading stops).
- * The same reader construction-service and contract-service keep beside their
- * clients (`organization-directory.ts`).
- */
-async function readCapped(response: Response, limit: number): Promise<string | null> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > limit) {
-    await response.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
 }
 
 function parseJson(text: string): unknown {
