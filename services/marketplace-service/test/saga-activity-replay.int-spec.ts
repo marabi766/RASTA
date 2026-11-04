@@ -1,9 +1,11 @@
-import { MockActivityEnvironment } from '@temporalio/testing';
+import { MockActivityEnvironment, TestWorkflowEnvironment } from '@temporalio/testing';
+import { Worker } from '@temporalio/worker';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
 import type { EconomicClient } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { restartedSagaSteps } from './fixtures/restarted-saga.workflow';
 import {
   asActor,
   cleanup,
@@ -371,6 +373,68 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     await expect(saga.run(5, 1, (a) => a.markSettling(orderId))).resolves.toBe('SETTLING');
     return { orderId, saga, transactionId };
   }
+
+  it.each([false, true])(
+    'restarts two terminal chains under one workflow id without stale effects or collisions (reorder=%s)',
+    async (reorder) => {
+      const { orderId } = await receiptConfirmed();
+      const env = await TestWorkflowEnvironment.createTimeSkipping();
+      try {
+        const taskQueue = key('restart-steps');
+        const workflowId = `order-${orderId}`;
+        const worker = await Worker.create({
+          connection: env.nativeConnection,
+          taskQueue,
+          workflowsPath: require.resolve('./fixtures/restarted-saga.workflow'),
+          activities: createActivities({
+            orders: wiring.orders,
+            economic: stubEconomic().economic,
+          }),
+        });
+        await worker.runUntil(async () => {
+          const runs: string[] = [];
+          for (let chain = 0; chain < 2; chain++) {
+            // Isolate step-key reuse from the legacy history fallback's 5 s
+            // clock allowance; this advances the test server, not wall time.
+            if (chain > 0) await env.sleep('10 seconds');
+            const handle = await env.client.workflow.start(restartedSagaSteps, {
+              workflowId,
+              taskQueue,
+              args: [orderId, chain === 1 && reorder],
+            });
+            runs.push(handle.firstExecutionRunId);
+            await expect(handle.result()).rejects.toMatchObject({
+              cause: { type: 'SAGA_INCONSISTENT' },
+            });
+            const row = await rowOf(orderId);
+            expect(row.status).toBe('RECEIPT_CONFIRMED');
+            expect(row.reminderCount).toBe(chain + 1);
+            expect(await eventsOf(orderId, 'ORDER_SETTLEMENT_STARTED')).toBe(chain + 1);
+            expect(await eventsOf(orderId, 'ORDER_SETTLEMENT_FAILED')).toBe(chain + 1);
+          }
+          expect(runs[0]).not.toBe(runs[1]);
+          const records = await runUnscoped('test reads only its restarted order steps', () =>
+            prisma.client.sagaStep.findMany({
+              where: {
+                organizationId: org.buyer,
+                orderId,
+                stepKey: { startsWith: `${workflowId}/` },
+              },
+              select: { stepKey: true },
+            }),
+          );
+          for (const runId of runs) {
+            expect(
+              records.filter((r) => r.stepKey.startsWith(`${workflowId}/${runId}/`)),
+            ).toHaveLength(3);
+          }
+        });
+      } finally {
+        await env.teardown();
+      }
+    },
+    120_000,
+  );
 
   it('the hold: recorded, confirmed by the supplier, retried — still FUNDS_HELD, nothing rewritten', async () => {
     // Codex finding 1, step for step.

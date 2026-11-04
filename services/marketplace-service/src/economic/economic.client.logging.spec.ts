@@ -124,7 +124,8 @@ describe('EconomicClient error logging goes through the app logger', () => {
     });
     expect(text).not.toContain(TOKEN);
     expect(text).not.toContain(`postgresql://app:${PASSWORD}`);
-    expect(text).toContain('[REDACTED]');
+    expect(text).not.toContain(PASSWORD);
+    expect(lines[0]).toHaveProperty('failure', { type: 'TypeError' });
     expect(text.length).toBeLessThan(40_000);
   });
 });

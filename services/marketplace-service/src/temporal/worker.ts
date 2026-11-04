@@ -74,6 +74,8 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
         taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
         workflowsPath: require.resolve('./workflows'),
         activities: createActivities({ orders: this.orders, economic: this.economic }),
+        maxHeartbeatThrottleInterval: '1 second',
+        defaultHeartbeatThrottleInterval: '1 second',
         // Without it the SDK waits for an activity that ignores cancellation
         // for as long as that activity lasts. The force time counts from
         // `shutdown()`, which `stop()` calls as the shared budget starts.
