@@ -8,25 +8,28 @@ import { GATEWAY_ENV } from '../tokens';
 import { ProxyService } from '../proxy/proxy.service';
 import { RateLimiter } from '../proxy/rate-limiter';
 
+/** What the routes themselves declare, before the shared error envelope is published. */
+export function gatewayRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
+  return SwaggerModule.createDocument(
+    app,
+    new DocumentBuilder()
+      .setTitle('Rasta — API Gateway')
+      .setDescription(
+        'The single entry point for external traffic. Authenticates, resolves the ' +
+          'tenant, rate limits and routes. Holds no business logic and no database.',
+      )
+      .setVersion(version)
+      .addBearerAuth()
+      .build(),
+  );
+}
+
 /** The builder used by the real application and the documentation fixture. */
 export function buildGatewayOpenApiDocument(
   app: INestApplication,
   version = '0.1.0',
 ): OpenAPIObject {
-  return publishApiErrors(
-    SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — API Gateway')
-        .setDescription(
-          'The single entry point for external traffic. Authenticates, resolves the ' +
-            'tenant, rate limits and routes. Holds no business logic and no database.',
-        )
-        .setVersion(version)
-        .addBearerAuth()
-        .build(),
-    ),
-  );
+  return publishApiErrors(gatewayRouteDocument(app, version));
 }
 
 /** Decorators only: no database, broker, credentials or external requests. */
