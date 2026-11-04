@@ -5,6 +5,8 @@ import {
   ZERO_WIDTH_SPACE,
   ZWNJ,
 } from './codepoints';
+import { formMessage } from '../form-issues';
+
 import { groupDigits, toLatinDigits, toPersianDigits } from './digits';
 
 /**
@@ -46,19 +48,48 @@ export const IRR: CurrencyFormat = {
   fractionDigits: 0,
 };
 
+/** Why a typed amount could not be read: a closed set, so no sentence quotes what was typed. */
+export type MoneyInputFailure = 'EMPTY' | 'NOT_NUMERIC' | 'NO_DIGITS' | 'TOO_MANY_DECIMALS';
+
+/**
+ * The sentence for a failure: fixed words, parameterised only by the
+ * currency (the portal's own constant), never by the input — a typed amount
+ * may carry anything, a bidi control included (Codex PR-439 r1 F1). Declared
+ * with `formMessage`, so a schema that refuses with it is shown as written.
+ */
+export function moneyInputMessage(failure: MoneyInputFailure, currency: CurrencyFormat): string {
+  switch (failure) {
+    case 'EMPTY':
+      return formMessage('مبلغ را وارد کنید');
+    case 'NOT_NUMERIC':
+      return formMessage('مبلغ فقط از رقم تشکیل می‌شود');
+    case 'NO_DIGITS':
+      return formMessage('مبلغ رقمی ندارد');
+    case 'TOO_MANY_DECIMALS':
+      return currency.fractionDigits === 0
+        ? formMessage(`مبلغ به ${currency.label} جزء اعشاری ندارد`)
+        : formMessage(
+            `حداکثر ${toPersianDigits(String(currency.fractionDigits))} رقم اعشار پذیرفته می‌شود`,
+          );
+  }
+}
+
 /**
  * Raised when a typed amount cannot be read as one.
  *
  * A distinct type rather than a bare `Error`, so a form can catch exactly this
  * and show the field message, and so an unexpected failure somewhere else in
- * the call is not quietly reported to the user as "invalid amount".
+ * the call is not quietly reported to the user as "invalid amount". It holds
+ * the closed `failure` and its fixed sentence only: the input stays out of the
+ * exception, so no message, log line or `cause` chain can carry it
+ * (AGENTS.md disclosure rule; PR-439 r1 addendum B).
  */
 export class MoneyInputError extends Error {
   constructor(
-    readonly input: string,
-    reason: string,
+    readonly failure: MoneyInputFailure,
+    currency: CurrencyFormat,
   ) {
-    super(`نمی‌توان «${input}» را به‌عنوان مبلغ خواند: ${reason}`);
+    super(moneyInputMessage(failure, currency));
     this.name = 'MoneyInputError';
   }
 }
@@ -139,12 +170,12 @@ export function parseMoneyInput(input: string, currency: CurrencyFormat = IRR): 
     .trim();
 
   if (normalised === '' || normalised === '-') {
-    throw new MoneyInputError(input, 'مبلغ خالی است');
+    throw new MoneyInputError('EMPTY', currency);
   }
 
   const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(normalised);
   if (!match) {
-    throw new MoneyInputError(input, 'کاراکتر غیرعددی دارد');
+    throw new MoneyInputError('NOT_NUMERIC', currency);
   }
 
   const [, sign, wholePart, fractionPart] = match;
@@ -152,16 +183,11 @@ export function parseMoneyInput(input: string, currency: CurrencyFormat = IRR): 
   const fraction = fractionPart ?? '';
 
   if (wholePart === '' && fraction === '') {
-    throw new MoneyInputError(input, 'رقمی ندارد');
+    throw new MoneyInputError('NO_DIGITS', currency);
   }
 
   if (fraction.length > currency.fractionDigits) {
-    throw new MoneyInputError(
-      input,
-      currency.fractionDigits === 0
-        ? `${currency.label} جزء اعشاری ندارد`
-        : `حداکثر ${toPersianDigits(String(currency.fractionDigits))} رقم اعشار پذیرفته می‌شود`,
-    );
+    throw new MoneyInputError('TOO_MANY_DECIMALS', currency);
   }
 
   const scaled = whole + fraction.padEnd(currency.fractionDigits, '0');

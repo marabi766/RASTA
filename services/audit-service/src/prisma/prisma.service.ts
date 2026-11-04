@@ -43,6 +43,14 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
 
   readonly client: PrismaClient;
 
+  /**
+   * Work that must be finished before the client is disconnected (a sampler's in-flight
+   * queries). Nest runs the providers' destroy hooks **concurrently**, so a provider's own
+   * `onModuleDestroy` cannot be ordered before this one: instead the provider registers its
+   * stop here, and `onModuleDestroy` below awaits every one of them, then disconnects.
+   */
+  private readonly beforeDisconnectHooks: (() => Promise<void>)[] = [];
+
   constructor(databaseUrl: string) {
     this.client = createSafePrismaClient(
       () => new PrismaClient({ datasources: { db: { url: databaseUrl } } }),
@@ -82,8 +90,18 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /** Registers a stop that completes (boundedly) before `$disconnect`; see the field above. */
+  beforeDisconnect(stop: () => Promise<void>): void {
+    this.beforeDisconnectHooks.push(stop);
+  }
+
   async onModuleDestroy(): Promise<void> {
-    await this.client.$disconnect();
+    try {
+      // A hook that fails must not keep the connection open: all settle, then disconnect.
+      await Promise.allSettled(this.beforeDisconnectHooks.map((stop) => stop()));
+    } finally {
+      await this.client.$disconnect();
+    }
   }
 
   /**

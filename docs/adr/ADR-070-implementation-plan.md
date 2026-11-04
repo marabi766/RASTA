@@ -239,6 +239,32 @@ procurement در organization-service در PR 11) ولی امتیازی را ع�
   نگه‌داشتن تحویل نامرتب، `FORK`، ناسازگاری هویت، هشدار شکاف)؛ `GET /v1/internal/rfq-evidence/{rfqId}/chain` با `@AllowService('procurement-service')`.
 - رویدادهای `QUOTATION_*` هنوز تولید نمی‌شوند؛ آزمون با رویدادهای ساختگی هم‌شکل قرارداد `@rasta/contracts` (همان ترتیب CON-002 PR 6).
 
+> **وضعیت: ساخته شد (2026-11-02، COM-007 PR 7).** همان فهرست بالا، با این تفاوت‌ها:
+>
+> 1. **قرارداد رویداد هنوز در `@rasta/contracts` نیست:** رویدادهای `QUOTATION_*` را PR 8 تولید می‌کند (و کار هم‌زمان قرارداد آن را می‌سازد). مصرف‌کننده
+>    Schema خودش را دارد (`quotationReceiptPayloadSchema` در `audit/rfq-evidence.ts`، بی `.strict()` مانند `receiptPayloadSchema`) با میدان‌های ADR-070 § ۹ و
+>    قالب `BID_SUBMITTED`: `rfqId`، `quotationId`، `organizationId` (خریدار)، `supplierOrganizationId`، `revision`، `receivedAt`، `contentCommitment`،
+>    `ciphertextSha256`، `previousReceipt`، `receipt`. **PR 8 باید** قرارداد را با این میدان‌ها (و `.strict()` سمت تولیدکننده) بنویسد و آزمونی بیاورد که
+>    Schema تولیدکننده رویداد ساختگی این مصرف‌کننده را می‌پذیرد؛ نام یا نوع میدانی که تغییر کند، این PR را می‌شکند.
+> 2. **Genesis:** `SHA-256` روی برچسب و `rfqId` (هرکدام با پیشوند طول)، برچسب `rasta.quotation.receipt.genesis.v1` (دوقلوی `rasta.bid.receipt.genesis.v1`).
+>    `SealingLabels.receiptGenesis` برش PR 8 باید دقیقاً همین باشد وگرنه نخستین رسید زنجیره را ادامه نمی‌دهد؛ بایت‌ها با یک بردار در `rfq-evidence.spec.ts`
+>    سنجاق شده‌اند. پیاده‌سازی Genesis عمداً مستقل از `@rasta/sealing` است (همان قاعدهٔ audit-service در PR 4).
+> 3. **فقط رسیدها:** `QUOTATION_SUBMITTED` و `QUOTATION_REVISED` زنجیره را می‌افزایند. `QUOTATION_WITHDRAWN` و `QUOTATION_ACCESSED` زنجیره را نمی‌افزایند
+>    و جدول شاهد هم ندارند (ردیف ممیزی Projector هستند؛ ثبت الحاقی خواندن `quotation_access_log` در procurement-service و PR 8 است، نه جدول دوم اینجا).
+> 4. **سخت‌گیری افزوده نسبت به `tender_receipt_link`:** پاکتی که `producer`اش `procurement-service` نباشد، همانند ناسازگاری مستأجر یا شناسه، با
+>    `rfq_evidence_mismatch` رد می‌شود (ACL موضوع هم همین را می‌گوید؛ زنجیره لنگر اعتماد است).
+> 5. **پایگاه داده:** `rfq_receipt_link` (الحاقی با Trigger برای همه، نقش اجرا فقط `SELECT, INSERT`) و `rfq_receipt_pending` (صف کار با `SELECT, INSERT, DELETE`)،
+>    یکتایی `(rfq_id, receipt)` و `(rfq_id, previous_receipt)` برای FORK. Migration برگشت‌پذیر است و تا یک رسید یا رسید نگه‌داشته‌شده هست رد می‌شود.
+> 6. **مصرف‌کننده:** گروه `audit-service.rfq-evidence` (در `TOPIC_CONSUMERS`)، موضوع `rasta.procurement.v1` فقط، `fromBeginning`، DLQ همان `rasta.audit.v1.dlq`؛
+>    پیکربندی `AUDIT_RFQ_GAP_ALERT_SECONDS` (پیش‌فرض ۳۰۰)، سنج‌های `rasta_audit_rfq_{pending_links,overdue_links,pending_oldest_age_seconds}` و هشدار
+>    `RastaAuditRfqChainGapOpen`؛ دلیل‌های شمارندهٔ ورود `rfq_chain_fork`، `rfq_chain_gap_overdue`، `rfq_evidence_mismatch`.
+> 7. **خواندن:** `GET /v1/internal/rfq-evidence/{rfqId}/chain`، `@AllowService('procurement-service')` **و** بررسی فراخواننده در سرویس
+>    (`assertRfqEvidenceCaller`: توکن سرویس، فراخوانندهٔ `procurement-service`، سازمان امضاشده الزامی) ⇒ هر شخص، هر سرویس دیگر (از جمله `construction-service`)
+>    و توکن بی مستأجر `403`؛ جستجو با سازمان توکن **و** RFQ، پس RFQ سازمان دیگر یا RFQ ناشناخته همان زنجیرهٔ تهی با سر = Genesis است. خروجی OpenAPI سرویس
+>    را می‌گیرد. مصرف‌کنندهٔ این خواندن (`RfqEvidenceClient` و مقایسهٔ حلقه‌به‌حلقه) با PR 9 می‌آید.
+> 8. **آزمون:** `test/rfq-evidence.int-spec.ts` مجموعهٔ `tender-evidence.int-spec.ts` را مورد به مورد دنبال می‌کند (مورد‌های `BID_ACCESSED` ندارند)، و
+>    `src/audit/rfq-evidence.spec.ts` نگاشت و Genesis را.
+
 ### PR 8 — پیشنهاد قیمت مهرشده (`L`)
 
 - `quotation`، `quotation_receipt`، `quotation_access_log` (الحاقی)؛ ثبت/بازنگری/انصراف پیش از مهلت با `FOR SHARE`، پرسش مرجع صلاحیت و `eligible_as_of`،
@@ -246,6 +272,40 @@ procurement در organization-service در PR 11) ولی امتیازی را ع�
   مرتبط و ردش در همان تراکنش ممیزی (`QUOTATION_ACCESSED`؛ سازمان دیگر `404` بی ردیف، ADR-070 § ۴).
 - آزمون: مهلت (`−1ms` و دقیقاً مهلت)، انتظار قفل از مهلت می‌گذرد، انصراف در برابر بستن، ماتریس خواندن پیش از بازگشایی (هر خانهٔ جدول ADR-066 § ۴)،
   «رشتهٔ ساختگی در محتوا و قیمت هیچ‌جا در لاگ و رویداد نیست».
+
+> **وضعیت: بخش الف ساخته شد (2026-11-03، COM-007 PR 8A)؛ بخش ب (ماتریس خواندن) برش جدای پشته‌ای است (قاعدهٔ اندازهٔ D-117).**
+> بخش الف: جدول‌های `quotation` و `quotation_receipt`، ثبت/بازنگری/انصراف، رسید، قرارداد `QUOTATION_*` و `quotationCount`. **بخش ب** (PR 8B):
+> `quotation_access_log` (الحاقی)، `QUOTATION_ACCESSED`، خواندن رسید خود تأمین‌کننده و شمار و مهر زمانی سمت خریدار، و ماتریس کامل ADR-066 § ۴ با
+> ثبت هر خواندن و ردش در همان تراکنش (سازمان دیگر `404` بی ردیف). تفاوت‌ها با فهرست بالا:
+>
+> 1. **دو مسیر:** `PUT /v1/rfqs/{id}/quotations/mine` (بی `expectedRevision` نخستین پیشنهاد — یکی به‌ازای هر سازمان و RFQ، دومی `409`؛ با آن
+>    بازنگری بعدی، جابه‌جاشده `409`، پس‌گرفته `422 QUOTATION_NOT_SUBMITTED`) و `POST /v1/rfqs/{id}/quotations/mine/withdraw` (`expectedRevision`).
+>    بدنه `{ expectedRevision?, content }` است، نه خود `QuotationContent` طرح‌شده، تا فرمان و محتوای مهرشده از هم جدا بمانند. `content`: `unitPriceMinor`
+>    (رشتهٔ عدد صحیح مثبت تا ۲^۶۳−۱)، `answers[]` با `answer` (تا ۲۰۰۰ نویسه) و `note` (تا ۲۰۰۰)؛ متن پیش از سنجش طول و مهر به LF و NFC برده می‌شود.
+>    **هر معیار دقیقاً یک پاسخ** (Q-120 موقت): کد ناشناخته `422 UNKNOWN_CRITERION`، معیار بی‌پاسخ `422 CRITERION_UNANSWERED`.
+> 2. **ترتیب:** نقش (`PROCUREMENT_SUPPLIER_ROLES`؛ `AUDITOR`، `SYSTEM_ADMIN` حتی کنار `SUPPLIER`، و توکن سرویس `403`) پیش از هر خواندن؛ سپس RFQ
+>    فقط از راه دعوت سازمان خود فراخواننده (بی دعوت، سازمان دیگر، ناموجود: همان `404`، بی پرسش و بی نوشتن)؛ سپس سنجش محتوا در برابر RFQ منجمد —
+>    `unitPriceMinor × totalQuantity ≤ 2^63 − 1` در `bigint`، وگرنه `422 QUOTATION_AMOUNT_OUT_OF_RANGE` **پیش از مهر، پیش از پرسش supplier-service و بی
+>    هیچ نوشتن**؛ سپس صلاحیت از supplier-service (`GOODS_SUPPLY` تأییدشده و بی تعلیق باز، `422 SUPPLIER_NOT_ELIGIBLE`؛ ناپیدا `503`، کند `504`) و
+>    `eligible_as_of` = لحظهٔ پاسخ آن، کنار هر حلقهٔ رسید. انصراف صلاحیت نمی‌پرسد. سپس یک تراکنش: RFQ `FOR SHARE` از راه دعوت، ساعت پایگاه داده پس
+>    از قفل، مهلت نیم‌باز (`422 QUOTATION_WINDOW_CLOSED`)، پیشنهاد خود `FOR UPDATE`، مهر، حلقهٔ بعدی زنجیره زیر قفل Advisory، رویداد و پاسخ Idempotent.
+> 3. **پایگاه داده:** `quotation` زیر سازمان خریدار با `fk_quotation_invitation` (بی دعوت، بی پیشنهاد)؛ `tg_quotation_guard` ثبت، بازنگری و انصراف را
+>    فقط وقتی RFQ `PUBLISHED` است و **ساعت خود پایگاه داده** پیش از مهلت است می‌پذیرد (`ck_quotation_window`؛ ردی که پس از «بله»ی سرویس برسد همان
+>    `422` است)، بایت مهرشده فقط با بازنگری بعدی عوض می‌شود و پیشنهاد پس‌گرفته دیگر عوض نمی‌شود. `quotation_receipt` الحاقی است، `seq` پیوسته تا
+>    ۱۰٬۰۰۰ (همان بیشینهٔ زنجیره‌ای که audit-service برمی‌گرداند)، نخستین حلقه از Genesis که Trigger با همان برچسب از نو حساب می‌کند، و هیچ دو حلقه‌ای
+>    یک پیشین ندارند؛ در Commit هر بازنگری رسید خودش را دارد (`tg_quotation_receipt_check`). Migration برگشت‌پذیر است و تا پیشنهاد یا رسیدی هست رد می‌شود.
+> 4. **کران‌ها:** `PROCUREMENT_QUOTATION_MAX_REVISIONS` (پیش‌فرض ۱۰، بیشینه ۲۰ = ۱۰٬۰۰۰ ÷ ۵۰۰ دعوت) `422 QUOTATION_REVISION_LIMIT`؛ حلقهٔ بیش از ۱۰٬۰۰۰
+>    `422 QUOTATION_RECEIPT_LIMIT` (پشتیبان؛ با کران‌های پیکربندی دست‌نیافتنی).
+> 5. **Idempotency با Digest کلیددار:** بدنهٔ این فرمان‌ها قیمت است، پس `request_hash` آن‌ها SHA-256 ساده نیست (حدس قیمت از نسخهٔ پشتیبان) بلکه
+>    HMAC نمک‌دار زیر کلید مشتق از KEK و بسته به سازمان و کاربر (`hmac-v1:<kekId>:<salt>:<mac>`، الگوی construction در #250 r1)؛ `IdempotencyStore`
+>    یک `RequestHasher` اختیاری گرفت که پیش‌فرضش همان SHA-256 فرمان‌های دیگر است.
+> 6. **رویدادها:** `QUOTATION_SUBMITTED`/`QUOTATION_REVISED`/`QUOTATION_WITHDRAWN` در `@rasta/contracts` (`events/procurement-quotation.ts`) با همان نام و
+>    نوع میدان‌های مصرف‌کنندهٔ PR 7، به‌علاوهٔ `submittedBy`؛ `QUOTATION_WITHDRAWN` رسید ندارد. شناسه‌ها به شکل ضرب‌شدهٔ سرویس (`RFQ_<ULID>`،
+>    `QOT_<ULID>`) سنجیده می‌شوند، پس Fixtureهای `rfq-evidence.spec.ts` به همین شکل درآمدند (نام و نوع میدان بی‌تغییر). `RFQ_CLOSED.quotationCount` اکنون
+>    شمار پیشنهادهای `SUBMITTED` زیر قفل `FOR UPDATE` بستن است: انصرافی که پیش‌تر Commit شده بیرون، انصرافی که پشت بستن مانده رد و درون شمار.
+> 7. **آزمون:** `test/quotation.int-spec.ts` — مهلت `−1ms` پذیرفته، دقیقاً مهلت و پس از آن رد؛ انتظار قفلی که از مهلت می‌گذرد؛ رد پایگاه داده بر ساعت
+>    خودش؛ انصراف و بستن در هر دو ترتیب؛ کران مبلغ در مرز دقیق؛ ثبت هم‌زمان؛ بازپخش با کلید؛ سازمان دیگر و نقش‌های ممنوع؛ و نشانگر ساختگی در
+>    قیمت، پاسخ و یادداشت که در رویداد، لاگ، انبار Idempotency و رمزنوشته نیست.
 
 ### PR 9 — بازگشایی (`L`)
 

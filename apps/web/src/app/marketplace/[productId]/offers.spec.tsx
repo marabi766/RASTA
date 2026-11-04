@@ -54,22 +54,6 @@ function render_(
   );
 }
 
-describe('the supplier qualification column', () => {
-  it.each([
-    ['SUBMITTED', 'ارسال‌شده'],
-    ['APPROVED', 'تأییدشده'],
-    ['REJECTED', 'ردشده'],
-    ['UNAVAILABLE', 'بررسی بازار در دسترس نیست'],
-  ])('says %s in Persian', (state, label) => {
-    const { getByText, container } = render_(undefined, {
-      kind: 'OK',
-      data: { items: [{ ...OFFER, supplierQualification: state }] },
-    });
-    expect(getByText(label)).toBeInTheDocument();
-    expect(container.textContent).not.toContain(state);
-  });
-});
-
 describe('the product header', () => {
   it('shows the product’s own name and unit', () => {
     const { getByText } = render_();
@@ -107,10 +91,11 @@ describe('the offers table', () => {
   });
 
   it('never renders the qualification as a check nobody performed', () => {
+    // No directory answer was passed: the badge is «نامشخص», not «واجد صلاحیت».
     const { getByText, queryByText, container } = render_();
-    expect(getByText('بررسی بازار در دسترس نیست')).toBeInTheDocument();
-    expect(queryByText('تأییدشده')).toBeNull();
-    // Neutral: not a verdict on the supplier, not a promise that it will change.
+    expect(getByText('وضعیت نامشخص')).toBeInTheDocument();
+    expect(queryByText('واجد صلاحیت')).toBeNull();
+    // Neutral (task 248 wording rule): no verdict on the supplier, no promise that it will change.
     expect(container.textContent).not.toMatch(/هنوز|فعال نیست|رد شد|فاقد صلاحیت|بی‌صلاحیت/);
   });
 

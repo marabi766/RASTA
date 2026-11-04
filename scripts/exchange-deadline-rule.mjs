@@ -166,6 +166,8 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  * shutdown, a client leaving, or a database/TCP exchange.
  */
 export const ABORT_OWNERS = Object.freeze({
+  'services/marketplace-service/src/temporal/saga.client.ts':
+    'Temporal gRPC shutdown cancellation via Connection.withAbortSignal; no HTTP fetch or response body',
   'apps/web/src/lib/session-refusal.ts':
     "the browser's same-origin session probe: its own deadline, the body cancelled on every path (#507 r1 F1)",
   'services/api-gateway/src/proxy/gateway.controller.ts':

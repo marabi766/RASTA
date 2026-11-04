@@ -5,6 +5,7 @@ import { fetchDemoMode } from '@/server/demo-mode';
 import { canPlaceOrder } from '@/server/place-order';
 import { webServerEnv } from '@/server/env';
 import { mintSubmissionId, submissionBinding } from '@/server/submission';
+import { fetchOfferSuppliers } from '@/server/offer-suppliers';
 import { fetchOffers, fetchProduct, OFFER_SORTS } from '@/server/marketplace';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { OffersScreen } from './OffersScreen';
@@ -64,6 +65,12 @@ export default async function ProductOffersPage({
 
   const demoMode = await fetchDemoMode(session);
 
+  // Names and qualification for the table (task 305); a failed read leaves them unknown.
+  const suppliers = await fetchOfferSuppliers(
+    session,
+    offers.kind === 'OK' ? offers.data.items.map((offer) => offer.supplierOrganizationId) : [],
+  );
+
   return (
     <AppShell
       key={actingScope(session)}
@@ -83,6 +90,7 @@ export default async function ProductOffersPage({
         context={pageContext(session)}
         product={product}
         offers={offers}
+        suppliers={suppliers}
         productId={productId}
         sort={sort}
         demoMode={demoMode}

@@ -33,7 +33,7 @@ const datamodel = {
     {
       name: 'User',
       fields: [
-        relation('memberships', 'Membership'),
+        { ...relation('memberships', 'Membership'), relationName: 'MembershipUser' },
         relation('profiles', 'Profile'),
         relation('globalProfile', 'Profile', false),
         relation('inverseMembership', 'Membership', false),
@@ -44,14 +44,17 @@ const datamodel = {
     {
       name: 'Membership',
       fields: [
-        relation('user', 'User', false),
+        { ...relation('user', 'User', false, ['userId']), relationName: 'MembershipUser' },
         { name: 'payload', type: 'Json', kind: 'scalar', isList: false },
       ],
     },
   ],
 };
-const guard = createTenantGuardExtension({ scopedModels: ['Membership'], datamodel }).query
-  .$allModels.$allOperations;
+const guard = createTenantGuardExtension({
+  scopedModels: ['Membership'],
+  datamodel,
+  scalarFkFamily: 'identity',
+}).query.$allModels.$allOperations;
 const review = {
   relation: 'User.memberships',
   reason: 'Reviewed membership mutation for the acting tenant only',
@@ -453,11 +456,13 @@ it('to-one connect from a tenant model to a global target cannot evict another t
   await expect(result).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
   expect(query).not.toHaveBeenCalled();
 });
-it('global-to-global relations retain their tenantless platform semantics', async () => {
+it('global-to-global relations without an owning classification refuse', async () => {
   const query = jest.fn().mockResolvedValue('ok');
   const args = { data: { globalProfile: { connect: { id: 'global-profile' } } } };
-  await guard({ model: 'User', operation: 'update', args, query });
-  expect(query).toHaveBeenCalledWith(args);
+  await expect(guard({ model: 'User', operation: 'update', args, query })).rejects.toMatchObject({
+    code: 'TENANT_MISMATCH',
+  });
+  expect(query).not.toHaveBeenCalled();
 });
 describe.each(['createMany', 'createManyAndReturn'])('%s empty batches', (operation) => {
   it.each([

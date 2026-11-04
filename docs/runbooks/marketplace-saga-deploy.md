@@ -36,12 +36,19 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 
 ### گام ۳ — Gate
 
-از ریشهٔ مخزن، با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر سه اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
+پیش از گام ۲ زمان UTC را با `date -u +%Y-%m-%dT%H:%M:%S.000Z` ثبت کن و در همهٔ تکرارهای Gate
+همان مقدار را در `MARKETPLACE_SAGA_STOP_TIME` نگه دار؛ زمان را به جلو نبر. بررسی باید پیش از انقضای
+Retention تاریخچه و Visibility انجام شود؛ پس از آن، تطبیق عملیاتی لازم است.
+
+Gate همیشه از ریشهٔ مخزن **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout
+انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر پنج اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
 TEMPORAL_ADDRESS='<as the service>' TEMPORAL_NAMESPACE='<as the service>' \
   MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' \
+  MARKETPLACE_TARGET_PACKAGE_JSON='<package.json extracted from target image>' \
+  MARKETPLACE_SAGA_STOP_TIME='<recorded UTC time>' \
   node scripts/marketplace-saga-drain-check.mjs
 ```
 
@@ -55,22 +62,29 @@ temporal task-queue describe "${C[@]}" --task-queue "$MARKETPLACE_TEMPORAL_TASK_
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # n
 temporal workflow list "${C[@]}" --query "$Q" --output json                                           # باید دقیقاً n اجرای یکتا باشد، بی تکرار
 temporal workflow describe "${C[@]}" --workflow-id <id> --run-id <runId> --output json                 # هر ردیف یک بار: .pendingActivities نیست یا []
+temporal workflow show "${C[@]}" --workflow-id <id> --run-id <runId> --output json --no-json-shorthand-payloads # سازگاری نسخه
+CQ="WorkflowType=\"orderSaga\" AND ExecutionStatus=\"ContinuedAsNew\" AND CloseTime >= \"$MARKETPLACE_SAGA_STOP_TIME\""
+temporal workflow count "${C[@]}" --query "$CQ" --output json                                         # c
+temporal workflow list "${C[@]}" --query "$CQ" --output json                                          # دقیقاً c اجرای یکتا
+temporal workflow describe "${C[@]}" --workflow-id <id> --output json                                # اجرای جاری هر workflowId، بدون run-id
+temporal workflow show "${C[@]}" --workflow-id <id> --run-id <currentRunId> --output json --no-json-shorthand-payloads # شناسهٔ اجرای پاسخ describe
+temporal workflow count "${C[@]}" --query "$CQ" --output json                                         # باز همان c
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # باز همان n
 ```
 
 Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی‌کند؛ شکل‌ها همان خروجی CLI ـِ Image سنجاق‌شده (`temporalio/auto-setup:1.26.2`)
 روی سرور توسعه‌اند. هر شکل دیگر کد ۱ است (Codex دور ۳ روی #283):
 
-| فرمان                 | تنها شکل پذیرفته                                                                                                                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflow count`      | `{"count": "<n>"}` (رشتهٔ رقمی) یا `{"count": <n>}` (عدد صحیح نامنفی)، و `{}` برای صفر (CLI صفر را نمی‌نویسد)؛ هیچ کلید دیگری نه                                                          |
-| `task-queue describe` | شیئی با کلید `pollers` (`null` یا فهرست) و `stats` (فهرست)                                                                                                                                |
-| `workflow list`       | فهرستی که هر ردیفش `execution.workflowId` و `execution.runId` و نوع `orderSaga` دارد و هیچ جفت (`workflowId`، `runId`) در آن دو بار نیست (Codex دور ۴)                                    |
-| `workflow describe`   | `workflowExecutionInfo.execution` با همان `workflowId` **و** همان `runId` ردیف فهرست، نوع `orderSaga`، `executionConfig.taskQueue.name` همان Queue؛ `pendingActivities` نیست یا فهرست است |
+| فرمان                 | تنها شکل پذیرفته                                                                                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflow count`      | `{"count": "<n>"}` (رشتهٔ رقمی) یا `{"count": <n>}` (عدد صحیح نامنفی)، و `{}` برای صفر (CLI صفر را نمی‌نویسد)؛ هیچ کلید دیگری نه                                                                                    |
+| `task-queue describe` | شیئی با کلید `pollers` (`null` یا فهرست) و `stats` (فهرست)                                                                                                                                                          |
+| `workflow list`       | فهرستی که هر ردیفش `execution.workflowId` و `execution.runId` و نوع `orderSaga` دارد و هیچ جفت (`workflowId`، `runId`) در آن دو بار نیست (Codex دور ۴)                                                              |
+| `workflow describe`   | `workflowExecutionInfo.execution` با همان `workflowId` (و برای اجرای سنجاق‌شده همان `runId`)، وضعیت شناخته‌شده، نوع `orderSaga`، `executionConfig.taskQueue.name` همان Queue؛ `pendingActivities` نیست یا فهرست است |
 
 | کد خروج | معنا                                                                                                                                                                                                                          | استقرار      |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `0`     | هیچ Poller روی Queue، شمار و فهرست یکی، هیچ Activity در انتظار                                                                                                                                                                | مجاز (گام ۴) |
+| `0`     | هیچ Poller روی Queue، هر دو شمار و فهرست یکی، اجرای جاری بررسی شده، هیچ Activity در انتظار                                                                                                                                    | مجاز (گام ۴) |
 | `1`     | Poller یا Activity در انتظار یافت شد؛ جزئیات خروجی CLI چاپ نمی‌شود                                                                                                                                                            | **متوقف**    |
 | `1`     | `cannot verify — deployment blocked`: تنظیمی نیست، CLI نیست یا شکست خورد، پاسخی با شکلی جز جدول بالا، اجرایی دو بار فهرست شده، شمار و اجراهای یکتای فهرست نمی‌خوانند، شمار در حین بررسی عوض شد، Workflow ـی روی Queue ـی دیگر | **متوقف**    |
 
@@ -91,5 +105,136 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 
 مخزن اسکریپت یا Job استقراری برای marketplace-service ندارد (`.github/workflows/ci.yml` فقط می‌سازد و می‌آزماید؛ Manifest
 استقراری در مخزن نیست)، پس Gate فعلاً گامی دستی است. هر خط استقرار که ساخته شود باید همین اسکریپت را میان گام ۲ و ۴
-اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
+از جدیدترینِ انتشار در حال اجرا و انتشار هدف با هر چهار متغیر گام ۳ اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
 ـِ CI می‌آزماید (`pnpm run test:marketplace-saga-drain-check`).
+
+## Durable start delivery (task 1214 A)
+
+Placement commits its start intent on the order row. The immediate post-commit
+start and the ten-second reconciliation sweep share the same fenced claim.
+Each sweep claims at most four due rows in `(next_attempt_at, id)` order,
+using the partial due index and `SKIP LOCKED`; retries advance their due key
+by thirty seconds so one failed order cannot monopolize the head. A thirty-second
+lease exceeds the bounded start RPC (five seconds, plus a one-second connect).
+An expired claimant cannot acknowledge a newer claim. The receipt is retained
+with the order; neither idempotency expiry nor outbox purge removes it.
+
+Only accepted starts and `AlreadyStarted` acknowledge delivery. Disabled Temporal
+and transport failures leave an intent pending. Recovery includes `CANCELLING`:
+the workflow reads the committed cancellation, checks for an existing obligation,
+and cancels without first creating a hold. Started-but-failed workflows require
+operator reconciliation; the starter never deliberately creates a replacement.
+
+Legacy rows have no requested timestamp. Their first possible start is conservatively
+the order creation time. For any unacknowledged start older than the namespace's
+current history retention (queried from Temporal, with a one-minute safety margin),
+the starter describes the deterministic workflow id. Intent age is measured by the
+database clock, so a worker clock skew cannot turn expired history into proof of absence. An existing execution, including
+a closed/failed one, establishes delivery. Missing history is ambiguous and stays
+pending: do not clear an intent or invent a receipt to silence the alert. Reconcile
+Temporal archival/deployment records and economic ownership before an operator
+chooses a recovery. The same protection covers acceptance followed by a crash before
+acknowledgment, including a crash lasting beyond history retention. A deployment
+that shortens retention after deleting older history also requires operator review.
+
+`rasta_marketplace_saga_start_backlog` and
+`rasta_marketplace_saga_start_backlog_age_seconds` expose counts/age only.
+`RastaMarketplaceSagaStartBacklogAging` fires after age exceeds five minutes for
+two minutes. Local Prometheus loads the rule; external notification routing remains
+a deployment responsibility. Starter shutdown aborts active RPCs, joins database
+work and stops polling before Prisma disconnects.
+
+## Bounded transport and long waits (task 1214 B)
+
+Every economic response, including refusals and obligation lookup pages, is read
+into a buffer capped at 1 MiB. The shared exchange deadline remains active through
+the stream read and JSON parse; a monotonic check refuses a parse that completes
+after the deadline. Invalid JSON, invalid UTF-8, oversized bodies and malformed
+refusal envelopes return fixed platform errors without copying body fragments.
+No transport abort proves that a financial command did not commit: deterministic
+order/operation keys and economic-service reconciliation remain authoritative.
+
+Patched activities have a ten-second heartbeat timeout. They heartbeat immediately
+and once per second while running; the production worker caps heartbeat throttling
+at one second. Temporal's activity cancellation signal cancels the HTTP exchange,
+and cancellation remains a `CancelledFailure`. Heartbeat intervals and exchange
+listeners are removed on exit. Legacy activities without a heartbeat timeout do
+not heartbeat. A cancelled transport neither reverses money nor marks an order
+failed from transport evidence.
+
+The workflow checks for rollover between waiting iterations, after all activities
+have completed. It continues as new at 2,000 history events, 2 MiB, or an earlier
+server suggestion. The assumed server defaults are hard limits of 51,200 events /
+50 MiB, warnings at 10,240 events / 10 MiB, and suggestions at 4,096 events /
+4 MiB. These are the [Temporal 1.26.2 defaults](https://github.com/temporalio/temporal/blob/v1.26.2/common/dynamicconfig/constants.go#L351),
+matching the version pinned by Compose,
+not verified production settings: this repository establishes no deployed history
+overrides. Verify them when deploying. The
+[SDK suggestion](https://typescript.temporal.io/api/namespaces/workflow/interfaces/WorkflowInfo)
+is honored where available; the count/size bounds also work without that hint.
+The internal test threshold can only lower the event ceiling.
+
+A rollover carries both dispute identities, absolute reminder deadlines, status
+and counters, and the monotonic activity sequence. Financial effects are already
+recorded by their owner before a checkpoint; the new run re-reads that owner state.
+It does not repeat initial hold placement. Activity receipt keys are run-scoped:
+workflow id / run id / activity id, including legacy numeric activity ids. Patched
+activity ids use a sequence carried across runs. Financial HTTP idempotency keys
+remain derived from the order and operation/dispute identity, unchanged by rollover.
+
+`order-saga-durable-rollover-v1` gates new activity options/identities and rollover.
+Pre-change history replays the original commands; an existing live run can adopt
+the patch at a later checkpoint. The checked-in synthetic 49-event pre-change
+history and newly captured pre/post rollover histories are explicitly replayed
+with `Worker.runReplayHistory` in the workflow test suite.
+
+### Forward-only worker compatibility boundary
+
+After adoption of `order-saga-durable-rollover-v1`, the minimum compatible worker
+protocol is **1**. Draining activities does not make a downgrade safe. The gate
+reads complete durable histories for the executions it inspects with `workflow show
+--output json --no-json-shorthand-payloads` (the pinned CLI supports this flag;
+[CLI reference](https://docs.temporal.io/cli/workflow#show)). It requires protocol 1
+for either a recorded `core_patch` rollover marker or a start input carrying
+`resume`, including a continued run before its first workflow task/activity.
+Durable history proves protocol requirements for a discovered run; it does not
+discover runs or establish visibility completeness. It adds no workflow commands.
+
+Always run the gate from the **newest of the running and target releases**;
+never use the target checkout when rolling back. Use the five-variable invocation
+in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
+
+Extract `services/marketplace-service/package.json` from the **immutable target
+image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
+`name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
+support (this build: 1); an absent field means protocol **0**, the strictest legacy
+capability, so pre-protocol images are checked without modifying their manifests.
+Unreadable manifests, wrong names and malformed/unknown protocol values block
+even an empty queue. An incompatible
+target blocks regardless of pending activities. Missing/malformed markers,
+unsupported payload encodings and incomplete histories (event sequence/length
+checked against describe) also block. Never add protocol 1 to an old build to
+bypass the gate: it must preserve both continuation state and patched commands.
+
+Use this gate for **every** deployment, including rollback. Once a running saga
+requires protocol 1, restore only a compatible image or ship a forward fix. Never
+reset/terminate a saga to downgrade. Keep the stopped-worker/no-new-start window
+above; a history change during inspection requires another drain/check.
+
+## Continued-as-new visibility gap (FU-046)
+
+The gate uses continued-as-new predecessors closed at or after the recorded stop
+time, then describes each distinct workflow's **current** run by workflow id
+without a run id. This preserves deployment with idle running sagas while checking
+successors that RUNNING visibility may not have indexed. Both lists must contain
+unique executions and match their counts; count changes, partial pagination,
+unknown output/status, and describe failures block. A current running successor
+absent from the running list also blocks, even with no pending activities.
+
+Exit 0 proves only the observations made during this check: no listed poller,
+complete count-matched lists, and no pending activities in the inspected listed
+and current runs. It does not prove zero running workflows, completed settlements,
+or that held funds cannot move after workers resume. All old replicas must remain
+stopped, no other worker may poll this queue, and the stop timestamp must precede
+the shutdown and remain within history/visibility retention. This is not an atomic
+snapshot or an independent guarantee that Temporal visibility is fully up to date.

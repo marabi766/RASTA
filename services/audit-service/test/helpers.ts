@@ -180,6 +180,8 @@ export const PROTECTIVE_TRIGGERS = [
   'tg_tender_receipt_link_no_truncate',
   'tg_bid_access_evidence_append_only',
   'tg_bid_access_evidence_no_truncate',
+  'tg_rfq_receipt_link_append_only',
+  'tg_rfq_receipt_link_no_truncate',
   'tg_payment_reconciliation_evidence_append_only',
   'tg_payment_reconciliation_evidence_no_truncate',
 ] as const;
@@ -394,6 +396,16 @@ export async function cleanupRun(
       await tx.$executeRawUnsafe(`DELETE FROM ${table} WHERE tender_id LIKE $1`, like);
       await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
     }
+
+    // The RFQ-evidence rows (COM-007 PR 7): the same, for quotation receipts.
+    await tx.$executeRawUnsafe(`DELETE FROM rfq_receipt_pending WHERE rfq_id LIKE $1`, like);
+    await tx.$executeRawUnsafe(
+      'ALTER TABLE rfq_receipt_link DISABLE TRIGGER tg_rfq_receipt_link_append_only',
+    );
+    await tx.$executeRawUnsafe(`DELETE FROM rfq_receipt_link WHERE rfq_id LIKE $1`, like);
+    await tx.$executeRawUnsafe(
+      'ALTER TABLE rfq_receipt_link ENABLE TRIGGER tg_rfq_receipt_link_append_only',
+    );
 
     // D-046's evidence rows: append-only for everybody, lifted the same way.
     await tx.$executeRawUnsafe(

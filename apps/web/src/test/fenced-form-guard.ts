@@ -142,12 +142,13 @@ function isAlias(node: ts.Expression): boolean {
 interface Sym {
   readonly module: string;
   readonly name: string;
+  readonly member?: string;
 }
 
 const NAMESPACE = '*';
-const key = (sym: Sym) => `${sym.module}#${sym.name}`;
+const key = (sym: Sym) => `${sym.module}#${sym.name}${sym.member ? `.${sym.member}` : ''}`;
 const is = (sym: Sym | null, module: string, ...names: string[]) =>
-  sym !== null && sym.module === module && names.includes(sym.name);
+  sym !== null && sym.member === undefined && sym.module === module && names.includes(sym.name);
 
 const REACT = 'react';
 const BOUNDARY_MODULE = 'lib/fenced-submission.ts';
@@ -169,8 +170,6 @@ interface Module {
   readonly exports: Map<string, Exported>;
   /** `export * from` targets. */
   readonly stars: string[];
-  /** Every module named by an import or export declaration. */
-  readonly refers: Set<string>;
   /** Whether the file is a `'use server'` module. */
   readonly server: boolean;
   /** Local `const` names → what they alias: an expression, or a member of one (destructuring). */
@@ -194,7 +193,6 @@ class Program {
     const imports = new Map<string, Imported>();
     const exports = new Map<string, Exported>();
     const stars: string[] = [];
-    const refers = new Set<string>();
     const target = (specifier: ts.Expression) =>
       ts.isStringLiteral(specifier)
         ? (resolvePath(file, specifier.text, this.sources) ?? specifier.text)
@@ -203,7 +201,6 @@ class Program {
       if (ts.isImportDeclaration(statement)) {
         const from = target(statement.moduleSpecifier);
         if (from === null) continue;
-        refers.add(from);
         const clause = statement.importClause;
         if (clause?.name) imports.set(clause.name.text, { module: from, name: 'default' });
         const bindings = clause?.namedBindings;
@@ -219,7 +216,6 @@ class Program {
         }
       } else if (ts.isExportDeclaration(statement)) {
         const from = statement.moduleSpecifier ? target(statement.moduleSpecifier) : null;
-        if (from !== null) refers.add(from);
         const clause = statement.exportClause;
         if (!clause) {
           if (from !== null) stars.push(from);
@@ -254,15 +250,19 @@ class Program {
             ts.isInterfaceDeclaration(statement) ||
             ts.isTypeAliasDeclaration(statement) ||
             ts.isEnumDeclaration(statement)) &&
-          statement.name
+          (statement.name || (isDefault && ts.isFunctionDeclaration(statement)))
         ) {
-          exports.set(isDefault ? 'default' : statement.name.text, {
+          const name = statement.name?.text ?? 'default';
+          exports.set(isDefault ? 'default' : name, {
             kind: 'LOCAL',
-            local: statement.name.text,
+            local: name,
           });
         }
-      } else if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) {
-        exports.set('default', { kind: 'LOCAL', local: statement.expression.text });
+      } else if (ts.isExportAssignment(statement)) {
+        exports.set('default', {
+          kind: 'LOCAL',
+          local: ts.isIdentifier(statement.expression) ? statement.expression.text : 'default',
+        });
       }
     }
     const first = source.statements[0];
@@ -289,7 +289,7 @@ class Program {
         }
       }
     });
-    const parsed = { file, source, imports, exports, stars, refers, server, locals };
+    const parsed = { file, source, imports, exports, stars, server, locals };
     this.modules.set(file, parsed);
     return parsed;
   }
@@ -323,7 +323,7 @@ class Program {
       // `export const keep = answerThing`: the alias's own definition.
       const local = parsed.locals.get(entry.local);
       const aliased =
-        local && isAlias(local.from)
+        local && (local.member !== undefined || isAlias(local.from))
           ? this.resolve(module, ts.factory.createIdentifier(entry.local))
           : null;
       return aliased ?? { module, name: entry.local };
@@ -351,7 +351,10 @@ class Program {
     seen.add(module);
     const parsed = this.module(module);
     for (const star of parsed.stars) this.reexported(star, seen);
-    for (const entry of parsed.exports.values()) {
+    for (const [name, entry] of parsed.exports) {
+      const sym = this.exported(module, name);
+      if (sym !== null) this.reexported(sym.module, seen);
+      // Preserve the fail-closed dependency even when a FROM name is missing.
       if (entry.kind === 'FROM') this.reexported(entry.module, seen);
     }
     return seen;
@@ -370,8 +373,7 @@ class Program {
     }
     if (ts.isPropertyAccessExpression(node)) {
       const base = this.resolve(file, node.expression, depth + 1);
-      if (base === null || base.name !== NAMESPACE) return null;
-      return this.exported(base.module, node.name.text);
+      return this.member(base, node.name.text);
     }
     if (!ts.isIdentifier(node)) return null;
     const name = node.text;
@@ -383,9 +385,7 @@ class Program {
     if (local) {
       const base = this.resolve(file, local.from, depth + 1);
       if (local.member === undefined) return base;
-      return base !== null && base.name === NAMESPACE
-        ? this.exported(base.module, local.member)
-        : null;
+      return this.member(base, local.member);
     }
     // Defined in this file at the top level.
     for (const statement of parsed.source.statements) {
@@ -397,6 +397,12 @@ class Program {
       }
     }
     return null;
+  }
+
+  /** Namespace exports and object members retain their origin through every alias. */
+  private member(base: Sym | null, name: string): Sym | null {
+    if (base === null || base.member !== undefined) return null;
+    return base.name === NAMESPACE ? this.exported(base.module, name) : { ...base, member: name };
   }
 
   /** Whether `sym` is defined in a `'use server'` module, or in an `…actions` module. */
@@ -429,7 +435,10 @@ function calls(source: ts.SourceFile): ts.CallExpression[] {
 /** The function a declaration or `const` defines under `name` at the top level of `source`. */
 function topLevelFunction(source: ts.SourceFile, name: string): ts.Node | null {
   for (const statement of source.statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name?.text === name) return statement;
+    if (ts.isFunctionDeclaration(statement) && (statement.name?.text ?? 'default') === name)
+      return statement;
+    if (name === 'default' && ts.isExportAssignment(statement) && isFunction(statement.expression))
+      return statement.expression;
     if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         if (
@@ -497,20 +506,12 @@ export function fencedModules(sources: Sources): Set<string> {
 /** Whether `file` refers to something a store module defines (through any barrel). */
 function refersToStore(file: string, { program, stores }: Discovery): boolean {
   const parsed = program.module(file);
-  for (const imported of parsed.imports.values()) {
-    if (
-      imported.name === NAMESPACE ||
-      (imported.name === 'default' && !program.sources.has(imported.module))
-    ) {
-      if ([...program.reexported(imported.module)].some((module) => stores.has(module)))
-        return true;
-      continue;
-    }
-    const sym = program.exported(imported.module, imported.name);
+  for (const [name, imported] of parsed.imports) {
+    const sym = program.resolve(file, ts.factory.createIdentifier(name));
     if (sym !== null && stores.has(sym.module)) return true;
-    // A barrel that names a store but whose export cannot be followed: fail closed.
-    if (sym === null && [...program.reexported(imported.module)].some((m) => stores.has(m)))
-      return true;
+    // A namespace exposes all its exports; an unresolved barrel is gated too.
+    const module = sym?.name === NAMESPACE ? sym.module : sym === null ? imported.module : null;
+    if (module !== null && [...program.reexported(module)].some((m) => stores.has(m))) return true;
   }
   return false;
 }
@@ -677,12 +678,10 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       const writer =
         callee !== null && stores.has(callee.module) && /^(save|answer|settle)/.test(callee.name);
       const slotWrite =
-        ts.isPropertyAccessExpression(node.expression) &&
-        /^(start|answer|settle)$/.test(node.expression.name.text) &&
-        (() => {
-          const base = resolve(node.expression.expression);
-          return base !== null && base.name !== NAMESPACE && stores.has(base.module);
-        })();
+        callee !== null &&
+        stores.has(callee.module) &&
+        callee.member !== undefined &&
+        /^(start|answer|settle)$/.test(callee.member);
       if ((writer || slotWrite) && !insideBoundary(node)) {
         flag('store', node, `${node.expression.getText()}(...) outside the boundary`);
       }
@@ -708,9 +707,8 @@ export function fencedFormViolations(sources: Sources): Violation[] {
   const { program } = discovery;
   for (const file of program.files()) {
     if (file === GATE_MODULE) continue;
-    const { source, refers } = program.module(file);
-    // Only a file that imports the gate's module, or a barrel re-exporting it, can draw the gate.
-    if (![...refers].some((module) => program.reexported(module).has(GATE_MODULE))) continue;
+    const { source } = program.module(file);
+    // Resolve every JSX tag through the same graph used by form discovery.
     walk(source, (node) => {
       if (
         (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&

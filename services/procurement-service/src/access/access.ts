@@ -126,6 +126,17 @@ export class ProcurementAccess {
     return { organizationId: caller.organizationId };
   }
 
+  /**
+   * The caller of an invited supplier's quotation commands (plan PR 8): the same person the
+   * supplier side reads with — `PROCUREMENT_SUPPLIER_ROLES` in its own organization, never the
+   * oversight role, a service or the platform operator, even beside a supplier role (ADR-066 § 4's
+   * forbidden list) — judged before anything is read. Whether the RFQ invites that organization is
+   * judged next, by the read itself: no invitation is 404.
+   */
+  assertQuotationSupplier(): Acting {
+    return this.assertRfqSupplierReader();
+  }
+
   private rfqReaderRoles(): readonly string[] {
     return [...new Set([...this.rfqIssuerRoles, ...this.demandRoles])];
   }

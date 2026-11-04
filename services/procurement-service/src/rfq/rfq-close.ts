@@ -45,9 +45,11 @@ export class RfqClose {
         trigger: closedBy === null ? 'SWEEPER' : 'MANUAL',
         closedBy,
         closedAt: now.toISOString(),
-        // ADR-070 § 9: the sealed quotations it holds at its close. None exist before quotations
-        // arrive (plan PR 8), which counts them here.
-        quotationCount: 0,
+        // ADR-070 § 9: the sealed quotations standing at its close. Every quotation command holds
+        // the RFQ `FOR SHARE` and the caller holds it `FOR UPDATE`, so this count is exactly what
+        // the close shuts in: a withdrawal that committed first is out, one queued behind is
+        // refused at the deadline (plan PR 8).
+        quotationCount: await this.repository.countStandingQuotations(tx, rfq),
       },
     });
     return closed;

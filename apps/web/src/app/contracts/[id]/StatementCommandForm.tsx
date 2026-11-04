@@ -42,6 +42,7 @@ import {
   type UnconfirmedStatement,
 } from './statement-form-state';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
+import { ownText } from '@/lib/own-key';
 
 /**
  * One statement command this viewer may issue — drafting a statement of the
@@ -411,7 +412,7 @@ const REFUSAL_MESSAGES: Record<Extract<StatementFormState, { kind: 'REFUSED' }>[
 /** A 403's closed reasons in fixed words; the first one this portal has words for. */
 export function forbiddenText(reasons: readonly string[]): string | null {
   for (const reason of reasons) {
-    const text = STATEMENT_REFUSAL_TEXT[reason];
+    const text = ownText(STATEMENT_REFUSAL_TEXT, reason);
     if (text) return text;
   }
   return null;

@@ -1,10 +1,10 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
-import { apiErrorSchema as sharedApiErrorSchema } from '@rasta/contracts';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
 import {
+  publishedApiErrorSchema as apiErrorSchema,
   isOptionalField,
   objectShapeOf,
   RETRY_AFTER_MAX_SECONDS,
@@ -26,6 +26,13 @@ import {
   withdrawDemandSchema,
 } from '../demand/dto';
 import { AggregationRfqController, RfqController } from '../rfq/rfq.controller';
+import { QuotationController } from '../quotation/quotation.controller';
+import { QuotationService } from '../quotation/quotation.service';
+import {
+  putQuotationSchema,
+  quotationReceiptViewSchema,
+  withdrawQuotationSchema,
+} from '../quotation/dto';
 import { RfqService } from '../rfq/rfq.service';
 import { cancelRfqSchema, issueRfqSchema, listRfqsQuerySchema, rfqViewSchema } from '../rfq/dto';
 import { IdempotencyStore } from '../shared/idempotency';
@@ -55,20 +62,6 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 /** Pinned so the committed document is deterministic. */
 export const PROCUREMENT_VERSION = '0.1.0';
 
-const errorDetailSchema = z
-  .object({ path: z.string(), message: z.string(), code: z.string().optional() })
-  .strict();
-
-/**
- * The platform error envelope exactly as `AllExceptionsFilter` emits it: `correlationId` and
- * `timestamp` always, `traceId` and `path` when the request context has them, `details` only when
- * non-empty. Taken from the shared schema so the two cannot drift (PR-327 r1 F3: a strict local copy
- * without `timestamp` and `path` refused every real error body); only strictness is this service's.
- */
-const apiErrorSchema = sharedApiErrorSchema
-  .extend({ details: z.array(errorDetailSchema).optional() })
-  .strict();
-
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z
     .object({
@@ -93,6 +86,11 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/rfqs/{id}': { status: '200', schema: rfqViewSchema },
   'POST /v1/rfqs/{id}/close': { status: '200', schema: rfqViewSchema },
   'POST /v1/rfqs/{id}/cancel': { status: '200', schema: rfqViewSchema },
+  'PUT /v1/rfqs/{id}/quotations/mine': { status: '200', schema: quotationReceiptViewSchema },
+  'POST /v1/rfqs/{id}/quotations/mine/withdraw': {
+    status: '200',
+    schema: quotationReceiptViewSchema,
+  },
 };
 
 /** Every command takes a strict body. */
@@ -103,6 +101,8 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/aggregation-settings': recordAggregationSettingSchema,
   'POST /v1/aggregations/{id}/rfq': issueRfqSchema,
   'POST /v1/rfqs/{id}/cancel': cancelRfqSchema,
+  'PUT /v1/rfqs/{id}/quotations/mine': putQuotationSchema,
+  'POST /v1/rfqs/{id}/quotations/mine/withdraw': withdrawQuotationSchema,
 };
 
 /**
@@ -118,7 +118,11 @@ const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
  * The commands that ask another service before they write, fail closed (ADR-070 § 7): issuing an
  * RFQ asks supplier-service for each invitee's standing (and needs a configured KEK).
  */
-const UPSTREAM_COMMANDS: ReadonlySet<string> = new Set(['POST /v1/aggregations/{id}/rfq']);
+const UPSTREAM_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/aggregations/{id}/rfq',
+  // A quotation asks for the supplier's own standing (plan PR 8), and needs a configured KEK.
+  'PUT /v1/rfqs/{id}/quotations/mine',
+]);
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
 const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
@@ -128,6 +132,8 @@ const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/aggregations/{id}/rfq': 'rfqIssue',
   'POST /v1/rfqs/{id}/close': 'rfqClose',
   'POST /v1/rfqs/{id}/cancel': 'rfqCancellation',
+  'PUT /v1/rfqs/{id}/quotations/mine': 'quotation',
+  'POST /v1/rfqs/{id}/quotations/mine/withdraw': 'quotation',
 };
 
 /** `Retry-After` on a command's in-flight 409: optional, only that 409 carries it. */
@@ -230,11 +236,13 @@ export function buildProcurementOpenApiDocument(app: INestApplication): OpenAPIO
     AggregationController,
     AggregationRfqController,
     RfqController,
+    QuotationController,
     AggregationSettingController,
   ],
   providers: [
     { provide: DemandService, useValue: {} },
     { provide: RfqService, useValue: {} },
+    { provide: QuotationService, useValue: {} },
     { provide: AggregationSettingService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],

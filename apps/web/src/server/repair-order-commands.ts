@@ -9,6 +9,7 @@ import { z } from 'zod';
 import {
   IRR,
   MoneyInputError,
+  moneyInputMessage,
   PERSIAN_DECIMAL_SEPARATOR,
   PERSIAN_THOUSANDS_SEPARATOR,
   ZWNJ,
@@ -55,6 +56,7 @@ import { BIDI_CONTROL } from './drivers';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Writing to a repair order through the gateway (ADR-058 § 3, ADR-059 § 3).
@@ -80,7 +82,7 @@ import type { WebSession } from './session';
 // What a person types
 // ---------------------------------------------------------------------------
 
-const NOT_A_NUMBER = 'عدد معتبر وارد کنید';
+const NOT_A_NUMBER = formMessage('عدد معتبر وارد کنید');
 
 /**
  * A positive decimal typed as a string, in any digits and with either decimal
@@ -101,13 +103,13 @@ function positiveQuantity(label: string, maxDecimals: number, maxIntegerDigits: 
     .pipe(
       z
         .string()
-        .min(1, `${label} را وارد کنید`)
+        .min(1, formMessage(`${label} را وارد کنید`))
         .regex(new RegExp(`^\\d+(\\.\\d{1,${maxDecimals}})?$`), NOT_A_NUMBER)
         .refine(
           (value) => (value.split('.')[0] ?? '').length <= maxIntegerDigits,
-          `${label} بیش از حد بزرگ است`,
+          formMessage(`${label} بیش از حد بزرگ است`),
         )
-        .refine((value) => /[1-9]/.test(value), `${label} باید بیشتر از صفر باشد`),
+        .refine((value) => /[1-9]/.test(value), formMessage(`${label} باید بیشتر از صفر باشد`)),
     );
 }
 
@@ -120,7 +122,7 @@ function rialAmount(label: string, options: { readonly allowZero: boolean }) {
   return z.string().transform((raw, ctx): string => {
     const text = raw.trim();
     if (text === '') {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} را وارد کنید` });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: formMessage(`${label} را وارد کنید`) });
       return z.NEVER;
     }
     let minor: bigint;
@@ -128,7 +130,10 @@ function rialAmount(label: string, options: { readonly allowZero: boolean }) {
       minor = parseMoneyInput(text, IRR);
     } catch (cause) {
       if (cause instanceof MoneyInputError) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: cause.message });
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: moneyInputMessage(cause.failure, IRR),
+        });
         return z.NEVER;
       }
       throw cause;
@@ -137,15 +142,18 @@ function rialAmount(label: string, options: { readonly allowZero: boolean }) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: options.allowZero
-          ? `${label} نمی‌تواند منفی باشد`
-          : `${label} باید بیشتر از صفر باشد`,
+          ? formMessage(`${label} نمی‌تواند منفی باشد`)
+          : formMessage(`${label} باید بیشتر از صفر باشد`),
       });
       return z.NEVER;
     }
     // The ledger's own bound (BIGINT), not the platform's 30 digits: an amount
     // past it passes the schema and then fails in the database.
     if (minor > BigInt(MAX_AMOUNT_MINOR)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} بیش از حد بزرگ است` });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: formMessage(`${label} بیش از حد بزرگ است`),
+      });
       return z.NEVER;
     }
     return minor.toString();
@@ -160,8 +168,8 @@ function requiredText(label: string, min: number, max: number) {
     .pipe(
       z
         .string()
-        .min(min, `${label} دست‌کم ${min} نویسه باشد`)
-        .max(max, `${label} حداکثر ${max} نویسه است`)
+        .min(min, formMessage(`${label} دست‌کم ${min} نویسه باشد`))
+        .max(max, formMessage(`${label} حداکثر ${max} نویسه است`))
         .refine(
           (value) => value === '' || MAINTENANCE_DISPLAY_TEXT.test(value),
           DISPLAY_TEXT_MESSAGE,
@@ -169,8 +177,10 @@ function requiredText(label: string, min: number, max: number) {
     );
 }
 
-const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
-const REFERENCE_CONTROL_MESSAGE = 'شناسه نویسهٔ نامرئی، نیم‌فاصله یا شکست خط نمی‌پذیرد';
+const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد');
+const REFERENCE_CONTROL_MESSAGE = formMessage(
+  'شناسه نویسهٔ نامرئی، نیم‌فاصله یا شکست خط نمی‌پذیرد',
+);
 
 /**
  * An optional reference, up to 128 characters, empty meaning none — the
@@ -185,7 +195,7 @@ function optionalReference(label: string) {
   return z
     .string()
     .trim()
-    .max(128, `${label} حداکثر ۱۲۸ نویسه است`)
+    .max(128, formMessage(`${label} حداکثر ۱۲۸ نویسه است`))
     .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
     .refine((value) => WITHOUT_CONTROL_CHARACTER.test(value), REFERENCE_CONTROL_MESSAGE)
     .transform((value) => (value === '' ? undefined : value));
@@ -203,7 +213,7 @@ export const startRepairFormSchema = z
   .object({
     workSummary: optionalText('شرح کار', 1000).refine(
       (value) => value === undefined || value.length >= 2,
-      'شرح کار دست‌کم ۲ نویسه باشد',
+      formMessage('شرح کار دست‌کم ۲ نویسه باشد'),
     ),
   })
   .strict();
@@ -300,7 +310,7 @@ export const recordPartFormSchema = z
     quantity: positiveQuantity('تعداد', 3, 9),
     unit: requiredText('واحد', 1, 32),
     unitCostMinor: rialAmount('بهای واحد', { allowZero: true }),
-    source: z.enum(PART_SOURCES, { error: 'منبع قطعه را انتخاب کنید' }),
+    source: z.enum(PART_SOURCES, { error: formMessage('منبع قطعه را انتخاب کنید') }),
     sourceReference: optionalReference('ارجاع منبع'),
   })
   .strict();
@@ -332,7 +342,7 @@ export const recordLabourFormSchema = z
     description: requiredText('شرح کار', 2, 500),
     technician: optionalText('نام تعمیرکار', 120).refine(
       (value) => value === undefined || value.length >= 2,
-      'نام تعمیرکار دست‌کم ۲ نویسه باشد',
+      formMessage('نام تعمیرکار دست‌کم ۲ نویسه باشد'),
     ),
     hours: positiveQuantity('ساعت کار', 2, 6),
     hourlyRateMinor: rialAmount('نرخ ساعتی', { allowZero: true }),
@@ -364,7 +374,7 @@ export function recordCostFormValues(form: FormData): RecordCostFormValues {
 export const recordCostFormSchema = z
   .object({
     category: z.enum(DIRECT_COST_CATEGORIES, {
-      error: 'نوع هزینه را از فهرست انتخاب کنید',
+      error: formMessage('نوع هزینه را از فهرست انتخاب کنید'),
     }),
     amountMinor: rialAmount('مبلغ', { allowZero: false }),
     description: requiredText('شرح هزینه', 2, 500),

@@ -1,6 +1,8 @@
 import { test } from './expect';
 import { expect } from './expect';
 
+import { THEME_COOKIE_NAME } from '../src/ui/theme/theme';
+
 /**
  * The first browser test in this repository.
  *
@@ -62,5 +64,20 @@ test.describe('the way into the portal', () => {
     // The whole point of ADR-059: an XSS on this page has nothing to take.
     expect(stored.local).toEqual([]);
     expect(stored.session).toEqual([]);
+  });
+
+  test('sets no cookie of its own, and the only one it may be handed is the theme', async ({
+    context,
+    page,
+  }) => {
+    await page.goto('/login');
+    // A visit sets nothing. The theme cookie appears only when the person
+    // uses the switch (`theme.spec.ts`), and is then the one name and value
+    // this allow-list admits — never a session, token or identifier.
+    for (const cookie of await context.cookies()) {
+      expect(cookie.name).toMatch(THEME_COOKIE_NAME);
+      expect(['light', 'dark']).toContain(cookie.value);
+    }
+    expect(await context.cookies()).toEqual([]);
   });
 });

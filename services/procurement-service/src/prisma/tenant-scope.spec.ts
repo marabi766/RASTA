@@ -82,7 +82,7 @@ describe('the schema keeps history from being erased', () => {
 });
 
 describe('the schema models nothing COM-007 has not decided so far', () => {
-  it('has the aggregation, its settings, the demand, the RFQ with its criteria and invitations, and the idempotency store (quotations and purchase orders are later PRs)', () => {
+  it('has the aggregation, its settings, the demand, the RFQ with its criteria and invitations, its sealed quotations and their receipt chain, and the idempotency store (the access log, the opening and purchase orders are later PRs)', () => {
     // Each step adds its models here, so an unplanned one still fails this test.
     const names = [...models(SCHEMA).keys()].filter(
       (name) => !['OutboxMessage', 'OutboxStreamSequence'].includes(name),
@@ -94,6 +94,8 @@ describe('the schema models nothing COM-007 has not decided so far', () => {
       'Rfq',
       'RfqCriterion',
       'RfqInvitation',
+      'Quotation',
+      'QuotationReceipt',
       'IdempotencyKey',
     ]);
   });

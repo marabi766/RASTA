@@ -428,6 +428,7 @@ test('C: retention and gauge comparisons are classified not-eligibility with a r
     ['packages/nest-common/src/outbox/outbox-sql.ts', 'created_at'],
     ['services/construction-service/src/tender/award-standing-check.repository.ts', 'created_at'],
     ['services/audit-service/src/audit/tender-evidence.repository.ts', 'held_at'],
+    ['services/audit-service/src/audit/rfq-evidence.repository.ts', 'held_at'],
   ])
     assert.ok(
       notEligibility.some((s) => s.file === file && s.column === column && s.reason),

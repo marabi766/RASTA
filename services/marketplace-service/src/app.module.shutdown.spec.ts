@@ -8,6 +8,7 @@ import {
 import { AppModule } from './app.module';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { ENV } from './tokens';
+import { OrderSagaClient } from './temporal/saga.client';
 import { OrderSagaWorker } from './temporal/worker';
 import { ReturnMirrorConsumer } from './returns/return-mirror.consumer';
 
@@ -59,6 +60,7 @@ describe('AppModule shutdown wiring (D-052)', () => {
       OutboxRelay,
       OutboxPurgeScheduler,
       OrderSagaWorker,
+      OrderSagaClient,
       ReturnMirrorConsumer,
       KafkaEventPublisher,
     ];
@@ -76,6 +78,7 @@ describe('AppModule shutdown wiring (D-052)', () => {
       expect.arrayContaining([
         OutboxRelay,
         OrderSagaWorker,
+        OrderSagaClient,
         ReturnMirrorConsumer,
         KafkaEventPublisher,
       ]),

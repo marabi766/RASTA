@@ -20,6 +20,7 @@ import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import { localDateTimeToIso } from './usage';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Putting a driver in charge of a machine, and taking them off it, through
@@ -144,7 +145,10 @@ const optionalLocalDateTime = z
     if (raw.trim() === '') return undefined;
     const iso = localDateTimeToIso(raw);
     if (iso === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'تاریخ یا ساعت معتبر نیست' });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: formMessage('تاریخ یا ساعت معتبر نیست'),
+      });
       return z.NEVER;
     }
     return iso;
@@ -155,15 +159,15 @@ export const assignFormSchema = z
   .object({
     assetId: z
       .string()
-      .min(1, 'ماشین را انتخاب کنید')
-      .refine((value) => assetId.safeParse(value).success, 'شناسهٔ ماشین معتبر نیست'),
+      .min(1, formMessage('ماشین را انتخاب کنید'))
+      .refine((value) => assetId.safeParse(value).success, formMessage('شناسهٔ ماشین معتبر نیست')),
     // Blank means "now" — the common case — not a value the service must
     // parse; the transform below turns that into an absent field.
     startedAt: optionalLocalDateTime,
     purpose: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(500, 'هدف حداکثر ۵۰۰ نویسه است'))
+      .pipe(z.string().max(500, formMessage('هدف حداکثر ۵۰۰ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
   })
   .strict();
@@ -264,7 +268,7 @@ export const endAssignmentFormSchema = z
     notes: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(500, 'یادداشت حداکثر ۵۰۰ نویسه است'))
+      .pipe(z.string().max(500, formMessage('یادداشت حداکثر ۵۰۰ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
   })
   .strict();

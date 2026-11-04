@@ -61,6 +61,9 @@ export {
   eligibilityClockTag,
 } from './eligibility-clock';
 
+export { recordCalls } from './call-record';
+export type { CallRecord, SpyLike } from './call-record';
+
 export { mintTestInternalToken } from './internal-token';
 export type { TestInternalTokenKey } from './internal-token';
 
@@ -114,7 +117,11 @@ export {
   guardedFetch,
   guardFetch,
   guardRequestContext,
+  guardEveryRequestContext,
+  installRequestContextGuard,
   RedirectRefusedError,
   REFUSED_REDIRECT_STATUSES,
 } from './guarded-http';
 export type { GuardableRequestContext, GuardedFetch } from './guarded-http';
+
+export { REQUEST_CONTEXT_ROUTES, rawContextFromFactory } from './request-routes';

@@ -280,6 +280,27 @@
     "decision": "platform-wide: projects signed organization hierarchy events into the shared audit reference replica"
   },
   {
+    "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
+    "line": 58,
+    "hash": "eddd5de45570718e23166439d4b2c6d353abe78d153b615739819fc7b5e77167",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
+  },
+  {
+    "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
+    "line": 236,
+    "hash": "76f5c31752bf913d857829a2fef73d4308d1b8cb791b34a34347f3f6b5751958",
+    "occurrence": 0,
+    "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
+  },
+  {
+    "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
+    "line": 242,
+    "hash": "db43fbeaa38c2c52616e2008e1f82ae289453d52c1ab93b786136a958bcb76cb",
+    "occurrence": 0,
+    "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
+  },
+  {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
     "line": 59,
     "hash": "839f7e9a308c458a3c203532ca02d081cbd4a40365adb1b8647dd3e7d9be3b22",
@@ -1059,9 +1080,9 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "f69ccff231aae51715fbedb929ef02dd3436b32f378ae162b1d6d0ac8d9ce692",
+    "hash": "daeb0670a1ea029e63f6c4b8d3d5a63c8b1f598b9bdea4b081bae73bba31e0cc",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (wallet_hold by its reference), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
@@ -2359,6 +2380,34 @@
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 29,
+    "hash": "1d4d038793204dded7071b1a6ebc4d2698e73caf564b9848cdb3cdffcb2ec165",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local statement timeout bounds starter database work; no tenant data result"
+  },
+  {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 39,
+    "hash": "5b5d369d47528a345a11f2ec672fbb37edb89a6cdfcc7fad946f334f75e59e87",
+    "occurrence": 0,
+    "decision": "platform-wide: bounded durable-start queue claims across buyers; persisted organization and fresh lease token fence every later acknowledgment"
+  },
+  {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 64,
+    "hash": "f412a749f1d872b5102f9df8030ee8cf08a24009e1ee13d8bee06843c6fd4925",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 79,
+    "hash": "367ddc1e04369ec30fa59919457805f81c3c9474de5ce970a1e9da8394f28091",
+    "occurrence": 0,
+    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database"
+  },
+  {
     "file": "services/notification-service/src/notification/notification.repository.ts",
     "line": 159,
     "hash": "fb249fe3dac5b48761658d7b5fd36538feab40572abb5c8babba21f5db3b29c1",
@@ -2749,6 +2798,27 @@
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 52,
+    "hash": "88327ddf15c3b94282545225c756e3dbb0853a7f2481fff6e2136d058692b7a0",
+    "occurrence": 0,
+    "decision": "platform-wide: invitations are owned by buyers; an invited supplier share-locks the buyer RFQ only through the join to its own invitation, binding supplier_organization_id from the token"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 69,
+    "hash": "b47ee6c994ffc09c71f845457dea6e8d3c4b48fd219352314b9d202b1971f48f",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 182,
+    "hash": "e2bf218d5c6baa98e6a6ea867a6f80c946d36007be1997ddd01456b658950625",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-scoped advisory lock keyed by the RFQ id the caller already share-locked through its own invitation; reads and returns no row"
   },
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",

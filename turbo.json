@@ -90,6 +90,7 @@
         "$TURBO_ROOT$/scripts/test-only-path.mjs",
         "$TURBO_ROOT$/scripts/testing-dev-only.mjs",
         "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs",
+        "$TURBO_ROOT$/scripts/zod-coercion-rule.mjs",
         "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
       ],
       "outputs": []
@@ -161,7 +162,8 @@
         "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*",
-        "SUPPLIER_SERVICE_URL"
+        "SUPPLIER_SERVICE_URL",
+        "AUDIT_RFQ_GAP_ALERT_SECONDS"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -245,7 +247,8 @@
         "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*",
-        "SUPPLIER_SERVICE_URL"
+        "SUPPLIER_SERVICE_URL",
+        "AUDIT_RFQ_GAP_ALERT_SECONDS"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -378,6 +381,9 @@
     // supplier-service for an RFQ invitee's standing, so the URL is declared
     // here for every task that starts it — which takes it off
     // construction-service's withheld entry too.
+    // AUDIT_RFQ_GAP_ALERT_SECONDS (COM-007 PR 7): how long a quotation receipt may be
+    // held for a predecessor before the gap alerts; audit-service's new setting, so
+    // it is declared here and in the test tasks above, never added to the withheld list.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -424,7 +430,8 @@
         "ANALYTICS_*",
         "CORS_ORIGINS",
         "PROCUREMENT_*",
-        "SUPPLIER_SERVICE_URL"
+        "SUPPLIER_SERVICE_URL",
+        "AUDIT_RFQ_GAP_ALERT_SECONDS"
       ]
     },
     "clean": { "cache": false }
