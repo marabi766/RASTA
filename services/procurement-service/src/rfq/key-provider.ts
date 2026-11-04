@@ -1,6 +1,7 @@
-import { randomBytes } from 'node:crypto';
+import { createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   NONCE_BYTES,
+  SALT_BYTES,
   SealingError,
   aeadDecrypt,
   aeadEncrypt,
@@ -44,6 +45,25 @@ export interface RfqKeyProvider {
   wrap(privateKeyDer: Buffer, context: KeyContext): WrappedKey;
   /** Returns the PKCS#8 private key. The caller zeroises it (`fill(0)`) when done. */
   unwrap(wrapped: WrappedKey, context: KeyContext): Buffer;
+  /**
+   * A keyed, salted digest of a quotation command's request, bound to who asked — what the
+   * idempotency store keeps instead of the plain SHA-256 it keeps for other commands (plan PR 8;
+   * the construction design of Codex r1 on #250, R1). The request is the price: a plain digest of a
+   * low-entropy price lets any reader of a backup confirm a guess. Under a key derived from the
+   * current KEK (never stored with the data), salted per call, the organization and the user inside
+   * the MAC — so no two digests compare, and a reader who can also quote cannot test candidates.
+   * Stored as `hmac-v1:<kekId>:<salt>:<mac>`, so a rotation keeps recognising it while the KEK is
+   * kept. No KEK: throws `KEY_UNAVAILABLE` (and no quotation could be sealed either).
+   */
+  requestDigest(context: RequestDigestContext, data: string): string;
+  /** Whether `stored` is a `requestDigest(context, data)`; anything else, an unknown KEK included: false. */
+  matchesRequestDigest(stored: string, context: RequestDigestContext, data: string): boolean;
+}
+
+/** Who a keyed request digest belongs to: both are inside its MAC. */
+export interface RequestDigestContext {
+  readonly organizationId: string;
+  readonly userId: string;
 }
 
 const KEK_BYTES = 32;
@@ -155,5 +175,59 @@ export class EnvKekProvider implements RfqKeyProvider {
       wrapped.ciphertext,
       wrapped.tag,
     );
+  }
+
+  requestDigest(context: RequestDigestContext, data: string): string {
+    const configuration = this.configuration;
+    const kek = configuration?.keys.get(configuration.currentId);
+    if (!configuration || !kek) throw new SealingError('KEY_UNAVAILABLE');
+    const salt = randomBytes(SALT_BYTES);
+    const mac = requestMac(kek, salt, context, data);
+    return [
+      REQUEST_DIGEST_VERSION,
+      configuration.currentId,
+      salt.toString('hex'),
+      mac.toString('hex'),
+    ].join(':');
+  }
+
+  matchesRequestDigest(stored: string, context: RequestDigestContext, data: string): boolean {
+    const [version, kekId, saltHex, macHex, ...rest] = stored.split(':');
+    if (version !== REQUEST_DIGEST_VERSION || !kekId || !saltHex || !macHex || rest.length > 0) {
+      return false;
+    }
+    const kek = this.configuration?.keys.get(kekId);
+    if (!kek) return false;
+    const salt = Buffer.from(saltHex, 'hex');
+    if (salt.length !== SALT_BYTES || salt.toString('hex') !== saltHex) return false;
+    const expected = requestMac(kek, salt, context, data);
+    const actual = Buffer.from(macHex, 'hex');
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  }
+}
+
+/** The stored form of a keyed request digest: `hmac-v1:<kekId>:<salt hex>:<mac hex>`. */
+const REQUEST_DIGEST_VERSION = 'hmac-v1';
+const REQUEST_DIGEST_LABEL = 'rasta.procurement.request-digest.v1';
+
+/**
+ * HMAC-SHA256 under a key derived from the KEK (HKDF-SHA256, its own label: the KEK itself keys
+ * nothing but the wrapping), over the salt, the requester and the data, length-prefixed.
+ */
+function requestMac(
+  kek: Buffer,
+  salt: Buffer,
+  context: RequestDigestContext,
+  data: string,
+): Buffer {
+  const key = Buffer.from(hkdfSync('sha256', kek, Buffer.alloc(0), REQUEST_DIGEST_LABEL, 32));
+  try {
+    return createHmac('sha256', key)
+      .update(
+        lengthPrefixed(REQUEST_DIGEST_LABEL, salt, context.organizationId, context.userId, data),
+      )
+      .digest();
+  } finally {
+    key.fill(0);
   }
 }
