@@ -188,6 +188,58 @@ describe('the spelling matcher', () => {
     expect(nonStandardSpelling(point)).not.toBeNull(),
   );
 
+  it.each([
+    ['Arabic', '\u0675'],
+    ['Supplement', '\u0750'],
+    ['Extended-A', '\u08a8'],
+    ['Extended-B right hamza', '\u0881'],
+    ['Extended-B left hamza', '\u0882'],
+    ['Extended-B tatweel hamza', '\u0883'],
+    ['Extended-B alef', '\u0870'],
+    ['Extended-B format control', '\u0890'],
+    ['Extended-C', '\u{10ec2}'],
+    ['Presentation Forms-A', '\ufbdd'],
+    ['Presentation Forms-B', '\ufe83'],
+    ['Mathematical', '\u{1ee00}'],
+    ['Rumi numeral', '\u{10e60}'],
+  ])('refuses Arabic-script points inside a word: %s', (_, point) => {
+    expect(nonStandardSpelling('ت' + point + 'مین')).not.toBeNull();
+  });
+
+  it('sweeps the Arabic script properties independently of block ranges', () => {
+    const permitted = new Set([
+      ...'ءآأؤإئابتثجحخدذرزسشصضطظعغفقكلمنهويىپچژکگی',
+      ...'٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹،؛؟٪٫٬۔',
+      ...'\u061c\u0640\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652',
+    ]);
+    const missed: string[] = [];
+    let refused = 0;
+    for (let code = 0; code <= 0x10ffff; code += 1) {
+      const point = String.fromCodePoint(code);
+      if (!/[\p{Script=Arabic}\p{Script_Extensions=Arabic}]/u.test(point)) continue;
+      if (permitted.has(point)) continue;
+      refused += 1;
+      for (const text of [point, 'ب' + point, 'ت' + point + 'مین']) {
+        if (nonStandardSpelling(text) === null) missed.push(`U+${code.toString(16)}: ${text}`);
+      }
+    }
+    expect(refused).toBeGreaterThan(1000);
+    expect(missed).toEqual([]);
+  });
+
+  it.each(['\u0313', '\u0903', '\u20dd', '\u0898', '\u{10efa}'])(
+    'refuses unknown marks carried across tatweel: %s',
+    (mark) => {
+      for (const text of ['ی\u0640' + mark, mark + '\u0640ی', 'ی\u200d\u0640' + mark]) {
+        expect(nonStandardSpelling(text)).not.toBeNull();
+      }
+    },
+  );
+
+  it.each(['\u06c0', '\u0629', '\u0670'])('keeps the PM-decided ezafe exclusions: %s', (point) => {
+    expect(nonStandardSpelling('ب' + point)).not.toBeNull();
+  });
+
   it('allows only the explicit Persian repertoire and usual diacritics', () => {
     expect(nonStandardSpelling('ءآأؤإئابتثجحخدذرزسشصضطظعغفقكلمنهويىپچژکگی')).toBeNull();
     expect(nonStandardSpelling('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹،؛؟٪٫٬۔\u061c\u0640')).toBeNull();

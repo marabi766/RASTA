@@ -63,17 +63,19 @@ const HAMZA_LESS = new RegExp(
 /** Explicit repertoire: Persian letters, existing Arabic yeh/kaf aliases, digits,
  * punctuation, tatweel, bidi ALM and the usual harakat (tanwin through sukun).
  * Combining hamza is separately permitted ONLY immediately after plain heh.
+ * PM policy keeps U+06C0, U+0629 and U+0670 refused; Persian ezafe uses هٔ.
  */
 const ALLOWED_ARABIC = new Set([
   ...'ءآأؤإئابتثجحخدذرزسشصضطظعغفقكلمنهويىپچژکگی',
   ...'٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹،؛؟٪٫٬۔',
   ...'\u061c\u0640\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652',
 ]);
-const ARABIC_BLOCK =
-  /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff\u{1ee00}-\u{1eeff}]/u;
-/** Marks on either side, including runs separated by format controls. */
+/** Script properties cover every block; retain legacy ranges to refuse unassigned points too. */
+const ARABIC_CODE_POINT =
+  /[\p{Script=Arabic}\p{Script_Extensions=Arabic}\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff\u{1ee00}-\u{1eeff}]/u;
+/** Marks on either side, including runs separated by format controls or tatweel. */
 const UNKNOWN_ADJACENT_MARK = new RegExp(
-  String.raw`(?:[\p{sc=Arab}&&\p{L}][\p{M}\p{Cf}]*[\p{M}--[\u064b-\u0652\u0654]]|[\p{M}--[\u064b-\u0652\u0654]][\p{M}\p{Cf}]*[\p{sc=Arab}&&\p{L}])`,
+  String.raw`(?:[[\p{scx=Arab}&&\p{L}]\u0640][\p{M}\p{Cf}\u0640]*[\p{M}--[\u064b-\u0652\u0654]]|[\p{M}--[\u064b-\u0652\u0654]][\p{M}\p{Cf}\u0640]*[[\p{scx=Arab}&&\p{L}]\u0640])`,
   'v',
 );
 
@@ -82,7 +84,7 @@ function outsideRepertoire(text: string): string | null {
   for (const point of text) {
     if (point === '\u0654') {
       if (previous !== '\u0647') return point;
-    } else if (ARABIC_BLOCK.test(point) && !ALLOWED_ARABIC.has(point)) {
+    } else if (ARABIC_CODE_POINT.test(point) && !ALLOWED_ARABIC.has(point)) {
       return point;
     }
     previous = point;
