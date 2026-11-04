@@ -353,6 +353,15 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
+  `z.string({checks:[z.overwrite(()=>true)]}).transform(Number);`,
+  `const opts={checks:[z.overwrite(()=>true)]}; z.string(opts).transform(Number);`,
+  `z.array(z.string(),{checks:[z.overwrite(()=>[true])]}).transform(v=>v.map(Number));`,
+  ...['min(0', 'max(1000', 'length(1', 'regex(/.*/'].map(
+    (method) => `z.string().${method},{when:p=>{p.value=true;return false;}}).transform(Number);`,
+  ),
+  `z.string().nonempty({when:p=>{p.value=true;return false;}}).transform(Number);`,
+  `const opts={when:p=>{p.value=true;return false;}}; z.string().regex(/.*/,opts).transform(Number);`,
+  `z.string().regex(/.*/,{...{when:p=>{p.value=true;return false;}}}).transform(Number);`,
   `z.core._url(getConstructor(),{});`,
   `z.core._int(getConstructor(),{});`,
   `let C=z.core.$ZodString; C=unresolved; z.core._string(C,{});`,
@@ -450,6 +459,12 @@ for (const [index, code] of transformFailures.entries())
     ));
 for (const code of [
   `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
+  `z.string({error:'Required'}).min(1,{message:'Length'}).transform(Number);`,
+  'z.string().min(1, `Known bound ${1}`).transform(Number);',
+  `z.string().meta({when:'data',coerce:true}).transform(Number);`,
+  `z.array(z.string(),{error:'Array'}).transform(v=>v.map(Number));`,
+  `z.string().min(0,undefined).transform(Number);`,
+  `z.string().regex(/.*/).transform(Number);`,
   `z.string().transform(Number);`,
   `z.string().transform(v=>Number(v));`,
   `const f=async v=>Number(v); z.string().transform(f);`,
@@ -481,6 +496,9 @@ it('F3 keeps a validated string receiver through a method alias', () =>
 
 // F3 codecs validate decode against `in` and encode against `out` independently.
 for (const code of [
+  `z.codec(z.string({checks:[z.overwrite(()=>true)]}),z.number(),{decode:Number,encode:v=>v});`,
+  `z.codec(z.number(),z.string().min(0,{when:p=>{p.value=true;return false;}}),{decode:v=>v,encode:Number});`,
+  `new z.ZodCodec({type:'pipe',in:z.string({checks:[z.overwrite(()=>true)]}),out:z.number(),transform:Number,reverseTransform:v=>v});`,
   `z.codec(z.unknown(),z.number(),{decode:Number,encode:v=>v});`,
   `z.codec(z.number(),z.unknown(),{decode:v=>v,encode:Number});`,
   `const f=async v=>Number(v); z.codec(z.unknown(),z.number(),{decode:f,encode:v=>v});`,
