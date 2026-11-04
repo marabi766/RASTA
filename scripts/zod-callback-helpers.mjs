@@ -74,18 +74,19 @@ const pins = {
   'services/audit-service/src/audit/audit.cursor.ts':
     '61320e503117b4535f008253df76539e8ec2d29159cb9d5fdcb59e56753b814b',
 };
-export function verifiedCallbackHelper(root, module, name) {
-  const helper = helpers.find(([path, , names]) => path === module && names.includes(name));
+export const CALLBACK_HELPER_SOURCES = Object.freeze(Object.keys(pins));
+export function verifiedCallbackHelper(root, modulePath, name) {
+  const helper = helpers.find(([path, , names]) => path === modulePath && names.includes(name));
   if (!helper) return undefined;
   try {
     const files = [
       helper[1],
-      ...(module === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
+      ...(modulePath === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
       ...([
         'apps/web/src/lib/format',
         'apps/web/src/server/drivers',
         'apps/web/src/server/usage',
-      ].includes(module)
+      ].includes(modulePath)
         ? Object.keys(pins).filter((path) => path.startsWith('apps/web/src/lib/format/'))
         : []),
     ];
