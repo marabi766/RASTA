@@ -189,7 +189,28 @@ describe('query parameters', () => {
       (parameter: { name: string }) => parameter.name,
     );
 
-    expect(names.sort()).toEqual(['capability', 'cursor', 'limit', 'qualifiedFor', 'status']);
+    expect(names.sort()).toEqual([
+      'capability',
+      'cursor',
+      'limit',
+      'organizationId',
+      'qualifiedFor',
+      'status',
+    ]);
+  });
+
+  it('publishes organizationId as an optional bounded list of organization ids (FU-019)', () => {
+    const document = enrichOpenApiDocument(withPaths({ '/v1/suppliers': { get: {} } }));
+    const parameter = (
+      op(document, '/v1/suppliers', 'get').parameters as {
+        name: string;
+        required: boolean;
+        schema: { type: string; minItems: number; maxItems: number };
+      }[]
+    ).find((p) => p.name === 'organizationId');
+
+    expect(parameter?.required).toBe(false);
+    expect(parameter?.schema).toMatchObject({ type: 'array', minItems: 1, maxItems: 200 });
   });
 
   it('marks the capability required on ListQualifiedFor', () => {

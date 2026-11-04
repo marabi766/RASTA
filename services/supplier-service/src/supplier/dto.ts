@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, plainText, referenceId } from '@rasta/contracts';
+import {
+  cursorPaginationSchema,
+  organizationIdSchema,
+  plainText,
+  referenceId,
+} from '@rasta/contracts';
 import { SUPPLIER_CAPABILITIES } from './capabilities';
 import { QUALIFICATION_STATES } from './qualification.state-machine';
 import { SUPPLIER_STATUSES } from './suspension.state-machine';
@@ -229,6 +234,23 @@ export type ReinstateSupplierDto = z.infer<typeof reinstateSupplierSchema>;
  * `sort=RATING` is likewise absent rather than accepted-and-ignored, which is
  * the choice ADR-042 already made on the marketplace side.
  */
+export const MAX_DIRECTORY_ORGANIZATION_IDS = 200;
+
+/**
+ * One value arrives as a string, a repeated one as an array. Each id must be a
+ * canonical organization id; more than {@link MAX_DIRECTORY_ORGANIZATION_IDS}
+ * values (counted before deduplication, so the bound is on what was sent) or an
+ * empty one is a 400, never a silently truncated or widened answer.
+ */
+const directoryOrganizationIds = z.preprocess(
+  (value) => (typeof value === 'string' ? [value] : value),
+  z
+    .array(organizationIdSchema)
+    .min(1)
+    .max(MAX_DIRECTORY_ORGANIZATION_IDS)
+    .transform((ids) => [...new Set(ids)]),
+);
+
 export const searchSuppliersQuerySchema = cursorPaginationSchema
   .extend({
     /** Suppliers that *claim* this capability. Claiming is not qualification. */
@@ -236,6 +258,14 @@ export const searchSuppliersQuerySchema = cursorPaginationSchema
     /** Suppliers with a **current** approval for this capability. */
     qualifiedFor: capability.optional(),
     status: z.enum(SUPPLIER_STATUSES).optional(),
+    /**
+     * Narrows the page to these organizations' directory entries (FU-019): the
+     * offer page asks for exactly the suppliers behind its offers instead of
+     * walking the directory. Repeat the parameter (`?organizationId=A&organizationId=B`).
+     * It only narrows the same cross-tenant, catalogue-safe list — same roles,
+     * same projection; an organization with no profile is simply absent.
+     */
+    organizationId: directoryOrganizationIds.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
