@@ -299,7 +299,7 @@ for (const code of [
 ])
   it(`F3 proven helper call: ${code}`, () => assert.deepEqual(messages(code), []));
 
-import { mkdtempSync, cpSync, appendFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, cpSync, appendFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifiedCallbackHelper } from './zod-callback-helpers.mjs';
@@ -940,6 +940,56 @@ it('FU-069b resolves exact sources and dependency siblings', () => {
       );
       rmSync(join(root, shadow));
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it('FU-069b respects compiler aliases and module suffixes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-config-'));
+  const source = 'apps/web/src/lib/order-fields.ts';
+  const importer = join(root, 'apps/web/src/probe.ts');
+  const config = join(root, 'apps/web/tsconfig.json');
+  const options = {
+    module: 'esnext',
+    moduleResolution: 'bundler',
+    baseUrl: '.',
+    paths: { '@/*': ['./src/*'] },
+  };
+  try {
+    cpSync(join(ROOT, source), join(root, source));
+    writeFileSync(config, JSON.stringify({ compilerOptions: options, include: ['src/**/*'] }));
+    assert.equal(
+      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
+      'predicate',
+    );
+    cpSync(join(ROOT, source), join(root, 'apps/web/src/alternate/order-fields.ts'));
+    writeFileSync(
+      config,
+      JSON.stringify({
+        compilerOptions: { ...options, paths: { '@/lib/*': ['./src/alternate/*'] } },
+        include: ['src/**/*'],
+      }),
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
+      undefined,
+    );
+    appendFileSync(
+      join(root, 'apps/web/src/lib/order-fields.evil.ts'),
+      'export const isOrderCommand=Number;',
+    );
+    writeFileSync(
+      config,
+      JSON.stringify({
+        compilerOptions: { ...options, moduleSuffixes: ['.evil', ''] },
+        include: ['src/**/*'],
+      }),
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, '@/lib/order-fields', 'isOrderCommand', importer),
+      undefined,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
