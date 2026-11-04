@@ -35,8 +35,8 @@ export const zodRouteInputKey = (input: ZodRouteInput): string =>
  */
 export function zodRouteInputs(app: INestApplicationContext): ZodRouteInput[] {
   const controllers = new Set<Type>();
-  for (const module of app.get(ModulesContainer).values()) {
-    for (const wrapper of module.controllers.values()) {
+  for (const nestModule of app.get(ModulesContainer).values()) {
+    for (const wrapper of nestModule.controllers.values()) {
       if (typeof wrapper.metatype === 'function') controllers.add(wrapper.metatype as Type);
     }
   }
