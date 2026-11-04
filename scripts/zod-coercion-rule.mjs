@@ -92,6 +92,33 @@ const STRING_METHODS = new Set(
 const STRING_RESULTS = new Set(
   'trim normalize replace slice substring toUpperCase toLowerCase'.split(' '),
 );
+const SCHEMA_VALIDATORS = new Set(
+  'min max length regex trim normalize toLowerCase toUpperCase refine describe meta brand readonly nonempty prefault'.split(
+    ' ',
+  ),
+);
+const CALLBACK_APIS = new Set(['preprocess', 'transform', 'overwrite']);
+// Callback slots and definition fields are capabilities, independent of call/new syntax.
+const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
+  if (!raw && !receiverSchema) return {};
+  const init = name === 'init';
+  if (name === 'create' || init) name = owner;
+  if (name === 'createWithPreprocess') return { slot: 0 };
+  const api = name?.replace(/^_/, '');
+  const offset = raw && name?.startsWith('_') && ['transform'].includes(api) ? 1 : 0;
+  return {
+    slot: CALLBACK_APIS.has(api) ? offset : undefined,
+    fields: ['clone', 'constructor'].includes(api)
+      ? name === 'clone' && !receiverSchema
+        ? 1
+        : 0
+      : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|CheckOverwrite)/.test(api)
+        ? init
+          ? 1
+          : 0
+        : undefined,
+  };
+};
 const unwrap = (node) => {
   while (
     node &&
@@ -184,10 +211,13 @@ export default {
       zodModule(def.parent.source?.value) &&
       def.parent.importKind !== 'type' &&
       def.node.importKind !== 'type';
-    const access = (result, name) => ({
+    const access = (result, name, receiver) => ({
       ...result,
+      receiver: result.schema ? receiver : undefined,
       raw:
-        (result.raw || (result.schema && ['constructor', 'clone'].includes(name))) &&
+        (result.raw ||
+          (result.schema &&
+            (['constructor', 'clone'].includes(name) || CALLBACK_APIS.has(name)))) &&
         capability(name),
       receiverSchema: !!result.schema,
       schema: !!result.schema && SCHEMA_FIELDS.has(name),
@@ -218,7 +248,7 @@ export default {
               if (binding.parent?.type === 'Property') path.unshift(key(binding.parent));
               binding = binding.parent;
             }
-            for (const name of path) if (result) result = access(result, name);
+            for (const name of path) if (result) result = access(result, name, def.node.init);
             if (result?.raw) resolved = result;
             else if (result?.schema && !resolved?.raw) resolved = result;
             resolved ??= result;
@@ -249,7 +279,7 @@ export default {
       }
       if (node.type === 'MemberExpression') {
         const result = origin(node.object, seen);
-        if (result) return access(result, key(node));
+        if (result) return access(result, key(node), node.object);
       }
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         if (globalName(node.callee, 'require') && zodModule(constant(node.arguments[0])))
@@ -291,7 +321,10 @@ export default {
       )
         return node.name;
       if (node.type === 'MemberExpression') {
-        if (['call', 'apply', 'bind'].includes(key(node))) return numeric(node.object, seen);
+        if (['call', 'apply', 'bind'].includes(key(node))) {
+          const convert = numeric(node.object, seen);
+          return convert && `${convert}.${key(node)}`;
+        }
         return (
           ['globalThis', 'global', 'window', 'Number'].some((name) =>
             globalName(node.object, name),
@@ -415,7 +448,9 @@ export default {
         /^\$?Zod/.test(origin(raw).name ?? '') &&
         factory?.raw &&
         factory.name?.startsWith('_') &&
-        (optionsIndex(factory) > 0 || optionsIndex(factory) === COERCING_API) &&
+        (optionsIndex(factory) > 0 ||
+          optionsIndex(factory) === COERCING_API ||
+          callbackSignature(factory).slot === 1) &&
         parent.arguments[0] === node
       )
         return;
@@ -473,8 +508,69 @@ export default {
         const index = optionsIndex(factory);
         if (index === COERCING_API) report(node);
         if (index >= 0) options(node.arguments[index], new Set(), true);
-        if (!factory.raw || factory.name !== 'preprocess') return;
-        const callbacks = [node.arguments[0]];
+        const api = callbackSignature(factory);
+        const callbacks = [];
+        if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
+        const fields = (raw, seen = new Set()) => {
+          const definition = unwrap(raw);
+          if (!definition || seen.has(definition)) return;
+          seen.add(definition);
+          if (definition.type === 'Identifier') {
+            const binding = variable(definition),
+              def = binding?.defs[0];
+            if (
+              def?.type !== 'Variable' ||
+              binding.references.some(
+                (ref) =>
+                  (ref.isWrite() && !ref.init) ||
+                  (ref.identifier.parent.type === 'MemberExpression' &&
+                    ['AssignmentExpression', 'UpdateExpression'].includes(
+                      ref.identifier.parent.parent.type,
+                    )),
+              )
+            ) {
+              report(definition, 'preprocess');
+              return;
+            }
+            for (const ref of binding.references.filter((ref) => ref.isRead())) {
+              const read = ref.identifier,
+                parent = read.parent;
+              if (parent.type === 'VariableDeclarator' && parent.init === read) {
+                fields(parent.id, seen);
+              } else if (
+                ['CallExpression', 'NewExpression'].includes(parent.type) &&
+                callbackSignature(origin(parent.callee)).fields === parent.arguments.indexOf(read)
+              ) {
+                // The same audited definition slot may read an immutable object again.
+              } else if (
+                parent.type !== 'MemberExpression' ||
+                (parent.parent.type === 'CallExpression' && parent.parent.callee === parent)
+              )
+                report(read, 'preprocess');
+            }
+            fields(def.node.init, seen);
+            return;
+          }
+          if (definition.type !== 'ObjectExpression') {
+            if (api.fields !== index) report(definition, 'preprocess');
+            return;
+          }
+          for (const prop of definition.properties) {
+            if (
+              prop.type === 'SpreadElement' ||
+              key(prop) === undefined ||
+              key(prop) === '__proto__' ||
+              ['get', 'set'].includes(prop.kind)
+            ) {
+              report(prop, 'preprocess');
+              continue;
+            }
+            if (['transform', 'preprocess', 'tx'].includes(key(prop))) callbacks.push(prop.value);
+            if (key(prop) === 'effect') fields(prop.value, seen);
+          }
+        };
+        if (api.fields !== undefined) fields(node.arguments[api.fields]);
+        if (!callbacks.length) return;
         let callback;
         let callbackFn;
         const localFunction = (raw) => {
@@ -486,6 +582,58 @@ export default {
         // Follow local helper bodies; opaque helpers cannot prove that conversion
         // is guarded. Only the audited Number helper may call Number itself.
         const strict = factory.name === 'preprocess';
+        const stringInput = (
+          raw = api.fields === undefined
+            ? (factory.receiver ?? unwrap(node.callee)?.object)
+            : undefined,
+          seen = new Set(),
+          kind = 'string',
+        ) => {
+          const schema = unwrap(raw);
+          if (!schema || seen.has(schema)) return false;
+          seen.add(schema);
+          if (schema.type === 'Identifier') {
+            const binding = variable(schema);
+            if (binding?.references.some((r) => r.isWrite() && !r.init)) return false;
+            return stringInput(binding?.defs[0]?.node.init, seen, kind);
+          }
+          if (schema.type !== 'CallExpression') return false;
+          const api = origin(schema.callee);
+          if (
+            api?.receiverSchema &&
+            api.name === 'check' &&
+            schema.arguments.every(
+              (arg) => arg.type === 'CallExpression' && reviewedHelper(arg.callee) === 'check',
+            )
+          )
+            return stringInput(unwrap(schema.callee)?.object, seen, kind);
+          if (api?.receiverSchema && api.name === 'refine' && schema.arguments[1]) {
+            const opts = unwrap(schema.arguments[1]);
+            if (
+              opts.type !== 'Literal' &&
+              (opts.type !== 'ObjectExpression' ||
+                opts.properties.some(
+                  (prop) =>
+                    prop.type === 'SpreadElement' ||
+                    key(prop) === 'when' ||
+                    key(prop) === '__proto__' ||
+                    key(prop) === undefined ||
+                    ['get', 'set'].includes(prop.kind),
+                ))
+            )
+              return false;
+          }
+          if (api?.name === 'pipe')
+            return stringInput(schema.arguments[api.receiverSchema ? 0 : 1], seen, kind);
+          if (api?.raw && api.name === kind) return true;
+          if (api?.raw && api.name === 'array' && kind === 'strings')
+            return stringInput(schema.arguments[0]);
+          return (
+            api?.receiverSchema &&
+            SCHEMA_VALIDATORS.has(api.name) &&
+            stringInput(unwrap(schema.callee)?.object, seen, kind)
+          );
+        };
         const stringValue = (raw, at, seen = new Set(), parameters = new Map()) => {
           const value = unwrap(raw);
           if (value?.kind === 'string') return true;
@@ -515,6 +663,14 @@ export default {
             parameters.has(binding) &&
             !seen.has(binding) &&
             stringValue(parameters.get(binding), at, new Set([...seen, binding]), parameters)
+          )
+            return true;
+          if (
+            !strict &&
+            def?.type === 'Parameter' &&
+            def.node === callbackFn &&
+            def.name === callbackFn.params[0] &&
+            stringInput()
           )
             return true;
           if (
@@ -570,6 +726,14 @@ export default {
               );
               return kinds.every((kind) => kind === 'bigint') ? 'bigint' : undefined;
             }
+            if (
+              def?.type === 'Parameter' &&
+              def.node === callbackFn &&
+              def.name === callbackFn.params[0]
+            ) {
+              if (stringInput(undefined, new Set(), 'strings')) return 'strings';
+              if (stringInput(undefined, new Set(), 'array')) return 'array';
+            }
             return valueKind(parameters.get(binding) ?? def?.node.init, at, parameters, seen);
           }
           if (value.type === 'NewExpression')
@@ -597,11 +761,23 @@ export default {
           if (reviewed)
             return reviewed !== 'predicate' && !stringValue(args[0], callee, new Set(), parameters);
           if (globalName(callee, 'Date') && !args.length && callee !== callback) return false;
-          if (numeric(callee))
+          if ((numeric(callee) || '').includes('.')) return true;
+          if (numeric(callee)) {
+            if (
+              !strict &&
+              numeric(callee) === 'BigInt' &&
+              /^(?:-?\d+)$/.test(String(constant(args[0]) ?? ''))
+            )
+              return false;
             return !(
-              file === 'packages/contracts/src/common/number-input.ts' &&
-              globalName(callee, 'Number')
+              (file === 'packages/contracts/src/common/number-input.ts' &&
+                globalName(callee, 'Number')) ||
+              (!strict &&
+                numeric(callee) !== 'BigInt' &&
+                ((callee === callback && stringInput()) ||
+                  stringValue(args[0], callee, new Set(), parameters)))
             );
+          }
           if (callee?.type === 'CallExpression') {
             const fn = localFunction(callee.callee);
             if (!fn?.params || unsafe(callee.callee, seen, callee.arguments, parameters))
@@ -749,7 +925,7 @@ export default {
           if (
             (strict &&
               !['ArrowFunctionExpression', 'FunctionExpression'].includes(callback.type)) ||
-            unsafe(callback, new Set(), [{ kind: 'unknown' }])
+            unsafe(callback, new Set(), [{ kind: !strict && stringInput() ? 'string' : 'unknown' }])
           )
             report(callback, 'preprocess');
         }

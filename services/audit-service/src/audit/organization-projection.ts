@@ -85,7 +85,7 @@ const identifier = z.string().trim().min(1).max(LIMITS.organizationId);
 const parentIdentifier = z
   .union([z.string(), z.null()])
   .transform((value) => {
-    const trimmed = value === null ? '' : value.trim();
+    const trimmed = typeof value === 'string' ? value.trim() : '';
     return trimmed.length === 0 ? null : trimmed;
   })
   .refine((value) => value === null || value.length <= LIMITS.organizationId, {
