@@ -80,6 +80,8 @@ datasource db {
 /// organization-agnostic (AGENTS.md A-05), and which organization plays the
 /// operator role is a deployment fact.
 model LedgerAccount {
+  // id, organization, type, purpose and currency never change
+  // (`trg_ledger_account_identity_fixed`).
   /// `ACC_<ULID>`.
   id String @id
 
@@ -1467,6 +1469,7 @@ model SettlementReversal {
 /// One per transaction and one per journal, both UNIQUE. A settlement without
 /// its journal is not expressible, and a journal cannot back two settlements.
 model Settlement {
+  // Append-only: no row is ever updated or deleted (`trg_settlement_append_only`).
   /// `STL_<ULID>`.
   id String @id
 

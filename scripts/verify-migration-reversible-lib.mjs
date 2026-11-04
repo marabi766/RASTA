@@ -1574,8 +1574,15 @@ const SETTLEMENT_REVERSAL_STEPS = [
   },
   { label: 'settlement reversal: up again', reapply: true },
   {
+    label: 'settlement reversal: up again, a settlement is append-only once more',
+    sql: `DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';`,
+    mustFail: 'append-only',
+  },
+  {
     label: 'settlement reversal: the probe rows are removed before the chain reversal',
-    sql: `DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';
+    sql: `ALTER TABLE "settlement" DISABLE TRIGGER "trg_settlement_append_only";
+          DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';
+          ALTER TABLE "settlement" ENABLE TRIGGER "trg_settlement_append_only";
           DELETE FROM "transaction" WHERE id = 'TXN_MIGCHECK_SRV';`,
   },
 ];
@@ -2268,7 +2275,9 @@ export const EXPECTED = {
       'trg_journal_settlement_reversal_owned',
       'trg_journal_settlement_reversal_final',
       'trg_ledger_entry_settlement_reversal_closed',
-      'trg_settlement_figures_fixed',
+      'trg_settlement_append_only',
+      'trg_settlement_no_truncate',
+      'trg_ledger_account_identity_fixed',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2309,7 +2318,8 @@ export const EXPECTED = {
       'assert_settlement_reversal_journal_owned',
       'reject_settlement_reversal_journal_leg',
       'reject_settlement_reversal_journal_undo',
-      'reject_settlement_figures_change',
+      'reject_settlement_mutation',
+      'reject_ledger_account_identity_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [

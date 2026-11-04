@@ -37,6 +37,8 @@ interface Amounts {
   commission: bigint;
   net: bigint;
 }
+/** A `settlement` row, every column, as JSON. */
+type SettlementRow = Record<string, unknown>;
 
 const GROSS = 10_000n;
 const ISSUER = 'http://itest.invalid/realms/rasta';
@@ -44,6 +46,17 @@ const PROPOSER = ['USR-RLG-PROPOSER', ISSUER, 'sub-proposer'] as const;
 const APPROVER = ['USR-RLG-APPROVER', ISSUER, 'sub-approver'] as const;
 
 const noCommission = (gross: bigint): Amounts => ({ gross, commission: 0n, net: gross });
+
+/** Everything that could be swapped by replacing a settlement row. */
+const REPLACEMENTS: readonly (readonly [label: string, changes: SettlementRow])[] = [
+  ['larger figures', { gross_amount_minor: 20_000, net_amount_minor: 20_000 }],
+  ['smaller figures', { gross_amount_minor: 100, net_amount_minor: 100 }],
+  ['a commission', { commission_amount_minor: 1, net_amount_minor: 9_999 }],
+  ['another payee', { payee_organization_id: 'ORG-ELSEWHERE' }],
+  ['another payer', { payer_organization_id: 'ORG-ELSEWHERE' }],
+  ['another currency', { currency: 'USD' }],
+  ['another journal', { journal_id: `JRN_${ulid()}` }],
+];
 
 describe('settlement reversal storage (real database, runtime role)', () => {
   let prisma: PrismaService;
@@ -100,7 +113,7 @@ describe('settlement reversal storage (real database, runtime role)', () => {
   });
 
   /** A really settled transaction, through the service's own settlement path. */
-  async function settled(charged = false): Promise<Settled> {
+  async function settled(charged = false, holdFunds = true): Promise<Settled> {
     const payeeOrganizationId = charged ? chargedPayee : payee;
     const transaction = await asActor({ organizationId: payer }, () =>
       wiring.transactions.create({
@@ -109,7 +122,7 @@ describe('settlement reversal storage (real database, runtime role)', () => {
         counterpartyOrganizationId: payeeOrganizationId,
         grossAmountMinor: GROSS.toString(),
         currency: 'IRR',
-        holdFunds: true,
+        holdFunds,
       }),
     );
     await asActor({ organizationId: payer }, () =>
@@ -175,7 +188,12 @@ describe('settlement reversal storage (real database, runtime role)', () => {
     );
 
   /** The account of one organization and purpose; the platform's revenue is whichever a settlement opened. */
-  const account = async (tx: Tx, organizationId: string, purpose = 'WALLET', currency = 'IRR') => {
+  const account = async (
+    tx: Pick<Tx, '$queryRawUnsafe'>,
+    organizationId: string,
+    purpose = 'WALLET',
+    currency = 'IRR',
+  ) => {
     const [row] = await tx.$queryRawUnsafe<{ id: string }[]>(
       `SELECT id FROM ledger_account
         WHERE organization_id = $1 AND purpose = $2::"AccountPurpose" AND currency = $3`,
@@ -184,6 +202,98 @@ describe('settlement reversal storage (real database, runtime role)', () => {
       currency,
     );
     return row!.id;
+  };
+
+  /** An account nothing has touched, in an organization nothing else uses. */
+  const newAccount = async (
+    purpose: string,
+    type: string,
+    organizationId = `${org.c}-RLG-${ulid()}`,
+  ) => {
+    const id = `ACC_${ulid()}`;
+    await runtime.$executeRawUnsafe(
+      `INSERT INTO ledger_account (id, organization_id, account_type, account_code, purpose, currency, created_by)
+       VALUES ($1, $2, $3::"AccountType", $4, $5::"AccountPurpose", 'IRR', 'itest')`,
+      id,
+      organizationId,
+      type,
+      `ITEST-${id}`,
+      purpose,
+    );
+    return { id, organizationId };
+  };
+
+  /** Runs `act`, then undoes it whatever it did: a refusal under test can never leave a change behind. */
+  const rolledBack = async (act: (tx: Tx) => Promise<unknown>) => {
+    const undone = new Error('rolled back: nothing was refused');
+    await runtime.$transaction(async (tx) => {
+      await act(tx);
+      throw undone;
+    });
+  };
+
+  const settlementRow = async (id: string) => {
+    const [found] = await owner.$queryRawUnsafe<{ row: SettlementRow }[]>(
+      'SELECT to_jsonb(s) AS row FROM settlement s WHERE id = $1',
+      id,
+    );
+    return found!.row;
+  };
+
+  const insertSettlement = (client: Pick<Tx, '$executeRawUnsafe'>, row: SettlementRow) =>
+    client.$executeRawUnsafe(
+      'INSERT INTO settlement SELECT * FROM jsonb_populate_record(NULL::settlement, $1::jsonb)',
+      JSON.stringify(row),
+    );
+
+  /** A SETTLED transaction with no settlement row, as a top-up is; `counterparty` as told. */
+  const settledWithNoRow = async (counterparty: string | null) => {
+    const id = `TXN_${ulid()}`;
+    await runtime.$executeRawUnsafe(
+      `INSERT INTO "transaction" (id, organization_id, counterparty_organization_id, transaction_type, status,
+                                  gross_amount_minor, commission_amount_minor, net_amount_minor, occurred_at,
+                                  settled_at, correlation_id, updated_at, created_by)
+       VALUES ($1, $2, $3::text, 'WALLET_TOP_UP', 'SETTLED', 10000, 0, 10000, now(), now(), 'COR-RLG', now(), 'itest')`,
+      id,
+      payer,
+      counterparty,
+    );
+    return id;
+  };
+
+  const rowFor = (transactionId: string, journalId: string): SettlementRow => ({
+    id: `STL_${ulid()}`,
+    organization_id: payer,
+    transaction_id: transactionId,
+    journal_id: journalId,
+    payer_organization_id: payer,
+    payee_organization_id: payee,
+    gross_amount_minor: 10_000,
+    commission_amount_minor: 0,
+    net_amount_minor: 10_000,
+    currency: 'IRR',
+    settled_at: new Date(),
+    settled_by: 'itest',
+  });
+
+  /**
+   * A settlement row replaced by someone who got past the guard: the owner, a row
+   * from before it, a restore. What the ledger says has to refuse it anyway.
+   */
+  const forgeSettlement = async (id: string, changes: SettlementRow) => {
+    const row = await settlementRow(id);
+    await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE settlement DISABLE TRIGGER trg_settlement_append_only',
+      );
+      await tx.$executeRawUnsafe('DELETE FROM settlement WHERE id = $1', id);
+      await insertSettlement(tx, { ...row, ...changes });
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE settlement ENABLE TRIGGER trg_settlement_append_only',
+      );
+    });
   };
 
   const leg = (
@@ -1089,6 +1199,184 @@ describe('settlement reversal storage (real database, runtime role)', () => {
       ).rejects.toThrow(refused);
     });
 
+    describe('the commission leg is the account the settlement credited', () => {
+      const charged = { gross: 1_000n, commission: 100n, net: 900n };
+      /** The reversal's wallets, right, with its commission debited to whatever is named. */
+      const commissionOn =
+        (legs: readonly (readonly [account: string, owner: string, amount: bigint])[]) =>
+        async (tx: Tx, fixture: Settled) => {
+          const id = await emptyJournal(tx, fixture.transactionId);
+          const to = fixture.payeeOrganizationId;
+          await leg(tx, id, await account(tx, payer), payer, 'CREDIT', charged.gross);
+          await leg(tx, id, await account(tx, to), to, 'DEBIT', charged.net);
+          for (const [accountId, owner, amount] of legs) {
+            await leg(tx, id, accountId, owner, 'DEBIT', amount);
+          }
+          return id;
+        };
+      const appliedCharged = (journalOf: (tx: Tx, fixture: Settled) => Promise<string>) =>
+        appliedWith(journalOf, { charged: true, amounts: charged });
+      const platformRevenue = () => account(owner, PLATFORM_ORGANIZATION_ID, 'COMMISSION_REVENUE');
+
+      it.each([
+        ['a third tenant', () => `${org.c}-RLG-${ulid()}`],
+        ['the payer', () => payer],
+        ['the payee', () => chargedPayee],
+      ])("refuses %s's own revenue account", async (_label, ownerOf) => {
+        const revenue = await newAccount('COMMISSION_REVENUE', 'REVENUE', ownerOf());
+        await expect(
+          appliedCharged(commissionOn([[revenue.id, revenue.organizationId, charged.commission]])),
+        ).rejects.toThrow(refused);
+      });
+
+      it('refuses the commission split between the right account and another', async () => {
+        const genuine = await platformRevenue();
+        const revenue = await newAccount('COMMISSION_REVENUE', 'REVENUE');
+        await expect(
+          appliedCharged(
+            commissionOn([
+              [genuine, PLATFORM_ORGANIZATION_ID, 50n],
+              [revenue.id, revenue.organizationId, 50n],
+            ]),
+          ),
+        ).rejects.toThrow(refused);
+      });
+
+      it('refuses any revenue leg when the settlement credited no revenue at all', async () => {
+        const genuine = await platformRevenue();
+        await expect(
+          appliedWith(
+            async (tx, fixture) => {
+              const id = await emptyJournal(tx, fixture.transactionId);
+              const to = fixture.payeeOrganizationId;
+              await leg(tx, id, await account(tx, payer), payer, 'CREDIT', 100n);
+              await leg(tx, id, await account(tx, to), to, 'DEBIT', 90n);
+              await leg(tx, id, genuine, PLATFORM_ORGANIZATION_ID, 'DEBIT', 10n);
+              return id;
+            },
+            { amounts: noCommission(100n) },
+          ),
+        ).rejects.toThrow(refused);
+      });
+
+      it("refuses a wallet leg on another of that party's accounts", async () => {
+        await owner.$executeRawUnsafe(
+          `INSERT INTO ledger_account (id, organization_id, account_type, account_code, purpose, currency, created_by)
+           VALUES ($1, $2, 'LIABILITY', $1, 'ESCROW', 'IRR', 'itest') ON CONFLICT DO NOTHING`,
+          `ACC_${ulid()}`,
+          payee,
+        );
+        await expect(
+          appliedWith(async (tx, fixture) => {
+            const id = await emptyJournal(tx, fixture.transactionId);
+            await leg(tx, id, await account(tx, payer), payer, 'CREDIT', 100n);
+            await leg(tx, id, await account(tx, payee, 'ESCROW'), payee, 'DEBIT', 100n);
+            return id;
+          }),
+        ).rejects.toThrow(refused);
+      });
+
+      it("refuses a third tenant's liability relabelled revenue, relabelled by the runtime role", async () => {
+        const wallet = await newAccount('WALLET', 'LIABILITY');
+        await expect(
+          runtime.$executeRawUnsafe(
+            `UPDATE ledger_account
+                SET purpose = 'COMMISSION_REVENUE', account_type = 'REVENUE' WHERE id = $1`,
+            wallet.id,
+          ),
+        ).rejects.toThrow(/What a ledger account is never changes/);
+      });
+
+      it('refuses it even relabelled past the guard: the leg is bound by id, not by label', async () => {
+        const wallet = await newAccount('WALLET', 'LIABILITY');
+        await owner.$transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE ledger_account DISABLE TRIGGER trg_ledger_account_identity_fixed',
+          );
+          await tx.$executeRawUnsafe(
+            `UPDATE ledger_account
+                SET purpose = 'COMMISSION_REVENUE', account_type = 'REVENUE' WHERE id = $1`,
+            wallet.id,
+          );
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE ledger_account ENABLE TRIGGER trg_ledger_account_identity_fixed',
+          );
+        });
+        await expect(
+          appliedCharged(commissionOn([[wallet.id, wallet.organizationId, charged.commission]])),
+        ).rejects.toThrow(refused);
+      });
+
+      it('refuses relabel, apply, restore inside one transaction', async () => {
+        const fixture = await settled(true);
+        const id = await open(fixture);
+        await propose(id, charged);
+        const wallet = await newAccount('WALLET', 'LIABILITY');
+        const relabel = (tx: Tx, purpose: string, type: string) =>
+          tx.$executeRawUnsafe(
+            `UPDATE ledger_account
+                SET purpose = $2::"AccountPurpose", account_type = $3::"AccountType" WHERE id = $1`,
+            wallet.id,
+            purpose,
+            type,
+          );
+        await expect(
+          runtime.$transaction(async (tx) => {
+            await relabel(tx, 'COMMISSION_REVENUE', 'REVENUE');
+            const journalId = await commissionOn([
+              [wallet.id, wallet.organizationId, charged.commission],
+            ])(tx, fixture);
+            await markApplied(tx, id, journalId);
+            await moveTransaction(tx, fixture.transactionId, 'PARTIALLY_REVERSED');
+            await relabel(tx, 'WALLET', 'LIABILITY');
+          }),
+        ).rejects.toThrow(/What a ledger account is never changes/);
+      });
+
+      it.each([
+        ['purpose', `purpose = 'REWARD_EXPENSE'`],
+        ['type', `account_type = 'ASSET'`],
+        ['organization', `organization_id = 'ORG-ELSEWHERE'`],
+        ['currency', `currency = 'USD'`],
+        ['id', `id = 'ACC_ELSEWHERE'`],
+      ])('an account never changes its %s, empty or carrying entries', async (_label, change) => {
+        const empty = await newAccount('WALLET', 'LIABILITY');
+        const carrying = await owner.$queryRawUnsafe<{ account_id: string }[]>(
+          `SELECT e.account_id FROM settlement s JOIN ledger_entry e ON e.journal_id = s.journal_id
+            WHERE s.id = $1 LIMIT 1`,
+          (await settled()).settlementId,
+        );
+        for (const id of [empty.id, carrying[0]!.account_id]) {
+          await expect(
+            rolledBack((tx) =>
+              tx.$executeRawUnsafe(`UPDATE ledger_account SET ${change} WHERE id = $1`, id),
+            ),
+          ).rejects.toThrow(/What a ledger account is never changes/);
+        }
+      });
+
+      it('what an account is called and whether it is active stay editable', async () => {
+        const { id } = await newAccount('WALLET', 'LIABILITY');
+        await expect(
+          runtime.$executeRawUnsafe(
+            `UPDATE ledger_account SET title = 'renamed', status = 'CLOSED' WHERE id = $1`,
+            id,
+          ),
+        ).resolves.toBe(1);
+      });
+
+      it('an account carrying an entry is not deleted, so it is not reinserted either', async () => {
+        const genuine = await platformRevenue();
+        await expect(
+          rolledBack((tx) =>
+            tx.$executeRawUnsafe('DELETE FROM ledger_account WHERE id = $1', genuine),
+          ),
+        ).rejects.toThrow(/ledger_entry|Foreign key/i);
+      });
+    });
+
     it('refuses a further leg once the case names the journal, in or after that transaction', async () => {
       const fixture = await settled();
       const id = await open(fixture);
@@ -1103,7 +1391,7 @@ describe('settlement reversal storage (real database, runtime role)', () => {
           await leg(tx, journalId, await account(tx, payer), payer, 'DEBIT', 5_000n);
           await leg(tx, journalId, await account(tx, chargedPayee), chargedPayee, 'CREDIT', 5_000n);
         }),
-      ).rejects.toThrow(/takes no leg once its reversal names it/);
+      ).rejects.toThrow(/takes no leg once a settlement or its reversal names it/);
       await expect(statusOf(fixture.transactionId)).resolves.toBe('SETTLED');
     });
 
@@ -1159,7 +1447,23 @@ describe('settlement reversal storage (real database, runtime role)', () => {
           fixture.transactionId,
           journalId,
         ),
-      ).rejects.toThrow(/no ledger reversal undoes one/);
+      ).rejects.toThrow(/no ledger reversal undoes either/);
+    });
+
+    it('no ledger reversal undoes the settlement either: that money moves back by a case alone', async () => {
+      const fixture = await settled();
+      const { journal_id: settlementJournal } = await settlementRow(fixture.settlementId);
+      await expect(
+        runtime.$executeRawUnsafe(
+          `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at,
+                                posted_by, correlation_id, reverses_id, reversal_reason)
+           VALUES ($1, $2, $3, 'REVERSAL', 'undo', now(), 'itest', 'itest', $4, 'an attempt')`,
+          `JRN_${ulid()}`,
+          payer,
+          fixture.transactionId,
+          settlementJournal,
+        ),
+      ).rejects.toThrow(/no ledger reversal undoes either/);
     });
 
     it('the generic reversal refuses to undo one, and writes nothing', async () => {
@@ -1199,14 +1503,317 @@ describe('settlement reversal storage (real database, runtime role)', () => {
       ['transaction', `transaction_id = 'TXN_ELSEWHERE'`],
       ['journal', `journal_id = 'JRN_ELSEWHERE'`],
       ['currency', `currency = 'USD'`],
-    ])('a settlement never changes its %s', async (_label, assignment) => {
+      ['time', `settled_at = settled_at + interval '1 day'`],
+      ['author', `settled_by = 'USR-ELSEWHERE'`],
+      ['acting organization', `acting_organization_id = 'ORG-ELSEWHERE'`],
+      ['id', `id = 'STL_ELSEWHERE'`],
+      ['organization', `organization_id = 'ORG-ELSEWHERE'`],
+    ])('before any case, a settlement never changes its %s', async (_label, assignment) => {
       const fixture = await settled();
       await expect(
         runtime.$executeRawUnsafe(
           `UPDATE settlement SET ${assignment} WHERE id = $1`,
           fixture.settlementId,
         ),
-      ).rejects.toThrow(/parties and figures never change/);
+      ).rejects.toThrow(/append-only/);
+    });
+
+    it('before any case, a settlement is never deleted', async () => {
+      const fixture = await settled();
+      await expect(
+        runtime.$executeRawUnsafe('DELETE FROM settlement WHERE id = $1', fixture.settlementId),
+      ).rejects.toThrow(/append-only/);
+      await expect(settlementRow(fixture.settlementId)).resolves.toBeDefined();
+    });
+
+    it.each(REPLACEMENTS)(
+      'before any case, delete and reinsert with %s is refused, and the cap stays the real one',
+      async (_label, changes) => {
+        const fixture = await settled();
+        const before = await settlementRow(fixture.settlementId);
+        await expect(
+          runtime.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(
+              'DELETE FROM settlement WHERE id = $1',
+              fixture.settlementId,
+            );
+            await insertSettlement(tx, { ...before, ...changes });
+          }),
+        ).rejects.toThrow(/append-only/);
+        await expect(settlementRow(fixture.settlementId)).resolves.toEqual(before);
+        const id = await open(fixture);
+        await expect(propose(id, noCommission(GROSS + 1n))).rejects.toThrow(
+          /never reversed beyond/,
+        );
+        await expect(propose(id, noCommission(GROSS))).resolves.toBe(1);
+      },
+    );
+
+    it('a second row cannot take the identity of the first', async () => {
+      const fixture = await settled();
+      const row = await settlementRow(fixture.settlementId);
+      const fresh = {
+        id: `STL_${ulid()}`,
+        transaction_id: `TXN_${ulid()}`,
+        journal_id: `JRN_${ulid()}`,
+      };
+      for (const same of [
+        { ...row, ...fresh, id: row.id },
+        { ...row, ...fresh, transaction_id: row.transaction_id },
+        { ...row, ...fresh, journal_id: row.journal_id },
+      ]) {
+        await expect(insertSettlement(runtime, same)).rejects.toThrow(/Unique constraint|23505/);
+      }
+    });
+
+    it('an upsert is an update, and is refused as one', async () => {
+      const fixture = await settled();
+      await expect(
+        runtime.$executeRawUnsafe(
+          `INSERT INTO settlement (id, organization_id, transaction_id, journal_id, payer_organization_id,
+                                   payee_organization_id, gross_amount_minor, commission_amount_minor,
+                                   net_amount_minor, currency, settled_at, settled_by)
+           SELECT id, organization_id, transaction_id, journal_id, payer_organization_id,
+                  payee_organization_id, gross_amount_minor, commission_amount_minor,
+                  net_amount_minor, currency, settled_at, settled_by
+             FROM settlement WHERE id = $1
+           ON CONFLICT (id) DO UPDATE
+             SET gross_amount_minor = 20000, net_amount_minor = 20000`,
+          fixture.settlementId,
+        ),
+      ).rejects.toThrow(/append-only/);
+    });
+
+    it("a change to the transaction's id cannot cascade into its settlement", async () => {
+      // Nothing but the settlement refers to this one, so only its guard can answer.
+      const transactionId = await settledWithNoRow(payee);
+      await insertSettlement(runtime, rowFor(transactionId, `JRN_${ulid()}`));
+      await expect(
+        rolledBack((tx) =>
+          tx.$executeRawUnsafe(
+            `UPDATE "transaction" SET id = $2 WHERE id = $1`,
+            transactionId,
+            `TXN_${ulid()}`,
+          ),
+        ),
+      ).rejects.toThrow(/A settlement is append-only/);
+    });
+
+    it('the table is never emptied, by the runtime role or the owner', async () => {
+      await expect(
+        // ISOLATION-ALLOW-UNBOUNDED: refused for want of the privilege, before the table is reached.
+        runtime.$executeRawUnsafe('TRUNCATE settlement CASCADE'),
+      ).rejects.toThrow(/permission denied|42501/i);
+      await expect(
+        // ISOLATION-ALLOW-UNBOUNDED: refused by the trigger under test; settlement_reversal's own
+        // guard refuses the same statement should that trigger be gone, so nothing is emptied.
+        owner.$executeRawUnsafe('TRUNCATE settlement CASCADE'),
+      ).rejects.toThrow(/A settlement is append-only/);
+    });
+
+    describe('and a row got past the guard is believed only as far as its journal agrees', () => {
+      const bearsOut = /own journal bears out/;
+
+      it.each(REPLACEMENTS)(
+        'nothing is proposed against a settlement replaced with %s',
+        async (_label, changes) => {
+          const fixture = await settled();
+          await forgeSettlement(fixture.settlementId, changes);
+          const id = await open(fixture);
+          await expect(propose(id, noCommission(50n))).rejects.toThrow(bearsOut);
+        },
+      );
+
+      it('nor against the journal of another transaction', async () => {
+        const [fixture, other] = [await settled(), await settled()];
+        const otherJournal = (await settlementRow(other.settlementId)).journal_id;
+        await forgeSettlement(other.settlementId, { journal_id: `JRN_${ulid()}` });
+        await forgeSettlement(fixture.settlementId, { journal_id: otherJournal });
+        await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
+      });
+
+      /** A balanced journal of the fixture's own transaction: SETTLEMENT, in IRR, unless told. */
+      const forgedJournal = (
+        fixture: Settled,
+        forged: {
+          gross?: bigint;
+          revenue?: readonly (readonly [string, string, bigint])[];
+          currency?: string;
+          type?: string;
+          organizationId?: string;
+          from?: string;
+        } = {},
+      ) =>
+        runtime.$transaction(async (tx) => {
+          const { gross = GROSS, revenue = [], currency = 'IRR', type = 'SETTLEMENT' } = forged;
+          const from = forged.from ?? payer;
+          const id = await emptyJournal(tx, fixture.transactionId, {
+            type,
+            ...(forged.organizationId ? { organizationId: forged.organizationId } : {}),
+          });
+          const to = fixture.payeeOrganizationId;
+          const commission = revenue.reduce((sum, [, , amount]) => sum + amount, 0n);
+          await leg(
+            tx,
+            id,
+            await account(tx, from, 'WALLET', currency),
+            from,
+            'DEBIT',
+            gross,
+            currency,
+          );
+          await leg(
+            tx,
+            id,
+            await account(tx, to, 'WALLET', currency),
+            to,
+            'CREDIT',
+            gross - commission,
+            currency,
+          );
+          for (const [accountId, owner, amount] of revenue) {
+            await leg(tx, id, accountId, owner, 'CREDIT', amount, currency);
+          }
+          return id;
+        });
+
+      it.each([
+        [
+          'larger, row and all: the transaction does not say so',
+          { gross: GROSS * 2n },
+          { gross_amount_minor: 20_000, net_amount_minor: 20_000 },
+        ],
+        ['larger, the row not saying so', { gross: GROSS * 2n }, {}],
+        [
+          'paid by someone else, row and all',
+          { from: chargedPayee },
+          { payer_organization_id: chargedPayee },
+        ],
+        ['of another type', { type: 'FUNDS_HELD' }, {}],
+        ["in another organization's books", { organizationId: `${org.c}-RLG` }, {}],
+        ['in another currency, the row not saying so', { currency: 'USD' }, {}],
+        ['in another currency, the row saying so', { currency: 'USD' }, { currency: 'USD' }],
+      ])('nor against its own journal %s', async (_label, forged, row) => {
+        for (const organizationId of [payer, payee]) {
+          await owner.$executeRawUnsafe(
+            `INSERT INTO ledger_account (id, organization_id, account_type, account_code, purpose, currency, created_by)
+             SELECT $1, organization_id, account_type, account_code, purpose, 'USD', created_by
+               FROM ledger_account
+              WHERE organization_id = $2 AND purpose = 'WALLET' AND currency = 'IRR'
+             ON CONFLICT DO NOTHING`,
+            `ACC_${ulid()}`,
+            organizationId,
+          );
+        }
+        const fixture = await settled();
+        const journalId = await forgedJournal(fixture, forged);
+        await forgeSettlement(fixture.settlementId, { journal_id: journalId, ...row });
+        await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
+      });
+
+      it('nor against a commission its transaction never charged', async () => {
+        const fixture = await settled();
+        const other = await newAccount('COMMISSION_REVENUE', 'REVENUE');
+        const journalId = await forgedJournal(fixture, {
+          revenue: [[other.id, other.organizationId, 1_000n]],
+        });
+        await forgeSettlement(fixture.settlementId, {
+          journal_id: journalId,
+          commission_amount_minor: 1_000,
+          net_amount_minor: 9_000,
+        });
+        await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
+        const silent = await settled();
+        await forgeSettlement(silent.settlementId, {
+          journal_id: await forgedJournal(silent, {
+            revenue: [[other.id, other.organizationId, 1_000n]],
+          }),
+        });
+        await expect(propose(await open(silent), noCommission(50n))).rejects.toThrow(bearsOut);
+      });
+
+      it('nor against a row added beside a top-up, which has no counterparty to be its payee', async () => {
+        const transactionId = await settledWithNoRow(null);
+        const settlementId = `STL_${ulid()}`;
+        const fixture = { transactionId, settlementId, payeeOrganizationId: payee };
+        await insertSettlement(runtime, {
+          ...rowFor(transactionId, await forgedJournal(fixture)),
+          id: settlementId,
+        });
+        await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
+      });
+
+      it('and a journal takes no further leg once a settlement names it, in that transaction either', async () => {
+        const transactionId = await settledWithNoRow(payee);
+        await expect(
+          runtime.$transaction(async (tx) => {
+            const id = await emptyJournal(tx, transactionId, { type: 'SETTLEMENT' });
+            await leg(tx, id, await account(tx, payer), payer, 'DEBIT', GROSS);
+            await leg(tx, id, await account(tx, payee), payee, 'CREDIT', GROSS);
+            await insertSettlement(tx, rowFor(transactionId, id));
+            await leg(tx, id, await account(tx, payer), payer, 'CREDIT', GROSS);
+          }),
+        ).rejects.toThrow(/takes no leg/);
+      });
+
+      it('nor against a settlement whose journal was reversed before the guard', async () => {
+        const fixture = await settled();
+        const { journal_id: settlementJournal } = await settlementRow(fixture.settlementId);
+        await owner.$transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE journal DISABLE TRIGGER trg_journal_settlement_reversal_final',
+          );
+          const id = `JRN_${ulid()}`;
+          await tx.$executeRawUnsafe(
+            `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at,
+                                  posted_by, correlation_id, reverses_id, reversal_reason)
+             VALUES ($1, $2, $3, 'REVERSAL', 'undo', now(), 'itest', 'itest', $4, 'before the guard')`,
+            id,
+            payer,
+            fixture.transactionId,
+            settlementJournal,
+          );
+          await leg(tx, id, await account(tx, payer), payer, 'CREDIT', 1n);
+          await leg(tx, id, await account(tx, payee), payee, 'DEBIT', 1n);
+          // The journal's own checks run now: DDL waits for no deferred trigger.
+          await tx.$executeRawUnsafe('SET CONSTRAINTS ALL IMMEDIATE');
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE journal ENABLE TRIGGER trg_journal_settlement_reversal_final',
+          );
+        });
+        await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
+      });
+
+      it('nor against a journal that credited revenue on two accounts', async () => {
+        const fixture = await settled(true);
+        const genuine = await account(owner, PLATFORM_ORGANIZATION_ID, 'COMMISSION_REVENUE');
+        const other = await newAccount('COMMISSION_REVENUE', 'REVENUE');
+        const journalId = await forgedJournal(fixture, {
+          revenue: [
+            [genuine, PLATFORM_ORGANIZATION_ID, 500n],
+            [other.id, other.organizationId, 500n],
+          ],
+        });
+        await forgeSettlement(fixture.settlementId, { journal_id: journalId });
+        await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
+      });
+
+      it('nor against a journal that credited a liability labelled revenue', async () => {
+        const fixture = await settled(true);
+        const other = await newAccount('COMMISSION_REVENUE', 'LIABILITY');
+        const journalId = await forgedJournal(fixture, {
+          revenue: [[other.id, other.organizationId, 1_000n]],
+        });
+        await forgeSettlement(fixture.settlementId, { journal_id: journalId });
+        await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
+      });
+
+      it('a settlement paid straight from the wallet is borne out too', async () => {
+        const fixture = await settled(false, false);
+        await expect(propose(await open(fixture), noCommission(50n))).resolves.toBe(1);
+      });
     });
 
     it('a settlement with a case behind it is never deleted', async () => {
@@ -1214,7 +1821,7 @@ describe('settlement reversal storage (real database, runtime role)', () => {
       await open(fixture);
       await expect(
         runtime.$executeRawUnsafe('DELETE FROM settlement WHERE id = $1', fixture.settlementId),
-      ).rejects.toThrow(/settlement_reversal_settlement_id_fkey|Foreign key/i);
+      ).rejects.toThrow(/append-only/);
     });
   });
 

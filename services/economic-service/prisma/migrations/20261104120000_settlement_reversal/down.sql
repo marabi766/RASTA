@@ -21,8 +21,8 @@ SELECT set_config('statement_timeout',
                   true);
 
 -- Locked first, so nothing can be written between the check and the changes.
-LOCK TABLE "settlement_reversal", "transaction", "journal", "ledger_entry", "settlement"
-  IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE "settlement_reversal", "transaction", "journal", "ledger_entry", "settlement",
+  "ledger_account" IN ACCESS EXCLUSIVE MODE;
 
 DO $preflight_settlement_reversal$
 BEGIN
@@ -35,13 +35,16 @@ BEGIN
 END
 $preflight_settlement_reversal$;
 
-DROP TRIGGER "trg_settlement_figures_fixed" ON "settlement";
+DROP TRIGGER "trg_ledger_account_identity_fixed" ON "ledger_account";
+DROP TRIGGER "trg_settlement_no_truncate" ON "settlement";
+DROP TRIGGER "trg_settlement_append_only" ON "settlement";
 DROP TRIGGER "trg_journal_settlement_reversal_final" ON "journal";
 DROP TRIGGER "trg_ledger_entry_settlement_reversal_closed" ON "ledger_entry";
 DROP TRIGGER "trg_journal_settlement_reversal_owned" ON "journal";
 DROP TRIGGER "trg_transaction_reversal_status" ON "transaction";
 DROP TABLE "settlement_reversal";
-DROP FUNCTION reject_settlement_figures_change();
+DROP FUNCTION reject_ledger_account_identity_change();
+DROP FUNCTION reject_settlement_mutation();
 DROP FUNCTION reject_settlement_reversal_journal_undo();
 DROP FUNCTION reject_settlement_reversal_journal_leg();
 DROP FUNCTION assert_settlement_reversal_journal_owned();

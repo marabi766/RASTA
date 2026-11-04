@@ -29,9 +29,17 @@
 -- remainder lands on the last reversal. The lock serialises two approvals, and
 -- the sum after it sees what the other committed, which is a property of READ
 -- COMMITTED alone: a snapshot older than the lock would read a stale sum, so any
--- other isolation level is refused rather than trusted. What it is capped by holds
--- still: `trg_settlement_figures_fixed` refuses any change to a settlement's
--- parties and figures, which nothing in this service ever updates.
+-- other isolation level is refused rather than trusted.
+--
+-- What it is capped by holds still, whoever writes. A settlement row is append-only
+-- from birth, case or no case: `trg_settlement_append_only` refuses every UPDATE and
+-- DELETE (and so an upsert or a cascade), `trg_settlement_no_truncate` the rest, and
+-- its unique keys refuse a second row. And the row is believed only as far as the
+-- ledger agrees: the journal it names must be its transaction's own SETTLEMENT
+-- journal, immutable, never reversed, with exactly these parties, figures and
+-- currency, and the transaction must say the same, or nothing is proposed or
+-- applied. So a row added beside a SETTLED transaction with none, a top-up say,
+-- caps nothing: a top-up has no counterparty to be its payee.
 --
 -- ## The transaction follows the money, in both directions
 --
@@ -47,15 +55,24 @@
 -- books, and its legs are the reversal, checked when the case names it:
 --
 --   CREDIT  the payer's WALLET        gross
---   DEBIT   COMMISSION_REVENUE        commission
+--   DEBIT   the account the settlement credited as revenue   commission
 --   DEBIT   the payee's WALLET        net   (the journal balances at commit)
 --
--- `trg_ledger_entry_settlement_reversal_closed` then refuses any further leg, so
--- what was checked is what commits. RLG-002-3 adds the receivable leg of D-115 B
+-- The revenue account is named by id, from the settlement's own journal: a purpose
+-- label proves nothing about whose it is. The wallets are named by organization,
+-- purpose and currency, which is one account (the unique key on the three). And what all of
+-- it reads stays put: `trg_ledger_account_identity_fixed` freezes an account's id,
+-- organization, type, purpose and currency from birth, and a foreign key refuses to
+-- delete one that carries an entry, so no account is relabelled, not even for a
+-- moment inside one transaction.
+--
+-- `trg_ledger_entry_settlement_reversal_closed` then refuses any further leg on it,
+-- or on a journal a settlement names, so what was checked is what commits. RLG-002-3 adds the receivable leg of D-115 B
 -- here when it adds the account: until then a leg of any other shape is refused.
 -- `trg_journal_settlement_reversal_owned` (at commit) is the other direction: no
 -- SETTLEMENT_REVERSAL journal exists without the applied case that names it. And
--- `trg_journal_settlement_reversal_final` refuses a ledger reversal of one.
+-- `trg_journal_settlement_reversal_final` refuses a ledger reversal of one, or of a
+-- SETTLEMENT journal: that would give the money back beside any case.
 --
 -- ## Refused rather than decided
 --
@@ -175,6 +192,8 @@ CREATE OR REPLACE FUNCTION enforce_settlement_reversal_change() RETURNS TRIGGER 
 DECLARE
   settled RECORD;
   applied RECORD;
+  obligation RECORD;
+  origin RECORD;
   posted RECORD;
 BEGIN
   IF TG_OP = 'INSERT' THEN
@@ -259,11 +278,50 @@ BEGIN
     RAISE EXCEPTION 'A settlement reversal is proposed or applied only under READ COMMITTED'
       USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_settlement_reversal_cap';
   END IF;
-  PERFORM 1 FROM "transaction" WHERE "id" = NEW."transaction_id" FOR UPDATE;
+  SELECT "gross_amount_minor", "commission_amount_minor", "currency",
+         "organization_id", "counterparty_organization_id"
+    INTO obligation FROM "transaction" WHERE "id" = NEW."transaction_id" FOR UPDATE;
 
   SELECT "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "currency",
-         "payer_organization_id", "payee_organization_id"
+         "payer_organization_id", "payee_organization_id", "journal_id"
     INTO settled FROM "settlement" WHERE "id" = NEW."settlement_id";
+  -- bool_and skips a NULL, so nothing inside it may be able to be one: every column
+  -- here is NOT NULL, and no rows at all leave `shaped` NULL, which is refused. Net
+  -- needs no comparison: `ck_settlement_amounts` and a balanced journal imply it.
+  SELECT COALESCE(SUM(e."amount_minor") FILTER (WHERE e."direction" = 'DEBIT'), 0) AS gross,
+         COALESCE(SUM(e."amount_minor") FILTER (WHERE e."direction" = 'CREDIT' AND a."purpose" = 'COMMISSION_REVENUE'), 0)
+           AS commission,
+         COUNT(*) FILTER (WHERE e."direction" = 'CREDIT' AND a."purpose" = 'COMMISSION_REVENUE') AS revenue_legs,
+         MIN(e."account_id") FILTER (WHERE e."direction" = 'CREDIT' AND a."purpose" = 'COMMISSION_REVENUE')
+           AS revenue_account,
+         bool_and(e."currency" = settled."currency"
+                  AND ((e."direction" = 'DEBIT' AND a."purpose" IN ('WALLET', 'ESCROW')
+                        AND e."organization_id" = settled."payer_organization_id")
+                    OR (e."direction" = 'CREDIT' AND a."purpose" = 'WALLET'
+                        AND e."organization_id" = settled."payee_organization_id")
+                    OR (e."direction" = 'CREDIT' AND a."purpose" = 'COMMISSION_REVENUE'
+                        AND a."account_type" = 'REVENUE')))
+           AS shaped
+    INTO origin
+    FROM "journal" j
+    JOIN "ledger_entry" e ON e."journal_id" = j."id"
+    JOIN "ledger_account" a ON a."id" = e."account_id"
+   WHERE j."id" = settled."journal_id"
+     AND j."journal_type" = 'SETTLEMENT'
+     AND j."organization_id" = NEW."organization_id"
+     AND j."transaction_id" = NEW."transaction_id";
+  IF origin.shaped IS NOT TRUE OR origin.revenue_legs > 1
+     OR origin.gross <> settled."gross_amount_minor"
+     OR origin.commission <> settled."commission_amount_minor"
+     OR obligation."gross_amount_minor" <> settled."gross_amount_minor"
+     OR obligation."commission_amount_minor" <> settled."commission_amount_minor"
+     OR obligation."currency" <> settled."currency"
+     OR obligation."organization_id" <> settled."payer_organization_id"
+     OR obligation."counterparty_organization_id" IS DISTINCT FROM settled."payee_organization_id"
+     OR EXISTS (SELECT 1 FROM "journal" u WHERE u."reverses_id" = settled."journal_id") THEN
+    RAISE EXCEPTION 'A settlement reversal is measured only against a settlement its own journal bears out'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_settlement_reversal_cap';
+  END IF;
   SELECT COALESCE(SUM("gross_minor"), 0) AS gross,
          COALESCE(SUM("commission_minor"), 0) AS commission,
          COALESCE(SUM("net_minor"), 0) AS net
@@ -278,14 +336,15 @@ BEGIN
 
   IF NEW."status" = 'APPLIED' THEN
     SELECT COALESCE(SUM(e."amount_minor") FILTER (WHERE e."direction" = 'CREDIT'), 0) AS credited,
-           COALESCE(SUM(e."amount_minor") FILTER (WHERE a."purpose" = 'COMMISSION_REVENUE'), 0)
+           COALESCE(SUM(e."amount_minor") FILTER (WHERE e."account_id" = origin.revenue_account), 0)
              AS commission,
            bool_and(e."currency" = settled."currency"
                     AND ((e."direction" = 'CREDIT' AND a."purpose" = 'WALLET'
                           AND e."organization_id" = settled."payer_organization_id")
                       OR (e."direction" = 'DEBIT' AND a."purpose" = 'WALLET'
                           AND e."organization_id" = settled."payee_organization_id")
-                      OR (e."direction" = 'DEBIT' AND a."purpose" = 'COMMISSION_REVENUE')))
+                      OR (e."direction" = 'DEBIT'
+                          AND e."account_id" IS NOT DISTINCT FROM origin.revenue_account)))
              AS shaped
       INTO posted
       FROM "journal" j
@@ -399,8 +458,9 @@ CREATE CONSTRAINT TRIGGER "trg_journal_settlement_reversal_owned"
 
 CREATE OR REPLACE FUNCTION reject_settlement_reversal_journal_leg() RETURNS TRIGGER AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM "settlement_reversal" r WHERE r."journal_id" = NEW."journal_id") THEN
-    RAISE EXCEPTION 'A settlement reversal journal takes no leg once its reversal names it'
+  IF EXISTS (SELECT 1 FROM "settlement_reversal" r WHERE r."journal_id" = NEW."journal_id")
+     OR EXISTS (SELECT 1 FROM "settlement" s WHERE s."journal_id" = NEW."journal_id") THEN
+    RAISE EXCEPTION 'A journal takes no leg once a settlement or its reversal names it'
       USING ERRCODE = 'restrict_violation',
             CONSTRAINT = 'trg_ledger_entry_settlement_reversal_closed';
   END IF;
@@ -414,8 +474,9 @@ CREATE TRIGGER "trg_ledger_entry_settlement_reversal_closed"
 CREATE OR REPLACE FUNCTION reject_settlement_reversal_journal_undo() RETURNS TRIGGER AS $$
 BEGIN
   IF EXISTS (SELECT 1 FROM "journal" j
-              WHERE j."id" = NEW."reverses_id" AND j."journal_type"::text = 'SETTLEMENT_REVERSAL') THEN
-    RAISE EXCEPTION 'A settlement reversal is final: no ledger reversal undoes one'
+              WHERE j."id" = NEW."reverses_id"
+                AND j."journal_type"::text IN ('SETTLEMENT', 'SETTLEMENT_REVERSAL')) THEN
+    RAISE EXCEPTION 'A settlement moves back only by a settlement reversal, which is final: no ledger reversal undoes either'
       USING ERRCODE = 'restrict_violation',
             CONSTRAINT = 'trg_journal_settlement_reversal_final';
   END IF;
@@ -428,23 +489,37 @@ CREATE TRIGGER "trg_journal_settlement_reversal_final"
   WHEN (NEW."reverses_id" IS NOT NULL)
   EXECUTE FUNCTION reject_settlement_reversal_journal_undo();
 
-CREATE OR REPLACE FUNCTION reject_settlement_figures_change() RETURNS TRIGGER AS $$
+CREATE OR REPLACE FUNCTION reject_settlement_mutation() RETURNS TRIGGER AS $$
 BEGIN
-  RAISE EXCEPTION 'A settlement''s parties and figures never change'
-    USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_settlement_figures_fixed';
+  RAISE EXCEPTION 'A settlement is append-only: never changed, removed or replaced'
+    USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_settlement_append_only';
 END; $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER "trg_settlement_figures_fixed"
-  BEFORE UPDATE ON "settlement"
+CREATE TRIGGER "trg_settlement_append_only"
+  BEFORE UPDATE OR DELETE ON "settlement"
+  FOR EACH ROW EXECUTE FUNCTION reject_settlement_mutation();
+
+CREATE TRIGGER "trg_settlement_no_truncate"
+  BEFORE TRUNCATE ON "settlement"
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_settlement_mutation();
+
+-- From birth, not from the first entry: nothing in this service ever updates these
+-- (`ensureAccount`: first writer wins, an existing account is never mutated), and an
+-- empty account relabelled before its first entry would carry that label into it.
+-- `status` and `title` are not what an account is.
+CREATE OR REPLACE FUNCTION reject_ledger_account_identity_change() RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'What a ledger account is never changes'
+    USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_ledger_account_identity_fixed';
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_ledger_account_identity_fixed"
+  BEFORE UPDATE ON "ledger_account"
   FOR EACH ROW
-  WHEN ((OLD."id", OLD."organization_id", OLD."transaction_id", OLD."journal_id",
-         OLD."payer_organization_id", OLD."payee_organization_id", OLD."gross_amount_minor",
-         OLD."commission_amount_minor", OLD."net_amount_minor", OLD."currency")
+  WHEN ((OLD."id", OLD."organization_id", OLD."account_type", OLD."purpose", OLD."currency")
         IS DISTINCT FROM
-        (NEW."id", NEW."organization_id", NEW."transaction_id", NEW."journal_id",
-         NEW."payer_organization_id", NEW."payee_organization_id", NEW."gross_amount_minor",
-         NEW."commission_amount_minor", NEW."net_amount_minor", NEW."currency"))
-  EXECUTE FUNCTION reject_settlement_figures_change();
+        (NEW."id", NEW."organization_id", NEW."account_type", NEW."purpose", NEW."currency"))
+  EXECUTE FUNCTION reject_ledger_account_identity_change();
 
 -- What ck_transaction_amounts and ck_transaction_settled_at hold of a SETTLED row
 -- stays true of one that was reversed. NOT VALID because no existing row can hold
