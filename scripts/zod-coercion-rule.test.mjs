@@ -265,6 +265,9 @@ for (const [index, code] of positives.entries())
   it(`F4 safe syntax ${index + 1}: ${code}`, () => assert.deepEqual(messages(code), []));
 
 const provenanceFailures = [
+  `function factory(){if(true)return Number;return v=>v;} z.preprocess(v=>factory()(v),z.number());`,
+  `const factory=()=>{while(true){return BigInt;}return v=>v;}; z.preprocess(v=>factory()(v),z.bigint());`,
+  `function factory(){if(true)return String;return v=>v;} z.preprocess(v=>factory()(v),z.string());`,
   `function apply(f,v) { return f(v); } z.preprocess(v=>apply(Number,v),z.number());`,
   `function get() { return Number; } z.preprocess(v=>get()(v),z.number());`,
   `const get=()=>Number; const f=get(); z.preprocess(v=>f(v),z.number());`,
@@ -284,6 +287,7 @@ for (const code of provenanceFailures)
     ));
 for (const code of [
   `function apply(f,v) { return f(v); } z.preprocess(v=>apply(n=>n,v),z.unknown());`,
+  `function factory(){if(false)throw new Error('unused');return v=>v;} z.preprocess(v=>factory()(v),z.unknown());`,
   `z.preprocess(v=>new Promise(resolve=>setTimeout(resolve,1)),z.unknown());`,
   `function f(v) { return v.trim(); } z.preprocess(v=>typeof v==='string'?f(v):v,z.string());`,
   `import {normalizePersianText} from '@/lib/format'; z.preprocess(v=>typeof v==='string'?normalizePersianText(v):v,z.string());`,
@@ -305,6 +309,11 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
     cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
       recursive: true,
     });
+    // The reviewed current formatter delegates fixed messages to this source.
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/form-issues.ts'),
+      join(root, 'apps/web/src/lib/form-issues.ts'),
+    );
     assert.equal(
       verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
       'string',

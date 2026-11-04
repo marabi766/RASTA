@@ -844,7 +844,12 @@ export default {
                 bound.set(variable(param), callee.arguments[i]);
             });
             if (fn.body.type !== 'BlockStatement') return unsafe(fn.body, seen, args, bound);
-            const returns = fn.body.body.filter((child) => child.type === 'ReturnStatement');
+            if (fn.body.body.at(-1)?.type !== 'ReturnStatement') return true;
+            const returns = [];
+            walk(fn.body, (child) => {
+              if (FUNCTION_TYPES.has(child.type)) return false;
+              if (child.type === 'ReturnStatement') returns.push(child);
+            });
             return (
               !returns.length || returns.some((child) => unsafe(child.argument, seen, args, bound))
             );
