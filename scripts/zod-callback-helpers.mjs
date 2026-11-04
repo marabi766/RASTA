@@ -66,7 +66,11 @@ export function verifiedCallbackHelper(root, module, name) {
     const files = [
       helper[1],
       ...(module === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
-      ...(module === 'apps/web/src/lib/format'
+      ...([
+        'apps/web/src/lib/format',
+        'apps/web/src/server/drivers',
+        'apps/web/src/server/usage',
+      ].includes(module)
         ? Object.keys(pins).filter((path) => path.startsWith('apps/web/src/lib/format/'))
         : []),
     ];

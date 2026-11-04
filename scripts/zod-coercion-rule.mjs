@@ -542,11 +542,7 @@ export default {
                 callbackSignature(origin(parent.callee)).fields === parent.arguments.indexOf(read)
               ) {
                 // The same audited definition slot may read an immutable object again.
-              } else if (
-                parent.type !== 'MemberExpression' ||
-                (parent.parent.type === 'CallExpression' && parent.parent.callee === parent)
-              )
-                report(read, 'preprocess');
+              } else report(read, 'preprocess');
             }
             fields(def.node.init, seen);
             return;
@@ -599,6 +595,9 @@ export default {
           }
           if (schema.type !== 'CallExpression') return false;
           const api = origin(schema.callee);
+          // Refinements may mutate array elements while returning true. A prior
+          // string-element proof cannot survive an unreviewed refinement.
+          if (api?.name === 'refine' && kind !== 'string') return false;
           if (
             api?.receiverSchema &&
             api.name === 'check' &&

@@ -310,9 +310,27 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
       'string',
     );
     assert.equal(verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'unknown'), undefined);
+    for (const [module, name] of [
+      ['drivers', 'localDateToIso'],
+      ['usage', 'localDateTimeToIso'],
+    ]) {
+      cpSync(
+        join(ROOT, `apps/web/src/server/${module}.ts`),
+        join(root, `apps/web/src/server/${module}.ts`),
+      );
+      assert.equal(verifiedCallbackHelper(root, `apps/web/src/server/${module}`, name), 'verified');
+    }
     appendFileSync(join(root, 'apps/web/src/lib/format/digits.ts'), '\n// changed helper\n');
     assert.equal(
       verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      undefined,
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/server/drivers', 'localDateToIso'),
+      undefined,
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/server/usage', 'localDateTimeToIso'),
       undefined,
     );
   } finally {
@@ -322,6 +340,11 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
+  `const def={effect:{type:'transform',transform:v=>v}}; def.effect.transform=Number; new z.ZodEffects(def);`,
+  `const def={effect:{type:'transform',transform:v=>v}}; const effect=def.effect; effect.transform=Number; new z.ZodEffects(def);`,
+  `const def={effect:{type:'transform',transform:v=>v}}; mutate(def.effect); new z.ZodEffects(def);`,
+  `z.array(z.string()).refine(v=>{v[0]=true;return true;}).transform(v=>v.map(Number));`,
+  `const mutate=v=>{v[0]=true;return true;}; z.array(z.string()).refine(mutate).transform(v=>v.map(Number));`,
   `const C=z.transform(()=>'1').constructor; new C({type:'transform',transform:Number});`,
   `z.transform(()=>'1').clone({type:'transform',transform:Number});`,
 
