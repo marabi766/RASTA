@@ -13,10 +13,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./marketplace-saga-drain-check.mjs', import.meta.url));
@@ -703,6 +704,249 @@ for (const [name, recorded] of Object.entries({
   });
 }
 
+// ---- Every marker the saga records is known to the gate (FU-079) --------------
+//
+// What a target must declare to run a history carrying each patch id. Adding a
+// `patched()` id to the saga without an entry here fails below; the entry then
+// fails until the gate knows the id and the manifest declares its protocol.
+const PATCHES = {
+  'order-saga-durable-rollover-v1': 1,
+  'dispute-settle-resumes-order': 2,
+};
+const LATEST = Math.max(...Object.values(PATCHES));
+const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
+const manifest = JSON.parse(readFileSync(new URL('../package.json', SAGA_SOURCE), 'utf8'));
+const sagaSources = () =>
+  readdirSync(SAGA_SOURCE, { recursive: true })
+    .filter((file) => file.endsWith('.ts') && !file.endsWith('.spec.ts'))
+    .map((file) => readFileSync(new URL(file, SAGA_SOURCE), 'utf8'));
+const parsed = (source) => ts.createSourceFile('saga.ts', source, ts.ScriptTarget.Latest, true);
+const eachNode = (node, visit) => {
+  visit(node);
+  ts.forEachChild(node, (child) => eachNode(child, visit));
+};
+const WORKFLOW_MODULE = '@temporalio/workflow';
+
+/** Every patch id in `sources`; any use it cannot read as a plain call throws. */
+function patchIdsIn(sources) {
+  const ids = new Set();
+  for (const source of sources) {
+    const file = parsed(source);
+    const constants = new Map();
+    eachNode(file, (node) => {
+      if (ts.isVariableDeclaration(node) && node.initializer) {
+        const value = ts.isStringLiteralLike(node.initializer) ? node.initializer.text : null;
+        const name = node.name.getText();
+        constants.set(name, new Set([...(constants.get(name) ?? []), value]));
+      }
+    });
+    eachNode(file, (node) => {
+      if (!ts.isIdentifier(node) && !ts.isStringLiteralLike(node)) return;
+      const { parent } = node;
+      if (node.text === WORKFLOW_MODULE) {
+        // Named imports only: a namespace, a default or a re-export hides names.
+        const bindings = ts.isImportDeclaration(parent) && parent.importClause?.namedBindings;
+        assert.ok(bindings && ts.isNamedImports(bindings), 'unscannable use of the workflow API');
+      }
+      // The SDK's other marker: the gate refuses every marker but `core_patch`.
+      assert.notEqual(node.text, 'proxyLocalActivities', 'local activities record a marker');
+      if (node.text !== 'patched' && node.text !== 'deprecatePatch') return;
+      if (ts.isImportSpecifier(parent) && !parent.propertyName) return;
+      assert.ok(
+        ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node,
+        `unscannable use of ${node.text}`,
+      );
+      const [argument] = parent.arguments;
+      const values = argument && constants.get(argument.getText());
+      const id = ts.isStringLiteralLike(argument)
+        ? argument.text
+        : values?.size === 1
+          ? [...values][0]
+          : null;
+      assert.ok(parent.arguments.length === 1 && id, `patch id cannot be resolved: ${node.text}`);
+      ids.add(id);
+    });
+  }
+  return ids;
+}
+
+test('every patch id in the saga source has its own protocol; the manifest declares the latest', () => {
+  const found = patchIdsIn(sagaSources());
+  // A scan that stopped finding them would pass everything below.
+  assert.ok(
+    found.has('order-saga-durable-rollover-v1') && found.has('dispute-settle-resumes-order'),
+  );
+  for (const id of found) assert.ok(Object.hasOwn(PATCHES, id), `gate test does not know ${id}`);
+  // A new id on an old protocol would pass the previous release, which cannot replay it.
+  const protocols = Object.values(PATCHES);
+  assert.equal(new Set(protocols).size, protocols.length);
+  assert.equal(manifest.marketplaceSagaProtocol, LATEST);
+});
+
+test('the source scan refuses what it cannot read, so a marker cannot hide from it', () => {
+  const url = "const u = 'http://x'; ";
+  assert.deepEqual(
+    [
+      ...patchIdsIn([
+        `const P = 'via-constant';\nimport { patched } from '${WORKFLOW_MODULE}';\npatched(P);\n${url}patched('direct');`,
+        "'/*'; patched('between-comment-marks'); '*/'",
+      ]),
+    ],
+    ['via-constant', 'direct', 'between-comment-marks'],
+  );
+  for (const source of [
+    "import { patched as p } from 'x';",
+    'const p = patched;',
+    "import { patched } from 'x';\nconst p = patched;\np('hidden');",
+    "wf['patched']('hidden');",
+    "wf.patched('hidden');",
+    `import * as wf from '${WORKFLOW_MODULE}';\nwf[k]('hidden');`,
+    `import wf from '${WORKFLOW_MODULE}';`,
+    `export * from '${WORKFLOW_MODULE}';`,
+    `const wf = require('${WORKFLOW_MODULE}');`,
+    "function a() { const P = 'one'; patched(P); }\nfunction b() { const P = 'two'; patched(P); }",
+    "patched('one', 'two');",
+    'patched();',
+    'patched(computed());',
+    'patched(unresolved);',
+    'deprecatePatch(unresolved);',
+    'proxyLocalActivities({});',
+  ]) {
+    assert.throws(() => patchIdsIn([source]), undefined, source);
+  }
+});
+
+function withHistory(recorded) {
+  const scenario = drained();
+  scenario['workflow show order-A'].stdout = recorded;
+  scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
+    recorded.events.length,
+  );
+  return scenario;
+}
+const targetOf = (marketplaceSagaProtocol) => ({
+  target: { name: TARGET_NAME, marketplaceSagaProtocol },
+});
+
+for (const [id, protocol] of Object.entries(PATCHES)) {
+  test(`marker ${id} needs protocol ${protocol}: passes the real manifest, blocks below`, () => {
+    const scenario = withHistory(history({}, [{ id, deprecated: false }]));
+    assert.equal(run(scenario, { target: manifest }).status, 0);
+    assert.equal(run(scenario, targetOf(protocol)).status, 0);
+    const below = run(scenario, targetOf(protocol - 1));
+    assert.equal(below.status, 1);
+    assert.match(below.stderr, new RegExp(`requires saga protocol ${protocol}; incompatible`));
+  });
+}
+
+test('the highest protocol in a history decides, in either order', () => {
+  const markers = [
+    { id: 'order-saga-durable-rollover-v1', deprecated: false },
+    { id: 'dispute-settle-resumes-order', deprecated: true },
+  ];
+  for (const recorded of [markers, [...markers].reverse()]) {
+    const scenario = withHistory(history({}, recorded));
+    assert.equal(run(scenario, targetOf(1)).status, 1);
+    assert.equal(run(scenario, targetOf(2)).status, 0);
+  }
+});
+
+for (const id of ['unknown', 'constructor', '__proto__', 'dispute-settle-resumes-order-v2', 7]) {
+  test(`refuses unknown marker ${id} even for the latest target`, () => {
+    const result = run(withHistory(history({}, [{ id, deprecated: false }])), targetOf(LATEST));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown compatibility marker/);
+  });
+}
+
+test('a missing marker id or flag is refused, known id or not', () => {
+  for (const patch of [{ deprecated: false }, { id: 'dispute-settle-resumes-order' }]) {
+    const result = run(withHistory(history({}, [patch])), targetOf(LATEST));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown compatibility marker/);
+  }
+});
+
+test('a continuation carries its writer protocol before its first marker', () => {
+  const written = withHistory(history({ resume: { activitySequence: 1, reminderDue: [] } }));
+  assert.match(run(written, targetOf(1)).stderr, /requires saga protocol 2; incompatible/);
+  assert.equal(run(written, targetOf(2)).status, 0);
+  const before = withHistory(history({ resume: { activitySequence: 1 } }));
+  assert.equal(run(before, targetOf(1)).status, 0);
+});
+
+/** The members of an interface in the saga's own source. */
+function fieldsOf(name) {
+  const fields = [];
+  eachNode(parsed(readFileSync(new URL('temporal/workflows.ts', SAGA_SOURCE), 'utf8')), (node) => {
+    if (ts.isInterfaceDeclaration(node) && node.name.text === name) {
+      fields.push(...node.members.map((member) => member.name.getText()));
+    }
+  });
+  assert.ok(fields.length > 0, `no interface ${name}`);
+  return fields;
+}
+
+test('every field the saga continues with needs its protocol, and any other is refused', () => {
+  const RESUME_FIELDS = {
+    status: 1,
+    mirroredDispute: 1,
+    mirroredEconomicDispute: 1,
+    waitingIn: 1,
+    nextReminderAt: 1,
+    activitySequence: 1,
+    reminderDue: 2,
+  };
+  assert.ok(Math.max(...Object.values(RESUME_FIELDS)) <= manifest.marketplaceSagaProtocol);
+  for (const field of fieldsOf('SagaResume')) {
+    const protocol = RESUME_FIELDS[field];
+    assert.ok(protocol, `gate test does not know resume.${field}`);
+    const known = withHistory(history({ resume: { [field]: 1 } }));
+    assert.equal(run(known, targetOf(protocol)).status, 0, `gate does not know resume.${field}`);
+    assert.equal(run(known, targetOf(protocol - 1)).status, 1, `resume.${field} needs ${protocol}`);
+  }
+  for (const resume of [{ another: 1 }, null, []]) {
+    const result = run(withHistory(history({ resume })), targetOf(LATEST));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown continuation state|invalid start input/);
+  }
+});
+
+test('every field a saga starts with is known, and any other is refused', () => {
+  const fields = fieldsOf('OrderSagaInput').filter((field) => field !== 'resume');
+  assert.ok(fields.includes('orderId'));
+  for (const field of fields) {
+    const known = withHistory(history({ [field]: 1 }));
+    assert.equal(run(known, targetOf(0)).status, 0, `gate does not know input.${field}`);
+  }
+  const unknown = run(withHistory(history({ anotherField: 1 })), targetOf(LATEST));
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /invalid start input/);
+});
+
+// The SDK's own marker, not this file's idea of one: a saga run at #625's head
+// (`dfa48a55`) against Temporal's test server, saved with `historyToJSON`.
+test('a real captured history with the dispute marker requires protocol 2', () => {
+  const real = JSON.parse(
+    readFileSync(
+      new URL(
+        'temporal/__fixtures__/order-saga-pre-fu080-release-refused.history.json',
+        SAGA_SOURCE,
+      ),
+    ),
+  );
+  const scenario = withHistory(real);
+  scenario['workflow count'] = { stdout: { count: '1' } };
+  scenario['workflow list'] = { stdout: [execution('A')] };
+  const queue = real.events[0].workflowExecutionStartedEventAttributes.taskQueue.name;
+  scenario['workflow describe order-A'].stdout.executionConfig.taskQueue.name = queue;
+  const settings = { ...SETTINGS, MARKETPLACE_TEMPORAL_TASK_QUEUE: queue };
+  assert.equal(run(scenario, { settings, ...targetOf(2) }).status, 0);
+  const below = run(scenario, { settings, ...targetOf(1) });
+  assert.equal(below.status, 1);
+  assert.match(below.stderr, /requires saga protocol 2; incompatible/);
+});
+
 test('legacy-only histories accept an explicitly declared legacy target', () => {
   assert.equal(
     run(drained(), { target: { name: TARGET_NAME, marketplaceSagaProtocol: 0 } }).status,
@@ -718,7 +962,7 @@ test('legacy-only histories accept the unmodified origin/main pre-protocol targe
   assert.match(result.stdout, /OK — no poller/);
 });
 
-for (const value of ['1', '0', 2, -1, 0.5, null, false, {}, []]) {
+for (const value of ['1', '0', LATEST + 1, -1, 0.5, null, false, {}, []]) {
   test(`refuses malformed or unknown target protocol ${JSON.stringify(value)} before querying`, () => {
     const result = run(drained(), {
       target: { name: TARGET_NAME, marketplaceSagaProtocol: value },
