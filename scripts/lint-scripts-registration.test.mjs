@@ -304,8 +304,8 @@ export const BUILTIN_READERS = new Map([
   [
     'scripts/zod-callback-helpers.mjs',
     {
-      why: 'verifies exact named callback helpers against reviewed source hashes; unreadable or changed files refuse',
-      builtins: { fs: ['readFileSync'], crypto: ['createHash'] },
+      why: 'resolves exact named callback helper files and refuses ambiguous siblings, then verifies reviewed source hashes',
+      builtins: { fs: ['readFileSync', 'lstatSync'], crypto: ['createHash'] },
       buildsPrograms: false,
       exports: ['verifiedCallbackHelper'],
       reads: [
