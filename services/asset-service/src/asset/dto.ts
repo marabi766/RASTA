@@ -159,20 +159,57 @@ export type CreateAssetDto = z.infer<typeof createAssetSchema>;
  */
 export const expectedVersion = z.number().int().min(1);
 
+/*
+ * What the published document says about these fields comes from here, through
+ * the shared converter (`toJsonSchema`, @rasta/nest-common): the controller
+ * publishes each command body as the converter output of the schema it
+ * validates with, so there is no second, hand-typed description to drift
+ * (FU-078). A `.describe()` changes the document only, never what parses.
+ */
+
+/** ISO 8601 instant in UTC only: `isoDateTime()` refuses a numeric offset. */
+const utcInstant = () =>
+  z
+    .string()
+    .check(isoDateTime())
+    .describe(
+      'ISO 8601 instant in UTC, ending in `Z` (`2026-11-04T06:30:00Z`). A numeric offset ' +
+        '(`+03:30`) or no zone at all is refused with 400 VALIDATION_FAILED.',
+    );
+
+const PLAIN_TEXT_DESCRIPTION =
+  'Trimmed. Any text without a Unicode bidirectional control character (`\\p{Bidi_Control}`); ' +
+  'one is refused with 400 VALIDATION_FAILED.';
+
+const editVersion = expectedVersion.describe(
+  'The `version` of the asset the edit was made against, as a read returned it. ' +
+    'Required: a stale version is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written.',
+);
+
+const commandVersion = expectedVersion.describe(
+  'The `version` of the asset the command was made against, as a read returned it. ' +
+    'Required: a stale version is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written — ' +
+    'which is also what a command sent a second time answers, because the first one ' +
+    'moved the version.',
+);
+
 export const updateAssetSchema = z
   .object({
     name: displayText(2, 200).optional(),
     assetTag: identifierText(1, 64).nullable().optional(),
     manufacturer: displayText(1, 120).nullable().optional(),
-    model: plainText().min(1).max(120).nullable().optional(),
+    model: plainText().min(1).max(120).describe(PLAIN_TEXT_DESCRIPTION).nullable().optional(),
     manufactureYear: numberInput(z.number().int().min(1300).max(2100)).nullable().optional(),
     specifications: freeFormSpecifications.optional(),
-    expectedVersion,
+    expectedVersion: editVersion,
   })
   .strict()
   .refine((value) => Object.keys(value).some((key) => key !== 'expectedVersion'), {
     message: 'At least one field must be provided',
-  });
+  })
+  .describe(
+    'At least one field besides `expectedVersion` must be present. `null` clears an optional field.',
+  );
 
 export type UpdateAssetDto = z.infer<typeof updateAssetSchema>;
 
@@ -196,8 +233,8 @@ export type ListAssetsQuery = z.infer<typeof listAssetsQuerySchema>;
 
 export const activateAssetSchema = z
   .object({
-    commissionedAt: z.string().check(isoDateTime()).optional(),
-    expectedVersion,
+    commissionedAt: utcInstant().optional(),
+    expectedVersion: commandVersion,
   })
   .strict();
 
@@ -208,8 +245,8 @@ export const changeStatusSchema = z
     status: z.enum(['ACTIVE', 'IDLE', 'OUT_OF_SERVICE']),
     /** Recorded on the event and the timeline. Withdrawing a machine from
      *  service without a stated why is not reviewable later. */
-    reason: plainText().min(3).max(500),
-    expectedVersion,
+    reason: plainText().min(3).max(500).describe(PLAIN_TEXT_DESCRIPTION),
+    expectedVersion: commandVersion,
   })
   .strict();
 
@@ -217,9 +254,9 @@ export type ChangeStatusDto = z.infer<typeof changeStatusSchema>;
 
 export const decommissionSchema = z
   .object({
-    reason: plainText().min(10).max(1000),
-    decommissionedAt: z.string().check(isoDateTime()).optional(),
-    expectedVersion,
+    reason: plainText().min(10).max(1000).describe(PLAIN_TEXT_DESCRIPTION),
+    decommissionedAt: utcInstant().optional(),
+    expectedVersion: commandVersion,
   })
   .strict();
 

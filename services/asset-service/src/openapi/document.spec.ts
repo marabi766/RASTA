@@ -7,7 +7,9 @@ import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
 import { IdempotencyStore } from '../asset/idempotency';
 import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { toJsonSchema } from '@rasta/nest-common';
 import { z } from 'zod';
+import { buildAssetOpenApiDocument, buildDocumentationApp } from './document';
 import {
   activateAssetSchema,
   changeStatusSchema,
@@ -233,13 +235,13 @@ describe.each([
 });
 
 /**
- * The character rule, published (#220): every hand-written body field whose
+ * The character rule, published (#220): every published body field whose
  * Zod schema carries a regex publishes that regex's source as its `pattern` —
  * read out of the validator itself, so a published rule that drifts from the
  * one enforced fails here. The fields #220 moved to `plainText()` are named
  * too, so a body that stops publishing them cannot pass by having no regex.
  */
-describe('the character rule in the hand-written request bodies', () => {
+describe('the character rule in the published request bodies', () => {
   /** Every regex source on a Zod field, through optional, nullable and refinement wrappers. */
   function regexSources(field: z.ZodTypeAny): string[] {
     let current: z.ZodTypeAny = field;
@@ -298,4 +300,65 @@ describe('the character rule in the hand-written request bodies', () => {
       expect([name, regexSources(field)]).toEqual([name, [property.pattern]]);
     }
   });
+});
+
+/**
+ * FU-078: every request body the service serves is the shared converter's output for the DTO the
+ * route validates with — read from the document the documentation module really serves, not from
+ * decorator metadata. A body typed out by hand (as these four were) fails here on its first
+ * difference, and a new `@ApiBody` with no entry below fails the completeness check.
+ */
+describe('the served request bodies are their DTOs, converted (FU-078)', () => {
+  const PUBLISHED: Record<string, z.ZodType> = {
+    'patch /v1/assets/{id}': updateAssetSchema,
+    'post /v1/assets/{id}/activate': activateAssetSchema,
+    'post /v1/assets/{id}/status': changeStatusSchema,
+    'post /v1/assets/{id}/decommission': decommissionSchema,
+  };
+  type Operation = { requestBody?: { content: Record<string, { schema: unknown }> } };
+  let bodies: Record<string, unknown>;
+
+  beforeAll(async () => {
+    const app = await buildDocumentationApp();
+    try {
+      const document = buildAssetOpenApiDocument(app);
+      bodies = {};
+      for (const [path, item] of Object.entries(document.paths)) {
+        for (const [method, operation] of Object.entries(item as Record<string, Operation>)) {
+          const body = operation?.requestBody?.content['application/json']?.schema;
+          if (body !== undefined) bodies[`${method} ${path}`] = body;
+        }
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('publishes a body for exactly the routes listed here', () => {
+    expect(Object.keys(bodies).sort()).toEqual(Object.keys(PUBLISHED).sort());
+  });
+
+  it.each(Object.entries(PUBLISHED))('%s', (operation, schema) => {
+    expect(bodies[operation]).toEqual(toJsonSchema(schema));
+  });
+
+  it.each([
+    ['post /v1/assets/{id}/activate', 'commissionedAt', activateAssetSchema],
+    ['post /v1/assets/{id}/decommission', 'decommissionedAt', decommissionSchema],
+  ] as const)('%s says %s is UTC only, as the validator enforces', (operation, field, schema) => {
+    const published = (bodies[operation] as { properties: Record<string, unknown> }).properties[
+      field
+    ];
+    expect(published).toMatchObject({ type: 'string', format: 'date-time' });
+    expect((published as { description: string }).description).toMatch(/UTC.*`\+03:30`/s);
+    const at = (instant: string) => schema.safeParse({ ...validBody(schema), [field]: instant });
+    expect(at('2026-11-04T06:30:00Z').success).toBe(true);
+    expect(at('2026-11-04T10:00:00+03:30').success).toBe(false);
+  });
+
+  function validBody(schema: z.ZodType): Record<string, unknown> {
+    return schema === decommissionSchema
+      ? { expectedVersion: 1, reason: 'retired after inspection' }
+      : { expectedVersion: 1 };
+  }
 });

@@ -12,12 +12,7 @@ import {
 import { ApiBody, ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { ApiQueryFromSchema } from '../openapi/query-parameters';
-import {
-  ACTIVATE_ASSET_BODY_SCHEMA,
-  CHANGE_STATUS_BODY_SCHEMA,
-  DECOMMISSION_BODY_SCHEMA,
-} from '../openapi/lifecycle-bodies';
-import { UPDATE_ASSET_BODY_SCHEMA } from '../openapi/update-asset-body';
+import { bodyFromSchema } from '../openapi/request-body';
 import { AssetService } from './asset.service';
 import { IdempotencyStore, requiredIdempotencyKey } from './idempotency';
 import { InsuranceService } from '../insurance/insurance.service';
@@ -241,7 +236,7 @@ export class AssetController {
       'nothing and answers with the asset as it is. `null` clears an optional field. ' +
       'Returns 404 for an asset in another organization — never 403 — whatever version is sent.',
   })
-  @ApiBody({ schema: UPDATE_ASSET_BODY_SCHEMA })
+  @ApiBody(bodyFromSchema(updateAssetSchema))
   update(@Param('id') id: string, @Body(zodPipe(updateAssetSchema)) dto: UpdateAssetDto) {
     return this.assets.update(id, dto);
   }
@@ -258,7 +253,7 @@ export class AssetController {
       'and nothing is written or published. A body without it is `400`. Returns 404 for an asset ' +
       'in another organization — never 403 — whatever version is sent.',
   })
-  @ApiBody({ schema: ACTIVATE_ASSET_BODY_SCHEMA })
+  @ApiBody(bodyFromSchema(activateAssetSchema))
   activate(@Param('id') id: string, @Body(zodPipe(activateAssetSchema)) dto: ActivateAssetDto) {
     return this.assets.activate(id, dto);
   }
@@ -277,7 +272,7 @@ export class AssetController {
       '`400`. Returns 404 for an asset in another organization — never 403 — whatever version ' +
       'is sent.',
   })
-  @ApiBody({ schema: CHANGE_STATUS_BODY_SCHEMA })
+  @ApiBody(bodyFromSchema(changeStatusSchema))
   changeStatus(@Param('id') id: string, @Body(zodPipe(changeStatusSchema)) dto: ChangeStatusDto) {
     return this.assets.changeStatus(id, dto);
   }
@@ -305,7 +300,7 @@ export class AssetController {
       'written or published. A body without it is `400`. Returns 404 for an asset in another ' +
       'organization — never 403 — whatever version is sent.',
   })
-  @ApiBody({ schema: DECOMMISSION_BODY_SCHEMA })
+  @ApiBody(bodyFromSchema(decommissionSchema))
   decommission(@Param('id') id: string, @Body(zodPipe(decommissionSchema)) dto: DecommissionDto) {
     return this.assets.decommission(id, dto);
   }
