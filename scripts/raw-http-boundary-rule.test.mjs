@@ -47,6 +47,8 @@ credentialFetch(url, { headers: { authorization: token } });`,
 // …and the variants the PM named: bind, call, Reflect.apply, factory return, dynamic
 // import / require alias, computed name. Credential spelling is irrelevant to the boundary.
 const VARIANTS = {
+  'normalized URL module': "await import(' \tDaTa:text/javascript,fetch(url)');",
+
   'process listener result': "const p=process.on('x',callback); p.getBuiltinModule('fs');",
 
   'factory escapes':

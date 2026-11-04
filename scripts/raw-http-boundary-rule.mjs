@@ -105,13 +105,21 @@ const inTypePosition = (node) => {
   }
   return false;
 };
-const isSenderModule = (name) =>
-  /^(?:file:|[\\/]|[A-Za-z]:)/.test(name) ||
-  CLIENT_MODULES.test(name) ||
-  NODE_HTTP.test(name) ||
-  PLAYWRIGHT_TEST.test(name) ||
-  /^(?:(?:node:)?(?:vm|worker_threads|module)(?:\/|$)|(?:data|blob|https?):)/.test(name) ||
-  /(?:^|[\\/])node_modules(?:[\\/]|$)/.test(name);
+const isSenderModule = (source) => {
+  let name = source;
+  try {
+    name = new URL(source).href;
+  } catch {
+    /* A bare module specifier. */
+  }
+  return;
+  /^(?:file:|[\\/]|[A-Za-z]:)/i.test(name) ||
+    CLIENT_MODULES.test(name) ||
+    NODE_HTTP.test(name) ||
+    PLAYWRIGHT_TEST.test(name) ||
+    /^(?:(?:node:)?(?:vm|worker_threads|module)(?:\/|$)|(?:data|blob|https?):)/.test(name) ||
+    /(?:^|[\\/])node_modules(?:[\\/]|$)/.test(name);
+};
 
 /**
  * Q-155 Follow-up 1: the transport boundary, enforced independently of how a
