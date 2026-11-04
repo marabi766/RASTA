@@ -12,7 +12,7 @@ import { AssetService } from '../asset/asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
 import { IdempotencyStore } from '../asset/idempotency';
-import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { publishedIsoDateTimeZone, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { toJsonSchema, ZodValidationPipe } from '@rasta/nest-common';
 import { parametersOf } from './query-parameters';
 import { z } from 'zod';
@@ -272,6 +272,9 @@ describe('the character rule in the published request bodies', () => {
     if (!(current instanceof z.ZodString)) return [];
     return (current.def.checks ?? []).flatMap((check) => {
       const def = check._zod.def as { check: string; format?: string; pattern?: RegExp };
+      // An `isoDateTime()` check enforces its zone, registered beside it and published (FU-035).
+      const zone = publishedIsoDateTimeZone(check);
+      if (zone) return [zone.pattern];
       return def.check === 'string_format' && def.format === 'regex' && def.pattern
         ? [def.pattern.source]
         : [];
