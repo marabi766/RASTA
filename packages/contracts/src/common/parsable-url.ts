@@ -13,7 +13,7 @@ import { z } from 'zod';
  * Use it where `.url()` was: `z.string().check(parsableUrl())`.
  */
 export function parsableUrl(params?: { message?: string }): z.core.$ZodCheck<string> {
-  const check = z.core._url(z.ZodURL, params ?? {});
+  const check = z.core._url(z.ZodURL, { message: params?.message });
   check._zod.check = (payload) => {
     try {
       new URL(payload.value);
