@@ -551,3 +551,118 @@ for (const code of [
   `z.codec(z.unknown(),z.unknown(),{decode:v=>v,encode:v=>v});`,
 ])
   it(`F3 codec preserves: ${code}`, () => assert.deepEqual(messages(code), []));
+
+// F1: the reviewer's 41 executable escapes, including all 22 constructor
+// detections present at 46422b9d. Mini unions have no public .options field.
+import { createRequire } from 'node:module';
+import { runInNewContext } from 'node:vm';
+const contractsRequire = createRequire(
+  new URL('../packages/contracts/package.json', import.meta.url),
+);
+const containerPaths = [
+  `z.object({n:z.number()}).shape.n`,
+  `z.union([z.number(),z.string()]).options[0]`,
+  `z.xor([z.number(),z.string()]).options[0]`,
+  `z.discriminatedUnion('k',[z.object({k:z.literal('a'),n:z.number()})]).options[0].shape.n`,
+  ...['def', '_def', '_zod.def'].map((p) => `z.object({n:z.number()}).${p}.shape.n`),
+  ...['left', 'right'].map((p) => `z.intersection(z.number(),z.number()).def.${p}`),
+  `z.tuple([z.number()]).def.items[0]`,
+  `z.tuple([]).rest(z.number()).def.rest`,
+  `z.object({}).catchall(z.number()).def.catchall`,
+  `z.number().optional().def.innerType`,
+  `z.array(z.number()).def.element`,
+  `z.record(z.string(),z.number()).def.valueType`,
+  `z.map(z.number(),z.number()).def.keyType`,
+  `z.set(z.number()).def.valueType`,
+  `z.pipe(z.number(),z.number()).def.in`,
+  `z.any().safeParse(z.number()).data`,
+];
+const containerProbes = containerPaths.flatMap((path) => [
+  ['zod', `const s=${path}.clone({coerce:true});`],
+  ['zod', `const C=${path}.constructor; const s=new C({type:'number',coerce:true});`],
+]);
+for (const [module, paths] of [
+  ['zod/mini', [containerPaths[0]]],
+  ['zod/v3', containerPaths.slice(0, 2)],
+])
+  for (const path of paths)
+    containerProbes.push([
+      module,
+      `const C=${path}.constructor; const s=new C({type:'number',typeName:'ZodNumber',checks:[],coerce:true});`,
+    ]);
+for (const [module, code] of containerProbes)
+  it(`F1 executable container ${module}: ${code}`, () => {
+    const diagnostics = messages(
+      code.replaceAll('z.', 'schema.').replace(/^/, `const schema = z; `),
+    );
+    assert.ok(
+      diagnostics.some((m) => m.messageId === 'boundary'),
+      JSON.stringify(diagnostics),
+    );
+    const api = contractsRequire(module);
+    const result = runInNewContext(
+      `${code} z.safeParse ? z.safeParse(s,true) : s.safeParse(true);`,
+      { z: api },
+    );
+    assert.equal(result.success, true);
+    assert.equal(result.data, 1);
+    // Exercise the actual import module as well as the renamed local alias.
+    assert.ok(
+      linter
+        .verify(`import * as z from '${module}'; ${code}`, [
+          {
+            languageOptions: { parser: tseslint.parser },
+            plugins: { boundary: { rules: { coercion: rule } } },
+            rules: { 'boundary/coercion': 'error' },
+          },
+        ])
+        .some((m) => m.messageId === 'boundary'),
+    );
+  });
+
+for (const code of [
+  `const shape=z.object({n:z.number()}).shape; const child=shape.n; child.clone({coerce:true});`,
+  `const {shape:{n:child}}=z.object({n:z.number()}); child.clone({coerce:true});`,
+  `const {n:child}=z.object({n:z.number()}).shape; child.clone({coerce:true});`,
+  `const {...shape}=z.object({n:z.number()}).shape; shape.n.clone({coerce:true});`,
+  `const {options:[child]}=z.union([z.number(),z.string()]); child.clone({coerce:true});`,
+  `const [child]=z.union([z.number(),z.string()]).options; child.clone({coerce:true});`,
+  `const [,...tail]=z.union([z.string(),z.number()]).options; tail[0].clone({coerce:true});`,
+  `const items=[...z.union([z.number(),z.string()]).options]; items[0].clone({coerce:true});`,
+  `const {_zod:{def:{shape:{n:child}}}}=z.object({n:z.number()}); child.clone({coerce:true});`,
+  `const {def:{items:[child]}}=z.tuple([z.number()]); child.clone({coerce:true});`,
+  `const {data:child}=z.any().safeParse(z.number()); child.clone({coerce:true});`,
+  `const {data:{n:child}}=z.any().safeParse({n:z.number()}); child.clone({coerce:true});`,
+  `const child=z.any().safeParse([z.number()]).data[0]; child.clone({coerce:true});`,
+  `const [child]=z.any().safeParse([z.number()]).data; child.clone({coerce:true});`,
+  `const child=z.safeParse(z.any(),z.number()).data; child.clone({coerce:true});`,
+  `const {data:child}=await z.any().safeParseAsync(z.number()); child.clone({coerce:true});`,
+  `z.union([z.number(),z.string()]).options.at(0).clone({coerce:true});`,
+  `z.number().pipe(z.number()).def.out.clone({coerce:true});`,
+  `z.array(z.number())._def.type.constructor({coerce:true});`,
+  `z.object({n:z.number()})._def.shape().n.constructor({coerce:true});`,
+  `z.lazy(()=>z.number()).def.getter().clone({coerce:true});`,
+  `z.lazy(()=>z.number())._zod.innerType.clone({coerce:true});`,
+  `z.function()._def.returns.constructor({coerce:true});`,
+  `z.discriminatedUnion('k',[]).optionsMap.get('a').shape.n.constructor({coerce:true});`,
+  `z.union([z.number(),z.string()]).options.slice()[0].clone({coerce:true});`,
+  `z.discriminatedUnion('k',[]).optionsMap.values().next().value.clone({coerce:true});`,
+  `const data=z.any().safeParse({n:z.number()}).data; data[getKey()].constructor({coerce:true});`,
+  `let child; [child]=z.union([z.number(),z.string()]).options; child.clone({coerce:true});`,
+])
+  it(`F1 container propagation: ${code}`, () =>
+    assert.ok(messages(code).some((m) => m.messageId === 'boundary')));
+
+for (const code of [
+  `const {data}=z.any().safeParse({n:1}); data.n;`,
+  `const {data:{coerce}}=z.any().safeParse({coerce:true});`,
+  `const data=z.any().safeParse({n:1}).data; data.clone({coerce:true});`,
+  `const {n}=z.object({n:z.number()}).shape; export {n};`,
+  `const [n]=z.union([z.number(),z.string()]).options; n.clone({coerce:false});`,
+  `const {data:n}=z.any().safeParse(z.number()); n.clone({coerce:false});`,
+  `const {n}=z.object({n:z.number()}).shape; n.clone({coerce:false});`,
+  `const count=z.union([z.number(),z.string()]).options.length; use(count);`,
+  `const data=z.object({n:z.number()}).parse({n:1}); data.n;`,
+  `const meta=z.number().meta(); meta.clone({coerce:true});`,
+])
+  it(`F1 keeps containers distinct from data: ${code}`, () => assert.deepEqual(messages(code), []));
