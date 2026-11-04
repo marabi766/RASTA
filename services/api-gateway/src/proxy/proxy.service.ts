@@ -227,6 +227,7 @@ export class ProxyService {
     if (!FORWARDABLE_METHODS.includes(request.method.toUpperCase())) {
       throw new MethodNotAllowedException('This method is not supported');
     }
+    if (`${request.path}${request.query}`.includes(ENCODED_NUL)) throw unstorableText();
     const body = this.bodyFor(request.method, request.body);
     const context = getContext();
     const target = `${serviceUrl(this.urls, request.service)}${request.path}${request.query}`;
@@ -582,18 +583,45 @@ function unforwardable(service: ServiceName): RastaError {
   });
 }
 
-/** The caller's parsed body as sent, refused past {@link MAX_FORWARDED_BODY_NESTING}. */
+function unstorableText(): RastaError {
+  return new RastaError('MALFORMED_REQUEST', 'The request holds characters it cannot carry');
+}
+
+/** A NUL in a request target. Once decoded it is what {@link assertStorableText} refuses. */
+const ENCODED_NUL = '%00';
+
+/** A surrogate with no partner; with the `u` flag, a valid pair is one other code point. */
+const LONE_SURROGATE = /\p{Cs}/u;
+
+/**
+ * Text no service can hold. PostgreSQL refuses NUL (22021) and Prisma a lone
+ * surrogate, whichever the field, and a schema's bare `z.string()` lets both
+ * through: to a service they are a 500, and five of those open the breaker for
+ * every tenant.
+ */
+function assertStorableText(text: string): void {
+  if (text.includes('\u0000') || LONE_SURROGATE.test(text)) throw unstorableText();
+}
+
+/**
+ * The caller's parsed body as sent, refused past {@link MAX_FORWARDED_BODY_NESTING}
+ * or holding text no service can store, in a value or a key.
+ */
 function serializedBody(body: unknown): string {
   // Level by level, without recursion: the body is what may be too deep to recurse into.
   let level: unknown[] = [body];
   for (let nesting = 0; level.length > 0; nesting += 1) {
     const next: unknown[] = [];
     for (const value of level) {
+      if (typeof value === 'string') assertStorableText(value);
       if (typeof value !== 'object' || value === null) continue;
       if (nesting === MAX_FORWARDED_BODY_NESTING) {
         throw new RastaError('MALFORMED_REQUEST', 'The request body is nested too deeply');
       }
-      for (const child of Object.values(value)) next.push(child);
+      for (const [key, child] of Object.entries(value)) {
+        assertStorableText(key);
+        next.push(child);
+      }
     }
     level = next;
   }

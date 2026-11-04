@@ -472,6 +472,78 @@ describe('a body nested too deeply to forward', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Text no service can store: its 500 would be counted
+// ---------------------------------------------------------------------------
+
+describe('text PostgreSQL or Prisma would refuse', () => {
+  const posted = (body: string): Attempt => deep('POST', body);
+
+  it.each<[string, Attempt]>([
+    ['NUL in a value', posted('{"note":"a\\u0000b"}')],
+    ['NUL in a nested value', posted('{"a":[{"b":["\\u0000"]}]}')],
+    ['NUL in a key', posted('{"a\\u0000":1}')],
+    ['a lone high surrogate', posted('{"note":"a\\ud800b"}')],
+    ['a lone low surrogate', posted('{"note":"\\udc00"}')],
+    ['a lone surrogate in a key', posted('{"\\ud800":1}')],
+    ['NUL, DELETE', deep('DELETE', '{"reason":"\\u0000"}')],
+    ['NUL in a query', { path: `${USERS}?q=%00` }],
+    ['NUL in a path', { path: `${USERS}/a%00b` }],
+    [
+      'NUL in a query, POST',
+      { method: 'POST', path: `${USERS}?q=%00`, headers: JSON_TYPE, body: '{}' },
+    ],
+  ])('%s: the caller’s 400, nothing sent, nothing counted', async (_name, attempt) => {
+    const port = await startGateway();
+
+    await hammer(port, attempt, { status: 400, code: 'MALFORMED_REQUEST' });
+
+    expect(received).toHaveLength(0);
+    await otherTenantStillServed(port);
+  });
+
+  it.each<[string, Attempt]>([
+    ['a valid surrogate pair', posted('{"note":"a\\ud83d\\ude00b"}')],
+    ['other control characters', posted('{"note":"a\\u0001\\u007f\\n"}')],
+    ['the words of an escape', posted('{"note":"%00 and \\\\u0000"}')],
+    ['a query with an encoded percent', { path: `${USERS}?q=%2500` }],
+    ['Persian with a ZWNJ', posted('{"note":"می\u200cشود"}')],
+  ])('%s: forwarded', async (_name, attempt) => {
+    const port = await startGateway();
+
+    expect(await send(port, attempt)).toMatchObject({ status: 200 });
+
+    expect(received).toHaveLength(1);
+  });
+
+  it('a GET’s body is never sent, so it is never read', async () => {
+    const port = await startGateway();
+
+    expect(await send(port, deep('GET', '{"a":"\\u0000"}'))).toMatchObject({ status: 200 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The header budget: the gateway's own headers can tip a request past the service's
+// ---------------------------------------------------------------------------
+
+describe('headers that fit the gateway but not the service', () => {
+  it('the service’s 431 is an answer: relayed, and nothing counted', async () => {
+    const port = await startGateway();
+    // Under the 16 KiB both parsers allow, until the gateway's token is added.
+    const attempt: Attempt = {
+      method: 'POST',
+      headers: { ...JSON_TYPE, 'x-pad': 'a'.repeat(16_000) },
+      body: '{}',
+    };
+
+    await hammer(port, attempt, { status: 431 });
+
+    expect(received).toHaveLength(0);
+    await otherTenantStillServed(port);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Family 3: methods
 // ---------------------------------------------------------------------------
 
@@ -629,6 +701,8 @@ describe('the probe slot', () => {
   it.each<[string, Attempt, number]>([
     ['TRACE', { method: 'TRACE' }, 405],
     ['a deep body', deep('POST', objects(10_000)), 400],
+    ['a NUL in a body', deep('POST', '{"a":"\\u0000"}'), 400],
+    ['a NUL in a query', { path: `${USERS}?q=%00` }, 400],
     ['a corrupt body', encoded('gzip', 'not gzip'), 400],
   ])('%s does not take it, and does not reopen the circuit', async (_name, attempt, status) => {
     const port = await startGateway();
