@@ -763,8 +763,8 @@ export function serviceCallersByOperation(
 ): Map<string, readonly string[] | undefined> {
   type Target = Parameters<Reflector['getAllAndOverride']>[1][number];
   const handlers = new Map<string, [Target, Target]>();
-  for (const module of app.get(ModulesContainer).values()) {
-    for (const { metatype } of module.controllers.values()) {
+  for (const nestModule of app.get(ModulesContainer).values()) {
+    for (const { metatype } of nestModule.controllers.values()) {
       if (typeof metatype !== 'function') continue;
       for (const name of Object.getOwnPropertyNames(metatype.prototype)) {
         const handler: unknown = metatype.prototype[name];
