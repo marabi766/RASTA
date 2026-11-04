@@ -732,8 +732,13 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       `sleeper group: process group ${pid} still has a live writer (${pid})`,
     );
     // Both a delayed-exit writer and a zombie answer `kill(pid, 0)`; only the state tells them apart.
-    const zombie = await printedPid('sleep 0 & echo $!; exec sleep 30');
-    const leader = await printedPid('setsid sh -c "echo \\$\\$; exit 0" & exec sleep 30');
+    // Each child exits only once its parent has become `sleep` (after the exec), so the shell can
+    // never reap it first — under load `sleep 0` used to end before the exec (FU-049).
+    const afterExec = 'while [ "$(ps -o comm= -p $p)" != sleep ]; do sleep 0.05; done';
+    const zombie = await printedPid(`p=$$; (${afterExec}) & echo $!; exec sleep 30`);
+    const leader = await printedPid(
+      `p=$$; setsid sh -c 'echo $$; ${afterExec.replace('$p', '"$1"')}' sh $p & exec sleep 30`,
+    );
     for (const target of [zombie, -leader]) {
       await waitFor(() => liveMembers([target])[0].length === 0);
       expect(alive(target)).toBe(true); // not reaped: the signal probe still sees it
