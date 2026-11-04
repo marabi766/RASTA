@@ -1,4 +1,9 @@
-import { InternalHttpClient, exchangeWithDeadline, type InternalSender } from '@rasta/nest-common';
+import {
+  InternalHttpClient,
+  exchangeWithDeadline,
+  readBoundedText,
+  type InternalSender,
+} from '@rasta/nest-common';
 import { z } from 'zod';
 import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
@@ -11,6 +16,9 @@ import {
   type RecipientQuery,
   type RecipientResolution,
 } from './recipient.port';
+
+/** Byte ceiling of the peer's answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 1024 * 1024;
 
 /**
  * Recipient resolution over identity-service's REST API (ADR-054 § 1).
@@ -167,7 +175,7 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
         async (response) => ({
           ok: response.ok,
           status: response.status,
-          text: response.ok ? await response.text() : undefined,
+          text: response.ok ? await readBoundedText(response, MAX_ANSWER_BYTES) : undefined,
         }),
       );
     } catch (error) {

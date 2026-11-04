@@ -374,7 +374,7 @@ export class ClamdClient {
         return;
       }
       answered = true;
-      settleReply(replyBytes.bytes().toString('latin1'));
+      settleReply(replyBytes.toBuffer().toString('latin1'));
       // Handed over as a string; retaining the buffers past that point keeps
       // the reply resident for the life of the exchange for no reason.
       replyBytes.clear();

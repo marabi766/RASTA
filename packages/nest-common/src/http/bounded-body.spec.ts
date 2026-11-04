@@ -1,4 +1,11 @@
-import { BoundedBodyCollector, readCappedText } from './bounded-body';
+import { ExchangeDeadlineError } from './exchange-deadline';
+import {
+  BodyTooLargeError,
+  BoundedBodyCollector,
+  readBoundedJson,
+  readBoundedText,
+  readCappedText,
+} from './bounded-body';
 
 const streamed = (parts: Uint8Array[]) =>
   new Response(
@@ -31,10 +38,10 @@ describe('BoundedBodyCollector', () => {
     expect(body.append(Buffer.from('01234'))).toBe(true);
     expect(body.append(Buffer.from('56789'))).toBe(true);
     expect(body.append(Buffer.from('X'))).toBe(false);
-    expect(body.bytes().toString()).toBe('0123456789');
+    expect(body.toBuffer().toString()).toBe('0123456789');
     body.clear();
     expect(body.byteLength).toBe(0);
-    expect(body.bytes().byteLength).toBe(0);
+    expect(body.toBuffer().byteLength).toBe(0);
   });
 
   it('keeps no chunk it was handed and allocates in proportion to its bytes (FU-044 r2)', async () => {
@@ -130,5 +137,37 @@ describe('readCappedText', () => {
     const response = new Response(stream, { headers: { 'content-length': '11' } });
     await expect(readCappedText(response, 10)).resolves.toBeNull();
     expect(pulled).toBe(false);
+  });
+});
+
+describe('readBoundedText / readBoundedJson (PR #722 r1 F1/F2)', () => {
+  it('are `.text()` / `.json()` with a ceiling: exact cap read, one byte more refused', async () => {
+    await expect(readBoundedText(streamed([Buffer.from('ab'), Buffer.from('c')]), 3)).resolves.toBe(
+      'abc',
+    );
+    await expect(readBoundedText(streamed([Buffer.from('abcd')]), 3)).rejects.toBeInstanceOf(
+      BodyTooLargeError,
+    );
+    await expect(readBoundedJson(streamed([Buffer.from('{"a":1}')]), 7)).resolves.toEqual({ a: 1 });
+    await expect(readBoundedJson(streamed([Buffer.from('{"a":')]), 7)).rejects.toBeInstanceOf(
+      SyntaxError,
+    );
+  });
+
+  it('stops at a caller-given monotonic deadline between chunks and cancels the stream', async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(Uint8Array.of(0x20));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+    const read = readBoundedText(response, 1024 * 1024, { deadlineAt: performance.now() + 20 });
+    await expect(read).rejects.toBeInstanceOf(ExchangeDeadlineError);
+    expect(cancelled).toBe(true);
   });
 });

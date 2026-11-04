@@ -64,7 +64,7 @@ async function readEconomicJson(response: Response, deadlineAt: number): Promise
       // Refused before the chunk that would cross the ceiling is copied.
       if (!body.append(value)) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
     }
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(body.bytes());
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(body.toBuffer());
     if (!text && response.status !== 204) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
     return text ? (JSON.parse(text) as unknown) : undefined;
   } finally {

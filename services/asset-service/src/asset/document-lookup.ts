@@ -2,11 +2,15 @@ import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import {
   RastaError,
+  readBoundedText,
   tryGetContext,
   upstreamExchange,
   type InternalTokenService,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
+
+/** Byte ceiling of the peer's answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 1024 * 1024;
 
 /**
  * Asks document-service who owns a document before a reference to it is stored
@@ -120,7 +124,10 @@ export class DocumentLookupClient implements DocumentLookup {
           `${this.options.baseUrl.replace(/\/+$/, '')}/v1/documents/${encodeURIComponent(documentId)}`,
           { method: 'GET', headers, signal },
         ),
-      async (response) => ({ status: response.status, text: await response.text() }),
+      async (response) => ({
+        status: response.status,
+        text: await readBoundedText(response, MAX_ANSWER_BYTES),
+      }),
     );
 
     const body = parseJson(text);

@@ -6,6 +6,7 @@ import {
   exchangeWithDeadline,
   upstreamExchange,
 } from './exchange-deadline';
+import { readCappedText } from './bounded-body';
 
 /** What a test can see of a body: whether the consumer gave it up. */
 interface Watched {
@@ -317,5 +318,53 @@ describe('upstreamExchange', () => {
       }),
     ).rejects.toMatchObject({ code: ERROR_CODES.UPSTREAM_UNAVAILABLE });
     expect(watched.cancelled()).toBe(true);
+  });
+});
+
+describe('the deadline holds when the timer never gets its turn (PR #722 r1 F2)', () => {
+  /** A valid JSON document padded to `size` bytes, one byte per always-ready pull. */
+  function trickled(size: number) {
+    const document = Buffer.from(`{"tenderId":"t","pad":"${' '.repeat(size - 25)}"}`);
+    const probe = { read: 0, cancelled: false };
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (probe.read === document.byteLength) return controller.close();
+        controller.enqueue(document.subarray(probe.read, ++probe.read));
+      },
+      cancel() {
+        probe.cancelled = true;
+      },
+    });
+    return { probe, response: new Response(stream, { status: 200 }) };
+  }
+
+  it('stops a fragmented body at the deadline instead of accepting it late', async () => {
+    const { probe, response } = trickled(1024 * 1024);
+    const started = performance.now();
+    const outcome = await upstreamExchange(
+      'audit-service',
+      100,
+      sendOf(response),
+      async (received) => {
+        const text = await readCappedText(received, 8 * 1024 * 1024);
+        return (JSON.parse(text!) as { tenderId: string }).tenderId;
+      },
+    ).catch((e: unknown) => e);
+    expect(outcome).toBeInstanceOf(RastaError);
+    expect((outcome as RastaError).code).toBe(ERROR_CODES.UPSTREAM_TIMEOUT);
+    expect(probe.cancelled).toBe(true);
+    expect(probe.read).toBeLessThan(1024 * 1024);
+    // Stopped near the deadline, not after the whole body.
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it('refuses an answer the reader completes after the deadline, even with no body left to check', async () => {
+    const outcome = exchangeWithDeadline(20, sendOf(new Response('ok')), async (received) => {
+      const text = await received.text();
+      const until = performance.now() + 60;
+      while (performance.now() < until); // the timer cannot run during this
+      return text;
+    });
+    await expect(outcome).rejects.toBeInstanceOf(ExchangeDeadlineError);
   });
 });

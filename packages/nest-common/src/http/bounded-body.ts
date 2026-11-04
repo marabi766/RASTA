@@ -1,3 +1,5 @@
+import { ExchangeDeadlineError, exchangeDeadlineOf } from './exchange-deadline';
+
 /**
  * Byte-capped collection of a peer's body whose memory follows the bytes
  * received, never the cap and never the number of chunks (FU-044, FU-081).
@@ -43,7 +45,7 @@ export class BoundedBodyCollector {
   }
 
   /** The bytes received so far (a view; empty when nothing arrived). */
-  bytes(): Buffer {
+  toBuffer(): Buffer {
     return this.owned ? this.owned.subarray(0, this.size) : Buffer.alloc(0);
   }
 
@@ -55,19 +57,54 @@ export class BoundedBodyCollector {
 }
 
 /**
- * The body as UTF-8 text, or `null` once it exceeds `limit` bytes — declared
- * or read — after which reading stops and the stream is cancelled.
+ * What {@link readBoundedText} / {@link readBoundedJson} reject with when the
+ * body is larger than the caller's limit. Carries no URL, header or body.
  */
-export async function readCappedText(response: Response, limit: number): Promise<string | null> {
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super('The response body exceeded its byte limit');
+    this.name = 'BodyTooLargeError';
+  }
+}
+
+export interface CappedReadOptions {
+  /**
+   * A monotonic deadline (`performance.now()`) checked between chunks, for a
+   * read outside {@link exchangeWithDeadline}; inside one, the exchange's own
+   * deadline applies without being passed. The earlier of the two wins.
+   */
+  readonly deadlineAt?: number;
+}
+
+/**
+ * The body's bytes, or `null` once it exceeds `limit` bytes — declared or
+ * read, after any content decoding — after which reading stops and the stream
+ * is cancelled. Past the deadline (the exchange's, or `options.deadlineAt`)
+ * the stream is cancelled and it rejects with `ExchangeDeadlineError`: an
+ * always-ready stream would otherwise keep the abort timer from ever running
+ * (PR #722 r1 F2).
+ */
+async function collectCapped(
+  response: Response,
+  limit: number,
+  options: CappedReadOptions,
+): Promise<Buffer | null> {
+  const exchange = exchangeDeadlineOf(response);
+  const deadlineAt = Math.min(exchange?.at ?? Infinity, options.deadlineAt ?? Infinity);
+  const late = () => new ExchangeDeadlineError(exchange?.timeoutMs ?? 0);
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => undefined);
     return null;
   }
-  if (!response.body) return '';
+  if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
   const body = new BoundedBodyCollector(limit);
   for (;;) {
+    if (performance.now() >= deadlineAt) {
+      await reader.cancel().catch(() => undefined);
+      throw late();
+    }
     const { done, value } = await reader.read();
     if (done) break;
     if (!body.append(value)) {
@@ -75,5 +112,48 @@ export async function readCappedText(response: Response, limit: number): Promise
       return null;
     }
   }
-  return body.bytes().toString('utf8');
+  if (performance.now() >= deadlineAt) throw late();
+  return body.toBuffer();
+}
+
+/**
+ * The body as UTF-8 text, or `null` once it exceeds `limit` bytes; see
+ * `collectCapped` for the deadline.
+ */
+export async function readCappedText(
+  response: Response,
+  limit: number,
+  options: CappedReadOptions = {},
+): Promise<string | null> {
+  const bytes = await collectCapped(response, limit, options);
+  return bytes === null ? null : bytes.toString('utf8');
+}
+
+/**
+ * The bounded drop-in for `response.text()`: the same text, but rejects with
+ * {@link BodyTooLargeError} past `limit` bytes. Every peer body is read through
+ * this module (`bounded-body.sweep.spec.ts`), never through the unbounded
+ * `Response` readers.
+ */
+export async function readBoundedText(
+  response: Response,
+  limit: number,
+  options: CappedReadOptions = {},
+): Promise<string> {
+  const text = await readCappedText(response, limit, options);
+  if (text === null) throw new BodyTooLargeError();
+  return text;
+}
+
+/**
+ * The bounded drop-in for `response.json()`: rejects with
+ * {@link BodyTooLargeError} past `limit` bytes and, like `.json()`, with a
+ * `SyntaxError` when the body is not JSON.
+ */
+export async function readBoundedJson(
+  response: Response,
+  limit: number,
+  options: CappedReadOptions = {},
+): Promise<unknown> {
+  return JSON.parse(await readBoundedText(response, limit, options)) as unknown;
 }

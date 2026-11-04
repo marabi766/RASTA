@@ -1,6 +1,11 @@
 import { InternalHttpClient, type InternalTokenService } from '../http/internal-http-client';
 import { tryGetContext } from '../context/request-context';
+import { RastaError } from '../errors/rasta-error';
+import { readCappedText } from '../http/bounded-body';
 import { upstreamExchange } from '../http/exchange-deadline';
+
+/** The default byte ceiling of an internal answer (PR #722 r1 F1). */
+export const INTERNAL_GET_MAX_BYTES = 1024 * 1024;
 
 /** Identifier characters only; anything else is not forwarded as a correlation id. */
 const SAFE_CORRELATION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -14,6 +19,8 @@ export interface InternalGetOptions {
   /** One exchange, body included. */
   readonly timeoutMs: number;
   readonly tokens: Pick<InternalTokenService, 'issue'>;
+  /** Byte ceiling of the body, decoded; past it the read is `UPSTREAM_UNAVAILABLE`. */
+  readonly maxBodyBytes?: number;
   /** Injection seam for tests. */
   readonly fetch?: typeof fetch;
 }
@@ -60,7 +67,11 @@ export async function internalGet(
         headers,
         signal,
       }),
-    async (response) => ({ status: response.status, text: await response.text() }),
+    async (response) => {
+      const body = await readCappedText(response, options.maxBodyBytes ?? INTERNAL_GET_MAX_BYTES);
+      if (body === null) throw RastaError.upstreamUnavailable(options.to);
+      return { status: response.status, text: body };
+    },
   );
   return { status, body: parseJson(text) };
 }

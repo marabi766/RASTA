@@ -90,6 +90,123 @@ function sweep(): string[] {
   );
 }
 
+/**
+ * PR #722 r1 F1: the chunk sweep above sees one collector shape, not every
+ * reader. A body read through `Response#text/json/arrayBuffer/blob/formData/
+ * bytes`, an SDK `transformTo*` helper, `stream/consumers` or `Readable.fromWeb`
+ * has no ceiling before collection — chunked or highly compressed, the decoded
+ * bytes are buffered whole. Every such call, and every hand-rolled
+ * `getReader()` loop, in production code is either one of the bounded readers
+ * (`./bounded-body.ts`, `apps/web/src/server/bounded-body.ts`) or a reviewed
+ * line below; a new one fails this test until it is bounded or reviewed.
+ */
+const BODY_READER =
+  /\.(?:text|json|arrayBuffer|blob|formData|bytes)\(\s*\)|\.getReader\(\s*\)|\btransformTo(?:ByteArray|String|WebStream)\(|\bstream\/consumers\b|\bfromWeb\(/;
+
+/** Reviewed body-reading lines: `file` → exact trimmed line → why it is bounded or not a peer. */
+const REVIEWED_READERS: Record<string, Record<string, string>> = {
+  'packages/nest-common/src/http/bounded-body.ts': {
+    'const reader = response.body.getReader();': 'the bounded collector itself',
+  },
+  'apps/web/src/server/bounded-body.ts': {
+    'const reader = response.body.getReader();': "the portal's bounded collector",
+  },
+  'services/marketplace-service/src/economic/economic.client.ts': {
+    'const reader = response.body.getReader();':
+      'BoundedBodyCollector with its own deadline check between chunks (FU-044)',
+  },
+  'services/document-service/src/storage/s3.storage.ts': {
+    'const reader = body.transformToWebStream().getReader();':
+      'prefix read: at most `length` bytes kept, then cancelled',
+  },
+  'scripts/verify-grafana-dashboard-probe.mjs': {
+    'const reader = response.body.getReader();': 'byte-capped `boundedText` of the harness',
+  },
+  'apps/web/src/server/asset-documents.ts': {
+    'const bytes = new Uint8Array(await file.arrayBuffer());':
+      "the user's own upload, already parsed by Next under its server-action body limit; not a peer answer",
+    'const bytes = new Uint8Array(await call.file.arrayBuffer());':
+      "the user's own upload, already parsed by Next under its server-action body limit; not a peer answer",
+  },
+  'apps/web/src/app/auth/logout/route.ts': {
+    'const form = await request.formData().catch(() => null);':
+      "the browser's own logout form posted to this route, not a peer answer",
+  },
+};
+
+/** `file:line` and trimmed text of every body-reading call in `text`. */
+export function bodyReaders(file: string, text: string): { site: string; line: string }[] {
+  return text.split('\n').flatMap((line, index) =>
+    // Comment lines are prose, not reads.
+    BODY_READER.test(line) && !/^\s*(?:\*|\/\/|\/\*)/.test(line)
+      ? [{ site: `${file}:${index + 1}`, line: line.trim() }]
+      : [],
+  );
+}
+
+function sourceFiles(): string[] {
+  const roots = ['services', 'packages', 'apps'].flatMap((top) =>
+    readdirSync(join(ROOT, top))
+      .map((name) => join(ROOT, top, name, 'src'))
+      .filter((dir) => {
+        try {
+          return statSync(dir).isDirectory();
+        } catch {
+          return false;
+        }
+      }),
+  );
+  return [
+    ...roots.flatMap((dir) => sources(dir)),
+    ...readdirSync(join(ROOT, 'scripts'))
+      .filter((name) => /\.m?js$/.test(name) && !TEST_FILE.test(name))
+      .map((name) => join(ROOT, 'scripts', name)),
+  ].filter((path) => !/[\\/]generated[\\/]/.test(path));
+}
+
+describe('peer body readers (PR #722 r1 F1)', () => {
+  const found = sourceFiles().flatMap((path) =>
+    bodyReaders(relative(ROOT, path).split('\\').join('/'), readFileSync(path, 'utf8')),
+  );
+  const fileOf = (site: string) => site.slice(0, site.lastIndexOf(':'));
+
+  it('every production body read is bounded or reviewed', () => {
+    const unreviewed = found.filter(
+      ({ site, line }) => REVIEWED_READERS[fileOf(site)]?.[line] === undefined,
+    );
+    expect(unreviewed).toEqual([]);
+  });
+
+  it('every reviewed line still exists (a stale entry would hide a new one)', () => {
+    const present = new Set(found.map(({ site, line }) => `${fileOf(site)}\u0000${line}`));
+    const stale = Object.entries(REVIEWED_READERS).flatMap(([file, lines]) =>
+      Object.keys(lines)
+        .filter((line) => !present.has(`${file}\u0000${line}`))
+        .map((line) => `${file}: ${line}`),
+    );
+    expect(stale).toEqual([]);
+  });
+
+  it('recognises every unbounded reader shape, the review inventory included', () => {
+    for (const shape of [
+      'async (response) => ({ status: response.status, text: await response.text() }),',
+      'const parsed = schema.safeParse(await response.json());',
+      'const buffer = await response.arrayBuffer();',
+      'const blob = await response.blob();',
+      'const bytes = await response.bytes();',
+      'const form = await response.formData();',
+      'return await body.transformToByteArray();',
+      "import { text } from 'node:stream/consumers';",
+      'const node = Readable.fromWeb(response.body);',
+      'const reader = response.body.getReader();',
+    ]) {
+      expect(bodyReaders('x.ts', shape)).toHaveLength(1);
+    }
+    expect(bodyReaders('x.ts', 'const text = await readBoundedText(response, 1024);')).toEqual([]);
+    expect(bodyReaders('x.ts', ' * the bounded drop-in for `response.json()`')).toEqual([]);
+  });
+});
+
 describe('incoming-chunk collectors (FU-081)', () => {
   const found = sweep();
 

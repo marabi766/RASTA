@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
+import { readBoundedJson } from './bounded-body';
 import { credentialFetch } from './credential-fetch';
 import { credentialHeaders, type GatewayCredential } from './session-organization';
 import { MAX_REQUEST_TIMEOUT_MS } from './unresolved-request-policy';
@@ -198,6 +199,10 @@ export interface GatewayCall {
  */
 const GATEWAY_TIMEOUT_MS = MAX_REQUEST_TIMEOUT_MS;
 
+/** Byte ceilings of a gateway answer and of a refusal's problem body, decoded (PR #722 r1 F1). */
+const MAX_GATEWAY_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_PROBLEM_BODY_BYTES = 64 * 1024;
+
 export interface GatewayResponse<T> {
   readonly data: T;
   readonly correlationId: string;
@@ -227,6 +232,10 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
   // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
   const fetchImpl = call.fetchImpl;
 
+  // The timer behind the signal is not the whole deadline: the body is also
+  // checked against this instant between chunks (PR #722 r1 F2).
+  const timeoutMs = call.timeoutMs ?? GATEWAY_TIMEOUT_MS;
+  const deadlineAt = performance.now() + timeoutMs;
   let response: Response;
   try {
     // Never follows a redirect: the bearer token, and a write's key and body,
@@ -247,7 +256,7 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
         },
         body: call.body === undefined ? undefined : JSON.stringify(call.body),
         cache: 'no-store',
-        signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       },
       fetchImpl,
     );
@@ -275,7 +284,7 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     throw new GatewayRequestError(
       response.status,
       correlationId,
-      response.status < 500 ? await readProblem(response) : null,
+      response.status < 500 ? await readProblem(response, deadlineAt) : null,
       parseRetryAfter(response.headers.get('retry-after')),
     );
   }
@@ -293,8 +302,13 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
   }
 
   try {
-    return { data: (await response.json()) as T, correlationId };
+    return {
+      data: (await readBoundedJson(response, MAX_GATEWAY_BODY_BYTES, deadlineAt)) as T,
+      correlationId,
+    };
   } catch {
+    // Past the byte ceiling or the deadline too (PR #722 r1 F1/F2): the
+    // answer was not read, and a write it answered is still unconfirmed.
     // A 2xx whose body does not parse is the gateway's contract broken, not
     // something a screen mid-form can be asked to make sense of — but it is
     // still a 2xx: a write it answers has most likely happened.
@@ -312,10 +326,12 @@ export function parseRetryAfter(value: string | null): number | null {
   return Number(value.trim());
 }
 
-async function readProblem(response: Response): Promise<GatewayProblem | null> {
+async function readProblem(response: Response, deadlineAt: number): Promise<GatewayProblem | null> {
   if (!(response.headers.get('content-type') ?? '').includes('application/json')) return null;
   try {
-    const parsed = gatewayProblemSchema.safeParse(await response.json());
+    const parsed = gatewayProblemSchema.safeParse(
+      await readBoundedJson(response, MAX_PROBLEM_BODY_BYTES, deadlineAt),
+    );
     return parsed.success ? parsed.data : null;
   } catch {
     return null;
