@@ -124,16 +124,8 @@ const resolvedSource = (root, modulePath) => {
 // points at apps/web/src, or that a workspace has no moduleSuffixes override.
 const resolvedImport = (root, specifier, importer, configImporter = importer) => {
   const config = ts.findConfigFile(dirname(configImporter), ts.sys.fileExists);
-  const parsed =
-    config &&
-    ts.getParsedCommandLineOfConfigFile(
-      config,
-      {},
-      {
-        ...ts.sys,
-        onUnRecoverableConfigFileDiagnostic() {},
-      },
-    );
+  const host = { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} };
+  const parsed = config && ts.getParsedCommandLineOfConfigFile(config, {}, host);
   if (config && (!parsed || parsed.errors.length)) return undefined;
   const result = ts.resolveModuleName(
     specifier,

@@ -876,6 +876,7 @@ const unsoundBindings = [
   `const [...xs]=v; return Number(xs)`,
   `v[0]=true; const [x]=v; return Number(x)`,
   `const alias=v; alias[0]=true; const [x]=v; return Number(x)`,
+  `const alias=v.reverse(); alias[0]=true; return v.map(Number)`,
   `return v.map((s,i,a)=>{a[1]=true; return Number(s)})`,
   `return v.map((s,...args)=>{args[1][1]=true; return Number(s)})`,
   `return v.map(function(s){arguments[2][1]=true; return Number(s)})`,
@@ -957,12 +958,8 @@ it('FU-069b respects compiler aliases and module suffixes', () => {
   const source = 'apps/web/src/lib/order-fields.ts',
     importer = join(root, 'apps/web/src/probe.ts');
   const config = join(root, 'apps/web/tsconfig.json');
-  const options = {
-    module: 'esnext',
-    moduleResolution: 'bundler',
-    baseUrl: '.',
-    paths: { '@/*': ['./src/*'] },
-  };
+  const paths = { '@/*': ['./src/*'] };
+  const options = { module: 'esnext', moduleResolution: 'bundler', baseUrl: '.', paths };
   const configure = (extra) =>
     writeFileSync(
       config,

@@ -1008,6 +1008,7 @@ export default {
             if (ref.init) return true;
             if (ref.isWrite() || writeTarget(ref.identifier)) return false;
             const parent = ref.identifier.parent;
+            if (key(parent) === 'reverse') return false;
             if (parent.type === 'VariableDeclarator' && parent.init === ref.identifier)
               return parent.id.type !== 'Identifier' || stableElements(parent.id, seen);
             return parent.type === 'MemberExpression' && parent.object === ref.identifier;

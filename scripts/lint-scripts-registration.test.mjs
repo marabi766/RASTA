@@ -2840,8 +2840,8 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
     [
       [
         'scripts/zod-callback-helpers.mjs',
-        { fs: ['readFileSync'], crypto: ['createHash'] },
-        false,
+        { fs: ['readFileSync', 'lstatSync'], crypto: ['createHash'] },
+        true,
         ['verifiedCallbackHelper'],
         ['callback-helper-sources'],
       ],
@@ -3437,12 +3437,12 @@ test('mutant: the real parser entry cannot stop saying it builds programs, nor i
     found.workspaces.every((w) => w.builders.get(parser)?.includes('`buildsPrograms: true`')),
   );
   assert.equal(programBuildProblems(found, cached).length, 1);
-  // the entry and the names both gone: nothing flags it (what the table pin test exists for)
+  // With its entry and names gone the parser is no longer flagged; other compiler readers remain.
   const gone = discover({
     ...hidden,
     exceptions: new Map([...BUILTIN_READERS, [parser, entry]]),
   });
-  assert.deepEqual(programBuildProblems(gone, cached), []);
+  assert.ok(programBuildProblems(gone, cached).every((p) => !p.includes(parser)));
 });
 
 // The registry reads across workspace boundaries; a cache may not forget one source.
