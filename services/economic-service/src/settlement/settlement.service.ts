@@ -14,7 +14,7 @@ import {
 import { CommissionService } from '../commission/commission.service';
 import type { CommissionDecision, CommissionOutcome } from '../commission/rule-engine';
 import { assertSufficient, balancesFrom } from '../wallet/balances';
-import { nextStatus } from '../transaction/state-machine';
+import { assertSettlementReady, nextStatus } from '../transaction/state-machine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor } from '../shared/money';
 import { after, resolveCursor } from '../shared/cursor';
@@ -230,6 +230,16 @@ export class SettlementService {
     if (!payer || !payee) throw RastaError.internal('A wallet vanished while locking it');
 
     const hold = await this.walletRepository.findActiveHold(tx, payer.id, transaction.id);
+
+    // Escrowed money moves only on a recorded authorisation, whatever the
+    // status says: an older release's resolution left escrowed, never
+    // authorised rows in PENDING_SETTLEMENT (D-083; #623 round 1, F1). Read
+    // under the row lock, before any journal or hold release; the database
+    // refuses the same (`trg_wallet_hold_release_settlement_authority`).
+    assertSettlementReady(transactionId, {
+      settlementAuthorised: transaction.settlementAuthorised,
+      fundsHeld: transaction.fundsHeld || hold !== null,
+    });
 
     // With no escrow behind it — the maintenance obligation of ADR-032 — the
     // payer's spendable balance has to cover it now. Checked under the lock,
