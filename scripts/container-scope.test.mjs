@@ -590,9 +590,10 @@ test('allow-list proof stays valid for every Docker build context and scan input
   const scan = workflow.jobs.containers.steps.find((step) =>
     step.uses?.startsWith('aquasecurity/trivy-action@'),
   );
-  // One time-boxed exception file (CVE-2026-115905/7/8/9, expire 2026-11-04); the
-  // earlier zod one went with the zod 4 migration.
-  assert.equal(scan.with.trivyignores, '.trivyignore.services');
+  // No exception file: every service image is scanned with none (the zod
+  // advisory's went with the zod 4 migration, the Temporal zip one with the
+  // @temporalio 1.25.0 bump).
+  assert.equal(scan.with.trivyignores, undefined);
   assert.equal(scan.with['image-ref'], 'rasta/${{ matrix.service }}:${{ github.sha }}');
 });
 

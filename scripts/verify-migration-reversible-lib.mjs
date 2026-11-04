@@ -1078,6 +1078,16 @@ const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
 ];
 
 const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_dispute';
+/**
+ * Rolled back with it, newest first: both replace its function, so a re-apply
+ * of 20261022120000 alone would leave its own body under them, and the
+ * whole-chain check of the newest one would find the chain changed.
+ */
+const RESOLVED_DISPUTE_DOWNS = [
+  '20261103121000_transaction_settlement_authority',
+  '20261103120000_transaction_dispute_resolution_by_authority',
+  TRANSACTION_RESOLVED_DISPUTE,
+];
 
 /** One lifecycle move of a probe row, as the service writes it: the dispute triggers see a status change. */
 const RSD_MOVE = (id, set) => `UPDATE "transaction" SET ${set} WHERE id = '${id}';`;
@@ -1153,7 +1163,7 @@ END $$;`;
 const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   {
     label: 'resolved dispute: down to the schema before the column (empty)',
-    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+    runDownScript: RESOLVED_DISPUTE_DOWNS,
   },
   {
     label: 'resolved dispute: disputes as the previous release wrote them',
@@ -1214,7 +1224,7 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   },
   {
     label: 'resolved dispute: down succeeds over attributed rows',
-    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+    runDownScript: RESOLVED_DISPUTE_DOWNS,
   },
   {
     label:
@@ -2147,6 +2157,8 @@ export const EXPECTED = {
       'recognition_rule',
       // A source key taken off a transaction, kept with its decision (#334 r3).
       'transaction_source_quarantine',
+      // What 20261103121000 found and did about legacy settlement authority (D-083).
+      'settlement_authority_reconciliation',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2172,6 +2184,13 @@ export const EXPECTED = {
       // A quarantined source key is never changed nor deleted.
       'trg_transaction_source_quarantine_append_only',
       'trg_transaction_source_quarantine_no_truncate',
+      // A resolved dispute goes back to where its settlement authority stands (D-083).
+      'trg_transaction_dispute_resolution',
+      // Escrowed money settles only on a recorded authorisation (D-083, #623 r1 F1).
+      'trg_transaction_settlement_authority',
+      'trg_wallet_hold_release_settlement_authority',
+      'trg_settlement_authority_reconciliation_frozen',
+      'trg_settlement_authority_reconciliation_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -2190,6 +2209,10 @@ export const EXPECTED = {
       'reject_transaction_source_quarantine_mutation',
       // The correction 20261017130000's preflight names (an operator's tool).
       'quarantine_transaction_source',
+      'enforce_transaction_dispute_resolution',
+      'enforce_transaction_settlement_authority',
+      'enforce_hold_release_settlement_authority',
+      'reject_settlement_authority_reconciliation_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -2210,6 +2233,7 @@ export const EXPECTED = {
       // ORDER is recorded by a service over the API, never by a person (recorded-sources.ts).
       'ck_transaction_order_source',
       'ck_transaction_source_quarantine_decision',
+      'ck_settlement_authority_reconciliation_outcome',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',

@@ -341,9 +341,10 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
         details: [{ code: 'REFUND_REVERSAL_PENDING' }],
         internalContext: { walletStatus: status, outcome: 'WALLET_NOT_ACTIVE' },
       });
+      // Read before the restore: a restored spy has no history to read.
+      expect(refundAsked).not.toHaveBeenCalled();
       jest.restoreAllMocks();
 
-      expect(refundAsked).not.toHaveBeenCalled();
       await expectHeldNotReversed(made, held);
       // Already REFUNDED_NOT_REVERSED: nothing re-marked, nothing announced twice.
       expect(await tasksOf(made.intentId)).toEqual([

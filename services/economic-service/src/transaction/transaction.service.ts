@@ -470,8 +470,9 @@ export class TransactionService {
    * Registers an objection. **Settlement stops completely** (docs/10 § 10.5).
    *
    * There is no timeout that clears it and no automatic resolution: the state
-   * machine has no edge from `DISPUTED` to `SETTLED`, only to
-   * `PENDING_SETTLEMENT` by an explicit human decision, or to `REFUNDED`.
+   * machine has no edge from `DISPUTED` to `SETTLED`, only an explicit human
+   * decision back to where its authority stands (`resolvedStatus`), or
+   * `REFUNDED`.
    *
    * An order's obligation is disputed only by the order saga (docs/24 Q-138,
    * `assertMayDisputeDirectly`).
@@ -492,7 +493,11 @@ export class TransactionService {
   }
 
   /**
-   * Resolves a dispute back into the settlement queue.
+   * Resolves a dispute — back to where the transaction's recorded authority
+   * stands, never further (D-083, `resolvedStatus`): an authorised transaction
+   * to the settlement queue, an escrowed one never authorised back to `HELD`.
+   * A resolution lifts the objection; it is not the authorisation to settle,
+   * which for an order's obligation is the buyer's confirmed receipt.
    *
    * With `dto.disputeId`, the decision is about that dispute and no other:
    * refused unless the transaction still holds it (Codex on #318 round 2, N1).
@@ -684,7 +689,12 @@ export class TransactionService {
       // thing read before the write — nothing to ask again (docs/23 D-054).
       const authority = await this.authorizeAct(transaction, event);
 
-      const target = nextStatus(transactionId, transaction.status, event);
+      // A resolution goes where the transaction's recorded authority stands,
+      // read with the lock above — never further (D-083, `resolvedStatus`).
+      const target = nextStatus(transactionId, transaction.status, event, {
+        settlementAuthorised: transaction.settlementAuthorised,
+        fundsHeld: transaction.fundsHeld,
+      });
       if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
         // Fixed words: the identities stay out of the envelope and the log.
         throw RastaError.invalidStateTransition(

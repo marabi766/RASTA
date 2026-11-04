@@ -181,11 +181,13 @@ describe('PlaceOrderForm: K1 set aside, K2 sent, then K1 answers', () => {
       }
       await k1Answer.promise.catch(() => undefined);
     });
+    // Read before the restore: the calls are the evidence, whatever the restore clears.
+    const sentKeys = placeOrder.mock.calls.map(([, form]) => form.get('submission'));
     jest.restoreAllMocks();
 
     // K2: byte for byte; nothing sent again, under either key.
     expect(window.sessionStorage.getItem(SLOT)).toBe(k2);
-    expect(placeOrder.mock.calls.map(([, form]) => form.get('submission'))).toEqual([K1, K2]);
+    expect(sentKeys).toEqual([K1, K2]);
 
     if (late === 'REDIRECT') {
       // Placed: nothing is unknown about K1 — no warning, K2's view stays.
@@ -320,11 +322,13 @@ describe('DisputeCommandForm: K1 set aside, K2 sent, then K1 answers', () => {
       }
       await k1Answer.promise.catch(() => undefined);
     });
+    // Read before the restore: the calls are the evidence, whatever the restore clears.
+    const sentKeys = sendDispute.mock.calls.map(([, , form]) => form.get('submission'));
     jest.restoreAllMocks();
 
     // K2's key, text, deadline: byte for byte. Nothing sent again under either key.
     expect(window.sessionStorage.getItem(SLOT)).toBe(k2);
-    expect(sendDispute.mock.calls.map(([, , form]) => form.get('submission'))).toEqual([K1, K2]);
+    expect(sentKeys).toEqual([K1, K2]);
 
     if (late === 'REDIRECT') {
       expect(setAside()).toEqual([]);

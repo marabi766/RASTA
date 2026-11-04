@@ -12,7 +12,9 @@
  *      counts, none twice (`workflow list` against `workflow count`, before
  *      and after; a (workflow id, run id) listed twice is unverifiable);
  *   3. not one of them has a pending activity (`workflow describe`, each
- *      listed run exactly once: visibility does not index pending activities).
+ *      listed run exactly once: visibility does not index pending activities);
+ *   4. every complete history is compatible with the declared target build,
+ *      including patch markers and not-yet-started continued runs with resume.
  * Exit 1: a poller or a pending activity was found, or anything could not
  * be checked — a missing setting, the CLI absent or failing, output it does
  * not recognise. Both block the deployment; there is no exception.
@@ -32,10 +34,15 @@
  * queue finds nothing and would pass): TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE,
  * MARKETPLACE_TEMPORAL_TASK_QUEUE — the values the service runs with. TLS or
  * an API key: the `temporal` CLI's own TEMPORAL_* variables, inherited.
+ * MARKETPLACE_TARGET_PACKAGE_JSON is the package.json extracted from the target
+ * image, whose name must be @rasta/marketplace-service. marketplaceSagaProtocol
+ * is 0 (legacy) or 1; an absent field means 0. Always run this gate from the
+ * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
 import { commandFailure, clientFailureCode } from '../packages/config/src/command-failure.js';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 const QUERY = 'WorkflowType="orderSaga" AND ExecutionStatus="Running"';
 const CLI_TIMEOUT_MS = 60_000;
@@ -106,11 +113,90 @@ function countOf(answer) {
   return Number.isSafeInteger(count) && count >= 0 ? count : null;
 }
 
+// Protocol 1 is forward-only: patch commands and continuation state cannot be
+// understood by protocol 0. Read durable history, not eventually indexed memo.
+const ROLLOVER_PATCH = 'order-saga-durable-rollover-v1';
+function jsonPayload(payload) {
+  try {
+    if (payload?.metadata?.encoding !== 'anNvbi9wbGFpbg==' || typeof payload.data !== 'string') {
+      throw new Error();
+    }
+    const bytes = Buffer.from(payload.data, 'base64');
+    if (bytes.toString('base64') !== payload.data) throw new Error();
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new Unverifiable('workflow history: compatibility payload cannot be read');
+  }
+}
+
+function requiredProtocol(history, historyLength, taskQueue) {
+  const events = history?.events;
+  if (
+    !Array.isArray(events) ||
+    events.length === 0 ||
+    String(events.length) !== String(historyLength) ||
+    events.some(
+      (event, i) => event?.eventId !== String(i + 1) || typeof event.eventType !== 'string',
+    )
+  ) {
+    throw new Unverifiable('workflow history: incomplete or unreadable compatibility evidence');
+  }
+  const start = events[0].workflowExecutionStartedEventAttributes;
+  if (
+    events[0].eventType !== 'EVENT_TYPE_WORKFLOW_EXECUTION_STARTED' ||
+    start?.workflowType?.name !== 'orderSaga' ||
+    start?.taskQueue?.name !== taskQueue ||
+    start?.input?.payloads?.length !== 1
+  ) {
+    throw new Unverifiable('workflow history: missing start input');
+  }
+  const input = jsonPayload(start.input.payloads[0]);
+  if (!isRecord(input)) throw new Unverifiable('workflow history: invalid start input');
+  let required = Object.hasOwn(input, 'resume') ? 1 : 0;
+  for (const event of events) {
+    if (
+      event.eventType !== 'EVENT_TYPE_MARKER_RECORDED' &&
+      !Object.hasOwn(event, 'markerRecordedEventAttributes')
+    )
+      continue;
+    const marker = event.markerRecordedEventAttributes;
+    if (
+      event.eventType !== 'EVENT_TYPE_MARKER_RECORDED' ||
+      marker?.markerName !== 'core_patch' ||
+      marker.details?.['patch-data']?.payloads?.length !== 1
+    ) {
+      throw new Unverifiable('workflow history: unreadable compatibility marker');
+    }
+    const patch = jsonPayload(marker.details['patch-data'].payloads[0]);
+    if (patch?.id !== ROLLOVER_PATCH || typeof patch.deprecated !== 'boolean') {
+      throw new Unverifiable('workflow history: unknown compatibility marker');
+    }
+    required = 1;
+  }
+  return required;
+}
+
 function check() {
   const cli = process.env.TEMPORAL_CLI?.trim() || 'temporal';
   const address = setting('TEMPORAL_ADDRESS');
   const namespace = setting('TEMPORAL_NAMESPACE');
   const taskQueue = setting('MARKETPLACE_TEMPORAL_TASK_QUEUE');
+  let target;
+  try {
+    // Must be extracted from the immutable target image, never this checkout.
+    target = JSON.parse(readFileSync(setting('MARKETPLACE_TARGET_PACKAGE_JSON'), 'utf8'));
+  } catch {
+    throw new Unverifiable('target build compatibility declaration cannot be read');
+  }
+  if (target?.name !== '@rasta/marketplace-service') {
+    throw new Unverifiable('target manifest is not marketplace-service');
+  }
+  // Pre-protocol releases support only legacy histories; do not rewrite their manifests.
+  const targetProtocol =
+    target.marketplaceSagaProtocol === undefined ? 0 : target.marketplaceSagaProtocol;
+  if (targetProtocol !== 0 && targetProtocol !== 1) {
+    throw new Unverifiable('target build compatibility declaration is unsupported');
+  }
   const common = ['--address', address, '--namespace', namespace];
   const blockers = [];
 
@@ -207,6 +293,21 @@ function check() {
     const queueOfRun = described.executionConfig?.taskQueue?.name;
     if (queueOfRun !== taskQueue) {
       throw new Unverifiable('workflow runs on an unchecked task queue; details withheld');
+    }
+    const history = temporal(cli, [
+      'workflow',
+      'show',
+      ...common,
+      '--workflow-id',
+      workflowId,
+      '--run-id',
+      runId,
+      '--output',
+      'json',
+      '--no-json-shorthand-payloads',
+    ]);
+    if (requiredProtocol(history, info.historyLength, taskQueue) > targetProtocol) {
+      blockers.push('workflow requires saga protocol 1; incompatible target build');
     }
     for (let i = 0; i < pending.length; i += 1) {
       blockers.push('workflow has a pending activity; details withheld');

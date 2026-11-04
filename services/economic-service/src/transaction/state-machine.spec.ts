@@ -1,8 +1,10 @@
 import {
+  assertSettlementReady,
   attractsCommission,
   canTransition,
   isTerminal,
   nextStatus,
+  resolvedStatus,
   TERMINAL_STATUSES,
   type TransactionEvent,
 } from './state-machine';
@@ -82,12 +84,91 @@ describe('a dispute stops settlement completely', () => {
 
   it('returns a resolved dispute to the queue rather than settling it', () => {
     // Unblocking and paying stay two acts.
-    expect(nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE')).toBe('PENDING_SETTLEMENT');
+    expect(
+      nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', {
+        settlementAuthorised: true,
+        fundsHeld: true,
+      }),
+    ).toBe('PENDING_SETTLEMENT');
+  });
+
+  describe('a resolution never authorises (D-083, marketplace audit F1)', () => {
+    it('returns an escrowed transaction never authorised to HELD, not to the settlement queue', () => {
+      expect(
+        nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', {
+          settlementAuthorised: false,
+          fundsHeld: true,
+        }),
+      ).toBe('HELD');
+    });
+
+    it('returns an authorised transaction to PENDING_SETTLEMENT, held or not', () => {
+      for (const fundsHeld of [true, false]) {
+        expect(resolvedStatus({ settlementAuthorised: true, fundsHeld })).toBe(
+          'PENDING_SETTLEMENT',
+        );
+      }
+    });
+
+    it('returns an obligation with no escrow to PENDING_SETTLEMENT: it was authorised when recorded', () => {
+      expect(resolvedStatus({ settlementAuthorised: false, fundsHeld: false })).toBe(
+        'PENDING_SETTLEMENT',
+      );
+    });
+
+    it('refuses to guess a resolution without the authority it depends on', () => {
+      expect(() => nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE')).toThrow(
+        /needs its settlement authority/,
+      );
+    });
+
+    it('reads no authority for any other move', () => {
+      expect(nextStatus('TXN_1', 'DISPUTED', 'REFUND')).toBe('REFUNDED');
+    });
   });
 
   it('can be raised from HELD and from PENDING_SETTLEMENT', () => {
     expect(nextStatus('TXN_1', 'HELD', 'DISPUTE')).toBe('DISPUTED');
     expect(nextStatus('TXN_1', 'PENDING_SETTLEMENT', 'DISPUTE')).toBe('DISPUTED');
+  });
+});
+
+describe('settlement checks its authority, not only its status (D-083, #623 r1 F1)', () => {
+  it('refuses an escrowed transaction with no recorded authorisation — the legacy PENDING_SETTLEMENT row', () => {
+    try {
+      assertSettlementReady('TXN_1', { settlementAuthorised: false, fundsHeld: true });
+      throw new Error('settled without authority');
+    } catch (error) {
+      expect(error).toBeInstanceOf(RastaError);
+      expect((error as RastaError).code).toBe('INVALID_STATE_TRANSITION');
+    }
+  });
+
+  it('lets an authorised transaction, or one with nothing held, settle', () => {
+    for (const authority of [
+      { settlementAuthorised: true, fundsHeld: true },
+      { settlementAuthorised: true, fundsHeld: false },
+      { settlementAuthorised: false, fundsHeld: false },
+    ]) {
+      expect(() => assertSettlementReady('TXN_1', authority)).not.toThrow();
+    }
+  });
+
+  it('agrees with where a resolution sends it: settlement-ready exactly when settleable', () => {
+    for (const settlementAuthorised of [true, false]) {
+      for (const fundsHeld of [true, false]) {
+        const authority = { settlementAuthorised, fundsHeld };
+        const settleable = (() => {
+          try {
+            assertSettlementReady('TXN_1', authority);
+            return true;
+          } catch {
+            return false;
+          }
+        })();
+        expect(resolvedStatus(authority) === 'PENDING_SETTLEMENT').toBe(settleable);
+      }
+    }
   });
 });
 
