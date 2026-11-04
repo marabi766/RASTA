@@ -79,6 +79,7 @@ export const CLI_CONTRACT = Object.freeze({
 
   // --- scripts ----------------------------------------------------------------
   // A Git revision is resolved to a verified commit id; raw input is never echoed.
+  'scripts/prepush-parity.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
   'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
   'scripts/prepush-scope-lib.mjs': {
     other: [
