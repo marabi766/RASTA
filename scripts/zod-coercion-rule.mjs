@@ -446,7 +446,6 @@ export default {
       if (
         parent.type === 'CallExpression' &&
         /^\$?Zod/.test(origin(raw).name ?? '') &&
-        !origin(raw).ambiguous &&
         factory?.raw &&
         factory.name?.startsWith('_') &&
         (optionsIndex(factory) > 0 ||
@@ -510,6 +509,11 @@ export default {
         if (index === COERCING_API) report(node);
         if (index >= 0) options(node.arguments[index], new Set(), true);
         const api = callbackSignature(factory);
+        if (api.slot === 1) {
+          const ctor = origin(node.arguments[0]);
+          if (!ctor?.raw || ctor.ambiguous || !/^\$?Zod/.test(ctor.name ?? ''))
+            report(node, 'preprocess');
+        }
         const callbacks = [];
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
         const fields = (raw, seen = new Set()) => {
