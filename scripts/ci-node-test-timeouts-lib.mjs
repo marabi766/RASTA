@@ -22,6 +22,14 @@
  * `npx`, `sh -c`, a pnpm call with options or arguments, a computed word, an
  * unlisted node option, a redirection - is refused, never assumed bounded.
  *
+ * ONE scanner (parseCommands) reads every command of the guard and of the watchdog
+ * check, and it refuses what it does not fully understand instead of skipping it: a
+ * parameter expansion with anything but a plain name, `$((`, `$'..'`, here-documents,
+ * and escapes or comments inside a command substitution. The execution context is
+ * resolved at every level (workflow `defaults.run`, job `defaults.run`, the step's
+ * `shell`/`working-directory`, `env` names the shell reads, local `uses`): see
+ * contextProblems.
+ *
  * A step limit on every one of the quality job's ~35 `node --test` steps cannot
  * exist: the job budget rule (ci-integration-split-lib.mjs) adds step limits to the
  * job's setup allowance, and 35 limits do not fit in the job.
@@ -59,16 +67,36 @@ const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:_.-]*$/;
 const BUDGET = /^[1-9][0-9]{0,8}$/;
 const MAX_DEPTH = 4;
 
+/** `${NAME}`, `${1}`, `${@}`: the only parameter expansions that cannot run or hide a command. */
+const PLAIN_EXPANSION = /^\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?!$-])\}/;
+
 /**
  * Tokenize shell text into commands of words {value, dynamic}. `dynamic` marks a word
- * the shell computes ($var, globs, braces); command substitutions are parsed as
- * commands of their own. `problems` lists syntax that is not understood.
+ * the shell computes ($var, globs, braces); command substitutions are parsed by the
+ * SAME scanner, in place (quotes, escapes and comments decide where one ends), and
+ * their commands are returned with the others. `problems` lists everything the scanner
+ * does not fully understand - it refuses, it never skips: a parameter expansion with an
+ * operator (`${X:-$(cmd)}`, `${{ expr }}`), `$((`, `$[`, `$'..'`, `$".."`, a here-document,
+ * a redirection, and a backslash or a comment inside a command substitution (where the
+ * end of the substitution is no longer decided by plain bracket matching).
+ * Text after a refused construct is still scanned, so commands after it are still seen.
  */
-export function parseCommands(text, depth = 0) {
-  const commands = [];
-  const problems = [];
+export function parseCommands(text) {
+  const out = { commands: [], problems: [] };
+  scan(String(text), 0, 0, 'top', out);
+  return out;
+}
+
+/** Scans `text` from `from`; `mode` is top level, `$( )` or a backtick body. Returns the index it stopped at. */
+function scan(text, from, depth, mode, out) {
+  const { commands, problems } = out;
+  const refuse = (reason) => {
+    if (!problems.includes(reason)) problems.push(reason);
+  };
+  const inside = mode !== 'top';
   let words = [];
   let word = null;
+  let parens = 0;
   const endWord = () => {
     if (word) words.push(word);
     word = null;
@@ -87,41 +115,62 @@ export function parseCommands(text, depth = 0) {
     word.dynamic = true;
     word.cut ??= word.value.length; // the literal part before the first computed character
   };
-  const substitute = (start, open, close) => {
-    // `start` indexes the opening bracket; returns the index of the closing one.
-    let level = 0;
-    for (let at = open === close ? start + 1 : start; at < text.length; at++) {
-      if (text[at] === open && open !== close) level++;
-      else if (text[at] === close && (open === close || --level === 0)) {
-        if (depth >= MAX_DEPTH) problems.push('command substitutions nested too deeply');
-        else {
-          const inner = parseCommands(text.slice(start + 1, at), depth + 1);
-          commands.push(...inner.commands);
-          problems.push(...inner.problems);
-        }
-        return at;
-      }
+  const nested = (start, nestedMode) => {
+    // `start` indexes the first character after the opening bracket; returns where it stopped.
+    markDynamic();
+    if (depth >= MAX_DEPTH) {
+      refuse('command substitutions nested too deeply');
+      return text.length;
     }
-    problems.push('unterminated command substitution');
-    return text.length;
+    if (nestedMode === 'paren') {
+      const end = scan(text, start, depth + 1, 'paren', out);
+      if (end >= text.length) refuse('unterminated command substitution');
+      return end;
+    }
+    let end = start;
+    while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1;
+    if (end >= text.length) {
+      refuse('unterminated command substitution');
+      end = text.length;
+    }
+    // The body is cut out first, then read as a command line of its own.
+    scan(text.slice(start, end), 0, depth + 1, 'tick', out);
+    return end;
   };
   const dollar = (at) => {
-    markDynamic();
+    // `at` indexes the `$`; returns the index of the last character of the expansion.
     const rest = text.slice(at + 1);
-    if (rest.startsWith('(')) return substitute(at + 1, '(', ')');
-    if (rest.startsWith('{'))
-      return rest.indexOf('}') < 0 ? text.length : at + 1 + rest.indexOf('}');
+    if (rest.startsWith('((') || rest.startsWith('[')) {
+      refuse('an arithmetic expansion');
+      markDynamic();
+      return rest.startsWith('[') ? at + 1 : at; // its content is still scanned
+    }
+    if (rest.startsWith('(')) return nested(at + 2, 'paren');
+    if (rest.startsWith('{')) {
+      markDynamic();
+      const plain = PLAIN_EXPANSION.exec(rest);
+      if (plain) return at + plain[0].length;
+      refuse('a parameter expansion with an operator, subscript or nested text');
+      return at + 1; // what follows is still scanned
+    }
+    if (rest.startsWith("'") || rest.startsWith('"')) {
+      refuse('ANSI-C or locale quoting');
+      markDynamic();
+      return at;
+    }
+    markDynamic();
     return at + (/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])/.exec(rest)?.[0].length ?? 0);
   };
-  for (let at = 0; at < text.length; at++) {
+  for (let at = from; at < text.length; at++) {
     const char = text[at];
     if (char === '\\') {
+      if (inside) refuse('a backslash inside a command substitution');
       if (text[at + 1] === '\n') at++;
       else if (at + 1 < text.length) add(text[++at]);
     } else if (char === "'") {
       const end = text.indexOf("'", at + 1);
       if (end < 0) {
-        problems.push('unterminated quote');
+        refuse('unterminated quote');
         break;
       }
       add('');
@@ -135,25 +184,34 @@ export function parseCommands(text, depth = 0) {
           closed = true;
           break;
         }
-        if (text[at] === '\\' && '"\\$`\n'.includes(text[at + 1] ?? 'x')) {
-          if (text[++at] !== '\n') add(text[at]);
+        if (text[at] === '\\') {
+          if (inside) refuse('a backslash inside a command substitution');
+          if ('"\\$`\n'.includes(text[at + 1] ?? 'x')) {
+            if (text[++at] !== '\n') add(text[at]);
+          } else add('\\');
         } else if (text[at] === '$') at = dollar(at);
-        else if (text[at] === '`') {
-          markDynamic();
-          at = substitute(at, '`', '`');
-        } else add(text[at]);
+        else if (text[at] === '`') at = nested(at + 1, 'tick');
+        else add(text[at]);
       }
-      if (!closed) problems.push('unterminated quote');
+      if (!closed) refuse('unterminated quote');
     } else if (char === '$') {
       at = dollar(at);
     } else if (char === '`') {
-      markDynamic();
-      at = substitute(at, '`', '`');
+      at = nested(at + 1, 'tick');
     } else if (char === '#' && !word) {
-      while (at + 1 < text.length && text[at + 1] !== '\n') at++;
+      if (inside) refuse('a comment inside a command substitution');
+      else while (at + 1 < text.length && text[at + 1] !== '\n') at++;
     } else if (char === '<' || char === '>') {
-      problems.push('redirection');
-    } else if ('\n;&|()'.includes(char)) {
+      refuse(text.startsWith('<<', at) ? 'a here-document' : 'redirection');
+    } else if (char === '(') {
+      parens++;
+      endCommand();
+    } else if (char === ')') {
+      endCommand();
+      if (parens > 0) parens--;
+      else if (mode === 'paren') return at;
+      else refuse('an unbalanced closing parenthesis');
+    } else if ('\n;&|'.includes(char)) {
       endCommand();
     } else if (char === ' ' || char === '\t' || char === '\r') {
       endWord();
@@ -163,7 +221,7 @@ export function parseCommands(text, depth = 0) {
     }
   }
   endCommand();
-  return { commands, problems };
+  return text.length;
 }
 
 const clip = (words) =>
@@ -283,14 +341,73 @@ function textProblems(label, text, scripts, problems) {
   return found;
 }
 
+/** Variables the shell or node read to decide what a command means. */
+const SHELL_ENV = /^(?:BASH_ENV|ENV|SHELLOPTS|BASHOPTS|PATH|IFS|CDPATH|NODE_OPTIONS|BASH_FUNC_.*)$/;
+const READABLE_SHELLS = new Set(['bash', 'sh']);
+const isMap = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * The execution context of every step of the job, resolved the way Actions does it
+ * (workflow defaults.run, then job defaults.run, then the step) and checked at each
+ * level that sets something: the shell must be a plain bash or sh, the directory the
+ * repository root (so a root script means the root script), and `env` a plain map
+ * that does not name a variable the shell reads. Anything else is refused.
+ */
+function contextProblems(doc, job) {
+  const problems = [];
+  const levels = [
+    ['workflow', doc, doc?.defaults?.run, doc?.defaults],
+    ['job', job, job?.defaults?.run, job?.defaults],
+  ];
+  for (const [label, owner, run, defaults] of levels) {
+    const name = label === 'job' ? `job ${UNIT_STEP.job}` : 'the workflow';
+    if (defaults !== undefined && !isMap(defaults))
+      problems.push(`${name} has defaults that cannot be read`);
+    else if (run !== undefined && !isMap(run))
+      problems.push(`${name} sets defaults.run to something that cannot be read`);
+    else if (isMap(run)) {
+      const shell = run.shell;
+      const unreadable =
+        Object.keys(run).some((key) => key !== 'shell') ||
+        (shell !== undefined && !READABLE_SHELLS.has(shell));
+      if (unreadable) problems.push(`${name} sets defaults.run, so its commands cannot be read`);
+    }
+    problems.push(...envProblems(name, owner?.env));
+  }
+  for (const step of job.steps) {
+    const name = `step "${step?.name}"`;
+    if (!isMap(step)) {
+      problems.push(`${name} cannot be read`);
+      continue;
+    }
+    if (
+      step['working-directory'] !== undefined ||
+      (step.shell !== undefined && !READABLE_SHELLS.has(step.shell))
+    )
+      problems.push(`${name} sets shell or working-directory, so it cannot be read`);
+    // A local action's own steps are not read here, so it could run any node --test.
+    if (typeof step.uses === 'string' && /^(?:\.|docker:)/.test(step.uses))
+      problems.push(`${name} uses ${step.uses}, which cannot be read`);
+    problems.push(...envProblems(name, step.env));
+  }
+  return problems;
+}
+
+function envProblems(name, env) {
+  if (env === undefined) return [];
+  if (!isMap(env)) return [`${name} has an env that cannot be read`];
+  return Object.keys(env)
+    .filter((key) => SHELL_ENV.test(key))
+    .map((key) => `${name} sets ${key}, which changes what its commands mean`);
+}
+
 export function nodeTestTimeoutProblems(doc, scripts) {
   const problems = [];
   const job = doc?.jobs?.[UNIT_STEP.job];
   const steps = job?.steps;
   if (!Array.isArray(steps)) return [`job ${UNIT_STEP.job} has no readable steps`];
-  // A different shell or directory changes what the command text means.
-  if (job.defaults?.run !== undefined)
-    problems.push(`job ${UNIT_STEP.job} sets defaults.run, so its commands cannot be read`);
+  // A different shell, directory or shell-reading environment changes what the text means.
+  problems.push(...contextProblems(doc, job));
   const queue = [];
   for (const step of steps) {
     if (step?.run === undefined) continue;
@@ -299,8 +416,6 @@ export function nodeTestTimeoutProblems(doc, scripts) {
       problems.push(`step "${step.name}": run is not text`);
       continue;
     }
-    if (step['working-directory'] !== undefined || !['bash', 'sh', undefined].includes(step.shell))
-      problems.push(`step "${step.name}" sets shell or working-directory, so it cannot be read`);
     queue.push(...textProblems(`step "${step.name}"`, step.run, scripts, problems).follows);
   }
   const names = new Set();
@@ -326,9 +441,21 @@ export function nodeTestTimeoutProblems(doc, scripts) {
     problems.push(
       `step "${UNIT_STEP.step}" timeout-minutes must be at most ${UNIT_STEP.maxMinutes}`,
     );
+  // The step must really run the script that carries the budget and the preload.
+  const unitRun = typeof unit.run === 'string' ? analyse(unit.run, scripts) : undefined;
+  if (!unitRun || unitRun.problems.length > 0 || !unitRun.follows.has(UNIT_STEP.script))
+    problems.push(
+      `step "${UNIT_STEP.step}" must run ${UNIT_STEP.script} and nothing it cannot read`,
+    );
   // The preload is an argument of the one node --test command, before its files.
-  const tests = analyse(scripts[UNIT_STEP.script] ?? '', scripts).nodeTests;
-  if (tests.length !== 1 || tests[0].imports.join('\n') !== UNIT_STEP.watchdog)
+  // Read by the same parser as every other command: a construct it refuses is not a preload.
+  const watched = analyse(scripts[UNIT_STEP.script] ?? '', scripts);
+  const tests = watched.nodeTests;
+  if (
+    watched.problems.length > 0 ||
+    tests.length !== 1 ||
+    tests[0].imports.join('\n') !== UNIT_STEP.watchdog
+  )
     problems.push(
       `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (--import ${UNIT_STEP.watchdog}) and nothing else, before its files`,
     );

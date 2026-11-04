@@ -252,6 +252,272 @@ test('task 312: a step that changes the shell or directory is not readable as ro
     /sets defaults\.run/,
   );
 });
+// Task 322 (#606 r2 F1): ONE conservative scanner reads every command, and it REFUSES
+// what it does not fully understand instead of skipping it. Each construct below hides a
+// harmless `true`, so only its refusal can catch it (the reviewer's unbudgeted
+// `node --test x` variants are in the second table). Every reason is asserted by name.
+const REFUSALS = {
+  'a parameter expansion with a default word': [
+    '${UNSET:-$(true)}',
+    /parameter expansion with an operator/,
+  ],
+  'a parameter expansion with an alternative': [
+    '${UNSET:+$(true)}',
+    /parameter expansion with an operator/,
+  ],
+  'a parameter expansion that assigns': ['${UNSET:=word}', /parameter expansion with an operator/],
+  'a parameter expansion that substitutes': [
+    '${UNSET//a/$(true)}',
+    /parameter expansion with an operator/,
+  ],
+  'an array subscript': ['${ARR[$(true)]}', /parameter expansion with an operator/],
+  'an indirect expansion': ['${!NAME}', /parameter expansion with an operator/],
+  'a length expansion': ['${#NAME}', /parameter expansion with an operator/],
+  'a quoted word in an expansion': ['${UNSET:-"a b"}', /parameter expansion with an operator/],
+  'a workflow expression': ['${{ github.ref }}', /parameter expansion with an operator/],
+  'a backslash-escaped parenthesis': [
+    String.raw`$(echo \) true)`,
+    /backslash inside a command substitution/,
+  ],
+  'an escaped quote in a substitution': [
+    String.raw`$(echo \" true)`,
+    /backslash inside a command substitution/,
+  ],
+  'a backslash in a backtick substitution': [
+    '`echo \\` true`',
+    /backslash inside a command substitution/,
+  ],
+  'an escaped quote in a quoted string in a substitution': [
+    '$(echo "a\\"b" true)',
+    /backslash inside a command substitution/,
+  ],
+  'a stray backslash in a quoted string in a substitution': [
+    '$(echo "a\\)" true)',
+    /backslash inside a command substitution/,
+  ],
+  'a commented parenthesis': ['$(true # )\ntrue)', /comment inside a command substitution/],
+  'a comment in a backtick substitution': ['`true # x`', /comment inside a command substitution/],
+  'an arithmetic expansion': ['$((1 + 2))', /arithmetic expansion/],
+  'a bracket arithmetic expansion': ['$[1 + 2]', /arithmetic expansion/],
+  'ANSI-C quoting': ["$'a\\'b'", /ANSI-C or locale quoting/],
+  'locale quoting': ['$"a"', /ANSI-C or locale quoting/],
+  'a here-document': ['<<EOF\nx\nEOF\n', /here-document/],
+  'a here-string': ['<<< word', /here-document/],
+  'a closing parenthesis without an opening one': [') true', /unbalanced closing parenthesis/],
+  'an unterminated substitution': ['$(true', /unterminated command substitution/],
+  'an unterminated backtick substitution': ['`true', /unterminated command substitution/],
+  'substitutions nested too deeply': [
+    '$(true $(true $(true $(true $(true)))))',
+    /nested too deeply/,
+  ],
+};
+const POSITIONS = {
+  'an inert argument': (x) => `true ${x}`,
+  'an assignment': (x) => `FOO=${x} true`,
+  'a node file argument': (x) => `node --test ${B} ${x}`,
+  'a pnpm-free echo': (x) => `echo ${x}`,
+  'a double-quoted word': (x) => `echo "${x}"`,
+};
+for (const [label, [construct, reason]] of Object.entries(REFUSALS)) {
+  for (const [position, place] of Object.entries(POSITIONS)) {
+    // Quotes, here-documents and closers change meaning inside "..." or after `=`.
+    if (position === 'a double-quoted word' && /^(?:ANSI|locale|a here|a closing)/.test(label))
+      continue;
+    const run = place(construct);
+    for (const where of ['step', 'script'])
+      test(`task 322: ${label} as ${position} is refused (${where})`, () => {
+        const problems = timeoutProblemsAfter((doc, all) => {
+          if (where === 'step') doc.jobs.quality.steps.push({ name: 'Escape', run });
+          else {
+            all['test:escape'] = run;
+            doc.jobs.quality.steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+          }
+        });
+        refused(problems, reason);
+      });
+  }
+}
+// The reviewer's executable reproductions: bash runs `node --test x` in each, with no budget.
+for (const [label, run] of Object.entries({
+  'a default word with a substitution': 'echo "${UNSET:-$(node --test x)}"',
+  'an escaped parenthesis': String.raw`echo "$(echo \); node --test x)"`,
+  'a commented parenthesis': 'echo "$(true # )\nnode --test x)"',
+  'a quoted parenthesis': 'echo "$(echo ")"; node --test x)"',
+  'a case pattern parenthesis': 'echo "$(case x in a) node --test x;; esac)"',
+  'a backtick body behind an escape': 'echo "`echo \\`; node --test x`"',
+  'an operator in an assignment': 'FOO=${UNSET:-$(node --test x)} true',
+  'a subscript in a node file argument': `node --test ${B} \${ARR[$(node --test y)]}`,
+}))
+  for (const where of ['step', 'script'])
+    test(`task 322: reviewer reproduction ${label} is refused (${where})`, () => {
+      const problems = timeoutProblemsAfter((doc, all) => {
+        if (where === 'step') doc.jobs.quality.steps.push({ name: 'Escape', run });
+        else {
+          all['test:escape'] = run;
+          doc.jobs.quality.steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+        }
+      });
+      assert.notDeepEqual(problems, [], run);
+    });
+test('task 322: expansions and substitutions that are fully understood are still accepted', () => {
+  for (const run of [
+    'echo "${HOME}" ${1} "${@}" "${#}" $HOME "$(node scripts/print.mjs)"',
+    'echo "$(echo ")")" && echo "$(echo \'(\')"',
+    'echo "$(echo "$(true)")" `true`',
+    'echo \'${X:-$(node --test x)}\' "\\${X:-y}"',
+    `FOO="$(true)" BAR=\${HOME} node --test ${B} x`,
+    'echo "$(true && (true; true))"',
+  ]) {
+    const problems = timeoutProblemsAfter((doc) =>
+      doc.jobs.quality.steps.push({ name: 'Fine', run }),
+    );
+    assert.deepEqual(problems, [], run);
+  }
+});
+// The effective context: workflow defaults.run, job defaults.run, the step, and the
+// environment the shell reads, each resolved and checked on its own.
+const CONTEXT_EDITS = {
+  'workflow python shell': [
+    (doc) => (doc.defaults = { run: { shell: 'python {0}' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow bash with options': [
+    (doc) => (doc.defaults = { run: { shell: 'bash -x {0}' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow working directory': [
+    (doc) => (doc.defaults = { run: { 'working-directory': 'tests/e2e' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow bash in another directory': [
+    (doc) => (doc.defaults = { run: { shell: 'bash', 'working-directory': '.' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow run as text': [
+    (doc) => (doc.defaults = { run: 'bash' }),
+    /the workflow sets defaults\.run to something/,
+  ],
+  'workflow run as a list': [
+    (doc) => (doc.defaults = { run: [] }),
+    /the workflow sets defaults\.run to something/,
+  ],
+  'workflow defaults as text': [
+    (doc) => (doc.defaults = 'run'),
+    /the workflow has defaults that cannot be read/,
+  ],
+  'workflow defaults empty': [
+    (doc) => (doc.defaults = null),
+    /the workflow has defaults that cannot be read/,
+  ],
+  'job python shell': [
+    (doc) => (doc.jobs.quality.defaults = { run: { shell: 'python {0}' } }),
+    /job quality sets defaults\.run/,
+  ],
+  'job working directory': [
+    (doc) => (doc.jobs.quality.defaults = { run: { 'working-directory': 'x' } }),
+    /job quality sets defaults\.run/,
+  ],
+  'job run as text': [
+    (doc) => (doc.jobs.quality.defaults = { run: 'bash' }),
+    /job quality sets defaults\.run to something/,
+  ],
+  'job defaults as a list': [
+    (doc) => (doc.jobs.quality.defaults = []),
+    /job quality has defaults that cannot be read/,
+  ],
+  'step python shell': [
+    (doc) => (boundedStep(doc).shell = 'python {0}'),
+    /step "Unit-step concurrency is bounded" sets shell or working-directory/,
+  ],
+  'step bash with options': [
+    (doc) => (boundedStep(doc).shell = 'bash -e {0}'),
+    /sets shell or working-directory/,
+  ],
+  'step shell as a list': [
+    (doc) => (boundedStep(doc).shell = ['bash']),
+    /sets shell or working-directory/,
+  ],
+  'step working directory': [
+    (doc) => (boundedStep(doc)['working-directory'] = '.'),
+    /sets shell or working-directory/,
+  ],
+  'workflow BASH_ENV': [(doc) => (doc.env.BASH_ENV = './x.sh'), /the workflow sets BASH_ENV/],
+  'workflow NODE_OPTIONS': [
+    (doc) => (doc.env.NODE_OPTIONS = '--x'),
+    /the workflow sets NODE_OPTIONS/,
+  ],
+  'job PATH': [(doc) => (doc.jobs.quality.env = { PATH: '/x' }), /job quality sets PATH/],
+  'step BASH_FUNC': [
+    (doc) => (boundedStep(doc).env = { 'BASH_FUNC_node%%': '() { :; }' }),
+    /sets BASH_FUNC_node%%/,
+  ],
+  'workflow env as an expression': [
+    (doc) => (doc.env = '${{ fromJSON(inputs.env) }}'),
+    /the workflow has an env that cannot be read/,
+  ],
+  'step env as a list': [
+    (doc) => (boundedStep(doc).env = ['PATH=/x']),
+    /has an env that cannot be read/,
+  ],
+};
+for (const uses of ['./.github/actions/x', './', 'docker://alpine'])
+  CONTEXT_EDITS[`step uses ${uses}`] = [
+    (doc) => doc.jobs.quality.steps.push({ name: 'Local', uses }),
+    /step "Local" uses .* which cannot be read/,
+  ];
+CONTEXT_EDITS['a step that is not a map'] = [
+  (doc) => doc.jobs.quality.steps.push(null),
+  /step "undefined" cannot be read/,
+];
+for (const name of [
+  'BASH_ENV',
+  'ENV',
+  'SHELLOPTS',
+  'BASHOPTS',
+  'PATH',
+  'IFS',
+  'CDPATH',
+  'NODE_OPTIONS',
+])
+  CONTEXT_EDITS[`job ${name} (shell-read variable)`] = [
+    (doc) => (doc.jobs.quality.env = { [name]: 'x' }),
+    new RegExp(`job quality sets ${name}`),
+  ];
+for (const [label, [edit, reason]] of Object.entries(CONTEXT_EDITS))
+  test(`task 322: ${label} is refused`, () => refused(timeoutProblemsAfter(edit), reason));
+test('task 322: a plain bash or sh at any level, and ordinary env names, are accepted', () => {
+  for (const edit of [
+    (doc) => (doc.defaults = { run: { shell: 'bash' } }),
+    (doc) => (doc.jobs.quality.defaults = { run: { shell: 'sh' } }),
+    (doc) => (boundedStep(doc).shell = 'bash'),
+    (doc) => (boundedStep(doc).env = { CI: 'true', NODE_ENV: 'test' }),
+  ])
+    assert.deepEqual(timeoutProblemsAfter(edit), []);
+});
+test('task 322: the step must run the unit-step script, and the script must be readable', () => {
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc).run = `echo pnpm run ${UNIT_STEP.script}`)),
+    /must run test:unit-step-concurrency/,
+  );
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc).run = `pnpm run ${UNIT_STEP.script} ${B}`)),
+    /must run test:unit-step-concurrency/,
+  );
+  refused(
+    timeoutProblemsAfter(
+      (doc) => (boundedStep(doc).run = `pnpm run ${UNIT_STEP.script} && true \${X:-a}`),
+    ),
+    /must run test:unit-step-concurrency/,
+  );
+  // Appended after the real command, behind a refused construct: the watchdog check alone
+  // (not the generic one) names it.
+  refused(
+    timeoutProblemsAfter((_doc, all) => {
+      all[UNIT_STEP.script] = `${realScripts[UNIT_STEP.script]} && echo "\${UNSET:-$(true)}"`;
+    }),
+    /must preload/,
+  );
+});
 // The watchdog preload is an argument of the one node --test command, before its files.
 {
   const watchdog = UNIT_STEP.watchdog;
