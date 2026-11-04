@@ -1,8 +1,18 @@
-import { foldAsciiCase } from '@rasta/nest-common';
+import { foldAsciiCase, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { createUserSchema, submitRegistrationSchema } from '../src/identity/dto';
+import {
+  createUserSchema,
+  listRegistrationRequestsQuerySchema,
+  listUsersQuerySchema,
+  submitRegistrationSchema,
+} from '../src/identity/dto';
+import { IdentityRepository } from '../src/identity/identity.repository';
+import { IdentityService } from '../src/identity/identity.service';
+import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
+import type { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { newPrisma } from './helpers';
+import { addMembershipRow } from './identity-fixtures';
+import { asActor, newPrisma, tenants } from './helpers';
 
 /**
  * One person, one login name, however it is typed (FU-084): the application and PostgreSQL fold
@@ -86,5 +96,119 @@ describe('the canonical login key (FU-084)', () => {
         /ck_user_login_printable_ascii|23514/,
       );
     }
+  });
+
+  it('the database matches a printable-ASCII login case-insensitively exactly as user_login_key folds it', async () => {
+    // The user search matches the login arms with ILIKE (`userSearchArms`); over printable ASCII,
+    // the only characters a login holds, that must be the key's A–Z fold and nothing else. `%`, `_`
+    // and `\` are LIKE syntax, so they are not used as patterns.
+    const [row] = await prisma.client.$queryRawUnsafe<{ disagreements: number }[]>(
+      `SELECT count(*)::int AS disagreements
+         FROM generate_series(33, 126) c, generate_series(33, 126) d
+        WHERE d NOT IN (37, 92, 95)
+          AND (chr(c) ILIKE chr(d)) <> (user_login_key(chr(c)) = user_login_key(chr(d)))`,
+    );
+    expect(row!.disagreements).toBe(0);
+  });
+
+  it('every read finds a login by the spelling it was created with, legacy mixed case included (r2 F1)', async () => {
+    const org = tenants().a;
+    const tag = ulid().toLowerCase().slice(-10);
+    const typed = `ali۱-${tag}`;
+    const created = createUserSchema.parse({
+      username: typed,
+      email: `ali۱-${tag}@example.test`.replace('۱', '1'),
+      firstName: 'علی',
+      lastName: 'رضایی',
+      organizationId: org,
+      roles: ['DRIVER'],
+    });
+    const legacy = `Leg-${tag}`;
+    const deleted = `gone-${tag}`;
+    const users = [
+      { id: `USR_${ulid()}`, username: created.username, email: created.email, deletedAt: null },
+      { id: `USR_${ulid()}`, username: legacy, email: `Leg-${tag}@Example.TEST`, deletedAt: null },
+      {
+        id: `USR_${ulid()}`,
+        username: deleted,
+        email: `${deleted}@example.test`,
+        deletedAt: new Date(),
+      },
+    ];
+    await runUnscoped('test fixture', async () => {
+      for (const user of users) {
+        await prisma.client.user.create({
+          data: {
+            ...user,
+            firstName: 'آزمون',
+            lastName: 'کاربر',
+            status: 'ACTIVE',
+            createdBy: 'ITEST',
+            updatedBy: 'ITEST',
+          },
+        });
+      }
+      await prisma.client.registrationRequest.create({
+        data: {
+          id: `REG_${ulid()}`,
+          userId: users[1]!.id,
+          requestedOrganizationId: org,
+          requestedRoles: ['DRIVER'],
+          documentRefs: [],
+        },
+      });
+    });
+    for (const user of users.slice(0, 2)) {
+      await addMembershipRow(prisma, user.id, { organizationId: org, roles: ['DRIVER'] });
+    }
+    const repository = new IdentityRepository(prisma);
+
+    // The uniqueness check: by key, deleted holders too.
+    const username = (raw: string) => createUserSchema.shape.username.parse(raw);
+    expect(
+      await repository.findUserByUsernameOrEmail(username(legacy), `nobody-${tag}@example.test`),
+    ).toEqual({ id: users[1]!.id });
+    expect(
+      await repository.findUserByUsernameOrEmail(`nobody-${tag}`, `LEG-${tag}@example.test`),
+    ).toEqual({ id: users[1]!.id });
+    expect(
+      await repository.findUserByUsernameOrEmail(username(deleted), `nobody-${tag}@example.test`),
+    ).toEqual({ id: users[2]!.id });
+    expect(
+      await repository.findUserByUsernameOrEmail(
+        username(`ZZ-${tag}`),
+        `nobody-${tag}@example.test`,
+      ),
+    ).toBeNull();
+
+    // The search: the typed spelling and the legacy row, inside the caller's organization only.
+    const search = (q: string, organizationId = org) =>
+      asActor({ organizationId }, () =>
+        repository.listUsersInOrganization(listUsersQuerySchema.parse({ q, limit: 10 })),
+      ).then((page) => page.users.map((user) => user.id));
+    expect(await search(typed)).toEqual([users[0]!.id]);
+    expect(await search(`ALI1-${tag}`)).toEqual([users[0]!.id]);
+    expect(await search(`leg-${tag}`)).toEqual([users[1]!.id]);
+    expect(await search(`leg-${tag}@example.test`)).toEqual([users[1]!.id]);
+    expect(await search(typed, tenants().b)).toEqual([]);
+    // `_` and `%` are literal: `ali_-…` is not `ali1-…`, and NFKC's `％` finds no one.
+    expect(await search(`ali_-${tag}`)).toEqual([]);
+    expect(await search(`ali1-${tag.slice(0, 4)}％`)).toEqual([]);
+
+    // The review queue's exact-username filter: the legacy `Leg-…` under its folded `leg-…`.
+    const service = new IdentityService(
+      repository,
+      {} as KeycloakAdminClient,
+      {} as KeycloakProjector,
+    );
+    const queue = (raw: string) =>
+      asActor({ organizationId: org, roles: ['UNION_ADMIN'] }, () =>
+        service.listRegistrationRequests(
+          listRegistrationRequestsQuerySchema.parse({ username: raw, limit: 10 }),
+        ),
+      ).then((page) => page.items.map((item) => item.userId));
+    expect(await queue(legacy)).toEqual([users[1]!.id]);
+    expect(await queue(`LEG-${tag}`)).toEqual([users[1]!.id]);
+    expect(await queue(typed)).toEqual([]);
   });
 });

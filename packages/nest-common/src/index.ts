@@ -374,8 +374,10 @@ export { assertConsumerHealth, consumerFailures } from './consumer/consumer-heal
 // Human-typed text a uniqueness constraint compares (FU-084) ----------------
 export {
   canonicalUniqueText,
+  foldUniqueText,
   isCanonicalUniqueText,
   uniqueTextKey,
+  uniqueTextSearchKey,
   foldAsciiCase,
   uniqueText,
   NOT_CANONICAL_TEXT,

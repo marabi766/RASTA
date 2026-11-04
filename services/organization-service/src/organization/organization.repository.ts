@@ -1,5 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { allocateStreamSeqSql, buildOutboxRow, type OutboxMessageInput } from '@rasta/nest-common';
+import {
+  allocateStreamSeqSql,
+  buildOutboxRow,
+  uniqueTextSearchKey,
+  type OutboxMessageInput,
+} from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { OrganizationEventName } from './events';
 import { PrismaService, type PrismaTransactionClient } from '../prisma/prisma.service';
@@ -147,9 +152,17 @@ export class OrganizationRepository {
    *
    * `q` matches as a plain case-insensitive substring (`strpos` over
    * `lower`), so `%` and `_` in the search text are literal characters.
+   *
+   * The external code is compared by its key, as its unique index compares
+   * it (FU-084 r2): the term is folded the way the write folded the code
+   * (`uniqueTextSearchKey`, A–Z folded for the case-insensitive search) and
+   * looked for in `organization_text_key(external_code)` under the same A–Z
+   * `translate`, so `IR-۱۲` finds `IR-12`. The names are display text, not
+   * keys, and keep their own plain match.
    */
   async list(query: ListOrganizationsQuery, viewerOrganizationId: string | null) {
     const q = query.q ? query.q.toLowerCase() : null;
+    const codeKey = query.q ? uniqueTextSearchKey(query.q, { caseFold: true }) : null;
     const rows = await this.client.$queryRaw<OrganizationRow[]>`
       SELECT o.* FROM organization o
       WHERE o.deleted_at IS NULL
@@ -161,7 +174,10 @@ export class OrganizationRepository {
         AND (${q}::text IS NULL
              OR strpos(lower(o.name), ${q}::text) > 0
              OR strpos(lower(coalesce(o.short_name, '')), ${q}::text) > 0
-             OR strpos(lower(coalesce(o.external_code, '')), ${q}::text) > 0)
+             OR (${codeKey}::text <> ''
+                 AND strpos(translate(organization_text_key(o.external_code),
+                                      'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),
+                            ${codeKey}::text) > 0))
         AND (${query.cursor ?? null}::text IS NULL OR o.id > ${query.cursor ?? null}::text)
       ORDER BY o.id
       LIMIT ${query.limit + 1}

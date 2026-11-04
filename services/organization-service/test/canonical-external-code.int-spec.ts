@@ -5,7 +5,7 @@ import {
   uniqueTextKey,
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { createOrganizationSchema } from '../src/organization/dto';
+import { createOrganizationSchema, listOrganizationsQuerySchema } from '../src/organization/dto';
 import { OrganizationRepository } from '../src/organization/organization.repository';
 import { OrganizationService } from '../src/organization/organization.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
@@ -96,7 +96,7 @@ describe('the canonical external code (FU-084)', () => {
     const taken = `کد-یزد-${suffix}`;
     const operator = <T>(fn: () => Promise<T>) =>
       asActor({ organizationId: 'ORG-ITEST-OPERATOR', roles: ['SYSTEM_ADMIN'] }, fn);
-    const create = (externalCode: string) =>
+    const create = (externalCode?: string) =>
       operator(() =>
         service.create(
           createOrganizationSchema.parse({ name: 'سازمان کد', type: 'DEHYARI', externalCode }),
@@ -137,22 +137,66 @@ describe('the canonical external code (FU-084)', () => {
     expect(raced).toBeInstanceOf(RastaError);
     expect((raced as RastaError).status).toBe(409);
 
-    // The database alone refuses it too: the key, not the bytes.
+    // The database alone refuses it too: the key, not the bytes. On this test's own organization,
+    // created without a code and addressed by its id, so neither statement can pass by touching no
+    // row (r1 F2).
+    const bare = await create();
+    const [fixture] = await prisma.client.$queryRaw<{ external_code: string | null }[]>`
+      SELECT external_code FROM organization WHERE id = ${bare.id}`;
+    expect(fixture).toEqual({ external_code: null });
     await expect(
       prisma.client.$executeRawUnsafe(
-        `UPDATE organization SET external_code = $1
-          WHERE id = (SELECT id FROM organization WHERE external_code IS NULL LIMIT 1)`,
+        'UPDATE organization SET external_code = $1 WHERE id = $2',
         `کد-ی\u200cزد-${suffix}`,
+        bare.id,
       ),
     ).rejects.toThrow(/23505/);
     // And holds nothing outside the form, whatever the code forgets.
     await expect(
       prisma.client.$executeRawUnsafe(
-        `UPDATE organization SET external_code = $1
-          WHERE id = (SELECT id FROM organization WHERE external_code IS NULL LIMIT 1)`,
+        'UPDATE organization SET external_code = $1 WHERE id = $2',
         `IR\u200d${suffix}`,
+        bare.id,
       ),
     ).rejects.toThrow(/ck_organization_external_code_canonical|23514/);
+    // The statement itself is sound: a code in the form, free by key, is written.
+    await expect(
+      prisma.client.$executeRawUnsafe(
+        'UPDATE organization SET external_code = $1 WHERE id = $2',
+        `IR-FREE-${suffix}`,
+        bare.id,
+      ),
+    ).resolves.toBe(1);
+  });
+
+  it('the search finds a code by the spelling it was created with (r2 F1)', async () => {
+    const suffix = ulid().slice(-8);
+    const operator = <T>(fn: () => Promise<T>) =>
+      asActor({ organizationId: 'ORG-ITEST-OPERATOR', roles: ['SYSTEM_ADMIN'] }, fn);
+    const created = await operator(() =>
+      service.create(
+        createOrganizationSchema.parse({
+          name: 'سازمان جست‌وجو',
+          type: 'DEHYARI',
+          externalCode: `IR-۱۲-كد\u200cيزد-${suffix}`,
+        }),
+      ),
+    );
+    expect(created.externalCode).toBe(`IR-12-کد\u200cیزد-${suffix}`);
+    const search = (q: string) =>
+      operator(() => service.list(listOrganizationsQuerySchema.parse({ q, limit: 100 }))).then(
+        (page) => page.items.map((item) => item.id),
+      );
+    for (const spelling of [
+      `IR-۱۲-كد\u200cيزد-${suffix}`,
+      `ir-12-کدیزد-${suffix}`,
+      `۱۲-كد\u200cيزد-${suffix}`,
+      `IR-١٢-کدیزد-${suffix}`,
+    ]) {
+      expect([spelling, await search(spelling)]).toEqual([spelling, [created.id]]);
+    }
+    // A term that folds to nothing searches no code, rather than every code.
+    expect(await search('\u0640')).not.toContain(created.id);
   });
 
   it('the request schema folds what keyboards vary and refuses what nobody sees', () => {

@@ -62,14 +62,12 @@ export interface CanonicalUniqueTextOptions {
 }
 
 /**
- * The value in its one form, or `null` if it has none. What keyboards vary without anyone meaning a
- * difference is folded; anything else invisible is refused rather than removed, since the person
- * never saw what would be dropped.
+ * What keyboards vary without anyone meaning a difference, folded: presentation and compatibility
+ * forms, the Arabic ي ى ك, ۀ, Persian and Arabic-Indic digits, tatweel, blank runs; then A–Z when
+ * `caseFold`. Nothing is refused here, so this alone is not the form: {@link canonicalUniqueText}
+ * holds the result to it, and a search reads it through {@link uniqueTextSearchKey}.
  */
-export function canonicalUniqueText(
-  raw: string,
-  options: CanonicalUniqueTextOptions,
-): string | null {
+export function foldUniqueText(raw: string, options: CanonicalUniqueTextOptions): string {
   const folded = raw
     // Presentation forms and compatibility characters, other blanks, and composed letters.
     .normalize('NFKC')
@@ -81,13 +79,37 @@ export function canonicalUniqueText(
     .replace(/\u0640/g, '')
     .replace(/[\t\n\v\f\r ]+/g, ' ')
     .replace(/^ | $/g, '');
-  const text = options.caseFold ? foldAsciiCase(folded) : folded;
+  return options.caseFold ? foldAsciiCase(folded) : folded;
+}
+
+/**
+ * The value in its one form, or `null` if it has none. What keyboards vary without anyone meaning a
+ * difference is folded; anything else invisible is refused rather than removed, since the person
+ * never saw what would be dropped.
+ */
+export function canonicalUniqueText(
+  raw: string,
+  options: CanonicalUniqueTextOptions,
+): string | null {
+  const text = foldUniqueText(raw, options);
   return isCanonicalUniqueText(text) ? text : null;
 }
 
 /** What makes two canonical values one value: the migrations' `*_text_key`. */
 export function uniqueTextKey(canonical: string): string {
   return canonical.replace(/\u200c/g, '');
+}
+
+/**
+ * What a search for `raw` looks for inside the keys of stored values (FU-084 r2): the same fold the
+ * write applied, then the same key. Every read of a uniqueness-compared field goes through the fold
+ * — an exact read through {@link canonicalUniqueText}, a substring search through this — so a value
+ * is found by the spelling it was created with. Nothing is refused: a search term may be a fragment
+ * of a value (one starting with a half-space, say) that is not itself in the form, and a term that
+ * folds to something no stored key holds simply finds nothing.
+ */
+export function uniqueTextSearchKey(raw: string, options: CanonicalUniqueTextOptions): string {
+  return uniqueTextKey(foldUniqueText(raw, options));
 }
 
 /** The closed refusal: it names no character and repeats no input (S-09). */
