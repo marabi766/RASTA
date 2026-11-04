@@ -4,7 +4,12 @@ import {
   request,
   type APIRequestContext,
 } from '@playwright/test';
-import { guardRequestContext, guardedAbsenceMatchers } from '@rasta/testing';
+import {
+  guardEveryRequestContext,
+  guardRequestContext,
+  guardedAbsenceMatchers,
+  installRequestContextGuard,
+} from '@rasta/testing';
 
 /**
  * Playwright's `expect` with the disclosure guard every Jest suite has
@@ -15,24 +20,42 @@ import { guardRequestContext, guardedAbsenceMatchers } from '@rasta/testing';
  */
 export const expect = playwrightExpect.extend(guardedAbsenceMatchers(playwrightExpect));
 
+/** Playwright resets test.expect on extend; guard every descendant at its creation. */
+function withGuard<T extends typeof base>(derived: T): T {
+  const extend = derived.extend;
+  return Object.assign(derived, {
+    expect,
+    extend: ((fixtures) => withGuard(extend(fixtures))) as T['extend'],
+  });
+}
+
 /**
  * Every exported test.expect must share the same guarded assertion origin.
  *
- * And the `request` fixture refuses redirects (Q-155, PR #492 r1 F2), as
- * send() does for the actors: Playwright would follow a 307/308 with the body
- * and answer with the redirect target's success.
+ * A worker fixture guards the request class before hooks/tests run (Q-155 N1).
+ * page.request, context.request and factory-created contexts all refuse
+ * redirects, including contexts obtained by destructuring or reflection.
+ * The existing per-context wrappers and lint remain additional layers.
  */
-export const test = Object.assign(
-  base.extend({
+export const test = withGuard(
+  base.extend<object, { requestContextGuard: void }>({
     // `provide` is Playwright's fixture `use`.
     request: async ({ request }, provide) => provide(guardRequestContext(request)),
+    requestContextGuard: [
+      async ({ playwright }, provide) => {
+        await installRequestContextGuard(playwright.request);
+        await provide();
+      },
+      { scope: 'worker', auto: true },
+    ],
   }),
-  { expect },
 );
 
 /** A Playwright API request context outside a test (global setup), guarded the same way. */
 export async function newApiContext(): Promise<APIRequestContext> {
-  return guardRequestContext(await request.newContext());
+  const context = await request.newContext();
+  guardEveryRequestContext(context);
+  return guardRequestContext(context);
 }
 export type {
   APIRequestContext,
