@@ -12,9 +12,9 @@ import { z } from 'zod';
  * Why not `z.coerce.number()`: it calls `Number(input)` before any type check,
  * on whatever the client sent. `{"toString":null}` makes that throw a
  * TypeError, which leaves the validation pipe as a 500; and `true`, `[30]` and,
- * outside a `.nullable()`, `null` quietly become 1, 30 and 0. ESLint refuses
- * `z.coerce` outside the `env.ts` files, whose input is `process.env` — only
- * strings — so this is the one way a request schema converts a number.
+ * outside a `.nullable()`, `null` quietly become 1, 30 and 0. The shared ESLint
+ * coercion boundary permits only explicitly reviewed environment loader paths
+ * and diagnostic tests; this is the request schema's Number conversion helper.
  *
  * The OpenAPI converters unwrap the effect, so `schema` is what is published.
  */
