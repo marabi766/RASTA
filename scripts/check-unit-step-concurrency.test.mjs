@@ -32,6 +32,8 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const realWorkflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
 const realScripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
 const realDoc = parse(realWorkflow);
+const contracts = JSON.parse(readFileSync(join(root, 'packages/contracts/package.json'), 'utf8'));
+const realPackages = { [contracts.name]: contracts.scripts };
 const [exception] = UNBOUNDED_EXCEPTIONS;
 const unitStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === 'Unit tests');
 const securityStep = (doc) =>
@@ -64,8 +66,9 @@ test('real workflow passes as YAML and as parsed text', () => {
 const timeoutProblemsAfter = (edit, scripts = realScripts) => {
   const doc = structuredClone(realDoc);
   const copy = structuredClone(scripts);
-  edit(doc, copy);
-  return nodeTestTimeoutProblems(doc, copy);
+  const packages = structuredClone(realPackages);
+  edit(doc, copy, packages);
+  return nodeTestTimeoutProblems(doc, copy, packages);
 };
 const boundedStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === UNIT_STEP.step);
 const qualityNodeTestScripts = [
@@ -76,7 +79,7 @@ const qualityNodeTestScripts = [
   ),
 ].filter((name) => nodeTestSegments(realScripts[name]).length > 0);
 test('task 310: the real quality job bounds every node --test', () => {
-  assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts), []);
+  assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts, realPackages), []);
   // The class is found, not listed: the step that hung and the slowest others.
   for (const name of [UNIT_STEP.script, 'test:backup-restore-drill-lib', 'test:ci-trivy-db'])
     assert.ok(qualityNodeTestScripts.includes(name), name);
@@ -217,18 +220,17 @@ test('task 312: the commands the quality job really uses are still accepted', ()
     `node --test ${B} scripts/x.test.mjs scripts/y.test.mjs`,
     `node '--test' "--test-timeout=300000" 'scripts/x.test.mjs'`,
     `node --no-warnings --test ${B} --test-concurrency=1 x`,
-    `node --env-file-if-exists=.env --test ${B} --import ./a.mjs x`,
-    `FOO=1 BAR="$(node scripts/print.mjs)" node --test ${B} x`,
+    `node --test ${B} --import ${UNIT_STEP.watchdog} x`,
+    `base=1 SERVICE_ENV_WITHHELD_BASE="$(node scripts/print.mjs)" node --test ${B} x`,
     `node --test ${B} x # a comment mentioning --test-timeout=0 and a stray ' quote`,
     `pnpm run test:bounded # && node --test unbounded.test.mjs`,
     `node --test \\\n  ${B} \\\n  x`,
     `pnpm --filter @rasta/contracts build && node --test ${B} x`,
     `pnpm --filter @rasta/contracts run build\nnode scripts/check.mjs --test`,
-    `base="$(node scripts/print.mjs)"\nSCOPE="$base" pnpm run test:bounded`,
+    `base="$(node scripts/print.mjs)"\nSERVICE_ENV_WITHHELD_BASE="$base" pnpm run test:bounded`,
     'node scripts/check.mjs --test-timeout=0 && echo done',
     'prettier --check "**/*.{ts,json}" && eslint scripts && turbo run lint --concurrency=3',
     'pnpm install --frozen-lockfile',
-    'if true; then pnpm run test:bounded; fi',
   ]) {
     const problems = timeoutProblemsAfter((doc, all) => {
       all['test:bounded'] = `node --test ${B} scripts/bounded.test.mjs`;
@@ -365,8 +367,7 @@ test('task 322: expansions and substitutions that are fully understood are still
     'echo "$(echo ")")" && echo "$(echo \'(\')"',
     'echo "$(echo "$(true)")" `true`',
     'echo \'${X:-$(node --test x)}\' "\\${X:-y}"',
-    `FOO="$(true)" BAR=\${HOME} node --test ${B} x`,
-    'echo "$(true && (true; true))"',
+    `base="$(true)" SERVICE_ENV_WITHHELD_BASE=\${HOME} node --test ${B} x`,
   ]) {
     const problems = timeoutProblemsAfter((doc) =>
       doc.jobs.quality.steps.push({ name: 'Fine', run }),
@@ -490,7 +491,7 @@ test('task 322: a plain bash or sh at any level, and ordinary env names, are acc
     (doc) => (doc.defaults = { run: { shell: 'bash' } }),
     (doc) => (doc.jobs.quality.defaults = { run: { shell: 'sh' } }),
     (doc) => (boundedStep(doc).shell = 'bash'),
-    (doc) => (boundedStep(doc).env = { CI: 'true', NODE_ENV: 'test' }),
+    (doc) => (boundedStep(doc).env = { TEMPORAL_TEST_SERVER_DIR: 'x', NODE_VERSION: '22' }),
   ])
     assert.deepEqual(timeoutProblemsAfter(edit), []);
 });
@@ -542,6 +543,205 @@ test('task 322: the step must run the unit-step script, and the script must be r
       );
     });
 }
+// Task 4003 (#669 r1): the grammar is closed. Each harmful input first does its harm under the
+// real bash, node or pnpm, then the guard refuses it, so no case is vacuous.
+const inTemp = (use) => {
+  const dir = mkdtempSync(join(tmpdir(), 'guard-4003-'));
+  try {
+    return use(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+const bashStderr = (run, shims = ['node', 'pnpm']) =>
+  inTemp((dir) => {
+    for (const name of shims)
+      writeFileSync(join(dir, name), `#!/bin/sh\necho "RAN ${name} $*" >&2\n`, { mode: 0o755 });
+    const env = { PATH: `${dir}:${process.env.PATH}` };
+    return spawnSync('bash', ['-c', run], { encoding: 'utf8', env }).stderr;
+  });
+const pnpmStdout = (scripts, argv, extra = {}) =>
+  inTemp((cwd) => {
+    const { packageManager } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    const manifest = { name: 'rasta', packageManager, scripts };
+    writeFileSync(join(cwd, 'package.json'), JSON.stringify(manifest));
+    writeFileSync(join(cwd, 'pnpm-workspace.yaml'), 'packages: []\n');
+    // The repository's own pnpm, never a download (a Corepack shim would fetch the latest).
+    const env = { ...extra, PATH: process.env.PATH, HOME: process.env.HOME };
+    env.COREPACK_ENABLE_NETWORK = '0';
+    return spawnSync('pnpm', argv, { cwd, encoding: 'utf8', env }).stdout;
+  });
+const refusedAtBoth = (run, reason, edit = () => {}) => {
+  for (const where of ['step', 'script']) {
+    const problems = timeoutProblemsAfter((doc, all, packages) => {
+      edit(all, packages);
+      if (where === 'script') all['test:escape'] = run;
+      const command = where === 'step' ? run : 'pnpm run test:escape';
+      doc.jobs.quality.steps.push({ name: 'Escape', run: command });
+    });
+    refused(problems, reason);
+  }
+};
+const UNBUDGETED = /RAN node --test \/dev\/null/;
+const PRELOAD = '--import data:text/javascript,console.error(String.fromCharCode(82,65,78))';
+test('task 4003: F1 a carriage return or other unreadable character is refused', () => {
+  assert.match(bashStderr('echo \r#; node --test /dev/null'), UNBUDGETED);
+  for (const run of ['echo \r#; true', 'true\r\n', 'echo "\r"', 'echo a #', 'echo \f#'])
+    refusedAtBoth(run, /a carriage return, control/);
+});
+test('task 4003: F2 arithmetic evaluation is refused wherever it can start', () => {
+  const inner = "'arr[$(node --test /dev/null)]'";
+  for (const [run, reason] of [
+    [`a=${inner}; ((x=a+1))`, /an assignment to a /],
+    [`base=${inner}; ((base))`, /a subshell or an arithmetic command/],
+    [`base=${inner}; if ((base)); then true; fi`, /a subshell or an arithmetic command/],
+    [`base=${inner}; echo "$(( base ))"`, /arithmetic expansion/],
+    [`base=${inner}; let base`, /the command let/],
+    [`base=${inner}; [[ base -eq 1 ]]`, /computed command word/],
+    [`RANDOM=${inner}`, /an assignment to RANDOM /],
+    [`SRANDOM=${inner}`, /an assignment to SRANDOM /],
+    [`OPTIND=${inner}`, /an assignment to OPTIND /],
+  ]) {
+    assert.match(bashStderr(run), UNBUDGETED, run);
+    refusedAtBoth(run, reason);
+  }
+});
+test('task 4003: F3 inline assignments, env files and shell overrides meet one policy', () => {
+  for (const [run, reason] of [
+    [`NODE_OPTIONS='${PRELOAD}' node /dev/null`, /an assignment to NODE_OPTIONS /],
+    [`node '${PRELOAD.replace(' ', "' '")}' /dev/null`, /a node --import that is not the watchdog/],
+  ]) {
+    assert.match(bashStderr(run, []), /RAN/);
+    refusedAtBoth(run, reason);
+  }
+  for (const option of ['--env-file', '--env-file-if-exists']) {
+    const ran = inTemp((dir) => {
+      writeFileSync(join(dir, 'x.env'), `NODE_OPTIONS=${PRELOAD}\n`);
+      return bashStderr(`node ${option}=${join(dir, 'x.env')} /dev/null`, []);
+    });
+    assert.match(ran, /RAN/);
+    refusedAtBoth(`node ${option}=x.env /dev/null`, /an unlisted node option --env-file/);
+  }
+  const script = { x: 'echo HERE' };
+  assert.match(pnpmStdout(script, ['run', 'x']), /^HERE$/m);
+  const override = { PNPM_CONFIG_SCRIPT_SHELL: '/bin/true' };
+  assert.doesNotMatch(pnpmStdout(script, ['run', 'x'], override), /^HERE$/m);
+  const spellings = ['NPM', 'PNPM'].flatMap((tool) => [
+    `${tool}_CONFIG_SCRIPT_SHELL`,
+    `${tool.toLowerCase()}_config_script_shell`,
+  ]);
+  for (const name of spellings) {
+    refusedAtBoth(`${name}=/bin/true pnpm run test:progress`, new RegExp(`assignment to ${name} `));
+    for (const level of [(doc) => doc, (doc) => doc.jobs.quality, boundedStep])
+      refused(
+        timeoutProblemsAfter((doc) => (level(doc).env = { [name]: '/bin/true' })),
+        new RegExp(`sets ${name}, which may change`),
+      );
+  }
+  // A shell override in a pnpm config file of the repository is the same source.
+  for (const file of ['.npmrc', 'pnpm-workspace.yaml'])
+    assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /script-?shell|shell-?emulator/i);
+});
+test('task 4003: F4 a required command must really run, at both boundaries', () => {
+  const required = `pnpm run ${UNIT_STEP.script}`;
+  const never = [
+    (x) => `true || ${x}`,
+    (x) => `if ! true; then ${x}; fi`,
+    (x) => `while ! true; do ${x}; done`,
+  ];
+  for (const wrap of never) assert.doesNotMatch(bashStderr(wrap(required)), /RAN pnpm/);
+  const other = [(x) => `echo "$(${x})"`, (x) => `echo x && ${x}`, (x) => `base=1 ${x}`];
+  const mustRun = /must run test:unit-step-concurrency unconditionally/;
+  for (const wrap of [...never, ...other]) {
+    refused(
+      timeoutProblemsAfter((doc) => (boundedStep(doc).run = wrap(required))),
+      mustRun,
+    );
+    const script = wrap(realScripts[UNIT_STEP.script]);
+    refused(
+      timeoutProblemsAfter((_doc, all) => (all[UNIT_STEP.script] = script)),
+      /must preload/,
+    );
+  }
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc).if = 'false')),
+    mustRun,
+  );
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc)['continue-on-error'] = true)),
+    mustRun,
+  );
+});
+test('task 4003: F5 a pnpm target is resolved and read, never exempted by script name', () => {
+  const selectors = ['--dir .', '-C .', '--filter rasta', '-F rasta'];
+  const bad = (all) => (all.build = all.lint = all.typecheck = 'node --test /dev/null');
+  for (const selector of selectors) {
+    const argv = [...selector.split(' '), 'run', 'build'];
+    assert.match(pnpmStdout({ build: 'echo HERE' }, argv), /^HERE$/m);
+    for (const name of ['build', 'lint', 'typecheck'])
+      for (const run of [`pnpm ${selector} run ${name}`, `pnpm ${selector} ${name}`])
+        refusedAtBoth(run, /a pnpm form that is not|a package that was not read/, bad);
+  }
+  const contract = '@rasta/contracts';
+  const inContract = (name, text) => (_all, packages) => (packages[contract][name] = text);
+  for (const [run, reason, edit] of [
+    [
+      `pnpm --filter ${contract} build`,
+      /without exactly one/,
+      inContract('build', 'node --test x'),
+    ],
+    [`pnpm --filter ${contract} build`, /prebuild: the command sh/, inContract('prebuild', 'sh x')],
+    [`pnpm --filter ${contract} run test:unit`, /test:unit: the command jest/],
+    [`pnpm --filter ${contract} run missing`, /an unknown script missing/],
+    [`pnpm --filter ${contract} lint`, /a pnpm form that is not/],
+    [`pnpm --filter ${contract}... build`, /a package that was not read/],
+    ['pnpm --filter constructor build', /a package that was not read/],
+  ])
+    refusedAtBoth(run, reason, edit);
+  // Omitting the table of read packages opens nothing.
+  refused(nodeTestTimeoutProblems(realDoc, realScripts), /a package that was not read/);
+});
+test('task 4003: what pnpm runs on its own around a script is read too', () => {
+  const scripts = { prex: 'echo A', x: 'echo B', postx: 'echo C', postinstall: 'echo D' };
+  const output = pnpmStdout(scripts, ['run', 'x']);
+  for (const line of ['A', 'B', 'C']) assert.match(output, new RegExp(`^${line}$`, 'm'));
+  assert.match(pnpmStdout(scripts, ['install', '--offline']), /\bD$/m);
+  for (const name of ['pretest:progress', 'posttest:progress', 'preinstall', 'postinstall'])
+    refusedAtBoth(
+      'pnpm run test:progress',
+      new RegExp(`script ${name} runs node --test without`),
+      (all) => {
+        all[name] = 'node --test /dev/null';
+      },
+    );
+  refusedAtBoth(
+    'pnpm install --frozen-lockfile',
+    /script prepare runs node --test without/,
+    (all) => {
+      all.prepare = 'node --test /dev/null';
+    },
+  );
+});
+test('task 4003: other forms outside the grammar are refused', () => {
+  const split = 'echo "$\\\n(node --test /dev/null)"';
+  assert.match(bashStderr(split), UNBUDGETED);
+  for (const [run, reason] of [
+    [split, /a line continuation inside a word/],
+    ['echo $\\\n(true)', /a line continuation inside a word/],
+    ['echo $\\\n{X:-$(true)}', /a line continuation inside a word/],
+    ['true\\', /a backslash at the end/],
+    ['true | true', /a pipeline/],
+    ['true || true', /a pipeline/],
+    ['true & true', /a pipeline/],
+    ['if true; then true; fi', /the command if/],
+    ['! true', /the command !/],
+    ['(true)', /a subshell/],
+    ['f() { true; }', /a subshell/],
+    ['pnpm install --ignore-scripts', /a pnpm form/],
+    ['pnpm build', /a pnpm form/],
+  ])
+    refusedAtBoth(run, reason);
+});
 test('task 310: cycles terminate, inherited names are not scripts, other commands are free', () => {
   assert.equal(runsNodeTest('pnpm run a', { a: 'pnpm run b', b: 'pnpm run a' }), false);
   assert.equal(runsNodeTest('pnpm constructor', {}), false);
