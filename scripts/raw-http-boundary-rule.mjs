@@ -112,13 +112,14 @@ const isSenderModule = (source) => {
   } catch {
     /* A bare module specifier. */
   }
-  return;
-  /^(?:file:|[\\/]|[A-Za-z]:)/i.test(name) ||
+  return (
+    /^(?:file:|[\\/]|[A-Za-z]:)/i.test(name) ||
     CLIENT_MODULES.test(name) ||
     NODE_HTTP.test(name) ||
     PLAYWRIGHT_TEST.test(name) ||
     /^(?:(?:node:)?(?:vm|worker_threads|module)(?:\/|$)|(?:data|blob|https?):)/.test(name) ||
-    /(?:^|[\\/])node_modules(?:[\\/]|$)/.test(name);
+    /(?:^|[\\/])node_modules(?:[\\/]|$)/.test(name)
+  );
 };
 
 /**
