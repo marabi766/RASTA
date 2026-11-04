@@ -103,6 +103,7 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
   if (!raw && !receiverSchema) return {};
   const init = name === 'init';
   if (name === 'create' || init) name = owner;
+  if (name === 'createWithPreprocess') return { slot: 0 };
   const api = name?.replace(/^_/, '');
   const offset = raw && name?.startsWith('_') && ['transform'].includes(api) ? 1 : 0;
   return {
@@ -110,6 +111,15 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
     guardOptions: receiverSchema
       ? { min: 1, max: 1, length: 1, regex: 1, refine: 1, nonempty: 0 }[api]
       : undefined,
+    fields: ['clone', 'constructor'].includes(api)
+      ? name === 'clone' && !receiverSchema
+        ? 1
+        : 0
+      : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|CheckOverwrite)/.test(api)
+        ? init
+          ? 1
+          : 0
+        : undefined,
   };
 };
 const unwrap = (node) => {
@@ -511,6 +521,61 @@ export default {
         }
         const callbacks = [];
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
+        const fields = (raw, seen = new Set()) => {
+          const definition = unwrap(raw);
+          if (!definition || seen.has(definition)) return;
+          seen.add(definition);
+          if (definition.type === 'Identifier') {
+            const binding = variable(definition),
+              def = binding?.defs[0];
+            if (
+              def?.type !== 'Variable' ||
+              binding.references.some(
+                (ref) =>
+                  (ref.isWrite() && !ref.init) ||
+                  (ref.identifier.parent.type === 'MemberExpression' &&
+                    ['AssignmentExpression', 'UpdateExpression'].includes(
+                      ref.identifier.parent.parent.type,
+                    )),
+              )
+            ) {
+              report(definition, 'preprocess');
+              return;
+            }
+            for (const ref of binding.references.filter((ref) => ref.isRead())) {
+              const read = ref.identifier,
+                parent = read.parent;
+              if (parent.type === 'VariableDeclarator' && parent.init === read) {
+                fields(parent.id, seen);
+              } else if (
+                ['CallExpression', 'NewExpression'].includes(parent.type) &&
+                callbackSignature(origin(parent.callee)).fields === parent.arguments.indexOf(read)
+              ) {
+                // The same audited definition slot may read an immutable object again.
+              } else report(read, 'preprocess');
+            }
+            fields(def.node.init, seen);
+            return;
+          }
+          if (definition.type !== 'ObjectExpression') {
+            if (api.fields !== index) report(definition, 'preprocess');
+            return;
+          }
+          for (const prop of definition.properties) {
+            if (
+              prop.type === 'SpreadElement' ||
+              key(prop) === undefined ||
+              key(prop) === '__proto__' ||
+              ['get', 'set'].includes(prop.kind)
+            ) {
+              report(prop, 'preprocess');
+              continue;
+            }
+            if (['transform', 'preprocess', 'tx'].includes(key(prop))) callbacks.push(prop.value);
+            if (key(prop) === 'effect') fields(prop.value, seen);
+          }
+        };
+        if (api.fields !== undefined) fields(node.arguments[api.fields]);
         if (!callbacks.length) return;
         let callback;
         let callbackFn;

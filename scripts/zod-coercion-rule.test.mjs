@@ -373,17 +373,31 @@ const transformFailures = [
   `import {MAX_AMOUNT_MINOR} from 'unknown'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
   `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(v=>MAX_AMOUNT_MINOR('1'));`,
   `import {other} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(other));`,
+  `const def={effect:{type:'transform',transform:v=>v}}; def.effect.transform=Number; new z.ZodEffects(def);`,
+  `const def={effect:{type:'transform',transform:v=>v}}; const effect=def.effect; effect.transform=Number; new z.ZodEffects(def);`,
+  `const def={effect:{type:'transform',transform:v=>v}}; mutate(def.effect); new z.ZodEffects(def);`,
   `z.array(z.string()).refine(v=>{v[0]=true;return true;}).transform(v=>v.map(Number));`,
   `const mutate=v=>{v[0]=true;return true;}; z.array(z.string()).refine(mutate).transform(v=>v.map(Number));`,
+  `const C=z.transform(()=>'1').constructor; new C({type:'transform',transform:Number});`,
+  `z.transform(()=>'1').clone({type:'transform',transform:Number});`,
+
+  `new z.ZodTransform({type:'transform', __proto__:{transform:Number}});`,
   `z.string().check(ctx=>{ctx.value=true;}).transform(Number);`,
   `z.string().superRefine((v,ctx)=>{ctx.value=true;}).transform(Number);`,
   `z.string().refine(()=>true,{when:ctx=>{ctx.value=true;return true;}}).transform(Number);`,
+
   `z.transform(v=>Number.call('validated-this',v));`,
   `z.transform(v=>Number.apply('validated-this',[v]));`,
   `const f=Number.call; z.transform(v=>f('validated-this',v));`,
   `const f=Number.apply; z.transform(v=>f('validated-this',[v]));`,
   `z.transform(v=>globalThis.String.call('validated-this',v));`,
   `const f=Boolean.bind(null); z.transform(f);`,
+
+  `const def={type:'transform',transform:v=>v}; const alias=def; alias.transform=Number; new z.ZodTransform(def);`,
+  `const def={type:'transform',transform:v=>v}; Object.assign(def,{transform:Number}); new z.ZodTransform(def);`,
+  `const def={type:'transform',transform:v=>v}; mutate(def); new z.ZodTransform(def);`,
+  `const def={type:'transform',transform:v=>v, mutate(){this.transform=Number;}}; def.mutate(); new z.ZodTransform(def);`,
+
   ...['Number', 'BigInt', 'String', 'Boolean', 'Date', 'parseInt', 'parseFloat'].flatMap(
     (convert) => [`z.unknown().transform(${convert});`, `z.transform(${convert});`],
   ),
@@ -405,8 +419,27 @@ const transformFailures = [
   `const f = z.unknown().transform; f(Number);`,
   `let f = z.string().transform; f = v => v; f(Number);`,
   `z.unknown()[method](Number);`,
+  ...['transform', 'preprocess'].map(
+    (field) =>
+      `new z.ZodEffects({effect: {type: '${field}', ${field}: Number}, schema: z.unknown()});`,
+  ),
+  ...['ZodTransform', 'ZodMiniTransform', 'core.$ZodTransform'].map(
+    (type) => `new z.${type}({type: 'transform', transform: Number});`,
+  ),
+  `z.ZodTransform({type: 'transform', transform: Number});`,
+  `z.ZodTransform.init({}, {type: 'transform', transform: Number});`,
+  `z.ZodTransform.create({type: 'transform', transform: Number});`,
   `z.core._transform(z.core.$ZodTransform, Number);`,
+  `z.ZodEffects.createWithPreprocess(Number, z.number());`,
+  `z.clone(z.transform(v => v), {type: 'transform', transform: Number});`,
+  `z.transform(v => v).clone({type: 'transform', transform: Number});`,
+  `const def = {type:'transform',transform:Number}; new z.ZodTransform(def);`,
+  `const def = {type:'transform',transform:v=>v}; def.transform=Number; new z.ZodTransform(def);`,
+  `new z.ZodTransform(getDefinition());`,
+  `new z.ZodTransform({...getDefinition()});`,
+  `new z.ZodTransform({get transform() { return Number; }});`,
   ...['z.overwrite', 'z.unknown().overwrite', 'z.core._overwrite'].map((api) => `${api}(Number);`),
+  `new z.core.$ZodCheckOverwrite({check:'overwrite',tx:Number});`,
   `z.check(z.overwrite(Number));`,
   `z.unknown().transform((v, n=Number(v))=>n);`,
   `z.unknown().overwrite((v, {n=Number(v)}={})=>n);`,
@@ -451,7 +484,10 @@ for (const code of [
   `z.unknown().transform(v=>new Promise(resolve=>setTimeout(resolve,1)));`,
   `z.core._transform(z.core.$ZodTransform, v=>v);`,
   `const C=z.core.$ZodTransform; z.core._transform(C,v=>v);`,
+  `new z.ZodTransform({type:'transform',transform:v=>v});`,
+  `const def={type:'transform',transform:v=>v}; new z.ZodTransform(def);`,
   `z.unknown().overwrite(v=>v);`,
+  `new z.core.$ZodCheckOverwrite({check:'overwrite',tx:v=>v});`,
 ])
   it(`F3 verified transform: ${code}`, () => assert.deepEqual(messages(code), []));
 
