@@ -93,6 +93,16 @@ export const MAX_LIVE_DEMANDS_LIMIT = DIGEST_DEMANDS_PER_BUDGET / 2;
  */
 export const MAX_INVITEES_LIMIT = 500;
 
+/**
+ * The most links one RFQ's receipt chain holds: what audit-service returns of a chain
+ * (`MAX_CHAIN_LINKS`), and the `seq` bound of `quotation_receipt`. A link past it would leave an RFQ
+ * that can never be opened (the lesson of construction audit F2).
+ */
+export const QUOTATION_RECEIPT_CHAIN_LIMIT = 10_000;
+
+/** The most revisions one quotation may have: the chain's links shared by the most invitees. */
+export const MAX_QUOTATION_REVISIONS_LIMIT = QUOTATION_RECEIPT_CHAIN_LIMIT / MAX_INVITEES_LIMIT;
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -175,6 +185,12 @@ function roleList(name: string, options: { min: number }) {
  *   PROCUREMENT_RFQ_MAX_INVITEES       Q-121 (1). The most suppliers one RFQ invites: default 200,
  *                                      at most 500 — protection of the service (each is asked of
  *                                      supplier-service before the issue), not a business rule.
+ *   PROCUREMENT_QUOTATION_MAX_REVISIONS
+ *                                      ADR-070 § 4 (plan PR 8). The sealed revisions one quotation
+ *                                      may have, its submission included: default 10, at most 20 —
+ *                                      so the 500 invitees an RFQ may have never fill its receipt
+ *                                      chain past the 10,000 links audit-service returns
+ *                                      (QUOTATION_RECEIPT_CHAIN_LIMIT). Protection, not a rule.
  *   PROCUREMENT_RFQ_KEKS / _KEK_CURRENT
  *                                      ADR-070 § 4. The key-encryption keys that wrap each RFQ's
  *                                      private sealing key — a secret, never construction's.
@@ -295,6 +311,14 @@ export const procurementEnvSchema = baseEnvSchema
       .min(1)
       .max(MAX_INVITEES_LIMIT)
       .prefault(200),
+
+    /** ADR-070 § 4: sealed revisions per quotation (× MAX_INVITEES_LIMIT ≤ the chain's 10,000). */
+    PROCUREMENT_QUOTATION_MAX_REVISIONS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_QUOTATION_REVISIONS_LIMIT)
+      .prefault(10),
 
     /**
      * The key-encryption keys that wrap each RFQ's private sealing key (ADR-070 § 4, ADR-066 § 2):

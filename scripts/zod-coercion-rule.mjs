@@ -61,7 +61,8 @@ const DATA_RESULTS = new Set(
   validateAsync isOptional isNullable toJSONSchema config getErrorMap formatError flattenError
   treeifyError prettifyError registry get`.split(/\s+/),
 );
-const SCHEMA_FIELDS = new Set(
+const SCHEMA_FIELDS = new Set(['element', 'keyType', 'valueType', 'innerType', 'in', 'out']);
+const DEFINITION_SCHEMA_FIELDS = new Set(
   'element keyType valueType innerType in out left right rest catchall type schema input output args returns'.split(
     ' ',
   ),
@@ -88,6 +89,7 @@ const optionsIndex = ({ name, raw, method, owner } = {}) => {
   const kind = api?.replace(/^\$?Zod(?:Mini)?/, '').toLowerCase();
   if (name === 'clone') return method ? 0 : raw ? 1 : 0;
   if (name === 'constructor') return 0;
+  if (name === 'init' && (owner === 'constructor' || /^\$?Zod/.test(owner ?? ''))) return 1;
   if (name === 'create') return owner ? optionsIndex({ name: owner, raw: true }) : 0;
   if (api === 'hash') return 1 + core;
   if (api === 'stringFormat') return 2 + core;
@@ -131,7 +133,7 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
       api === 'codec'
         ? 2
         : ['clone', 'constructor'].includes(api)
-          ? name === 'clone' && !receiverSchema
+          ? (name === 'clone' && !receiverSchema) || init
             ? 1
             : 0
           : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|CheckOverwrite)/.test(api)
@@ -258,7 +260,13 @@ export default {
             ),
           ),
         );
-      if (name === undefined && result.container) return { opaque: true };
+      if (name === undefined && result.container === 'literal')
+        return mergeOrigins(
+          ...result.children.values(),
+          result.spread && access(result.spread, name),
+        );
+      if (name === undefined && result.container && !['shape', 'list'].includes(result.container))
+        return { opaque: true };
       if (result.container) {
         if (result.container === 'literal')
           return (
@@ -277,8 +285,11 @@ export default {
           if (result.container === 'list' && name === 'length') return undefined;
           return { schema: true, ambiguous: result.ambiguous };
         }
+        if (result.container === 'internals' && name === 'constr')
+          return { raw: true, name: 'constructor', ambiguous: result.ambiguous };
         if (result.container === 'internals' && name === 'def') return { container: 'definition' };
-        if (SCHEMA_FIELDS.has(name)) return { schema: true, ambiguous: result.ambiguous };
+        if (DEFINITION_SCHEMA_FIELDS.has(name))
+          return { schema: true, ambiguous: result.ambiguous };
         const container = Object.hasOwn(SCHEMA_CONTAINERS, name)
           ? SCHEMA_CONTAINERS[name]
           : undefined;
@@ -343,8 +354,7 @@ export default {
         Boolean,
       );
       if (children.some((child) => child.raw)) return { raw: true, ambiguous: true };
-      if (children.length && children.every((child) => child.schema)) return { schema: true };
-      return children.length === 1 ? children[0] : children.length ? { opaque: true } : undefined;
+      return mergeOrigins(...children);
     };
     // Follow binding definitions, not spellings: aliases, nested destructuring and const chains.
     // Keep schema results distinct from parsed/metadata data and raw factories.
@@ -493,7 +503,11 @@ export default {
         break;
       }
     };
-    const stableReceiver = (raw, seen = new Set()) => {
+    const enclosingFunction = (node) => {
+      while (node && !FUNCTION_TYPES.has(node.type)) node = node.parent;
+      return node;
+    };
+    const stableReceiver = (raw, at, seen = new Set()) => {
       const node = unwrap(raw);
       if (node?.type !== 'Identifier') return node?.type === 'ArrayExpression';
       const binding = variable(node);
@@ -504,7 +518,19 @@ export default {
         if (ref.isWrite() || writeTarget(ref.identifier)) return false;
         const parent = ref.identifier.parent;
         if (parent.type === 'VariableDeclarator' && parent.init === ref.identifier)
-          return stableReceiver(parent.id, seen);
+          return stableReceiver(parent.id, at, seen);
+        // A fresh local value can be returned after this synchronous use. It
+        // cannot have escaped to a caller before its own construction/use.
+        if (
+          parent.type === 'ReturnStatement' &&
+          ref.identifier.range[0] > at.range[0] &&
+          ['NewExpression', 'ArrayExpression', 'Literal'].includes(
+            binding.defs[0]?.node.init?.type,
+          ) &&
+          enclosingFunction(binding.defs[0].node) === enclosingFunction(at) &&
+          enclosingFunction(ref.identifier) === enclosingFunction(at)
+        )
+          return true;
         return parent.type === 'MemberExpression' && parent.object === ref.identifier;
       });
     };
@@ -1107,7 +1133,7 @@ export default {
             if (
               callee.object.type === 'Identifier' &&
               ['array', 'strings', 'Date', 'regex'].includes(kind) &&
-              !stableReceiver(callee.object)
+              !stableReceiver(callee.object, callee)
             )
               return true;
             if (
@@ -1148,7 +1174,7 @@ export default {
             if (
               name === 'includes' &&
               ['array', 'strings'].includes(kind) &&
-              stableReceiver(callee.object)
+              stableReceiver(callee.object, callee)
             )
               return false;
             if (

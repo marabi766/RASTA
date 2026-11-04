@@ -479,13 +479,18 @@ describe('the window of an aggregation', () => {
       const holderPid = await lockHeld;
       const waiting = as.submit({ productId, quantity: 3 }).then((response) => response);
       // Until the request is parked on the holder's lock, by the catalogue — then time passes.
-      for (let attempt = 0; ; attempt += 1) {
+      // Bounded by wall-clock time, not by a count of event-loop turns: under coverage
+      // instrumentation and CI load 500 setImmediate turns ended before the request reached
+      // the lock (train run 41820102199), a false failure.
+      const parkDeadline = Date.now() + 20_000;
+      for (;;) {
         const [row] = await holder.$queryRaw<{ blocked: bigint }[]>`
           SELECT count(*) AS blocked FROM pg_stat_activity
            WHERE ${holderPid}::int = ANY(pg_blocking_pids(pid))`;
         if (Number(row?.blocked ?? 0) > 0) break;
-        if (attempt > 500) throw new Error('the request never waited on the window lock');
-        await new Promise((resolve) => setImmediate(resolve));
+        if (Date.now() > parkDeadline)
+          throw new Error('the request never waited on the window lock');
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
       clock.set(new Date(T0.getTime() + 10 * HOUR));
       release();

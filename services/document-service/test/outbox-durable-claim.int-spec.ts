@@ -16,11 +16,17 @@ import {
   expireLease,
   GatedPublisher,
   holdLockOnOldest,
+  installReleaseProbe,
   newProtocolPrisma,
+  observeRelease,
   PROTOCOL_SCHEMA,
   readRow,
+  refusedUnderBudget,
+  RELEASE_REFUSAL,
   seedRow,
   truncate,
+  type ReleaseObservation,
+  type ReleaseProbe,
 } from './outbox-claim.helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
@@ -684,46 +690,178 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
   // -- the release's own bound (#291 r2) -------------------------------------
 
-  it('a release blocked on a row lock ends by its own statement timeout and leaves the claim', async () => {
+  describe('a release blocked on a row lock', () => {
     // The relay stops waiting for a release at its stop's bound in any case;
-    // this is the database giving up then too, not holding the UPDATE (and a
+    // these are the database giving up then too, not holding the UPDATE (and a
     // pooled connection) behind a lock after the process has moved on.
-    await seedRow(a, 'SD_BLOCKED');
-    const claimed = await claim(storeA, 10);
-    const held = await holdLockOnOldest(b, 1, `id = 'SD_BLOCKED'`);
-    expect(held.ids).toEqual(['SD_BLOCKED']);
+    //
+    // Which refusal comes back — the statement's 57014 or Prisma's expired
+    // transaction, in either of its two forms — is a race, and a 5 000 ms
+    // transaction and statement budget would also be refused well inside the
+    // 10 s backstop with the same words (FU-048, Codex r1 on #644). So the
+    // budget is read where it is decided, not inferred from the refusal: the
+    // `timeout`/`maxWait` Prisma's engine is handed, and the `statement_timeout`
+    // PostgreSQL holds when the UPDATE begins, each against the time the bound
+    // reported (see `refusedUnderBudget`).
+    const BUDGET_MS = 300;
+    let probe: ReleaseProbe;
 
-    let backstop: NodeJS.Timeout | undefined;
-    try {
-      const outcome = await Promise.race([
-        storeA.release(['SD_BLOCKED'], claimed.token!, releaseWithin(300)).then(
-          (released) => `released ${released}`,
-          (error: unknown) => String(error),
-        ),
-        new Promise<string>((resolve) => {
-          backstop = setTimeout(() => resolve('still waiting after 10 s'), 10_000);
-        }),
-      ]);
-      // Whichever bound reports first — the statement's, or Prisma's
-      // transaction timeout, both what was left of the bound (#291 r3: no
-      // margin past it) — the release did not release. Prisma words its own
-      // refusal two ways, both P2028: `expired transaction` once the engine has
-      // recorded the expiry, `Transaction not found` for a request that lands
-      // between the rollback and that record (FU-034, the same race as
-      // construction-service's transaction-timeout spec).
-      expect(outcome).toMatch(
-        /57014|statement timeout|expired transaction|Transaction not found\. Transaction ID is invalid/,
-      );
-      // And the database gave up too: no UPDATE is left waiting on the lock.
-      // Prisma's timeout alone would not end it; the statement timeout does.
-      expect(await updatesWaitingOnALock(b)).toBe(0);
-    } finally {
-      clearTimeout(backstop);
-      await held.release();
-    }
+    beforeAll(async () => {
+      probe = await installReleaseProbe(a);
+    });
 
-    // Not released: the token still holds the row, and its lease decides.
-    expect((await readRow(a, 'SD_BLOCKED')).claim_token).toBe(claimed.token);
+    afterAll(async () => {
+      await probe.remove();
+    });
+
+    /**
+     * A claimed row another connection holds locked, released under a bound
+     * that reports `budgetMs` at every read. Returns what the release showed.
+     */
+    const blockedRelease = async (budgetMs: number): Promise<ReleaseObservation> => {
+      await seedRow(a, 'SD_BLOCKED');
+      const claimed = await claim(storeA, 10);
+      const held = await holdLockOnOldest(b, 1, `id = 'SD_BLOCKED'`);
+      expect(held.ids).toEqual(['SD_BLOCKED']);
+      let seen: ReleaseObservation;
+      try {
+        const release = () =>
+          observeRelease(
+            a,
+            probe,
+            (bound) => storeA.release(['SD_BLOCKED'], claimed.token!, bound),
+            budgetMs,
+          );
+        seen = await release();
+        // A machine that stalls between the transaction's start and its UPDATE
+        // lets the transaction expire first: the UPDATE never reaches the
+        // database, and that attempt shows nothing about its statement. The
+        // claim is untouched, so ask again (bounded) rather than pass or fail on it.
+        for (let again = 0; again < 2 && seen.updates === 0; again += 1) seen = await release();
+        // The database gave up too: no UPDATE is left waiting on the lock.
+        // Prisma's timeout alone would not end it; the statement timeout does.
+        expect(await updatesWaitingOnALock(b)).toBe(0);
+      } finally {
+        await held.release();
+      }
+      // Not released: the token still holds the row, and its lease decides.
+      expect((await readRow(a, 'SD_BLOCKED')).claim_token).toBe(claimed.token);
+      return seen;
+    };
+
+    it('ends by its own statement timeout, under the requested budget, and leaves the claim', async () => {
+      const seen = await blockedRelease(BUDGET_MS);
+      expect(seen.outcome).toMatch(RELEASE_REFUSAL);
+      expect(seen).toMatchObject({
+        starts: [{ timeout: BUDGET_MS, maxWait: BUDGET_MS }],
+        updates: 1,
+        statementTimeoutMs: BUDGET_MS,
+      });
+      expect(refusedUnderBudget(seen, BUDGET_MS)).toBe(true);
+    });
+
+    it('a longer budget is refused as well, and fails the verdict for 300 ms', async () => {
+      // The same release on 1 200 ms ends inside the backstop with a message the
+      // old assertion accepted. It qualifies at its own budget, and only there.
+      const seen = await blockedRelease(1_200);
+      expect(refusedUnderBudget(seen, 1_200)).toBe(true);
+      expect(refusedUnderBudget(seen, BUDGET_MS)).toBe(false);
+      expect(seen.starts).toEqual([{ timeout: 1_200, maxWait: 1_200 }]);
+      expect(seen.statementTimeoutMs).toBe(1_200);
+    });
+
+    describe('the verdict', () => {
+      const ours: ReleaseObservation = {
+        outcome: 'Error: canceling statement due to statement timeout (57014)',
+        reads: [BUDGET_MS, BUDGET_MS, BUDGET_MS],
+        starts: [{ timeout: BUDGET_MS, maxWait: BUDGET_MS }],
+        updates: 1,
+        statementTimeoutMs: BUDGET_MS,
+      };
+
+      it('accepts the observation of a 300 ms release', () => {
+        expect(refusedUnderBudget(ours, BUDGET_MS)).toBe(true);
+        expect(
+          refusedUnderBudget(
+            {
+              ...ours,
+              outcome:
+                'Error: Transaction not found. Transaction ID is invalid, refers to an old closed',
+            },
+            BUDGET_MS,
+          ),
+        ).toBe(true);
+      });
+
+      it.each<[string, Partial<ReleaseObservation>]>([
+        [
+          'a 5 000 ms budget end to end (the reviewer’s counterexample)',
+          {
+            outcome: 'Transaction already closed: expired transaction',
+            reads: [5_000, 5_000, 5_000],
+            starts: [{ timeout: 5_000, maxWait: 5_000 }],
+            statementTimeoutMs: 5_000,
+          },
+        ],
+        [
+          'a 5 000 ms transaction with a 300 ms statement',
+          { starts: [{ timeout: 5_000, maxWait: 5_000 }] },
+        ],
+        ['a 300 ms transaction with a 5 000 ms statement', { statementTimeoutMs: 5_000 }],
+        [
+          'a connection wait longer than the budget',
+          { starts: [{ timeout: BUDGET_MS, maxWait: 5_000 }] },
+        ],
+        [
+          'a transaction timeout that is not a number',
+          { starts: [{ timeout: '300', maxWait: BUDGET_MS }] },
+        ],
+        ['no transaction start', { starts: [] }],
+        ['two transaction starts', { starts: [ours.starts[0]!, ours.starts[0]!] }],
+        ['an UPDATE that never reached the database', { updates: 0, statementTimeoutMs: null }],
+        ['two UPDATEs', { updates: 2 }],
+        ['no statement timeout in force', { statementTimeoutMs: 0 }],
+        ['a statement timeout that was not read', { statementTimeoutMs: null }],
+        [
+          'a statement timeout not recomputed from the deadline',
+          { reads: [BUDGET_MS, 250, 200], statementTimeoutMs: BUDGET_MS },
+        ],
+        [
+          'a bound that never reported the whole budget',
+          {
+            reads: [250, 250, 250],
+            starts: [{ timeout: 250, maxWait: 250 }],
+            statementTimeoutMs: 250,
+          },
+        ],
+        ['a bound that reported more than the budget', { reads: [BUDGET_MS, 301, BUDGET_MS] }],
+        ['a bound that was not read', { reads: [] }],
+        ['a release that went through', { outcome: 'released 1' }],
+        ['a release still waiting at the backstop', { outcome: 'still waiting after 10000 ms' }],
+        ['an unrelated failure', { outcome: 'Error: Can’t reach database server' }],
+      ])('refuses %s', (_what, change) => {
+        expect(refusedUnderBudget({ ...ours, ...change }, BUDGET_MS)).toBe(false);
+      });
+
+      it('a 5 000 ms observation qualifies at 5 000 and not at 300: the refusal is on the budget alone', () => {
+        const long: ReleaseObservation = {
+          outcome: 'Transaction already closed: expired transaction',
+          reads: [5_000, 4_990, 4_980],
+          starts: [{ timeout: 5_000, maxWait: 5_000 }],
+          updates: 1,
+          statementTimeoutMs: 4_990,
+        };
+        expect(refusedUnderBudget(long, 5_000)).toBe(true);
+        expect(refusedUnderBudget(long, BUDGET_MS)).toBe(false);
+      });
+
+      it('fails loudly, instead of observing nothing, when Prisma no longer exposes its engine', async () => {
+        const moved = { base: {} } as unknown as PrismaService;
+        await expect(observeRelease(moved, probe, async () => 0, BUDGET_MS)).rejects.toThrow(
+          /no longer exposes _engine\.transaction/,
+        );
+      });
+    });
   });
 
   /**
