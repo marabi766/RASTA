@@ -127,7 +127,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
             if (obligation.status !== 'DISPUTED') {
               return answer(res, refusedRetry.status, {
                 code: refusedRetry.code,
-                message: `Transaction cannot move from ${String(obligation.status)} to PENDING_SETTLEMENT`,
+                message: `A ${String(obligation.status)} transaction cannot have a dispute resolved`,
               });
             }
             if (JSON.stringify(body) !== JSON.stringify({ resolution })) {
@@ -228,7 +228,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
     await expect(
       run(6, 1, (a) => a.resolveObligationDispute(orderId, transactionId, disputeId, resolution)),
     ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE', nonRetryable: false });
-    expect(service.obligation.status).toBe('PENDING_SETTLEMENT');
+    expect(service.obligation.status).toBe(after.status);
     expect(await recordsOf(orderId)).not.toContainEqual({ activity: 'resolveObligationDispute' });
 
     const resolveKey = `POST /v1/transactions/{id}/resolve-dispute ${idempotencyKeyFor.resolveDispute(orderId, disputeId)}`;
@@ -255,7 +255,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
       const { orderId, service, resolveKey, retry } = await resolutionLost(after);
       const before = service.requests.length;
 
-      // Refused PENDING_SETTLEMENT -> PENDING_SETTLEMENT, then read back: this
+      // Refused for the state its first attempt left, then read back: this
       // resolution's effect. It used to stay a refusal until the attempts ran
       // out, and the workflow failed with the funds held.
       await expect(retry(2)).resolves.toBeUndefined();
@@ -276,6 +276,10 @@ describe('a dispute resolution retried after economic-service let its answer exp
     [
       'no resolution kept apart and the objection still in place',
       { status: 'PENDING_SETTLEMENT', disputeReason: reason, disputeResolution: null },
+    ],
+    [
+      'HELD with another resolution’s words (D-083: HELD is a resolution’s exit too)',
+      { status: 'HELD', disputeReason: reason, disputeResolution: 'Refunded.' },
     ],
   ])('a transaction carrying %s proves nothing: the refusal stands', async (_, after) => {
     const { orderId, service, retry } = await resolutionLost(after);

@@ -544,6 +544,12 @@ model Transaction {
   @@index([organizationId, sourceType, sourceReference])
   @@index([counterpartyOrganizationId, status])
   @@index([pricingRuleId])
+  /// Not modelled: `settlement_authority_reconciliation` (migration
+  /// `20261103121000_transaction_settlement_authority`), what that migration
+  /// found and did about an escrowed, settlement-ready row with no recorded
+  /// authorisation — AUTHORISED_UNRECORDED (counts as authorised) or
+  /// RETURNED_TO_HELD. Filled there and frozen; read only by raw SQL
+  /// (`TransactionRepository.lockForUpdate`) and the settlement triggers.
   @@map("transaction")
 }
 

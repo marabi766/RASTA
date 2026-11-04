@@ -643,15 +643,22 @@ export function createActivities(deps: ActivityDependencies) {
         },
         {
           transactionId,
-          // Out of the dispute and back in the settlement queue (or since
-          // settled). With the dispute's identity, out of THAT dispute — by
+          // Out of the dispute: back in the settlement queue (or since
+          // settled), or back in HELD — where economic-service returns an
+          // escrowed obligation never authorised, a dispute raised before
+          // the buyer confirmed receipt (D-083). A resolution is the only way
+          // out of DISPUTED to either, so with this dispute's identity on it,
+          // or this resolution's words, it is this resolution's effect. With
+          // the dispute's identity, out of THAT dispute — by
           // whoever resolved it, since economic-service's resolution only
           // releases the transaction and the order's decision is what moves
           // the money (Q-138). Without it, carrying this resolution's words
           // (`resolutionOf`) — never in place of the identity.
           answer: (transaction) => {
             const released =
-              (transaction.status === 'PENDING_SETTLEMENT' || transaction.status === 'SETTLED') &&
+              (transaction.status === 'HELD' ||
+                transaction.status === 'PENDING_SETTLEMENT' ||
+                transaction.status === 'SETTLED') &&
               transaction.disputedAt !== null;
             const ours =
               economicDisputeId === undefined
