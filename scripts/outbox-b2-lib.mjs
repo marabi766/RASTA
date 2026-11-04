@@ -733,6 +733,23 @@ function toNumber(value) {
 const mapRow = (row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, toNumber(v)]));
 
 /**
+ * The error is the B1 assertion's own `RAISE EXCEPTION`: SQLSTATE `P0001`
+ * (raise_exception) and a message starting with the `B1: ` prefix every check
+ * in `assertB1Definitions()` uses. Prisma wraps a raw-query database error as
+ * `P2010` with the server's code and message in `meta`; a bare driver error
+ * carries them at the top level. Anything else — including an error with the
+ * right text but no SQLSTATE, or the SQLSTATE without the prefix — is not
+ * proof that the schema is missing.
+ */
+export function isB1AssertionFailure(error) {
+  if (typeof error !== 'object' || error === null) return false;
+  const meta = typeof error.meta === 'object' && error.meta !== null ? error.meta : undefined;
+  const sqlState = meta ? meta.code : error.code;
+  const message = meta ? meta.message : error.message;
+  return sqlState === 'P0001' && typeof message === 'string' && /^(?:ERROR:\s+)?B1: /.test(message);
+}
+
+/**
  * Run B2 against one service database.
  *
  * `db` is the port — `query`, `transaction`, `execute` — so this function is
@@ -749,9 +766,15 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
 
   // Preconditions first, and against the catalog rather than against a name.
   // A missing or reshaped B1 object is a refusal, not a partial run.
+  //
+  // Only a failure the assertion itself raised is a confirmed schema refusal
+  // (#673 r1 F1). A connection reset, an unreachable server (P1001) or any
+  // other error means the schema could not be inspected, not that B1 is
+  // missing; it propagates unchanged and is reported generically.
   try {
     await db.query(assertB1Definitions());
   } catch (error) {
+    if (!isB1AssertionFailure(error)) throw error;
     throw new B2RefusalError(
       `B1 schema precondition failed for ${service}: ${error.message}. ` +
         'Deploy the three ADR-051 B1 migrations before running the B2 backfill.',

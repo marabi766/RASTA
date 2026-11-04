@@ -119,6 +119,30 @@ for (const [entry, exit] of [
   });
 }
 
+// #673 r1 F2: a valid command prefix does not license the rest of the line.
+// Each would otherwise reach the environment, the database or Keycloak (an
+// empty environment then refuses with another code, so the mutant is seen).
+for (const args of [
+  ['backfill', '--dry-run'],
+  ['backfill', '--organization', SENTINELS[1]],
+  ['reconcile', `--${SENTINELS[0]}`],
+  ['reconcile', 'backfill'],
+]) {
+  test(`usage: projection.cli.js ${args.join(' ')} — trailing argument refused, exit 2`, () => {
+    assertCliRefusal('usage', 'services/identity-service/dist/keycloak/projection.cli.js', args, 2);
+  });
+}
+
+test('usage: B2 parsers refuse an unsupported argument after a valid prefix', async () => {
+  await assertRefusal('usage', () =>
+    parseOptions(['--service', 'document', '--apply', `--${SENTINELS[0]}`], {}),
+  );
+  await assertRefusal('usage', () => parseOptions(['--service', 'document', SENTINELS[1]], {}));
+  await assertRefusal('usage', () =>
+    parseVacuumOptions(['--service', 'document', `--${SENTINELS[0]}`], {}),
+  );
+});
+
 // --- environment and credentials ---------------------------------------------
 
 test('node-env: B2 interlock refuses production and an unrecognised NODE_ENV', async () => {
@@ -208,6 +232,18 @@ test('prisma-client-missing: B2 port for a service with no client', async () => 
 
 // --- B2 backfill guards ------------------------------------------------------
 
+/**
+ * What Prisma 6 throws when the B1 assertion's own `RAISE EXCEPTION` fires
+ * from `$queryRawUnsafe`: `P2010`, with the server's SQLSTATE and message in
+ * `meta` (the same shape services/asset-service negative-amount.spec.ts uses).
+ */
+function b1AssertionError(meta = {}) {
+  return Object.assign(new Error(`Raw query failed. Code: \`P0001\`. ${SENTINELS[0]}`), {
+    code: 'P2010',
+    meta: { code: 'P0001', message: `ERROR: B1: outbox_message.stream_seq is missing`, ...meta },
+  });
+}
+
 function port({ b1, plan = {}, batch = {}, verify = {} } = {}) {
   const batches = [
     { selected: 2, updated: 2, streams: 1, violations: 0, history_purged: 0, ...batch },
@@ -215,7 +251,8 @@ function port({ b1, plan = {}, batch = {}, verify = {} } = {}) {
   ];
   const answer = async (sql) => {
     if (sql === b1PreconditionSql()) {
-      if (b1) throw new Error(SENTINELS[0]);
+      if (b1 === true) throw b1AssertionError();
+      if (b1) throw b1.throws;
       return [];
     }
     if (sql === planSql()) return [{ pending_unsequenced: 2, streams_history_purged: 0, ...plan }];
@@ -259,6 +296,31 @@ for (const [code, scripted] of [
 ]) {
   test(`${code}: B2 backfill guard ${JSON.stringify(scripted)}`, async () => {
     await assertRefusal(code, () => backfill(port(scripted)));
+  });
+}
+
+// #673 r1 F1: a failure to inspect the schema is not a schema refusal. Each of
+// these propagates unchanged and reports exactly as it would on its own.
+for (const [label, foreign] of [
+  ['an unknown error', () => new Error(SENTINELS[0])],
+  ['ECONNRESET', () => Object.assign(new Error(SENTINELS[0]), { code: 'ECONNRESET' })],
+  ['P1001 (server unreachable)', () => Object.assign(new Error(SENTINELS[0]), { code: 'P1001' })],
+  ['P0001 without the B1 prefix', () => b1AssertionError({ message: `ERROR: ${SENTINELS[0]}` })],
+  ['the B1 prefix with another SQLSTATE', () => b1AssertionError({ code: '57P01' })],
+  ['the B1 text with no SQLSTATE', () => new Error('B1: outbox_message.stream_seq is missing')],
+  ['a non-object rejection', () => 'B1: outbox_message.stream_seq is missing'],
+]) {
+  test(`b1 check failing with ${label} is not reported as b1-precondition`, async () => {
+    const error = foreign();
+    let thrown;
+    try {
+      await backfill(port({ b1: { throws: error } }));
+    } catch (caught) {
+      thrown = caught;
+    }
+    assert.equal(thrown, error);
+    assert.equal(commandFailure(thrown), commandFailure(error));
+    assert.match(commandFailure(thrown), /^command failed \(code /);
   });
 }
 

@@ -137,7 +137,12 @@ const legacyTarget = JSON.parse(
 
 function run(
   scenario,
-  { settings = SETTINGS, cli, target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 } } = {},
+  {
+    settings = SETTINGS,
+    cli,
+    target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 },
+    args = [],
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'saga-drain-'));
   try {
@@ -155,7 +160,7 @@ function run(
     };
     env.FAKE_TEMPORAL_SCENARIO = join(dir, 'scenario.json');
     env.FAKE_TEMPORAL_CALLS = join(dir, 'calls.jsonl');
-    const result = spawnSync(process.execPath, [SCRIPT], { env, encoding: 'utf8' });
+    const result = spawnSync(process.execPath, [SCRIPT, ...args], { env, encoding: 'utf8' });
     const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8')
       .trim()
       .split('\n')
@@ -225,6 +230,29 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
     ['workflow', 'count', ...common, '--query', QUERY, '--output', 'json'],
   ]);
 });
+
+// #673 r1 F2: the gate takes its settings from the environment only. An
+// argument — even one naming another namespace — is refused before any
+// `temporal` call, so it can never report OK for a namespace it did not check.
+for (const args of [
+  ['--namespace', 'requested-namespace'],
+  ['--task-queue', SENTINELS[1]],
+  [SENTINELS[0]],
+]) {
+  test(`refuses an argument (${args[0]}) on a drained queue, asking Temporal nothing`, () => {
+    const { status, stdout, stderr, calls } = run(drained(), { args });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.equal(
+      stderr,
+      'marketplace saga drain check: cannot verify — deployment blocked: ' +
+        'command refused (code usage); diagnostics withheld; ' +
+        'prior work may have committed — reconcile before retrying\n',
+    );
+    assert.deepEqual(calls, []);
+    assertNoSentinel(stdout + stderr, args[0]);
+  });
+}
 
 test('passes with no running saga at all (the CLI prints {} for a zero count)', () => {
   const scenario = {

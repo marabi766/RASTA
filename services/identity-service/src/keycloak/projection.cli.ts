@@ -36,8 +36,11 @@ const usage = (message: string): Error => markRefusal(new Error(message), 'usage
  * failure code, never the URL.
  */
 async function main(): Promise<number> {
-  const mode = process.argv[2];
-  if (mode !== 'reconcile' && mode !== 'backfill') {
+  // Exactly one argument, the mode (#673 r1 F2): `backfill --dry-run` must not
+  // project every account because the prefix was valid. Checked before the
+  // environment, the database or Keycloak is touched.
+  const [mode, ...rest] = process.argv.slice(2);
+  if ((mode !== 'reconcile' && mode !== 'backfill') || rest.length > 0) {
     throw usage('usage: projection.cli.ts <reconcile|backfill>');
   }
 
