@@ -1,4 +1,4 @@
-import { RastaError } from '@rasta/nest-common';
+import { RastaError } from '../errors/rasta-error';
 import { MAX_QUERY_SEGMENTS, strictQueryParser } from './strict-query-parser';
 
 describe('strictQueryParser (PR 699 review F1)', () => {

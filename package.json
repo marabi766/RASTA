@@ -30,6 +30,7 @@
     "test:audit-correction-lib": "node --test scripts/verify-audit-correction-command-lib.test.mjs",
     "test:outbox-test-clock": "node --test --test-timeout=300000 scripts/outbox-test-clock.test.mjs",
     "test:disclosure-guard-wiring": "node --test --test-timeout=300000 scripts/disclosure-guard-wiring.test.mjs",
+    "test:strict-query-parser-wiring": "node --test scripts/strict-query-parser-wiring.test.mjs",
     "test:outbox-b1": "node --test scripts/verify-outbox-b1-lib.test.mjs",
     "test:outbox-b2": "node --test --test-timeout=300000 scripts/outbox-b2-lib.test.mjs",
     "test:outbox-provenance-restoration-guard": "node --test --test-timeout=300000 scripts/outbox-provenance-restoration-guard.test.mjs",

@@ -114,6 +114,9 @@ jobs:
       - name: Disclosure guard reaches every Jest project and Playwright spec (#452)
         run: pnpm run test:disclosure-guard-wiring
 
+      - name: Every HTTP service installs the strict query parser (FU-072)
+        run: pnpm run test:strict-query-parser-wiring
+
       - name: Local PostgreSQL defaults contract
         # `.env.example` must point host-side PostgreSQL at 127.0.0.1, not
         # `localhost`, which can try ::1 first against an IPv4-only listener
