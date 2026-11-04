@@ -128,7 +128,7 @@ const CALLBACK_REGISTRY = [
 const CALLBACK_APIS = new Set(['preprocess', 'transform', 'overwrite']);
 
 // Callback slots and definition fields are capabilities, independent of call/new syntax.
-const callbackSignature = ({ name, owner, raw, receiverSchema, module } = {}) => {
+const callbackSignature = ({ name, owner, raw, receiverSchema, zodSource } = {}) => {
   if (!raw && !receiverSchema) return {};
   const init = name === 'init';
   const legacyCreate = name === 'create' && owner === 'ZodEffects';
@@ -138,7 +138,7 @@ const callbackSignature = ({ name, owner, raw, receiverSchema, module } = {}) =>
   const entry =
     (!receiverSchema || CALLBACK_APIS.has(api)) &&
     CALLBACK_REGISTRY.find(
-      (item) => item.names.split(' ').includes(api) && (!module || item.modules.test(module)),
+      (item) => item.names.split(' ').includes(api) && (!zodSource || item.modules.test(zodSource)),
     );
   const offset =
     raw && name?.startsWith('_') && ['transform', 'custom', 'refine'].includes(api) ? 1 : 0;
@@ -324,7 +324,7 @@ export default {
         return container ? { container, ambiguous: result.ambiguous } : undefined;
       }
       return {
-        module: result.module,
+        zodSource: result.zodSource,
         receiver: result.schema ? receiver : undefined,
         raw:
           (result.raw ||
@@ -398,7 +398,7 @@ export default {
         for (const def of v.defs) {
           if (imported(def)) {
             const name = def.node.imported?.name ?? def.node.imported?.value;
-            return { raw: capability(name), name, module: def.parent.source.value };
+            return { raw: capability(name), name, zodSource: def.parent.source.value };
           }
           if (def.type === 'Variable') {
             let result = origin(def.node.init, next);
@@ -444,7 +444,7 @@ export default {
       }
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         if (globalName(node.callee, 'require') && zodModule(constant(node.arguments[0])))
-          return { raw: true, module: constant(node.arguments[0]) };
+          return { raw: true, zodSource: constant(node.arguments[0]) };
         const factory = origin(node.callee, seen);
         if (factory) {
           if (factory.elementMethod) return { schema: true, ambiguous: factory.ambiguous };
@@ -461,13 +461,13 @@ export default {
             ) && input?.schema;
           return {
             raw: false,
-            module: factory.module,
+            zodSource: factory.zodSource,
             schema: !!inputSchema || (!data && !!(factory.raw || factory.receiverSchema)),
           };
         }
       }
       if (node.type === 'ImportExpression' && zodModule(constant(node.source)))
-        return { raw: true, module: constant(node.source) };
+        return { raw: true, zodSource: constant(node.source) };
     };
     const walk = (node, visit) => {
       if (!node) return;
