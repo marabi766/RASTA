@@ -838,6 +838,116 @@ describe('the guard fails where it must', () => {
       });
     });
 
+    describe('FU-071: one provenance for adapters — own members stay own, composed adapters invoke their target', () => {
+      // #1 (regression of PR 698 r2): a module's own `call`/`apply` member is itself, not an adapter.
+      const owns = ['call', 'apply'].flatMap((name) =>
+        [`${name}(p) { return fencedSlot(p); }`, `${name}: (p) => fencedSlot(p)`].flatMap(
+          (member) =>
+            [
+              `export default { ${member} };`,
+              `const api = { ${member} }; export default api;`,
+            ].flatMap((exported) =>
+              ['ts', 'tsx'].map((ext) => [`${exported} (.${ext})`, name, exported, ext] as const),
+            ),
+        ),
+      );
+      it.each(owns)('an own factory member %s is found', (_label, name, exported, ext) => {
+        const extra = {
+          [`lib/factory.${ext}`]: `import { fencedSlot } from './unresolved-tenancy'; ${exported}`,
+          'lib/thing-store.ts': STORE.replace(
+            "import { fencedSlot } from './unresolved-tenancy';\n    const slot = fencedSlot(",
+            `import F from './factory'; const slot = F.${name}(`,
+          ),
+        };
+        expect(fencedModules(tree(COMPLIANT, extra)).has('lib/thing-store.ts')).toBe(true);
+        expect(fencedForms(tree(COMPLIANT, extra))).toEqual(['app/thing/ThingForm.tsx']);
+        expect(rules(COMPLIANT, extra)).toEqual([]);
+        expect(rules(`${COMPLIANT} saveThing();`, extra)).toEqual(['store']);
+      });
+
+      // #2: composed, kept, aliased and bound adapters.
+      const composed = [
+        'saveThing.call.bind(saveThing)(null)',
+        'Reflect.apply.apply(null, [saveThing, null, []])',
+        'Reflect.apply.call.apply(Reflect.apply, [null, saveThing, null, []])',
+        'Function.prototype.call.call(saveThing, null)',
+        'Function.prototype.bind.call(saveThing, null)()',
+        'Reflect.apply.bind(null, saveThing)(null, [])',
+        'Reflect.apply.bind(null, saveThing, null)([])',
+        'globalThis.Reflect.apply(saveThing, null, [])',
+        '(0, Reflect.apply)(saveThing, null, [])',
+      ];
+      // Already refused at 8c945408 (PR 698 r2); kept so the provenance rewrite cannot lose them.
+      const guarded = [
+        'Reflect.apply.call(null, saveThing, null, [])',
+        'saveThing.bind(null).call(null)',
+        '(Reflect.apply as never)(saveThing, null, [])',
+      ];
+      const kept = [
+        'const run = Reflect.apply; run(saveThing, null, []);',
+        'const R = Reflect; R.apply(saveThing, null, []);',
+        'const { apply } = Reflect; apply(saveThing, null, []);',
+        'const { apply: run } = Reflect; run(saveThing, null, []);',
+        'const R = Reflect; const { apply: run } = R; run(saveThing, null, []);',
+        'const c = saveThing.call; c.call(saveThing, null);',
+        'const a = saveThing.apply; a.call(saveThing, null, []);',
+        'const c = Function.prototype.call; c.apply(saveThing, [null]);',
+        'const b = saveThing.call.bind(saveThing); b(null);',
+        'const b = Reflect.apply.bind(null, saveThing); b(null, []);',
+      ];
+      it.each([...[...composed, ...guarded].map((c) => `${c};`), ...kept])(
+        '%s is refused outside the boundary',
+        (write) => {
+          expect(rules(`${COMPLIANT} ${write}`)).toEqual(['store']);
+        },
+      );
+      it.each([...composed, ...guarded])('%s passes inside the boundary', (write) => {
+        expect(
+          rules(COMPLIANT.replace('remember: () => saveThing()', `remember: () => ${write}`)),
+        ).toEqual([]);
+      });
+      it('an adapter whose function or arguments cannot be read is refused (fail closed)', () => {
+        for (const write of [
+          'const c = saveThing.call; c(null);',
+          'Reflect.apply(...xs);',
+          'Reflect.construct(saveThing, []);',
+          'const { construct } = Reflect; construct(saveThing, []);',
+        ]) {
+          expect({ write, rules: rules(`${COMPLIANT} ${write}`) }).toEqual({
+            write,
+            rules: ['unresolved'],
+          });
+        }
+      });
+      it('bound arguments reach the target: the hook, the boundary and a factory', () => {
+        const valid = COMPLIANT.replace(
+          'useSlotActionState(send, null)',
+          'useSlotActionState.bind(null, send)(null)',
+        );
+        expect(rules(valid)).toEqual([]);
+        const react = valid.replace(
+          'useSlotActionState.bind(null, send)(null)',
+          'Reflect.apply.bind(null, useActionState, null)([send, null])',
+        );
+        expect(rules(`import { useActionState } from 'react'; ${react}`)).toEqual(['state']);
+        const made = {
+          'lib/thing-store.ts': STORE.replace(
+            "fencedSlot('p.'",
+            "Reflect.apply.bind(null, fencedSlot).call(null, null, ['p.']), fencedSlot('p.'",
+          ),
+        };
+        expect(fencedModules(tree(COMPLIANT, made)).has('lib/thing-store.ts')).toBe(true);
+        const only = {
+          'lib/thing-store.ts': STORE.replace(
+            "import { fencedSlot } from './unresolved-tenancy';",
+            "import { fencedSlot as f } from './unresolved-tenancy'; const fencedSlot = f.call.bind(f, null);",
+          ),
+        };
+        expect(fencedModules(tree(COMPLIANT, only)).has('lib/thing-store.ts')).toBe(true);
+        expect(fencedForms(tree(COMPLIANT, only))).toEqual(['app/thing/ThingForm.tsx']);
+      });
+    });
+
     it('refuses when resolution is exhausted, keeping where it stopped', () => {
       const cycle = {
         'lib/a.ts': "export { x } from './b'; export * from './thing-store';",
