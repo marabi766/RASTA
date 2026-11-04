@@ -25,7 +25,8 @@ import { RastaError } from '../errors/rasta-error';
  */
 @Injectable()
 export class ZodValidationPipe<T extends z.ZodType> implements PipeTransform {
-  constructor(private readonly schema: T) {}
+  /** Public so the OpenAPI document can publish what this pipe validates (`zod-route-inputs`). */
+  constructor(readonly schema: T) {}
 
   transform(value: unknown, _metadata: ArgumentMetadata): z.infer<T> {
     return validateRequestInput(this.schema, value);
