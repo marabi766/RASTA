@@ -263,3 +263,59 @@ for (const [finding, cases] of Object.entries(regressions))
     });
 for (const [index, code] of positives.entries())
   it(`F4 safe syntax ${index + 1}: ${code}`, () => assert.deepEqual(messages(code), []));
+
+const provenanceFailures = [
+  `function apply(f,v) { return f(v); } z.preprocess(v=>apply(Number,v),z.number());`,
+  `function get() { return Number; } z.preprocess(v=>get()(v),z.number());`,
+  `const get=()=>Number; const f=get(); z.preprocess(v=>f(v),z.number());`,
+  `const get=()=>Number; const f=get(); z.preprocess((v,n=f(v))=>n,z.number());`,
+  `function f(v,{n=Number(v)}={}) { return n; } z.preprocess(v=>f(v),z.number());`,
+  `import {normalizePersianText} from 'unreviewed'; z.preprocess(v=>normalizePersianText(v),z.string());`,
+  `import {normalizePersianText} from '@/lib/format'; z.preprocess(v=>normalizePersianText(v),z.string());`,
+  `import {parseMoneyInput} from '@/lib/format'; z.preprocess(v=>parseMoneyInput(v),z.bigint());`,
+  `z.preprocess(v=>new Promise(Number),z.number());`,
+  `z.preprocess(v=>setTimeout(Number,1),z.number());`,
+];
+for (const code of provenanceFailures)
+  it(`F3 helper provenance refusal: ${code}`, () =>
+    assert.ok(
+      messages(code).some((m) => m.ruleId === 'boundary/coercion'),
+      code,
+    ));
+for (const code of [
+  `function apply(f,v) { return f(v); } z.preprocess(v=>apply(n=>n,v),z.unknown());`,
+  `z.preprocess(v=>new Promise(resolve=>setTimeout(resolve,1)),z.unknown());`,
+  `function f(v) { return v.trim(); } z.preprocess(v=>typeof v==='string'?f(v):v,z.string());`,
+  `import {normalizePersianText} from '@/lib/format'; z.preprocess(v=>typeof v==='string'?normalizePersianText(v):v,z.string());`,
+  `import {parseMoneyInput} from '@/lib/format'; z.preprocess(v=>typeof v==='string'?parseMoneyInput(v):v,z.bigint());`,
+])
+  it(`F3 proven helper call: ${code}`, () => assert.deepEqual(messages(code), []));
+
+import { mkdtempSync, cpSync, appendFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { verifiedCallbackHelper } from './zod-callback-helpers.mjs';
+it('reviewed helper provenance refuses unknown, missing and changed source', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-helper-'));
+  try {
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      undefined,
+    );
+    cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
+      recursive: true,
+    });
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      'string',
+    );
+    assert.equal(verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'unknown'), undefined);
+    appendFileSync(join(root, 'apps/web/src/lib/format/digits.ts'), '\n// changed helper\n');
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      undefined,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
