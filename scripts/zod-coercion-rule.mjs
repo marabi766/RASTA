@@ -1181,6 +1181,15 @@ export default {
               (['array', 'strings'].includes(kind) &&
                 ['map', 'filter', 'reverse', 'slice', 'join'].includes(name))
             ) {
+              // A custom Symbol.replace can call its callback with arbitrary
+              // values. Only string patterns and literal regexes prove a match.
+              if (
+                kind === 'string' &&
+                name === 'replace' &&
+                !stringValue(args[0], callee, new Set(), parameters) &&
+                !unwrap(args[0])?.regex
+              )
+                return true;
               const position =
                 ['array', 'strings'].includes(kind) && ['map', 'filter'].includes(name)
                   ? 0

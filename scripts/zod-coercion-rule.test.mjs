@@ -839,6 +839,7 @@ for (const code of [
   `z.pipe(z.string(), z.pipe(z.string(), z.transform(Number)));`,
   `z.string().transform(v => v.replace(/x/g, s => s.toUpperCase()));`,
   `z.string().transform(v => v.replace(/x/g, s => Number(s)));`,
+  `z.string().transform(v => v.replace('x', s => s.toUpperCase()));`,
   `z.ZodEffects.create(z.string(), {type:'transform', transform:v=>v.trim()});`,
   `z.ZodEffects.create(z.string(), {type:'transform', transform:Number});`,
   `new z.ZodEffects({schema:z.string(),effect:{type:'transform',transform:Number}});`,
@@ -850,6 +851,8 @@ for (const code of [
   `const t=z.transform(Number); z.string().pipe(t); z.unknown().pipe(t);`,
   `z.string().transform(v => v.replace(/x/g, (s, offset) => Number(offset)));`,
   `z.unknown().transform(v => v.replace(/x/g, s => Number(s)));`,
+  `z.string().transform(v => v.replace({[Symbol.replace]:(s,fn)=>fn(true)}, Number));`,
+  `z.string().transform(v => v.replace(pattern, Number));`,
   `z.ZodEffects.create(z.unknown(), {type:'transform', transform:Number});`,
   `z.ZodEffects.create(z.string(), {type:'preprocess', transform:Number});`,
 ])
