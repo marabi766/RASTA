@@ -342,6 +342,16 @@ describe('the served request bodies are their DTOs, converted (FU-078)', () => {
     expect(bodies[operation]).toEqual(toJsonSchema(schema));
   });
 
+  it.each(Object.keys(PUBLISHED))('%s keeps the prose the hand-typed body carried', (operation) => {
+    const published = bodies[operation] as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(published.properties.expectedVersion?.description).toMatch(/OPTIMISTIC_LOCK_FAILED/);
+    for (const field of ['model', 'reason'].filter((name) => name in published.properties)) {
+      expect(published.properties[field]?.description).toMatch(/Bidi_Control/);
+    }
+  });
+
   it.each([
     ['post /v1/assets/{id}/activate', 'commissionedAt', activateAssetSchema],
     ['post /v1/assets/{id}/decommission', 'decommissionedAt', decommissionSchema],

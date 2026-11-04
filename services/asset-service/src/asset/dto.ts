@@ -177,31 +177,15 @@ const utcInstant = () =>
         '(`+03:30`) or no zone at all is refused with 400 VALIDATION_FAILED.',
     );
 
-const PLAIN_TEXT_DESCRIPTION =
-  'Trimmed. Any text without a Unicode bidirectional control character (`\\p{Bidi_Control}`); ' +
-  'one is refused with 400 VALIDATION_FAILED.';
-
-const editVersion = expectedVersion.describe(
-  'The `version` of the asset the edit was made against, as a read returned it. ' +
-    'Required: a stale version is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written.',
-);
-
-const commandVersion = expectedVersion.describe(
-  'The `version` of the asset the command was made against, as a read returned it. ' +
-    'Required: a stale version is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written — ' +
-    'which is also what a command sent a second time answers, because the first one ' +
-    'moved the version.',
-);
-
 export const updateAssetSchema = z
   .object({
     name: displayText(2, 200).optional(),
     assetTag: identifierText(1, 64).nullable().optional(),
     manufacturer: displayText(1, 120).nullable().optional(),
-    model: plainText().min(1).max(120).describe(PLAIN_TEXT_DESCRIPTION).nullable().optional(),
+    model: plainText().min(1).max(120).nullable().optional(),
     manufactureYear: numberInput(z.number().int().min(1300).max(2100)).nullable().optional(),
     specifications: freeFormSpecifications.optional(),
-    expectedVersion: editVersion,
+    expectedVersion,
   })
   .strict()
   .refine((value) => Object.keys(value).some((key) => key !== 'expectedVersion'), {
@@ -234,7 +218,7 @@ export type ListAssetsQuery = z.infer<typeof listAssetsQuerySchema>;
 export const activateAssetSchema = z
   .object({
     commissionedAt: utcInstant().optional(),
-    expectedVersion: commandVersion,
+    expectedVersion,
   })
   .strict();
 
@@ -245,8 +229,8 @@ export const changeStatusSchema = z
     status: z.enum(['ACTIVE', 'IDLE', 'OUT_OF_SERVICE']),
     /** Recorded on the event and the timeline. Withdrawing a machine from
      *  service without a stated why is not reviewable later. */
-    reason: plainText().min(3).max(500).describe(PLAIN_TEXT_DESCRIPTION),
-    expectedVersion: commandVersion,
+    reason: plainText().min(3).max(500),
+    expectedVersion,
   })
   .strict();
 
@@ -254,13 +238,37 @@ export type ChangeStatusDto = z.infer<typeof changeStatusSchema>;
 
 export const decommissionSchema = z
   .object({
-    reason: plainText().min(10).max(1000).describe(PLAIN_TEXT_DESCRIPTION),
+    reason: plainText().min(10).max(1000),
     decommissionedAt: utcInstant().optional(),
-    expectedVersion: commandVersion,
+    expectedVersion,
   })
   .strict();
 
 export type DecommissionDto = z.infer<typeof decommissionSchema>;
+
+/*
+ * Field descriptions for the published bodies, attached through zod's registry
+ * (what `.describe()` writes) rather than inline: apps/web's contract specs pin
+ * these fields' source text (`expectedVersion` shorthand, `plainText().min().max()`).
+ * Documentation only — nothing here changes what parses.
+ */
+const PLAIN_TEXT_DESCRIPTION =
+  'Trimmed. Any text without a Unicode bidirectional control character (`\\p{Bidi_Control}`); ' +
+  'one is refused with 400 VALIDATION_FAILED.';
+z.globalRegistry.add(expectedVersion, {
+  description:
+    'The `version` of the asset the edit or command was made against, as a read returned it. ' +
+    'Required: a stale version is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written — ' +
+    'which is also what a command sent a second time answers, because the first one ' +
+    'moved the version.',
+});
+for (const field of [
+  updateAssetSchema.shape.model,
+  changeStatusSchema.shape.reason,
+  decommissionSchema.shape.reason,
+]) {
+  z.globalRegistry.add(field, { description: PLAIN_TEXT_DESCRIPTION });
+}
 
 export const transferAssetSchema = z
   .object({
