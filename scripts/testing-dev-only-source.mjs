@@ -1550,7 +1550,7 @@ export function sourceProblems(root = REPO_ROOT) {
     }
     if (kind !== 'types') {
       try {
-        const viaNode = requireFrom(file).resolve(spec);
+        const viaNode = resolveFrom(file, spec);
         if (isAbsolute(viaNode)) targets.add(viaNode);
       } catch {
         // Not loadable by require from here; the other resolutions decide.
@@ -1592,11 +1592,7 @@ export function sourceProblems(root = REPO_ROOT) {
   };
 
   const nodeCache = ts.createModuleResolutionCache(root, (f) => f, NODE_OPTIONS);
-  let requireMemo = [];
-  const requireFrom = (file) => {
-    if (requireMemo[0] !== file) requireMemo = [file, createRequire(file)];
-    return requireMemo[1];
-  };
+  const resolveFrom = (file, spec) => createRequire(file).resolve(spec);
   const pathLike = (spec) => spec.startsWith('.') || isAbsolute(spec) || /^file:/i.test(spec);
   const parent = new Map();
   const chain = (file) => {

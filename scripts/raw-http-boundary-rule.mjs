@@ -18,11 +18,15 @@ export const AUDITED_TRANSPORTS = Object.freeze({
     "the signed storage URL PUT, sent with redirect: 'error' so the capability never moves",
   'apps/web/src/lib/session-refusal.ts':
     "browser same-origin GET /auth/session; the browser's own cookie, no credential set by code",
+  'scripts/test-stall-watchdog.mjs':
+    'audited static local watchdog worker; telemetry only, no executable strings or HTTP sender',
+  'scripts/workspace-module.mjs':
+    'runtime-checked local workspace loads only; refuses dependency paths and escapes before loading',
   'scripts/credential-fetch.mjs': 'credentialFetch for root scripts (the Grafana probe)',
   'packages/testing/src/guarded-http.ts':
     'guardedFetch and guardRequestContext: the E2E helper transport, refuses every redirect',
   'packages/testing/src/redirect-probe.ts':
-    'test servers only; hands specs the real fetch before they stub the global (it sends nothing)',
+    'test servers only; the captured sender reaches only this active probe’s own loopback origins',
   'tests/e2e/src/http.ts': "send(): redirect: 'manual' and the five statuses refused (Q-155)",
   'tests/e2e/src/expect.ts':
     "where Playwright's request API enters the harness, wrapped in guardRequestContext",
@@ -47,13 +51,22 @@ const CLIENT_MODULES =
   /^(?:undici|axios|node-fetch|got|superagent|ky|cross-fetch|isomorphic-fetch|make-fetch-happen|needle|phin|playwright|playwright-core)(?:\/|$)/;
 /** Node's HTTP modules: their server half is not a sender, their client half is. */
 const NODE_HTTP = /^(?:node:)?(?:http|https|http2)$/;
-const NODE_HTTP_CLIENT = new Set([
-  'request',
-  'get',
-  'connect',
-  'Agent',
-  'globalAgent',
-  'ClientRequest',
+const NODE_HTTP_SAFE = new Set([
+  'createServer',
+  'createSecureServer',
+  'Server',
+  'ServerResponse',
+  'IncomingMessage',
+  'STATUS_CODES',
+  'METHODS',
+  'validateHeaderName',
+  'validateHeaderValue',
+  'maxHeaderSize',
+  'getDefaultSettings',
+  'getPackedSettings',
+  'getUnpackedSettings',
+  'constants',
+  'sensitiveHeaders',
 ]);
 /** Playwright Test: only these value exports carry no unguarded API request context. */
 const PLAYWRIGHT_TEST = /^@playwright\/test(?:\/|$)/;
@@ -92,65 +105,13 @@ const inTypePosition = (node) => {
   }
   return false;
 };
-/** `Symbol.for('…')` or a well-known `Symbol.x`. */
-const isSymbol = (node) =>
-  (node.type === 'CallExpression' &&
-    node.callee.type === 'MemberExpression' &&
-    node.callee.object.type === 'Identifier' &&
-    node.callee.object.name === 'Symbol' &&
-    staticKey(node.callee) === 'for') ||
-  (node.type === 'MemberExpression' &&
-    node.object.type === 'Identifier' &&
-    node.object.name === 'Symbol' &&
-    !node.computed);
-const PATH_BUILDERS = new Set(['join', 'resolve']);
-/**
- * A loader argument that can only be a file: `join(ROOT, …)` / `resolve(dir, …)`
- * from a non-literal base, or `pathToFileURL(…).href` — directly or through a
- * `const`. Anything else computed (a variable holding `'undici'`, a
- * concatenation) may name a client module and is refused.
- */
-const isFilePath = (node, scopeOf, seen = new Set()) => {
-  if (!node || seen.has(node)) return false;
-  seen.add(node);
-  if (node.type === 'MemberExpression' && staticKey(node) === 'href') {
-    const url = node.object;
-    return (
-      url.type === 'CallExpression' &&
-      (url.callee.name ?? staticKey(url.callee)) === 'pathToFileURL'
-    );
-  }
-  if (node.type === 'CallExpression') {
-    const callee =
-      node.callee.type === 'MemberExpression' ? staticKey(node.callee) : node.callee.name;
-    const [base] = node.arguments;
-    return (
-      PATH_BUILDERS.has(callee) &&
-      base !== undefined &&
-      literalText(base) === undefined &&
-      base.type !== 'SpreadElement'
-    );
-  }
-  if (node.type === 'Identifier') {
-    let scope = scopeOf(node);
-    while (scope) {
-      const variable = scope.set.get(node.name);
-      if (variable) {
-        const [def] = variable.defs;
-        return (
-          variable.defs.length === 1 &&
-          def.type === 'Variable' &&
-          def.parent.kind === 'const' &&
-          isFilePath(def.node.init, scopeOf, seen)
-        );
-      }
-      scope = scope.upper;
-    }
-  }
-  return false;
-};
 const isSenderModule = (name) =>
-  CLIENT_MODULES.test(name) || NODE_HTTP.test(name) || PLAYWRIGHT_TEST.test(name);
+  /^(?:file:|[\\/]|[A-Za-z]:)/.test(name) ||
+  CLIENT_MODULES.test(name) ||
+  NODE_HTTP.test(name) ||
+  PLAYWRIGHT_TEST.test(name) ||
+  /^(?:(?:node:)?(?:vm|worker_threads|module)(?:\/|$)|(?:data|blob|https?):)/.test(name) ||
+  /(?:^|[\\/])node_modules(?:[\\/]|$)/.test(name);
 
 /**
  * Q-155 Follow-up 1: the transport boundary, enforced independently of how a
@@ -181,7 +142,6 @@ export default {
     if (Object.hasOwn(AUDITED_TRANSPORTS, file)) return {};
     // In the E2E trees `request` is Playwright's API context; elsewhere it is a domain word.
     const playwright = context.options[0]?.playwright === true;
-    const scopeOf = (node) => context.sourceCode.getScope(node);
     const report = (node, what) => context.report({ node, messageId: 'raw', data: { what } });
     const typeOnly = (declaration, specifier) =>
       declaration.importKind === 'type' ||
@@ -194,7 +154,43 @@ export default {
       if (!isSenderModule(source)) return;
       const values = specifiers.filter((specifier) => !typeOnly(node, specifier));
       if (typeOnly(node) || (specifiers.length > 0 && values.length === 0)) return;
-      if (CLIENT_MODULES.test(source) || specifiers.length === 0) return report(node, source);
+      if (/^(?:node:)?module$/.test(source)) {
+        for (const specifier of values) {
+          if (
+            specifier.type !== 'ImportSpecifier' ||
+            !['createRequire', 'isBuiltin', 'builtinModules', 'syncBuiltinESMExports'].includes(
+              specifier.imported.name,
+            )
+          )
+            report(specifier, 'module loader export');
+          else if (specifier.imported.name === 'createRequire')
+            for (const variable of context.sourceCode.getDeclaredVariables(specifier))
+              for (const reference of variable.references) {
+                const call = reference.identifier.parent;
+                if (call.type !== 'CallExpression' || call.callee !== reference.identifier)
+                  report(reference.identifier, 'createRequire escaping');
+                else
+                  checkLoaderResult(
+                    call,
+                    context.sourceCode.getText(call.arguments[0] ?? call) === 'import.meta.url',
+                  );
+              }
+        }
+        return;
+      }
+      if (/^(?:node:)?worker_threads$/.test(source)) {
+        for (const specifier of values)
+          if (
+            specifier.type !== 'ImportSpecifier' ||
+            !['workerData', 'parentPort', 'isMainThread', 'threadId'].includes(
+              specifier.imported.name,
+            )
+          )
+            report(specifier, 'worker code execution');
+        return;
+      }
+      if ((!NODE_HTTP.test(source) && !PLAYWRIGHT_TEST.test(source)) || specifiers.length === 0)
+        return report(node, source);
       for (const specifier of values) {
         const name =
           specifier.type === 'ImportSpecifier'
@@ -203,7 +199,7 @@ export default {
               ? (specifier.local.name ?? specifier.local.value)
               : undefined; // default or namespace: the whole module
         const raw = NODE_HTTP.test(source)
-          ? name === undefined || NODE_HTTP_CLIENT.has(name)
+          ? name === undefined || !NODE_HTTP_SAFE.has(name)
           : name === undefined || !PLAYWRIGHT_SAFE.has(name);
         if (raw) report(specifier, `${source} ${name ?? '(whole module)'}`);
       }
@@ -219,14 +215,82 @@ export default {
       if (parent.type === 'BinaryExpression' && parent.operator === 'in' && parent.right === node)
         return;
       if (parent.type === 'MemberExpression' && parent.object === node) {
-        if (parent.computed && isSymbol(parent.property)) return; // a symbol never names `fetch`
+        const call = parent.property;
+        if (
+          parent.computed &&
+          call.type === 'CallExpression' &&
+          call.callee.type === 'MemberExpression' &&
+          staticKey(call.callee) === 'for' &&
+          call.callee.object.type === 'Identifier' &&
+          call.callee.object.name === 'Symbol'
+        ) {
+          let scope = context.sourceCode.getScope(call.callee.object);
+          while (scope && !scope.set.has('Symbol')) scope = scope.upper;
+          if (!scope?.set.get('Symbol')?.defs.some((definition) => !erased(definition))) return;
+        }
         const key = staticKey(parent);
         if (key === undefined) return report(parent, `${identifier.name}[computed]`);
-        if (RAW_GLOBALS.has(key) || GLOBAL_OBJECTS.has(key))
+        if (
+          RAW_GLOBALS.has(key) ||
+          GLOBAL_OBJECTS.has(key) ||
+          ['require', 'module', 'process'].includes(key)
+        )
           return report(parent, `${identifier.name}.${key}`);
         return;
       }
       report(identifier, `${identifier.name} as a value`);
+    };
+
+    // A loader may only be called in place with a literal, or used for resolution.
+    // No alias/argument/return/bind escapes: unanalysable loader uses are refused.
+    const checkLoaderResult = (node, trustedBase = true) => {
+      const parent = node.parent;
+      if (
+        parent.type === 'MemberExpression' &&
+        parent.object === node &&
+        staticKey(parent) === 'resolve'
+      )
+        return;
+      if (parent.type === 'CallExpression' && parent.callee === node) {
+        if (trustedBase) checkLoaderCall(parent);
+        else report(parent, 'unproven loader base');
+        return;
+      }
+      if (
+        parent.type === 'VariableDeclarator' &&
+        parent.init === node &&
+        parent.id.type === 'Identifier' &&
+        parent.parent.kind === 'const'
+      ) {
+        for (const variable of context.sourceCode.getDeclaredVariables(parent))
+          for (const reference of variable.references)
+            if (reference.identifier !== parent.id)
+              checkLoaderResult(reference.identifier, trustedBase);
+        return;
+      }
+      if (
+        parent.type === 'MemberExpression' &&
+        staticKey(parent) === 'main' &&
+        parent.parent.type === 'BinaryExpression' &&
+        ['===', '!=='].includes(parent.parent.operator)
+      )
+        return;
+      report(node, 'loader escaping');
+    };
+    const checkLoaderCall = (node) => {
+      const name = literalText(node.arguments[0]);
+      if (name === undefined || isSenderModule(name)) report(node, 'unproven module load');
+    };
+    const erased = (definition) => {
+      if (
+        definition.type === 'Type' ||
+        definition.parent?.importKind === 'type' ||
+        definition.node?.importKind === 'type'
+      )
+        return true;
+      for (let at = definition.node; at; at = at.parent)
+        if (at.declare || at.type === 'TSDeclareFunction') return true;
+      return false;
     };
 
     return {
@@ -248,7 +312,7 @@ export default {
       ImportExpression(node) {
         const name = literalText(node.source);
         if (name === undefined) {
-          if (!isFilePath(node.source, scopeOf)) report(node, 'import(computed)');
+          report(node, 'import(computed)');
         } else if (isSenderModule(name)) report(node, `import('${name}')`);
       },
       CallExpression(node) {
@@ -257,7 +321,7 @@ export default {
         const name = literalText(node.arguments[0]);
         if (LOADER.test(callee ?? '')) {
           if (node.arguments.length > 0 && name === undefined) {
-            if (!isFilePath(node.arguments[0], scopeOf)) report(node, `${callee}(computed)`);
+            report(node, `${callee}(computed)`);
           } else if (name !== undefined && isSenderModule(name))
             report(node, `${callee}('${name}')`);
         } else if (name !== undefined && UNAMBIGUOUS.test(name)) {
@@ -267,9 +331,25 @@ export default {
       },
       // Playwright's API request contexts that bypass the guarded fixture.
       MemberExpression(node) {
+        if (!inTypePosition(node) && staticKey(node) === 'constructor') {
+          let at = node;
+          while (TS_WRAPPERS.has(at.parent?.type)) at = at.parent;
+          if (!(at.parent.type === 'MemberExpression' && staticKey(at.parent) === 'name'))
+            report(node, 'constructor string execution');
+        }
         if (!playwright || inTypePosition(node) || staticKey(node) !== 'request') return;
         if (node.parent.type === 'CallExpression' && node.parent.callee === node) return; // route.request()
         report(node, '.request (Playwright API context)');
+      },
+      ObjectPattern(node) {
+        for (const property of node.properties)
+          if (
+            property.type === 'Property' &&
+            (property.computed
+              ? literalText(property.key)
+              : (property.key.name ?? property.key.value)) === 'constructor'
+          )
+            report(property, 'constructor extraction');
       },
       VariableDeclarator(node) {
         if (!playwright || node.id.type !== 'ObjectPattern') return;
@@ -285,10 +365,62 @@ export default {
           for (const reference of scope.references) {
             const { identifier, resolved } = reference;
             // A binding the module itself declares is not the global.
-            if (resolved && resolved.defs.length > 0) continue;
+            if (resolved?.defs.some((definition) => !erased(definition))) continue;
             if (inTypePosition(identifier)) continue;
             if (RAW_GLOBALS.has(identifier.name)) report(identifier, identifier.name);
             else if (GLOBAL_OBJECTS.has(identifier.name)) checkGlobalObject(identifier);
+            else if (identifier.name === 'require') checkLoaderResult(identifier);
+            else if (identifier.name === 'createRequire') {
+              const call = identifier.parent;
+              if (call.type === 'CallExpression' && call.callee === identifier)
+                checkLoaderResult(
+                  call,
+                  context.sourceCode.getText(call.arguments[0] ?? call) === 'import.meta.url',
+                );
+              else report(identifier, 'unproven loader factory');
+            } else if (identifier.name === 'module' || identifier.name === 'process') {
+              const parent = identifier.parent;
+              const safe =
+                identifier.name === 'module'
+                  ? ['exports']
+                  : [
+                      'getuid',
+                      'env',
+                      'argv',
+                      'execPath',
+                      'platform',
+                      'arch',
+                      'pid',
+                      'ppid',
+                      'cwd',
+                      'exit',
+                      'exitCode',
+                      'stdout',
+                      'stderr',
+                      'stdin',
+                      'on',
+                      'once',
+                      'off',
+                      'removeListener',
+                      'kill',
+                      'hrtime',
+                      'memoryUsage',
+                      'versions',
+                      'version',
+                      'uptime',
+                      'emitWarning',
+                    ];
+              if (
+                !(
+                  parent.type === 'MemberExpression' &&
+                  parent.object === identifier &&
+                  safe.includes(staticKey(parent))
+                ) &&
+                !(parent.type === 'UnaryExpression' && parent.operator === 'typeof') &&
+                !(identifier.name === 'module' && parent.type === 'BinaryExpression')
+              )
+                report(identifier, `${identifier.name} loader capability`);
+            }
           }
         }
       },

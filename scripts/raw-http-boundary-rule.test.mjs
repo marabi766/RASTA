@@ -47,6 +47,43 @@ credentialFetch(url, { headers: { authorization: token } });`,
 // …and the variants the PM named: bind, call, Reflect.apply, factory return, dynamic
 // import / require alias, computed name. Credential spelling is irrelevant to the boundary.
 const VARIANTS = {
+  'factory escapes':
+    "import {createRequire} from 'node:module'; const factory = createRequire; consume(factory);",
+
+  'new constructor string': "new (() => {}).constructor('return fetch')();",
+  'constructor extracted': "const C = (() => {}).constructor; C('return fetch')()(url);",
+  'constructor destructured': "const {constructor:C}=()=>{}; C('return fetch')()(url);",
+
+  'unknown loader base':
+    "import { createRequire } from 'node:module'; const load = createRequire(base); load('./index.js');",
+
+  'unknown HTTP export': "import { futureSender } from 'node:http'; futureSender(url);",
+  'global process loader': 'globalThis.process.getBuiltinModule(name);',
+  'unknown process export': 'process.futureLoader(name);',
+  'shadowed Symbol': "const Symbol = pick(); globalThis[Symbol.for('fetch')](url);",
+
+  'ambient fetch': 'declare const fetch: typeof globalThis.fetch; fetch(url);',
+  'ambient namespace':
+    'declare namespace window { function fetch(u: string): unknown; } window.fetch(url);',
+  'aliased factory':
+    "import { createRequire as make } from 'node:module'; const load = make(import.meta.url); load(name);",
+  'factory result':
+    "import { createRequire } from 'node:module'; createRequire(import.meta.url)('ky');",
+  'escaping loader':
+    "import { createRequire } from 'node:module'; const load = createRequire(import.meta.url); consume(load);",
+  'fake builder': 'function resolve(x) { return x; } require(resolve(name));',
+  'dependency path': "require('./node_modules/undici/index.js');",
+  'VM string': "import vm from 'node:vm'; vm.runInThisContext('fetch(url)');",
+  'worker string': "import { Worker } from 'node:worker_threads'; new Worker(code, {eval:true});",
+  'data module': "await import('data:text/javascript,fetch(url)');",
+  'module loader namespace':
+    "import * as module from 'node:module'; module.createRequire(base)(name);",
+  'process loader alias': 'const { getBuiltinModule: load } = process; load(name);',
+  'constructor string': "(() => {}).constructor('return fetch')()(url);",
+  'workspace build path': "require(join(ROOT, 'packages', 'x', 'dist', 'index.js'));",
+  'path through a const': "const generated = join(dir, 'src', 'generated'); require(generated);",
+  'file URL import': 'await import(pathToFileURL(dist).href);',
+
   bind: 'const send = fetch.bind(null); send(url, init);',
   call: 'fetch.call(globalThis, url, init);',
   apply: 'fetch.apply(globalThis, [url, init]);',
@@ -131,6 +168,8 @@ for (const [name, code] of Object.entries(PLAYWRIGHT_RAW)) {
 }
 
 const ALLOWED = {
+  'native Symbol': "globalThis[Symbol.for('k')];",
+
   'typeof fetch in a type': 'const impl: typeof fetch = injected;',
   'fetch parameter type': 'type Input = Parameters<typeof fetch>[0];',
   'globalThis.fetch in a type': 'let impl: typeof globalThis.fetch;',
@@ -140,15 +179,11 @@ const ALLOWED = {
   'typeof window': "const browser = typeof window !== 'undefined';",
   'feature test': "const has = 'fetch' in globalThis;",
   'safe global member': 'globalThis.crypto.randomUUID(); window.location.assign(url);',
-  'symbol-keyed global': "(globalThis as unknown as Record<symbol, unknown>)[Symbol.for('k')];",
   'injected transport through internalFetch': 'internalFetch(url, init, this.fetchImpl);',
   'injected member': 'deps.fetch(url);',
   'redis eval member': 'await redis.eval(script, 1, key);',
   'Function as a type': 'let callback: Function | undefined;',
   'local binding named fetch': 'function send(fetch: Fetch) { return fetch(url); }',
-  'workspace build path': "require(join(ROOT, 'packages', 'x', 'dist', 'index.js'));",
-  'path through a const': "const generated = join(dir, 'src', 'generated'); require(generated);",
-  'file URL import': 'await import(pathToFileURL(dist).href);',
   'protocol check': "url.protocol.startsWith('http');",
   'domain field named request outside E2E': 'const id = outcome.request.id;',
 };
@@ -191,6 +226,8 @@ test('every audited transport is one existing file with a reason, never a direct
     'packages/testing/src/guarded-http.ts',
     'packages/testing/src/redirect-probe.ts',
     'scripts/credential-fetch.mjs',
+    'scripts/test-stall-watchdog.mjs',
+    'scripts/workspace-module.mjs',
     'tests/e2e/src/expect.ts',
     'tests/e2e/src/http.ts',
   ]);
@@ -255,7 +292,12 @@ const JS_FORMS = {
   'class-field transport':
     'class Client {\n  transport = globalThis.fetch;\n  send(url, token) {\n    return this.transport(url, { headers: { authorization: token } });\n  }\n}',
 };
-const TS_ONLY = new Set(['computed name through a cast', 'import equals']);
+const TS_ONLY = new Set([
+  'computed name through a cast',
+  'import equals',
+  'ambient fetch',
+  'ambient namespace',
+]);
 const PRELUDE_TS =
   'declare const url: string, token: string, init: RequestInit, options: { fetch?: typeof fetch };\n' +
   'declare const target: object, name: string, module: { require(id: string): any };\n' +
