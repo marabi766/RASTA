@@ -22,6 +22,8 @@ export const TENANT_SCOPED_MODELS = [
   'DemandAggregation',
   'DemandRequest',
   'IdempotencyKey',
+  'Quotation',
+  'QuotationReceipt',
   'Rfq',
   'RfqCriterion',
   'RfqInvitation',

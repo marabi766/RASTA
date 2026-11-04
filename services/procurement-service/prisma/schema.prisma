@@ -255,6 +255,64 @@ model RfqInvitation {
   @@map("rfq_invitation")
 }
 
+/// An invited supplier's sealed quotation on an RFQ (ADR-070 § 4, plan PR 8). Stored under the
+/// buyer's organization; the supplier reaches it through its invitation (`runUnscoped`, with the
+/// invitation's organization and its own in the predicate). The content is only ever sealed.
+model Quotation {
+  id                     String @id
+  organizationId         String @map("organization_id")
+  rfqId                  String @map("rfq_id")
+  supplierOrganizationId String @map("supplier_organization_id")
+  /// SUBMITTED | WITHDRAWN (CHECK ck_quotation_status).
+  status                 String
+  revision               Int
+
+  sealVersion       Int    @map("seal_version")
+  keyId             String @map("key_id")
+  nonce             Bytes
+  ciphertext        Bytes
+  tag               Bytes
+  wrappedContentKey Bytes  @map("wrapped_content_key")
+  contentCommitment String @map("content_commitment")
+  ciphertextSha256  String @map("ciphertext_sha256")
+
+  submittedAt DateTime  @map("submitted_at") @db.Timestamptz(3)
+  submittedBy String    @map("submitted_by")
+  /// When the database clock received the current revision.
+  receivedAt  DateTime  @map("received_at") @db.Timestamptz(3)
+  withdrawnAt DateTime? @map("withdrawn_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @map("updated_at") @db.Timestamptz(3)
+  updatedBy   String    @map("updated_by")
+
+  @@unique([organizationId, id], map: "ux_quotation_org_id")
+  @@unique([organizationId, rfqId, id], map: "ux_quotation_org_rfq_id")
+  @@unique([organizationId, rfqId, supplierOrganizationId], map: "ux_quotation_rfq_supplier")
+  @@index([organizationId, rfqId, status], map: "ix_quotation_org_rfq_status")
+  @@map("quotation")
+}
+
+/// An RFQ's receipt chain (ADR-066 § 3): one link per sealed revision, append-only, in order.
+model QuotationReceipt {
+  organizationId    String   @map("organization_id")
+  rfqId             String   @map("rfq_id")
+  seq               Int
+  quotationId       String   @map("quotation_id")
+  revision          Int
+  receivedAt        DateTime @map("received_at") @db.Timestamptz(3)
+  ciphertextSha256  String   @map("ciphertext_sha256")
+  contentCommitment String   @map("content_commitment")
+  previousReceipt   String   @map("previous_receipt")
+  receipt           String
+  /// When supplier-service last confirmed the supplier's standing for this revision.
+  eligibleAsOf      DateTime @map("eligible_as_of") @db.Timestamptz(3)
+
+  @@id([organizationId, rfqId, seq], map: "quotation_receipt_pkey")
+  @@unique([organizationId, rfqId, receipt], map: "ux_quotation_receipt_receipt")
+  @@unique([organizationId, rfqId, previousReceipt], map: "ux_quotation_receipt_previous")
+  @@unique([organizationId, quotationId, revision], map: "ux_quotation_receipt_revision")
+  @@map("quotation_receipt")
+}
+
 /// Idempotent commands (docs/06 § 6.8): this service's own store.
 model IdempotencyKey {
   key            String @map("key")

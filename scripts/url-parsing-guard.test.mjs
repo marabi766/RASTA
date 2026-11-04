@@ -214,6 +214,12 @@ const ALLOWED = Object.freeze([
     line: 78,
   },
   {
+    file: 'scripts/disclosure-jest-launches.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason:
+      'loads only the pinned typescript and yaml packages by literal name to inspect Jest launchers',
+  },
+  {
     file: 'scripts/kafka-acl-generate.mjs',
     call: 'createRequire(import.meta.url)',
     reason: 'loads only the built repository contracts package to generate broker ACL documents',
