@@ -425,6 +425,32 @@ describe('supplier HTTP API', () => {
         .expect(400);
     });
 
+    it('refuses a query string too long to parse whole, never answering it unfiltered (PR 699 F1)', async () => {
+      const get = (query: string) =>
+        http()
+          .get(`/v1/suppliers?${query}`)
+          .set('authorization', `Bearer ${procurementUser(buyerOrg)}`);
+
+      // 1000 empty segments then the filter: Express's default parser dropped
+      // the filter and answered the whole directory.
+      const hidden = await get('&'.repeat(1000) + `organizationId=${supplierOrg}`).expect(400);
+      expect(hidden.body.code).toBe('VALIDATION_FAILED');
+      expect(JSON.stringify(hidden.body)).not.toContain(otherSupplierId);
+
+      // 800 empties then 201 ids: the default parser kept 200 and accepted them.
+      const ids = Array.from({ length: 201 }, (_, i) => `organizationId=ORG-BATCH-${i}`);
+      await get('&'.repeat(800) + ids.join('&')).expect(400);
+
+      // A malformed value after the padding — still under the bound — reaches
+      // validation instead of being discarded.
+      await get('&'.repeat(990) + `organizationId=${supplierOrg}&organizationId=bad`).expect(400);
+      await get('&'.repeat(990) + `organizationId[]=${supplierOrg}`).expect(400);
+
+      // The same padding with a valid id is parsed whole and filtered.
+      const padded = await get('&'.repeat(990) + `organizationId=${supplierOrg}`).expect(200);
+      expect(padded.body.items.map((item: { id: string }) => item.id)).toEqual([supplierId]);
+    });
+
     it('keeps the role gate: a role that cannot browse cannot narrow either', async () => {
       await http()
         .get(`/v1/suppliers?organizationId=${supplierOrg}`)
