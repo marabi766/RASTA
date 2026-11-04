@@ -161,8 +161,9 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
     }
     expect((await second).status).toBe(200);
     expect(decided.status).toBe(200);
+    // Escrowed and never authorised: the resolution returns it to HELD (D-083).
     expect(decided.body).toMatchObject({
-      status: 'PENDING_SETTLEMENT',
+      status: 'HELD',
       disputeId: a,
       resolvedDisputeId: a,
     });
@@ -270,7 +271,7 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
           ? harness.prisma.client.$executeRaw`UPDATE "transaction"
                SET resolved_dispute_id = 'TXD_FORGED' WHERE id = ${transactionId}`
           : harness.prisma.client.$executeRaw`UPDATE "transaction"
-               SET status = 'PENDING_SETTLEMENT', dispute_resolved_at = now(),
+               SET status = 'HELD', dispute_resolved_at = now(),
                    resolved_dispute_id = 'TXD_FORGED'
              WHERE id = ${transactionId}`,
       );
@@ -289,6 +290,47 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
 
     await forge('alone');
     expect(await resolvedId()).toBe(a);
+  });
+
+  it('a writer that resolves an escrowed, unauthorised dispute into the settlement queue is refused (D-083)', async () => {
+    // A pod of the previous release resolves every dispute to
+    // PENDING_SETTLEMENT. Under the trigger that write is refused, nothing
+    // changes, and the same row resolves to HELD.
+    const transactionId = await heldObligation();
+    const a = await disputedOnce(transactionId);
+    const write = (status: 'PENDING_SETTLEMENT' | 'HELD') =>
+      runUnscoped('the suite resolves as a previous release would', () =>
+        harness.prisma.client.$executeRawUnsafe(
+          `UPDATE "transaction" SET status = '${status}', dispute_resolved_at = now() WHERE id = $1`,
+          transactionId,
+        ),
+      );
+
+    await expect(write('PENDING_SETTLEMENT')).rejects.toThrow(
+      /A resolved dispute returns a transaction to where its settlement authority stands/,
+    );
+    expect(await read(transactionId)).toMatchObject({
+      status: 'DISPUTED',
+      disputeId: a,
+      resolvedDisputeId: null,
+    });
+    expect(await write('HELD')).toBe(1);
+    expect(await read(transactionId)).toMatchObject({ status: 'HELD', resolvedDisputeId: a });
+
+    // Authorised, disputed again: the queue is where its authority stands,
+    // and HELD is refused instead.
+    await request(http)
+      .post(`/v1/transactions/${transactionId}/authorise-settlement`)
+      .set('authorization', asPayer())
+      .set('idempotency-key', id('rsdsp-authorise'))
+      .expect(200);
+    const b = await disputedOnce(transactionId);
+    await expect(write('HELD')).rejects.toThrow(/where its settlement authority stands/);
+    expect(await write('PENDING_SETTLEMENT')).toBe(1);
+    expect(await read(transactionId)).toMatchObject({
+      status: 'PENDING_SETTLEMENT',
+      resolvedDisputeId: b,
+    });
   });
 
   // ---- Rows resolved before the column (Codex on #352, finding 1) -----------
@@ -311,8 +353,18 @@ describe('a dispute resolution is attributed by identity, not by time', () => {
       ),
     ]);
 
-  /** Resolved (A) before the column; returns A. */
+  /**
+   * Resolved (A) before the column; returns A. Authorised first: a resolution
+   * returns a transaction to the settlement queue only when its settlement
+   * was authorised (D-083), and the rows this backfill attributes are the
+   * ones resolved into that queue.
+   */
   async function resolvedBeforeTheColumn(transactionId: string): Promise<string> {
+    await request(http)
+      .post(`/v1/transactions/${transactionId}/authorise-settlement`)
+      .set('authorization', asPayer())
+      .set('idempotency-key', id('rsdsp-authorise'))
+      .expect(200);
     const a = await disputedOnce(transactionId);
     expect((await resolve(transactionId, DECISION_A)).status).toBe(200);
     await asBeforeTheColumn(transactionId);
