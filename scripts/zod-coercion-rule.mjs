@@ -446,6 +446,7 @@ export default {
       if (
         parent.type === 'CallExpression' &&
         /^\$?Zod/.test(origin(raw).name ?? '') &&
+        !origin(raw).ambiguous &&
         factory?.raw &&
         factory.name?.startsWith('_') &&
         (optionsIndex(factory) > 0 ||

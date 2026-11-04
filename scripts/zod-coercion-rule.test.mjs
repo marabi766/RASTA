@@ -353,6 +353,8 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
+  `let C=z.core.$ZodTransform; C=unresolved; z.core._transform(C,v=>v);`,
+  `let C=z.ZodTransform; ({C}=getConstructors()); z.core._transform(C,v=>v);`,
   `import {MAX_AMOUNT_MINOR} from 'unknown'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
   `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(v=>MAX_AMOUNT_MINOR('1'));`,
   `import {other} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(other));`,
@@ -460,6 +462,7 @@ for (const code of [
   `import {parseMoneyInput} from '@/lib/format'; z.string().transform(parseMoneyInput);`,
   `z.unknown().transform(v=>new Promise(resolve=>setTimeout(resolve,1)));`,
   `z.core._transform(z.core.$ZodTransform, v=>v);`,
+  `const C=z.core.$ZodTransform; z.core._transform(C,v=>v);`,
   `new z.ZodTransform({type:'transform',transform:v=>v});`,
   `const def={type:'transform',transform:v=>v}; new z.ZodTransform(def);`,
   `z.unknown().overwrite(v=>v);`,
