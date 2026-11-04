@@ -297,11 +297,6 @@
         },
         "summary": "Create a warehouse, owned by the organization the request acts for",
         "tags": ["warehouses"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -346,7 +341,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/warehouses/{id}": {
@@ -955,11 +955,6 @@
         },
         "summary": "Reserve stock: every line, or none",
         "tags": ["reservations"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1013,7 +1008,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock/reservations/{id}": {
@@ -1448,11 +1448,6 @@
         },
         "summary": "Release a reservation (ACTIVE → RELEASED): the stock stays",
         "tags": ["reservations"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1470,7 +1465,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock/reservations/{id}/issue": {
@@ -1757,11 +1757,6 @@
         },
         "summary": "Issue a reservation (ACTIVE → CONSUMED): the stock leaves",
         "tags": ["reservations"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1779,7 +1774,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock": {
@@ -2544,11 +2544,6 @@
         },
         "summary": "Receive stock into a warehouse (on hand grows)",
         "tags": ["stock"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2583,7 +2578,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock/adjustments": {
@@ -2863,11 +2863,6 @@
         },
         "summary": "Adjust on hand by a signed quantity (a count, a loss, a direct issue)",
         "tags": ["stock"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2897,7 +2892,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/shipments": {
@@ -3275,11 +3275,6 @@
         },
         "summary": "Create a shipment out of one of the owner’s warehouses",
         "tags": ["shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3335,7 +3330,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/shipments/{id}": {
@@ -3841,11 +3841,6 @@
         },
         "summary": "Dispatch a shipment (CREATED → DISPATCHED): it left its origin warehouse",
         "tags": ["shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3863,7 +3858,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/shipments/{id}/deliver": {
@@ -4095,11 +4095,6 @@
         },
         "summary": "Deliver a shipment (DISPATCHED → DELIVERED), as its origin warehouse’s owner records it",
         "tags": ["shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -4117,7 +4112,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments": {
@@ -4772,11 +4772,6 @@
         },
         "summary": "Record goods of a return as on their way to one of the owner’s warehouses",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -4858,7 +4853,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments/{id}": {
@@ -5568,11 +5568,6 @@
         },
         "summary": "Receive a return shipment (IN_TRANSIT → RECEIVED): the goods arrived",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -5615,7 +5610,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments/{id}/inspection": {
@@ -5921,11 +5921,6 @@
         },
         "summary": "Record the inspection of a return shipment (RECEIVED → INSPECTED)",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -5955,7 +5950,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments/{id}/resolution": {
@@ -6323,11 +6323,6 @@
         },
         "summary": "Resolve a return shipment: give every received unit an outcome (INSPECTED → RESOLVED)",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -6381,7 +6376,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/internal/return-requests/{id}/return-shipment": {
@@ -6623,11 +6623,6 @@
         },
         "summary": "Withdraw a dispatch reservation of a return request, unless it has a shipment (internal)",
         "tags": ["return-requests-internal"],
-        "security": [
-          {
-            "internalToken": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -6646,7 +6641,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "internalToken": []
+          }
+        ]
       }
     }
   },
@@ -6669,7 +6669,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Internal-Token",
-        "description": "A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user."
+        "description": "A platform service’s internal token (ADR-020, ADR-035), signed for the organization it acts for, sent without an `Authorization` header: a request carrying both is judged on the bearer token, as a user. Admitted only where the route names the calling service."
       }
     },
     "schemas": {

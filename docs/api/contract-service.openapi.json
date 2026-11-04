@@ -777,11 +777,6 @@
         },
         "summary": "Accept the draft contract for the side the caller acts for (DRAFT → SIGNED)",
         "tags": ["contracts"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -799,7 +794,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/cancel": {
@@ -1086,11 +1086,6 @@
         },
         "summary": "Cancel a draft contract (DRAFT → CANCELLED), employer only",
         "tags": ["contracts"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1121,7 +1116,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/amendments": {
@@ -1669,11 +1669,6 @@
         },
         "summary": "Propose an amendment of a signed contract, employer only",
         "tags": ["amendments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1709,7 +1704,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/amendments/{amendmentId}": {
@@ -2237,11 +2237,6 @@
         },
         "summary": "Sign an amendment for the side the caller acts for (PROPOSED → EFFECTIVE)",
         "tags": ["amendments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2259,7 +2254,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/milestones": {
@@ -2670,11 +2670,6 @@
         },
         "summary": "Plan a milestone on a signed contract, employer only",
         "tags": ["milestones"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2706,7 +2701,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/milestones/{milestoneId}": {
@@ -3116,11 +3116,6 @@
         },
         "summary": "Change a planned milestone no statement refers to, employer only",
         "tags": ["milestones"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3157,7 +3152,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/statements": {
@@ -4034,11 +4034,6 @@
         },
         "summary": "Draft a statement of a signed contract, contractor only",
         "tags": ["statements"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -4102,7 +4097,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/statements/{statementId}": {
@@ -4948,11 +4948,6 @@
         },
         "summary": "Submit a draft statement for approval, contractor only",
         "tags": ["statements"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -4971,7 +4966,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contracts/{id}/statements/{statementId}/decisions": {
@@ -5508,11 +5508,6 @@
         },
         "summary": "Approve or reject a step of a submitted statement’s approval chain",
         "tags": ["statements"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -5548,7 +5543,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/internal/statements/{id}": {
@@ -6001,11 +6001,6 @@
         },
         "summary": "Write an approval policy version (DRAFT) for an organization",
         "tags": ["contract-approval-policies"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -6092,7 +6087,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       },
       "get": {
         "operationId": "PolicyController_list_v1",
@@ -7167,11 +7167,6 @@
         },
         "summary": "Send a DRAFT policy for platform approval",
         "tags": ["contract-approval-policies"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -7190,7 +7185,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contract-approval-policies/{id}/approve": {
@@ -7465,11 +7465,6 @@
         },
         "summary": "Approve a pending policy: it comes into force",
         "tags": ["contract-approval-policies"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -7488,7 +7483,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contract-approval-policies/{id}/reject": {
@@ -7743,11 +7743,6 @@
         },
         "summary": "Reject a pending policy, with a reason",
         "tags": ["contract-approval-policies"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -7771,7 +7766,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/contract-approval-policies/{id}/retire": {
@@ -8026,11 +8026,6 @@
         },
         "summary": "Take an ACTIVE policy out of force with no replacement",
         "tags": ["contract-approval-policies"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -8049,7 +8044,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     }
   },
@@ -8072,7 +8072,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Internal-Token",
-        "description": "A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user."
+        "description": "A platform service’s internal token (ADR-020, ADR-035), signed for the organization it acts for, sent without an `Authorization` header: a request carrying both is judged on the bearer token, as a user. Admitted only where the route names the calling service."
       }
     },
     "schemas": {
