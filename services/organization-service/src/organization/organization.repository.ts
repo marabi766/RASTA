@@ -122,8 +122,16 @@ export class OrganizationRepository {
     return { ...organization, childCount };
   }
 
-  async findByExternalCode(externalCode: string) {
-    return this.client.organization.findFirst({ where: { externalCode, deletedAt: null } });
+  /**
+   * The organization holding this code's key, deleted ones included: `ux_organization_external_code_key`
+   * is global, so a deleted holder still makes the code taken (FU-084).
+   */
+  async findByExternalCode(externalCode: string): Promise<{ id: string } | null> {
+    const rows = await this.client.$queryRaw<{ id: string }[]>`
+      SELECT id FROM organization
+       WHERE organization_text_key(external_code) = organization_text_key(${externalCode}::text)
+       LIMIT 1`;
+    return rows[0] ?? null;
   }
 
   /**

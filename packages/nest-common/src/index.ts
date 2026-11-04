@@ -370,3 +370,14 @@ export { clientFailureCode } from './database/client-failure';
 export { DatabaseConnectionError, createSafePrismaClient } from './database/safe-prisma-client';
 export type { RuntimeDatabaseSetting } from './database/safe-prisma-client';
 export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';
+
+// Human-typed text a uniqueness constraint compares (FU-084) ----------------
+export {
+  canonicalUniqueText,
+  isCanonicalUniqueText,
+  uniqueTextKey,
+  foldAsciiCase,
+  uniqueText,
+  NOT_CANONICAL_TEXT,
+} from './text/canonical-unique-text';
+export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';

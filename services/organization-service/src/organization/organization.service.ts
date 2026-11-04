@@ -355,20 +355,22 @@ export class OrganizationService {
         parentPath = parent.path;
       }
 
-      const row = await tx.organization.create({
-        data: {
-          id,
-          name: dto.name,
-          shortName: dto.shortName ?? null,
-          type: dto.type,
-          status: 'ACTIVE',
-          parentId: dto.parentId ?? null,
-          externalCode: dto.externalCode ?? null,
-          metadata: dto.metadata as object,
-          createdBy: actor,
-          updatedBy: actor,
-        },
-      });
+      const row = await takenAsConflict(
+        tx.organization.create({
+          data: {
+            id,
+            name: dto.name,
+            shortName: dto.shortName ?? null,
+            type: dto.type,
+            status: 'ACTIVE',
+            parentId: dto.parentId ?? null,
+            externalCode: dto.externalCode ?? null,
+            metadata: dto.metadata as object,
+            createdBy: actor,
+            updatedBy: actor,
+          },
+        }),
+      );
 
       // Prisma cannot write an `Unsupported` column, so the ltree path is set
       // immediately afterwards inside the same transaction.
@@ -418,17 +420,19 @@ export class OrganizationService {
     const updated = await this.repository.transaction(async (tx) => {
       await this.assertCanWriteLocked(tx, id);
 
-      const row = await tx.organization.update({
-        where: { id },
-        data: {
-          ...(dto.name !== undefined ? { name: dto.name } : {}),
-          ...(dto.shortName !== undefined ? { shortName: dto.shortName } : {}),
-          ...(dto.externalCode !== undefined ? { externalCode: dto.externalCode } : {}),
-          ...(dto.metadata !== undefined ? { metadata: dto.metadata as object } : {}),
-          updatedBy: actor,
-          version: { increment: 1 },
-        },
-      });
+      const row = await takenAsConflict(
+        tx.organization.update({
+          where: { id },
+          data: {
+            ...(dto.name !== undefined ? { name: dto.name } : {}),
+            ...(dto.shortName !== undefined ? { shortName: dto.shortName } : {}),
+            ...(dto.externalCode !== undefined ? { externalCode: dto.externalCode } : {}),
+            ...(dto.metadata !== undefined ? { metadata: dto.metadata as object } : {}),
+            updatedBy: actor,
+            version: { increment: 1 },
+          },
+        }),
+      );
 
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'Organization',
@@ -1260,4 +1264,24 @@ function toContactView(contact: ContactLike): ContactView {
     email: contact.email,
     isPrimary: contact.isPrimary,
   };
+}
+
+/**
+ * A concurrent writer took the external code's key between the check before the transaction and
+ * this write. `ux_organization_external_code_key` is the only unique besides the id, so P2002 is the
+ * same 409 that check answers, not a 500 (FU-084).
+ */
+async function takenAsConflict<T>(write: Promise<T>): Promise<T> {
+  try {
+    return await write;
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: unknown }).code === 'P2002'
+    ) {
+      throw RastaError.alreadyExists('Organization');
+    }
+    throw error;
+  }
 }
