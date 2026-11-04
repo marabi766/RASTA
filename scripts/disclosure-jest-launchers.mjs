@@ -178,11 +178,11 @@ export const JEST_LAUNCHERS = {
       'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        '0273cb3f7e2e7379c84e22fb3a288c07a4a43bc483108452c192314f73b0f4ab',
+        '264e7d7b9a3443bb3520b2ff380fc0395733cf2a1ca67d6ea60d9134af9da947',
       'scripts/ci-integration-split-lib.mjs':
         'fdce9bdfac074267f1fc26702ed9af73d9911f94f00a599ddc5d5def2a6912fe',
       'scripts/workspace-roots-lib.mjs':
-        '4da347ee566298cb7b2f3aea50d1c69d338983b74f610b85ac7cee4a7282e634',
+        'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
   },
   'scripts/testing-dev-only.test.mjs': {
