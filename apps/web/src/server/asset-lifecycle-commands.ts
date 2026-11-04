@@ -20,6 +20,7 @@ import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Commissioning, changing the status of, and decommissioning a machine,
@@ -74,7 +75,7 @@ export const canDecommissionAsset = (roles: readonly string[]): boolean =>
 
 const fa = (value: number): string => toPersianDigits(String(value));
 
-const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد');
 
 /**
  * A reason, as asset-service takes it: trimmed text of `min` to `max`
@@ -92,9 +93,9 @@ function reasonText(label: string, min: number, max: number) {
     .pipe(
       z
         .string()
-        .min(1, `${label} را بنویسید`)
-        .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .min(1, formMessage(`${label} را بنویسید`))
+        .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
     );
 }
@@ -116,7 +117,7 @@ export const activateFormValues = (): ActivateAssetFormValues => ({});
 export const changeStatusFormSchema = z
   .object({
     status: z.enum(CHANGE_STATUS_TARGETS, {
-      error: 'وضعیت تازه را از فهرست انتخاب کنید',
+      error: formMessage('وضعیت تازه را از فهرست انتخاب کنید'),
     }),
     reason: reasonText(
       'دلیل تغییر',
@@ -159,8 +160,9 @@ export function parseChangeStatusForm(
   return { ok: true, body: parsed.data };
 }
 
-export const DECOMMISSION_UNCONFIRMED_MESSAGE =
-  'برای اسقاط باید تأیید کنید که پیامد آن را می‌دانید';
+export const DECOMMISSION_UNCONFIRMED_MESSAGE = formMessage(
+  'برای اسقاط باید تأیید کنید که پیامد آن را می‌دانید',
+);
 
 export const decommissionFormSchema = z
   .object({

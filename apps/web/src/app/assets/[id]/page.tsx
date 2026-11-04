@@ -47,6 +47,7 @@ import { AssetDocuments } from './AssetDocuments';
 import { AttachDocumentForm } from './AssetDocumentForm';
 import { AssetAvailability } from './AssetAvailability';
 import { DeclareAvailabilityForm, RevokeAvailabilityForm } from './AvailabilityForms';
+import { ownValue } from '@/lib/own-key';
 import {
   actingOrganizationLabel,
   actingScope,
@@ -162,7 +163,7 @@ export default async function AssetDossierPage({
   // service holds work on — with the note that says what to do first.
   const holdsOpenWork =
     lifecycleSource !== null &&
-    OPEN_WORK_NOTES[lifecycleSource.asset.status] !== undefined &&
+    ownValue(OPEN_WORK_NOTES, lifecycleSource.asset.status) !== undefined &&
     (canChangeAssetStatus(lifecycleSource.roles) || canDecommissionAsset(lifecycleSource.roles));
   const lifecycle =
     lifecycleSource && (Object.keys(tokens).length > 0 || holdsOpenWork) ? (

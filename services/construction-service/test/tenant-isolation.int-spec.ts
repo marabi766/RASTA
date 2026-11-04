@@ -41,7 +41,7 @@ describe('tenant isolation', () => {
     const project = await asAdmin(a, () => w.projects.create({ ...PROJECT, area: SQUARE }));
     projectId = project.id;
     const need = await asAdmin(a, () =>
-      w.needs.add(projectId, { title: 'Gravel', description: 'Base' }),
+      w.needs.add(projectId, { expectedProjectVersion: 1, title: 'Gravel', description: 'Base' }),
     );
     needId = need.id;
     // B has a project of its own, so "B sees nothing" is not merely "B has nothing".
@@ -78,21 +78,32 @@ describe('tenant isolation', () => {
       ],
       [
         'POST /v1/projects/{id}/needs',
-        () => w.needs.add(projectId, { title: 'Inject', description: 'Needs' }),
+        () =>
+          w.needs.add(projectId, {
+            expectedProjectVersion: 1,
+            title: 'Inject',
+            description: 'Needs',
+          }),
       ],
       ['GET /v1/projects/{id}/needs', () => w.needs.list(projectId, { limit: 25 })],
       [
         'PATCH /v1/projects/{id}/needs/{needId}',
-        () => w.needs.update(projectId, needId, { expectedVersion: 1, title: 'Hijacked' }),
+        () =>
+          w.needs.update(projectId, needId, {
+            expectedProjectVersion: 1,
+            expectedVersion: 1,
+            title: 'Hijacked',
+          }),
       ],
       [
         'POST /v1/projects/{id}/needs/{needId}/submit',
-        () => w.needs.submit(projectId, needId, { expectedVersion: 1 }),
+        () => w.needs.submit(projectId, needId, { expectedProjectVersion: 1, expectedVersion: 1 }),
       ],
       [
         'POST /v1/projects/{id}/needs/{needId}/withdraw',
         () =>
           w.needs.withdraw(projectId, needId, {
+            expectedProjectVersion: 1,
             expectedVersion: 1,
             reason: 'Cross-tenant attempt',
           }),

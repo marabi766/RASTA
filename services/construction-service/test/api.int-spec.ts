@@ -170,7 +170,13 @@ describe('construction HTTP API', () => {
       const added = await http()
         .post(`/v1/projects/${project.id}/needs`)
         .set('authorization', `Bearer ${token}`)
-        .send({ title: 'Gravel', description: 'Base course', quantity: '12.5', unit: 'm3' })
+        .send({
+          expectedProjectVersion: 1,
+          title: 'Gravel',
+          description: 'Base course',
+          quantity: '12.5',
+          unit: 'm3',
+        })
         .expect(201);
       const needId = added.body.id as string;
 
@@ -183,17 +189,17 @@ describe('construction HTTP API', () => {
       await http()
         .patch(`/v1/projects/${project.id}/needs/${needId}`)
         .set('authorization', `Bearer ${token}`)
-        .send({ expectedVersion: 1, quantity: '13' })
+        .send({ expectedProjectVersion: 1, expectedVersion: 1, quantity: '13' })
         .expect(200);
       await http()
         .post(`/v1/projects/${project.id}/needs/${needId}/submit`)
         .set('authorization', `Bearer ${token}`)
-        .send({ expectedVersion: 2 })
+        .send({ expectedProjectVersion: 1, expectedVersion: 2 })
         .expect(200);
       const withdrawn = await http()
         .post(`/v1/projects/${project.id}/needs/${needId}/withdraw`)
         .set('authorization', `Bearer ${token}`)
-        .send({ expectedVersion: 3, reason: 'Scope was reduced' })
+        .send({ expectedProjectVersion: 1, expectedVersion: 3, reason: 'Scope was reduced' })
         .expect(200);
       expect(withdrawn.body).toMatchObject({ status: 'WITHDRAWN', quantity: '13' });
     });
@@ -281,7 +287,7 @@ describe('construction HTTP API', () => {
         () =>
           http()
             .post(`/v1/projects/${project.id}/needs`)
-            .send({ title: 'Inject', description: 'x' }),
+            .send({ expectedProjectVersion: 1, title: 'Inject', description: 'x' }),
       ];
       for (const call of calls) {
         const response = await call().set('authorization', `Bearer ${intruder}`);

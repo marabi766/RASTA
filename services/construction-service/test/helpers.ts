@@ -1368,9 +1368,15 @@ export async function readyProject(
     w.projects.create({ ...PROJECT, estimatedCostMinor }),
   );
   const need = await asAdmin(organizationId, () =>
-    w.needs.add(project.id, { title: 'Gravel', description: 'Base course' }),
+    w.needs.add(project.id, {
+      expectedProjectVersion: 1,
+      title: 'Gravel',
+      description: 'Base course',
+    }),
   );
-  await asAdmin(organizationId, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 }));
+  await asAdmin(organizationId, () =>
+    w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+  );
   return { id: project.id, version: project.version };
 }
 

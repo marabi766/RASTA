@@ -19,6 +19,8 @@ import { join } from 'node:path';
 import { cleanupFixtures, LOST_DIAGNOSTIC, signalChild } from './test/build-lifetime';
 import {
   alive,
+  goneAtBoundary,
+  liveMembers,
   LOCK,
   plantFakeApp,
   plantFakeNext,
@@ -536,7 +538,12 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(await driver.ended).toBe('COMPLETED');
     await driver.done;
     // COMPLETED required the supervisor's own FINAL plus observed group absence.
-    for (const pid of ran(dir)) await waitGone(pid, 'process the build ran');
+    // Every process the build ran (none, when the cleanup came before the build started), all in
+    // one census.
+    const started = ran(dir);
+    if (started.length > 0) {
+      await goneAtBoundary(started.map((pid) => [pid, 'process the build ran'] as const));
+    }
   });
 
   it('R6-1: controller loss is LOST, and the watchdog rejects while inherited pipes stay held', async () => {
@@ -585,7 +592,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       expect.stringContaining('build lock: could not be released (details withheld)'),
     ]);
     // When the wrapper returned, its `next build` was gone, and had never got past the handshake.
-    await waitGone(pid, '`next build` of the refused build');
+    await goneAtBoundary([[pid, '`next build` of the refused build']]);
     expect(ran(dir)).toEqual([]);
     chmodSync(join(dir, LOCK), 0o700);
     // The kept lock names a dead wrapper and no group: B takes it over and builds its own.
@@ -605,7 +612,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       status: 1,
       problems: ['build: unexpected failure (details withheld); refusing'],
     });
-    await waitGone(record(dir).pid, '`next build` of the failed start');
+    await goneAtBoundary([[record(dir).pid, '`next build` of the failed start']]);
     expect(existsSync(join(dir, LOCK))).toBe(false);
     expect(ran(dir)).toEqual([]);
   });
@@ -666,7 +673,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       });
       const writer = Number(readFileSync(join(dir, 'linger.pid'), 'utf8'));
       expect(existsSync(join(dir, '.next/from-linger'))).toBe(true);
-      await waitGone(writer, 'process `next build` started (linger.pid)');
+      await goneAtBoundary([[writer, 'process `next build` started (linger.pid)']]);
       expect(existsSync(join(dir, LOCK))).toBe(false);
       expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
     },
@@ -701,6 +708,119 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     );
   });
 
+  /** Pids printed (space separated) by a detached process; its group is stopped in `afterEach`. */
+  async function printedPids(command: string, args: string[]): Promise<number[]> {
+    const child = spawn(command, args, { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    child.unref();
+    groups.set(child.pid as number, child);
+    const line = await new Promise<string>((resolve) =>
+      (child.stdout as NodeJS.ReadableStream).once('data', (chunk) => resolve(String(chunk))),
+    );
+    return line.trim().split(' ').map(Number);
+  }
+  /** A pid printed by a shell that then `exec`s a sleeper; the sleeper never reaps its zombie. */
+  const printedPid = async (script: string): Promise<number> =>
+    (await printedPids('sh', ['-c', script]))[0];
+
+  it('goneAtBoundary: a running writer fails at once, naming it; a zombie passes the boundary step but not the full-reaping one (FU-040)', async () => {
+    const pid = liveGroup();
+    expect(liveMembers([pid, -pid])).toEqual([[pid], [pid]]);
+    await expect(goneAtBoundary([[pid, 'sleeper']])).rejects.toThrow(
+      `sleeper: pid ${pid} still has a live writer (${pid})`,
+    );
+    await expect(goneAtBoundary([[-pid, 'sleeper group']])).rejects.toThrow(
+      `sleeper group: process group ${pid} still has a live writer (${pid})`,
+    );
+    // Both a delayed-exit writer and a zombie answer `kill(pid, 0)`; only the state tells them apart.
+    const zombie = await printedPid('sleep 0 & echo $!; exec sleep 30');
+    const leader = await printedPid('setsid sh -c "echo \\$\\$; exit 0" & exec sleep 30');
+    for (const target of [zombie, -leader]) {
+      await waitFor(() => liveMembers([target])[0].length === 0);
+      expect(alive(target)).toBe(true); // not reaped: the signal probe still sees it
+      await expect(goneAtBoundary([[target, 'zombie']], 100)).rejects.toThrow(
+        `zombie: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still alive 100 ms`,
+      );
+    }
+    expect(liveMembers([999_999_999])).toEqual([[]]); // no such process: nothing live
+    await expect(goneAtBoundary([])).rejects.toThrow(/cannot prove a writer is gone/);
+  });
+
+  it('goneAtBoundary: ONE census covers every target: a writer live at return fails although the zombie root checked before it is reaped later (FU-040 r2 F1)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'boundary-'));
+    const go = join(dir, 'go');
+    try {
+      // A parent that blocks (so it cannot reap) until `go` exists. Its child `root` ends at
+      // once, a zombie; `writer` runs for exactly as long as `root` is not reaped.
+      const [root, writer] = await printedPids(process.execPath, [
+        '-e',
+        `const { spawn } = require('node:child_process'); const { existsSync } = require('node:fs');
+const root = spawn('true', [], { stdio: 'ignore' });
+const writer = spawn('sh', ['-c', 'while kill -0 $0 2>/dev/null; do sleep 0.02; done', String(root.pid)], { stdio: 'ignore' });
+console.log(root.pid + ' ' + writer.pid);
+while (!existsSync(process.argv[1])) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+setInterval(() => {}, 1000);`,
+        go,
+      ]);
+      await waitFor(() => liveMembers([root])[0].length === 0);
+      expect(liveMembers([root, writer])).toEqual([[], [writer]]); // a zombie root, a live writer
+      // The root is reaped ~300 ms after the wrapper "returned", and the writer ends a moment
+      // after that. Checked one after the other the writer would be inspected AFTER the wait
+      // for the root and pass; checked together it is live at the boundary.
+      const release = setTimeout(() => writeFileSync(go, ''), 300);
+      await expect(
+        goneAtBoundary([
+          [root, 'zombie root'],
+          [writer, 'second writer'],
+        ]),
+      ).rejects.toThrow(`second writer: pid ${writer} still has a live writer (${writer})`);
+      clearTimeout(release);
+      // The control: once the root is reaped and the writer is gone, the same call passes.
+      writeFileSync(go, '');
+      await waitGone(writer, 'second writer');
+      await goneAtBoundary([
+        [root, 'zombie root'],
+        [writer, 'second writer'],
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('goneAtBoundary: a census that fails, cannot be read or is incomplete proves nothing, so it refuses', () => {
+    const bin = mkdtempSync(join(tmpdir(), 'ps-fault-'));
+    const ps = join(bin, 'ps');
+    const me = `${process.pid} ${process.pid} Ssl`;
+    const census = (...rows: string[]): string => rows.map((row) => `echo "${row}"`).join('\n');
+    try {
+      for (const body of [
+        'exit 1',
+        'echo "12 12"',
+        'echo "x y Ss"',
+        'exit 0',
+        // Successful, well-formed, but without the caller (known live): not a census of this host.
+        census('1 1 Ss'),
+        census('1 1 Ss', `${process.pid} ${process.pid} Z`), // the caller cannot be a zombie
+        // A row that is not `pid pgid stat` of the grammar, wherever it is: nothing is classified.
+        census(me, '5 5 Z-not-a-state'),
+        census(me, '5 5 Zombie'),
+        census('5 5 Ss+x', me),
+        census(me, '5 5 Z extra'),
+        census(me, '-5 5 Ss'),
+        census(me, '5 5 sZ'),
+      ]) {
+        writeFileSync(ps, `#!/bin/sh\n${body}\n`);
+        chmodSync(ps, 0o755);
+        expect(() => liveMembers([process.pid], ps)).toThrow(/cannot prove a writer is gone/);
+      }
+      writeFileSync(ps, `#!/bin/sh\n${census(me, '5 5 Z', '6 5 Z+', '7 5 Ss', '8 8 R<')}\n`);
+      chmodSync(ps, 0o755);
+      // The control: a good census. Zombies are not live; a pgid target reads the same rows.
+      expect(liveMembers([process.pid, 5, -5, -8], ps)).toEqual([[process.pid], [], [7], [8]]);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
   it('(B) a process that outlives `next build` briefly, inside the settle window, is waited for: receipted', async () => {
     const dir = app({ linger: { ms: 300 } });
     expect(await runDriver(dir, { nextFrom })).toMatchObject({ status: 0, problems: [] });
@@ -725,11 +845,10 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
         status,
         problems: ['build: interrupted; the build was stopped before the lock was released'],
       });
-      await waitGone(record(dir).pid, '`next build` of the interrupted build');
-      await waitGone(
-        Number(readFileSync(join(dir, 'linger.pid'), 'utf8')),
-        'process `next build` started (linger.pid)',
-      );
+      await goneAtBoundary([
+        [record(dir).pid, '`next build` of the interrupted build'],
+        [Number(readFileSync(join(dir, 'linger.pid'), 'utf8')), 'process `next build` started'],
+      ]);
       expect(existsSync(join(dir, LOCK))).toBe(false);
       expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
     },
@@ -757,8 +876,10 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
           problems: ['build: interrupted; the build was stopped before the lock was released'],
         });
         const { pid, group } = record(dir);
-        await waitGone(pid, '`next build` of the interrupted build');
-        await waitGone(-group, 'group of the interrupted build');
+        await goneAtBoundary([
+          [pid, '`next build` of the interrupted build'],
+          [-group, 'group of the interrupted build'],
+        ]);
         expect(existsSync(join(dir, LOCK))).toBe(false);
         const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
         expect(events.filter((e) => e === 'send-term')).toHaveLength(1);
@@ -816,7 +937,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     await waitFor(() => existsSync(join(dir, 'paused')));
     const { pid, group } = record(dir);
     expect(pid).not.toBe(group);
-    await waitGone(pid, 'root `next build` (exited, supervisor holds the group)');
+    await goneAtBoundary([[pid, 'root `next build` (exited, supervisor holds the group)']]);
     expect(alive(group)).toBe(true);
     expect(alive(-group)).toBe(true);
     const census = spawnSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8' });
@@ -832,7 +953,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect((await runDriver(dir, { nextFrom, lockWaitMs: 0 })).status).toBe(1);
     writeFileSync(join(dir, 'go'), '');
     expect(await driver.done).toMatchObject({ status: 0, problems: [] });
-    await waitGone(-group, 'group of the finished build');
+    await goneAtBoundary([[-group, 'group of the finished build']]);
     expect(existsSync(join(dir, LOCK))).toBe(false);
     expect(receipt(dir)).toEqual([]);
     const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
@@ -1023,10 +1144,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       status: 1,
       problems: ['next build: a process it started was still running after it exited; refusing'],
     });
-    await waitGone(
-      Number(readFileSync(join(dir, 'linger.pid'), 'utf8')),
-      'surviving writer that ignores TERM (linger.pid)',
-    );
+    await goneAtBoundary([
+      [Number(readFileSync(join(dir, 'linger.pid'), 'utf8')), 'surviving writer that ignores TERM'],
+    ]);
     expect(existsSync(join(dir, LOCK))).toBe(false);
   });
 
@@ -1043,10 +1163,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       problems: ['next build: a process it started was still running after it exited; refusing'],
     });
     expect(existsSync(join(dir, LOCK))).toBe(false);
-    await waitGone(
-      Number(readFileSync(join(dir, 'linger.pid'), 'utf8')),
-      'process `next build` started (linger.pid)',
-    );
+    await goneAtBoundary([
+      [Number(readFileSync(join(dir, 'linger.pid'), 'utf8')), 'process `next build` started'],
+    ]);
   });
 
   it('(C) the wrapper killed with SIGKILL after publication: the lock stays held while the build lives, and recovery waits for it (fail closed)', async () => {

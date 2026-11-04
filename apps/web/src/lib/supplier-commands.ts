@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { legacyParse } from '@rasta/contracts';
 
-import { firstIssuePerField } from './form-issues';
+import { firstIssuePerField, formMessage } from './form-issues';
 import { normalizePersianText, toPersianDigits } from './format';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
 import { SUPPLIER_CAPABILITIES } from './supplier-fields';
@@ -214,8 +214,8 @@ export const reasonFormValues = (form: FormData): ReasonFormValues => ({
 
 const fa = (value: number): string => toPersianDigits(String(value));
 
-export const BIDI_CONTROL_MESSAGE = 'این فیلد نویسه جهت‌دهی پنهان نمی‌پذیرد';
-export const CONTROL_CHARACTER_MESSAGE = 'این فیلد نویسه کنترلی یا پنهان نمی‌پذیرد';
+export const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسه جهت‌دهی پنهان نمی‌پذیرد');
+export const CONTROL_CHARACTER_MESSAGE = formMessage('این فیلد نویسه کنترلی یا پنهان نمی‌پذیرد');
 
 /** Free text as supplier-service's `plainText()` takes it: trimmed, no bidi control. */
 function prose(label: string, min: number, max: number) {
@@ -225,9 +225,9 @@ function prose(label: string, min: number, max: number) {
     .pipe(
       z
         .string()
-        .min(1, `${label} را بنویسید`)
-        .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .min(1, formMessage(`${label} را بنویسید`))
+        .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
     );
 }
@@ -240,14 +240,14 @@ function optionalProse(label: string, max: number) {
     .pipe(
       z
         .string()
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
     )
     .transform((value) => (value === '' ? undefined : value));
 }
 
 const capabilityEnum = z.enum(SUPPLIER_CAPABILITIES, {
-  error: 'یکی از دسته‌های فهرست را انتخاب کنید',
+  error: formMessage('یکی از دسته‌های فهرست را انتخاب کنید'),
 });
 
 export const registerFormSchema = z
@@ -255,9 +255,12 @@ export const registerFormSchema = z
     displayName: prose('نام', MIN_DISPLAY_NAME_LENGTH, MAX_DISPLAY_NAME_LENGTH),
     capabilities: z
       .array(capabilityEnum)
-      .min(1, 'دست‌کم یک دسته را انتخاب کنید')
+      .min(1, formMessage('دست‌کم یک دسته را انتخاب کنید'))
       .max(SUPPLIER_CAPABILITIES.length)
-      .refine((value) => new Set(value).size === value.length, 'هر دسته را فقط یک بار بنویسید'),
+      .refine(
+        (value) => new Set(value).size === value.length,
+        formMessage('هر دسته را فقط یک بار بنویسید'),
+      ),
   })
   .strict();
 
@@ -267,8 +270,11 @@ const evidenceRowSchema = z
   .object({
     documentId: z
       .string()
-      .min(1, 'شناسه سند را بنویسید')
-      .max(MAX_DOCUMENT_ID_LENGTH, `شناسه سند حداکثر ${fa(MAX_DOCUMENT_ID_LENGTH)} نویسه است`)
+      .min(1, formMessage('شناسه سند را بنویسید'))
+      .max(
+        MAX_DOCUMENT_ID_LENGTH,
+        formMessage(`شناسه سند حداکثر ${fa(MAX_DOCUMENT_ID_LENGTH)} نویسه است`),
+      )
       .refine((value) => !CONTROL_CHARACTER.test(value), CONTROL_CHARACTER_MESSAGE),
     label: optionalProse('برچسب سند', MAX_EVIDENCE_LABEL_LENGTH),
   })
@@ -283,7 +289,7 @@ export const submitFormSchema = z
     statement: optionalProse('توضیح', MAX_STATEMENT_LENGTH),
     evidence: z
       .array(evidenceRowSchema)
-      .max(MAX_EVIDENCE_ITEMS, `حداکثر ${fa(MAX_EVIDENCE_ITEMS)} سند پیوست می‌شود`),
+      .max(MAX_EVIDENCE_ITEMS, formMessage(`حداکثر ${fa(MAX_EVIDENCE_ITEMS)} سند پیوست می‌شود`)),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -292,7 +298,7 @@ export const submitFormSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['evidence'],
-        message: 'هر سند را فقط یک بار پیوست کنید',
+        message: formMessage('هر سند را فقط یک بار پیوست کنید'),
       });
     }
   })

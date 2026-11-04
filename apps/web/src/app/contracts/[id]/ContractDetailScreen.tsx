@@ -43,6 +43,7 @@ import { amendmentLabel, type ContractCommandOffers } from './contract-offers';
 import { StatementCommands, type OfferedStatementCommand } from './StatementCommands';
 import type { MilestoneOption } from './StatementCommandForm';
 import { contextHref } from '@/lib/page-context';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The contract detail (docs/16 § ۱۶٫۶, `/contracts/[id]`).
@@ -135,7 +136,7 @@ function AmendmentRow({
             slot="AMENDMENT"
             subjectId={amendment.id}
             subjectLabel={amendmentLabel(amendment)}
-            offered={commands.amendments[amendment.id] ?? []}
+            offered={ownValue(commands.amendments, amendment.id) ?? []}
             context={commands.context}
           />
         </div>
@@ -245,7 +246,7 @@ function MilestoneRow({
             slot="MILESTONE"
             subjectId={milestone.id}
             subjectLabel={milestone.title}
-            offered={commands.milestones[milestone.id] ?? []}
+            offered={ownValue(commands.milestones, milestone.id) ?? []}
             context={commands.context}
             collapsedLabel={`ویرایش «${milestone.title}»`}
           />

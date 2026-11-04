@@ -61,7 +61,7 @@ export const CLI_CONTRACT = Object.freeze({
   'apps/web/scripts/build-supervisor.mjs': { other: ['-axo'] },
   'apps/web/src/app/fonts.ts': { other: ['--font-vazirmatn'] },
   // Test helper of the build-binding specs: runs the build scripts in a child Node.
-  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },
+  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-axo', '-e'] },
 
   // --- packages: test fixtures run by their specs ----------------------------
   // The stock-zod oracle's build child (PR #444 r4): its input arrives on stdin.

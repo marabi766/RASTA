@@ -58,6 +58,79 @@ export async function waitGone(target: number, what: string, ms = 15_000): Promi
   }
 }
 
+/** Kernel task states that cannot write any more: zombie (`Z`) and dead (`X`, old kernels `x`). */
+const NOT_LIVE = /^[ZXx]/;
+/**
+ * The whole `ps` STAT grammar: one state letter (procps: D I R S T t W X Z, old kernels K P x)
+ * and its modifier letters (`<` `N` `L` `s` `l` `+`). Anything else is not a state, so it is
+ * not classified at all (`Z-not-a-state` must not pass as a zombie).
+ */
+const STAT = /^[DIKPRSTtWXxZ][<NLsl+]*$/;
+const UNPROVEN = 'cannot prove a writer is gone';
+
+/**
+ * Members of each of `targets` (a pid, or, negative, a process group) that are LIVE right
+ * now, aligned with `targets`: ONE `ps` snapshot of pid, pgid and state for all of them (a
+ * second snapshot taken later is a second moment, FU-040 r2 F1), minus zombies. A zombie has
+ * released its memory and its files, so it cannot write, but it still answers `kill(pid, 0)`
+ * until its parent reaps it; the signal probe cannot tell it from a running writer, the process
+ * state can. `waitpid` is not an option: these are grandchildren of the build, not children of
+ * the test. Fails closed: every row must be a complete `pid pgid stat` of the grammar, and the
+ * calling process (known live) must be in the census, so a snapshot that cannot be taken, read
+ * or is incomplete proves nothing and throws (`ps`: test seam).
+ */
+export function liveMembers(targets: readonly number[], ps = 'ps'): number[][] {
+  const census = spawnSync(ps, ['-axo', 'pid=,pgid=,stat='], { encoding: 'utf8' });
+  if (census.status !== 0) throw new Error(`process census failed: ${UNPROVEN}`);
+  const rows = census.stdout
+    .trim()
+    .split('\n')
+    .map((line) => {
+      const cells = line.trim().split(/\s+/);
+      const [pid, pgid, state] = cells;
+      if (cells.length !== 3 || !/^\d+$/.test(pid) || !/^\d+$/.test(pgid) || !STAT.test(state)) {
+        throw new Error(`process census unreadable: ${UNPROVEN}`);
+      }
+      return { pid: Number(pid), pgid: Number(pgid), live: !NOT_LIVE.test(state) };
+    });
+  if (!rows.some((row) => row.pid === process.pid && row.live)) {
+    throw new Error(`process census incomplete (the calling process is missing): ${UNPROVEN}`);
+  }
+  return targets.map((target) =>
+    rows
+      .filter((row) => row.live && (target < 0 ? row.pgid === -target : row.pid === target))
+      .map((row) => row.pid),
+  );
+}
+
+/**
+ * For the places where processes must be gone AT a boundary (the wrapper returned, the lock
+ * was released): at this very moment no member of ANY target may still be running. ONE
+ * census covers all targets and every live member is refused before anything is awaited: a
+ * target checked after another one's reaping wait would regain `waitGone`'s eventual-exit
+ * allowance (FU-040 r2 F1), so a single target per call cannot be expressed. A zombie
+ * awaiting its parent's `wait` is allowed (it cannot write). Then `waitGone` for the full
+ * disappearance of each, which may lag the boundary. Without the first step a writer stopped a
+ * moment AFTER an early return and release would pass, as `waitGone` alone accepts any exit
+ * within its budget (FU-040). No target proves nothing, so it throws.
+ */
+export async function goneAtBoundary(
+  targets: ReadonlyArray<readonly [target: number, what: string]>,
+  ms?: number,
+): Promise<void> {
+  if (targets.length === 0) throw new Error(`no process to check at the boundary: ${UNPROVEN}`);
+  const live = liveMembers(targets.map(([target]) => target));
+  const refused = targets.flatMap(([target, what], i) =>
+    live[i].length === 0
+      ? []
+      : [
+          `${what}: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still has a live writer (${live[i].join(', ')}) at the point the lock was released`,
+        ],
+  );
+  if (refused.length > 0) throw new Error(refused.join('\n'));
+  await Promise.all(targets.map(([target, what]) => waitGone(target, what, ms)));
+}
+
 export interface Result {
   /** Undefined when the driver died before printing its result. */
   status?: number;

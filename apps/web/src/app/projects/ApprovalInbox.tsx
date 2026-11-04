@@ -3,6 +3,7 @@ import type { ApprovalInbox as Inbox, ReadResult } from '@/server/projects';
 import { toPersianDigits } from '@/lib/format';
 
 import { StepRow, type DecisionTokens } from './[id]/ProjectApprovals';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The authority's inbox (`GET /v1/approvals`): the project approval steps
@@ -85,7 +86,7 @@ function InboxBody({ result, csrfToken, decisions }: ApprovalInboxProps) {
             step={step}
             csrfToken={csrfToken}
             place="inbox"
-            tokens={decisions[step.id]}
+            tokens={ownValue(decisions, step.id)}
             showProject
           />
         ))}

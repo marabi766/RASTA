@@ -8,7 +8,7 @@ import type { FieldErrors, ResolverOptions } from 'react-hook-form';
 import { z } from 'zod';
 import { legacyParse, type LegacyRefusal } from '@rasta/contracts';
 
-import { formIssueMessage, GENERIC_FIELD_MESSAGE } from './form-issues';
+import { formIssueMessage, formMessage, GENERIC_FIELD_MESSAGE } from './form-issues';
 import { legacyFormResolver } from './form-resolver';
 
 /**
@@ -17,6 +17,9 @@ import { legacyFormResolver } from './form-resolver';
  * `zodResolver`, and a union refused as a whole routes each option's issues to
  * the option's own fields, worded and masked as every other form issue.
  */
+
+/** A sentence the schema author declared (formIssueMessage rule 2). */
+const WRONG = formMessage('مقدار درست نیست');
 
 const options = { fields: {}, shouldUseNativeValidation: false } as const;
 const allCriteria = { ...options, criteriaMode: 'all' } as const;
@@ -57,7 +60,7 @@ describe('legacyFormResolver awaits the parse (r4 F4)', () => {
         n: z.string().refine(async (value) => {
           await tick();
           return value === 'ok';
-        }, 'مقدار درست نیست'),
+        }, WRONG),
       }),
       { n: 'ok' },
       { n: 'no' },
@@ -67,7 +70,7 @@ describe('legacyFormResolver awaits the parse (r4 F4)', () => {
       z.object({
         n: z.string().superRefine(async (value, ctx) => {
           await tick();
-          if (value !== 'ok') ctx.addIssue({ code: 'custom', message: 'مقدار درست نیست' });
+          if (value !== 'ok') ctx.addIssue({ code: 'custom', message: WRONG });
         }),
       }),
       { n: 'ok' },
@@ -79,7 +82,7 @@ describe('legacyFormResolver awaits the parse (r4 F4)', () => {
         n: z.string().check(async (ctx) => {
           await tick();
           if (ctx.value !== 'ok') {
-            ctx.issues.push({ code: 'custom', message: 'مقدار درست نیست', input: ctx.value });
+            ctx.issues.push({ code: 'custom', message: WRONG, input: ctx.value });
           }
         }),
       }),
@@ -91,7 +94,7 @@ describe('legacyFormResolver awaits the parse (r4 F4)', () => {
       z.object({
         n: z.string().transform(async (value, ctx) => {
           await tick();
-          if (value !== 'ok') ctx.addIssue({ code: 'custom', message: 'مقدار درست نیست' });
+          if (value !== 'ok') ctx.addIssue({ code: 'custom', message: WRONG });
           return value.toUpperCase();
         }),
       }),
@@ -106,7 +109,7 @@ describe('legacyFormResolver awaits the parse (r4 F4)', () => {
             await tick();
             return typeof value === 'string' ? value.trim() : value;
           },
-          z.string().refine((value) => value === 'ok', 'مقدار درست نیست'),
+          z.string().refine((value) => value === 'ok', WRONG),
         ),
       }),
       { n: ' ok ' },
@@ -127,7 +130,7 @@ describe('legacyFormResolver awaits the parse (r4 F4)', () => {
       const resolved = await resolve(schema, invalid);
       expect(resolved.values).toEqual({});
       expect(resolved.errors).toEqual({
-        n: { type: 'custom', message: 'مقدار درست نیست', ref: undefined },
+        n: { type: 'custom', message: WRONG, ref: undefined },
       });
       expect(fieldsOf(resolved.errors)).toEqual(
         fieldsOf((await viaZodResolver(schema, invalid)).errors),
@@ -263,11 +266,11 @@ describe('the union branch tree is value-free (r4 F5, addendum A)', () => {
         z.object({ a: z.enum(['OPTION-ALPHA', 'OPTION-BETA']), n: z.string().max(2) }),
         z.object({
           b: z.literal('LITERAL-GAMMA'),
-          c: z.string().refine((v) => v === 'ok', 'مقدار درست نیست'),
+          c: z.string().refine((v) => v === 'ok', WRONG),
         }),
         z.object({
-          // A Persian message built from the input: shown as written, at the
-          // top level and in an option alike (formIssueMessage rule 1).
+          // A Persian message built from the input: never declared, so never
+          // shown — at the top level and in an option alike (PR-439 r1 F1).
           d: z.number({ error: (issue) => `مقدار ${String(issue.input)} عدد نیست` }),
         }),
       ]),
@@ -299,15 +302,16 @@ describe('the union branch tree is value-free (r4 F5, addendum A)', () => {
       expect(text).not.toMatch(/OPTION-ALPHA|OPTION-BETA|LITERAL-GAMMA/);
       expect(text).not.toMatch(/[A-Za-z]{4,} /); // no English sentence of zod's
     }
-    // A Persian message the schema wrote — static or built from the input —
-    // passes exactly as it would at the top level (formIssueMessage rule 1).
+    // A message built from the input is worded exactly as it would be at the
+    // top level: by its code, without the input (formIssueMessage rule 2).
     const top = legacyParse(z.object({ d: schema.shape.tags.valueType.options[2].shape.d }), {
       d: TYPED,
     });
     if (top.success) throw new Error('expected a refusal');
     const d = tree!.flat().find((branch) => branch.path.at(-1) === 'd');
     expect(d?.message).toBe(formIssueMessage(top.refusal.issues[0]));
-    expect(d?.message).toBe(`مقدار ${TYPED} عدد نیست`);
+    expect(d?.message).toBe('یک عدد صحیح و معتبر وارد کنید');
+    expect(d?.message).not.toContain(TYPED);
   });
 
   it('leaves the refusal itself as it was: no tree in its issues, JSON or inspection', () => {
@@ -323,5 +327,123 @@ describe('the union branch tree is value-free (r4 F5, addendum A)', () => {
     );
     expect(inspect(refusal)).toBe(`LegacyRefusal ${JSON.stringify(refusal)}`);
     expect(JSON.stringify(refusal.issues)).not.toMatch(/branches|OPTION-ALPHA/);
+  });
+});
+
+describe('parity with zodResolver, messages aside (Codex PR-439 r1 F3, addendum F)', () => {
+  // Differential: the same schema and values through both resolvers. Only the
+  // wording may differ (ours is Persian, and `type` names zod 3's code, D-078);
+  // success, values, the fields addressed (union options included) and, under
+  // criteriaMode all, how many criteria each field collected must not.
+  const MARK = 'typed-input-marker';
+  // `extra`: fields zod 3's run order adds on purpose (D-078: a refinement on
+  // the object still runs after its children failed); nothing else may differ.
+  const corpus: [string, z.ZodType<Record<string, unknown>>, unknown[], string[]?][] = [
+    [
+      'a field corrected after a failure',
+      z.object({ n: z.string().min(2) }),
+      [{ n: 'a' }, { n: 'abc' }],
+    ],
+    [
+      'a union of objects refused as a whole',
+      z.object({ choice: z.union([z.object({ a: z.string() }), z.object({ b: z.number() })]) }),
+      [{ choice: {} }, { choice: { a: MARK } }, { choice: { b: 1 } }],
+    ],
+    [
+      'a discriminated union',
+      z.object({
+        d: z.discriminatedUnion('k', [
+          z.object({ k: z.literal('x'), x: z.string().min(1) }),
+          z.object({ k: z.literal('y'), y: z.number() }),
+        ]),
+      }),
+      [{ d: { k: 'x', x: '' } }, { d: { k: MARK } }, { d: { k: 'y', y: 2 } }],
+    ],
+    [
+      'two criteria on one field',
+      z.object({ p: z.string().min(5).regex(/^\d+$/) }),
+      [{ p: 'ab' }, { p: '12345' }],
+    ],
+    [
+      'nested arrays and an object-level refinement with a path',
+      z
+        .object({ rows: z.array(z.object({ q: z.number().int().positive() })), a: z.string() })
+        .refine((v) => v.a !== MARK, { path: ['a'], message: 'x' }),
+      [
+        { rows: [{ q: 1 }, { q: -1 }, { q: 1.5 }], a: MARK },
+        { rows: [{ q: 2 }], a: 'ok' },
+      ],
+      ['a'],
+    ],
+    [
+      'a transform and an async refinement',
+      z.object({
+        t: z
+          .string()
+          .trim()
+          .transform((v) => v.toUpperCase())
+          .refine(async (v) => {
+            await tick();
+            return v !== 'BAD';
+          }),
+      }),
+      [{ t: ' bad ' }, { t: ' ok ' }],
+    ],
+  ];
+  const modes: [string, Options][] = [
+    ['firstError', options],
+    ['criteriaMode all', allCriteria],
+  ];
+
+  const typesOf = (errors: FieldErrors, prefix = ''): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(errors)) {
+      if (!value || typeof value !== 'object' || key === 'ref' || key === 'types') continue;
+      const name = prefix ? `${prefix}.${key}` : key;
+      const types = (value as { types?: object }).types;
+      if (types) out[name] = Object.keys(types).length;
+      Object.assign(out, typesOf(value as FieldErrors, name));
+    }
+    return out;
+  };
+
+  describe.each(corpus)('%s', (_label, schema, values, extra = []) => {
+    it.each(modes)('%s: same outcome, values and error structure', async (_mode, mode) => {
+      for (const value of values) {
+        const ours = await resolve(schema, value, mode);
+        const upstream = await viaZodResolver(schema, value, mode);
+        expect(Object.keys(ours.errors).length === 0).toBe(
+          Object.keys(upstream.errors).length === 0,
+        );
+        expect(ours.values).toEqual(upstream.values);
+        const added = fieldsOf(ours.errors).filter((f) => !fieldsOf(upstream.errors).includes(f));
+        expect(fieldsOf(ours.errors).filter((f) => !added.includes(f))).toEqual(
+          fieldsOf(upstream.errors),
+        );
+        expect(added).toEqual(Object.keys(upstream.errors).length === 0 ? [] : extra);
+        const counted = typesOf(ours.errors);
+        for (const field of added) delete counted[field];
+        expect(counted).toEqual(typesOf(upstream.errors));
+        const shown = JSON.stringify(ours.errors);
+        expect(shown).not.toContain(MARK);
+        expect(shown).not.toMatch(/[A-Za-z]{4,} /);
+      }
+    });
+  });
+
+  it('clears the browser’s own validity once a corrected value parses, as upstream does', async () => {
+    const schema = z.object({ n: z.string().min(2) });
+    const trace = async (resolver: typeof resolve | typeof viaZodResolver) => {
+      const calls: string[] = [];
+      const ref = { setCustomValidity: (m: string) => calls.push(m), reportValidity: () => {} };
+      const native = { fields: { n: { ref, name: 'n' } }, shouldUseNativeValidation: true };
+      await resolver(schema, { n: 'a' }, native as unknown as Options);
+      await resolver(schema, { n: 'abc' }, native as unknown as Options);
+      return calls;
+    };
+    const ours = await trace(resolve);
+    const upstream = await trace(viaZodResolver);
+    expect(ours.map((m) => m === '')).toEqual(upstream.map((m) => m === ''));
+    expect(ours).toEqual(['حداقل ۲ نویسه لازم است', '']);
   });
 });
