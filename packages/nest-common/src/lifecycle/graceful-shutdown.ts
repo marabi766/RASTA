@@ -153,7 +153,11 @@ export function installGracefulShutdown(
     logger = consoleLogger,
     signals = DEFAULT_SHUTDOWN_SIGNALS,
     exit = (code: number): void => process.exit(code),
-    signalSource = { on: (signal, listener) => process.on(signal, listener) },
+    signalSource = {
+      on: (signal, listener) => {
+        process.on(signal, listener);
+      },
+    },
   } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
   const afterCloseTimeoutMs = options.afterCloseTimeoutMs ?? DEFAULT_AFTER_CLOSE_TIMEOUT_MS;

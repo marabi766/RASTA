@@ -411,6 +411,21 @@ export default {
                       'emitWarning',
                     ];
               if (
+                parent.type === 'MemberExpression' &&
+                ['on', 'once', 'off', 'removeListener'].includes(staticKey(parent))
+              ) {
+                const call = parent.parent;
+                if (
+                  call.type !== 'CallExpression' ||
+                  call.callee !== parent ||
+                  !(
+                    call.parent.type === 'ExpressionStatement' ||
+                    (call.parent.type === 'UnaryExpression' && call.parent.operator === 'void')
+                  )
+                )
+                  report(parent, 'process listener result exposes loaders');
+              }
+              if (
                 !(
                   parent.type === 'MemberExpression' &&
                   parent.object === identifier &&
