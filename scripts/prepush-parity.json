@@ -1,6 +1,37 @@
 {
-  "version": 1,
-  "jobKeys": ["name", "runs-on", "steps", "timeout-minutes"],
+  "version": 2,
+  "workflow": {
+    "name": "CI",
+    "on": {
+      "push": {
+        "branches": ["main"]
+      },
+      "pull_request": {
+        "branches": ["main"]
+      }
+    },
+    "concurrency": {
+      "group": "ci-${{ github.ref }}",
+      "cancel-in-progress": true
+    },
+    "env": {
+      "NODE_VERSION": "22",
+      "PNPM_VERSION": "11.22.0",
+      "MINIO_IMAGE": "cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1",
+      "MC_IMAGE": "cgr.dev/chainguard/minio-client@sha256:b8b144ab34694ecea25aa352c4be9de4c26ee2a02701521dce02ee5593c57338",
+      "TRIVY_VERSION": "v0.70.0"
+    }
+  },
+  "job": {
+    "name": "Lint, types and unit tests",
+    "runs-on": "ubuntu-latest",
+    "timeout-minutes": 64
+  },
+  "pnpmInputs": {
+    "package.json": "5b9317155b82d265378fc90fe690e6f5796bd7cbad4f5710a12aa0b839a050b7",
+    "pnpm-workspace.yaml": "684806e1022996c3e17312726df6f87a29f5a4264fef3b53f333927a692609ed",
+    ".npmrc": "cc4bfd2fb3d4673444a53190a9b275eba6b6af6156ced60728582829895cf9ef"
+  },
   "steps": [
     {
       "ci": {

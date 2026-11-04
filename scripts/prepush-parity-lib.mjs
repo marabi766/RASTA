@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'yaml';
@@ -9,47 +10,47 @@ const refuse = () => {
 };
 const load = (root, file) => readFileSync(`${root}/${file}`, 'utf8');
 
-// Compare the whole executable step, including env, shell, conditions and
-// failure handling. No regex that silently ignores a new command spelling.
-export function validateParity(workflow, manifest, scripts) {
-  const job = parse(workflow)?.jobs?.quality;
-  if (
-    job?.name !== 'Lint, types and unit tests' ||
-    !Array.isArray(job.steps) ||
-    !job.steps.length ||
-    manifest?.version !== 1 ||
-    !Array.isArray(manifest.steps) ||
-    !isDeepStrictEqual(Object.keys(job).sort(), manifest.jobKeys) ||
-    !isDeepStrictEqual(job.env, manifest.jobEnv) ||
-    job.steps.length !== manifest.steps.length
-  )
-    refuse();
+// Pin all workflow context and all quality-job values, not just key names.
+// Repository pnpm inputs are pinned with normalized line endings; new settings require review.
+const pnpmFiles = ['package.json', 'pnpm-workspace.yaml', '.npmrc'];
+export function validateParity(workflow, manifest, scripts, pnpmInputs) {
+  const { jobs, ...context } = parse(workflow);
+  const { steps, ...job } = jobs.quality;
+  if (manifest?.version !== 2) refuse();
+  if (!isDeepStrictEqual(context, manifest.workflow)) refuse();
+  if (!isDeepStrictEqual(job, manifest.job)) refuse();
+  if (!Array.isArray(manifest.steps)) refuse();
+  if (steps.length !== manifest.steps.length) refuse();
+  const digests = Object.fromEntries(
+    pnpmFiles.map((file) => [
+      file,
+      createHash('sha256').update(pnpmInputs[file].replace(/\r\n?/g, '\n')).digest('hex'),
+    ]),
+  );
+  if (!isDeepStrictEqual(digests, manifest.pnpmInputs)) refuse();
   const checks = [];
-  for (const [index, step] of job.steps.entries()) {
+  for (const [index, step] of steps.entries()) {
     const entry = manifest.steps[index];
     if (!isDeepStrictEqual(step, entry.ci)) refuse();
     if (entry.script !== undefined) {
       if (
         entry.reason !== undefined ||
+        !isDeepStrictEqual(Object.keys(step).sort(), ['name', 'run']) ||
         step.run !== `pnpm run ${entry.script}` ||
-        step.env !== undefined ||
-        step.if !== undefined ||
-        step['continue-on-error'] !== undefined ||
-        typeof entry.command !== 'string' ||
+        ['pre', 'post'].some((prefix) => scripts[`${prefix}${entry.script}`] !== undefined) ||
         scripts[entry.script] !== entry.command ||
-        !/^node --test --test-timeout=300000 scripts\/prepush-(scope|parity)\.test\.mjs$/.test(
-          entry.command,
-        )
+        entry.command !==
+          `node --test --test-timeout=300000 scripts/${entry.script.slice(5)}.test.mjs`
       )
         refuse();
       checks.push(entry);
-    } else if (typeof entry.reason !== 'string' || !entry.reason.trim()) refuse();
+    } else if (!entry.reason?.trim()) refuse();
   }
   if (
-    !['test:prepush-scope', 'test:prepush-parity'].every((name) =>
-      checks.some((c) => c.script === name),
-    ) ||
-    new Set(checks.map((c) => c.script)).size !== checks.length
+    !isDeepStrictEqual(
+      checks.map((c) => c.script),
+      ['test:prepush-scope', 'test:prepush-parity'],
+    )
   )
     refuse();
   return checks;
@@ -98,6 +99,7 @@ export function runParity(
     read(root, '.github/workflows/ci.yml'),
     JSON.parse(read(root, 'scripts/prepush-parity.json')),
     JSON.parse(read(root, 'package.json')).scripts,
+    Object.fromEntries(pnpmFiles.map((file) => [file, read(root, file)])),
   ];
   const before = inputs();
   const checks = validateParity(...before);
@@ -112,18 +114,6 @@ export function runParity(
   if (!isDeepStrictEqual(before, after)) refuse();
   const finalScope = select(root, scope.resolvedBase);
   if (!isDeepStrictEqual(scope, finalScope)) refuse();
-  validateParity(...after);
-  if (
-    !isDeepStrictEqual(
-      receipts,
-      checks.map((entry) => ({
-        script: entry.script,
-        command: entry.command,
-        env,
-      })),
-    )
-  )
-    refuse();
   const exclusions = before[1].steps.filter((entry) => entry.reason);
   for (const entry of exclusions)
     report(`EXCLUDED ${entry.ci.name ?? entry.ci.run ?? entry.ci.uses}: ${entry.reason}`);

@@ -1,15 +1,29 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { stringify, parse } from 'yaml';
-import { controlledEnv, executeCheck, runParity, validateParity } from './prepush-parity-lib.mjs';
+import {
+  controlledEnv,
+  executeCheck,
+  runParity,
+  validateParity as validate,
+} from './prepush-parity-lib.mjs';
 
 const root = new URL('../', import.meta.url).pathname;
 const workflow = readFileSync(`${root}.github/workflows/ci.yml`, 'utf8');
 const manifest = JSON.parse(readFileSync(`${root}scripts/prepush-parity.json`, 'utf8'));
 const scripts = JSON.parse(readFileSync(`${root}package.json`, 'utf8')).scripts;
+const pnpmInputs = Object.fromEntries(
+  ['package.json', 'pnpm-workspace.yaml', '.npmrc'].map((file) => [
+    file,
+    readFileSync(`${root}${file}`, 'utf8'),
+  ]),
+);
+const validateParity = (workflow, manifest, scripts, inputs = pnpmInputs) =>
+  validate(workflow, manifest, scripts, inputs);
 const sha = 'a'.repeat(40);
 const scope = {
   resolvedBase: sha,
@@ -188,5 +202,177 @@ test('real child ignores root .env and inherited Node options/credentials, and n
     if (previous === undefined) delete process.env.NODE_OPTIONS;
     else process.env.NODE_OPTIONS = previous;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Keep each refusal independent so removing one clause cannot hide behind another.
+test('workflow context values and unknown keys refuse without a reviewed pin', () => {
+  for (const change of [
+    { name: 'Other' },
+    { on: {} },
+    { concurrency: {} },
+    { permissions: {} },
+    { defaults: { run: { shell: 'true {0}' } } },
+    { env: { ...manifest.workflow.env, NODE_OPTIONS: '--require=./injected.cjs' } },
+    { env: { ...manifest.workflow.env, NODE_VERSION: '18' } },
+    { futureSetting: true },
+  ]) {
+    assert.throws(() =>
+      validateParity(stringify({ ...parse(workflow), ...change }), manifest, scripts),
+    );
+  }
+});
+
+test('all job values and unknown job keys refuse independently', () => {
+  for (const change of [
+    { name: 'Other' },
+    { 'runs-on': 'windows-latest' },
+    { 'timeout-minutes': 0.05 },
+    { env: { NODE_OPTIONS: '--require=./injected.cjs' } },
+    { defaults: {} },
+    { container: 'node:18' },
+    { services: {} },
+    { if: 'false' },
+    { 'continue-on-error': true },
+    { permissions: {} },
+    { strategy: {} },
+    { futureSetting: true },
+  ]) {
+    const changed = parse(workflow);
+    Object.assign(changed.jobs.quality, change);
+    assert.throws(() => validateParity(stringify(changed), manifest, scripts));
+  }
+});
+
+test('every extra executed-step field refuses even with CI and manifest co-drift', () => {
+  for (const change of [
+    { shell: 'true {0}' },
+    { 'working-directory': 'services/asset-service' },
+    { 'timeout-minutes': 0.01 },
+    { env: {} },
+    { if: 'false' },
+    { 'continue-on-error': true },
+    { futureSetting: true },
+  ]) {
+    for (const script of ['test:prepush-scope', 'test:prepush-parity']) {
+      const changed = clone(manifest),
+        ci = parse(workflow);
+      const index = changed.steps.findIndex((entry) => entry.script === script);
+      Object.assign(changed.steps[index].ci, change);
+      ci.jobs.quality.steps[index] = changed.steps[index].ci;
+      assert.throws(() => validateParity(stringify(ci), changed, scripts));
+    }
+  }
+});
+
+test('manifest version, step array, trailing entry and executed reasons refuse independently', () => {
+  for (const mutate of [
+    (m) => {
+      m.version = 1;
+    },
+    (m) => {
+      m.steps = { ...m.steps, length: m.steps.length };
+    },
+    (m) => {
+      m.steps.push({ ci: { run: 'true' }, reason: 'Extra' });
+    },
+    (m) => {
+      m.steps.find((e) => e.script).reason = '';
+    },
+    (m) => {
+      delete m.steps[0].reason;
+    },
+    (m) => {
+      m.steps[0].reason = 42;
+    },
+  ]) {
+    const changed = clone(manifest);
+    mutate(changed);
+    assert.throws(() => validateParity(workflow, changed, scripts));
+  }
+});
+
+test('executed run and exact script-to-command binding refuse co-drift', () => {
+  const changed = clone(manifest),
+    ci = parse(workflow);
+  const index = changed.steps.findIndex((e) => e.script);
+  changed.steps[index].ci.run = 'true';
+  ci.jobs.quality.steps[index] = changed.steps[index].ci;
+  assert.throws(() => validateParity(stringify(ci), changed, scripts));
+  for (const script of ['test:prepush-scope', 'test:prepush-parity']) {
+    for (const prefix of ['pre', 'post']) {
+      assert.throws(() =>
+        validateParity(workflow, manifest, { ...scripts, [`${prefix}${script}`]: 'true' }),
+      );
+    }
+  }
+  const swapped = clone(manifest),
+    commands = { ...scripts };
+  for (const entry of swapped.steps.filter((e) => e.script)) {
+    entry.command = entry.command.replace(
+      /prepush-(scope|parity)/,
+      (_, name) => `prepush-${name === 'scope' ? 'parity' : 'scope'}`,
+    );
+    commands[entry.script] = entry.command;
+  }
+  assert.throws(() => validateParity(workflow, swapped, commands));
+});
+
+test('every repository pnpm input is pinned, missing inputs and run settings refuse', () => {
+  for (const file of Object.keys(pnpmInputs)) {
+    for (const value of [undefined, `${pnpmInputs[file]}\n# drift`]) {
+      assert.throws(() =>
+        validateParity(workflow, manifest, scripts, { ...pnpmInputs, [file]: value }),
+      );
+    }
+  }
+  for (const setting of ['scriptShell', 'nodeOptions', 'enablePrePostScripts', 'futureSetting']) {
+    assert.throws(() =>
+      validateParity(workflow, manifest, scripts, {
+        ...pnpmInputs,
+        'pnpm-workspace.yaml': `${pnpmInputs['pnpm-workspace.yaml']}\n${setting}: true\n`,
+      }),
+    );
+    assert.throws(() =>
+      validateParity(workflow, manifest, scripts, {
+        ...pnpmInputs,
+        '.npmrc': `${pnpmInputs['.npmrc']}\n${setting}=true\n`,
+      }),
+    );
+  }
+  const crlf = Object.fromEntries(
+    Object.entries(pnpmInputs).map(([file, text]) => [file, text.replace(/\n/g, '\r\n')]),
+  );
+  assert.equal(validateParity(workflow, manifest, scripts, crlf).length, 2);
+  const cr = Object.fromEntries(
+    Object.entries(pnpmInputs).map(([file, text]) => [file, text.replace(/\n/g, '\r')]),
+  );
+  assert.equal(validateParity(workflow, manifest, scripts, cr).length, 2);
+  // Hooks stay forbidden even if the package.json digest is deliberately repinned.
+  const pkg = JSON.parse(pnpmInputs['package.json']);
+  pkg.scripts['pretest:prepush-scope'] = 'true';
+  const inputs = { ...pnpmInputs, 'package.json': JSON.stringify(pkg) },
+    changed = clone(manifest);
+  changed.pnpmInputs['package.json'] = createHash('sha256')
+    .update(inputs['package.json'])
+    .digest('hex');
+  assert.throws(() => validateParity(workflow, changed, pkg.scripts, inputs));
+});
+
+test('pnpm inputs are re-read after execution and drift refuses', () => {
+  for (const target of ['.npmrc', 'pnpm-workspace.yaml']) {
+    let ran = false;
+    assert.throws(() =>
+      runParity(root, sha, {
+        select: () => clone(scope),
+        execute: () => {
+          ran = true;
+        },
+        report: () => {},
+        read: (dir, file) =>
+          readFileSync(`${dir}/${file}`, 'utf8') + (ran && file === target ? '\n# drift' : ''),
+      }),
+    );
+    assert.equal(ran, true);
   }
 });

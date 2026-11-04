@@ -127,7 +127,9 @@ incomplete dependent closures. Run from the worktree root after
 `pnpm run prepush:parity --base origin/main` recomputes selection and runs the
 scope and parity suites serially in a controlled environment, then verifies the
 selection and execution inputs again. `scripts/prepush-parity.json` explicitly
-accounts for every quality-job step, including exclusions with reasons. Command,
+pins the entire workflow context, quality-job settings and repository pnpm inputs,
+and accounts for every quality-job step, including exclusions with reasons. Executed
+steps allow only `name` and `run`; their pre/post hooks are refused. Command,
 environment, condition or failure-handling drift refuses until reviewed. This is
 an incomplete parity slice, not the full pre-push gate: package checks, static
 checks, prerequisites and measured cold/warm timings remain slice C. No old
