@@ -1,8 +1,10 @@
 import { Body, Controller, Headers, HttpCode, Param, Post, Put } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
+import { JSON_BODY_LIMIT_BYTES } from '../shared/body-parser';
 import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
 import {
+  QUOTATION_BODY_MAX_BYTES,
   putQuotationSchema,
   withdrawQuotationSchema,
   type PutQuotationDto,
@@ -58,7 +60,10 @@ export class QuotationController {
       'ALREADY_EXISTS when it has one, a withdrawn one included); with it, the next revision of ' +
       'the caller’s own (none: 404; moved: 409 OPTIMISTIC_LOCK_FAILED; withdrawn: 422 ' +
       'QUOTATION_NOT_SUBMITTED; past PROCUREMENT_QUOTATION_MAX_REVISIONS: 422 ' +
-      'QUOTATION_REVISION_LIMIT). The content is judged against the RFQ before anything is sealed ' +
+      `QUOTATION_REVISION_LIMIT). A body above ${QUOTATION_BODY_MAX_BYTES} bytes of compact JSON, ` +
+      'counted after its text is made canonical, is 400 VALIDATION_FAILED; a request above ' +
+      `${JSON_BODY_LIMIT_BYTES} bytes as sent is not read: 413 PAYLOAD_TOO_LARGE, whatever it ` +
+      'holds. The content is judged against the RFQ before anything is sealed ' +
       'or written: one answer per criterion (422 UNKNOWN_CRITERION / CRITERION_UNANSWERED), and ' +
       'unitPriceMinor × the RFQ’s totalQuantity at most 2^63 − 1 (422 ' +
       'QUOTATION_AMOUNT_OUT_OF_RANGE). The supplier’s standing is then asked of supplier-service ' +

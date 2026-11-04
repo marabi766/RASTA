@@ -10,6 +10,8 @@ import { EventPublisher } from '../src/events/publisher';
 import { LOGGER } from '../src/tokens';
 import { QUOTATION_SEALING } from '../src/quotation/sealing';
 import { QuotationRepository } from '../src/quotation/quotation.repository';
+import { QUOTATION_BODY_MAX_BYTES } from '../src/quotation/dto';
+import { JSON_BODY_LIMIT_BYTES } from '../src/shared/body-parser';
 import { actor, internalToken, key } from './api-helpers';
 import { cleanup } from './helpers';
 import {
@@ -21,6 +23,7 @@ import {
   waitForLockWaiter,
   type RfqHarness,
 } from './rfq-helpers';
+import { CRITERION_CODES, largestQuotationBody, quotationBodyOfBytes } from './quotation-body';
 
 /**
  * Sealed quotations on an issued RFQ (ADR-070 § 4, ADR-066 § 2-3; plan PR 8): an invited supplier
@@ -63,11 +66,13 @@ describe('sealed quotations', () => {
     const token = actor(organizationId, roles, rastaUserId ? { rastaUserId } : {});
     const http = () => request(h.api.app.getHttpServer());
     return {
-      put: (rfqId: string, body: object, k = key()) =>
+      /** A string is sent as it is: the bytes on the wire are the test's. */
+      put: (rfqId: string, body: object | string, k = key()) =>
         http()
           .put(`/v1/rfqs/${rfqId}/quotations/mine`)
           .set('authorization', `Bearer ${token}`)
           .set('idempotency-key', k)
+          .type('json')
           .send(body),
       withdraw: (rfqId: string, expectedRevision: number, k = key()) =>
         http()
@@ -82,7 +87,14 @@ describe('sealed quotations', () => {
    * An RFQ issued 12 hours into the timeline `t0` with a deadline `hours` later, its invitees
    * eligible suppliers (one more invited when `invite` names it).
    */
-  async function issued(options: { t0?: Date; deadline?: Date; invite?: string[] } = {}) {
+  async function issued(
+    options: {
+      t0?: Date;
+      deadline?: Date;
+      invite?: string[];
+      criteria?: Record<string, unknown>[];
+    } = {},
+  ) {
     const t0 = options.t0 ?? T0;
     const { organizationId, aggregation } = await h.readyAggregation(undefined, t0);
     const deadline = options.deadline ?? new Date(t0.getTime() + 12 * HOUR + 48 * HOUR);
@@ -95,6 +107,7 @@ describe('sealed quotations', () => {
     const body = h.issueBody(aggregation, {
       quotationClosingAt: deadline.toISOString(),
       invitedSupplierOrganizationIds: invitees,
+      ...(options.criteria ? { criteria: options.criteria } : {}),
     });
     const response = await h.admin(organizationId).issueRfq(aggregation.id, body);
     expect(response.status).toBe(201);
@@ -469,6 +482,139 @@ describe('sealed quotations', () => {
       });
       expect(codeOf(missing)).toBe('CRITERION_UNANSWERED');
       expect(await rows(rfq.id)).toEqual([]);
+    });
+  });
+
+  describe('the body budget, through the parser production runs (PR-605 r1 F1)', () => {
+    const FIFTY_CRITERIA = CRITERION_CODES.map((code) => ({
+      code,
+      label: code,
+      weightBp: 200,
+      scoringMethod: 'MANUAL_SCORE',
+      maxScore: 100,
+    }));
+    const wireBytes = (body: object | string) =>
+      Buffer.byteLength(typeof body === 'string' ? body : JSON.stringify(body));
+    /** The refusal of the schema, never the transport's. */
+    const expectOverBudget = (response: request.Response) => {
+      expect([response.status, response.body.code, codeOf(response)]).toEqual([
+        400,
+        'VALIDATION_FAILED',
+        'too_big',
+      ]);
+      expect(response.body.details[0].message).toContain(
+        `at most ${QUOTATION_BODY_MAX_BYTES} bytes`,
+      );
+    };
+
+    it.each([
+      ['ASCII', 'x', false],
+      ['Persian', 'ب', false],
+      ['escape-heavy', '"\\\n\t\u0001', false],
+      ['answers and a note', 'ب', true],
+    ])('%s: submit and revise at the budget, refused one byte over', async (_, unit, note) => {
+      const { buyer, rfq, invitees } = await issued({ criteria: FIFTY_CRITERIA });
+      const a = supplierAs(invitees[0]!);
+      const asked = h.supplier.asked.length;
+
+      const tooBig = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES + 1, unit, { note });
+      expect(wireBytes(tooBig)).toBe(QUOTATION_BODY_MAX_BYTES + 1);
+      expectOverBudget(await a.put(rfq.id, tooBig));
+      expect(h.supplier.asked.length).toBe(asked);
+      expect(await rows(rfq.id)).toEqual([]);
+
+      const first = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES, unit, { note });
+      expect(wireBytes(first)).toBe(QUOTATION_BODY_MAX_BYTES);
+      const submitted = await a.put(rfq.id, first);
+      expect([submitted.status, submitted.body.revision]).toEqual([200, 1]);
+
+      const options = { note, expectedRevision: 1 };
+      const tooBigRevision = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES + 1, unit, options);
+      expect(wireBytes(tooBigRevision)).toBe(QUOTATION_BODY_MAX_BYTES + 1);
+      expectOverBudget(await a.put(rfq.id, tooBigRevision));
+      expect(await rows(rfq.id)).toMatchObject([{ revision: 1 }]);
+
+      const revision = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES, unit, options);
+      expect(wireBytes(revision)).toBe(QUOTATION_BODY_MAX_BYTES);
+      const revised = await a.put(rfq.id, revision);
+      expect([revised.status, revised.body.revision]).toEqual([200, 2]);
+
+      expect(await h.events(buyer, 'QUOTATION_SUBMITTED')).toHaveLength(1);
+      expect(await h.events(buyer, 'QUOTATION_REVISED')).toHaveLength(1);
+    });
+
+    it('takes the bodies the review found refused: 33 × 2,000 ASCII and 17 × 2,000 Persian characters', async () => {
+      const { rfq, invitees } = await issued({ criteria: FIFTY_CRITERIA });
+      const answers = (count: number, character: string) => ({
+        content: {
+          unitPriceMinor: '10',
+          answers: CRITERION_CODES.map((criterionCode, index) => ({
+            criterionCode,
+            answer: index < count ? character.repeat(2000) : character,
+          })),
+        },
+      });
+      for (const [invitee, body] of [
+        [invitees[0]!, answers(33, 'x')],
+        [invitees[1]!, answers(17, 'ب')],
+      ] as const) {
+        expect(wireBytes(body)).toBeGreaterThan(64 * 1024);
+        expect((await supplierAs(invitee).put(rfq.id, body)).status).toBe(200);
+      }
+    });
+
+    it('takes an at-budget body in the spellings a client may use: \\uXXXX, CRLF', async () => {
+      const { rfq, invitees } = await issued({ criteria: FIFTY_CRITERIA });
+      const persian = JSON.stringify(quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES, 'ب')).replace(
+        /[\u0080-\uffff]/g,
+        (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`,
+      );
+      const crlf = JSON.stringify(quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES, '\n')).replace(
+        /\\n/g,
+        '\\r\\n',
+      );
+      for (const [invitee, wire] of [
+        [invitees[0]!, persian],
+        [invitees[1]!, crlf],
+      ] as const) {
+        expect(wireBytes(wire)).toBeGreaterThan(QUOTATION_BODY_MAX_BYTES);
+        expect(wireBytes(wire)).toBeLessThanOrEqual(JSON_BODY_LIMIT_BYTES);
+        expect((await supplierAs(invitee).put(rfq.id, wire)).status).toBe(200);
+      }
+    });
+
+    it.each([
+      ['Persian', 'ب'],
+      ['text JSON escapes to 2 bytes', '"'],
+    ])(
+      'judges the largest body within the field bounds, of %s: never 413',
+      async (_, character) => {
+        const { rfq, invitees } = await issued();
+        const body = largestQuotationBody(character);
+        expect(wireBytes(body)).toBeGreaterThan(2 * QUOTATION_BODY_MAX_BYTES);
+        expect(wireBytes(body)).toBeLessThanOrEqual(JSON_BODY_LIMIT_BYTES);
+        expectOverBudget(await supplierAs(invitees[0]!).put(rfq.id, body));
+      },
+    );
+
+    it('does not read what is above the limit as sent, within the field bounds or not: the documented 413', async () => {
+      const { rfq, invitees } = await issued();
+      const body = largestQuotationBody('😀');
+      expect(wireBytes(body)).toBeGreaterThan(JSON_BODY_LIMIT_BYTES);
+      const refused = await supplierAs(invitees[0]!).put(rfq.id, body);
+      expect([refused.status, refused.body.code]).toEqual([413, 'PAYLOAD_TOO_LARGE']);
+    });
+
+    it('reads a body to the parser limit and refuses one byte more with 413', async () => {
+      const { rfq, invitees } = await issued();
+      const a = supplierAs(invitees[0]!);
+      const body = JSON.stringify({ content: {} });
+      const padded = (bytes: number) => body + ' '.repeat(bytes - wireBytes(body));
+
+      const read = await a.put(rfq.id, padded(JSON_BODY_LIMIT_BYTES));
+      expect([read.status, read.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+      const refused = await a.put(rfq.id, padded(JSON_BODY_LIMIT_BYTES + 1));
+      expect([refused.status, refused.body.code]).toEqual([413, 'PAYLOAD_TOO_LARGE']);
     });
   });
 

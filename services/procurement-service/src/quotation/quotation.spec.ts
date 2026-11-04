@@ -1,8 +1,20 @@
-import { generateSealingKeyPair, privateKeyFromDer } from '@rasta/sealing';
+import { MAX_CONTENT_BYTES, generateSealingKeyPair, privateKeyFromDer } from '@rasta/sealing';
 import { expectNotDisclosed } from '@rasta/testing';
-import { RastaError, runWithContext, createSystemContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, createSystemContext, zodPipe } from '@rasta/nest-common';
 import type { RfqRecord } from '../rfq/rfq.repository';
-import { MAX_AMOUNT_MINOR, canonicalText, putQuotationSchema, quotationContentSchema } from './dto';
+import {
+  CRITERION_CODES,
+  largestQuotationBody,
+  quotationBodyOfBytes,
+} from '../../test/quotation-body';
+import {
+  MAX_AMOUNT_MINOR,
+  QUOTATION_BODY_MAX_BYTES,
+  canonicalText,
+  putQuotationSchema,
+  quotationBodyBytes,
+  quotationContentSchema,
+} from './dto';
 import { assertSealable } from './quotation.service';
 import { QUOTATION_SEALING, QUOTATION_SEALING_LABELS } from './sealing';
 
@@ -167,5 +179,89 @@ describe('the quotation body', () => {
     expect(
       putQuotationSchema.safeParse({ expectedRevision: 0, content: content('1') }).success,
     ).toBe(false);
+  });
+});
+
+describe('the body budget, in bytes (PR-605 r1 F1)', () => {
+  const issuesOf = (body: unknown) => {
+    const parsed = putQuotationSchema.safeParse(body);
+    return parsed.success ? 'ACCEPTED' : parsed.error.issues.map((issue) => issue.code).join();
+  };
+
+  describe.each([
+    ['ASCII', 'x', {}],
+    ['Persian', 'ب', {}],
+    ['astral', '😀', {}],
+    ['escape-heavy', '"\\\n\t\u0001', {}],
+    ['answers and a note', 'ب', { note: true }],
+    ['a revision', 'x', { expectedRevision: 7 }],
+  ])('%s', (_, unit, options) => {
+    it('takes the budget to the byte and refuses one more', () => {
+      const at = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES, unit, options);
+      const over = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES + 1, unit, options);
+      expect(Buffer.byteLength(JSON.stringify(at))).toBe(QUOTATION_BODY_MAX_BYTES);
+      expect(Buffer.byteLength(JSON.stringify(over))).toBe(QUOTATION_BODY_MAX_BYTES + 1);
+      expect(issuesOf(at)).toBe('ACCEPTED');
+      expect(issuesOf(over)).toBe('too_big');
+    });
+  });
+
+  it('counts the text as it is kept: CRLF, untrimmed and decomposed spellings of an at-budget body pass', () => {
+    const at = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES, '\n');
+    const spelled = structuredClone(at);
+    spelled.content.answers = spelled.content.answers.map((item) => ({
+      ...item,
+      answer: `  ${item.answer.replace(/\n/g, '\r\n')}\n`,
+    }));
+    expect(quotationBodyBytes(spelled)).toBeGreaterThan(QUOTATION_BODY_MAX_BYTES);
+    expect(issuesOf(spelled)).toBe('ACCEPTED');
+
+    // آ as alef + maddah: 4 bytes on the way in, 2 as it is kept.
+    const decomposed = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES + 1, 'ا\u0653');
+    expect(issuesOf(decomposed)).toBe('ACCEPTED');
+  });
+
+  it('counts after canonicalization grows the text: what NFC expands is weighed expanded', () => {
+    // U+0958 has no composed form under NFC: one character of 3 bytes becomes two of 6.
+    const answers = CRITERION_CODES.slice(0, 25).map((criterionCode) => ({
+      criterionCode,
+      answer: '\u0958'.repeat(999),
+    }));
+    const body = { content: { unitPriceMinor: '10', answers } };
+    expect(quotationBodyBytes(body)).toBeLessThan(QUOTATION_BODY_MAX_BYTES);
+    expect(issuesOf(body)).toBe('too_big');
+  });
+
+  it('always fits the seal: an at-budget body seals, with room to spare', async () => {
+    const { publicKeyPem } = await generateSealingKeyPair();
+    const at = quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES, '😀');
+    const sealed = QUOTATION_SEALING.seal({
+      publicKeyPem,
+      binding: { scopeId: 'R', entryId: 'Q', submitterId: 'S', revision: 1, keyId: 'K' },
+      content: at.content,
+    });
+    expect(sealed.ciphertext.length).toBeLessThan(MAX_CONTENT_BYTES);
+    expect(3 * QUOTATION_BODY_MAX_BYTES).toBeLessThanOrEqual(MAX_CONTENT_BYTES);
+  });
+
+  it.each([
+    ['a few fields', quotationBodyOfBytes(QUOTATION_BODY_MAX_BYTES + 1, 'ب')],
+    ['every field at its bound', largestQuotationBody('😀')],
+  ])('refuses %s through the pipe, in bytes, repeating nothing of the body', (_, over) => {
+    let refusal: unknown;
+    try {
+      zodPipe(putQuotationSchema).transform(over, { type: 'body' });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(RastaError);
+    expect((refusal as RastaError).details).toEqual([
+      {
+        path: '*',
+        code: 'too_big',
+        message:
+          'A quotation is at most 87381 bytes as compact JSON in UTF-8, counted after its text is made canonical',
+      },
+    ]);
   });
 });

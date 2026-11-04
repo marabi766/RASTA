@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { plainText } from '@rasta/contracts';
 import { codePointLength } from '@rasta/nest-common';
+import { MAX_CONTENT_BYTES } from '@rasta/sealing';
 
 /**
  * A quotation, as the invited supplier writes it and as it is answered (ADR-070 § 4, Q-120, Q-86;
@@ -19,6 +20,33 @@ export const MAX_NOTE_LENGTH = 2000;
 export const MAX_ANSWERS = 50;
 /** The largest amount the platform states: a PostgreSQL `bigint` (ADR-070 § 8). */
 export const MAX_AMOUNT_MINOR = 9_223_372_036_854_775_807n;
+
+/**
+ * The ONE size budget of a quotation body, in bytes: what `quotationBodyBytes` counts. The field
+ * bounds count characters, and 50 full answers can weigh far more than any layer carries (PR-605 r1
+ * F1).
+ *
+ * A third of 256 KiB: the seal's limit, and what both parsers read (`JSON_BODY_LIMIT_BYTES`). Sealing
+ * adds under a hundred bytes to the content, so a body within the budget always seals. The factor is
+ * the margin for how a client may spell canonical text: every non-ASCII character as `\uXXXX` (at
+ * most 3×, the default of several JSON libraries) or line endings as CRLF (2×) still fit the
+ * parsers. It does not cover every spelling: padding, or ASCII written as `\uXXXX`, can pass 256 KiB
+ * as sent, and is then 413, whatever it holds.
+ */
+export const QUOTATION_BODY_MAX_BYTES = Math.floor(MAX_CONTENT_BYTES / 3);
+
+/**
+ * The UTF-8 bytes of a parsed body as compact JSON, with JSON's escapes: exactly what a client that
+ * serializes the canonical text sends, and what `canonicalize` hands the seal for each string.
+ */
+export function quotationBodyBytes(body: unknown): number {
+  return Buffer.byteLength(JSON.stringify(body), 'utf8');
+}
+
+/** Static: it names the rule and never repeats the body (S-09). */
+const QUOTATION_BODY_TOO_LARGE =
+  `A quotation is at most ${QUOTATION_BODY_MAX_BYTES} bytes as compact JSON in UTF-8, ` +
+  'counted after its text is made canonical';
 
 /**
  * Free text in one spelling before it is length-checked and sealed: CRLF and a lone CR are LF, and
@@ -86,9 +114,28 @@ export const putQuotationSchema = z
           'it as the next revision (409 OPTIMISTIC_LOCK_FAILED when it moved; 404 when there is ' +
           'none to revise).',
       ),
-    content: quotationContentSchema,
+    content: quotationContentSchema.describe(
+      `The whole request body is at most ${QUOTATION_BODY_MAX_BYTES} bytes: UTF-8 of its compact ` +
+        'JSON, with JSON’s escapes, after the text is made canonical; above that 400 ' +
+        'VALIDATION_FAILED (`too_big`), even with every field within its own bound.',
+    ),
   })
-  .strict();
+  .strict()
+  .superRefine((body, context) => {
+    if (quotationBodyBytes(body) <= QUOTATION_BODY_MAX_BYTES) return;
+    context.addIssue({
+      // No field of the body is at fault. The pipe's echo backstop reads what lies under an issue's
+      // path, and a whole body holds more than it reads: at the root, this message would become
+      // zod's "at most N character(s)", which is wrong about the unit.
+      path: ['bytes'],
+      code: 'too_big',
+      origin: 'string',
+      maximum: QUOTATION_BODY_MAX_BYTES,
+      inclusive: true,
+      input: '',
+      message: QUOTATION_BODY_TOO_LARGE,
+    });
+  });
 export type PutQuotationDto = z.infer<typeof putQuotationSchema>;
 
 /** `POST /v1/rfqs/{id}/quotations/mine/withdraw`. */
