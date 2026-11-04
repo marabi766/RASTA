@@ -91,6 +91,13 @@
         "$TURBO_ROOT$/scripts/testing-dev-only.mjs",
         "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs",
         "$TURBO_ROOT$/scripts/zod-coercion-rule.mjs",
+        "$TURBO_ROOT$/scripts/zod-callback-helpers.mjs",
+        "$TURBO_ROOT$/apps/web/src/lib/form-issues.ts",
+        "$TURBO_ROOT$/apps/web/src/lib/format/codepoints.ts",
+        "$TURBO_ROOT$/apps/web/src/lib/format/digits.ts",
+        "$TURBO_ROOT$/apps/web/src/lib/format/index.ts",
+        "$TURBO_ROOT$/apps/web/src/lib/format/money.ts",
+        "$TURBO_ROOT$/apps/web/src/lib/format/text.ts",
         "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
       ],
       "outputs": []

@@ -34,13 +34,14 @@ const pins = {
   'apps/web/src/lib/format/text.ts':
     'df06651d9fa1d3d0c03f2543b27a97caef2a2e4e35e0b8d4b7f521e472355d9c',
 };
-export function verifiedCallbackHelper(root, module, name) {
-  const helper = helpers.find(([path, , names]) => path === module && names.includes(name));
+export const CALLBACK_HELPER_SOURCES = Object.freeze(Object.keys(pins));
+export function verifiedCallbackHelper(root, modulePath, name) {
+  const helper = helpers.find(([path, , names]) => path === modulePath && names.includes(name));
   if (!helper) return undefined;
   try {
     const files = [
       helper[1],
-      ...(module === 'apps/web/src/lib/format'
+      ...(modulePath === 'apps/web/src/lib/format'
         ? Object.keys(pins).filter((path) => path.startsWith('apps/web/src/lib/format/'))
         : []),
     ];
