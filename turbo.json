@@ -92,6 +92,7 @@
         "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs",
         "$TURBO_ROOT$/scripts/zod-coercion-rule.mjs",
         "$TURBO_ROOT$/scripts/zod-callback-helpers.mjs",
+        "$TURBO_ROOT$/apps/web/src/lib/repair-order-fields.ts",
         "$TURBO_ROOT$/apps/web/src/lib/order-fields.ts",
         "$TURBO_ROOT$/apps/web/src/server/drivers.ts",
         "$TURBO_ROOT$/apps/web/src/server/usage.ts",

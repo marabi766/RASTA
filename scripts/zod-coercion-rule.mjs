@@ -779,14 +779,18 @@ export default {
           if (origin(callee)) return false;
           const reviewed = reviewedHelper(callee);
           if (reviewed)
-            return reviewed !== 'predicate' && !stringValue(args[0], callee, new Set(), parameters);
+            return (
+              reviewed === 'money-limit' ||
+              (reviewed !== 'predicate' && !stringValue(args[0], callee, new Set(), parameters))
+            );
           if (globalName(callee, 'Date') && !args.length && callee !== callback) return false;
           if ((numeric(callee) || '').includes('.')) return true;
           if (numeric(callee)) {
             if (
               !strict &&
               numeric(callee) === 'BigInt' &&
-              /^(?:-?\d+)$/.test(String(constant(args[0]) ?? ''))
+              (/^(?:-?\d+)$/.test(String(constant(args[0]) ?? '')) ||
+                reviewedHelper(args[0]) === 'money-limit')
             )
               return false;
             return !(
