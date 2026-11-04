@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse, stringify } from 'yaml';
 import {
   checkBootstrapExample,
   checkCiUp,
@@ -285,19 +286,37 @@ test('an unnamed step, or one written in flow style, is checked like any other',
 
 test('the real workflow fails the check when a start step keeps the directory or a test step takes the admin’s', () => {
   const real = read('.github/workflows/ci.yml');
-  const kept = real.replaceAll('          unset KAFKA_SECRETS_DIR\n', '');
-  assert.notEqual(kept, real);
-  assert.ok(checkWorkflow(kept).some((problem) => /without first unsetting/.test(problem)));
-  const widened = real.replace(
-    '          pnpm run test:integration\n        env:\n',
-    '          pnpm run test:integration\n        env:\n          KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets\n',
-  );
-  assert.notEqual(widened, real);
+  const parsed = parse(real);
+  const kept = structuredClone(parsed);
+  for (const job of Object.values(kept.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (typeof step.run === 'string')
+        step.run = step.run.replace(/^[\t ]*unset KAFKA_SECRETS_DIR[\t ]*(?:\r?\n|$)/gm, '');
+    }
+  }
+  assert.notDeepEqual(kept, parsed);
   assert.ok(
-    checkWorkflow(widened).some((problem) =>
-      /"Integration tests" is given KAFKA_ADMIN_SECRETS_DIR/.test(problem),
-    ),
+    checkWorkflow(stringify(kept)).some((problem) => /without first unsetting/.test(problem)),
   );
+  // Mutate parsed steps, not the spelling of a command or YAML anchor. Every
+  // shard and the unsharded security gate must reject the admin directory.
+  let checked = 0;
+  for (const [job, value] of Object.entries(parsed.jobs)) {
+    for (const [index, step] of (value.steps ?? []).entries()) {
+      if (!step.run?.includes('pnpm run test:integration')) continue;
+      const widened = structuredClone(parsed);
+      widened.jobs[job].steps[index].env.KAFKA_ADMIN_SECRETS_DIR =
+        '${{ runner.temp }}/rasta-kafka-admin-secrets';
+      assert.ok(
+        checkWorkflow(stringify(widened)).some((problem) =>
+          problem.includes(`"${step.name}" is given KAFKA_ADMIN_SECRETS_DIR`),
+        ),
+        `${job}: ${step.name}`,
+      );
+      checked += 1;
+    }
+  }
+  assert.ok(checked >= 5, 'the four suite shards and filtered security gate are checked');
 });
 
 test('kafka-credentials.sh hands out exactly each scope, each from its own directory', async () => {

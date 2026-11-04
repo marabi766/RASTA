@@ -10,6 +10,7 @@ import { formatEstimate } from '../ProjectsScreen';
 import { GrantApprovalForm, RejectApprovalForm } from './ProjectForms';
 import type { ProjectPlace } from './project-runner';
 import type { ProjectToken } from './ProjectCommands';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The approval rounds of a project, in round and step order, and — on a step
@@ -157,7 +158,7 @@ export function ProjectApprovals({ result, csrfToken, decisions }: ProjectApprov
                   step={step}
                   csrfToken={csrfToken}
                   place="project"
-                  tokens={decisions[step.id]}
+                  tokens={ownValue(decisions, step.id)}
                 />
               ))}
             </ul>
@@ -173,7 +174,7 @@ export function ApprovalsSection({ children }: { children: ReactNode }) {
     <Section
       headingId="project-approvals"
       title="موافقت‌ها"
-      description="سامانه هیچ پروژه‌ای را خودکار تایید نمی‌کند: هر مرحله را مرجع نام‌برده تصمیم می‌گیرد."
+      description="سامانه هیچ پروژه‌ای را خودکار تأیید نمی‌کند: هر مرحله را مرجع نام‌برده تصمیم می‌گیرد."
     >
       {children}
     </Section>

@@ -195,9 +195,17 @@ describe('updates', () => {
   });
 
   it('applies the same rules to a need', () => {
-    expect(updateNeedSchema.safeParse({ expectedVersion: 1 }).success).toBe(false);
-    expect(updateNeedSchema.safeParse({ expectedVersion: 1, quantity: null }).success).toBe(true);
-    expect(updateNeedSchema.safeParse({ expectedVersion: 0, unit: 'm' }).success).toBe(false);
+    expect(
+      updateNeedSchema.safeParse({ expectedProjectVersion: 1, expectedVersion: 1 }).success,
+    ).toBe(false);
+    expect(
+      updateNeedSchema.safeParse({ expectedProjectVersion: 1, expectedVersion: 1, quantity: null })
+        .success,
+    ).toBe(true);
+    expect(
+      updateNeedSchema.safeParse({ expectedProjectVersion: 1, expectedVersion: 0, unit: 'm' })
+        .success,
+    ).toBe(false);
   });
 });
 
@@ -207,22 +215,34 @@ describe('reasons', () => {
       false,
     );
     expect(
-      withdrawNeedSchema.safeParse({ expectedVersion: 1, reason: 'Funding withdrawn' }).success,
+      withdrawNeedSchema.safeParse({
+        expectedProjectVersion: 1,
+        expectedVersion: 1,
+        reason: 'Funding withdrawn',
+      }).success,
     ).toBe(true);
   });
 });
 
 describe('needs and queries', () => {
   it('accepts a need with only a title and description', () => {
-    expect(createNeedSchema.safeParse({ title: 'Asphalt', description: 'Hot mix' }).success).toBe(
-      true,
-    );
+    expect(
+      createNeedSchema.safeParse({
+        expectedProjectVersion: 1,
+        title: 'Asphalt',
+        description: 'Hot mix',
+      }).success,
+    ).toBe(true);
   });
 
   it('refuses a need that tries to set its own status', () => {
     expect(
-      createNeedSchema.safeParse({ title: 'Asphalt', description: 'Hot mix', status: 'SUBMITTED' })
-        .success,
+      createNeedSchema.safeParse({
+        expectedProjectVersion: 1,
+        title: 'Asphalt',
+        description: 'Hot mix',
+        status: 'SUBMITTED',
+      }).success,
     ).toBe(false);
   });
 

@@ -52,6 +52,7 @@ test('command, environment, shell, condition and failure handling drift refuses,
     { shell: 'sh' },
     { if: 'false' },
     { 'continue-on-error': true },
+    { 'timeout-minutes': 1 },
   ]) {
     for (const index of [0, 4, 5]) {
       const mutant = parse(workflow);
@@ -80,6 +81,19 @@ test('missing reasons, changed root scripts, duplicate entries and missing guard
   duplicated.steps.push(clone(duplicated.steps.find((c) => c.script)));
   mutant.jobs.quality.steps = duplicated.steps.map((c) => c.ci);
   assert.throws(() => validateParity(stringify(mutant), duplicated, scripts));
+});
+
+test("executed commands retain main's exact deadline even when script and manifest drift together", () => {
+  for (const script of ['test:prepush-scope', 'test:prepush-parity']) {
+    for (const deadline of ['', '--test-timeout=0 ', '--test-timeout=600000 ']) {
+      const changed = clone(manifest);
+      const entry = changed.steps.find((entry) => entry.script === script);
+      entry.command = entry.command.replace('--test-timeout=300000 ', deadline);
+      assert.throws(() =>
+        validateParity(workflow, changed, { ...scripts, [script]: entry.command }),
+      );
+    }
+  }
 });
 
 test('runner recomputes selection, executes serially with resolved base and records successes', () => {
@@ -141,7 +155,7 @@ test('selection error, execution failure and post-execution drift never produce 
       read: (dir, file) => {
         const text = readFileSync(`${dir}/${file}`, 'utf8');
         return count && file === 'package.json'
-          ? text.replace('node --test scripts/prepush-scope.test.mjs', 'true')
+          ? text.replace(scripts['test:prepush-scope'], 'true')
           : text;
       },
     }),

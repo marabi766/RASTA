@@ -629,7 +629,7 @@ export interface OwnerRequest {
   readonly mapping: FieldMapping<string>;
 }
 
-function mappingFor(
+export function mappingFor(
   command: OwnerCommand,
   paths: Readonly<Record<string, string>>,
 ): FieldMapping<string> {

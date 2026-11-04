@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -9,11 +10,15 @@ import {
   ALLOWED_CONDITIONS,
   JOB_FLOOR_MINUTES,
   JOB_SETUP_MINUTES,
+  INTEGRATION_PARTITIONS,
   SPLIT_STEPS,
   STEP_INVENTORY,
   checkIntegrationSplit,
   checkIntegrationSplitText,
   jobBudgetProblems,
+  discoverIntegrationPackages,
+  integrationPartitionProblems,
+  integrationPartitionStepProblems,
 } from './ci-integration-split-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -38,6 +43,171 @@ const dropStep = (job, name) => {
   job.steps = job.steps.filter((step) => step.name !== name);
 };
 const escape = (text) => text.replace(/[()]/g, '\\$&');
+
+test('disk discovery covers the live partition, including the empty gateway project', () => {
+  assert.deepEqual(
+    discoverIntegrationPackages(),
+    Object.values(INTEGRATION_PARTITIONS).flat().sort(),
+  );
+  assert.deepEqual(integrationPartitionProblems(), []);
+});
+
+test('the workflow validator refuses a newly added, unassigned workspace on disk', (t) => {
+  const dir = mkdtempSync(resolve(ROOT, 'packages/ci-integration-discovery-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(
+    resolve(dir, 'package.json'),
+    JSON.stringify({ name: '@rasta/new-workspace', scripts: { 'test:integration': 'jest' } }),
+  );
+  fails(real(), /@rasta\/new-workspace: expected exactly one integration partition, found 0/);
+});
+
+test('partition mutants: drop, duplicate within/across partitions, and unknown package fail', () => {
+  const packages = discoverIntegrationPackages();
+  assert.match(integrationPartitionProblems({ suites: packages.slice(1) }).join('\n'), /found 0/);
+  assert.match(
+    integrationPartitionProblems({ suites: [...packages, packages[0]] }).join('\n'),
+    /found 2/,
+  );
+  assert.match(
+    integrationPartitionProblems({ suites: packages, other: [packages[0]] }).join('\n'),
+    /found 2/,
+  );
+  assert.match(
+    integrationPartitionProblems({ suites: [...packages, '@rasta/unknown'] }).join('\n'),
+    /unknown integration package/,
+  );
+  for (const invalid of [null, [], {}, { suites: [] }, { suites: 'all' }]) {
+    assert.ok(integrationPartitionProblems(invalid).length > 0);
+  }
+});
+
+test('FU-027: partition keys cannot be renamed, added or removed independently', () => {
+  for (const change of ['rename', 'add', 'remove']) {
+    const partitions = structuredClone(INTEGRATION_PARTITIONS);
+    if (change !== 'add') delete partitions['Integration construction'];
+    if (change !== 'remove') partitions['Unregistered suite'] = ['@rasta/construction-service'];
+    assert.match(
+      integrationPartitionStepProblems(real(), partitions).join('\n'),
+      /partition step missing from suite inventory|suite inventory step has no partition/,
+    );
+  }
+});
+
+test('FU-027: inventory keys cannot be renamed, added or removed independently', () => {
+  for (const change of ['rename', 'add', 'remove']) {
+    const inventory = structuredClone(STEP_INVENTORY);
+    if (change !== 'remove')
+      inventory['Unregistered suite'] = inventory['Integration construction'];
+    if (change !== 'add') delete inventory['Integration construction'];
+    assert.match(
+      integrationPartitionStepProblems(real(), INTEGRATION_PARTITIONS, inventory).join('\n'),
+      /partition step missing from suite inventory|suite inventory step has no partition/,
+    );
+  }
+});
+
+test('FU-027: workflow suite steps cannot be renamed, added or removed independently', () => {
+  for (const change of ['rename', 'add', 'remove']) {
+    const workflow = real();
+    const step = stepNamed(workflow, 'Integration construction');
+    if (change === 'add') {
+      workflow.jobs['integration-construction'].steps.push({ ...step, name: 'Unregistered suite' });
+    } else if (change === 'rename') step.name = 'Unregistered suite';
+    else dropStep(workflow.jobs['integration-construction'], step.name);
+    fails(workflow, /workflow suite step has no partition|partition step must occur exactly once/);
+  }
+  for (const run of [
+    'pnpm run test:integration',
+    'node scripts/run-test-phases.mjs test:integration',
+  ]) {
+    const extra = real();
+    extra.jobs.quality.steps.push({ name: 'Unregistered suite', run });
+    fails(extra, /workflow integration step missing from inventory/);
+  }
+  const outside = real();
+  outside.jobs.quality.steps.push({
+    name: 'Tenant isolation and authorization tests',
+    run: 'pnpm run test:integration',
+  });
+  fails(outside, /integration execution must run in an integration-\* job/);
+  const workflow = real();
+  workflow.jobs.quality.steps.push(
+    structuredClone(stepNamed(workflow, 'Integration construction')),
+  );
+  fails(workflow, /partition step must occur exactly once in workflow, found 2/);
+});
+
+const workspaceFixture = (t) => {
+  const root = mkdtempSync(resolve(tmpdir(), 'integration-discovery-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const put = (file, value) => {
+    mkdirSync(dirname(resolve(root, file)), { recursive: true });
+    writeFileSync(resolve(root, file), JSON.stringify(value));
+  };
+  put('pnpm-workspace.yaml', {
+    packages: [
+      '.',
+      'apps/*',
+      'services/*',
+      'packages/*',
+      'tests/*',
+      'extensions/**',
+      '!extensions/excluded',
+    ],
+  });
+  put('package.json', {
+    name: 'orchestration',
+    scripts: { 'test:integration': 'node orchestrate' },
+  });
+  for (const group of ['apps', 'services', 'packages', 'tests', 'extensions/nested']) {
+    put(`${group}/member/package.json`, { name: group, scripts: { 'test:integration': 'jest' } });
+  }
+  put('extensions/excluded/package.json', {
+    name: 'excluded',
+    scripts: { 'test:integration': 'jest' },
+  });
+  put('extensions/node_modules/dependency/package.json', {
+    name: 'dependency',
+    scripts: { 'test:integration': 'jest' },
+  });
+  put('apps/no-integration/package.json', { name: 'no-integration', scripts: { test: 'jest' } });
+  return { root, put };
+};
+
+test('discovery follows configured roots, exclusions and new manifests independently', (t) => {
+  const { root, put } = workspaceFixture(t);
+  const packages = ['apps', 'services', 'packages', 'tests', 'extensions/nested'].sort();
+  assert.deepEqual(discoverIntegrationPackages(root), packages);
+  assert.deepEqual(integrationPartitionProblems({ suites: packages }, root), []);
+  put('extensions/added/package.json', {
+    name: 'new-workspace',
+    scripts: { 'test:integration': 'jest' },
+  });
+  assert.match(
+    integrationPartitionProblems({ suites: packages }, root).join('\n'),
+    /new-workspace:.*found 0/,
+  );
+});
+
+test('unreadable/malformed discovery inputs and duplicate package names fail closed', (t) => {
+  const { root, put } = workspaceFixture(t);
+  put('apps/duplicate/package.json', { name: 'apps', scripts: { 'test:integration': 'jest' } });
+  assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed: duplicate/);
+  put('apps/duplicate/package.json', { name: 'unique', scripts: { 'test:integration': '' } });
+  assert.match(
+    integrationPartitionProblems({}, root).join('\n'),
+    /discovery failed:.*nonempty script/,
+  );
+  writeFileSync(resolve(root, 'apps/duplicate/package.json'), '{');
+  assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed/);
+  for (const patterns of [null, [], ['../outside/*'], ['/tmp/*'], [null]]) {
+    put('pnpm-workspace.yaml', { packages: patterns });
+    assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed/);
+  }
+  rmSync(resolve(root, 'pnpm-workspace.yaml'));
+  assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed/);
+});
 
 test('the committed workflow passes', () => {
   assert.deepEqual(checkIntegrationSplitText(TEXT), []);
@@ -254,7 +424,7 @@ test('a test step without its time limit, or above it, is refused', () => {
   fails(expression, /"Construction coverage gate" has no timeout-minutes/);
   const aboveJob = real();
   aboveJob.jobs['integration-suites']['timeout-minutes'] = 10;
-  fails(aboveJob, /"Integration tests" has timeout-minutes 21, above its job's 10/);
+  fails(aboveJob, /"Integration tests" has timeout-minutes 13, above its job's 10/);
   const tightened = real();
   stepNamed(tightened, 'Construction coverage gate')['timeout-minutes'] = 7;
   assert.deepEqual(checkIntegrationSplit(tightened), []);
@@ -274,7 +444,10 @@ test('every job holds its steps one after the other: step limits plus setup fit 
   assert.deepEqual(
     Object.fromEntries(jobs.map(([id, job]) => [id, stepSum(job) + JOB_SETUP_MINUTES[id]])),
     {
-      'integration-suites': 83,
+      'integration-suites': 75,
+      'integration-construction': 25,
+      'integration-economic': 24,
+      'integration-contract': 23,
       'integration-security': 37,
       'integration-coverage-critical': 35,
       'integration-coverage': 80,
@@ -282,6 +455,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'migration-reversibility-chain': 17,
       'migration-guards': 18,
       'trivy-db': 21,
+      quality: 64,
     },
   );
   for (const [id, job] of jobs) {
@@ -315,7 +489,7 @@ test('a job whose step limits plus setup exceed its own limit is refused', () =>
     (step) => step.name === 'PostgreSQL connection ceiling',
   );
   connections['timeout-minutes'] += 1;
-  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 76 .* 84 in all/);
+  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 68 .* 76 in all/);
 });
 
 test('a job outside the split is held to its cumulative budget too', () => {
@@ -477,7 +651,11 @@ test('a job whose measured runtime needed its limit may not go back below it', (
     delete missing.jobs[id]['timeout-minutes'];
     fails(missing, new RegExp(`^${id} has no timeout-minutes`));
     const raised = real();
-    raised.jobs[id]['timeout-minutes'] = floor + 1;
+    // A raised limit must still hold the job's step limits plus its setup (quality: 10 + 54).
+    const budget = limitedSteps(raised.jobs[id]).length
+      ? stepSum(raised.jobs[id]) + JOB_SETUP_MINUTES[id]
+      : 0;
+    raised.jobs[id]['timeout-minutes'] = Math.max(floor + 1, budget);
     assert.deepEqual(checkIntegrationSplit(raised), [], id);
   }
 });
@@ -729,5 +907,50 @@ test('aggregate rejects backup drill failure, skip and cancellation independentl
       `needs[name].result !== "success" && !(name === "integration-backup-drill" && needs[name].result === "${result}")`,
     );
     fails(workflow, /must fail unless every needed job's result is "success"/);
+  }
+});
+
+test('every suite shard refuses no-op commands, changed filters, missing aggregate dependencies and infrastructure', () => {
+  for (const name of Object.keys(INTEGRATION_PARTITIONS)) {
+    for (const change of [
+      () => 'true',
+      (run) => `echo ${run}`,
+      (run) => `${run} || true`,
+      (run) => run.replace(/--shard=\w+/, '--shard=unknown'),
+    ]) {
+      const workflow = real();
+      const step = stepNamed(workflow, name);
+      step.run = change(step.run);
+      fails(workflow, /must run exactly/);
+    }
+    const workflow = real();
+    const id = jobRunning(workflow, name);
+    workflow.jobs.integration.needs = workflow.jobs.integration.needs.filter((need) => need !== id);
+    fails(workflow, /does not need/);
+    for (const required of [
+      'Start the authenticated Kafka broker',
+      'Start MinIO and create the document bucket',
+      'Start ClamAV on a Unix socket',
+      'Apply migrations',
+      'Provision databases, roles and extensions',
+    ]) {
+      const missing = real();
+      dropStep(missing.jobs[id], required);
+      fails(missing, /runs without/);
+    }
+    for (const service of ['redis', 'mailpit', 'postgres']) {
+      const missing = real();
+      delete missing.jobs[id].services[service];
+      fails(missing, /runs without/);
+    }
+    const extra = real();
+    stepNamed(extra, name).env.UNDECLARED_OPTION = '1';
+    fails(extra, /undeclared env/);
+    for (const [key, value] of Object.entries(STEP_INVENTORY[name].env)) {
+      if (value.includes('${{')) continue;
+      const changed = real();
+      stepNamed(changed, name).env[key] = 'different';
+      fails(changed, /must set/);
+    }
   }
 });

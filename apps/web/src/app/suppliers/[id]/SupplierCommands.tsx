@@ -23,6 +23,7 @@ import {
   SubmitQualificationForm,
   SuspendSupplierForm,
 } from '../SupplierForms';
+import { setOwn } from '@/lib/own-key';
 
 /**
  * What the supplier page offers to do, drawn from the token's roles and the
@@ -70,7 +71,7 @@ export function Disclosure({ summary, children }: { summary: string; children: R
 }
 
 export const OWN_CASE_NOTE =
-  'سازمان شما صاحب این پرونده است؛ هیچ نقشی به سازمان تامین‌کننده اجازه نمی‌دهد درباره صلاحیت، تعلیق یا رفع تعلیق خودش تصمیم بگیرد.';
+  'سازمان شما صاحب این پرونده است؛ هیچ نقشی به سازمان تأمین‌کننده اجازه نمی‌دهد درباره صلاحیت، تعلیق یا رفع تعلیق خودش تصمیم بگیرد.';
 export const READ_ONLY_NOTE = 'نقش شما در این پرونده فقط خواندن را می‌دهد.';
 
 export function supplierCommandsFor(
@@ -124,9 +125,11 @@ export function supplierCommandsFor(
     for (const qualification of supplier.qualifications) {
       if (qualification.state !== 'SUBMITTED') continue;
       const capabilityLabel = supplierCapabilityLabel(qualification.capability);
-      decisions[qualification.id] = (
+      setOwn(
+        decisions,
+        qualification.id,
         <div className="flex flex-col gap-4">
-          <Disclosure summary="تایید صلاحیت…">
+          <Disclosure summary="تأیید صلاحیت…">
             <ApproveQualificationForm
               key={formKey}
               {...identity('APPROVE_QUALIFICATION', { qualificationId: qualification.id })}
@@ -140,7 +143,7 @@ export function supplierCommandsFor(
               capabilityLabel={capabilityLabel}
             />
           </Disclosure>
-        </div>
+        </div>,
       );
     }
     // Each signed with the episode it was drawn on (Codex review of PR 366,
@@ -148,7 +151,7 @@ export function supplierCommandsFor(
     const open = openSuspensionIdOf(supplier.suspensions);
     if (supplier.status === 'ACTIVE') {
       suspension = (
-        <Disclosure summary="تعلیق این تامین‌کننده…">
+        <Disclosure summary="تعلیق این تأمین‌کننده…">
           <SuspendSupplierForm
             key={formKey}
             {...identity('SUSPEND', { suspensionId: latestSuspensionIdOf(supplier.suspensions) })}

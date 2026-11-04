@@ -24,6 +24,10 @@ import type { MarketplaceEnv } from './env';
  */
 export const CLAIM_WAIT_MS = 5_000;
 
+export const SAGA_START_DB_MAX_WAIT_MS = 1000;
+export const SAGA_START_DB_TIMEOUT_MS = 1500;
+export const SAGA_START_STOP_BUDGET_MS = SAGA_START_DB_MAX_WAIT_MS + SAGA_START_DB_TIMEOUT_MS;
+
 /** Slack for a claim-side transaction beyond its lock wait, so the wait ends first. */
 export const WAIT_TRANSACTION_SLACK_MS = 2_000;
 

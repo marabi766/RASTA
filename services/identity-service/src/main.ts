@@ -33,6 +33,7 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
 import { SwaggerModule } from '@nestjs/swagger';
+import { buildIdentityOpenApiDocument } from './openapi/document';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import {
@@ -44,7 +45,6 @@ import {
 } from '@rasta/nest-common';
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
-import { identityDocumentConfig } from './openapi-config';
 
 async function bootstrap(): Promise<void> {
   // D-045: refuse to start as anything but the runtime role before Nest builds a
@@ -101,7 +101,7 @@ async function bootstrap(): Promise<void> {
   app.useBodyParser('json', { limit: '256kb' });
 
   if (allowsDeveloperTooling(env)) {
-    const document = SwaggerModule.createDocument(app, identityDocumentConfig(env.SERVICE_VERSION));
+    const document = buildIdentityOpenApiDocument(app, env.SERVICE_VERSION);
     SwaggerModule.setup('docs', app, document);
   }
 

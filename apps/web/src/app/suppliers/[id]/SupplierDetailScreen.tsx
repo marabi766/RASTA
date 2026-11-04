@@ -23,6 +23,7 @@ import type {
   SupplierDetail,
   SuspensionRecord,
 } from '@/server/suppliers';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The supplier's private record (docs/16 § ۱۶٫۶, `/suppliers/[id]`):
@@ -53,13 +54,13 @@ export function SupplierDetailScreen({
   commands = NO_COMMANDS,
 }: SupplierDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
-    return <NoAccessState description="این تامین‌کننده در اختیار شما نیست." />;
+    return <NoAccessState description="این تأمین‌کننده در اختیار شما نیست." />;
   }
 
   if (result.kind === 'NOT_FOUND') {
     return (
       <EmptyState
-        title="این تامین‌کننده پیدا نشد"
+        title="این تأمین‌کننده پیدا نشد"
         description="شناسه اشتباه است یا در سازمان فعال شما نیست."
       />
     );
@@ -68,7 +69,7 @@ export function SupplierDetailScreen({
   if (result.kind === 'UNAVAILABLE' || result.kind === 'MALFORMED') {
     return (
       <ErrorState
-        description="پرونده‌ی تامین‌کننده خوانده نشد. کمی بعد دوباره تلاش کنید."
+        description="پرونده‌ی تأمین‌کننده خوانده نشد. کمی بعد دوباره تلاش کنید."
         correlationId={result.correlationId}
       />
     );
@@ -209,7 +210,7 @@ function QualificationsSection({
       {qualifications.length === 0 ? (
         <EmptyState
           title="هیچ درخواست صلاحیتی ثبت نشده"
-          description="این تامین‌کننده هنوز برای هیچ دسته‌ای صلاحیت ارسال نکرده است."
+          description="این تأمین‌کننده هنوز برای هیچ دسته‌ای صلاحیت ارسال نکرده است."
         />
       ) : (
         <ul className="flex flex-col gap-3">
@@ -217,7 +218,7 @@ function QualificationsSection({
             <QualificationRow
               key={qualification.id}
               qualification={qualification}
-              decision={decisions[qualification.id] ?? null}
+              decision={ownValue(decisions, qualification.id) ?? null}
             />
           ))}
         </ul>
@@ -264,7 +265,7 @@ function SuspensionsSection({
       {suspensions.length === 0 ? (
         <EmptyState
           title="هیچ تعلیقی ثبت نشده"
-          description="این تامین‌کننده تا کنون تعلیق نشده است."
+          description="این تأمین‌کننده تا کنون تعلیق نشده است."
         />
       ) : (
         <ul className="flex flex-col gap-3">

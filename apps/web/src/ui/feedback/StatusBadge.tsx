@@ -2,6 +2,7 @@ import { AlertTriangle, Ban, CheckCircle2, CircleDashed, Wrench } from 'lucide-r
 import type { ReactNode } from 'react';
 
 import { cn } from '../cn';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The platform's visual language for status.
@@ -142,8 +143,8 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   PENDING: 'در انتظار نگه‌داشت وجه',
   FUNDS_HELD: 'وجه نگه‌داشته شد',
   CONFIRMED: 'پذیرفته‌شده توسط فروشنده',
-  AWAITING_RECEIPT_CONFIRMATION: 'تحویل‌شده، منتظر تایید خریدار',
-  RECEIPT_CONFIRMED: 'دریافت تایید شد',
+  AWAITING_RECEIPT_CONFIRMATION: 'تحویل‌شده، منتظر تأیید خریدار',
+  RECEIPT_CONFIRMED: 'دریافت تأیید شد',
   SETTLING: 'در حال تسویه',
   DISPUTED: 'در اختلاف',
   CANCELLING: 'در حال لغو',
@@ -160,7 +161,7 @@ export function StatusBadge({
   label?: ReactNode;
   className?: string;
 }) {
-  const tone = STATUS_TONES[status] ?? 'neutral';
+  const tone = ownValue(STATUS_TONES, status) ?? 'neutral';
   const { className: toneClassName, Icon } = TONES[tone];
 
   return (
@@ -174,7 +175,7 @@ export function StatusBadge({
       )}
     >
       <Icon aria-hidden="true" className="size-3.5 shrink-0" />
-      {label ?? STATUS_LABELS[status] ?? status}
+      {label ?? ownValue(STATUS_LABELS, status) ?? status}
     </span>
   );
 }

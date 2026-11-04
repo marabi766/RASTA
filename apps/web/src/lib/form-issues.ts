@@ -1,6 +1,7 @@
 import {
   isSchemaAuthored,
   requireLegacyRefusal,
+  UNSUPPORTED_CHARACTERS,
   type LegacyIssue,
   type LegacyRefusal,
 } from '@rasta/contracts';
@@ -18,28 +19,61 @@ import { toPersianDigits } from './format/digits';
  * `form-issue-boundary.spec.ts` fails on any other reader of an issue's
  * message, so a new parser cannot reopen the class.
  *
- * Rules, in order:
- *  1. A message the schema's author wrote, in Persian, is shown as written —
- *     those are the specific, field-aware sentences («نام سازمان را وارد
- *     کنید»). Who wrote it is decided by where zod took the message from
- *     (`isSchemaAuthored`), never by what it says: a default of zod's that
- *     repeats a Persian value, option or key is zod's all the same (PR #444
- *     r5 F6), and an issue nobody can vouch for is not the author's. Of the
- *     author's, only one holding an Arabic-script letter passes; one written
- *     in English does not.
- *  2. Otherwise a specific sentence from the issue's code and its bounds
+ * Rules, in order — by PROVENANCE, never by what a sentence says or which
+ * script it is in (Codex PR-397 r2 F1, PR-439 r1 F1):
+ *  1. A shared contract message (`@rasta/contracts`, English, a closed set
+ *     matched by exact text) is shown as its Persian translation.
+ *  2. A message the schema's author wrote (`isSchemaAuthored`: zod took it
+ *     from the schema, PR #444 r5 F6) is shown as written only if the author
+ *     also declared it a portal sentence with {@link formMessage}: a literal,
+ *     or a template over the portal's own labels and bounds, never over the
+ *     input. An authored message that is not declared — one built at parse
+ *     time from what was typed (`MoneyInputError` used to quote the amount),
+ *     English, or an echo of the value — is not shown.
+ *  3. Otherwise a specific sentence from the issue's code and its bounds
  *     («حداکثر ۲۰۰ نویسه مجاز است»), which names the limit and never the input.
- *  3. Otherwise one generic sentence.
+ *  4. Otherwise one generic sentence.
  *
- * No hamza letters and no U+0654 in any sentence here (docs/16 text policy).
+ * Standard orthography (hamza included), no U+0654: `orthography.spec.ts`.
  */
 
 /** The fallback for an issue nothing above can describe. */
 export const GENERIC_FIELD_MESSAGE = 'مقدار واردشده معتبر نیست';
 
-// Detection only (is this sentence Persian?), not an allow-list of what may be typed:
-// the Arabic blocks, so `display-text-sites.spec.ts` keeps its one-definition rule.
-const ARABIC_SCRIPT_LETTER = /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]/;
+/** Rule 1: the shared contract messages, by exact text (a `Map`: own keys only). */
+const CONTRACT_MESSAGES: ReadonlyMap<string, string> = new Map([
+  [UNSUPPORTED_CHARACTERS, 'نویسه‌های واردشده مجاز نیست'],
+  [
+    'Amount must be a non-negative integer string in minor units',
+    'مبلغ را به ریال و با ارقام درست بنویسید، بدون اعشار',
+  ],
+  [
+    'Amount must be an integer string in minor units',
+    'مبلغ را به ریال و با ارقام درست بنویسید، بدون اعشار',
+  ],
+]);
+
+/** Rule 2: every sentence an author declared with {@link formMessage}. */
+const DECLARED = new Set<string>();
+
+// Directional formatting and other invisible controls (ZWNJ, which Persian
+// spelling needs, aside): a declared sentence never carries one.
+const INVISIBLE_CONTROL = /(?!\u200c)\p{Cf}|\p{Cc}/u;
+
+/**
+ * Declares `text` a sentence the portal's author wrote for a form field, so
+ * {@link formIssueMessage} may show it as written when a schema refuses with
+ * it. The argument is a literal or a template over the portal's own labels and
+ * bounds — never over the value being validated (`form-message-trust.spec.ts`
+ * refuses any other argument). Returns `text` unchanged.
+ */
+export function formMessage(text: string): string {
+  if (text === '' || INVISIBLE_CONTROL.test(text)) {
+    throw new Error('formMessage: a declared sentence is non-empty and has no control characters');
+  }
+  DECLARED.add(text);
+  return text;
+}
 
 const digits = (value: number | bigint): string => toPersianDigits(String(value));
 
@@ -104,8 +138,10 @@ function boundMessage(issue: LegacyIssue): string | null {
  * wrong one (PR #444 r1 F1).
  */
 export function formIssueMessage(issue: LegacyIssue | undefined): string {
-  if (issue && isSchemaAuthored(issue) && ARABIC_SCRIPT_LETTER.test(issue.message)) {
-    return issue.message;
+  if (issue && isSchemaAuthored(issue)) {
+    const shared = CONTRACT_MESSAGES.get(issue.message);
+    if (shared !== undefined) return shared;
+    if (DECLARED.has(issue.message)) return issue.message;
   }
   return (issue && boundMessage(issue)) ?? GENERIC_FIELD_MESSAGE;
 }
@@ -130,8 +166,16 @@ export function firstIssuePerField<F extends string>(
   const fieldErrors: Partial<Record<F, string>> = {};
   for (const issue of issues) {
     const field = issue.path[0];
-    if (typeof field === 'string' && isField(field) && fieldErrors[field] === undefined) {
-      fieldErrors[field] = formIssueMessage(issue);
+    // Own keys only, read and written: a field named `constructor` or
+    // `toString` is not already answered by Object.prototype, and `__proto__`
+    // is a field, not the prototype (PR-439 r1 addendum C).
+    if (typeof field === 'string' && isField(field) && !Object.hasOwn(fieldErrors, field)) {
+      Object.defineProperty(fieldErrors, field, {
+        value: formIssueMessage(issue),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
   }
   return fieldErrors;

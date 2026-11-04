@@ -37,7 +37,9 @@ export function validateParity(workflow, manifest, scripts) {
         step['continue-on-error'] !== undefined ||
         typeof entry.command !== 'string' ||
         scripts[entry.script] !== entry.command ||
-        !/^node --test scripts\/prepush-(scope|parity)\.test\.mjs$/.test(entry.command)
+        !/^node --test --test-timeout=300000 scripts\/prepush-(scope|parity)\.test\.mjs$/.test(
+          entry.command,
+        )
       )
         refuse();
       checks.push(entry);

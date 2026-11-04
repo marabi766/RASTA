@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { legacyParse } from '@rasta/contracts';
 
-import { firstIssuePerField } from './form-issues';
+import { firstIssuePerField, formMessage } from './form-issues';
 import { normalizePersianText, toPersianDigits } from './format';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
 import { SUPPLIER_CAPABILITIES } from './supplier-fields';
@@ -21,7 +21,7 @@ import { SUPPLIER_CAPABILITIES } from './supplier-fields';
  * a profile, no "my supplier" lookup, and no `Idempotency-Key` on any of the six
  * endpoints — so nothing here retries a send.
  *
- * Wording: new text on these screens carries no hamza and no combining hamza.
+ * Wording: standard Persian orthography (hamza included, no U+0654); see `orthography.spec.ts`.
  */
 
 export const SUPPLIER_COMMANDS = [
@@ -39,26 +39,26 @@ export function isSupplierCommand(value: unknown): value is SupplierCommand {
 }
 
 export const SUPPLIER_COMMAND_LABELS: Readonly<Record<SupplierCommand, string>> = {
-  REGISTER: 'ثبت پرونده تامین‌کننده',
+  REGISTER: 'ثبت پرونده تأمین‌کننده',
   SUBMIT_QUALIFICATION: 'ارسال درخواست صلاحیت',
-  APPROVE_QUALIFICATION: 'تایید صلاحیت',
+  APPROVE_QUALIFICATION: 'تأیید صلاحیت',
   REJECT_QUALIFICATION: 'رد صلاحیت',
-  SUSPEND: 'تعلیق تامین‌کننده',
+  SUSPEND: 'تعلیق تأمین‌کننده',
   REINSTATE: 'رفع تعلیق',
 };
 
 /** What each command does, and as truthfully what it does not (the controller's own descriptions). */
 export const SUPPLIER_COMMAND_CONSEQUENCES: Readonly<Record<SupplierCommand, string>> = {
   REGISTER:
-    'پرونده برای همین سازمان ساخته می‌شود؛ سازمان از نشست شما گرفته می‌شود و فیلدی برای آن نیست. دسته‌هایی که اینجا می‌نویسید ادعای شماست، نه صلاحیت: ثبت‌نام هیچ صلاحیتی نمی‌دهد و تا وقتی اپراتور پلتفرم درخواست صلاحیت را تایید نکند، تامین‌کننده برای هیچ دسته‌ای واجد صلاحیت نیست. برای هر سازمان فقط یک پرونده می‌شود.',
+    'پرونده برای همین سازمان ساخته می‌شود؛ سازمان از نشست شما گرفته می‌شود و فیلدی برای آن نیست. دسته‌هایی که اینجا می‌نویسید ادعای شماست، نه صلاحیت: ثبت‌نام هیچ صلاحیتی نمی‌دهد و تا وقتی اپراتور پلتفرم درخواست صلاحیت را تأیید نکند، تأمین‌کننده برای هیچ دسته‌ای واجد صلاحیت نیست. برای هر سازمان فقط یک پرونده می‌شود.',
   SUBMIT_QUALIFICATION:
-    'درخواست برای یک دسته ارسال می‌شود و منتظر تصمیم اپراتور پلتفرم می‌ماند. اپراتور از طرف تامین‌کننده درخواست نمی‌فرستد. سند پیوست فقط با شناسه در سرویس اسناد ذخیره می‌شود؛ سامانه سند را نمی‌گشاید، نمی‌خواند و درستی آن را نمی‌سنجد. تا وقتی درخواستی منتظر تصمیم یا تاییدشده است، درخواست دوم برای همان دسته پذیرفته نمی‌شود.',
+    'درخواست برای یک دسته ارسال می‌شود و منتظر تصمیم اپراتور پلتفرم می‌ماند. اپراتور از طرف تأمین‌کننده درخواست نمی‌فرستد. سند پیوست فقط با شناسه در سرویس اسناد ذخیره می‌شود؛ سامانه سند را نمی‌گشاید، نمی‌خواند و درستی آن را نمی‌سنجد. تا وقتی درخواستی منتظر تصمیم یا تأییدشده است، درخواست دوم برای همان دسته پذیرفته نمی‌شود.',
   APPROVE_QUALIFICATION:
-    'تصمیم صریح یک انسان است و هیچ مسیر خودکاری برای تایید نیست. تصمیم نهایی است: تغییر آن فقط با درخواست تازه ممکن است و درخواست اول در سابقه می‌ماند. یادداشت اختیاری خصوصی است: فقط بازبینان پلتفرم آن را می‌بینند، نه تامین‌کننده، و در هیچ رویدادی منتشر نمی‌شود. اگر پیامی برای تامین‌کننده لازم است، در یادداشت ننویسید. تایید رویداد «صلاحیت‌یافته» را همان لحظه منتشر می‌کند. تایید به معنی بررسی یا درستی سند پیوست نیست.',
+    'تصمیم صریح یک انسان است و هیچ مسیر خودکاری برای تأیید نیست. تصمیم نهایی است: تغییر آن فقط با درخواست تازه ممکن است و درخواست اول در سابقه می‌ماند. یادداشت اختیاری خصوصی است: فقط بازبینان پلتفرم آن را می‌بینند، نه تأمین‌کننده، و در هیچ رویدادی منتشر نمی‌شود. اگر پیامی برای تأمین‌کننده لازم است، در یادداشت ننویسید. تأیید رویداد «صلاحیت‌یافته» را همان لحظه منتشر می‌کند. تأیید به معنی بررسی یا درستی سند پیوست نیست.',
   REJECT_QUALIFICATION:
-    'تصمیم نهایی است. دلیل رد برای تامین‌کننده منتشر می‌شود تا بتواند اقدام کند؛ یادداشت اختیاری فقط سابقه خصوصی بازبین است و هرگز منتشر نمی‌شود. تامین‌کننده می‌تواند بعد از اصلاح، درخواست تازه بفرستد.',
+    'تصمیم نهایی است. دلیل رد برای تأمین‌کننده منتشر می‌شود تا بتواند اقدام کند؛ یادداشت اختیاری فقط سابقه خصوصی بازبین است و هرگز منتشر نمی‌شود. تأمین‌کننده می‌تواند بعد از اصلاح، درخواست تازه بفرستد.',
   SUSPEND:
-    'تصمیم اپراتور پلتفرم درباره سازمانی دیگر است و خودکار هیچ تعلیقی نیست. تعلیق صلاحیت‌ها را باطل نمی‌کند، فقط نگه می‌دارد: تامین‌کننده معلق برای هیچ دسته‌ای واجد صلاحیت شمرده نمی‌شود و با رفع تعلیق دقیقا همان تایید قبلی برمی‌گردد. تعلیق تا رفع صریح آن ادامه دارد و رویداد «تعلیق» همان لحظه منتشر می‌شود.',
+    'تصمیم اپراتور پلتفرم درباره سازمانی دیگر است و خودکار هیچ تعلیقی نیست. تعلیق صلاحیت‌ها را باطل نمی‌کند، فقط نگه می‌دارد: تأمین‌کننده معلق برای هیچ دسته‌ای واجد صلاحیت شمرده نمی‌شود و با رفع تعلیق دقیقا همان تأیید قبلی برمی‌گردد. تعلیق تا رفع صریح آن ادامه دارد و رویداد «تعلیق» همان لحظه منتشر می‌شود.',
   REINSTATE:
     'دوره تعلیق باز با نام شما و دلیل بسته می‌شود و پاک نمی‌شود؛ پس همیشه معلوم می‌ماند چه کسی و چرا تعلیق کرد. رویداد «رفع تعلیق» همان لحظه منتشر می‌شود.',
 };
@@ -82,15 +82,15 @@ export const SUPPLIER_NOTICE_TEXT: Readonly<
 > = {
   registered: {
     tone: 'success',
-    text: 'پرونده تامین‌کننده ثبت شد. هنوز برای هیچ دسته‌ای واجد صلاحیت نیست؛ درخواست صلاحیت بفرستید.',
+    text: 'پرونده تأمین‌کننده ثبت شد. هنوز برای هیچ دسته‌ای واجد صلاحیت نیست؛ درخواست صلاحیت بفرستید.',
   },
   submitted: {
     tone: 'success',
     text: 'درخواست صلاحیت ارسال شد و منتظر تصمیم اپراتور پلتفرم است.',
   },
-  approved: { tone: 'success', text: 'صلاحیت تایید شد.' },
-  rejected: { tone: 'success', text: 'صلاحیت رد شد و دلیل آن برای تامین‌کننده ثبت شد.' },
-  suspended: { tone: 'success', text: 'تامین‌کننده تعلیق شد.' },
+  approved: { tone: 'success', text: 'صلاحیت تأیید شد.' },
+  rejected: { tone: 'success', text: 'صلاحیت رد شد و دلیل آن برای تأمین‌کننده ثبت شد.' },
+  suspended: { tone: 'success', text: 'تأمین‌کننده تعلیق شد.' },
   reinstated: { tone: 'success', text: 'تعلیق برداشته شد.' },
   stale: {
     tone: 'warning',
@@ -214,8 +214,8 @@ export const reasonFormValues = (form: FormData): ReasonFormValues => ({
 
 const fa = (value: number): string => toPersianDigits(String(value));
 
-export const BIDI_CONTROL_MESSAGE = 'این فیلد نویسه جهت‌دهی پنهان نمی‌پذیرد';
-export const CONTROL_CHARACTER_MESSAGE = 'این فیلد نویسه کنترلی یا پنهان نمی‌پذیرد';
+export const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسه جهت‌دهی پنهان نمی‌پذیرد');
+export const CONTROL_CHARACTER_MESSAGE = formMessage('این فیلد نویسه کنترلی یا پنهان نمی‌پذیرد');
 
 /** Free text as supplier-service's `plainText()` takes it: trimmed, no bidi control. */
 function prose(label: string, min: number, max: number) {
@@ -225,9 +225,9 @@ function prose(label: string, min: number, max: number) {
     .pipe(
       z
         .string()
-        .min(1, `${label} را بنویسید`)
-        .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .min(1, formMessage(`${label} را بنویسید`))
+        .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
     );
 }
@@ -240,14 +240,14 @@ function optionalProse(label: string, max: number) {
     .pipe(
       z
         .string()
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`))
         .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
     )
     .transform((value) => (value === '' ? undefined : value));
 }
 
 const capabilityEnum = z.enum(SUPPLIER_CAPABILITIES, {
-  error: 'یکی از دسته‌های فهرست را انتخاب کنید',
+  error: formMessage('یکی از دسته‌های فهرست را انتخاب کنید'),
 });
 
 export const registerFormSchema = z
@@ -255,9 +255,12 @@ export const registerFormSchema = z
     displayName: prose('نام', MIN_DISPLAY_NAME_LENGTH, MAX_DISPLAY_NAME_LENGTH),
     capabilities: z
       .array(capabilityEnum)
-      .min(1, 'دست‌کم یک دسته را انتخاب کنید')
+      .min(1, formMessage('دست‌کم یک دسته را انتخاب کنید'))
       .max(SUPPLIER_CAPABILITIES.length)
-      .refine((value) => new Set(value).size === value.length, 'هر دسته را فقط یک بار بنویسید'),
+      .refine(
+        (value) => new Set(value).size === value.length,
+        formMessage('هر دسته را فقط یک بار بنویسید'),
+      ),
   })
   .strict();
 
@@ -267,8 +270,11 @@ const evidenceRowSchema = z
   .object({
     documentId: z
       .string()
-      .min(1, 'شناسه سند را بنویسید')
-      .max(MAX_DOCUMENT_ID_LENGTH, `شناسه سند حداکثر ${fa(MAX_DOCUMENT_ID_LENGTH)} نویسه است`)
+      .min(1, formMessage('شناسه سند را بنویسید'))
+      .max(
+        MAX_DOCUMENT_ID_LENGTH,
+        formMessage(`شناسه سند حداکثر ${fa(MAX_DOCUMENT_ID_LENGTH)} نویسه است`),
+      )
       .refine((value) => !CONTROL_CHARACTER.test(value), CONTROL_CHARACTER_MESSAGE),
     label: optionalProse('برچسب سند', MAX_EVIDENCE_LABEL_LENGTH),
   })
@@ -283,7 +289,7 @@ export const submitFormSchema = z
     statement: optionalProse('توضیح', MAX_STATEMENT_LENGTH),
     evidence: z
       .array(evidenceRowSchema)
-      .max(MAX_EVIDENCE_ITEMS, `حداکثر ${fa(MAX_EVIDENCE_ITEMS)} سند پیوست می‌شود`),
+      .max(MAX_EVIDENCE_ITEMS, formMessage(`حداکثر ${fa(MAX_EVIDENCE_ITEMS)} سند پیوست می‌شود`)),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -292,7 +298,7 @@ export const submitFormSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['evidence'],
-        message: 'هر سند را فقط یک بار پیوست کنید',
+        message: formMessage('هر سند را فقط یک بار پیوست کنید'),
       });
     }
   })
@@ -377,7 +383,7 @@ export const parseReinstateForm = (values: ReasonFormValues) =>
 
 /** 409 on registration: this organization already has a profile. */
 export const ALREADY_REGISTERED_MESSAGE =
-  'این سازمان پیش از این پرونده تامین‌کننده دارد و ثبت دوباره پذیرفته نمی‌شود. آن را در فهرست تامین‌کنندگان پیدا کنید؛ ردیف سازمان شما نشان دارد.';
+  'این سازمان پیش از این پرونده تأمین‌کننده دارد و ثبت دوباره پذیرفته نمی‌شود. آن را در فهرست تأمین‌کنندگان پیدا کنید؛ ردیف سازمان شما نشان دارد.';
 
 /**
  * The closed `details[].code` supplier-service answers with `409
@@ -443,9 +449,9 @@ export const SUPPLIER_VALIDATION_MESSAGES: Readonly<Record<string, string>> = {
 
 /** What a form says for a refusal it did not send: forbidden, absent, unavailable. */
 export const SUPPLIER_FORBIDDEN_MESSAGE =
-  'اجازه این کار به شما داده نشده است. سازمان تامین‌کننده درباره صلاحیت، تعلیق یا رفع تعلیق خودش تصمیم نمی‌گیرد و اپراتور پلتفرم از طرف تامین‌کننده درخواست نمی‌فرستد.';
+  'اجازه این کار به شما داده نشده است. سازمان تأمین‌کننده درباره صلاحیت، تعلیق یا رفع تعلیق خودش تصمیم نمی‌گیرد و اپراتور پلتفرم از طرف تأمین‌کننده درخواست نمی‌فرستد.';
 export const SUPPLIER_NOT_FOUND_MESSAGE =
-  'این تامین‌کننده یا درخواست پیدا نشد یا در سازمان فعال شما نیست.';
+  'این تأمین‌کننده یا درخواست پیدا نشد یا در سازمان فعال شما نیست.';
 /**
  * The reviewer note's promise, on both decision forms — and now a true one:
  * supplier-service returns the note to platform reviewers outside the supplier's
@@ -453,7 +459,7 @@ export const SUPPLIER_NOT_FOUND_MESSAGE =
  * review of PR 366, finding 1).
  */
 export const REVIEWER_NOTE_HINT =
-  'اختیاری؛ فقط بازبینان پلتفرم آن را می‌بینند، نه تامین‌کننده، و در هیچ رویدادی منتشر نمی‌شود.';
+  'اختیاری؛ فقط بازبینان پلتفرم آن را می‌بینند، نه تأمین‌کننده، و در هیچ رویدادی منتشر نمی‌شود.';
 
 export const SUPPLIER_FAILED_MESSAGE = 'انجام نشد و چیزی تغییر نکرد. می‌توانید دوباره بفرستید.';
 

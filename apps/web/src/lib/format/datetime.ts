@@ -1,4 +1,4 @@
-import { tz } from '@date-fns/tz';
+import { TZDate, tz } from '@date-fns/tz';
 import { format } from 'date-fns-jalali';
 import { faIR } from 'date-fns-jalali/locale';
 
@@ -108,4 +108,59 @@ export function formatJalaliDateTime(
  */
 export function formatGregorianUtc(value: string | number | Date): string {
   return toInstant(value).toISOString();
+}
+
+/** `YYYY-MM-DD`, what `<input type="date">` produces. */
+const CALENDAR_DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** `YYYY-MM-DDTHH:mm[:ss]`, what `<input type="datetime-local">` produces. */
+const WALL_CLOCK = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
+
+/**
+ * The Tehran instant a form's calendar day or wall-clock reading stands for, or
+ * `null` when the reading is not a real moment.
+ *
+ * It is the same reading the servers take (`localDateToIso` in
+ * `server/drivers.ts`, `localDateTimeToIso` in `server/usage.ts`): a day with
+ * no time of day is Tehran midnight, a wall clock with no zone is Tehran time,
+ * and a day the calendar would roll over (the 31st of a 30-day month) is
+ * refused. The two copies are pinned to each other in `datetime.spec.ts`; this
+ * one exists because those modules are server code and the form is not.
+ */
+function tehranMoment(raw: string): Date | null {
+  const day = CALENDAR_DAY.exec(raw);
+  const clock = WALL_CLOCK.exec(raw);
+  const match = day ?? clock;
+  if (!match) return null;
+  const [, year, month, date, hour = '0', minute = '0', second = '0'] = match;
+  const moment = new TZDate(
+    Number(year),
+    Number(month) - 1,
+    Number(date),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    DISPLAY_TIME_ZONE,
+  );
+  if (Number.isNaN(moment.getTime())) return null;
+  if (moment.getMonth() !== Number(month) - 1 || moment.getDate() !== Number(date)) return null;
+  return new Date(moment.getTime());
+}
+
+/**
+ * The Jalali reading of what a native date input holds — «۲۸ شهریور ۱۴۰۵» — or
+ * `null` for an empty or impossible value. A native date input is Gregorian
+ * whatever the page is (docs/16 § 16.3 asks for Jalali input; a full Jalali
+ * picker is a follow-up), so the form shows this beside it: the person sees
+ * which day they have chosen in the calendar the rest of the screen uses.
+ */
+export function jalaliOfCalendarDay(value: string): string | null {
+  const moment = CALENDAR_DAY.test(value) ? tehranMoment(value) : null;
+  return moment ? formatJalaliDateLong(moment) : null;
+}
+
+/** The same for a `datetime-local` value, read in Tehran time: «۱۴۰۵/۰۶/۲۸ ۰۱:۰۰». */
+export function jalaliOfWallClock(value: string): string | null {
+  const moment = WALL_CLOCK.test(value) ? tehranMoment(value) : null;
+  return moment ? formatJalaliDateTime(moment) : null;
 }

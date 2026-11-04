@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import {
   AMENDMENT_REASON_MAX,
   CANCEL_NOTE_MAX,
@@ -49,6 +49,7 @@ import {
   type UnconfirmedContractCommand,
 } from './contract-form-state';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
+import { ownText } from '@/lib/own-key';
 
 /**
  * One contract command this viewer may issue — signing or cancelling the
@@ -383,7 +384,7 @@ function CommandFields({
               }
               if (field === 'plannedDate') {
                 return (
-                  <input
+                  <JalaliDateInput
                     {...control}
                     type="date"
                     name={field}
@@ -426,7 +427,7 @@ const REFUSAL_MESSAGES: Record<Extract<ContractFormState, { kind: 'REFUSED' }>['
 /** A 403's closed reasons in fixed words; the first one this portal has words for. */
 export function forbiddenText(reasons: readonly string[]): string | null {
   for (const reason of reasons) {
-    const text = CONTRACT_REFUSAL_TEXT[reason];
+    const text = ownText(CONTRACT_REFUSAL_TEXT, reason);
     if (text) return text;
   }
   return null;

@@ -46,6 +46,17 @@ describe('a refusal reason', () => {
   });
 });
 
+describe('a reason named like an Object.prototype member (Codex PR-439 r1 F2)', () => {
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])(
+    '/login?error=%s renders the page and no sentence',
+    (reason) => {
+      const { getByRole, queryByRole } = render(<LoginScreen reason={reason} />);
+      expect(getByRole('link', { name: /ورود با حساب سازمانی/ })).toBeInTheDocument();
+      expect(queryByRole('alert')).toBeNull();
+    },
+  );
+});
+
 describe('accessibility', () => {
   it('has no violations', async () => {
     const { container } = render(<LoginScreen returnTo="/usage" />);

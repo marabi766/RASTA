@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { OutboxRelay, kafkaConnection, preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -106,7 +106,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${commandFailure(error)}\n`);
     process.exit(2);
   },
 );

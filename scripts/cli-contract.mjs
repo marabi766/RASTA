@@ -61,7 +61,7 @@ export const CLI_CONTRACT = Object.freeze({
   'apps/web/scripts/build-supervisor.mjs': { other: ['-axo'] },
   'apps/web/src/app/fonts.ts': { other: ['--font-vazirmatn'] },
   // Test helper of the build-binding specs: runs the build scripts in a child Node.
-  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },
+  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-axo', '-e'] },
 
   // --- packages: test fixtures run by their specs ----------------------------
   // The stock-zod oracle's build child (PR #444 r4): its input arrives on stdin.
@@ -355,8 +355,22 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/check-service-boundaries.mjs': { positionals: [], accepts: { '--root': 'path' } },
   'scripts/check-test-phases.mjs': { positionals: ['script'] },
   'scripts/ci-image-matrix.mjs': { other: ['--run'] },
-  'scripts/ci-integration-split-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
+  'scripts/ci-integration-split-lib.mjs': { other: ['--filter', '--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
+  // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
+  'scripts/ci-node-test-timeouts-lib.mjs': {
+    other: [
+      '--dir',
+      '--enable-source-maps',
+      '--filter',
+      '--import',
+      '--no-warnings',
+      '--test',
+      '--test-timeout',
+      '-C',
+      '-F',
+    ],
+  },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
   // scan), and zstd's (-q -T0 -c to pack; -q -d -c --memory to unpack).
   'scripts/ci-trivy-db-lib.mjs': {
@@ -474,7 +488,14 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
-    other: ['--passWithNoTests', '--runInBand', '--selectProjects', '--testNamePattern'],
+    other: [
+      '--passWithNoTests',
+      '--runInBand',
+      '--selectProjects',
+      '--shard',
+      '--testNamePattern',
+      '--verbose',
+    ],
   },
   'scripts/verify-audit-correction-command-migration.mjs': {
     positionals: [],
@@ -578,7 +599,9 @@ export const CLI_CONTRACT = Object.freeze({
   'services/fleet-service/src/fleet/clear-transferred.cli.ts': { positionals: [] },
   'services/fleet-service/src/fleet/drain-check.cli.ts': { positionals: [] },
   'services/identity-service/src/keycloak/projection.cli.ts': { positionals: ['enum'] },
+  'services/identity-service/src/openapi/document.ts': { other: PRETTIER },
   'services/inventory-service/src/openapi/document.ts': { other: PRETTIER },
   'services/notification-service/src/openapi/document.ts': { other: PRETTIER },
+  'services/organization-service/src/openapi/document.ts': { other: PRETTIER },
   'services/procurement-service/src/openapi/document.ts': { other: PRETTIER },
 });

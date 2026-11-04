@@ -432,6 +432,63 @@ model TenderReceiptPending {
   @@map("tender_receipt_pending")
 }
 
+// ---------------------------------------------------------------------------
+// The RFQ-evidence projection (COM-007 PR 7, ADR-070 § 4, ADR-066 § 2-3)
+// ---------------------------------------------------------------------------
+
+/// One link of an RFQ's quotation-receipt chain, as announced on `QUOTATION_SUBMITTED` /
+/// `QUOTATION_REVISED` when the quotation was made. **The externally held head**:
+/// procurement-service opens quotations against what is stored here, which it cannot rewrite
+/// (it has no access to this database). Append-only; continuity is verified on insert
+/// (`previous_receipt` is the genesis or the current head, and a link has one successor), so a
+/// break is refused loudly rather than accepted. Digests only — never a price, content or
+/// ciphertext.
+model RfqReceiptLink {
+  rfqId                  String   @map("rfq_id") @db.VarChar(128)
+  /// Position in the RFQ's chain, assigned under a per-RFQ lock.
+  seq                    Int
+  /// The buyer: the RFQ's owner, and the tenant the event is signed for.
+  organizationId         String   @map("organization_id") @db.VarChar(128)
+  supplierOrganizationId String   @map("supplier_organization_id") @db.VarChar(128)
+  quotationId            String   @map("quotation_id") @db.VarChar(128)
+  revision               Int
+  receivedAt             DateTime @map("received_at") @db.Timestamptz(3)
+  ciphertextSha256       String   @map("ciphertext_sha256") @db.Char(64)
+  contentCommitment      String   @map("content_commitment") @db.Char(64)
+  previousReceipt        String   @map("previous_receipt") @db.Char(64)
+  receipt                String   @db.Char(64)
+  sourceEventId          String   @unique(map: "ux_rfq_receipt_link_event") @map("source_event_id") @db.VarChar(128)
+  recordedAt             DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@id([rfqId, seq])
+  @@unique([rfqId, receipt], map: "ux_rfq_receipt_link_receipt")
+  @@unique([rfqId, previousReceipt], map: "ux_rfq_receipt_link_previous")
+  @@map("rfq_receipt_link")
+}
+
+/// A receipt announced before its predecessor arrived, held until it can be placed in the
+/// chain (and drained in order, in the transaction that appends the predecessor). A work
+/// queue, not evidence: rows are deleted when drained.
+model RfqReceiptPending {
+  sourceEventId          String   @id @map("source_event_id") @db.VarChar(128)
+  rfqId                  String   @map("rfq_id") @db.VarChar(128)
+  organizationId         String   @map("organization_id") @db.VarChar(128)
+  supplierOrganizationId String   @map("supplier_organization_id") @db.VarChar(128)
+  quotationId            String   @map("quotation_id") @db.VarChar(128)
+  revision               Int
+  receivedAt             DateTime @map("received_at") @db.Timestamptz(3)
+  ciphertextSha256       String   @map("ciphertext_sha256") @db.Char(64)
+  contentCommitment      String   @map("content_commitment") @db.Char(64)
+  previousReceipt        String   @map("previous_receipt") @db.Char(64)
+  receipt                String   @db.Char(64)
+  heldAt                 DateTime @default(now()) @map("held_at") @db.Timestamptz(6)
+
+  @@unique([rfqId, previousReceipt], map: "ux_rfq_receipt_pending_previous")
+  @@unique([rfqId, receipt], map: "ux_rfq_receipt_pending_receipt")
+  @@index([heldAt], map: "ix_rfq_receipt_pending_held")
+  @@map("rfq_receipt_pending")
+}
+
 /// One read of a bid, granted or refused (`BID_ACCESSED`), with the **real outcome**.
 /// Identifiers and a closed purpose only. Append-only.
 model BidAccessEvidence {

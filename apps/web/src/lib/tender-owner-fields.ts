@@ -1,4 +1,5 @@
 import { AWARD_REFUSAL_TEXT, EVALUATION_REFUSAL_TEXT } from './tender-evaluation-fields';
+import { ownText, ownValue } from '@/lib/own-key';
 
 /**
  * The vocabulary of the owner's tender commands on `/tenders/[id]` (EXP-004;
@@ -210,7 +211,7 @@ export function resentOutcome(outcome: OwnerOutcomeDone): OwnerDone {
 export function ownerDoneText(done: OwnerDone): { text: string; resent: boolean } {
   const resent = done.endsWith('_RESENT');
   const outcome = (resent ? done.slice(0, -'_RESENT'.length) : done) as OwnerOutcomeDone;
-  return { text: OWNER_COMMAND_DONE[outcome], resent };
+  return { text: ownText(OWNER_COMMAND_DONE, outcome) ?? '', resent };
 }
 
 /**
@@ -231,7 +232,7 @@ const REQUEST_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export const requestStatusLabel = (status: string): string =>
-  REQUEST_STATUS_LABELS[status] ?? status;
+  ownValue(REQUEST_STATUS_LABELS, status) ?? status;
 
 /** `APPROVAL_STATES`. */
 const STEP_STATUS_LABELS: Readonly<Record<string, string>> = {
@@ -242,7 +243,8 @@ const STEP_STATUS_LABELS: Readonly<Record<string, string>> = {
   SUPERSEDED: 'کنارگذاشته',
 };
 
-export const stepStatusLabel = (status: string): string => STEP_STATUS_LABELS[status] ?? status;
+export const stepStatusLabel = (status: string): string =>
+  ownValue(STEP_STATUS_LABELS, status) ?? status;
 
 /** `statedReason` of a rejection: 8 to 500 characters. */
 export const REJECT_REASON_MIN = 8;

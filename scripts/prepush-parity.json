@@ -48,7 +48,7 @@
         "run": "pnpm run test:prepush-scope"
       },
       "script": "test:prepush-scope",
-      "command": "node --test scripts/prepush-scope.test.mjs"
+      "command": "node --test --test-timeout=300000 scripts/prepush-scope.test.mjs"
     },
     {
       "ci": {
@@ -56,7 +56,7 @@
         "run": "pnpm run test:prepush-parity"
       },
       "script": "test:prepush-parity",
-      "command": "node --test scripts/prepush-parity.test.mjs"
+      "command": "node --test --test-timeout=300000 scripts/prepush-parity.test.mjs"
     },
     {
       "ci": {
@@ -306,6 +306,7 @@
     {
       "ci": {
         "name": "Unit-step concurrency is bounded",
+        "timeout-minutes": 10,
         "run": "pnpm run test:unit-step-concurrency"
       },
       "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."

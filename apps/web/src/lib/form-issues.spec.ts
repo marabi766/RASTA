@@ -7,8 +7,14 @@ import { join, relative } from 'node:path';
 import { z } from 'zod';
 import { legacyParse, type LegacyIssue } from '@rasta/contracts';
 
-import { firstIssuePerField, formIssueMessage, GENERIC_FIELD_MESSAGE } from './form-issues';
+import {
+  firstIssuePerField,
+  formIssueMessage,
+  formMessage,
+  GENERIC_FIELD_MESSAGE,
+} from './form-issues';
 import { legacyFormResolver } from './form-resolver';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
  * The portal's one Persian boundary for local validation (`form-issues.ts`).
@@ -19,8 +25,6 @@ import { legacyFormResolver } from './form-resolver';
 
 const LATIN_LETTER = /[A-Za-z]/;
 const ARABIC_LETTER = /\p{Script=Arabic}/u;
-/** Hamza letters and U+0654: the project's text policy for added copy. */
-const FORBIDDEN_SPELLING = /[\u0654\u0623\u0625\u0624\u0626]/u;
 
 // Parsed as every form parser parses (legacyParse): zod 3's issue, with the value it was raised on.
 const issueOf = (schema: z.ZodTypeAny, value: unknown): LegacyIssue => {
@@ -59,14 +63,13 @@ describe('formIssueMessage', () => {
       const message = formIssueMessage(issueOf(schema, value));
       expect(message).toBe(expected);
       expect(message).not.toMatch(LATIN_LETTER);
-      expect(message).not.toMatch(FORBIDDEN_SPELLING);
+      expect(nonStandardSpelling(message)).toBeNull();
     },
   );
 
-  it('shows a message the schema wrote in Persian as written', () => {
-    expect(formIssueMessage(issueOf(z.string().min(1, 'نام سازمان را وارد کنید'), ''))).toBe(
-      'نام سازمان را وارد کنید',
-    );
+  it('shows a Persian message the schema author declared as written', () => {
+    const declared = formMessage('نام سازمان را وارد کنید');
+    expect(formIssueMessage(issueOf(z.string().min(1, declared), ''))).toBe(declared);
   });
 
   it('replaces a message somebody wrote in English, and one that repeats the input', () => {

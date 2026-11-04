@@ -353,6 +353,13 @@ export const REVIEWED_SITES = [
     reason:
       'gap monitor gauges and the once-per-gap alert counter (tender-gap-monitor.ts:51); no receipt state changes on it',
   },
+  {
+    site: 'services/audit-service/src/audit/rfq-evidence.repository.ts#pendingSummary',
+    columns: ['held_at'],
+    verdict: 'not-eligibility',
+    reason:
+      'gap monitor gauges and the once-per-gap alert counter (rfq-gap-monitor.ts); no receipt state changes on it',
+  },
 ];
 
 function lineOf(ast, node) {
