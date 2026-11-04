@@ -664,6 +664,73 @@ test('R2-1 unknown local global-object names stay unknown while their URL member
     assert.deepEqual(sites(`function f(${name}){new ${name}.URL(env.X)}`), ['new URL']);
   }
 });
+// FU-045: the name floor only ADDS refusals. A file with a URL alias whose
+// name equals a non-URL capability's must still resolve the real binding.
+const HIDDEN_CAPABILITY = {
+  'a getBuiltinModule behind a URL alias': [
+    "import { URL as p } from 'node:url'; export function f() { const p = require('node:process'); return p.getBuiltinModule('node:vm'); }",
+    "import { URL as getBuiltinModule } from 'node:url'; export function f() { const { getBuiltinModule } = process; return getBuiltinModule('node:vm'); }",
+  ],
+  'globalThis.eval / globalThis.Function behind a URL alias': [
+    "import { URL as g } from 'node:url'; export function f(code) { const g = globalThis; return g.eval(code); }",
+    "import { URL as g } from 'node:url'; export function f(code) { const g = globalThis; return new g.Function(code); }",
+    "import { URL as eval } from 'node:url'; export function f(code) { const { eval } = globalThis; return eval(code); }",
+    "import { URL as v } from 'node:url'; export function f(code) { const v = require('node:vm'); return v.runInThisContext(code); }",
+  ],
+  'a URL mutation behind a URL alias': [
+    "import { URL as u } from 'node:url'; export function f(x) { const u = new URL('http://ok'); u.href = x; }",
+  ],
+};
+test('FU-045 a URL alias of the same name cannot hide a capability from the resolver', () => {
+  for (const [label, sources] of Object.entries(HIDDEN_CAPABILITY))
+    for (const source of sources) {
+      const kinds = sites(source);
+      assert.ok(
+        kinds.includes(label.includes('mutation') ? 'URL mutation' : 'dynamic code/loader'),
+        `${label}: ${source} -> ${kinds}`,
+      );
+    }
+});
+test('FU-045 an UNKNOWN local eval / Function / global-object name is refused, not ignored', () => {
+  for (const source of [
+    'function f(Function) { return new Function(code); }',
+    'function f(Function) { return Function(code); }',
+    'function f(e) { var eval = e; return eval(code); }',
+    'function f(window) { return window.eval(code); }',
+    'function f(self) { return new self.Function(code); }',
+    'function f(global) { return global.process.getBuiltinModule("vm"); }',
+    'function f(globalThis) { const { Function: F } = globalThis; return F(code); }',
+  ])
+    assert.ok(sites(source, 'x.cjs').includes('dynamic code/loader'), source);
+  // Passing such a local around is not an escape (`window` is a common name).
+  for (const name of ['window', 'self', 'global'])
+    assert.deepEqual(sites(`function f(${name}) { return g(${name}, ${name}.length); }`), []);
+});
+test("FU-045 argv and parseArgs readers keep main's syntactic floor beside the resolver", () => {
+  const reads = (text) => commandLineSurface(text, 'x.mjs').readsArgv;
+  for (const source of [
+    "import { URL as process } from 'node:url'; export const a = process.argv;",
+    "import { URL as parseArgs } from 'node:url'; export function f() { const { parseArgs } = require('node:util'); return parseArgs({ options: {} }); }",
+    "import { parseArgs } from 'node:util'; export const f = (parseArgs) => parseArgs({ options: {} });",
+    "export const run = (process) => process.argv; import { parseArgs as p } from 'node:util';",
+  ])
+    assert.equal(reads(source), true, source);
+  assert.equal(
+    reads("import { parseArgs as p } from 'node:util'; export const x = () => p({});"),
+    true,
+  );
+  assert.equal(
+    reads("import { URL as process } from 'node:url'; export const a = process.env;"),
+    false,
+  );
+  assert.deepEqual(
+    commandLineSurface(
+      "import { URL as parseArgs } from 'node:url'; function f() { const { parseArgs } = require('node:util'); parseArgs({ options: { 'api-key': {} } }); }",
+      'x.mjs',
+    ),
+    { readsArgv: true, options: ['--api-key'] },
+  );
+});
 test('R2-1 mutable bindings retain proven native instance capabilities', () => {
   assert.deepEqual(sites("let base=new URL('http://ok'); base.href=env.X"), ['URL mutation']);
 });

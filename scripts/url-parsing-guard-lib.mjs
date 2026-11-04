@@ -80,6 +80,7 @@ const PARSE_METHODS = new Set(['parse', 'canParse']);
 /** Objects a computed access on could yield `URL` (`globalThis[name]`). */
 const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'global']);
 const DYNAMIC_CAPABILITIES = new Set(['unsafe', 'createRequire', 'getBuiltinModule']);
+const isDynamic = (kinds) => kinds.some((kind) => DYNAMIC_CAPABILITIES.has(kind));
 
 const isImportMetaUrl = (node) =>
   ts.isPropertyAccessExpression(node) &&
@@ -287,6 +288,8 @@ function nameReference(node, bindings) {
 
 /**
  * Resolve lexical symbols without loading dependencies or ambient libraries.
+ * Every answer is a list: the name floor and the resolution are UNITED, so a
+ * same-named URL alias cannot hide what a binding really is (FU-045).
  * Resolution may add capabilities, never proofs that suppress the name-only floor.
  * Aliases and binding patterns are followed; their escape sites are still refused.
  */
@@ -327,8 +330,18 @@ function parserBindings(sourceFile) {
   const runtimeDeclarations = (node) =>
     (valueSymbol(node)?.declarations ?? []).filter(isRuntimeBinding);
   // Capabilities or UNKNOWN only: initial values never establish safety.
+  // Every result is a LIST: the name floor and the lexical resolution both
+  // speak, and the floor may only add a kind, never replace what the binding
+  // resolves to (FU-045: a same-named URL alias must not hide `eval`, `argv`).
   const UNKNOWN = Symbol('unknown value');
   const active = new Set();
+  const join = (...lists) => {
+    const all = [...new Set(lists.flat())];
+    const known = all.filter((value) => value !== UNKNOWN);
+    return known.length > 0 ? known : [UNKNOWN];
+  };
+  // A mutable slot keeps proven capabilities, never a proof of safety.
+  const strings = (values) => join(values.filter((value) => typeof value === 'string'));
   const moduleKind = (name) => {
     if (URL_MODULES.has(name)) return 'module';
     if (['vm', 'node:vm'].includes(name)) return 'unsafe';
@@ -338,69 +351,63 @@ function parserBindings(sourceFile) {
     return UNKNOWN;
   };
   const member = (object, name) => {
-    if (name === 'URL') return 'class';
+    if (name === 'URL') return ['class'];
     if (object && typeof object === 'object') {
       // Resolve literal members, but never infer absence across spreads/getters.
-      let value = UNKNOWN;
+      let value = [UNKNOWN];
       if (ts.isObjectLiteralExpression(object)) {
         for (const property of object.properties) {
           const key = property.name;
           if (ts.isSpreadAssignment(property) || (key && ts.isComputedPropertyName(key))) {
-            value = UNKNOWN;
+            value = [UNKNOWN];
           } else if (key?.text === name) {
-            if (active.has(property)) value = UNKNOWN;
+            if (active.has(property)) value = [UNKNOWN];
             else {
               active.add(property);
-              value = ts.isPropertyAssignment(property) ? reference(property.initializer) : UNKNOWN;
+              value = ts.isPropertyAssignment(property)
+                ? reference(property.initializer)
+                : [UNKNOWN];
               active.delete(property);
             }
           }
         }
-      } else {
-        value = UNKNOWN;
       }
       return value;
     }
-    if (object === UNKNOWN) return UNKNOWN;
+    if (object === UNKNOWN) return [UNKNOWN];
     if (object === 'global') {
-      if (GLOBAL_OBJECTS.has(name)) return 'global';
-      if (['eval', 'Function'].includes(name)) return 'unsafe';
-      if (name === 'process') return 'process';
+      if (GLOBAL_OBJECTS.has(name)) return ['global'];
+      if (['eval', 'Function'].includes(name)) return ['unsafe'];
+      if (name === 'process') return ['process'];
     }
-    if (object === 'class' && PARSE_METHODS.has(name)) return 'parse';
-    if (object === 'module' && name === 'parse') return 'parse';
-    if (object === 'class' && name === 'prototype') return 'prototype';
-    if (['prototype', 'instance'].includes(object) && name === 'constructor') return 'class';
-    if (object === 'loaderModule' && name === 'createRequire') return 'createRequire';
-    if (object === 'process' && name === 'getBuiltinModule') return 'getBuiltinModule';
-    if (object === 'process' && name === 'argv') return 'argv';
-    if (object === 'util' && name === 'parseArgs') return 'parseArgs';
-    return UNKNOWN;
+    if (object === 'class' && PARSE_METHODS.has(name)) return ['parse'];
+    if (object === 'module' && name === 'parse') return ['parse'];
+    if (object === 'class' && name === 'prototype') return ['prototype'];
+    if (['prototype', 'instance'].includes(object) && name === 'constructor') return ['class'];
+    if (object === 'loaderModule' && name === 'createRequire') return ['createRequire'];
+    if (object === 'process' && name === 'getBuiltinModule') return ['getBuiltinModule'];
+    if (object === 'process' && name === 'argv') return ['argv'];
+    if (object === 'util' && name === 'parseArgs') return ['parseArgs'];
+    return [UNKNOWN];
   };
+  const members = (objects, name) => join(...objects.map((object) => member(object, name)));
   const declarationReference = (declaration) => {
     if (ts.isVariableDeclaration(declaration)) {
-      const value = declaration.initializer ? reference(declaration.initializer) : UNKNOWN;
-      // Mutable bindings retain proven capabilities, never a proof of safety.
-      return declaration.parent.flags & ts.NodeFlags.Const || typeof value === 'string'
-        ? value
-        : UNKNOWN;
+      const value = declaration.initializer ? reference(declaration.initializer) : [UNKNOWN];
+      return declaration.parent.flags & ts.NodeFlags.Const ? value : strings(value);
     }
     if (ts.isBindingElement(declaration)) {
       const pattern = declaration.parent;
       const owner = pattern.parent;
       let from = ts.isParameter(owner)
-        ? UNKNOWN
+        ? [UNKNOWN]
         : ts.isBindingElement(owner)
           ? declarationReference(owner)
           : owner.initializer
-            ? reference(owner.initializer)
-            : UNKNOWN;
-      if (
-        ts.isVariableDeclaration(owner) &&
-        !(owner.parent.flags & ts.NodeFlags.Const) &&
-        typeof from !== 'string'
-      )
-        from = UNKNOWN;
+            ? receiver(owner.initializer)
+            : [UNKNOWN];
+      if (ts.isVariableDeclaration(owner) && !(owner.parent.flags & ts.NodeFlags.Const))
+        from = strings(from);
       const key = declaration.propertyName ?? declaration.name;
       const name = ts.isComputedPropertyName(key)
         ? isStringLike(unwrap(key.expression))
@@ -409,87 +416,100 @@ function parserBindings(sourceFile) {
         : ts.isIdentifier(key) || isStringLike(key)
           ? key.text
           : null;
-      return member(from, name);
+      return members(from, name);
     }
     if (ts.isImportSpecifier(declaration)) {
       const from = moduleKind(declaration.parent.parent.parent.moduleSpecifier.text);
       const name = (declaration.propertyName ?? declaration.name).text;
-      return name === 'default' ? from : member(from, name);
+      return name === 'default' ? [from] : member(from, name);
     }
     if (ts.isNamespaceImport(declaration) || ts.isImportClause(declaration)) {
       const imported = ts.isNamespaceImport(declaration)
         ? declaration.parent.parent
         : declaration.parent;
-      return moduleKind(imported.moduleSpecifier.text);
+      return [moduleKind(imported.moduleSpecifier.text)];
     }
     if (ts.isImportEqualsDeclaration(declaration)) {
       const specifier = declaration.moduleReference.expression;
-      return specifier && isStringLike(specifier) ? moduleKind(specifier.text) : UNKNOWN;
+      return [specifier && isStringLike(specifier) ? moduleKind(specifier.text) : UNKNOWN];
     }
+    return [UNKNOWN];
+  };
+  // What an identifier is when no binding proves it: the runtime global of
+  // that name. Also the answer for a LOCAL of such a name whose value cannot
+  // be resolved - `URL`, `process`, `eval`, `Function` stay refused (fail
+  // closed) rather than ignored.
+  const globalNamed = (name, local) => {
+    if (name === 'URL') return 'class';
+    if (GLOBAL_OBJECTS.has(name) && !local) return 'global';
+    if (['eval', 'Function'].includes(name)) return 'unsafe';
+    if (name === 'process') return 'process';
     return UNKNOWN;
   };
-  const reference = (node) => {
+  // A receiver whose members are read. A local `window`/`self`/`global`/
+  // `globalThis` that cannot be resolved is taken for the global object, so
+  // `window.eval`, `const { Function: F } = self` are refused; passing such a
+  // local around (`run(window)`, a common variable name) is not an escape.
+  const receiver = (node) => {
+    const kinds = reference(node);
     const inner = unwrap(node);
-    const floor = nameReference(inner, names);
-    if (floor !== null) return floor;
+    return kinds[0] === UNKNOWN && ts.isIdentifier(inner) && GLOBAL_OBJECTS.has(inner.text)
+      ? ['global']
+      : kinds;
+  };
+  const resolve = (inner) => {
     if (ts.isIdentifier(inner)) {
       const symbol = valueSymbol(inner);
       const declarations = runtimeDeclarations(inner);
-      if (declarations.length > 0) {
-        if (active.has(symbol)) return UNKNOWN;
-        active.add(symbol);
-        const results = declarations.map(declarationReference);
-        const result = results.find((value) => value !== UNKNOWN) ?? UNKNOWN;
-        active.delete(symbol);
-        if (result !== UNKNOWN || !['URL', 'process'].includes(inner.text)) return result;
-      }
-      if (inner.text === 'URL') return 'class';
-      if (GLOBAL_OBJECTS.has(inner.text)) return 'global';
-      if (['eval', 'Function'].includes(inner.text)) return 'unsafe';
-      if (inner.text === 'process') return 'process';
-      return UNKNOWN;
+      if (declarations.length === 0) return [globalNamed(inner.text, false)];
+      if (active.has(symbol)) return [UNKNOWN];
+      active.add(symbol);
+      const result = join(...declarations.map(declarationReference));
+      active.delete(symbol);
+      return result[0] === UNKNOWN ? [globalNamed(inner.text, true)] : result;
     }
     if (ts.isAwaitExpression(inner)) return reference(inner.expression);
-    if (isMemberAccess(inner)) {
-      return member(reference(inner.expression), memberName(inner));
-    }
-    if (isUrlModuleLoad(inner)) return 'module';
+    if (isMemberAccess(inner)) return members(receiver(inner.expression), memberName(inner));
+    if (isUrlModuleLoad(inner)) return ['module'];
+    const found = [];
     if (ts.isCallExpression(inner)) {
-      const callee = reference(inner.expression);
-      if (callee === 'createRequire') return 'loader';
-      if (
-        ['loader', 'getBuiltinModule'].includes(callee) &&
-        inner.arguments.length === 1 &&
-        isStringLike(inner.arguments[0])
-      )
-        return moduleKind(inner.arguments[0].text);
-    }
-    if (
-      ts.isCallExpression(inner) &&
-      inner.arguments.length === 1 &&
-      isStringLike(inner.arguments[0])
-    ) {
-      if (
-        inner.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(inner.expression) && inner.expression.text === 'require')
-      ) {
-        return moduleKind(inner.arguments[0].text);
+      for (const callee of reference(inner.expression)) {
+        if (callee === 'createRequire') found.push('loader');
+        if (
+          ['loader', 'getBuiltinModule'].includes(callee) &&
+          inner.arguments.length === 1 &&
+          isStringLike(inner.arguments[0])
+        )
+          found.push(moduleKind(inner.arguments[0].text));
       }
+      if (
+        inner.arguments.length === 1 &&
+        isStringLike(inner.arguments[0]) &&
+        (inner.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(inner.expression) && inner.expression.text === 'require'))
+      )
+        found.push(moduleKind(inner.arguments[0].text));
     }
-    if (ts.isNewExpression(inner)) {
-      const constructor = reference(inner.expression);
-      return constructor === 'class' ? 'instance' : UNKNOWN;
-    }
-    if (ts.isObjectLiteralExpression(inner) || ts.isArrayLiteralExpression(inner)) return inner;
-    return UNKNOWN;
+    if (ts.isNewExpression(inner) && reference(inner.expression).includes('class'))
+      found.push('instance');
+    if (ts.isObjectLiteralExpression(inner) || ts.isArrayLiteralExpression(inner))
+      found.push(inner);
+    return join(found);
+  };
+  // The name floor and the resolution, together: neither skips the other.
+  const reference = (node) => {
+    const inner = unwrap(node);
+    const floor = nameReference(inner, names);
+    return join(floor === null ? [] : [floor], resolve(inner));
   };
   return { reference, names };
 }
 
 /** Native parser capabilities, including global objects that can hand them out. */
-function parserReference(node, bindings) {
-  const kind = bindings.reference(node);
-  return ['class', 'parse', 'module', 'global', 'prototype'].includes(kind) ? kind : null;
+function parserKinds(node, bindings) {
+  return bindings
+    .reference(node)
+    .filter((kind) => ['class', 'parse', 'module', 'global', 'prototype'].includes(kind));
 }
 
 /** An identifier that names a declaration or a property, not a value. */
@@ -622,14 +642,14 @@ function isInType(node) {
 
 /** What kind of parse `node` is, or null when it is none. */
 function parseKind(node, bindings) {
-  if (ts.isNewExpression(node) && parserReference(node.expression, bindings) === 'class') {
+  if (ts.isNewExpression(node) && parserKinds(node.expression, bindings).includes('class')) {
     return 'new URL';
   }
-  if (!ts.isCallExpression(node) || parserReference(node.expression, bindings) !== 'parse') {
+  if (!ts.isCallExpression(node) || !parserKinds(node.expression, bindings).includes('parse')) {
     return null;
   }
   const callee = unwrap(node.expression);
-  if (isMemberAccess(callee) && parserReference(callee.expression, bindings) === 'class') {
+  if (isMemberAccess(callee) && parserKinds(callee.expression, bindings).includes('class')) {
     return `URL.${memberName(callee)}`;
   }
   return 'url.parse';
@@ -666,7 +686,7 @@ export function rawUrlParses(text, file) {
     if (
       !isInType(node) &&
       ((ts.isIdentifier(node) && !isDeclarationName(node)) || isMemberAccess(node)) &&
-      DYNAMIC_CAPABILITIES.has(bindings.reference(node))
+      isDynamic(bindings.reference(node))
     ) {
       const expression = outermost(node);
       site(
@@ -677,7 +697,7 @@ export function rawUrlParses(text, file) {
         'dynamic code/loader',
       );
     }
-    if (ts.isCallExpression(node) && DYNAMIC_CAPABILITIES.has(bindings.reference(node)))
+    if (ts.isCallExpression(node) && isDynamic(bindings.reference(node)))
       site(node, 'dynamic code/loader');
     if (
       ts.isImportDeclaration(node) &&
@@ -689,7 +709,7 @@ export function rawUrlParses(text, file) {
       ts.isBinaryExpression(node) &&
       ts.isAssignmentOperator(node.operatorToken.kind) &&
       isMemberAccess(unwrap(node.left)) &&
-      bindings.reference(unwrap(node.left).expression) === 'instance' &&
+      bindings.reference(unwrap(node.left).expression).includes('instance') &&
       !isLiteral(node.right)
     )
       site(node, 'URL mutation');
@@ -700,20 +720,25 @@ export function rawUrlParses(text, file) {
     ) {
       site(node, what);
     }
-    const reference =
+    const kinds =
       (ts.isIdentifier(node) && !isDeclarationName(node)) ||
       isMemberAccess(node) ||
       ts.isCallExpression(node)
-        ? parserReference(node, bindings)
-        : null;
+        ? parserKinds(node, bindings)
+        : [];
     // A reference is judged where it is outermost: `URL.parse` is one
     // reference, not also its `URL`.
     const partOfLarger =
-      reference !== null &&
+      kinds.length > 0 &&
       isMemberAccess(outermost(node).parent) &&
       outermost(node).parent.expression === outermost(node) &&
-      parserReference(outermost(node).parent, bindings) !== null;
-    if (reference !== null && !partOfLarger && !isInType(node) && !staysInPlace(node, reference)) {
+      parserKinds(outermost(node).parent, bindings).length > 0;
+    if (
+      kinds.length > 0 &&
+      !partOfLarger &&
+      !isInType(node) &&
+      kinds.some((kind) => !staysInPlace(node, kind))
+    ) {
       site(outermost(node).parent ?? node, 'escape');
     }
     // Loader/vm re-exports would move the refused capability into another file.
@@ -752,7 +777,7 @@ export function rawUrlParses(text, file) {
     if (ts.isElementAccessExpression(node) && memberName(node) === null && !isInType(node)) {
       const object = unwrap(node.expression);
       if (
-        parserReference(object, bindings) !== null ||
+        parserKinds(object, bindings).length > 0 ||
         (ts.isIdentifier(object) && GLOBAL_OBJECTS.has(object.text))
       ) {
         site(node, 'escape');
@@ -813,6 +838,26 @@ export function unlistedUrlParses(sites, allowList) {
 const OPTION_LITERAL = /^--?[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*(?:=[\s\S]*)?$/;
 
 /**
+ * Main's syntactic minimum, kept beside the resolver (FU-045): the literal
+ * `process.argv`, or a call of a name `node:util` exports `parseArgs` as. A
+ * binding that shadows the name elsewhere in the file cannot clear it.
+ */
+function readsCommandLine(node, utilParseArgs) {
+  if (
+    isMemberAccess(node) &&
+    memberName(node) === 'argv' &&
+    ts.isIdentifier(unwrap(node.expression)) &&
+    unwrap(node.expression).text === 'process'
+  )
+    return true;
+  return (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(unwrap(node.expression)) &&
+    utilParseArgs.has(unwrap(node.expression).text)
+  );
+}
+
+/**
  * The command-line surface of a file (#385 r6, Codex PR-385 r5 F2): whether
  * it reads its own command line (`process.argv`, or `parseArgs` of
  * `node:util`), and every option it spells — each string literal shaped like
@@ -824,13 +869,29 @@ export function commandLineSurface(text, file) {
   const kind = SCRIPT_KINDS[extname(file)] ?? ts.ScriptKind.TS;
   const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
   const bindings = parserBindings(sourceFile);
+  const utilParseArgs = new Set();
   let readsArgv = false;
   const options = new Set();
+  // Imports are hoisted: collected before any use is visited.
+  for (const node of sourceFile.statements) {
+    if (
+      ts.isImportDeclaration(node) &&
+      isStringLike(node.moduleSpecifier) &&
+      ['util', 'node:util'].includes(node.moduleSpecifier.text) &&
+      node.importClause?.namedBindings &&
+      ts.isNamedImports(node.importClause.namedBindings)
+    ) {
+      for (const element of node.importClause.namedBindings.elements)
+        if ((element.propertyName ?? element.name).text === 'parseArgs')
+          utilParseArgs.add(element.name.text);
+    }
+  }
   const visit = (node) => {
     if (
+      readsCommandLine(node, utilParseArgs) ||
       (((ts.isIdentifier(node) && !isDeclarationName(node)) || isMemberAccess(node)) &&
-        bindings.reference(node) === 'argv') ||
-      (ts.isCallExpression(node) && bindings.reference(node.expression) === 'parseArgs')
+        bindings.reference(node).includes('argv')) ||
+      (ts.isCallExpression(node) && bindings.reference(node.expression).includes('parseArgs'))
     ) {
       readsArgv = true;
       // A parseArgs call's options are its accepted options, keys spelled bare.
