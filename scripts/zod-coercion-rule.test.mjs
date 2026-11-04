@@ -360,6 +360,19 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
   }
 });
 
+it('reviewed ISO check refuses contracts barrel drift', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-contract-check-'));
+  try {
+    for (const file of ['packages/contracts/src/index.ts', 'packages/contracts/src/common/iso-datetime.ts'])
+      cpSync(join(ROOT, file), join(root, file));
+    assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), 'check');
+    appendFileSync(join(root, 'packages/contracts/src/index.ts'), '\n// changed barrel\n');
+    assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
   `import {formMessage} from 'unknown'; z.string().min(1,formMessage('Required')).transform(Number);`,
