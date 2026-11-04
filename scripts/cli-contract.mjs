@@ -55,6 +55,12 @@ const PRETTIER = ['--parser', '--stdin-filepath'];
 export const CLI_CONTRACT = Object.freeze({
   // --- apps -----------------------------------------------------------------
   'apps/web/e2e/contract-fixture.ts': { other: ['-X', '-f', '-q', '-v'] },
+  // The loopback port probe and the run marker (TASK 323): a port and, for the probe, the two paths it
+  // asks for; both are checked (an integer in range, a path that is only requested, never printed).
+  'apps/web/e2e/probe-port.mjs': { positionals: ['integer', 'path', 'path'] },
+  'apps/web/e2e/record-server-run.mjs': { positionals: ['integer'] },
+  // `ss`, `lsof` and `ps` options, to name who holds a port in a refusal.
+  'apps/web/e2e/server-reuse.ts': { other: ['-Fp', '-H', '-ltnp', '-nP', '-o', '-p'] },
   // The build's preload puts itself into every child's NODE_OPTIONS / execArgv (`--require`);
   // it reads no command line.
   'apps/web/scripts/capture-next-config.cjs': { other: ['--require'] },

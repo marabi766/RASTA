@@ -8,6 +8,18 @@ matters for what they may assume.
 `login`, the visitor blocks of `maintenance`, and similar. They start the portal
 and nothing else, so they run anywhere and any number of times at once.
 
+## The ports the suite owns (3200, 3201, 3291)
+
+Locally the suite builds the portal, starts it on :3200 and starts its own layout fixtures on
+:3201 and :3291. **It never reuses a server it did not start itself.** If something already
+holds one of those ports (a hand-run `pnpm dev`, another worktree's portal, a leftover from an
+earlier run), the config refuses at load and names the port and the process
+(`e2e/server-reuse.ts`, TASK 323): a reused dev server would skip the production build, and the
+fixture portal needs the production `BUILD_ID`. Stop that process and run again. The proof is a
+per-run id that the start step records beside the BUILD_ID it built, and a listener that serves
+exactly that build; a CI run is not inspected and never reuses, as before. (`playwright test
+--list` loads the config too, so it refuses as well while a foreign server holds :3200.)
+
 ## Live-stack scenarios — need the whole stack, and **one run per stack**
 
 Anything that signs in (`installLiveSession`) and writes or reads real records
