@@ -6,6 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
 import rawHttp, { AUDITED_TRANSPORTS } from './raw-http-boundary-rule.mjs';
+import {
+  EXECUTABLE_EXTENSIONS,
+  boundaryHolds,
+  code as anyExtension,
+  isExecutable,
+  requiredBoundary,
+} from './lint-extensions.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const linter = new Linter({ cwd: ROOT });
@@ -15,7 +22,7 @@ const check = (code, { path = 'apps/web/src/server/fixture.ts', playwright = fal
     code,
     [
       {
-        files: ['**/*.{ts,tsx,mjs,js,cjs}'],
+        files: [anyExtension('**/*')],
         languageOptions: { parser: tseslint.parser, sourceType: 'module' },
         plugins: { internal: { rules: { 'raw-http': rawHttp } } },
         rules: { 'internal/raw-http': ['error', { playwright }] },
@@ -259,7 +266,7 @@ for (const [workspace, base] of [
   ['tests/e2e', 'specs/raw-process.e2e-spec'],
 ]) {
   test(`real ${workspace} ESLint refuses imported process capabilities across source extensions`, () => {
-    for (const extension of ['ts', 'tsx', 'js', 'mjs', 'cjs']) {
+    for (const extension of EXECUTABLE_EXTENSIONS) {
       const cases =
         extension === 'cjs'
           ? ['process', 'node:process'].flatMap((source) => [
@@ -431,30 +438,15 @@ for (const [workspace, filePath] of REAL_SITES) {
   });
 }
 
-/** Repository files the boundary must cover, by the rule's scope (PM decision, PR #492 r2). */
-const isTestFile = (file) =>
-  /\.(?:spec|test|int-spec|e2e-spec)\.[cm]?[jt]sx?$/.test(file) ||
-  /(?:^|\/)(?:test|__tests__)\//.test(file);
-function inScope(file) {
-  if (!/\.(?:ts|tsx|js|mjs|cjs)$/.test(file) || file.endsWith('.d.ts')) return false;
-  // Live suites aim at an endpoint the environment names (PR #492 r2 F2), wherever they are.
-  if (/\.live-spec\.ts$/.test(file)) return true;
-  if (/^apps\/web\/e2e\//.test(file)) return true; // specs included
-  if (/^tests\/e2e\//.test(file))
-    return !/^tests\/e2e\/src\/[^/]+\.test\.ts$/.test(file) && !/eslint\.config\.mjs$/.test(file);
-  if (/^apps\/web\/src\//.test(file))
-    return !isTestFile(file) && !/^apps\/web\/src\/test\//.test(file);
-  if (/^scripts\//.test(file)) return !isTestFile(file);
-  return (
-    /^(?:services|packages)\/[^/]+\/(?:src|dev|prisma)\//.test(file) &&
-    !isTestFile(file) &&
-    !/\/src\/generated\//.test(file)
-  );
-}
+/**
+ * Repository files the boundary must cover: the ONE policy the coverage guard
+ * shares (requiredBoundary, scripts/lint-extensions.mjs), over every executable
+ * extension (FU-074 r2 F1).
+ */
+const inScope = (file) => requiredBoundary(file) !== null;
 const WORKSPACE_OF = (file) =>
   /^(?:apps|services|packages)\/[^/]+\//.exec(file)?.[0].slice(0, -1) ??
   (file.startsWith('tests/e2e/') ? 'tests/e2e' : '.');
-const E2E_TREE = /^(?:apps\/web\/e2e|tests\/e2e)\//;
 
 test('the boundary is on for every in-scope file, in every workspace, and the lint scripts reach them', () => {
   const tracked = spawnSync('git', ['ls-files'], {
@@ -501,30 +493,24 @@ test('the boundary is on for every in-scope file, in every workspace, and the li
     list.forEach((file, index) => {
       const rule = rules[relative[index]];
       // No exemption: #483 moved the Keycloak client to internalFetch and the block went.
-      if (rule?.[0] !== 2) problems.push(`${file}: internal/raw-http is ${JSON.stringify(rule)}`);
-      else if (E2E_TREE.test(file) && rule[1]?.playwright !== true)
-        problems.push(`${file}: the E2E tree needs { playwright: true }`);
+      if (!boundaryHolds(rule, requiredBoundary(file)))
+        problems.push(`${file}: internal/raw-http is ${JSON.stringify(rule)} (options included)`);
     });
   }
   assert.deepEqual(problems, []);
 });
 
-test('no inline directive switches the transport rules off, except the one pinned browser flow', () => {
-  const tracked = spawnSync(
-    'git',
-    ['ls-files', 'apps', 'services', 'packages', 'scripts', 'tests'],
-    {
-      cwd: ROOT,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
-  const directive =
-    /(?:\/\/|\/\*)\s*eslint(?:-disable(?:-next-line|-line)?|-enable)?(?=\s|\*\/|$)([^\n]*)/g;
+const DIRECTIVE =
+  /(?:\/\/|\/\*)\s*eslint(?:-disable(?:-next-line|-line)?|-enable)?(?=\s|\*\/|$)([^\n]*)/g;
+/**
+ * Every inline directive in `files` that could switch the boundary off: a blanket
+ * disable, or one naming an internal rule. Every executable extension is read
+ * (FU-074 r2 F1: `.mts`/`.cts`/`.jsx` were skipped, and ESLint honours them).
+ */
+function transportDirectives(files, read) {
   const found = [];
-  for (const file of tracked.stdout.split('\n').filter((f) => /\.(?:ts|tsx|js|mjs|cjs)$/.test(f))) {
-    const text = readFileSync(`${ROOT}${file}`, 'utf8');
-    for (const match of text.matchAll(directive)) {
+  for (const file of files.filter(isExecutable)) {
+    for (const match of read(file).matchAll(DIRECTIVE)) {
       const rules = match[1]
         .replace(/\*\/.*$/, '')
         .split('--')[0]
@@ -534,9 +520,62 @@ test('no inline directive switches the transport rules off, except the one pinne
         found.push(`${file}: ${rules || '(all rules)'}`);
     }
   }
+  return found;
+}
+
+test('no inline directive switches the transport rules off, except the one pinned browser flow', () => {
+  // Every tracked file, not a list of top-level directories.
+  const tracked = spawnSync('git', ['ls-files'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  assert.equal(tracked.status, 0, tracked.stderr);
+  const found = transportDirectives(tracked.stdout.split('\n').filter(Boolean), (file) =>
+    readFileSync(`${ROOT}${file}`, 'utf8'),
+  );
   assert.deepEqual(found, [
     // In the page, not the runner: the browser's own same-origin form post (Q-155 scope),
     // the one transport every spec that proves an action's outcome uses (PR #541 r1 F1).
     'apps/web/e2e/action-outcome.ts: internal/raw-http',
   ]);
+});
+
+// FU-074 r2 F1: one file per entry-point family, in every executable extension.
+const FAMILIES = [
+  'apps/web/src/server/fu074',
+  'apps/web/src/app/fu074/page',
+  'apps/web/e2e/fu074',
+  'apps/web/e2e/fu074.spec',
+  'apps/web/src/test/fu074.live-spec',
+  'services/api-gateway/src/fu074',
+  'services/api-gateway/dev/fu074',
+  'services/economic-service/prisma/fu074',
+  'services/identity-service/test/keycloak-live/fu074.live-spec',
+  'packages/nest-common/src/http/fu074',
+  'tests/e2e/src/fu074',
+  'tests/e2e/specs/document/fu074.e2e-spec',
+  'tests/e2e/global-setup-fu074',
+  'scripts/fu074',
+];
+const DISABLES = [
+  '/* eslint-disable internal/raw-http */',
+  '/* eslint-disable */',
+  '// eslint-disable-next-line internal/raw-http',
+  '/* eslint internal/raw-http: off */',
+];
+test('the directive scan and the scope reach every extension in every entry-point family', () => {
+  for (const family of FAMILIES)
+    for (const ext of EXECUTABLE_EXTENSIONS) {
+      const file = `${family}.${ext}`;
+      assert.ok(inScope(file), `${file} is outside the boundary scope`);
+      for (const directive of DISABLES) {
+        const text = `${directive}\nexport { getBuiltinModule } from 'node:process';\n`;
+        assert.equal(
+          transportDirectives([file], () => text).length,
+          1,
+          `${file}: \`${directive}\` was not seen`,
+        );
+      }
+    }
 });
