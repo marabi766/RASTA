@@ -7,6 +7,7 @@ import {
   probeExceptionProblems,
   httpErrorBodyProblems,
   PROBE_TRACEPARENT,
+  routeErrorProblems,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import request from 'supertest';
@@ -14,6 +15,7 @@ import { AppModule } from '../app.module';
 import {
   DocumentationModule,
   buildDocumentationApp,
+  gatewayRouteDocument,
   buildGatewayOpenApiDocument,
 } from './document';
 import { RateLimiter } from '../proxy/rate-limiter';
@@ -45,6 +47,23 @@ describe('api-gateway published errors (D-121)', () => {
     await app.close();
   });
 
+  it('holds the routes the app really serves, and their real error answers, against the document (FU-031)', async () => {
+    const send = async (method: string, url: string) => {
+      const verb = method.toLowerCase() as 'get' | 'post' | 'put' | 'patch' | 'delete';
+      const response = await request(app.getHttpServer())[verb](url);
+      return { status: response.status, body: response.body as unknown };
+    };
+    expect(
+      await routeErrorProblems(app, document, {
+        declared: gatewayRouteDocument(app),
+        send,
+        // The proxy catch-all: everything under it is the upstream service's own published
+        // contract, forwarded unchanged (proxy.service.ts), so the gateway does not republish it.
+        excluded: { '/v1/v1/*path': 'proxied to the upstream service, whose document covers it' },
+      }),
+    ).toEqual([]);
+  });
+
   it('documents every runtime controller (including excluded controllers)', () => {
     expect(Reflect.getMetadata('controllers', DocumentationModule)).toEqual(
       Reflect.getMetadata('controllers', AppModule),
@@ -52,7 +71,9 @@ describe('api-gateway published errors (D-121)', () => {
   });
 
   it('publishes the envelope on every error without probe exceptions', () => {
-    expect(probeExceptionProblems(document, 'api-gateway', [])).toEqual([]);
+    expect(
+      probeExceptionProblems(document, 'api-gateway', [], { declared: gatewayRouteDocument(app) }),
+    ).toEqual([]);
   });
 
   it.each([false, true])('accepts a real HTTP filter body, traced=%s', async (traced) => {
