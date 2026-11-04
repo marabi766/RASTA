@@ -1,3 +1,5 @@
+import { Context, CancelledFailure } from '@temporalio/activity';
+import { foreignFailure } from '../temporal/foreign-failure';
 import { InternalHttpClient, exchangeWithDeadline } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
@@ -35,6 +37,41 @@ import { economicCallDuration, economicCallsTotal } from '../observability/metri
  * retry a fresh financial effect, which is the failure this whole design
  * exists to prevent.
  */
+
+/** Transport ceiling, including error envelopes and paged obligation lookups. */
+export const ECONOMIC_RESPONSE_MAX_BYTES = 1024 * 1024;
+
+async function readEconomicJson(response: Response, deadlineAt: number): Promise<unknown> {
+  const length = response.headers.get('content-length');
+  if (length !== null && Number(length) > ECONOMIC_RESPONSE_MAX_BYTES) {
+    throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+  }
+  if (!response.body) {
+    if (response.status === 204) return undefined;
+    throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+  }
+  const reader = response.body.getReader();
+  const bytes = Buffer.alloc(ECONOMIC_RESPONSE_MAX_BYTES);
+  let size = 0;
+  try {
+    for (;;) {
+      // Always-ready microtasks can delay the abort timer's event-loop slot.
+      if (performance.now() >= deadlineAt) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > ECONOMIC_RESPONSE_MAX_BYTES - size)
+        throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+      bytes.set(value, size);
+      size += value.byteLength;
+    }
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, size));
+    if (!text && response.status !== 204) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+    return text ? (JSON.parse(text) as unknown) : undefined;
+  } finally {
+    // The exchange boundary aborts an incomplete stream without awaiting a stalled peer.
+    reader.releaseLock();
+  }
+}
 
 export interface TransactionView {
   id: string;
@@ -534,7 +571,14 @@ export class EconomicClient {
     // not hang on it. The request is not sent again here; whoever retries sends
     // the same idempotency key (derived from the order), so a write that did
     // commit replays instead of being applied twice.
-    let received: { ok: boolean; status: number; text: string };
+    let activity: Context | undefined;
+    try {
+      activity = Context.current();
+    } catch {
+      /* Non-activity callers have no cancellation owner. */
+    }
+    let received: { ok: boolean; status: number; parsed: unknown };
+    const deadlineAt = performance.now() + this.env.ECONOMIC_REQUEST_TIMEOUT_MS;
     try {
       received = await exchangeWithDeadline(
         this.env.ECONOMIC_REQUEST_TIMEOUT_MS,
@@ -549,26 +593,34 @@ export class EconomicClient {
             ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
             signal,
           }),
-        async (response) => ({
-          ok: response.ok,
-          status: response.status,
-          text: await response.text(),
-        }),
+        async (response) => {
+          const parsed = await readEconomicJson(response, deadlineAt);
+          // JSON parsing is synchronous; check the monotonic deadline again
+          // before accepting it, even if parsing delayed the timer callback.
+          if (performance.now() >= deadlineAt)
+            throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+          return { ok: response.ok, status: response.status, parsed };
+        },
+        { cancel: activity?.cancellationSignal },
       );
     } catch (error) {
       stop();
+      if (activity?.cancellationSignal.aborted)
+        throw new CancelledFailure('The financial activity was cancelled');
       economicCallsTotal.inc({ service: SERVICE_NAME, operation, outcome: 'UNREACHABLE' });
       // No detail from the error in the message: it can carry a URL with a
       // token in it depending on the runtime (S-09). The activity is retried
       // by Temporal, so what matters is that it failed, not how.
-      this.logger.error({ operation, err: error }, 'economic-service could not be reached');
+      this.logger.error(
+        { operation, failure: foreignFailure(error) },
+        'economic-service could not be reached',
+      );
       throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
     }
 
     stop();
 
-    const { ok, text, status } = received;
-    const parsed: unknown = text ? JSON.parse(text) : undefined;
+    const { ok, parsed, status } = received;
 
     if (ok) {
       economicCallsTotal.inc({ service: SERVICE_NAME, operation, outcome: 'OK' });
@@ -588,13 +640,19 @@ export class EconomicClient {
     // UPSTREAM_UNAVAILABLE, and a retry refused for the transaction's state
     // never reached the obligation read that answers it (D-053, review of
     // #287).
-    const body = parsed as Partial<Pick<ApiError, 'code' | 'message'>> | undefined;
-    const reported = body?.code;
-    const code: ErrorCode =
-      reported && reported in ERROR_CODES
-        ? (reported as ErrorCode)
-        : ERROR_CODES.UPSTREAM_UNAVAILABLE;
-    const message = body?.message ?? 'The financial service refused this operation';
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+    }
+    const body = parsed as Partial<Pick<ApiError, 'code' | 'message'>>;
+    if (
+      typeof body.code !== 'string' ||
+      !Object.hasOwn(ERROR_CODES, body.code) ||
+      typeof body.message !== 'string'
+    ) {
+      throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+    }
+    const code = body.code as ErrorCode;
+    const message = body.message;
 
     throw new RastaError(code, message, {
       internalContext: { operation, status },

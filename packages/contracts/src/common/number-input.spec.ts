@@ -11,7 +11,6 @@ import { numberInput } from './number-input';
  */
 
 const bounded = () => z.number().int().min(0).max(3650);
-// eslint-disable-next-line no-restricted-syntax -- the behaviour being replaced, as the baseline
 const before = z.coerce.number().int().min(0).max(3650);
 const after = numberInput(bounded());
 

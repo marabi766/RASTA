@@ -754,11 +754,7 @@ describe('order saga activities (real database)', () => {
                 },
               ]
             : [200, listed(rows, Object.fromEntries(asked.searchParams), queries)];
-        return {
-          ok: status < 300,
-          status,
-          text: async () => JSON.stringify(body),
-        } as Response;
+        return new Response(JSON.stringify(body), { status });
       }) as typeof fetch;
       const economic = new EconomicClient(
         {
@@ -794,7 +790,7 @@ describe('order saga activities (real database)', () => {
       globalThis.fetch = (async (url: string, init: RequestInit) => {
         if (init.method === 'POST') throw new TypeError('fetch failed');
         const body = listed(rows, Object.fromEntries(new URL(url).searchParams), queries);
-        return { ok: true, status: 200, text: async () => JSON.stringify(body) } as Response;
+        return new Response(JSON.stringify(body), { status: 200 });
       }) as typeof fetch;
       const economic = new EconomicClient(
         {
@@ -894,7 +890,7 @@ describe('order saga activities (real database)', () => {
       globalThis.fetch = (async () => {
         pages += 1;
         const body = { items: [], nextCursor: `C${pages}`, hasMore: true };
-        return { ok: true, status: 200, text: async () => JSON.stringify(body) } as Response;
+        return new Response(JSON.stringify(body), { status: 200 });
       }) as typeof fetch;
       const economic = new EconomicClient(
         {

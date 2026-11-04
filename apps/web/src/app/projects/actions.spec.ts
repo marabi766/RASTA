@@ -450,8 +450,8 @@ describe('the owning service is the guarantee; this portal’s timing is only UX
     // The reserve returned, then the process did not run again until after the deadline.
     stallTo(real + window + 110_000);
     expect(await submit(formData(VALID, { replay: real }))).toMatchObject({ kind: 'EXPIRED' });
-    jest.restoreAllMocks();
     expect(createProject).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
     // A never-ambiguous first attempt that provably did not go out is forgotten.
     expect(await held()).toEqual({ kind: 'NONE' });
   });
@@ -468,8 +468,8 @@ describe('the owning service is the guarantee; this portal’s timing is only UX
 
     stallTo(Date.now() + createReplayWindowSeconds() * 1000 + 110_000);
     expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
-    jest.restoreAllMocks();
     expect(createProject).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
     const after = await held();
     if (after.kind !== 'PENDING') throw new Error(after.kind);
     expect(after.request).toMatchObject({ id: before.request.id, key: before.request.key });
@@ -656,10 +656,10 @@ describe('an unresolved create outlives the form that sent it', () => {
     jest.spyOn(Date, 'now').mockReturnValue(real + 15 * 60_000);
     try {
       expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
+      expect(createProject).not.toHaveBeenCalled();
     } finally {
       jest.restoreAllMocks();
     }
-    expect(createProject).not.toHaveBeenCalled();
     expect((await held()).kind).toBe('PENDING');
   });
 

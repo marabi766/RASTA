@@ -158,8 +158,9 @@ describe('transaction lifecycle audit (real database)', () => {
     expect(actions).toEqual([
       ['CREATE', null, 'HELD'],
       ['DISPUTE', 'HELD', 'DISPUTED'],
-      ['RESOLVE_DISPUTE', 'DISPUTED', 'PENDING_SETTLEMENT'],
-      ['REFUND', 'PENDING_SETTLEMENT', 'REFUNDED'],
+      // Escrowed, never authorised: the resolution returns it to HELD (D-083).
+      ['RESOLVE_DISPUTE', 'DISPUTED', 'HELD'],
+      ['REFUND', 'HELD', 'REFUNDED'],
     ]);
     const row = await rowOf(created.id);
     expect(row.refundedBy).toBe('marketplace-service');

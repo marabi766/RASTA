@@ -400,6 +400,8 @@ describe('issuing a command', () => {
   it.each([
     [DISPUTE, 'dispute', 'DISPUTED'],
     [RESOLVE, 'resolve-dispute', 'PENDING_SETTLEMENT'],
+    // Escrowed and never authorised: back to HELD, still a done resolution (D-083).
+    [RESOLVE, 'resolve-dispute', 'HELD'],
   ])(
     'posts %j to its path with the submission id as the Idempotency-Key',
     async (request, path, target) => {
@@ -411,6 +413,14 @@ describe('issuing a command', () => {
       expect(init.method).toBe('POST');
       expect((init.headers as Record<string, string>)['idempotency-key']).toBe(SUBMISSION);
       expect(JSON.parse(init.body as string)).toEqual(request.body);
+    },
+  );
+
+  it.each(['DISPUTED', 'SETTLED', 'REFUNDED'])(
+    'reads a resolution answered %s as unconfirmed: no resolution leaves it there',
+    async (status) => {
+      const fetchImpl = jest.fn(async () => jsonResponse(200, { ...WIRE, status }));
+      expect(await send(fetchImpl, RESOLVE)).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
     },
   );
 

@@ -526,8 +526,10 @@ test code outside the two E2E trees (`services/*/test`, `*.spec.ts`, `__tests__`
 `apps/web/src/test`). It sends to loopback fakes, in-process applications and test
 containers, with one exception: the notification-service Mailpit reads (`MAILPIT_API_URL`),
 which carry no credential (GETs with no header). The document-service signed-URL helpers
-there use `guardedFetch` anyway. Then a Playwright context reached by a computed member name
-(`page[name]`), which cannot be told apart from ordinary indexing without types; browser flows (page navigation, `route.fetch`, code inside
+there use `guardedFetch` anyway. Computed Playwright context access (`page[name]`) and
+parameter/assignment destructuring or reflection can evade lint, but the runtime class guard
+below still covers their API contexts. Outside that runtime boundary: browser flows
+(page navigation, `route.fetch`, code inside
 `page.evaluate`, such as the pinned form replay in `apps/web/e2e/action-outcome.ts`, which the
 usage and session-pinning specs share); workspace
 tooling configs (`eslint`, `jest`, `next`, `postcss` configs), which send nothing; and SDK
@@ -539,6 +541,18 @@ that every sending method goes out with `maxRedirects: 0` (the caller's value ov
 and a redirect status is refused. Without it, Playwright follows a 307/308 to another
 origin with the body, keeps `authorization` on a same-origin hop, and returns the target's
 success. Both harnesses' `request` fixtures and `newApiContext()` use it.
+
+Q-155 N1 / task 1230: both harnesses also install `guardEveryRequestContext` in an
+automatic worker fixture before hooks/tests. It patches all seven public sending methods
+on the request class, covering existing and future instances (`page.request`,
+`context.request`, and raw factory contexts) regardless of how a spec obtains them.
+Unsupported method layouts abort setup; the installation sample is always disposed.
+Regressions exercise parameter destructuring, assignment destructuring and `Reflect.get`
+against real loopback 307/308 redirects, all methods, and caller redirect overrides.
+`request-routes.ts` contains only hostile access helpers, outside E2E lint so the tests
+exercise the runtime boundary independently. N2's probe sender and lint escapes remain
+for the approved stacked B/C follow-ups; `RedirectProbe.fetch` is unchanged here.
+
 `guardFetch(sender)` is the same policy over an explicit `fetch` (`guardedFetch` is it
 over the global, read at call time); `globalFetchStub()` uses it on the `fetch` captured
 before a test replaces the global, for the live spec's administrator (r2 F2).
