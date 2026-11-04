@@ -558,11 +558,13 @@ const FAMILIES = [
   'tests/e2e/global-setup-fu074',
   'scripts/fu074',
 ];
+// Assembled, so this file's own text carries no directive for the repository scan.
+const LINT = 'eslint';
 const DISABLES = [
-  '/* eslint-disable internal/raw-http */',
-  '/* eslint-disable */',
-  '// eslint-disable-next-line internal/raw-http',
-  '/* eslint internal/raw-http: off */',
+  `/* ${LINT}-disable internal/raw-http */`,
+  `/* ${LINT}-disable */`,
+  `// ${LINT}-disable-next-line internal/raw-http`,
+  `/* ${LINT} internal/raw-http: off */`,
 ];
 test('the directive scan and the scope reach every extension in every entry-point family', () => {
   for (const family of FAMILIES)
