@@ -518,6 +518,8 @@ export default {
           const ctor = origin(node.arguments[0]);
           if (!ctor?.raw || ctor.ambiguous || !/^\$?Zod/.test(ctor.name ?? ''))
             report(node, 'preprocess');
+          // Core factories may instantiate any supplied Zod class; inspect its capabilities too.
+          if (index >= 0 && callbackSignature(ctor).fields !== undefined) api.fields ??= index;
         }
         const callbacks = [];
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
