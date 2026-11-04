@@ -40,6 +40,9 @@ const defOf = (schema: z.ZodType): any => (schema as any)._zod.def;
 const checkDefs = (def: any): any[] =>
   ((def.checks ?? []) as any[]).map((check) => ({ check, def: check._zod.def }));
 
+/** The anchored pattern a refinement applies, set on the check (`@rasta/contracts` identifiers). */
+const PUBLISHED_PATTERN = Symbol.for('rasta.openapi.publishedPattern');
+
 /** The bounds of each `codePointLength` refinement, by its check. */
 const CODE_POINT_BOUNDS = new WeakMap<object, { minLength: number; maxLength: number }>();
 
@@ -219,7 +222,14 @@ const STRING_FORMATS: Record<string, string> = {
 function stringSchema(def: any): JsonSchema {
   const out: JsonSchema = { type: 'string' };
 
-  for (const { def: check } of checkDefs(def)) {
+  for (const { check: marked, def: check } of checkDefs(def)) {
+    // A refinement that applies one anchored pattern says so on itself
+    // (`prefixedIdSchema` in `@rasta/contracts`, FU-073): its runtime issue
+    // stays zod 3's `custom`, and the identifier is published as the pattern it
+    // is tested against rather than as any string. A flagged pattern cannot be
+    // carried by `pattern` faithfully, and is not published.
+    const published = marked[PUBLISHED_PATTERN];
+    if (published instanceof RegExp && published.flags === '') out.pattern = published.source;
     if (check.check === 'min_length') out.minLength = check.minimum;
     if (check.check === 'max_length') out.maxLength = check.maximum;
     if (check.check !== 'string_format') continue;

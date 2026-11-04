@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { isoDateTime, parsableUrl, prefixedIdSchema, seedIdSchema } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { codePointLength, toJsonSchema } from './zod-schema';
 
@@ -77,6 +77,29 @@ describe('toJsonSchema', () => {
       type: 'string',
       description: 'outer',
     });
+  });
+
+  it('publishes the pattern an identifier refinement is tested against (FU-073)', () => {
+    const ulid = '[0-9A-HJKMNP-TV-Z]{26}';
+    expect(toJsonSchema(prefixedIdSchema('AST').optional())).toEqual({
+      type: 'string',
+      pattern: `^AST_${ulid}$`,
+      description: 'AST identifier',
+    });
+    expect(toJsonSchema(seedIdSchema('ORG').describe('owner'))).toEqual({
+      anyOf: [
+        { type: 'string', pattern: `^ORG_${ulid}$`, description: 'ORG identifier' },
+        { type: 'string', pattern: '^ORG-[A-Z0-9-]{1,48}$' },
+      ],
+      description: 'owner',
+    });
+    // A clone keeps the check, so it keeps the pattern; a flagged one is not published.
+    expect(toJsonSchema(prefixedIdSchema('PO').describe('order'))).toMatchObject({
+      pattern: `^PO_${ulid}$`,
+    });
+    const flagged = z.refine<string>((value) => /^a$/i.test(value));
+    Object.defineProperty(flagged, Symbol.for('rasta.openapi.publishedPattern'), { value: /^a$/i });
+    expect(toJsonSchema(z.string().check(flagged))).toEqual({ type: 'string' });
   });
 
   it('counts codePointLength in code points, and raises the min/max issues', () => {
