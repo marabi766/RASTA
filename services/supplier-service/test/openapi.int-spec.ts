@@ -160,7 +160,7 @@ describe('the OpenAPI document describes the application that is running', () =>
     expect(offenders).toEqual([]);
   });
 
-  it('publishes the standing routes under the internal service token, and every other route under the bearer', () => {
+  it('publishes the standing routes under the internal service token, the @Public probes under none, and every other route under the bearer', () => {
     const schemes = (document.components as { securitySchemes?: Record<string, unknown> })
       .securitySchemes;
     expect(schemes?.internalToken).toMatchObject({ type: 'apiKey', in: 'header' });
@@ -168,11 +168,14 @@ describe('the OpenAPI document describes the application that is running', () =>
 
     for (const [path, item] of Object.entries(document.paths ?? {})) {
       const internal = path.startsWith('/v1/suppliers/standing-snapshot');
+      // `/health/*` and `/metrics` are `@Public`: the guard admits anyone, so no scheme (FU-075;
+      // the path rule used to stamp bearer on them).
+      const open = !path.startsWith('/v1/');
       for (const [method, operation] of Object.entries(item ?? {})) {
         const security = (operation as { security?: Record<string, unknown>[] }).security ?? [];
         expect({ route: `${method} ${path}`, schemes: security.flatMap(Object.keys) }).toEqual({
           route: `${method} ${path}`,
-          schemes: [internal ? 'internalToken' : 'bearer'],
+          schemes: open ? [] : [internal ? 'internalToken' : 'bearer'],
         });
       }
     }
