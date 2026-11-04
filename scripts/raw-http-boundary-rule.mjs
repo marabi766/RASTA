@@ -74,6 +74,33 @@ const PLAYWRIGHT_SAFE = new Set(['expect', 'defineConfig', 'devices']);
 /** Unambiguous module names: as the first argument of any call they load a client. */
 const UNAMBIGUOUS =
   /^(?:node:(?:http|https|http2)|undici|axios|node-fetch|playwright-core)(?:\/|$)/;
+/** Global and imported process capabilities share this closed policy. */
+const NODE_PROCESS = /^(?:node:)?process$/;
+const PROCESS_LISTENERS = new Set(['on', 'once', 'off', 'removeListener']);
+const PROCESS_SAFE = new Set([
+  'getuid',
+  'env',
+  'argv',
+  'execPath',
+  'platform',
+  'arch',
+  'pid',
+  'ppid',
+  'cwd',
+  'exit',
+  'exitCode',
+  'stdout',
+  'stderr',
+  'stdin',
+  ...PROCESS_LISTENERS,
+  'kill',
+  'hrtime',
+  'memoryUsage',
+  'versions',
+  'version',
+  'uptime',
+  'emitWarning',
+]);
 const LOADER = /^(?:require|getBuiltinModule|_load|import)$/;
 const TS_WRAPPERS = new Set([
   'TSAsExpression',
@@ -116,6 +143,7 @@ const isSenderModule = (source) => {
     /^(?:file:|[\\/]|[A-Za-z]:)/i.test(name) ||
     CLIENT_MODULES.test(name) ||
     NODE_HTTP.test(name) ||
+    NODE_PROCESS.test(name) ||
     PLAYWRIGHT_TEST.test(name) ||
     /^(?:(?:node:)?(?:vm|worker_threads|module)(?:\/|$)|(?:data|blob|https?):)/.test(name) ||
     /(?:^|[\\/])node_modules(?:[\\/]|$)/.test(name)
@@ -163,6 +191,31 @@ export default {
       if (!isSenderModule(source)) return;
       const values = specifiers.filter((specifier) => !typeOnly(node, specifier));
       if (typeOnly(node) || (specifiers.length > 0 && values.length === 0)) return;
+      if (NODE_PROCESS.test(source)) {
+        for (const specifier of values) {
+          if (['ImportDefaultSpecifier', 'ImportNamespaceSpecifier'].includes(specifier.type)) {
+            for (const variable of context.sourceCode.getDeclaredVariables(specifier))
+              for (const reference of variable.references)
+                if (!inTypePosition(reference.identifier)) checkProcessObject(reference.identifier);
+            continue;
+          }
+          const name =
+            specifier.type === 'ImportSpecifier'
+              ? (specifier.imported.name ?? specifier.imported.value)
+              : (specifier.local?.name ?? specifier.local?.value);
+          if (!PROCESS_SAFE.has(name)) report(specifier, 'process loader export');
+          else if (PROCESS_LISTENERS.has(name)) {
+            // These functions return process: only direct calls with discarded results are safe.
+            if (specifier.type !== 'ImportSpecifier') report(specifier, 'process listener export');
+            else
+              for (const variable of context.sourceCode.getDeclaredVariables(specifier))
+                for (const reference of variable.references)
+                  if (!inTypePosition(reference.identifier))
+                    checkListenerCall(reference.identifier);
+          }
+        }
+        return;
+      }
       if (/^(?:node:)?module$/.test(source)) {
         for (const specifier of values) {
           if (
@@ -248,6 +301,32 @@ export default {
         return;
       }
       report(identifier, `${identifier.name} as a value`);
+    };
+
+    const checkListenerCall = (node) => {
+      const call = node.parent;
+      if (
+        call.type !== 'CallExpression' ||
+        call.callee !== node ||
+        !(
+          call.parent.type === 'ExpressionStatement' ||
+          (call.parent.type === 'UnaryExpression' && call.parent.operator === 'void')
+        )
+      )
+        report(node, 'process listener result exposes loaders');
+    };
+    const checkProcessObject = (identifier) => {
+      const parent = identifier.parent;
+      if (parent.type === 'UnaryExpression' && parent.operator === 'typeof') return;
+      if (
+        parent.type === 'MemberExpression' &&
+        parent.object === identifier &&
+        PROCESS_SAFE.has(staticKey(parent))
+      ) {
+        if (PROCESS_LISTENERS.has(staticKey(parent))) checkListenerCall(parent);
+        return;
+      }
+      report(identifier, 'process loader capability');
     };
 
     // A loader may only be called in place with a literal, or used for resolution.
@@ -387,63 +466,19 @@ export default {
                   context.sourceCode.getText(call.arguments[0] ?? call) === 'import.meta.url',
                 );
               else report(identifier, 'unproven loader factory');
-            } else if (identifier.name === 'module' || identifier.name === 'process') {
+            } else if (identifier.name === 'process') checkProcessObject(identifier);
+            else if (identifier.name === 'module') {
               const parent = identifier.parent;
-              const safe =
-                identifier.name === 'module'
-                  ? ['exports']
-                  : [
-                      'getuid',
-                      'env',
-                      'argv',
-                      'execPath',
-                      'platform',
-                      'arch',
-                      'pid',
-                      'ppid',
-                      'cwd',
-                      'exit',
-                      'exitCode',
-                      'stdout',
-                      'stderr',
-                      'stdin',
-                      'on',
-                      'once',
-                      'off',
-                      'removeListener',
-                      'kill',
-                      'hrtime',
-                      'memoryUsage',
-                      'versions',
-                      'version',
-                      'uptime',
-                      'emitWarning',
-                    ];
-              if (
-                parent.type === 'MemberExpression' &&
-                ['on', 'once', 'off', 'removeListener'].includes(staticKey(parent))
-              ) {
-                const call = parent.parent;
-                if (
-                  call.type !== 'CallExpression' ||
-                  call.callee !== parent ||
-                  !(
-                    call.parent.type === 'ExpressionStatement' ||
-                    (call.parent.type === 'UnaryExpression' && call.parent.operator === 'void')
-                  )
-                )
-                  report(parent, 'process listener result exposes loaders');
-              }
               if (
                 !(
                   parent.type === 'MemberExpression' &&
                   parent.object === identifier &&
-                  safe.includes(staticKey(parent))
+                  staticKey(parent) === 'exports'
                 ) &&
                 !(parent.type === 'UnaryExpression' && parent.operator === 'typeof') &&
-                !(identifier.name === 'module' && parent.type === 'BinaryExpression')
+                parent.type !== 'BinaryExpression'
               )
-                report(identifier, `${identifier.name} loader capability`);
+                report(identifier, 'module loader capability');
             }
           }
         }

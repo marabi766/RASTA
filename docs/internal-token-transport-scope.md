@@ -564,7 +564,10 @@ name-based path-builder exemption is removed. `createRequire` results and aliase
 are followed through their references; escaping loaders are refused. Ambient/type-only
 bindings cannot hide runtime globals. VM, string/URL module execution and Worker
 imports are refused; the static telemetry-only watchdog is explicitly audited.
-Node HTTP exports and process members use known-safe lists, so additions require review.
+Node HTTP exports and global/imported process members use the same known-safe lists,
+so additions require review. Process object imports may only access proven-safe members;
+loader exports, unknown extraction, dynamic loads and unsafe re-exports are refused.
+Process listener results must be discarded, including named imports and aliases.
 Tooling that needs a computed workspace path uses `scripts/workspace-module.mjs`,
 which checks the real resolved path before loading a local build, generated Prisma
 client or Jest config; dependency paths, symlink escapes and outside paths are refused.

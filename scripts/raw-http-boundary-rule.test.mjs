@@ -15,7 +15,7 @@ const check = (code, { path = 'apps/web/src/server/fixture.ts', playwright = fal
     code,
     [
       {
-        files: ['**/*.{ts,tsx,mjs,js}'],
+        files: ['**/*.{ts,tsx,mjs,js,cjs}'],
         languageOptions: { parser: tseslint.parser, sourceType: 'module' },
         plugins: { internal: { rules: { 'raw-http': rawHttp } } },
         rules: { 'internal/raw-http': ['error', { playwright }] },
@@ -46,7 +46,31 @@ credentialFetch(url, { headers: { authorization: token } });`,
 };
 // …and the variants the PM named: bind, call, Reflect.apply, factory return, dynamic
 // import / require alias, computed name. Credential spelling is irrelevant to the boundary.
+const PROCESS_FORMS = (source) => ({
+  named: `import { getBuiltinModule as builtin } from '${source}'; builtin('vm').runInThisContext(code);`,
+  default: `import proc from '${source}'; proc.getBuiltinModule('vm');`,
+  namespace: `import * as proc from '${source}'; proc.getBuiltinModule('vm');`,
+  dynamic: `const { getBuiltinModule: builtin } = await import('${source}'); builtin('vm');`,
+  reexport: `export { getBuiltinModule as builtin } from '${source}';`,
+  star: `export * from '${source}';`,
+  'namespace reexport': `export * as proc from '${source}';`,
+  require: `const { getBuiltinModule: builtin } = require('${source}'); builtin('vm');`,
+  'unknown named export': `import { futureLoader as load } from '${source}'; load(code);`,
+  'unknown default member': `import proc from '${source}'; proc.futureLoader(code);`,
+  'object escape': `import * as proc from '${source}'; consume(proc);`,
+  'object destructuring': `import proc from '${source}'; const { [name]: load } = proc;`,
+  'listener result': `import { on as listen } from '${source}'; const p = listen('x', callback);`,
+  'listener alias': `import { once as listen } from '${source}'; const alias = listen;`,
+  'listener reexport': `export { off as listen } from '${source}';`,
+  'namespace listener result': `import * as proc from '${source}'; const p = proc.on('x', callback);`,
+});
+const PROCESS_VARIANTS = Object.fromEntries(
+  ['process', 'node:process'].flatMap((source) =>
+    Object.entries(PROCESS_FORMS(source)).map(([name, code]) => [`${source} ${name}`, code]),
+  ),
+);
 const VARIANTS = {
+  ...PROCESS_VARIANTS,
   'normalized URL module': "await import(' \tDaTa:text/javascript,fetch(url)');",
 
   'process listener result': "const p=process.on('x',callback); p.getBuiltinModule('fs');",
@@ -211,6 +235,49 @@ test('E2E: the guarded entry points and route.request() pass', () => {
       code,
     );
 });
+
+test('global and imported process allow only known capabilities and discarded listener results', () => {
+  for (const source of ['process', 'node:process']) {
+    for (const code of [
+      `import { env as environment, cwd as directory } from '${source}'; directory(); consume(environment);`,
+      `export { env, cwd as directory } from '${source}';`,
+      `import type { Process } from '${source}';`,
+      `import { type Process } from '${source}';`,
+      `export type * from '${source}';`,
+      `import proc from '${source}'; proc.cwd(); void proc.once('x', callback);`,
+      `import * as proc from '${source}'; proc.env.MODE; proc.on('x', callback);`,
+      `import { on as listen, off } from '${source}'; listen('x', callback); void off('x', callback);`,
+      `process.cwd(); process.on('x', callback); void process.once('x', callback);`,
+    ])
+      assert.deepEqual(check(code), [], code);
+  }
+});
+
+// Both actual E2E configs must reject the import class in every supported source extension.
+for (const [workspace, base] of [
+  ['apps/web', 'e2e/raw-process.spec'],
+  ['tests/e2e', 'specs/raw-process.e2e-spec'],
+]) {
+  test(`real ${workspace} ESLint refuses imported process capabilities across source extensions`, () => {
+    for (const extension of ['ts', 'tsx', 'js', 'mjs', 'cjs']) {
+      const cases =
+        extension === 'cjs'
+          ? ['process', 'node:process'].flatMap((source) => [
+              PROCESS_FORMS(source).require,
+              `(async () => { ${PROCESS_FORMS(source).dynamic} })();`,
+            ])
+          : Object.values(PROCESS_VARIANTS);
+      const findings = lintInWorkspace(workspace, `${base}.${extension}`, cases);
+      findings.forEach((messages, index) => {
+        assert.ok(
+          messages.some(({ ruleId, severity }) => ruleId === 'internal/raw-http' && severity === 2),
+          `${workspace}/${base}.${extension}: ${cases[index]} was accepted`,
+        );
+        assert.ok(!messages.some(({ ruleId }) => ruleId === null), 'fixture must parse');
+      });
+    }
+  });
+}
 
 // The allowlist: short, exact files, each with a reason.
 test('every audited transport is one existing file with a reason, never a directory', () => {

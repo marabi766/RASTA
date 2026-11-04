@@ -95,7 +95,7 @@ export default tseslint.config(
     // Keycloak admin password, password grants, bearers) and signed storage
     // URLs: all of them, specs included, go through guardedFetch or the
     // request fixture that e2e/expect.ts guards (PR #492 r1 F2).
-    files: ['e2e/**/*.{ts,mjs}'],
+    files: ['e2e/**/*.{ts,tsx,js,mjs,cjs}'],
     plugins: { internal },
     rules: {
       'internal/transport': 'error',
