@@ -1,10 +1,5 @@
 import { z } from 'zod';
-import {
-  cursorPaginationSchema,
-  organizationIdSchema,
-  plainText,
-  referenceId,
-} from '@rasta/contracts';
+import { cursorPaginationSchema, plainText, referenceId } from '@rasta/contracts';
 import { SUPPLIER_CAPABILITIES } from './capabilities';
 import { QUALIFICATION_STATES } from './qualification.state-machine';
 import { SUPPLIER_STATUSES } from './suspension.state-machine';
@@ -242,10 +237,27 @@ export const MAX_DIRECTORY_ORGANIZATION_IDS = 200;
  * values (counted before deduplication, so the bound is on what was sent) or an
  * empty one is a 400, never a silently truncated or widened answer.
  */
+/**
+ * One organization id, as a schema the OpenAPI converter can publish (PR 699
+ * review F2). The shared `organizationIdSchema` checks the ULID branch in a
+ * `.refine()`, which no JSON-schema converter can see, so the published item
+ * read `{"type":"string"}` — arbitrary strings. This is the same language as a
+ * single anchored pattern (`ORG_<26 Crockford base32>` or the readable seed
+ * form), so what runs and what is published come from one regex;
+ * `dto.spec.ts` pins the equivalence with `organizationIdSchema`. The shared
+ * schema itself is follow-up FU-073.
+ */
+export const DIRECTORY_ORGANIZATION_ID_PATTERN =
+  /^(?:ORG_[0-9A-HJKMNP-TV-Z]{26}|ORG-[A-Z0-9-]{1,48})$/;
+
+const directoryOrganizationId = z
+  .string()
+  .regex(DIRECTORY_ORGANIZATION_ID_PATTERN, 'Expected an identifier of the form ORG_<ULID>');
+
 const directoryOrganizationIds = z.preprocess(
   (value) => (typeof value === 'string' ? [value] : value),
   z
-    .array(organizationIdSchema)
+    .array(directoryOrganizationId)
     .min(1)
     .max(MAX_DIRECTORY_ORGANIZATION_IDS)
     .transform((ids) => [...new Set(ids)]),
