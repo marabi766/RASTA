@@ -92,6 +92,9 @@ jobs:
       - name: Prepush affected-package selection
         run: pnpm run test:prepush-scope
 
+      - name: Prepush CI parity guard
+        run: pnpm run test:prepush-parity
+
       - name: Product backlog and progress gate
         run: |
           pnpm run progress:check
