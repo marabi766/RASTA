@@ -1,18 +1,7 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Headers,
-  HttpCode,
-  Param,
-  Patch,
-  Post,
-  Query,
-} from '@nestjs/common';
-import { ApiBody, ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Roles, zodPipe } from '@rasta/nest-common';
-import { ApiQueryFromSchema } from '../openapi/query-parameters';
-import { bodyFromSchema } from '../openapi/request-body';
+import { Controller, Get, Headers, HttpCode, Param, Patch, Post } from '@nestjs/common';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Roles } from '@rasta/nest-common';
+import { ValidatedBody, ValidatedQuery } from '../openapi/validated';
 import { AssetService } from './asset.service';
 import { IdempotencyStore, requiredIdempotencyKey } from './idempotency';
 import { InsuranceService } from '../insurance/insurance.service';
@@ -125,14 +114,13 @@ export class AssetController {
 
   @Get()
   @ApiOperation({ summary: 'List assets in the requesting organization' })
-  list(@Query(zodPipe(listAssetsQuerySchema)) query: ListAssetsQuery) {
+  list(@ValidatedQuery(listAssetsQuerySchema) query: ListAssetsQuery) {
     return this.assets.list(query);
   }
 
   @Get('nearby')
   @ApiOperation({ summary: 'Assets within a radius, nearest first' })
-  @ApiQueryFromSchema(nearbyQuerySchema)
-  nearby(@Query(zodPipe(nearbyQuerySchema)) query: NearbyQuery) {
+  nearby(@ValidatedQuery(nearbyQuerySchema) query: NearbyQuery) {
     return this.assets.nearby(query);
   }
 
@@ -152,7 +140,7 @@ export class AssetController {
 
   @Get(':id/timeline')
   @ApiOperation({ summary: 'Full history, newest first' })
-  timeline(@Param('id') id: string, @Query(zodPipe(timelineQuerySchema)) query: TimelineQuery) {
+  timeline(@Param('id') id: string, @ValidatedQuery(timelineQuerySchema) query: TimelineQuery) {
     return this.assets.timeline(id, query);
   }
 
@@ -205,7 +193,7 @@ export class AssetController {
       'is two requests.',
   })
   async create(
-    @Body(zodPipe(createAssetSchema)) dto: CreateAssetDto,
+    @ValidatedBody(createAssetSchema) dto: CreateAssetDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<AssetView> {
     const key = requiredIdempotencyKey(idempotencyKey);
@@ -236,8 +224,7 @@ export class AssetController {
       'nothing and answers with the asset as it is. `null` clears an optional field. ' +
       'Returns 404 for an asset in another organization — never 403 — whatever version is sent.',
   })
-  @ApiBody(bodyFromSchema(updateAssetSchema))
-  update(@Param('id') id: string, @Body(zodPipe(updateAssetSchema)) dto: UpdateAssetDto) {
+  update(@Param('id') id: string, @ValidatedBody(updateAssetSchema) dto: UpdateAssetDto) {
     return this.assets.update(id, dto);
   }
 
@@ -253,8 +240,7 @@ export class AssetController {
       'and nothing is written or published. A body without it is `400`. Returns 404 for an asset ' +
       'in another organization — never 403 — whatever version is sent.',
   })
-  @ApiBody(bodyFromSchema(activateAssetSchema))
-  activate(@Param('id') id: string, @Body(zodPipe(activateAssetSchema)) dto: ActivateAssetDto) {
+  activate(@Param('id') id: string, @ValidatedBody(activateAssetSchema) dto: ActivateAssetDto) {
     return this.assets.activate(id, dto);
   }
 
@@ -272,8 +258,7 @@ export class AssetController {
       '`400`. Returns 404 for an asset in another organization — never 403 — whatever version ' +
       'is sent.',
   })
-  @ApiBody(bodyFromSchema(changeStatusSchema))
-  changeStatus(@Param('id') id: string, @Body(zodPipe(changeStatusSchema)) dto: ChangeStatusDto) {
+  changeStatus(@Param('id') id: string, @ValidatedBody(changeStatusSchema) dto: ChangeStatusDto) {
     return this.assets.changeStatus(id, dto);
   }
 
@@ -283,7 +268,7 @@ export class AssetController {
   // so it sits above a fleet manager.
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
   @ApiOperation({ summary: 'Transfer ownership; identity and history are preserved' })
-  transfer(@Param('id') id: string, @Body(zodPipe(transferAssetSchema)) dto: TransferAssetDto) {
+  transfer(@Param('id') id: string, @ValidatedBody(transferAssetSchema) dto: TransferAssetDto) {
     return this.assets.transfer(id, dto);
   }
 
@@ -300,8 +285,7 @@ export class AssetController {
       'written or published. A body without it is `400`. Returns 404 for an asset in another ' +
       'organization — never 403 — whatever version is sent.',
   })
-  @ApiBody(bodyFromSchema(decommissionSchema))
-  decommission(@Param('id') id: string, @Body(zodPipe(decommissionSchema)) dto: DecommissionDto) {
+  decommission(@Param('id') id: string, @ValidatedBody(decommissionSchema) dto: DecommissionDto) {
     return this.assets.decommission(id, dto);
   }
 
@@ -311,7 +295,7 @@ export class AssetController {
   @ApiOperation({ summary: 'Record the current location' })
   recordLocation(
     @Param('id') id: string,
-    @Body(zodPipe(recordLocationSchema)) dto: RecordLocationDto,
+    @ValidatedBody(recordLocationSchema) dto: RecordLocationDto,
   ) {
     return this.assets.recordLocation(id, dto);
   }
@@ -325,7 +309,7 @@ export class AssetController {
   @ApiHeader(IDEMPOTENCY_KEY_HEADER)
   async attachDocument(
     @Param('id') id: string,
-    @Body(zodPipe(attachDocumentSchema)) dto: AttachDocumentDto,
+    @ValidatedBody(attachDocumentSchema) dto: AttachDocumentDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<AttachedDocumentView> {
     const key = requiredIdempotencyKey(idempotencyKey);
@@ -352,7 +336,7 @@ export class AssetController {
   @ApiHeader(IDEMPOTENCY_KEY_HEADER)
   async recordPolicy(
     @Param('id') id: string,
-    @Body(zodPipe(createPolicySchema)) dto: CreatePolicyDto,
+    @ValidatedBody(createPolicySchema) dto: CreatePolicyDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<InsurancePolicyView> {
     const key = requiredIdempotencyKey(idempotencyKey);
@@ -379,7 +363,7 @@ export class AssetController {
   @ApiHeader(IDEMPOTENCY_KEY_HEADER)
   async recordInspection(
     @Param('id') id: string,
-    @Body(zodPipe(createInspectionSchema)) dto: CreateInspectionDto,
+    @ValidatedBody(createInspectionSchema) dto: CreateInspectionDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<InspectionView> {
     const key = requiredIdempotencyKey(idempotencyKey);
@@ -407,7 +391,7 @@ export class AssetController {
   @Post(':id/insurance-claims')
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
   @ApiOperation({ summary: 'File a claim against one of this asset’s policies' })
-  submitClaim(@Param('id') id: string, @Body(zodPipe(submitClaimSchema)) dto: SubmitClaimDto) {
+  submitClaim(@Param('id') id: string, @ValidatedBody(submitClaimSchema) dto: SubmitClaimDto) {
     return this.claims.submitClaim(id, dto);
   }
 
@@ -424,7 +408,7 @@ export class AssetController {
   attachClaimDocument(
     @Param('id') id: string,
     @Param('claimId') claimId: string,
-    @Body(zodPipe(attachClaimDocumentSchema)) dto: AttachClaimDocumentDto,
+    @ValidatedBody(attachClaimDocumentSchema) dto: AttachClaimDocumentDto,
   ) {
     return this.claims.attachDocument(id, claimId, dto);
   }
@@ -436,7 +420,7 @@ export class AssetController {
   reviewClaim(
     @Param('id') id: string,
     @Param('claimId') claimId: string,
-    @Body(zodPipe(reviewClaimSchema)) dto: ReviewClaimDto,
+    @ValidatedBody(reviewClaimSchema) dto: ReviewClaimDto,
   ) {
     return this.claims.startReview(id, claimId, dto);
   }
@@ -449,7 +433,7 @@ export class AssetController {
   decideClaim(
     @Param('id') id: string,
     @Param('claimId') claimId: string,
-    @Body(zodPipe(decideClaimSchema)) dto: DecideClaimDto,
+    @ValidatedBody(decideClaimSchema) dto: DecideClaimDto,
   ) {
     return this.claims.decide(id, claimId, dto);
   }
@@ -462,7 +446,7 @@ export class AssetController {
   recordClaimSettlement(
     @Param('id') id: string,
     @Param('claimId') claimId: string,
-    @Body(zodPipe(recordClaimSettlementSchema)) dto: RecordClaimSettlementDto,
+    @ValidatedBody(recordClaimSettlementSchema) dto: RecordClaimSettlementDto,
   ) {
     return this.claims.recordSettlement(id, claimId, dto);
   }

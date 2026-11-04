@@ -1,13 +1,20 @@
-import { VersioningType } from '@nestjs/common';
+import { VersioningType, type INestApplication } from '@nestjs/common';
+import { METHOD_METADATA, ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
+import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
+import { ModulesContainer } from '@nestjs/core';
+import { isDeepStrictEqual } from 'node:util';
+import Ajv from 'ajv';
+import addFormats from 'ajv-formats';
 import { Test } from '@nestjs/testing';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { AssetController } from '../asset/asset.controller';
 import { AssetService } from '../asset/asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
 import { IdempotencyStore } from '../asset/idempotency';
 import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
-import { toJsonSchema } from '@rasta/nest-common';
+import { toJsonSchema, ZodValidationPipe } from '@rasta/nest-common';
+import { parametersOf } from './query-parameters';
 import { z } from 'zod';
 import { buildAssetOpenApiDocument, buildDocumentationApp } from './document';
 import {
@@ -303,46 +310,198 @@ describe('the character rule in the published request bodies', () => {
 });
 
 /**
- * FU-078: every request body the service serves is the shared converter's output for the DTO the
- * route validates with — read from the document the documentation module really serves, not from
- * decorator metadata. A body typed out by hand (as these four were) fails here on its first
- * difference, and a new `@ApiBody` with no entry below fails the completeness check.
+ * FU-078: every input a route validates is published from the schema that validates it.
+ *
+ * The validated inputs are enumerated from the application itself — the validating pipe of every
+ * `@Body`/`@Query` parameter of every route the documentation module really serves, read out of
+ * Nest's route metadata — and independently of what the document publishes. A route that
+ * validates a body or query and publishes none fails here (r1 F1: eleven bodies and two queries
+ * did); so does one whose published body differs from its validator's converter output, and an
+ * input that is read with no validator, or with one this test cannot read, fails closed.
  */
-describe('the served request bodies are their DTOs, converted (FU-078)', () => {
-  const PUBLISHED: Record<string, z.ZodType> = {
-    'patch /v1/assets/{id}': updateAssetSchema,
-    'post /v1/assets/{id}/activate': activateAssetSchema,
-    'post /v1/assets/{id}/status': changeStatusSchema,
-    'post /v1/assets/{id}/decommission': decommissionSchema,
+describe('every validated input is published from its validator (FU-078)', () => {
+  type Parameter = { name: string; in: string; required?: boolean; schema?: unknown };
+  type Operation = {
+    operationId?: string;
+    requestBody?: { content: Record<string, { schema: unknown }> };
+    parameters?: Parameter[];
   };
-  type Operation = { requestBody?: { content: Record<string, { schema: unknown }> } };
-  let bodies: Record<string, unknown>;
+  type Validated = { handler: string; kind: 'body' | 'query'; schema: z.ZodType };
+
+  let document: OpenAPIObject;
+  let validated: Validated[];
+  const operations = new Map<string, Operation & { route: string }>();
+  /** `METHOD /path` → published body, for the field-level checks below. */
+  const bodies: Record<string, unknown> = {};
 
   beforeAll(async () => {
     const app = await buildDocumentationApp();
     try {
-      const document = buildAssetOpenApiDocument(app);
-      bodies = {};
-      for (const [path, item] of Object.entries(document.paths)) {
-        for (const [method, operation] of Object.entries(item as Record<string, Operation>)) {
-          const body = operation?.requestBody?.content['application/json']?.schema;
-          if (body !== undefined) bodies[`${method} ${path}`] = body;
-        }
-      }
+      document = buildAssetOpenApiDocument(app);
+      validated = validatedInputs(app);
     } finally {
       await app.close();
     }
+    for (const [path, item] of Object.entries(document.paths)) {
+      for (const [method, operation] of Object.entries(item as Record<string, Operation>)) {
+        const route = `${method} ${path}`;
+        if (operation?.operationId) operations.set(operation.operationId, { ...operation, route });
+        const body = operation?.requestBody?.content['application/json']?.schema;
+        if (body !== undefined) bodies[route] = body;
+      }
+    }
   });
 
-  it('publishes a body for exactly the routes listed here', () => {
-    expect(Object.keys(bodies).sort()).toEqual(Object.keys(PUBLISHED).sort());
+  /** Every `@Body`/`@Query` parameter of every served route, with the schema its pipe validates. */
+  function validatedInputs(app: INestApplication): Validated[] {
+    const found: Validated[] = [];
+    for (const module of app.get(ModulesContainer).values()) {
+      for (const wrapper of module.controllers.values()) {
+        const controller = wrapper.metatype as { name: string; prototype: object };
+        for (const name of Object.getOwnPropertyNames(controller.prototype)) {
+          const handler = (controller.prototype as Record<string, unknown>)[name];
+          if (name === 'constructor' || typeof handler !== 'function') continue;
+          if (Reflect.getMetadata(METHOD_METADATA, handler) === undefined) continue;
+          const args = (Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, name) ?? {}) as Record<
+            string,
+            { data?: unknown; pipes?: unknown[] }
+          >;
+          for (const [key, arg] of Object.entries(args)) {
+            const type = Number(key.split(':')[0]);
+            if (type !== RouteParamtypes.BODY && type !== RouteParamtypes.QUERY) continue;
+            const where = `${controller.name}.${name} ${key}`;
+            // Fail closed: an input read whole, by exactly one validator this test can read.
+            if (arg.data !== undefined) throw new Error(`${where} reads one field of its input`);
+            const zod = (arg.pipes ?? []).filter((pipe) => pipe instanceof ZodValidationPipe);
+            if (zod.length !== 1 || arg.pipes?.length !== 1) {
+              throw new Error(`${where} is not validated by exactly one ZodValidationPipe`);
+            }
+            found.push({
+              handler: `${controller.name}_${name}`,
+              kind: type === RouteParamtypes.BODY ? 'body' : 'query',
+              schema: (zod[0] as ZodValidationPipe<z.ZodType>).schema,
+            });
+          }
+        }
+      }
+    }
+    return found;
+  }
+
+  function operationOf(handler: string): Operation & { route: string } {
+    const operation = operations.get(handler) ?? operations.get(`${handler}_v1`);
+    if (!operation) throw new Error(`${handler} validates an input but serves no operation`);
+    return operation;
+  }
+
+  it('finds every validated input of the real controllers (15 bodies, 3 queries)', () => {
+    expect(validated.filter((input) => input.kind === 'body')).toHaveLength(15);
+    expect(validated.filter((input) => input.kind === 'query')).toHaveLength(3);
   });
 
-  it.each(Object.entries(PUBLISHED))('%s', (operation, schema) => {
-    expect(bodies[operation]).toEqual(toJsonSchema(schema));
+  it('publishes every validated body as its validator, converted', () => {
+    const wrong = validated
+      .filter((input) => input.kind === 'body')
+      .map((input) => {
+        const operation = operationOf(input.handler);
+        const published = operation.requestBody?.content['application/json']?.schema;
+        return { route: operation.route, published, expected: toJsonSchema(input.schema) };
+      })
+      .filter(({ published, expected }) => !isDeepStrictEqual(published, expected))
+      .map(({ route }) => route);
+    expect(wrong).toEqual([]);
   });
 
-  it.each(Object.keys(PUBLISHED))('%s keeps the prose the hand-typed body carried', (operation) => {
+  it('publishes a body only where one is validated', () => {
+    const validatedRoutes = validated
+      .filter((input) => input.kind === 'body')
+      .map((input) => operationOf(input.handler).route);
+    expect(Object.keys(bodies).sort()).toEqual([...validatedRoutes].sort());
+  });
+
+  it('publishes every validated query field as a parameter, from its validator', () => {
+    for (const input of validated.filter((candidate) => candidate.kind === 'query')) {
+      const operation = operationOf(input.handler);
+      const published = (operation.parameters ?? []).filter(
+        (parameter) => parameter.in === 'query',
+      );
+      const expected = parametersOf(input.schema as z.ZodObject).map((parameter) => ({
+        ...parameter,
+        in: 'query',
+      }));
+      expect([operation.route, sortByName(published)]).toEqual([
+        operation.route,
+        sortByName(expected as Parameter[]).map((parameter) => expect.objectContaining(parameter)),
+      ]);
+    }
+  });
+
+  function sortByName<T extends { name: string }>(parameters: T[]): T[] {
+    return [...parameters].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * FU-078 r1 F2: the published document, compiled by AJV the way a client's validator reads it.
+   * PATCH `assetTag` was `{"nullable":true}`, which AJV refuses ("nullable" cannot be used without
+   * "type"). Every schema the document carries is compiled, `$ref`s resolved against its components.
+   */
+  it('compiles under AJV, every schema it carries', () => {
+    const base = 'https://asset-service.invalid/components/';
+    const resolveRefs = (value: unknown): unknown =>
+      JSON.parse(JSON.stringify(value), (key, inner: unknown) =>
+        key === '$ref' && typeof inner === 'string'
+          ? inner.replace('#/components/schemas/', base)
+          : inner,
+      );
+    const ajv = new Ajv({ strict: true, allErrors: true });
+    addFormats(ajv);
+    ajv.addVocabulary(['example', 'xml', 'externalDocs']);
+    for (const [name, schema] of Object.entries(document.components?.schemas ?? {})) {
+      ajv.addSchema(resolveRefs(schema) as object, `${base}${name}`);
+    }
+    const failures: string[] = [];
+    const compile = (where: string, schema: unknown) => {
+      try {
+        ajv.compile(resolveRefs(schema) as object);
+      } catch (error) {
+        failures.push(`${where}: ${(error as Error).message}`);
+      }
+    };
+    for (const name of Object.keys(document.components?.schemas ?? {})) {
+      compile(`#/components/schemas/${name}`, { $ref: `${base}${name}` });
+    }
+    let compiled = 0;
+    for (const [path, item] of Object.entries(document.paths)) {
+      for (const [method, operation] of Object.entries(item as Record<string, Operation>)) {
+        const route = `${method} ${path}`;
+        const body = operation?.requestBody?.content['application/json']?.schema;
+        if (body !== undefined) {
+          compile(`${route} body`, body);
+          compiled += 1;
+        }
+        for (const parameter of operation?.parameters ?? []) {
+          if (parameter.schema !== undefined)
+            compile(`${route} ${parameter.name}`, parameter.schema);
+        }
+        const responses = (operation as { responses?: Record<string, unknown> })?.responses ?? {};
+        for (const [status, response] of Object.entries(responses)) {
+          const content = (response as { content?: Record<string, { schema?: unknown }> }).content;
+          for (const [type, media] of Object.entries(content ?? {})) {
+            if (media.schema !== undefined) compile(`${route} ${status} ${type}`, media.schema);
+          }
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+    expect(compiled).toBe(15);
+  });
+
+  it.each([
+    'patch /v1/assets/{id}',
+    'post /v1/assets/{id}/activate',
+    'post /v1/assets/{id}/status',
+    'post /v1/assets/{id}/decommission',
+  ])('%s keeps the prose the hand-typed body carried', (operation) => {
     const published = bodies[operation] as {
       properties: Record<string, { description?: string }>;
     };
@@ -350,6 +509,18 @@ describe('the served request bodies are their DTOs, converted (FU-078)', () => {
     for (const field of ['model', 'reason'].filter((name) => name in published.properties)) {
       expect(published.properties[field]?.description).toMatch(/Bidi_Control/);
     }
+  });
+
+  it('publishes PATCH assetTag as the bounded nullable string the validator accepts', () => {
+    const published = bodies['patch /v1/assets/{id}'] as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(published.properties.assetTag).toMatchObject({
+      type: 'string',
+      minLength: 1,
+      maxLength: 64,
+      nullable: true,
+    });
   });
 
   it.each([

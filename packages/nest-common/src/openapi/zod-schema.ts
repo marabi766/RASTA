@@ -161,8 +161,15 @@ function convert(def: any): JsonSchema {
     case 'optional':
       return toJsonSchema(def.innerType);
 
-    case 'nullable':
-      return { ...toJsonSchema(def.innerType), nullable: true };
+    // OpenAPI 3.0's `nullable` qualifies a `type` and means nothing without one ("nullable"
+    // cannot be used without "type", AJV). An inner schema that says nothing already admits
+    // `null`, so it is published as it is rather than as the non-schema `{"nullable":true}`.
+    case 'nullable': {
+      const inner = toJsonSchema(def.innerType);
+      return inner.type === undefined && Object.keys(inner).every((key) => key === 'description')
+        ? inner
+        : { ...inner, nullable: true };
+    }
 
     // `.prefault()` is zod 3's `.default()` (the value is parsed like any
     // input); either way the value written is the one published.
@@ -175,16 +182,48 @@ function convert(def: any): JsonSchema {
     // so the schema the input is checked against is published; the cross-field
     // rules `.refine()` carries — "at least one of hours or kilometres",
     // "periodEnd after periodStart" — are checks, left out the same way, and
-    // stay in the endpoint description where a human will read it. A pipe
-    // between two schemas (`.pipe()`) was never described, and stays so.
+    // stay in the endpoint description where a human will read it.
     case 'pipe':
       if (defOf(def.out).type === 'transform') return toJsonSchema(def.in);
       if (defOf(def.in).type === 'transform') return toJsonSchema(def.out);
-      return {};
+      return pipeBetweenSchemas(toJsonSchema(def.in), toJsonSchema(def.out));
 
     default:
       return {};
   }
+}
+
+/** The keywords a later schema in a pipe narrows: the tighter bound of the two is the one that holds. */
+const LOWER_BOUNDS = ['minLength', 'minimum', 'minItems'] as const;
+const UPPER_BOUNDS = ['maxLength', 'maximum', 'maxItems'] as const;
+
+/**
+ * `.pipe()` between two schemas — `identifierText()` is `plainText()`, canonicalised by a
+ * transform, piped into `z.string().min().max()`. A value is accepted only when it passes both, so
+ * the input schema's type and constraints are published, and the later schema's constraints are
+ * added where the two agree on the type (the tighter bound of a pair wins). This was `{}` (FU-078
+ * r1 F2): under `.nullable()` that published `{"nullable":true}`, which is not a schema — "nullable"
+ * cannot be used without "type" — and dropped a bounded string to "anything".
+ *
+ * When the input says nothing (`z.unknown().pipe(…)`), the value reaching the later schema is the
+ * input, so the later schema is what is published. When the two disagree on the type, the input
+ * schema alone is published: it is what the client sends.
+ */
+function pipeBetweenSchemas(input: JsonSchema, output: JsonSchema): JsonSchema {
+  if (Object.keys(input).every((key) => key === 'description')) return { ...output, ...input };
+  if (input.type === undefined || input.type !== output.type) return input;
+  const merged: JsonSchema = { ...output, ...input };
+  for (const key of LOWER_BOUNDS) {
+    if (typeof input[key] === 'number' && typeof output[key] === 'number') {
+      merged[key] = Math.max(input[key] as number, output[key] as number);
+    }
+  }
+  for (const key of UPPER_BOUNDS) {
+    if (typeof input[key] === 'number' && typeof output[key] === 'number') {
+      merged[key] = Math.min(input[key] as number, output[key] as number);
+    }
+  }
+  return merged;
 }
 
 function objectSchema(def: any): JsonSchema {
