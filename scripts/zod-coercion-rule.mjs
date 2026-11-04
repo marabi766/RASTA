@@ -537,6 +537,7 @@ export default {
     const absent = (raw, seen = new Set()) => {
       const node = unwrap(raw);
       if (!node || globalName(node, 'undefined')) return true;
+      if (node.type === 'Identifier' && node.name === 'undefined') return false;
       if (node.type === 'UnaryExpression' && node.operator === 'void') return true;
       if (node.type !== 'Identifier') return false;
       const binding = variable(node),

@@ -785,6 +785,8 @@ for (const code of [
   `for(const options of [{coerce:true}]){z.number(options);}`,
   `for(const options of [{coerce:true}]){const absence=options;z.number().clone(absence);}`,
   `const undefined={}; z.number(undefined);`,
+  `const undefined=void 0; z.number(undefined);`,
+  `const undefined=void 0; const absence=undefined; z.number({...absence});`,
   `function f(undefined){z.number(undefined);}`,
   `const undefined={coerce:true}; z.int(undefined);`,
   `function f(undefined){const absence=undefined; z.number().clone(absence);}`,
