@@ -30,6 +30,10 @@ import ts from 'typescript';
  * cycle, the depth limit — keeps where it stopped and is **refused** where it
  * is called or drawn (`unresolved`), never read as "not ours".
  *
+ * An invocation adapter — `f.call(t, …)`, `f.apply(t, args)`, `f.bind(t)(…)`,
+ * `Reflect.apply(f, t, args)` — invokes `f`: every rule reads the call as a
+ * call of `f`, with `f`'s own identity and member path (PR 698 r1 F1).
+ *
  * ## Discovery is by what the code does, not by a list
  *
  * - A **slot factory** is `fencedSlot`, and any function whose body calls a
@@ -191,9 +195,15 @@ function propertyName(name: ts.PropertyName): string | null {
     : null;
 }
 
-/** An expression that only names something defined elsewhere (`x`, `ns.x`, `(x as T)`, `f<T>`). */
+type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression;
+
+/** An expression that only names something defined elsewhere (`x`, `ns.x`, `(x as T)`, `f<T>`, `f.bind(t)`). */
 function isAlias(node: ts.Expression): boolean {
   const inner = bare(node);
+  if (ts.isCallExpression(inner)) {
+    const fn = bare(inner.expression);
+    return memberName(fn) === 'bind' && isAlias((fn as Access).expression);
+  }
   return ts.isIdentifier(inner) || memberName(inner) !== null;
 }
 
@@ -462,12 +472,17 @@ class Program {
     node = bare(node);
     const memberOf = memberName(node);
     if (memberOf !== null) {
-      const base = this.resolve(
-        file,
-        (node as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression,
-        depth + 1,
-      );
+      const base = this.resolve(file, (node as Access).expression, depth + 1);
       return this.member(base, memberOf, depth + 1);
+    }
+    // `f.bind(t)` is `f`, unless `bind` is a definition of its own (its result is then unknown).
+    if (ts.isCallExpression(node)) {
+      const fn = bare(node.expression);
+      if (memberName(fn) !== 'bind') return null;
+      const own = this.resolve(file, fn, depth + 1);
+      if (own !== null && (own.unresolved || own.member === undefined))
+        return own.unresolved ? own : null;
+      return this.resolve(file, (fn as Access).expression, depth + 1);
     }
     if (!ts.isIdentifier(node)) return null;
     const name = node.text;
@@ -529,6 +544,39 @@ class Program {
       return null;
     }
     return null;
+  }
+
+  /**
+   * What `call` invokes, read through the invocation adapters — `f.call(t, …)`,
+   * `f.apply(t, args)`, `Reflect.apply(f, t, args)`, and `f.bind(t)(…)` (in
+   * `resolve`) — keeping `f`'s own identity and member path; with the arguments
+   * `f` receives when they are written out one by one (`null`: not known). A
+   * definition of its own named `call` or `apply` is the callee itself.
+   */
+  invoked(
+    file: string,
+    call: ts.CallExpression,
+  ): { readonly sym: Sym | null; readonly args: readonly ts.Expression[] | null } {
+    let callee: ts.Expression = call.expression;
+    let args: readonly ts.Expression[] | null = call.arguments;
+    for (let depth = 0; ; depth++) {
+      // Exhausted: refused where used.
+      if (depth > 16) return { sym: { module: file, name: '', unresolved: true }, args };
+      const sym = this.resolve(file, callee);
+      const fn = bare(callee);
+      const adapter = memberName(fn);
+      if (adapter !== 'call' && adapter !== 'apply') return { sym, args };
+      if (sym !== null && (sym.unresolved || sym.member === undefined)) return { sym, args };
+      const base = bare((fn as Access).expression);
+      if (sym === null && adapter === 'apply' && ts.isIdentifier(base) && base.text === 'Reflect') {
+        if (!args?.[0]) return { sym, args };
+        callee = args[0];
+        args = null;
+      } else {
+        callee = base;
+        args = adapter === 'call' && args ? args.slice(1) : null;
+      }
+    }
   }
 
   /** Whether `sym` is defined in a `'use server'` module, or in an `…actions` module. */
@@ -608,7 +656,7 @@ function discover(sources: Sources): Discovery {
     let found = false;
     walk(within, (node) => {
       if (!found && ts.isCallExpression(node)) {
-        const callee = program.resolve(file, node.expression);
+        const callee = program.invoked(file, node).sym;
         // A callee the guard cannot follow may be a factory: fail closed.
         found = callee !== null && (callee.unresolved === true || factories.has(key(callee)));
       }
@@ -661,14 +709,18 @@ function refersToStore(file: string, { program, stores }: Discovery): boolean {
 }
 
 /** The action-state hook calls; a callee the guard cannot follow may be one (fail closed). */
-type Hook = { readonly call: ts.CallExpression; readonly hook: 'REACT' | 'SLOT' | 'UNRESOLVED' };
+type Hook = {
+  readonly call: ts.CallExpression;
+  readonly args: readonly ts.Expression[] | null;
+  readonly hook: 'REACT' | 'SLOT' | 'UNRESOLVED';
+};
 
 function actionStateCalls(file: string, program: Program): Hook[] {
   return calls(program.module(file).source).flatMap((call): Hook[] => {
-    const callee = program.resolve(file, call.expression);
-    if (is(callee, REACT, 'useActionState')) return [{ call, hook: 'REACT' }];
-    if (is(callee, BOUNDARY_MODULE, 'useSlotActionState')) return [{ call, hook: 'SLOT' }];
-    if (callee?.unresolved) return [{ call, hook: 'UNRESOLVED' }];
+    const { sym: callee, args } = program.invoked(file, call);
+    if (is(callee, REACT, 'useActionState')) return [{ call, args, hook: 'REACT' }];
+    if (is(callee, BOUNDARY_MODULE, 'useSlotActionState')) return [{ call, args, hook: 'SLOT' }];
+    if (callee?.unresolved) return [{ call, args, hook: 'UNRESOLVED' }];
     return [];
   });
 }
@@ -735,8 +787,8 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
   };
 
   /** The function a state hook is given: a function, or a name for one, or `useCallback` of one. */
-  const reducerOf = (call: ts.CallExpression): ts.FunctionLikeDeclaration | null => {
-    let argument: ts.Expression | undefined = call.arguments[0] && bare(call.arguments[0]);
+  const reducerOf = (args: readonly ts.Expression[] | null): ts.FunctionLikeDeclaration | null => {
+    let argument: ts.Expression | undefined = args?.[0] && bare(args[0]);
     if (argument && ts.isIdentifier(argument)) {
       const name = argument.text;
       let initializer: ts.Expression | undefined;
@@ -765,12 +817,12 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
 
   // 0, 1. The state is the slot hook's; its callback returns only the boundary and awaits nothing.
   let boundary = false;
-  for (const { call, hook } of actionStateCalls(file, program)) {
+  for (const { call, args, hook } of actionStateCalls(file, program)) {
     // An unresolved hook is refused by the call scan below.
     if (hook === 'UNRESOLVED') continue;
     if (hook === 'REACT')
       flag('state', call, "React's useActionState: hold the state through useSlotActionState");
-    const fn = reducerOf(call);
+    const fn = reducerOf(args);
     if (fn === null) {
       flag('callback', call, 'the state hook is not given a function (or useCallback of one)');
       continue;
@@ -818,7 +870,8 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
     }
 
     if (ts.isCallExpression(node)) {
-      const callee = resolve(node.expression);
+      // Through `.call`, `.apply`, `.bind(…)()` and `Reflect.apply`: the target, not the adapter.
+      const callee = program.invoked(file, node).sym;
       if (callee?.unresolved)
         flag('unresolved', node, `${node.expression.getText()}(...): the guard cannot follow it`);
       // 3. The server action only inside the boundary's `send`.

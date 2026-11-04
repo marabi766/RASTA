@@ -779,6 +779,65 @@ describe('the guard fails where it must', () => {
       expect(rules(`${COMPLIANT} saveThing();`, extra)).toEqual(['store']);
     });
 
+    describe('PR 698 r1 F1: an invocation adapter invokes its target, never replaces it', () => {
+      const store = { 'lib/thing-store.ts': `${STORE} export { slot };` };
+      const aliases = {
+        ...store,
+        'lib/alias.ts':
+          "import { saveThing, answerThing, settleThing, slot } from './thing-store'; export default { saveThing, answerThing, settleThing, slot };",
+      };
+      const spellings: [string, string, (name: string) => string][] = [
+        ['direct import', "import { slot } from '@/lib/thing-store';", (n) => n],
+        ['namespace', "import * as S from '@/lib/thing-store';", (n) => `S.${n}`],
+        ['default-object alias', "import D from '@/lib/alias';", (n) => `D.${n}`],
+      ];
+      const adapters: [string, (fn: string) => string][] = [
+        ['.call', (fn) => `${fn}.call(null)`],
+        ['.apply', (fn) => `${fn}.apply(null, [])`],
+        ['.bind()()', (fn) => `${fn}.bind(null)()`],
+        ['Reflect.apply', (fn) => `Reflect.apply(${fn}, null, [])`],
+      ];
+      const targets = [
+        ...['saveThing', 'answerThing', 'settleThing'],
+        ...['start', 'answer', 'settle'].map((m) => `slot.${m}`),
+      ];
+      const cases = spellings.flatMap(([spelling, imports, name]) =>
+        adapters.flatMap(([adapter, invoke]) =>
+          targets.map((target) => [
+            `${adapter} of ${target} (${spelling})`,
+            imports,
+            invoke(name(target)),
+          ]),
+        ),
+      );
+      it.each(cases)('%s is refused outside the boundary', (_label, imports, write) => {
+        expect(rules(`${COMPLIANT} ${imports} ${write};`, aliases)).toEqual(['store']);
+      });
+      it.each(cases.filter(([, , write]) => !write.includes('slot')))(
+        '%s passes inside the boundary',
+        (_label, imports, write) => {
+          const valid = COMPLIANT.replace(
+            'remember: () => saveThing()',
+            `remember: () => ${write}`,
+          );
+          expect(rules(`${valid} ${imports}`, aliases)).toEqual([]);
+        },
+      );
+      it('a hook or a factory behind an adapter is still found', () => {
+        const hook =
+          "import { saveThing } from '@/lib/thing-store'; import { useActionState } from 'react'; export const Form = () => useActionState.call(null, () => saveThing(), null);";
+        expect(fencedForms(tree(hook))).toEqual(['app/thing/ThingForm.tsx']);
+        expect(rules(hook)).toEqual(expect.arrayContaining(['state', 'store']));
+        const made = {
+          'lib/thing-store.ts': STORE.replace("fencedSlot('p.'", "fencedSlot.apply(null, ['p.']"),
+        };
+        expect(fencedModules(tree(COMPLIANT, made)).has('lib/thing-store.ts')).toBe(true);
+        expect(rules(`${COMPLIANT} saveThing.call(null);`, made)).toEqual(['store']);
+        // A bound writer kept aside is the writer.
+        expect(rules(`${COMPLIANT} const kept = saveThing.bind(null); kept();`)).toEqual(['store']);
+      });
+    });
+
     it('refuses when resolution is exhausted, keeping where it stopped', () => {
       const cycle = {
         'lib/a.ts': "export { x } from './b'; export * from './thing-store';",
