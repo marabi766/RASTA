@@ -2,7 +2,7 @@
 
 > Generated from `planning/backlog.json`. Do not edit this report directly.
 
-- As of: **2026-10-23**
+- As of: **2026-11-04**
 - Baseline: **APPROVED** — Approved by **Product Owner**.
 - Earned-points rule: only **ACCEPTED delivery units** earn points; in-progress work earns zero.
 - Decomposition rule: a decomposed Feature contributes its child Stories, never its own points again. An undecomposed Feature remains a legacy delivery unit.
@@ -38,9 +38,9 @@
 | Status | Delivery units | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 4 | 55 |
-| IN_PROGRESS | 7 | 139 |
-| BLOCKED | 4 | 52 |
+| READY | 4 | 39 |
+| IN_PROGRESS | 8 | 160 |
+| BLOCKED | 3 | 47 |
 | ACCEPTED | 32 | 385 |
 | CANCELLED | 0 | 0 |
 
@@ -51,8 +51,8 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Features | Baseline SP |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 4 | 55 |
-| IN_PROGRESS | 8 | 152 |
+| READY | 3 | 34 |
+| IN_PROGRESS | 9 | 173 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 27 | 377 |
 | CANCELLED | 0 | 0 |
@@ -62,9 +62,9 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Stories | Story Points |
 | --- | --- | --- |
 | PROPOSED | 0 | 0 |
-| READY | 0 | 0 |
+| READY | 1 | 5 |
 | IN_PROGRESS | 0 | 0 |
-| BLOCKED | 1 | 5 |
+| BLOCKED | 0 | 0 |
 | ACCEPTED | 6 | 21 |
 | CANCELLED | 0 | 0 |
 

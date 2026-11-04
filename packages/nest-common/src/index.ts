@@ -347,6 +347,9 @@ export {
   publishedPathOf,
   publishedResponseSchemaOf,
   realFilterResponse,
+  realRoutesOf,
+  routeErrorProblems,
+  unresolvedRefs,
   validatePublishedBody,
   PROBE_CONTEXTS,
   PROBE_TRACEPARENT,
@@ -358,6 +361,10 @@ export type {
   PublishedErrorResponse,
   PublishedSchema,
   PublishedProbeException,
+  ProbeExceptionOptions,
+  RealRoute,
+  RouteCheckOptions,
+  RoutedApplication,
 } from './openapi/published-body';
 
 export { clientFailureCode } from './database/client-failure';

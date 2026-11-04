@@ -6,6 +6,8 @@ import { runWithContext, type RequestContext } from '../context/request-context'
 import { RastaError } from '../errors/rasta-error';
 import { AllExceptionsFilter } from '../filters/exception.filter';
 import { validateRequestInput } from '../pipes/zod-validation.pipe';
+import { publishedApiErrorSchema } from './api-error';
+import { toJsonSchema } from './zod-schema';
 
 /**
  * Conformance of a service's **published** OpenAPI document to the error bodies the platform really
@@ -27,6 +29,8 @@ export interface PublishedDocument {
 
 export type PublishedSchema = Record<string, unknown>;
 type Schema = PublishedSchema;
+
+const SCHEMA_REF = '#/components/schemas/';
 
 const KNOWN = new Set([
   '$ref',
@@ -59,14 +63,17 @@ export function publishedResponseSchemaOf(
 ): Schema {
   const operation = (document.paths?.[path] as Record<string, unknown> | undefined)?.[
     method.toLowerCase()
-  ] as { responses?: Record<string, { content?: Record<string, { schema?: Schema }> }> };
+  ] as { responses?: Record<string, unknown> };
   const explicit =
     operation?.responses?.[String(status)] ??
     operation?.responses?.[`${Math.floor(status / 100)}XX`];
   // OpenAPI's default response is JSON metadata, not Zod's unparsed default() method.
   // eslint-disable-next-line zod/no-default
   const response = explicit ?? operation?.responses?.default;
-  const schema = response?.content?.['application/json']?.schema;
+  const schema =
+    response === undefined
+      ? undefined
+      : errorResponseSchema(response, `${method} ${path} ${status}`);
   if (!schema) throw new Error(`${method} ${path} documents no JSON body for ${status}`);
   return schema;
 }
@@ -188,6 +195,7 @@ function check(
 // ---- the error envelope ---------------------------------------------------------------------
 
 const METHODS = new Set(['get', 'put', 'post', 'patch', 'delete', 'head', 'options', 'trace']);
+const ERROR_REF = { $ref: '#/components/schemas/ApiError' };
 
 export interface PublishedErrorResponse {
   /** `POST /v1/things`. */
@@ -196,6 +204,27 @@ export interface PublishedErrorResponse {
   status: string;
   /** Absent when the response documents no JSON body. */
   schema?: Schema;
+}
+
+/**
+ * The JSON schema one Response Object gives its body; `undefined` when it gives none. The one
+ * reader the publisher and every check share (r2 F1): a reusable-response `$ref` is refused, not
+ * read past — its sibling keys are not the body — and so is a body that is not one JSON schema.
+ */
+export function errorResponseSchema(response: unknown, at: string): Schema | undefined {
+  if (typeof response !== 'object' || response === null) {
+    throw new Error(`${at}: the response is not an object`);
+  }
+  if ('$ref' in response) {
+    throw new Error(`${at}: a referenced response (${String(response.$ref)}) is not supported`);
+  }
+  const content = (response as { content?: Record<string, { schema?: Schema }> }).content;
+  if (content === undefined) return undefined;
+  const schema = content['application/json']?.schema;
+  if (Object.keys(content).length !== 1 || !schema) {
+    throw new Error(`${at}: declares an error body that is not one JSON schema`);
+  }
+  return schema;
 }
 
 /** Every error response (4xx, 5xx, `default`) every operation of the document publishes. */
@@ -207,9 +236,8 @@ export function publishedErrorResponses(document: PublishedDocument): PublishedE
       const responses = (operation as { responses?: Record<string, unknown> }).responses ?? {};
       for (const [status, response] of Object.entries(responses)) {
         if (status !== 'default' && !/^[45][0-9X]{2}$/.test(status)) continue;
-        const schema = (response as { content?: Record<string, { schema?: Schema }> }).content?.[
-          'application/json'
-        ]?.schema;
+        const at = `${method.toUpperCase()} ${path} ${status}`;
+        const schema = errorResponseSchema(response, at);
         found.push({ operation: `${method.toUpperCase()} ${path}`, status, schema });
       }
     }
@@ -318,24 +346,140 @@ function exceptionsAnswering(status: number): { name: string; exception: unknown
   ];
 }
 
+/** `schema` with every `$ref` alias at its root followed; an unresolved one or a cycle is refused. */
+function deref(document: PublishedDocument, schema: unknown): Schema {
+  const seen = new Set<string>();
+  let current = schema as Schema;
+  while (typeof current?.$ref === 'string') {
+    const ref = current.$ref;
+    if (seen.has(ref)) throw new Error(`the reference ${ref} is circular`);
+    seen.add(ref);
+    const target = ref.startsWith(SCHEMA_REF)
+      ? document.components?.schemas?.[ref.slice(SCHEMA_REF.length)]
+      : undefined;
+    if (target === undefined) throw new Error(`unresolved ${ref}`);
+    current = target as Schema;
+  }
+  if (typeof current !== 'object' || current === null) throw new Error('a schema is not an object');
+  return current;
+}
+
+/** The published envelope (api-error.ts) every typed refusal narrows; never read from the document. */
+const ENVELOPE = toJsonSchema(publishedApiErrorSchema);
+
+const json = (value: unknown): string => JSON.stringify(value);
+const without = (schema: Schema, ...keys: string[]): Schema =>
+  Object.fromEntries(Object.entries(schema).filter(([key]) => !keys.includes(key)));
+
+/** The closed values a narrowed string property allows (`const`/`enum`); `undefined` when free. */
+function narrowedValues(base: Schema, property: Schema): string[] | undefined {
+  if (json(property) === json(base)) return undefined;
+  const rest = without(property, 'const', 'enum', 'description');
+  const free = json(base) === json({ type: 'string' });
+  if (free && 'const' in property && typeof property.const === 'string' && json(rest) === '{}') {
+    return [property.const];
+  }
+  const values = property.enum;
+  if (
+    free &&
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((value) => typeof value === 'string') &&
+    json(rest) === json(base)
+  ) {
+    return values as string[];
+  }
+  throw new Error(`${json(property)} does not narrow ${json(base)}`);
+}
+
 /**
- * Every `(area, code)` a typed refusal schema lists in `details[]`: `path` the area, `code` the
- * reason — what `toJsonSchema` makes of `z.literal(area)` and `z.enum(codes)`. Empty for the plain
- * envelope, whose `path` and `code` are free strings.
+ * The `(area, code)` reasons of `schema` when it is the published envelope or a typed refusal —
+ * the envelope with only `details[]` items narrowed, `path` the area and `code` the reason
+ * (`z.literal(area)`, `z.enum(codes)`), every `$ref` on the way followed (r2 F3, F4). Anything
+ * else — another shape, an `anyOf` at the root or at `details`, a closed `path` with a free `code`
+ * — throws: an envelope or its reasons that cannot be read are never assumed.
  */
-function listedReasons(schema: Schema): { area: string; code: string }[] {
-  const item = (schema.properties as Record<string, Schema> | undefined)?.details?.items as
-    Schema | undefined;
-  const valuesOf = (property?: Schema): string[] =>
-    property && 'const' in property
-      ? [String(property.const)]
-      : ((property?.enum as string[] | undefined) ?? []);
-  const variants = (item?.anyOf as Schema[] | undefined) ?? [item];
+function typedEnvelopeReasons(
+  document: PublishedDocument,
+  schema: Schema,
+): { area: string; code: string }[] {
+  const root = deref(document, schema);
+  const properties = (root.properties ?? {}) as Record<string, Schema>;
+  const base = ENVELOPE.properties as Record<string, Schema>;
+  if (
+    json(without(root, 'properties', 'description')) !== json(without(ENVELOPE, 'properties')) ||
+    json(Object.keys(properties).sort()) !== json(Object.keys(base).sort())
+  ) {
+    throw new Error('not the shared envelope');
+  }
+  for (const name of Object.keys(base)) {
+    if (name !== 'details' && json(deref(document, properties[name])) !== json(base[name])) {
+      throw new Error(`envelope field ${name} is changed`);
+    }
+  }
+  const details = deref(document, properties.details);
+  const baseItem = (base.details as Schema).items as Schema;
+  if (json(without(details, 'items', 'description')) !== json({ type: 'array' })) {
+    throw new Error('details is not an array of details');
+  }
+  const items = deref(document, details.items);
+  const variants = Array.isArray(items.anyOf)
+    ? (() => {
+        if (json(without(items, 'anyOf', 'description')) !== '{}') {
+          throw new Error('details items mix anyOf with other keywords');
+        }
+        return (items.anyOf as Schema[]).map((variant) => deref(document, variant));
+      })()
+    : [items];
+  const baseFields = baseItem.properties as Record<string, Schema>;
   return variants.flatMap((variant) => {
-    const properties = variant?.properties as Record<string, Schema> | undefined;
-    const codes = valuesOf(properties?.code);
-    return valuesOf(properties?.path).flatMap((area) => codes.map((code) => ({ area, code })));
+    const fields = (variant.properties ?? {}) as Record<string, Schema>;
+    const required = (variant.required ?? []) as string[];
+    if (
+      variant.type !== 'object' ||
+      variant.additionalProperties !== false ||
+      json(Object.keys(without(variant, 'properties', 'description')).sort()) !==
+        json(['additionalProperties', 'required', 'type']) ||
+      Object.keys(fields).some((name) => !(name in baseFields)) ||
+      (baseItem.required as string[]).some((name) => !required.includes(name)) ||
+      required.some((name) => !(name in fields))
+    ) {
+      throw new Error(`a details item ${json(variant)} does not narrow the shared detail`);
+    }
+    const values = Object.fromEntries(
+      Object.keys(fields).map((name) => [
+        name,
+        narrowedValues(baseFields[name]!, deref(document, fields[name])),
+      ]),
+    );
+    if (values.message !== undefined) throw new Error('a details message is closed');
+    const areas = values.path;
+    const codes = values.code;
+    if (!areas && !codes) return [];
+    if (!areas || !codes || !required.includes('code')) {
+      throw new Error('a details item closes only one of path and code: its reasons are unknown');
+    }
+    return areas.flatMap((area) => codes.map((code) => ({ area, code })));
   });
+}
+
+/**
+ * Every typed reason under `schema`, through every `$ref` and `anyOf` (r2 F4): an object with a
+ * `details` field must be a readable typed envelope; one without (a D-121 health body) lists none.
+ */
+function listedReasons(
+  document: PublishedDocument,
+  schema: Schema,
+  depth = 0,
+): { area: string; code: string }[] {
+  if (depth > 16) throw new Error('the schema nests too deeply to read its reasons');
+  const root = deref(document, schema);
+  if (Array.isArray(root.anyOf)) {
+    return (root.anyOf as Schema[]).flatMap((option) => listedReasons(document, option, depth + 1));
+  }
+  const properties = root.properties as Record<string, unknown> | undefined;
+  if (properties && 'details' in properties) return typedEnvelopeReasons(document, root);
+  return [];
 }
 
 export interface EnvelopeOptions {
@@ -378,7 +522,14 @@ export function errorEnvelopeProblems(
     const answered = status === 'default' ? [400, 500] : [Number(status.replaceAll('X', '0'))];
     const probes: { name: string; exception: unknown }[] = answered.flatMap(exceptionsAnswering);
 
-    for (const { area, code } of listedReasons(resolve(document, schema))) {
+    let reasons: { area: string; code: string }[];
+    try {
+      reasons = listedReasons(document, schema);
+    } catch (error) {
+      problems.push(`${at}: its typed reasons cannot be read (${(error as Error).message})`);
+      reasons = [];
+    }
+    for (const { area, code } of reasons) {
       if (!options.refusal) {
         problems.push(`${at}: lists ${area}/${code} but no refusal producer was given`);
         continue;
@@ -411,6 +562,15 @@ export function errorEnvelopeProblems(
   return problems;
 }
 
+function isTypedEnvelope(document: PublishedDocument, schema: Schema): boolean {
+  try {
+    typedEnvelopeReasons(document, schema);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface PublishedProbeException {
   service: string;
   path: string;
@@ -419,13 +579,23 @@ export interface PublishedProbeException {
   bodies: readonly unknown[];
 }
 
+export interface ProbeExceptionOptions extends EnvelopeOptions {
+  /**
+   * The document the routes themselves declare (Nest's document before `publishApiErrors`). A
+   * response may carry a schema other than the shared envelope only where its route declared that
+   * very schema — a typed refusal (FU-031); without it, only the shared envelope is accepted.
+   */
+  declared?: PublishedDocument;
+}
+
 /** D-121: explicit exceptions only; every other response must name the shared envelope. */
 export function probeExceptionProblems(
   document: PublishedDocument,
   service: string,
   exceptions: readonly PublishedProbeException[],
+  options: ProbeExceptionOptions = {},
 ): string[] {
-  const problems = errorEnvelopeProblems(document);
+  const problems = errorEnvelopeProblems(document, options);
   for (const [path, item] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(item as Record<string, unknown>)) {
       if (!METHODS.has(method)) continue;
@@ -450,17 +620,28 @@ export function probeExceptionProblems(
     const at = `${operation} ${status}`;
     const exception = expected.get(at);
     if (!exception) {
-      if (JSON.stringify(schema) !== JSON.stringify({ $ref: '#/components/schemas/ApiError' })) {
+      const routes = options.declared;
+      const declared = routes ? declaredErrorSchema(routes, operation, status) : undefined;
+      const plain = JSON.stringify(schema) === JSON.stringify(ERROR_REF);
+      // Equal to what the route declared is not enough: it must also be the envelope with only
+      // `details` narrowed (r2 F3) — not an `anyOf` that lets a non-envelope body through.
+      const typed =
+        routes !== undefined &&
+        declared !== undefined &&
+        schema !== undefined &&
+        sameSchema(routes, declared, document, schema) &&
+        isTypedEnvelope(document, schema);
+      if (!plain && !typed) {
         problems.push(`${at}: does not use the shared envelope`);
       }
       continue;
     }
     expected.delete(at);
-    const options = schema?.anyOf as Schema[] | undefined;
-    const health = options?.[1];
+    const variants = schema?.anyOf as Schema[] | undefined;
+    const health = variants?.[1];
     if (
-      options?.length !== 2 ||
-      options[0]?.$ref !== '#/components/schemas/ApiError' ||
+      variants?.length !== 2 ||
+      variants[0]?.$ref !== '#/components/schemas/ApiError' ||
       typeof health?.description !== 'string' ||
       !health.description.includes('D-121')
     ) {
@@ -482,13 +663,6 @@ export function probeExceptionProblems(
   }
   for (const at of expected.keys()) problems.push(`${at}: exception has no published response`);
   return problems;
-}
-
-function resolve(document: PublishedDocument, schema: Schema): Schema {
-  if (typeof schema.$ref !== 'string') return schema;
-  const target = document.components?.schemas?.[schema.$ref.replace('#/components/schemas/', '')];
-  if (!target) throw new Error(`unresolved ${schema.$ref}`);
-  return target as Schema;
 }
 
 /** A W3C `traceparent` header value; the request context middleware reads `traceId` from it. */
@@ -525,10 +699,18 @@ export function publishedPathOf(document: PublishedDocument, url: string): strin
  */
 export function httpErrorBodyProblems(
   document: PublishedDocument,
-  response: { method: string; url: string; status: number; body: unknown; traced: boolean },
+  response: {
+    method: string;
+    url: string;
+    status: number;
+    body: unknown;
+    traced: boolean;
+    /** The route's own template when known; otherwise matched from `url`. */
+    template?: string;
+  },
 ): string[] {
   const at = `${response.method} ${response.url} ${response.status}`;
-  const path = publishedPathOf(document, response.url);
+  const path = response.template ?? publishedPathOf(document, response.url);
   if (!path) return [`${at}: the document publishes no such route`];
   let schema: Schema;
   try {
@@ -547,5 +729,310 @@ export function httpErrorBodyProblems(
   if (typeof body.path !== 'string' || !body.path.startsWith('/')) {
     problems.push(`${at}: no path`);
   }
+  return problems;
+}
+
+// ---- the real routes (FU-031) ---------------------------------------------------------------
+
+/** Every component reference reachable from `schema` that `document` does not define. */
+export function unresolvedRefs(document: PublishedDocument, schema: unknown): string[] {
+  const missing: string[] = [];
+  walkRefs(document, schema, new Set(), missing);
+  return missing;
+}
+
+/** Visits every `$ref` under `value`, following each into its component once. */
+function walkRefs(
+  document: PublishedDocument,
+  value: unknown,
+  seen: Set<string>,
+  missing: string[],
+): void {
+  if (Array.isArray(value)) {
+    for (const item of value) walkRefs(document, item, seen, missing);
+    return;
+  }
+  if (typeof value !== 'object' || value === null) return;
+  for (const [key, member] of Object.entries(value)) {
+    if (key !== '$ref') {
+      walkRefs(document, member, seen, missing);
+      continue;
+    }
+    if (typeof member !== 'string' || !member.startsWith(SCHEMA_REF)) {
+      missing.push(String(member));
+      continue;
+    }
+    if (seen.has(member)) continue;
+    seen.add(member);
+    const target = document.components?.schemas?.[member.slice(SCHEMA_REF.length)];
+    if (target === undefined) missing.push(member);
+    else walkRefs(document, target, seen, missing);
+  }
+}
+
+/**
+ * Whether `a` (in `aDocument`) and `b` (in `bDocument`) are the same schema: the same JSON, and every
+ * component either reaches the same JSON in both documents. An unresolved reference is never "same".
+ */
+function sameSchema(
+  aDocument: PublishedDocument,
+  a: Schema,
+  bDocument: PublishedDocument,
+  b: Schema,
+): boolean {
+  if (JSON.stringify(a) !== JSON.stringify(b)) return false;
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  walkRefs(aDocument, a, seen, missing);
+  if (missing.length || unresolvedRefs(bDocument, b).length) return false;
+  return [...seen].every((ref) => {
+    const name = ref.slice(SCHEMA_REF.length);
+    return (
+      JSON.stringify(aDocument.components?.schemas?.[name]) ===
+      JSON.stringify(bDocument.components?.schemas?.[name])
+    );
+  });
+}
+
+/** The JSON schema `document` gives `operation` (`GET /path`) at exactly `status`. */
+function declaredErrorSchema(
+  document: PublishedDocument,
+  operation: string,
+  status: string,
+): Schema | undefined {
+  return publishedErrorResponses(document).find(
+    (entry) => entry.operation === operation && entry.status === status,
+  )?.schema;
+}
+
+/** Every `METHOD /path` the document publishes an operation for. */
+function publishedOperations(document: PublishedDocument): Set<string> {
+  const found = new Set<string>();
+  for (const [path, item] of Object.entries(document.paths ?? {})) {
+    for (const method of Object.keys(item as Record<string, unknown>)) {
+      if (METHODS.has(method)) found.add(`${method.toUpperCase()} ${path}`);
+    }
+  }
+  return found;
+}
+
+/** One route the running application really serves; `path` in OpenAPI form (`/things/{id}`). */
+export interface RealRoute {
+  method: string;
+  path: string;
+}
+
+/** What `routeErrorProblems` needs of a Nest application. */
+export interface RoutedApplication {
+  getHttpAdapter(): { getInstance(): unknown };
+}
+
+interface RouterLayer {
+  name?: unknown;
+  handle?: unknown;
+  route?: { path?: unknown; methods?: Record<string, boolean> };
+}
+
+/**
+ * The only non-route layers the check accepts, in order (r2 F2): what Nest's Express adapter
+ * installs before the routes (its response hook, its `use` binding, the JSON and urlencoded body
+ * parsers — none ends a request a route would answer) and after them (the not-found handler and
+ * the error handler, reached only by what no route answered). Any other layer — a mounted router
+ * or sub-application, a middleware that may answer in a route's place — is refused, not skipped:
+ * its endpoints would be invisible to the route coverage.
+ */
+const PLATFORM_LAYERS = {
+  before: ['<anonymous>', 'bound use', 'jsonParser', 'urlencodedParser'],
+  after: ['<anonymous>', '<anonymous>'],
+};
+
+/**
+ * The routes the application's Express router really holds — what a client can reach, not what
+ * the document says. Throws when the router cannot be read or a route path is not one this check
+ * understands (an optional `{…}` group, a pattern): an unread route is never assumed absent.
+ */
+export function realRoutesOf(app: RoutedApplication): RealRoute[] {
+  const instance = app.getHttpAdapter().getInstance() as
+    { router?: { stack?: unknown }; _router?: { stack?: unknown } } | undefined;
+  // Express 5 exposes `router`; Express 4 `_router`.
+  const stack = instance?.router?.stack ?? instance?._router?.stack;
+  if (!Array.isArray(stack)) throw new Error('the application routes cannot be read');
+  const layers = stack as RouterLayer[];
+  const first = layers.findIndex((layer) => layer.route);
+  const last = layers.findLastIndex((layer) => layer.route);
+  const others = (from: number, to: number) => layers.slice(from, to).map(({ name }) => name);
+  if (
+    first < 0 ||
+    json(others(0, first)) !== json(PLATFORM_LAYERS.before) ||
+    json(others(last + 1, layers.length)) !== json(PLATFORM_LAYERS.after)
+  ) {
+    throw new Error('the application has routing layers this check cannot read');
+  }
+  const routes: RealRoute[] = [];
+  for (const layer of layers.slice(first, last + 1)) {
+    if (!layer.route) {
+      throw new Error(`the routing layer ${String(layer.name)} cannot be read`);
+    }
+    const { path, methods } = layer.route;
+    if (typeof path !== 'string' || /[{}()?+]/.test(path) || !methods) {
+      throw new Error(`the route ${String(path)} cannot be resolved`);
+    }
+    const template = path.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
+    for (const [method, enabled] of Object.entries(methods)) {
+      if (!enabled) continue;
+      routes.push({ method: method === '_all' ? 'ALL' : method.toUpperCase(), path: template });
+    }
+  }
+  if (routes.length === 0) throw new Error('the application serves no route');
+  return routes;
+}
+
+/**
+ * Whether `body` is a D-121 health-status body at a probe exception the service **registered**
+ * (the `probeExceptions` it gives `publishApiErrors`), never one inferred from the document or a
+ * description (r2 F3): the route, method and status are in `registry`, the document publishes
+ * exactly what the publisher writes for it, and the body is the registered health body, not an
+ * envelope. Anything else is held to the envelope checks of `httpErrorBodyProblems`.
+ */
+function isProbeExceptionBody(
+  document: PublishedDocument,
+  registry: Readonly<Record<string, PublishedSchema>>,
+  route: RealRoute,
+  status: number,
+  body: unknown,
+): boolean {
+  const operation = `${route.method} ${route.path}`;
+  const health = Object.hasOwn(registry, `${operation} ${status}`)
+    ? registry[`${operation} ${status}`]
+    : undefined;
+  return (
+    health !== undefined &&
+    json(declaredErrorSchema(document, operation, String(status))) ===
+      json({ anyOf: [ERROR_REF, health] }) &&
+    validatePublishedBody(document, health, body).length === 0 &&
+    validatePublishedBody(document, ERROR_REF, body).length > 0
+  );
+}
+
+/** A path parameter value no route treats specially. */
+const PROBE_ID = '01JD0000000000000000000000';
+
+export interface RouteCheckOptions extends EnvelopeOptions {
+  /** The document the routes declare: Nest's document before `publishApiErrors`. */
+  declared: PublishedDocument;
+  /** Real route paths deliberately left out of the document, each with its reason. */
+  excluded?: Readonly<Record<string, string>>;
+  /**
+   * The D-121 probe exceptions the service gives `publishApiErrors` — the one registry of routes
+   * whose health body is not an envelope. Omitted, no route is one.
+   */
+  probeExceptions?: Readonly<Record<string, PublishedSchema>>;
+  /** Sends one request (no body, no credentials) through the real application. */
+  send: (method: string, url: string) => Promise<{ status: number; body: unknown }>;
+}
+
+/**
+ * The problems found when the routes the application **really serves** are held against the
+ * published document (FU-031) — the check reads the router and the routes' answers, not only the
+ * document:
+ *   - every real route is published, unless excluded with a reason; every published operation is
+ *     a real route; an exclusion no route needs, or an excluded route that is published, fails;
+ *   - the routes' declared document and the published one have the same operations, and every
+ *     error body a route declares (a typed refusal) is published unchanged, not erased;
+ *   - every published route is sent one request, and each error it answers is validated, raw,
+ *     against the schema the document publishes for that route and status;
+ *   - `errorEnvelopeProblems` over the published document.
+ * Anything it cannot read — the router, a route path, a reference, a request that gets no
+ * answer — is a problem, never skipped.
+ */
+export async function routeErrorProblems(
+  app: RoutedApplication,
+  document: PublishedDocument,
+  options: RouteCheckOptions,
+): Promise<string[]> {
+  let routes: RealRoute[];
+  try {
+    routes = realRoutesOf(app);
+  } catch (error) {
+    return [(error as Error).message];
+  }
+  const problems: string[] = [];
+  const published = publishedOperations(document);
+  const excluded = new Map(Object.entries(options.excluded ?? {}));
+  const unusedExclusions = new Set(excluded.keys());
+  for (const [path, reason] of excluded) {
+    if (!reason.trim()) problems.push(`${path}: excluded without a reason`);
+  }
+
+  const served = new Set<string>();
+  const probes: RealRoute[] = [];
+  for (const route of routes) {
+    const key = `${route.method} ${route.path}`;
+    if (excluded.has(route.path)) {
+      unusedExclusions.delete(route.path);
+      if (published.has(key)) problems.push(`${key}: excluded but published`);
+      continue;
+    }
+    served.add(key);
+    if (!published.has(key)) problems.push(`${key}: served but not published`);
+    else probes.push(route);
+  }
+  for (const path of unusedExclusions) problems.push(`${path}: excluded but no route serves it`);
+  for (const key of published) {
+    if (!served.has(key)) problems.push(`${key}: published but no route serves it`);
+  }
+
+  const declared = publishedOperations(options.declared);
+  for (const key of declared) {
+    if (!published.has(key)) problems.push(`${key}: declared by its route but not published`);
+  }
+  for (const key of published) {
+    if (!declared.has(key)) problems.push(`${key}: published but not declared by any route`);
+  }
+  for (const { operation, status, schema } of publishedErrorResponses(options.declared)) {
+    if (!schema) continue; // nothing declared: the publisher supplies the shared envelope
+    const at = `${operation} ${status}`;
+    const missing = unresolvedRefs(options.declared, schema);
+    if (missing.length) {
+      problems.push(`${at}: the route declares an unresolved ${missing.join(', ')}`);
+      continue;
+    }
+    const kept = declaredErrorSchema(document, operation, status);
+    if (!kept || !sameSchema(options.declared, schema, document, kept)) {
+      problems.push(`${at}: the error body the route declares is not the one published`);
+    }
+  }
+
+  let answered = 0;
+  for (const route of probes) {
+    const url = route.path.replaceAll(/\{[^}]+\}/g, PROBE_ID);
+    let sent: { status: number; body: unknown };
+    try {
+      sent = await options.send(route.method, url);
+    } catch (error) {
+      problems.push(`${route.method} ${url}: no answer (${(error as Error).message})`);
+      continue;
+    }
+    if (sent.status < 400) continue;
+    answered += 1;
+    if (
+      isProbeExceptionBody(document, options.probeExceptions ?? {}, route, sent.status, sent.body)
+    ) {
+      continue;
+    }
+    problems.push(
+      ...httpErrorBodyProblems(document, {
+        method: route.method,
+        url,
+        status: sent.status,
+        body: sent.body,
+        traced: false,
+        template: route.path,
+      }),
+    );
+  }
+  if (answered === 0) problems.push('no real route answered with an error body');
+
+  problems.push(...errorEnvelopeProblems(document, options));
   return problems;
 }
