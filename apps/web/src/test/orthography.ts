@@ -10,10 +10,9 @@
  * of a word that takes one. A combining hamza on heh is the ezafe
  * («شمارهٔ دارایی») and is the standard spelling, so it is allowed.
  *
- * Expand each Unicode code point with NFKC before checking the carriers.
- * Never normalise the whole string first: that would compose a separate hamza
- * with its carrier and hide the violation. Per-code-point expansion preserves
- * standard precomposed letters while exposing ligatures and astral carriers.
+ * Check the raw repertoire and per-code-point NFKC expansion. Whole-string
+ * normalisation would compose a separate hamza and hide the violation.
+ * Presentation forms are refused even when they expand to standard letters.
  */
 
 /** Hamza-less spellings, in Persian letters (ی U+06CC, ک U+06A9); matched as word stems. */
@@ -40,9 +39,9 @@ export const HAMZA_LESS_WORDS = [
 ] as const;
 
 /** Invisible inside a word: combining marks, format characters (ZWNJ, ZWJ, bidi marks) and tatweel. */
-const INVISIBLE = '[\\p{Mn}\\p{Cf}\\u0640]';
+const INVISIBLE = '[\\p{M}\\p{Cf}\\u0640]';
 /** What may sit between a preceding letter and a word without separating them (ZWNJ does separate). */
-const JOINING = '[\\p{Mn}\\u0640\\u200d\\u200e\\u200f\\u061c]';
+const JOINING = '[\\p{M}\\u0640\\u200d\\u200e\\u200f\\u061c]';
 /** Prefixes a word joins without a ZWNJ (بی‌تأثیر written «بیتاثیر»); a ZWNJ compound needs none. */
 const PREFIXES = ['بی', 'نا', 'پر', 'کم', 'با', 'تحت'];
 
@@ -61,24 +60,34 @@ const HAMZA_LESS = new RegExp(
   'v',
 );
 
-/** Letters that never take a combining hamza in standard spelling (after compatibility folding). */
-const CARRIERS = new Set(['\u0627', '\u0671', '\u0648', '\u064a', '\u0649', '\u06cc']);
-const SKIPPED = new RegExp(`^${INVISIBLE}$`, 'u');
+/** Explicit repertoire: Persian letters, existing Arabic yeh/kaf aliases, digits,
+ * punctuation, tatweel, bidi ALM and the usual harakat (tanwin through sukun).
+ * Combining hamza is separately permitted ONLY immediately after plain heh.
+ */
+const ALLOWED_ARABIC = new Set([
+  ...'ءآأؤإئابتثجحخدذرزسشصضطظعغفقكلمنهويىپچژکگی',
+  ...'٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹،؛؟٪٫٬۔',
+  ...'\u061c\u0640\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652',
+]);
+const ARABIC_BLOCK =
+  /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff\u{1ee00}-\u{1eeff}]/u;
+/** Marks on either side, including runs separated by format controls. */
+const UNKNOWN_ADJACENT_MARK = new RegExp(
+  String.raw`(?:[\p{sc=Arab}&&\p{L}][\p{M}\p{Cf}]*[\p{M}--[\u064b-\u0652\u0654]]|[\p{M}--[\u064b-\u0652\u0654]][\p{M}\p{Cf}]*[\p{sc=Arab}&&\p{L}])`,
+  'v',
+);
 
-/** Compatibility expansion must not compose a hamza with the preceding code point. */
-function decomposedHamza(text: string): string | null {
-  const expanded = [...text].flatMap((point) => [...point.normalize('NFKC')]);
-  for (let at = 0; at < expanded.length; at += 1) {
-    if (expanded[at] !== '\u0654' && expanded[at] !== '\u0655') continue;
-    let base = at - 1;
-    while (base >= 0 && SKIPPED.test(expanded[base] as string)) base -= 1;
-    // A precomposed carrier may itself be followed by an extra, separate hamza.
-    const carrier = base < 0 ? '' : (expanded[base] as string).normalize('NFD')[0];
-    if (carrier !== undefined && CARRIERS.has(carrier)) {
-      return expanded.slice(base, at + 1).join('');
+function outsideRepertoire(text: string): string | null {
+  let previous = '';
+  for (const point of text) {
+    if (point === '\u0654') {
+      if (previous !== '\u0647') return point;
+    } else if (ARABIC_BLOCK.test(point) && !ALLOWED_ARABIC.has(point)) {
+      return point;
     }
+    previous = point;
   }
-  return null;
+  return UNKNOWN_ADJACENT_MARK.exec(text)?.[0] ?? null;
 }
 
 /** Compatibility forms (presentation forms) folded; Arabic yeh and kaf written as the Persian letters. */
@@ -91,7 +100,10 @@ function normalised(text: string): string {
 
 /** The first non-standard spelling in a text, or null. */
 export function nonStandardSpelling(text: string): string | null {
-  const decomposed = decomposedHamza(text);
-  if (decomposed !== null) return decomposed;
+  const raw = outsideRepertoire(text);
+  if (raw !== null) return raw;
+  const expanded = [...text].map((point) => point.normalize('NFKC')).join('');
+  const compatibility = outsideRepertoire(expanded);
+  if (compatibility !== null) return compatibility;
   return HAMZA_LESS.exec(normalised(text))?.[0] ?? null;
 }

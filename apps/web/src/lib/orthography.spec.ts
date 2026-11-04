@@ -84,7 +84,7 @@ describe('the spelling matcher', () => {
     }
   });
 
-  it('folds presentation forms', () => {
+  it('refuses raw presentation forms', () => {
     expect(nonStandardSpelling('\ufe97\ufe8e\ufee3\ufbff\ufee6')).not.toBeNull();
   });
 
@@ -99,7 +99,7 @@ describe('the spelling matcher', () => {
     },
   );
 
-  it('rejects every Unicode compatibility carrier without hiding a separate hamza', () => {
+  it('rejects compatibility carriers with a separate hamza (carrier + marks sweep)', () => {
     let carriers = 0;
     for (let code = 0; code <= 0x10ffff; code += 1) {
       if (code >= 0xd800 && code <= 0xdfff) continue;
@@ -116,10 +116,10 @@ describe('the spelling matcher', () => {
       }
     }
     expect(carriers).toBeGreaterThan(150); // includes ligatures and supplementary letters
-    for (const standard of ['أ', 'إ', 'ؤ', 'ئ', '\ufe83', '\ufe85', '\ufe89', '\ufef7']) {
+    for (const standard of ['أ', 'إ', 'ؤ', 'ئ']) {
       expect(nonStandardSpelling(standard)).toBeNull();
     }
-    expect(nonStandardSpelling('\ufee9\u0654')).toBeNull(); // presentation heh: ezafe
+    expect(nonStandardSpelling('\ufee9\u0654')).not.toBeNull(); // raw presentation heh
   });
 
   it('looks for the combining hamza before normalising (composition or stripping would hide it)', () => {
@@ -140,9 +140,66 @@ describe('the spelling matcher', () => {
     },
   );
 
+  // F1: one row per executed review-table input (expanded grouped rows).
+  it.each([
+    ['high-hamza alef in a word', 'ت\u0675مین'],
+    ['high hamza on alef', 'ا\u0674'],
+    ['high hamza on yeh', 'ی\u0674'],
+    ['high hamza on waw', 'و\u0674'],
+    ['high-hamza waw', '\u0676'],
+    ['high-hamza u', '\u0677'],
+    ['high-hamza yeh', '\u0678'],
+    ['presentation high-hamza u', '\ufbdd'],
+    ['wavy hamza below', 'ا\u065f'],
+    ['alef with wavy hamza above', '\u0672'],
+    ['alef with wavy hamza below', '\u0673'],
+    ['extended yeh hamza', 'ر\u08a8یس'],
+    ['enclosing mark before hamza', 'ا\u20dd\u0654'],
+    ['spacing mark before hamza', 'ا\u0903\u0654'],
+    ['alef wasla inside a word', 'ت\u0671مین'],
+    ['extra hamza control', 'أ\u064e\u0654'],
+    ['mathematical alef control', '\u{1ee00}\u0654'],
+  ])('refuses review F1: %s', (_, text) => {
+    expect(nonStandardSpelling(text)).not.toBeNull();
+  });
+
+  it.each(['\u0301', '\u0903', '\u20dd'])('refuses adjacent Mn/Mc/Me %s', (mark) => {
+    for (const text of ['ب' + mark, mark + 'ب', 'ب\u064e\u200d' + mark, mark + '\u200d\u064eب']) {
+      expect(nonStandardSpelling(text)).not.toBeNull();
+    }
+    expect(nonStandardSpelling('Latin ' + mark)).toBeNull();
+  });
+
+  it.each([
+    '\u0600',
+    '\u0750',
+    '\u08ff',
+    '\ufb50',
+    '\ufdff',
+    '\ufe70',
+    '\ufeff',
+    '\u{1eeff}',
+    '\ufe83',
+    '\ufe85',
+    '\ufe89',
+    '\ufef7',
+    '\ufee9',
+  ])('refuses unknown raw Arabic-block code points even if NFKC folds them: %s', (point) =>
+    expect(nonStandardSpelling(point)).not.toBeNull(),
+  );
+
+  it('allows only the explicit Persian repertoire and usual diacritics', () => {
+    expect(nonStandardSpelling('ءآأؤإئابتثجحخدذرزسشصضطظعغفقكلمنهويىپچژکگی')).toBeNull();
+    expect(nonStandardSpelling('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹،؛؟٪٫٬۔\u061c\u0640')).toBeNull();
+    expect(nonStandardSpelling('ب\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652')).toBeNull();
+    for (const text of ['\u0654', 'ب\u0654', 'ه\u0655', 'ه\u0654\u0654', 'ه\u200c\u0654']) {
+      expect(nonStandardSpelling(text)).not.toBeNull();
+    }
+  });
+
   it('allows the ezafe: heh + combining hamza', () => {
     expect(nonStandardSpelling('شماره\u0654 دارایی')).toBeNull();
-    expect(nonStandardSpelling('شماره\u064e\u0654')).toBeNull();
+    expect(nonStandardSpelling('شماره\u064e\u0654')).not.toBeNull();
   });
 });
 
@@ -206,6 +263,16 @@ describe('the scan, on a fixture workspace', () => {
     const { offenders } = workspace({ [path]: text });
     expect(offenders).not.toEqual([]);
     for (const offender of offenders) expect(offender).toContain(path);
+  });
+
+  it.each([
+    ['apps/web/src/x.ts', "export const t = 'ت\\u0675مین';"],
+    ['apps/web/src/x.tsx', 'export const X = () => <p>ت&#x675;مین</p>;'],
+    ['apps/web/src/x.json', '{"t":"ت\\u0675مین"}'],
+    ['apps/web/src/x.css', 'a::after { content: "ت\\675 مین"; }'],
+    ['packages/copy/src/index.ts', "export const t = 'ت\u0675مین';"],
+  ])('refuses the same hamza-encoding class through %s', (path, source) => {
+    expect(workspace({ [path]: source }).offenders).toContainEqual(expect.stringContaining(path));
   });
 
   it('finds the word in a spec file that a shipped module imports, and skips an unimported one', () => {
