@@ -91,7 +91,8 @@
         "$TURBO_ROOT$/scripts/testing-dev-only.mjs",
         "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs",
         "$TURBO_ROOT$/scripts/zod-coercion-rule.mjs",
-        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
+        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs",
+        "$TURBO_ROOT$/scripts/lint-extensions.mjs"
       ],
       "outputs": []
     },
