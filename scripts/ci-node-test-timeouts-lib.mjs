@@ -179,8 +179,8 @@ function packageScript(found, pkg, name, text) {
 
 /**
  * FU-077 R5: turbo runs package scripts, so it is never inert. Only `turbo run <task>`
- * (optionally `--concurrency=<n>`) is read: the task and every task it depends on in the
- * task graph (`turbo`: task -> dependsOn, from every turbo.json), in every read package.
+ * (optionally `--concurrency=<n>`) is read: the task and every task it runs in the task
+ * graph (`turbo` from turboTaskGraph: dependsOn and with edges), in every read package.
  */
 function turboCommand(args, packages, turbo, found) {
   const text = clip([{ value: 'turbo' }, ...args]);
@@ -349,14 +349,128 @@ function envProblems(name, env) {
     .map((key) => `${name} sets ${key}, which may change what its commands mean`);
 }
 
+// FU-077 r2 F1: the turbo task graph, read from every configuration with every edge kept.
+const TURBO_ROOT_KEYS = new Set(
+  '$schema ui globalDependencies globalEnv globalPassThroughEnv tasks remoteCache envMode daemon cacheDir concurrency dangerouslyDisablePackageManagerCheck noUpdateNotifier'.split(
+    ' ',
+  ),
+);
+const TURBO_PACKAGE_KEYS = new Set(['$schema', 'extends', 'tasks']);
+/** Task keys that add no task: `dependsOn` and `with` (tasks run alongside) are the edges. */
+const TURBO_TASK_KEYS = new Set(
+  'dependsOn with env passThroughEnv outputs cache inputs outputLogs persistent interactive interruptible'.split(
+    ' ',
+  ),
+);
+const TURBO_EDGES = ['dependsOn', 'with'];
+/** Every name turbo reads a configuration from, in the root and in each package. */
+export const TURBO_CONFIG_NAMES = ['turbo.json', 'turbo.jsonc'];
+
+/** JSON with comments, as turbo reads turbo.json and turbo.jsonc: comments outside strings dropped. */
+function parseJsonc(text) {
+  let out = '';
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at];
+    if (char === '"') {
+      const start = at;
+      for (at++; at < text.length && text[at] !== '"'; at++) if (text[at] === '\\') at++;
+      out += text.slice(start, at + 1);
+    } else if (char === '/' && text[at + 1] === '/') {
+      while (at < text.length && text[at] !== '\n') at++;
+      out += '\n';
+    } else if (char === '/' && text[at + 1] === '*') {
+      const end = text.indexOf('*/', at + 2);
+      if (end < 0) throw new Error('an unterminated comment');
+      at = end + 1;
+      out += ' ';
+    } else out += char;
+  }
+  return JSON.parse(out);
+}
+
+/**
+ * `configs`: { directory, files: { 'turbo.json'?: text, 'turbo.jsonc'?: text } } for the root
+ * (directory '.') and EVERY workspace package. Returns { turbo: task -> every task it runs
+ * (dependsOn and with, `^` dropped), problems }; with a problem `turbo` is undefined, so a turbo
+ * command refuses. Refused: unreadable JSON, both extensions in one directory, a root without a
+ * configuration, an unknown key at the top or in a task (it may add work this model does not
+ * read), a package `extends` other than ["//"], an edge list that is not strings, and a
+ * `$TURBO_EXTENDS$`-style microsyntax edge.
+ */
+export function turboTaskGraph(configs) {
+  const problems = [];
+  const turbo = {};
+  if (!configs.some(({ directory, files }) => directory === '.' && Object.keys(files).length))
+    problems.push('the root has no turbo.json');
+  for (const { directory, files } of configs) {
+    const names = Object.keys(files);
+    if (names.length > 1) problems.push(`${directory} has both ${names.join(' and ')}`);
+    for (const [file, text] of Object.entries(files)) {
+      const where = `${directory}/${file}`;
+      let config;
+      try {
+        config = parseJsonc(String(text));
+      } catch (error) {
+        problems.push(`${where} cannot be read (${error.message})`);
+        continue;
+      }
+      if (!isMap(config)) {
+        problems.push(`${where} is not an object`);
+        continue;
+      }
+      const known = directory === '.' ? TURBO_ROOT_KEYS : TURBO_PACKAGE_KEYS;
+      for (const key of Object.keys(config))
+        if (!known.has(key)) problems.push(`${where} sets ${key}, which this check does not read`);
+      if (
+        directory !== '.' &&
+        (!Array.isArray(config.extends) ||
+          config.extends.length !== 1 ||
+          config.extends[0] !== '//')
+      )
+        problems.push(`${where} extends something other than ["//"]`);
+      if (!isMap(config.tasks ?? {})) {
+        problems.push(`${where} has tasks that are not an object`);
+        continue;
+      }
+      for (const [name, task] of Object.entries(config.tasks ?? {})) {
+        if (!isMap(task)) {
+          problems.push(`${where} task ${name} is not an object`);
+          continue;
+        }
+        for (const key of Object.keys(task))
+          if (!TURBO_TASK_KEYS.has(key))
+            problems.push(`${where} task ${name} sets ${key}, which this check does not read`);
+        const edges = new Set(turbo[name] ?? []);
+        for (const key of TURBO_EDGES) {
+          const list = task[key] ?? [];
+          if (!Array.isArray(list) || !list.every((entry) => typeof entry === 'string')) {
+            problems.push(`${where} task ${name} has a ${key} that is not a list of task names`);
+            continue;
+          }
+          for (const entry of list) {
+            if (entry.includes('$'))
+              problems.push(`${where} task ${name} ${key} ${entry} is not a task name`);
+            edges.add(entry);
+          }
+        }
+        turbo[name] = [...edges];
+      }
+    }
+  }
+  return problems.length ? { turbo: undefined, problems } : { turbo, problems };
+}
+
 /**
  * `packages`: the scripts of EVERY workspace package (a `--filter` on an unread one refuses).
- * `workspace`: { turbo: task -> dependsOn of every turbo.json }; without it a turbo
- * command refuses, so omitting it opens nothing.
+ * `workspace`: { turbo, problems } from turboTaskGraph (task -> every task it runs, from
+ * every turbo.json and turbo.jsonc); without it a turbo command refuses, so omitting it opens
+ * nothing.
  */
 export function nodeTestTimeoutProblems(doc, scripts, packages = {}, workspace = {}) {
   const problems = [];
   const { turbo } = workspace;
+  for (const reason of workspace.problems ?? [])
+    problems.push(`the turbo task graph cannot be read: ${reason}`);
   const job = doc?.jobs?.[UNIT_STEP.job];
   const steps = job?.steps;
   if (!Array.isArray(steps)) return [`job ${UNIT_STEP.job} has no readable steps`];

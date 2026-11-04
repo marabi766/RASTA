@@ -69,7 +69,11 @@ test('a truncated digest is not a digest', () => {
 // --- compose, workflow and CI-script images (L7-45) ------------------------
 
 const C = `sha256:${'c'.repeat(64)}`;
-const NO_EXEMPTIONS = { digestVariants: new Map(), tagless: new Map() };
+const NO_EXEMPTIONS = {
+  digestVariants: new Map(),
+  tagless: new Map(),
+  evaluatedOutputs: new Map(),
+};
 const compose = (text) => ({ name: 'docker-compose.yml', kind: 'compose', text });
 const workflowYaml = (text) => ({ name: '.github/workflows/ci.yml', kind: 'workflow', text });
 /** A workflow whose one step runs `script`; extra top-level keys merged in. */
@@ -344,6 +348,7 @@ test('DIGEST_VARIANTS names the exact digests: those pass, a third is refused, a
   const policy = {
     digestVariants: new Map([['x/mc', { digests: [A, B], reason: 'two variants, on purpose' }]]),
     tagless: new Map(),
+    evaluatedOutputs: new Map(),
   };
   const at = (...digests) =>
     infra(
@@ -371,6 +376,7 @@ test('TAGLESS names exact references: listed ones pass, any other digest-only im
   const policy = {
     digestVariants: new Map(),
     tagless: new Map([[`x/minio@${A}`, 'no tag published']]),
+    evaluatedOutputs: new Map(),
   };
   assert.deepEqual(infra([compose(`services:\n  m:\n    image: x/minio@${A}`)], policy).errors, []);
   assert.match(
@@ -425,4 +431,116 @@ test('FU-077: a carriage return or control character is refused, not read past',
     infra.errors.some((error) => /carriage return/.test(error)),
     infra.errors.join(),
   );
+});
+
+// PR #727 r2 F2: text bash EXPANDS or EVALUATES is read, never skipped: substitutions in a
+// `${…}` operand, an arithmetic body or an expanding here-document; a literal `bash -c` or
+// eval body; a shell anywhere in a command reading a here-document. A shell reading a pipe or
+// a here-string, and eval of computed text, refuse. Ten shapes x run/create/pull x shell and
+// workflow input: each one finds the unpinned image or refuses at that line.
+const SHAPES = {
+  'parameter default': (v) => `echo \${V:-$(docker ${v} alpine:latest)}`,
+  'assignment prefix default': (v) => `X=\${V:-$(docker ${v} alpine:latest)} true`,
+  'arithmetic substitution': (v) => `echo $(( 1 + $(docker ${v} alpine:latest) ))`,
+  'expanding here-document': (v) => `cat <<EOF\n$(docker ${v} alpine:latest)\nEOF`,
+  'expanding <<- here-document': (v) => `cat <<-EOF\n\t\`docker ${v} alpine:latest\`\n\tEOF`,
+  'bash -c body': (v) => `bash -c 'docker ${v} alpine:latest'`,
+  'eval body': (v) => `eval 'docker ${v} alpine:latest'`,
+  'here-string into bash': (v) => `bash <<< 'docker ${v} alpine:latest'`,
+  'pipeline into sh': (v) => `echo 'docker ${v} alpine:latest' | sh`,
+  'env-prefixed quoted here-document': (v) => `env bash <<'EOF'\ndocker ${v} alpine:latest\nEOF`,
+};
+const bare = { evaluatedOutputs: new Map(), digestVariants: new Map(), tagless: new Map() };
+const asInput = (kind, body) =>
+  kind === 'shell'
+    ? { kind, name: 'scripts/x.sh', text: body }
+    : {
+        kind,
+        name: '.github/workflows/x.yml',
+        text: stringify({ jobs: { j: { steps: [{ run: body }] } } }),
+      };
+test('PR #727 r2 F2: expanded, evaluated and shell-input text is read or refused, never skipped', () => {
+  for (const [shape, script] of Object.entries(SHAPES))
+    for (const verb of ['run', 'create', 'pull'])
+      for (const kind of ['shell', 'workflow']) {
+        const { errors, images } = validateInfraImagePins([asInput(kind, script(verb))], bare);
+        assert.ok(
+          images.some(({ ref }) => ref === 'alpine:latest') || errors.length > 0,
+          `${shape} ${verb} ${kind}: ${JSON.stringify({ errors, images })}`,
+        );
+      }
+});
+test('PR #727 r2 F2: the controls stay readable; computed eval and -c bodies refuse', () => {
+  const ok = (body, policy = bare) => {
+    const { errors } = validateInfraImagePins([asInput('shell', body)], policy);
+    assert.deepEqual(errors, [], body);
+  };
+  ok('bash infrastructure/x.sh');
+  ok(`docker run --rm --entrypoint sh node:22@${A} -c 'true'`);
+  ok('cat <<EOF\n$HOME and \\$(not run)\nEOF');
+  ok('echo $((count + 1))');
+  ok('c="$(KAFKA_SECRETS_DIR="${d}" bash infra/creds.sh service x)"\neval "${c}"', {
+    ...bare,
+    evaluatedOutputs: new Map([['infra/creds.sh', 'prints exports only']]),
+  });
+  const refusedWith = (body, pattern, policy = bare) => {
+    const { errors } = validateInfraImagePins([asInput('shell', body)], policy);
+    assert.ok(
+      errors.some((error) => pattern.test(error)),
+      `${body}: ${errors.join()}`,
+    );
+  };
+  refusedWith('eval "$X"', /eval runs text this check cannot read/);
+  const creds = { ...bare, evaluatedOutputs: new Map([['infra/creds.sh', 'prints exports only']]) };
+  for (const body of [
+    'c="$(bash infra/creds.sh)"\nc+="; docker run x"\neval "${c}"',
+    'c="$(bash infra/creds.sh)"\nread -r c\neval "${c}"',
+    'eval "${c}"\nc="$(bash infra/creds.sh)"',
+  ])
+    refusedWith(body, /eval runs text/, creds);
+  refusedWith('bash --rcfile x.sh', /option --rcfile is not one this check reads/);
+  refusedWith('c="$(bash other.sh)"\neval "${c}"', /eval runs text/);
+  refusedWith('bash -c "$X"', /bash -c runs a body this check cannot read/);
+  refusedWith('bash < x.sh', /reads its commands from a redirection/);
+  refusedWith('bash -s x', /reads its commands from a pipe, a here-string or the terminal/);
+  refusedWith('true', /EVALUATED_OUTPUTS lists a.sh, which nothing evaluates/, {
+    ...bare,
+    evaluatedOutputs: new Map([['a.sh', 'why']]),
+  });
+});
+
+// PR #727 r2 F3: Dockerfile instructions are read with BuildKit's whitespace and
+// continuation rules, and every Dockerfile must have a base instruction that was read.
+test('PR #727 r2 F3: an indented, continued or lower-case FROM is read; none at all refuses', () => {
+  for (const text of [
+    ' FROM alpine:latest\n',
+    '\tFROM alpine:latest\n',
+    'FROM \\\n  alpine:latest\n',
+    'from alpine:latest\n',
+    `  FROM node:22@${A} AS a\n  FROM alpine:latest\n`,
+  ]) {
+    const { errors } = validateDockerfilePins([file(text)]);
+    assert.ok(
+      errors.some((error) => /FROM alpine:latest is not pinned by digest/.test(error)),
+      `${JSON.stringify(text)}: ${errors.join()}`,
+    );
+  }
+  for (const [text, pattern] of [
+    ['RUN true\n', /no FROM instruction was read/],
+    ['', /no FROM instruction was read/],
+    ['# escape=`\nFROM alpine:latest\n', /the parser directive escape/],
+    ['# syntax=example/other\nFROM alpine:latest\n', /the parser directive syntax/],
+    [`FROM --platform=linux/amd64 node:22@${A}\n`, /is not a form this check reads/],
+    [`FROM node:22@${A}\nRUN apk \\\n  upgrade\n`, /apk upgrade/],
+    [`FROM node:22@${A}\nRUN <<EOF\nFROM x\nEOF\n`, /a here-document/],
+    [`FROM node:22@${A}\nRUN true \\`, /a continuation that never ends/],
+  ]) {
+    const { errors } = validateDockerfilePins([file(text)]);
+    assert.ok(
+      errors.some((error) => pattern.test(error)),
+      `${JSON.stringify(text)}: ${errors.join()}`,
+    );
+  }
+  const good = `# syntax=docker/dockerfile:1.7\n# a note, then FROM inside text: FROM x\n  FROM node:22@${A} AS a\n  # a comment\n  FROM a\n`;
+  assert.deepEqual(validateDockerfilePins([file(good)]).errors, []);
 });

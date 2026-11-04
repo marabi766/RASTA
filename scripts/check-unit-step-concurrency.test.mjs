@@ -28,6 +28,8 @@ import {
   parseCommands,
   reachableScripts,
   runsNodeTest,
+  turboTaskGraph,
+  TURBO_CONFIG_NAMES,
   UNIT_STEP,
 } from './ci-node-test-timeouts-lib.mjs';
 
@@ -36,17 +38,17 @@ const realWorkflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8'
 const realScripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
 const realDoc = parse(realWorkflow);
 // FU-077: EVERY workspace package (only `dir/*` patterns are understood; another one
-// throws) and the task graph of every turbo.json, which turbo commands are read against.
+// throws) and the task graph of every turbo.json / turbo.jsonc (r2 F1: read by the
+// library's turboTaskGraph, every edge kept), which turbo commands are read against.
 const pnpmWorkspace = parse(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8'));
-const turboTasks = (file) =>
-  JSON.parse(readFileSync(file, 'utf8').replace(/^\s*\/\/.*$/gm, '')).tasks ?? {};
-const realTurbo = {};
-const addTurbo = (tasks) => {
-  for (const [name, task] of Object.entries(tasks)) {
-    realTurbo[name] = [...new Set([...(realTurbo[name] ?? []), ...(task.dependsOn ?? [])])];
-  }
-};
-addTurbo(turboTasks(join(root, 'turbo.json')));
+const turboFiles = (directory) =>
+  Object.fromEntries(
+    TURBO_CONFIG_NAMES.filter((name) => existsSync(join(root, directory, name))).map((name) => [
+      name,
+      readFileSync(join(root, directory, name), 'utf8'),
+    ]),
+  );
+const realTurboConfigs = [{ directory: '.', files: turboFiles('.') }];
 const realPackages = {};
 for (const pattern of pnpmWorkspace.packages) {
   const dir = /^([a-z]+)\/\*$/.exec(pattern)?.[1];
@@ -56,10 +58,13 @@ for (const pattern of pnpmWorkspace.packages) {
     if (!entry.isDirectory() || !existsSync(join(base, 'package.json'))) continue;
     const manifest = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8'));
     realPackages[manifest.name] = manifest.scripts ?? {};
-    if (existsSync(join(base, 'turbo.json'))) addTurbo(turboTasks(join(base, 'turbo.json')));
+    realTurboConfigs.push({
+      directory: `${dir}/${entry.name}`,
+      files: turboFiles(`${dir}/${entry.name}`),
+    });
   }
 }
-const realWorkspace = { turbo: realTurbo };
+const realWorkspace = turboTaskGraph(realTurboConfigs);
 const [exception] = UNBOUNDED_EXCEPTIONS;
 // FU-077 R1: run text with a CR or another control character is refused by the shared
 // policy (ci-shell-text-lib.mjs) before any grammar, so the CRLF/CR variants of the
@@ -2600,6 +2605,118 @@ test('FU-077 R5: an allow-listed tool is inert only in an allow-listed argument 
     refusedAtBoth('turbo run test:unit', /a turbo task .* that is not read/, (_all, _p, ws) =>
       edit(ws),
     );
+});
+// PR #727 r2 F1: every turbo configuration (turbo.json and turbo.jsonc) and every edge a
+// task has (dependsOn and with) is read; anything else in a configuration refuses.
+const graphProblems = (editConfigs, editPackages = () => {}) => {
+  const configs = structuredClone(realTurboConfigs);
+  editConfigs(configs);
+  const packages = structuredClone(realPackages);
+  editPackages(packages);
+  return nodeTestTimeoutProblems(realDoc, realScripts, packages, turboTaskGraph(configs));
+};
+const rootTurbo = (configs, edit) => {
+  const config = JSON.parse(configs[0].files['turbo.json'].replace(/^\s*\/\/.*$/gm, ''));
+  edit(config);
+  configs[0].files['turbo.json'] = JSON.stringify(config);
+};
+const packageConfig = (configs, directory) => configs.find((c) => c.directory === directory);
+const companion = (packages) => {
+  packages['@rasta/e2e']['background-check'] = 'node --test /dev/null';
+};
+test('PR #727 r2 F1: the real turbo configurations are read completely', () => {
+  assert.deepEqual(realWorkspace.problems, []);
+  assert.deepEqual(TURBO_CONFIG_NAMES, ['turbo.json', 'turbo.jsonc']);
+  assert.ok(realTurboConfigs.length > 20, String(realTurboConfigs.length));
+  assert.deepEqual(realWorkspace.turbo['test:unit'], ['^build']);
+});
+test('PR #727 r2 F1: a with edge is followed like dependsOn, wherever it is defined', () => {
+  const unbudgeted = /@rasta\/e2e background-check: node --test \/dev\/null/;
+  for (const [label, edit] of [
+    [
+      'root with',
+      (configs) =>
+        rootTurbo(configs, (config) => {
+          config.tasks['test:unit'].with = ['background-check'];
+          config.tasks['background-check'] = {};
+        }),
+    ],
+    [
+      'transitive with',
+      (configs) =>
+        rootTurbo(configs, (config) => {
+          config.tasks['test:unit'].with = ['companion'];
+          config.tasks.companion = { with: ['background-check'] };
+          config.tasks['background-check'] = {};
+        }),
+    ],
+    [
+      'workspace turbo.jsonc with',
+      (configs) => {
+        packageConfig(configs, 'tests/e2e').files['turbo.jsonc'] =
+          '// a comment\n{ "extends": ["//"], "tasks": { "test:unit": { "with": ["background-check"] }, /* c */ "background-check": {} } }';
+      },
+    ],
+    [
+      'workspace turbo.jsonc dependsOn',
+      (configs) => {
+        packageConfig(configs, 'tests/e2e').files['turbo.jsonc'] =
+          '{ "extends": ["//"], "tasks": { "test:unit": { "dependsOn": ["background-check"] }, "background-check": {} } }';
+      },
+    ],
+  ])
+    refused(graphProblems(edit, companion), unbudgeted, label);
+  // The control: without the edge, the companion script is not run and not reported.
+  assert.deepEqual(
+    graphProblems(() => {}, companion),
+    [],
+  );
+});
+test('PR #727 r2 F1: a configuration that cannot be read completely refuses the graph', () => {
+  for (const [edit, reason] of [
+    [
+      (configs) => rootTurbo(configs, (config) => (config.tasks['test:unit'].with = ['web#lint'])),
+      /a turbo task test:unit that is not read/,
+    ],
+    [
+      (configs) =>
+        rootTurbo(configs, (config) => (config.tasks['test:unit'].dependsOn = ['$TURBO_EXTENDS$'])),
+      /\$TURBO_EXTENDS\$ is not a task name/,
+    ],
+    [
+      (configs) => rootTurbo(configs, (config) => (config.tasks['test:unit'].runAlso = ['x'])),
+      /task test:unit sets runAlso/,
+    ],
+    [(configs) => rootTurbo(configs, (config) => (config.extra = 1)), /sets extra/],
+    [
+      (configs) => rootTurbo(configs, (config) => (config.tasks['test:unit'].with = 'x')),
+      /a with that is not a list/,
+    ],
+    [
+      (configs) => (packageConfig(configs, 'tests/e2e').files['turbo.json'] = '{ "tasks": {'),
+      /tests\/e2e\/turbo.json cannot be read/,
+    ],
+    [
+      (configs) => {
+        packageConfig(configs, 'apps/web').files['turbo.jsonc'] = '{ "extends": ["//"] }';
+      },
+      /apps\/web has both turbo.json and turbo.jsonc/,
+    ],
+    [
+      (configs) =>
+        (packageConfig(configs, 'tests/e2e').files['turbo.json'] =
+          '{ "extends": ["@rasta/web"], "tasks": {} }'),
+      /extends something other than/,
+    ],
+    [(configs) => (configs[0].files = {}), /the root has no turbo.json/],
+  ]) {
+    const problems = graphProblems(edit);
+    refused(
+      problems,
+      /the turbo task graph cannot be read|a turbo task test:unit that is not read/,
+    );
+    refused(problems, reason);
+  }
 });
 test('FU-077: the shared tokenizer is one module, re-exported where it was', async () => {
   const shared = await import('./ci-shell-text-lib.mjs');

@@ -33,31 +33,95 @@ export function validateDockerfilePins(dockerfiles) {
       errors.push(`${name}: cannot be read: ${unreadable}`);
       continue;
     }
-    text.split('\n').forEach((line, index) => {
-      const from = line.match(/^FROM\s+(\S+)(?:\s+AS\s+(\S+))?/i);
-      if (from) {
+    // FU-077 r2 F3: instructions read the way BuildKit reads them: leading whitespace before
+    // the keyword, backslash continuations joined (comment lines inside one dropped), keyword
+    // in any case. Only the default escape character is read; a parser directive refuses.
+    const instructions = dockerInstructions(text);
+    if (instructions.problem) {
+      errors.push(`${name}: cannot be read: ${instructions.problem}`);
+      continue;
+    }
+    let bases = 0;
+    for (const { line, keyword, rest } of instructions.list) {
+      if (keyword === 'FROM') {
+        bases += 1;
+        const from = rest.match(/^(\S+)(?:\s+AS\s+(\S+))?\s*$/i);
+        if (!from) {
+          errors.push(`${name}:${line}: FROM ${rest} is not a form this check reads`);
+          continue;
+        }
         const [, image, stage] = from;
+        if (stages.has(image) && !image.includes(':')) {
+          if (stage) stages.add(stage);
+          continue; // FROM <earlier stage>
+        }
         if (stage) stages.add(stage);
-        if (stages.has(image) && !image.includes(':')) return; // FROM <earlier stage>
         const digest = image.match(DIGEST);
         if (!digest) {
-          errors.push(`${name}:${index + 1}: FROM ${image} is not pinned by digest`);
+          errors.push(`${name}:${line}: FROM ${image} is not pinned by digest`);
         } else {
           digests.add(`${image.split('@')[0]}${digest[0]}`);
         }
       }
-      if (/^\s*RUN\b.*\bapk\b[^\n]*\bupgrade\b\s*(?:&&|;|$)/.test(line)) {
+      if (keyword === 'RUN' && /\bapk\b.*\bupgrade\b\s*(?:&&|;|$)/.test(rest)) {
         errors.push(
-          `${name}:${index + 1}: \`apk upgrade\` without a package name makes the image unreproducible`,
+          `${name}:${line}: \`apk upgrade\` without a package name makes the image unreproducible`,
         );
       }
-    });
+    }
+    // A file with no base instruction read is not a pinned file.
+    if (bases === 0) errors.push(`${name}: no FROM instruction was read`);
   }
 
   if (digests.size > 1) {
     errors.push(`Dockerfiles disagree on the base image digest: ${[...digests].join(', ')}`);
   }
   return { errors, digests: [...digests] };
+}
+
+/**
+ * FU-077 r2 F3: a Dockerfile's instructions `{ line, keyword, rest }` (1-based first line),
+ * or a problem. Leading whitespace is allowed before an instruction, a comment line is
+ * dropped (also inside a continuation), `\` at a line end continues it. A parser directive
+ * at the top other than `# syntax=docker/dockerfile:1[.x]` (an `escape=`, another frontend,
+ * `check=`) refuses: it changes how the rest is read.
+ * A here-document (`<<`) in an instruction refuses: its body lines are not instructions.
+ */
+export function dockerInstructions(text) {
+  const lines = text.split('\n');
+  const list = [];
+  let current = null;
+  let leading = true;
+  for (const [index, raw] of lines.entries()) {
+    const directive = leading && /^\s*#\s*([A-Za-z]+)\s*=\s*(.*?)\s*$/.exec(raw);
+    if (directive) {
+      // The official frontend, whose instruction rules are the ones read here, is allowed.
+      const [, key, value] = directive;
+      if (key.toLowerCase() === 'syntax' && /^docker\/dockerfile:1(?:\.\d+)*$/.test(value))
+        continue;
+      return { problem: `the parser directive ${key} at line ${index + 1}` };
+    }
+    leading = false;
+    if (/^\s*#/.test(raw)) continue;
+    let body = raw.trim();
+    const continues = /\\$/.test(body);
+    if (continues) body = body.slice(0, -1);
+    if (current) current.rest += ` ${body}`;
+    else if (body !== '') {
+      const match = /^([A-Za-z]+)(?:\s+([\s\S]*))?$/.exec(body);
+      if (!match) return { problem: `line ${index + 1} is not an instruction` };
+      current = { line: index + 1, keyword: match[1].toUpperCase(), rest: match[2] ?? '' };
+    }
+    if (current && !continues) {
+      current.rest = current.rest.trim();
+      if (/<<-?\s*["']?[A-Za-z_]/.test(current.rest))
+        return { problem: `a here-document in the instruction at line ${current.line}` };
+      list.push(current);
+      current = null;
+    }
+  }
+  if (current) return { problem: `a continuation that never ends (line ${current.line})` };
+  return { list };
 }
 
 // =============================================================================
@@ -123,6 +187,18 @@ export const TAGLESS = new Map([
   [`${MINIO}@${MINIO_DIGEST}`, CHAINGUARD_TAGLESS],
   [`${MC}@${MC_PLAIN}`, CHAINGUARD_TAGLESS],
   [`${MC}@${MC_DEV}`, CHAINGUARD_TAGLESS],
+]);
+
+/**
+ * FU-077 r2 F2: `eval "${X}"` runs text the check cannot read, so it refuses, except where X
+ * is the output of `bash <one of these scripts> …` assigned in the same script. Each entry
+ * says why that output starts no image; an entry nothing evaluates any more is refused.
+ */
+export const EVALUATED_OUTPUTS = new Map([
+  [
+    'infrastructure/docker/kafka/kafka-credentials.sh',
+    'prints only `export KAFKA_…=<single-quoted value read from a secrets file>` lines (its printf at line 46); the script itself is read by this check as a CI shell script',
+  ],
 ]);
 
 /** The compose file the checker validates; a `docker compose -f` naming any other fails closed. */
@@ -223,16 +299,82 @@ const IMAGELESS_VERBS = new Set([
   'unpause',
 ]);
 const RUN_VERBS = new Set(['run', 'create', 'pull']);
-const SHELLS = new Set(['bash', 'sh']);
+/** A word naming a shell, as a path or a bare name (FU-077 r2 F2: any word, not only the first). */
+const SHELL_WORD = /(?:^|\/)(?:ba|da|k|z)?sh$/;
+const SHELL_LONG_OPTIONS = new Set(['--norc', '--noprofile', '--posix', '--login', '--noediting']);
 const EXEMPT = /#\s*image-pin-exempt:(.*)$/;
 
 class ShellSyntaxError extends Error {}
 
 /**
+ * The index just past the `)` closing the `(` at `open` in `src`, quotes and backslashes
+ * respected, or -1.
+ */
+function matchParen(src, open) {
+  let depth = 0;
+  for (let j = open; j < src.length; j += 1) {
+    const ch = src[j];
+    if (ch === '\\') {
+      j += 1;
+    } else if (ch === "'") {
+      j = src.indexOf("'", j + 1);
+      if (j === -1) break;
+    } else if (ch === '"') {
+      j += 1;
+      while (j < src.length && src[j] !== '"') j += src[j] === '\\' ? 2 : 1;
+    } else if (ch === '(') {
+      depth += 1;
+    } else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) return j + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * FU-077 r2 F2: the command substitutions bash runs while it EXPANDS text the tokenizer
+ * otherwise keeps as data: a `${…}` operand, an arithmetic `$((…))` body, the body of a
+ * here-document whose delimiter is not quoted. Quotes are not treated as quoting here (in a
+ * here-document they are literal), so this reads at least every substitution bash runs:
+ * more is a refusal or an extra check, never a skipped command. Lines are 0-based from `line`.
+ */
+function substitutionsIn(text, line) {
+  const found = [];
+  let at = line;
+  for (let j = 0; j < text.length; j += 1) {
+    const ch = text[j];
+    if (ch === '\n') at += 1;
+    else if (ch === '\\') {
+      if (text[j + 1] === '\n') at += 1;
+      j += 1;
+    } else if (ch === '`') {
+      const end = text.indexOf('`', j + 1);
+      if (end === -1) throw new ShellSyntaxError(`unclosed backtick at line ${at + 1}`);
+      found.push({ script: text.slice(j + 1, end), line: at });
+      at += (text.slice(j, end).match(/\n/g) ?? []).length;
+      j = end;
+    } else if (ch === '$' && text[j + 1] === '(') {
+      const end = matchParen(text, j + 1);
+      if (end === -1) throw new ShellSyntaxError(`unclosed "$(" at line ${at + 1}`);
+      const body = text.slice(j + 2, end - 1);
+      // `$((…))` is arithmetic: what it runs is the substitutions inside it.
+      if (body.startsWith('(')) found.push(...substitutionsIn(body, at));
+      else found.push({ script: body, line: at });
+      at += (body.match(/\n/g) ?? []).length;
+      j = end - 1;
+    }
+  }
+  return found;
+}
+
+/**
  * Splits a shell script into simple commands. Each word keeps its unquoted
  * value; a word built from a command substitution is `opaque`. Substitutions
- * and the bodies of here-documents fed to bash/sh come back as `nested`
- * scripts with the line they start on. Lines are 0-based.
+ * (also inside `${…}`, `$((…))` and expanding here-documents) and the bodies of
+ * here-documents fed to a shell come back as `nested` scripts with the line they
+ * start on. Each command's `input` says whether its standard input is a pipe, a
+ * here-string or a here-document. Lines are 0-based.
  */
 export function tokenizeShell(src) {
   const unreadable = shellTextProblem(src);
@@ -245,42 +387,35 @@ export function tokenizeShell(src) {
   let line = 0;
   let startLine = null;
   let i = 0;
+  // FU-077 r2 F2: where each command's standard input comes from, so a shell that reads its
+  // commands from a pipe or a here-string is seen.
+  let input = {};
 
   const ensureWord = () => {
     if (!word) word = { value: '', opaque: false };
     if (startLine === null) startLine = line;
   };
+  let hereStringWord = false;
   const pushWord = () => {
-    if (word) words.push(word);
+    // A here-string's word is the command's input, not one of its arguments.
+    if (word && hereStringWord) hereStringWord = false;
+    else if (word) words.push(word);
     word = null;
   };
   const endCommand = () => {
     pushWord();
-    if (words.length > 0) commands.push({ startLine, endLine: line, words });
+    if (words.length > 0) {
+      commands.push({ startLine, endLine: line, words, input });
+      input = {};
+    }
     words = [];
     startLine = null;
   };
   /** The index just past the `)` that closes the `(` at `open`, quotes respected. */
   const closingParen = (open) => {
-    let depth = 0;
-    for (let j = open; j < src.length; j += 1) {
-      const ch = src[j];
-      if (ch === '\\') {
-        j += 1;
-      } else if (ch === "'") {
-        j = src.indexOf("'", j + 1);
-        if (j === -1) break;
-      } else if (ch === '"') {
-        j += 1;
-        while (j < src.length && src[j] !== '"') j += src[j] === '\\' ? 2 : 1;
-      } else if (ch === '(') {
-        depth += 1;
-      } else if (ch === ')') {
-        depth -= 1;
-        if (depth === 0) return j + 1;
-      }
-    }
-    throw new ShellSyntaxError(`unclosed "(" at line ${line + 1}`);
+    const end = matchParen(src, open);
+    if (end === -1) throw new ShellSyntaxError(`unclosed "(" at line ${line + 1}`);
+    return end;
   };
   const countLines = (text) => (text.match(/\n/g) ?? []).length;
   const substitution = () => {
@@ -298,7 +433,10 @@ export function tokenizeShell(src) {
     }
     const end = closingParen(i + 1);
     const body = src.slice(i + 2, end - 1);
-    if (!body.startsWith('(')) nested.push({ script: body, line });
+    word.scripts = [...(word.scripts ?? []), body];
+    // FU-077 r2 F2: an arithmetic body runs the substitutions inside it.
+    if (body.startsWith('(')) nested.push(...substitutionsIn(body, line));
+    else nested.push({ script: body, line });
     line += countLines(src.slice(i, end));
     word.value += '$(…)';
     i = end;
@@ -322,7 +460,7 @@ export function tokenizeShell(src) {
       line += 1;
       i += 1;
       while (heredocs.length > 0) {
-        const { delimiter, strip, feedsShell } = heredocs.shift();
+        const { delimiter, strip, feedsShell, expands } = heredocs.shift();
         const bodyLine = line;
         const body = [];
         let closed = false;
@@ -339,6 +477,8 @@ export function tokenizeShell(src) {
         }
         if (!closed) throw new ShellSyntaxError(`here-document ${delimiter} is never closed`);
         if (feedsShell) nested.push({ script: body.join('\n'), line: bodyLine });
+        // FU-077 r2 F2: an unquoted delimiter expands the body, running its substitutions.
+        else if (expands) nested.push(...substitutionsIn(body.join('\n'), bodyLine));
       }
       continue;
     }
@@ -353,7 +493,9 @@ export function tokenizeShell(src) {
     }
     if (c === ';' || c === '&' || c === '|') {
       endCommand();
+      const pipe = c === '|' && src[i + 1] !== '|';
       i += src[i + 1] === c || (c === '|' && src[i + 1] === '&') ? 2 : 1;
+      if (pipe) input = { pipe: true };
       continue;
     }
     if (c === '(' || c === ')') {
@@ -364,7 +506,10 @@ export function tokenizeShell(src) {
     if (c === '<' && src[i + 1] === '<' && src[i + 2] === '<') {
       // a here-string: the word after it is data, not a delimiter
       pushWord();
+      input = { ...input, hereString: true };
+      hereStringWord = true;
       i += 3;
+      while (src[i] === ' ' || src[i] === '\t') i += 1;
       continue;
     }
     if (c === '<' && src[i + 1] === '<') {
@@ -376,12 +521,14 @@ export function tokenizeShell(src) {
       const match = src.slice(i).match(/^(?:'([^']*)'|"([^"]*)"|([^\s;&|<>()]+))/);
       if (!match)
         throw new ShellSyntaxError(`here-document without a delimiter at line ${line + 1}`);
-      const first = words[0]?.value;
+      // FU-077 r2 F2: a shell anywhere in the command (`env bash`, `sudo sh`) reads the body.
       heredocs.push({
         delimiter: match[1] ?? match[2] ?? match[3],
         strip,
-        feedsShell: SHELLS.has(first) || /\/(?:ba)?sh$/.test(first ?? ''),
+        feedsShell: words.some(({ value }) => SHELL_WORD.test(value)),
+        expands: match[3] !== undefined && !/['"\\]/.test(match[3]),
       });
+      input = { ...input, hereDocument: true };
       i += match[0].length;
       continue;
     }
@@ -436,7 +583,12 @@ export function tokenizeShell(src) {
         else if (src[j] === '}' && --depth === 0) break;
       }
       if (j >= src.length) throw new ShellSyntaxError(`unclosed "\${" at line ${line + 1}`);
+      // FU-077 r2 F2: `${V:-$(cmd)}` runs cmd; its value then depends on that output.
+      const inner = substitutionsIn(src.slice(i + 2, j), line);
+      if (inner.length > 0) word.opaque = true;
+      nested.push(...inner);
       word.value += src.slice(i, j + 1);
+      line += countLines(src.slice(i, j + 1));
       i = j + 1;
       continue;
     }
@@ -470,13 +622,15 @@ function imageWord(args) {
 
 /**
  * @param {Array<{ name: string, text: string, kind: 'compose' | 'workflow' | 'shell' }>} files
- * @param {{ digestVariants?: Map<string, { digests: string[], reason: string }>, tagless?: Map<string, string>, composeFiles?: string[] }} [policy]
+ * @param {{ digestVariants?: Map<string, { digests: string[], reason: string }>, tagless?: Map<string, string>, composeFiles?: string[], evaluatedOutputs?: Map<string, string> }} [policy]
  * @returns {{ errors: string[], images: Array<{ where: string, ref: string }> }}
  */
 export function validateInfraImagePins(files, policy = {}) {
   const digestVariants = policy.digestVariants ?? DIGEST_VARIANTS;
   const tagless = policy.tagless ?? TAGLESS;
   const composeFiles = policy.composeFiles ?? COMPOSE_FILES;
+  const evaluated = { allowed: policy.evaluatedOutputs ?? EVALUATED_OUTPUTS, used: new Set() };
+  const shared = { composeFiles, evaluated };
   const errors = [];
   const images = [];
   const usedTagless = new Set();
@@ -484,11 +638,11 @@ export function validateInfraImagePins(files, policy = {}) {
   for (const file of files) {
     try {
       if (file.kind === 'compose') composeImages(file, images, errors);
-      else if (file.kind === 'workflow') workflowImages(file, images, errors, composeFiles);
+      else if (file.kind === 'workflow') workflowImages(file, images, errors, shared);
       else
         shellImages(
           file.text,
-          { file: file.name, lineOf: (n) => n + 1, env: new Map(), composeFiles },
+          { file: file.name, lineOf: (n) => n + 1, env: new Map(), ...shared },
           images,
           errors,
         );
@@ -541,6 +695,10 @@ export function validateInfraImagePins(files, policy = {}) {
         errors.push(`DIGEST_VARIANTS allows ${repository}@${digest}, which nothing uses any more`);
       }
     }
+  }
+  for (const [path, reason] of evaluated.allowed) {
+    if (!reason || !evaluated.used.has(path))
+      errors.push(`EVALUATED_OUTPUTS lists ${path}, which nothing evaluates any more`);
   }
   for (const key of tagless.keys()) {
     if (!usedTagless.has(key))
@@ -623,7 +781,7 @@ function composeImages({ name, text }, images, errors) {
   }
 }
 
-function workflowImages({ name, text }, images, errors, composeFiles) {
+function workflowImages({ name, text }, images, errors, shared) {
   const { doc, js, lineAt } = parseYaml(text);
   // Local tags carry across steps, in document order, as they do on the runner.
   const state = { localTags: new Set() };
@@ -677,7 +835,7 @@ function workflowImages({ name, text }, images, errors, composeFiles) {
         const first = lineAt(node) + (block ? 1 : 0);
         shellImages(
           step.run,
-          { file: name, lineOf: (n) => first + n, env, composeFiles },
+          { file: name, lineOf: (n) => first + n, env, ...shared },
           images,
           errors,
           state,
@@ -740,7 +898,24 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     return;
   }
   const vars = new Map();
+  const outputs = new Map(); // variable -> the one command substitution it was assigned from
+  // Every place a name is written to (`x=`, `x+=`, `read x`, `for x in`): not after `$`/`{`.
+  const writes = (name) =>
+    (src.match(new RegExp(`(?<![\\w$\\{])${name}(?![\\w])`, 'g')) ?? []).length;
   const restore = (value) => value.replace(/__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
+  // How many assignment-only commands of this script assign a variable one `$(…)`.
+  const assignedFrom = new Map();
+  for (const { words } of parsed.commands) {
+    const plain = words.filter(
+      ({ value }) => !['export', 'local', 'readonly', 'declare'].includes(value),
+    );
+    if (!plain.length || !plain.every(({ value }) => ASSIGNMENT.test(value))) continue;
+    for (const { value, scripts } of plain) {
+      const [, variable, assigned] = value.match(ASSIGNMENT);
+      if (assigned === '$(…)' && scripts?.length === 1)
+        assignedFrom.set(variable, (assignedFrom.get(variable) ?? 0) + 1);
+    }
+  }
 
   for (const command of parsed.commands) {
     const where = `${ctx.file}:${ctx.lineOf(command.startLine)}`;
@@ -758,21 +933,46 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       index += 1;
     }
     if (index === words.length) {
-      for (const { value, opaque } of assignments) {
+      for (const { value, opaque, scripts } of assignments) {
         const [, variable, assigned] = value.match(ASSIGNMENT);
         vars.set(variable, opaque ? null : restore(assigned));
+        if (assigned === '$(…)' && scripts?.length === 1) {
+          outputs.set(variable, scripts[0]);
+        } else outputs.delete(variable);
       }
       continue;
     }
     words = words.slice(index);
-    const at = words.findIndex(({ value }) => /(^|\/)docker(-compose)?$/.test(value));
-    if (at === -1) continue;
     let isExempt = false;
     for (let line = command.startLine - 1; line <= command.endLine; line += 1) {
       if (exempt.has(line)) isExempt = true;
     }
     if (isExempt) continue;
     const problem = (text) => errors.push(`${where}: ${text}`);
+    const at = words.findIndex(({ value }) => /(^|\/)docker(-compose)?$/.test(value));
+    // FU-077 r2 F2: a shell or eval before any docker word runs text as commands. Words after
+    // docker are the container's command, which runs inside the pinned image.
+    const shellAt = (at === -1 ? words : words.slice(0, at)).findIndex(
+      ({ value }) => SHELL_WORD.test(value) || value === 'eval',
+    );
+    if (shellAt !== -1) {
+      // An evaluated variable is read only when every write to it in this script is one of
+      // the tracked assignments, the latest one before this command.
+      const tracked = new Map(
+        [...outputs].filter(([name]) => writes(name) === assignedFrom.get(name)),
+      );
+      const read = shellInput(words.slice(shellAt), command.input, tracked, ctx.evaluated);
+      if (read.problem) problem(read.problem);
+      else if (read.script !== undefined)
+        shellImages(
+          read.script,
+          { ...ctx, lineOf: (n) => ctx.lineOf(command.startLine + n) },
+          images,
+          errors,
+          state,
+        );
+    }
+    if (at === -1) continue;
     const args = words.slice(at + 1);
     if (words[at].value.endsWith('docker-compose')) {
       composeCommand(args, ctx, problem);
@@ -858,6 +1058,71 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   for (const { script: inner, line } of parsed.nested) {
     shellImages(inner, { ...ctx, lineOf: (n) => ctx.lineOf(line + n) }, images, errors, state);
   }
+}
+
+/**
+ * FU-077 r2 F2: what a shell or `eval` command runs. `{ script }` is text to read as a script
+ * of its own, `{}` is input read elsewhere (a script file, which this check reads when it is a
+ * CI `.sh`, or a here-document body already read as a nested script), `{ problem }` refuses:
+ * a pipe or here-string into a shell, a computed `-c` body or eval text.
+ */
+function shellInput([command, ...args], input, outputs, evaluated) {
+  const literal = (word) => !word.opaque && !word.value.includes('$');
+  if (command.value === 'eval') {
+    if (args.length > 0 && args.every(literal))
+      return { script: args.map(({ value }) => value).join(' ') };
+    const name = args.length === 1 && /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(args[0].value);
+    const source = name && !args[0].opaque ? outputs.get(name[1]) : undefined;
+    const file = source === undefined ? undefined : evaluatedFile(source);
+    if (file !== undefined && evaluated.allowed.has(file)) {
+      evaluated.used.add(file);
+      return {};
+    }
+    return { problem: 'eval runs text this check cannot read (EVALUATED_OUTPUTS)' };
+  }
+  if (args.some(({ value }) => value.startsWith('<')))
+    return { problem: `${command.value} reads its commands from a redirection` };
+  let commandMode = false;
+  let index = 0;
+  for (; index < args.length; index += 1) {
+    const { value } = args[index];
+    if (value === '--') {
+      index += 1;
+      break;
+    }
+    if (!/^[-+]/.test(value) || value === '-' || value === '+') break;
+    // A long option can name a file the shell runs (--rcfile, --init-file): only these are read.
+    if (value.startsWith('--') && !SHELL_LONG_OPTIONS.has(value))
+      return { problem: `${command.value} option ${value} is not one this check reads` };
+    if (/^[-+][oO]$/.test(value)) index += 1;
+    else if (/^-[A-Za-z]*c/.test(value)) commandMode = true;
+  }
+  const operand = args[index];
+  if (commandMode) {
+    if (!operand || !literal(operand))
+      return { problem: `${command.value} -c runs a body this check cannot read` };
+    return { script: operand.value };
+  }
+  if (operand && !args.slice(0, index).some(({ value }) => /^-[A-Za-z]*s/.test(value))) return {};
+  if (input.hereDocument && !input.pipe && !input.hereString) return {};
+  return {
+    problem: `${command.value} reads its commands from a pipe, a here-string or the terminal, which this check does not read`,
+  };
+}
+
+/** The script file of `[NAME=… ]bash|sh <file> …`, the only command an evaluated output may come from. */
+function evaluatedFile(source) {
+  let parsed;
+  try {
+    parsed = tokenizeShell(source);
+  } catch {
+    return undefined;
+  }
+  if (parsed.commands.length !== 1 || parsed.nested.length > 0) return undefined;
+  const all = parsed.commands[0].words;
+  const words = all.slice(all.findIndex(({ value }) => !ASSIGNMENT.test(value)));
+  if (words.length < 2 || !/^(?:ba)?sh$/.test(words[0].value) || words[1].opaque) return undefined;
+  return words[1].value.replace(/^\.\//, '');
 }
 
 /** `docker compose` starts what a compose file names: it must be one this check validates. */
