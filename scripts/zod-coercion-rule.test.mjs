@@ -245,13 +245,17 @@ import { Linter } from 'eslint';
 import assert from 'node:assert/strict';
 const linter = new Linter();
 const messages = (code) =>
-  linter.verify(z + code, [
-    {
-      languageOptions: { parser: tseslint.parser },
-      plugins: { boundary: { rules: { coercion: rule } } },
-      rules: { 'boundary/coercion': 'error' },
-    },
-  ]);
+  linter.verify(
+    z + code,
+    [
+      {
+        languageOptions: { parser: tseslint.parser },
+        plugins: { boundary: { rules: { coercion: rule } } },
+        rules: { 'boundary/coercion': 'error' },
+      },
+    ],
+    { filename: `${ROOT}apps/web/src/probe.js` },
+  );
 for (const [finding, cases] of Object.entries(regressions))
   for (const [index, code] of cases.entries())
     it(`${finding} review trigger ${index + 1}: ${code}`, () => {

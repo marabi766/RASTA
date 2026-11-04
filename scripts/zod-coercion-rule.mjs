@@ -1,4 +1,4 @@
-import { dirname, relative, resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { verifiedCallbackHelper } from './zod-callback-helpers.mjs';
 import { fileURLToPath } from 'node:url';
 
@@ -222,14 +222,15 @@ export default {
         name = raw.name;
       if (def?.type === 'ImportBinding') {
         const from = def.parent.source.value;
-        path = from.startsWith('@/')
-          ? `apps/web/src/${from.slice(2)}`
-          : from.startsWith('.')
-            ? relative(ROOT, resolve(dirname(context.filename), from))
-            : from;
+        path = from;
         name = def.node.imported?.name;
       }
-      return verifiedCallbackHelper(ROOT, path, name);
+      return verifiedCallbackHelper(
+        ROOT,
+        path,
+        name,
+        def?.type === 'ImportBinding' ? context.filename : undefined,
+      );
     };
     const imported = (def) =>
       def?.type === 'ImportBinding' &&

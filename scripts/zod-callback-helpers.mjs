@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
-import { extname, resolve } from 'node:path';
+import { dirname, extname, relative, resolve } from 'node:path';
+
+import ts from 'typescript';
 
 // Named reviewed helper capabilities, never a file or method-name exemption.
 // A changed/unreadable source refuses until its implementation is reviewed again.
@@ -116,7 +118,35 @@ const resolvedSource = (root, modulePath) => {
   });
   return found.length === 1 ? found[0] : undefined;
 };
-export function verifiedCallbackHelper(root, modulePath, name) {
+// Compiler configuration is part of resolution: do not assume that @/ still
+// points at apps/web/src, or that a workspace has no moduleSuffixes override.
+const resolvedImport = (root, specifier, importer) => {
+  const config = ts.findConfigFile(dirname(importer), ts.sys.fileExists);
+  const parsed =
+    config &&
+    ts.getParsedCommandLineOfConfigFile(
+      config,
+      {},
+      {
+        ...ts.sys,
+        onUnRecoverableConfigFileDiagnostic() {},
+      },
+    );
+  if (config && (!parsed || parsed.errors.length)) return undefined;
+  const result = ts.resolveModuleName(
+    specifier,
+    importer,
+    parsed?.options ?? {},
+    ts.sys,
+  ).resolvedModule;
+  return result && relative(root, result.resolvedFileName).replaceAll('\\', '/');
+};
+export function verifiedCallbackHelper(root, modulePath, name, importer) {
+  if (importer && modulePath !== '@rasta/contracts') {
+    const exact = resolvedImport(root, modulePath, importer);
+    if (!exact || resolvedSource(root, exact) !== exact) return undefined;
+    modulePath = exact;
+  }
   const exact = modulePath === '@rasta/contracts' ? modulePath : resolvedSource(root, modulePath);
   const helper = helpers.find(
     ([path, file, names]) =>
