@@ -237,6 +237,20 @@ export type {
   RfqCancelledPayload,
 } from './events/procurement-rfq';
 export {
+  PROCUREMENT_QUOTATION_EVENTS,
+  PROCUREMENT_QUOTATION_EVENT_SCHEMAS,
+  QUOTATION_RECEIPT_GENESIS_LABEL,
+  quotationSubmittedPayloadSchema,
+  quotationRevisedPayloadSchema,
+  quotationWithdrawnPayloadSchema,
+} from './events/procurement-quotation';
+export type {
+  ProcurementQuotationEventName,
+  QuotationSubmittedPayload,
+  QuotationRevisedPayload,
+  QuotationWithdrawnPayload,
+} from './events/procurement-quotation';
+export {
   INVENTORY_SHIPMENT_EVENTS,
   INVENTORY_SHIPMENT_EVENT_SCHEMAS,
   SHIPMENT_AGGREGATE,

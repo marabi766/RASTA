@@ -31,15 +31,21 @@ export const SAGA_DISPUTE_RECOVERY = {
   refusedRetry: { status: 409, code: 'INVALID_STATE_TRANSITION' },
   /** What `GET /v1/transactions/{id}` then says, of the fields the recovery reads. */
   readAfter: {
-    /** Resolved by an economic-service that keeps the resolution apart. */
+    /**
+     * Resolved by an economic-service that keeps the resolution apart — and
+     * returns an escrowed obligation never authorised to HELD, not to the
+     * settlement queue (D-083): the saga mirrored a dispute raised before
+     * the buyer confirmed receipt.
+     */
     resolvedNow: {
-      status: 'PENDING_SETTLEMENT',
+      status: 'HELD',
       disputeReason: reason,
       disputeResolution: resolution,
     },
     /**
      * Resolved before migration `20261016160000_transaction_dispute_resolution`:
      * the resolution was written over the objection, and nothing kept it apart.
+     * That release resolved every dispute into the settlement queue.
      */
     resolvedBeforeTheField: {
       status: 'PENDING_SETTLEMENT',

@@ -1258,8 +1258,8 @@ describe('a late answer of an earlier send (send identities, PR 363 reviews 3 an
     await act(async () => {
       fireEvent.click(retry);
     });
-    jest.restoreAllMocks();
     expect(submit).toHaveBeenCalledTimes(1);
+    jest.restoreAllMocks();
     expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(before);
     expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeEnabled();
   });

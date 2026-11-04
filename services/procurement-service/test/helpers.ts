@@ -134,6 +134,9 @@ const GUARDED = [
   // An RFQ's frozen children, then the RFQ (plan PR 6). The RFQ and its aggregation name each other:
   // the aggregation's reference (`fk_demand_aggregation_rfq`) is deferred for the cleanup's
   // transaction, so the RFQ goes first and its aggregation after.
+  // A quotation's chain, then the quotation (plan PR 8): both before the invitation they name.
+  ['quotation_receipt', ['tg_quotation_receipt_guard']],
+  ['quotation', ['tg_quotation_guard']],
   ['rfq_criterion', ['tg_rfq_criterion_guard']],
   ['rfq_invitation', ['tg_rfq_invitation_guard']],
   ['rfq', ['tg_rfq_guard']],

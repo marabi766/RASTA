@@ -1080,9 +1080,9 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "f69ccff231aae51715fbedb929ef02dd3436b32f378ae162b1d6d0ac8d9ce692",
+    "hash": "daeb0670a1ea029e63f6c4b8d3d5a63c8b1f598b9bdea4b081bae73bba31e0cc",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (wallet_hold by its reference), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
@@ -2798,6 +2798,27 @@
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 52,
+    "hash": "88327ddf15c3b94282545225c756e3dbb0853a7f2481fff6e2136d058692b7a0",
+    "occurrence": 0,
+    "decision": "platform-wide: invitations are owned by buyers; an invited supplier share-locks the buyer RFQ only through the join to its own invitation, binding supplier_organization_id from the token"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 69,
+    "hash": "b47ee6c994ffc09c71f845457dea6e8d3c4b48fd219352314b9d202b1971f48f",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 182,
+    "hash": "e2bf218d5c6baa98e6a6ea867a6f80c946d36007be1997ddd01456b658950625",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-scoped advisory lock keyed by the RFQ id the caller already share-locked through its own invitation; reads and returns no row"
   },
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",

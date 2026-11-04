@@ -17,9 +17,12 @@
  *
  * No dispute categories, deadlines or outcomes: economic-service takes one free
  * text (`reason` to dispute, `resolution` to resolve) and nothing else, and
- * resolving has exactly one effect — the transaction goes back to
- * `PENDING_SETTLEMENT`. It does not settle and it does not refund; releasing
- * the money stays a separate act (`transaction.controller.ts`).
+ * resolving has exactly one effect — the dispute is lifted and the transaction
+ * goes back to where its settlement authority stands: `PENDING_SETTLEMENT` if
+ * its settlement was authorised (or nothing was ever held), `HELD` if its
+ * funds are escrowed and nothing authorised it (`resolvedStatus`, D-083). It
+ * does not settle, does not authorise and does not refund; releasing the money
+ * stays a separate act (`transaction.controller.ts`).
  */
 
 export const DISPUTE_COMMANDS = ['DISPUTE', 'RESOLVE_DISPUTE'] as const;
@@ -61,10 +64,16 @@ export const DISPUTE_FROM_STATES: Readonly<Record<DisputeCommand, readonly strin
   RESOLVE_DISPUTE: ['DISPUTED'],
 };
 
-/** The state a successful command leaves the transaction in — what a confirmed answer must show. */
-export const DISPUTE_TARGET_STATE: Readonly<Record<DisputeCommand, string>> = {
-  DISPUTE: 'DISPUTED',
-  RESOLVE_DISPUTE: 'PENDING_SETTLEMENT',
+/**
+ * The states a successful command can leave the transaction in — what a
+ * confirmed answer must show. A resolution has two: which one is the
+ * transaction's settlement authority's (`RESOLUTION_TARGETS`, D-083).
+ */
+export const DISPUTE_TARGET_STATES: Readonly<
+  Record<DisputeCommand, readonly [string, ...string[]]>
+> = {
+  DISPUTE: ['DISPUTED'],
+  RESOLVE_DISPUTE: ['HELD', 'PENDING_SETTLEMENT'],
 };
 
 /**
@@ -105,8 +114,9 @@ export const DISPUTE_COMMAND_CONSEQUENCES: Readonly<Record<DisputeCommand, strin
     'با ثبت اعتراض، تسویهٔ این تراکنش به‌طور کامل متوقف می‌شود و هیچ مهلت یا سازوکار خودکاری آن را برنمی‌دارد؛ ' +
     'فقط رسیدگی صریح یک شخص یا بازگشت وجه آن را از این وضعیت بیرون می‌برد.',
   RESOLVE_DISPUTE:
-    'با رسیدگی، تراکنش به صف «در انتظار تسویه» برمی‌گردد. این کار تسویه نمی‌کند و وجهی را بازنمی‌گرداند؛ ' +
-    'تسویه اقدامی جدا و بعدی است.',
+    'با رسیدگی، اعتراض برداشته می‌شود و تراکنش به جایی برمی‌گردد که مجوز تسویه‌اش اجازه می‌دهد: ' +
+    'اگر تسویه پیش‌تر مجاز شده بود به صف «در انتظار تسویه»، وگرنه «در وثیقه» می‌ماند تا مجوز برسد. ' +
+    'این کار تسویه نمی‌کند، مجوز تسویه نمی‌دهد و وجهی را بازنمی‌گرداند؛ تسویه اقدامی جدا و بعدی است.',
 };
 
 export const DISPUTE_FIELD_LABELS: Readonly<Record<DisputeField, string>> = {

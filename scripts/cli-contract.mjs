@@ -417,6 +417,7 @@ export const CLI_CONTRACT = Object.freeze({
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
   'scripts/marketplace-saga-drain-check.mjs': {
     other: [
+      '--no-json-shorthand-payloads',
       '--address',
       '--namespace',
       '--output',
