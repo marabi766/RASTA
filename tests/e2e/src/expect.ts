@@ -15,6 +15,15 @@ import { guardRequestContext, guardedAbsenceMatchers } from '@rasta/testing';
  */
 export const expect = playwrightExpect.extend(guardedAbsenceMatchers(playwrightExpect));
 
+/** Playwright resets test.expect on extend; guard every descendant at its creation. */
+function withGuard<T extends typeof base>(derived: T): T {
+  const extend = derived.extend;
+  return Object.assign(derived, {
+    expect,
+    extend: ((fixtures) => withGuard(extend(fixtures))) as T['extend'],
+  });
+}
+
 /**
  * Every exported test.expect must share the same guarded assertion origin.
  *
@@ -22,12 +31,11 @@ export const expect = playwrightExpect.extend(guardedAbsenceMatchers(playwrightE
  * send() does for the actors: Playwright would follow a 307/308 with the body
  * and answer with the redirect target's success.
  */
-export const test = Object.assign(
+export const test = withGuard(
   base.extend({
     // `provide` is Playwright's fixture `use`.
     request: async ({ request }, provide) => provide(guardRequestContext(request)),
   }),
-  { expect },
 );
 
 /** A Playwright API request context outside a test (global setup), guarded the same way. */

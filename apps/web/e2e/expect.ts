@@ -10,6 +10,15 @@ import { guardRequestContext, guardedAbsenceMatchers } from '@rasta/testing';
  */
 export const expect = playwrightExpect.extend(guardedAbsenceMatchers(playwrightExpect));
 
+/** Playwright resets test.expect on extend; guard every descendant at its creation. */
+function withGuard<T extends typeof base>(derived: T): T {
+  const extend = derived.extend;
+  return Object.assign(derived, {
+    expect,
+    extend: ((fixtures) => withGuard(extend(fixtures))) as T['extend'],
+  });
+}
+
 /**
  * Every exported test.expect must share the same guarded assertion origin.
  *
@@ -21,7 +30,7 @@ export const expect = playwrightExpect.extend(guardedAbsenceMatchers(playwrightE
  * back the redirect target's success. `internal/raw-http` refuses every other
  * route to a context (`playwright.request`, `page.request`, `context.request`).
  */
-export const test = Object.assign(
+export const test = withGuard(
   base.extend<object, { newApiContext: () => Promise<APIRequestContext> }>({
     // `provide` is Playwright's fixture `use` (renamed: React's hook rule claims the name).
     request: async ({ request }, provide) => provide(guardRequestContext(request)),
@@ -31,7 +40,6 @@ export const test = Object.assign(
       { scope: 'worker' },
     ],
   }),
-  { expect },
 );
 export type {
   APIRequestContext,
