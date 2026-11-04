@@ -1,11 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
-import {
-  LAYOUT_GATEWAY_PORT,
-  LAYOUT_ORIGIN,
-  LAYOUT_PORT,
-  layoutSessionSecret,
-} from './e2e/layout/constants';
+import { LAYOUT_ORIGIN } from './e2e/layout/constants';
+import { webServers } from './e2e/web-servers';
 
 /**
  * Browser tests for the portal.
@@ -30,6 +26,17 @@ const MOBILE_SPECS =
  * its two `webServer` entries at the end. Every other project ignores it.
  */
 const LAYOUT_SPEC = /mobile-layout\.spec\.ts$/;
+
+/**
+ * No server is ever reused, and nothing is inspected while this file loads
+ * (`e2e/server-reuse.ts`, TASK 323 and 325): workers and UI mode's loader load it
+ * again, and a port that is free now can be taken before the server binds. Locally
+ * each entry starts through `e2e/own-server.mjs`, which reports it ready only
+ * while the server it launched is the sole holder of the port; CI, on a fresh
+ * machine, polls the URL as before. The entries are in `e2e/web-servers.ts`, so
+ * the rule can be tested without loading Playwright.
+ */
+const ci = Boolean(process.env.CI);
 
 export default defineConfig({
   testDir: './e2e',
@@ -81,50 +88,5 @@ export default defineConfig({
       testMatch: MOBILE_SPECS,
     },
   ],
-  webServer: [
-    {
-      // Production mode everywhere, from ONE `next build`. The layout suite's
-      // portal below is always `next start`, and `next dev` empties `.next`
-      // (BUILD_ID included) when it starts: a dev server here made the second
-      // portal unable to start on any local run (PR #574 review, F1). So
-      // locally this entry builds first and then starts, and CI, which has
-      // already built, only starts. Both portals thus read the same finished
-      // build. A hand-run `pnpm dev` beside this suite has the same effect:
-      // stop it first, or the layout portal reports a missing production build.
-      // The price is a build per local run instead of compile-on-demand; the
-      // gain is that the suite checks the code that ships.
-      command: process.env.CI ? 'pnpm run start' : 'pnpm run build && pnpm run start',
-      url: 'http://localhost:3200',
-      reuseExistingServer: !process.env.CI,
-      // A cold build is part of a local start.
-      timeout: process.env.CI ? 120_000 : 360_000,
-    },
-    {
-      // The fixture gateway for the layout suite: populated pages, no live stack.
-      command: 'node e2e/layout/mock-gateway.mjs',
-      url: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/health`,
-      env: { LAYOUT_GATEWAY_PORT: String(LAYOUT_GATEWAY_PORT) },
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-    },
-    {
-      // A second copy of the portal, pointed at the fixture gateway. Always a
-      // production start on the build the entry above provides (CI has already
-      // run it; locally that entry builds): it shares `.next` with the first
-      // portal, so neither may be a dev server.
-      command: `pnpm exec next start --port ${LAYOUT_PORT}`,
-      url: `${LAYOUT_ORIGIN}/login`,
-      env: {
-        API_GATEWAY_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}`,
-        OIDC_ISSUER_URL: `http://127.0.0.1:${LAYOUT_GATEWAY_PORT}/realms/layout`,
-        OIDC_CLIENT_ID: 'rasta-web',
-        WEB_PUBLIC_ORIGIN: LAYOUT_ORIGIN,
-        WEB_COOKIE_SECURE: 'false',
-        WEB_SESSION_SECRET: layoutSessionSecret(),
-        WEB_REDIS_URL: process.env.WEB_REDIS_URL ?? 'redis://localhost:6379',
-      },
-      reuseExistingServer: false,
-      timeout: 120_000,
-    },
-  ],
+  webServer: webServers(ci),
 });

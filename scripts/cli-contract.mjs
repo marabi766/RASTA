@@ -55,6 +55,13 @@ const PRETTIER = ['--parser', '--stdin-filepath'];
 export const CLI_CONTRACT = Object.freeze({
   // --- apps -----------------------------------------------------------------
   'apps/web/e2e/contract-fixture.ts': { other: ['-X', '-f', '-q', '-v'] },
+  // The launcher that starts each Playwright server and proves it is the port's only holder
+  // (TASK 325): one port argument, checked as an integer in range. `ss` and `ps` options name
+  // the listening sockets and the process tree.
+  'apps/web/e2e/own-server.mjs': {
+    positionals: ['integer'],
+    other: ['-A', '-H', '-ltnp', '-o', '-p'],
+  },
   // The build's preload puts itself into every child's NODE_OPTIONS / execArgv (`--require`);
   // it reads no command line.
   'apps/web/scripts/capture-next-config.cjs': { other: ['--require'] },
