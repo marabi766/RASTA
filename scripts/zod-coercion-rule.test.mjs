@@ -854,3 +854,83 @@ for (const code of [
   `z.ZodEffects.create(z.string(), {type:'preprocess', transform:Number});`,
 ])
   it(`FU-070 refuses unproven input: ${code}`, () => assert.ok(messages(code).length, code));
+
+// FU-069a: infer each binding, then discard element proofs across mutation.
+const unsoundBindings = [
+  `const [x=true]=v; return Number(x)`,
+  `const [ok, x=true]=v; return Number(x)`,
+  `const [...xs]=v; return Number(xs)`,
+  `v[0]=true; const [x]=v; return Number(x)`,
+  `const alias=v; alias[0]=true; const [x]=v; return Number(x)`,
+  `return v.map((s,i,a)=>{a[1]=true; return Number(s)})`,
+  `return v.map((s,i,a)=>{const alias=a;alias[1]=true; return Number(s)})`,
+  `return v.filter((s,i,a)=>{a[1]=true; return true}).map(Number)`,
+  `const f=(s,i,a)=>{a[1]=true;return Number(s)};const alias=f;return v.map(alias)`,
+];
+for (const body of unsoundBindings)
+  for (const code of [
+    `z.array(z.string()).transform(v=>{${body}});`,
+    `z.array(z.string()).overwrite(v=>{${body}});`,
+    `z.codec(z.array(z.string()),z.unknown(),{decode:v=>{${body}},encode:v=>v});`,
+    `z.codec(z.unknown(),z.array(z.string()),{decode:v=>v,encode:v=>{${body}}});`,
+  ])
+    it(`FU-069a refuses unsound proof: ${code}`, () => assert.ok(messages(code).length, code));
+for (const code of [
+  `z.string().transform(v=>{const [...xs]=v.split(',');return Number(xs)});`,
+  `z.string().transform(v=>{const [x=true]=v.split(',');return Number(x)});`,
+])
+  it(`FU-069a split binding refuses: ${code}`, () => assert.ok(messages(code).length, code));
+for (const body of [
+  `const [x='4']=v; return Number(x)`,
+  `const [x,y='5']=v; return Number(y)`,
+  `const [...xs]=v; return xs.map(Number)`,
+  `return v.map((s,i,a)=>Number(s))`,
+  `return v.filter(s=>s.length>0).map(Number)`,
+])
+  it(`FU-069a preserves stable strings: ${body}`, () =>
+    assert.deepEqual(messages(`z.array(z.string()).transform(v=>{${body}});`), []));
+
+// FU-069b: alternate resolved files never inherit a reviewed source's hash.
+for (const ext of ['mjs', 'cjs', 'tsx'])
+  it(`FU-069b refuses unregistered ${ext} import`, () =>
+    assert.ok(
+      messages(
+        `import {isOrderCommand} from '@/lib/order-fields.${ext}'; z.transform(isOrderCommand);`,
+      ).length,
+    ));
+it('FU-069b resolves exact sources and dependency siblings', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-resolution-'));
+  const path = 'apps/web/src/lib/order-fields';
+  try {
+    cpSync(join(ROOT, path + '.ts'), join(root, path + '.ts'));
+    for (const spelling of [path, path + '.ts', path + '.js'])
+      assert.equal(verifiedCallbackHelper(root, spelling, 'isOrderCommand'), 'predicate');
+    for (const ext of ['mjs', 'cjs', 'tsx']) {
+      appendFileSync(join(root, path + '.' + ext), 'export const isOrderCommand=Number;');
+      assert.equal(verifiedCallbackHelper(root, path + '.' + ext, 'isOrderCommand'), undefined);
+      assert.equal(verifiedCallbackHelper(root, path, 'isOrderCommand'), undefined);
+      rmSync(join(root, path + '.' + ext));
+    }
+    cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
+      recursive: true,
+    });
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/form-issues.ts'),
+      join(root, 'apps/web/src/lib/form-issues.ts'),
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      'string',
+    );
+    for (const shadow of ['apps/web/src/lib/format.ts', 'apps/web/src/lib/format/digits.tsx']) {
+      appendFileSync(join(root, shadow), 'export const toLatinDigits=Number;');
+      assert.equal(
+        verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+        undefined,
+      );
+      rmSync(join(root, shadow));
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

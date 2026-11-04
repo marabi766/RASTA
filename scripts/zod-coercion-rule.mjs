@@ -229,7 +229,7 @@ export default {
             : from;
         name = def.node.imported?.name;
       }
-      return verifiedCallbackHelper(ROOT, path.replace(/\.[cm]?[jt]sx?$/, ''), name);
+      return verifiedCallbackHelper(ROOT, path, name);
     };
     const imported = (def) =>
       def?.type === 'ImportBinding' &&
@@ -833,11 +833,15 @@ export default {
         let callback;
         let callbackFn;
         let callbackInput;
-        const localFunction = (raw) => {
+        const localFunction = (raw, seen = new Set()) => {
           const value = unwrap(raw);
           if (value?.type !== 'Identifier') return value;
-          const def = variable(value)?.defs[0];
-          return def?.type === 'FunctionName' ? def.node : unwrap(def?.node.init);
+          const binding = variable(value);
+          if (seen.has(binding)) return undefined;
+          const def = binding?.defs[0];
+          return def?.type === 'FunctionName'
+            ? def.node
+            : localFunction(def?.node.init, new Set([...seen, binding]));
         };
         // Follow local helper bodies; opaque helpers cannot prove that conversion
         // is guarded. Only the audited Number helper may call Number itself.
@@ -937,6 +941,45 @@ export default {
             stringInput(unwrap(schema.callee)?.object, seen, kind)
           );
         };
+        // Element proofs belong to an immutable array, including aliases. Pattern
+        // reads copy elements; handing the array to an opaque consumer loses proof.
+        const stableElements = (raw, seen = new Set()) => {
+          const value = unwrap(raw);
+          if (value?.type !== 'Identifier') return true;
+          const binding = variable(value);
+          if (!binding || seen.has(binding)) return true;
+          seen.add(binding);
+          const init = binding.defs[0]?.node.init;
+          if (init?.type === 'Identifier' && !stableElements(init, seen)) return false;
+          return binding.references.every((ref) => {
+            if (ref.init) return true;
+            if (ref.isWrite() || writeTarget(ref.identifier)) return false;
+            const parent = ref.identifier.parent;
+            if (parent.type === 'VariableDeclarator' && parent.init === ref.identifier)
+              return parent.id.type !== 'Identifier' || stableElements(parent.id, seen);
+            return parent.type === 'MemberExpression' && parent.object === ref.identifier;
+          });
+        };
+        const iterationStable = (fn) => {
+          const resolved = localFunction(fn);
+          if (!FUNCTION_TYPES.has(resolved?.type)) return !!(numeric(fn) || reviewedHelper(fn));
+          const param = resolved.params[2];
+          return !param || (param.type === 'Identifier' && stableElements(param));
+        };
+        const projectedKind = (binding, def, at, parameters, seen) => {
+          let kind = valueKind(def.node.init, at, parameters, seen);
+          for (const step of bindingPath(def.name, def.node.id)) {
+            if (step?.fallback) {
+              if (valueKind(step.fallback, at, parameters, new Set(seen)) !== kind)
+                return undefined;
+            } else if (step?.rest) {
+              kind = ['string', 'strings'].includes(kind) ? 'strings' : 'array';
+            } else {
+              kind = ['string', 'strings'].includes(kind) ? 'string' : undefined;
+            }
+          }
+          return kind;
+        };
         const stringValue = (raw, at, seen = new Set(), parameters = new Map()) => {
           const value = unwrap(raw);
           if (value?.kind === 'string') return true;
@@ -976,18 +1019,12 @@ export default {
             stringInput()
           )
             return true;
-          if (
-            def?.type === 'Variable' &&
-            !seen.has(binding) &&
-            stringValue(def.node.init, at, new Set([...seen, binding]), parameters)
-          )
-            return true;
-          if (
-            def?.type === 'Variable' &&
-            def.node.id.type === 'ArrayPattern' &&
-            valueKind(def.node.init, at, parameters) === 'strings'
-          )
-            return true;
+          if (def?.type === 'Variable' && !seen.has(binding)) {
+            const next = new Set([...seen, binding]);
+            if (def.node.id.type === 'Identifier') {
+              if (stringValue(def.node.init, at, next, parameters)) return true;
+            } else if (projectedKind(binding, def, at, parameters, next) === 'string') return true;
+          }
           const guarded = (test) =>
             test?.type === 'LogicalExpression' && test.operator === '&&'
               ? guarded(test.left) || guarded(test.right)
@@ -1034,10 +1071,15 @@ export default {
               def.node === callbackFn &&
               def.name === callbackFn.params[0]
             ) {
-              if (stringInput(undefined, new Set(), 'strings')) return 'strings';
+              if (stringInput(undefined, new Set(), 'strings'))
+                return stableElements(value) ? 'strings' : 'array';
               if (stringInput(undefined, new Set(), 'array')) return 'array';
             }
-            return valueKind(parameters.get(binding) ?? def?.node.init, at, parameters, seen);
+            const kind =
+              def?.type === 'Variable' && def.node.id.type !== 'Identifier'
+                ? projectedKind(binding, def, at, parameters, seen)
+                : valueKind(parameters.get(binding) ?? def?.node.init, at, parameters, seen);
+            return kind === 'strings' && !stableElements(value) ? 'array' : kind;
           }
           if (value.type === 'NewExpression')
             return ['Date', 'Set', 'Map'].find((name) => globalName(value.callee, name));
@@ -1049,7 +1091,9 @@ export default {
               ['array', 'strings'].includes(receiver) &&
               ['map', 'filter', 'reverse', 'slice'].includes(name)
             )
-              return name === 'map' ? 'array' : receiver;
+              return name === 'map' || (name === 'filter' && !iterationStable(value.arguments[0]))
+                ? 'array'
+                : receiver;
           }
         };
         const unsafe = (raw, seen = new Set(), args = [], parameters = new Map()) => {
@@ -1196,7 +1240,8 @@ export default {
                     [
                       {
                         kind:
-                          kind === 'strings' || (kind === 'string' && name === 'replace')
+                          (kind === 'strings' && iterationStable(args[position])) ||
+                          (kind === 'string' && name === 'replace')
                             ? 'string'
                             : 'unknown',
                       },

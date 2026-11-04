@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { lstatSync, readFileSync } from 'node:fs';
+import { extname, resolve } from 'node:path';
 
 // Named reviewed helper capabilities, never a file or method-name exemption.
 // A changed/unreadable source refuses until its implementation is reviewed again.
@@ -93,18 +93,45 @@ const pins = {
     '61320e503117b4535f008253df76539e8ec2d29159cb9d5fdcb59e56753b814b',
 };
 export const CALLBACK_HELPER_SOURCES = Object.freeze(Object.keys(pins));
+// Resolve the import spelling before granting a capability. Ambiguous file /
+// directory or extension siblings are refused instead of guessing a toolchain's
+// precedence. JS specifiers may name TS sources, as in the repository imports.
+const resolvedSource = (root, modulePath) => {
+  const extensions = ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'];
+  const ext = extensions.includes(extname(modulePath)) ? extname(modulePath) : '';
+  const replacements = {
+    '.js': ['.ts', '.tsx', '.js', '.jsx'],
+    '.mjs': ['.mts', '.mjs'],
+    '.cjs': ['.cts', '.cjs'],
+  };
+  const candidates = ext
+    ? (replacements[ext] ?? [ext]).map((suffix) => modulePath.slice(0, -ext.length) + suffix)
+    : extensions.flatMap((suffix) => [modulePath + suffix, modulePath + '/index' + suffix]);
+  const found = candidates.filter((path) => {
+    try {
+      return lstatSync(resolve(root, path)).isFile();
+    } catch {
+      return false;
+    }
+  });
+  return found.length === 1 ? found[0] : undefined;
+};
 export function verifiedCallbackHelper(root, modulePath, name) {
-  const helper = helpers.find(([path, , names]) => path === modulePath && names.includes(name));
+  const exact = modulePath === '@rasta/contracts' ? modulePath : resolvedSource(root, modulePath);
+  const helper = helpers.find(
+    ([path, file, names]) =>
+      (path === '@rasta/contracts' ? path === exact : file === exact) && names.includes(name),
+  );
   if (!helper) return undefined;
   try {
     const files = [
       helper[1],
-      ...(modulePath === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
+      ...(helper[0] === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
       ...([
         'apps/web/src/lib/format',
         'apps/web/src/server/drivers',
         'apps/web/src/server/usage',
-      ].includes(modulePath)
+      ].includes(helper[0])
         ? Object.keys(pins).filter((path) => path.startsWith('apps/web/src/lib/format/'))
         : []),
     ];
@@ -119,6 +146,7 @@ export function verifiedCallbackHelper(root, modulePath, name) {
     if (
       files.some(
         (path) =>
+          resolvedSource(root, path.replace(/\.[cm]?[jt]sx?$/, '')) !== path ||
           ![pins[path]].flat().includes(
             createHash('sha256')
               .update(readFileSync(resolve(root, path)))
