@@ -658,6 +658,155 @@ describe('the guard fails where it must', () => {
     });
   });
 
+  describe('FU-037: every static alias resolves through the one normalizer', () => {
+    const storeImport =
+      "import { answerThing, clearThing, restoreThing, saveThing, settleThing } from '@/lib/thing-store';";
+    const writeThrough = (alias: string, imports: string, writer: string) => {
+      const extra = { 'lib/alias.ts': alias };
+      const valid = COMPLIANT.replace(storeImport, `${storeImport} ${imports}`).replace(
+        'remember: () => saveThing()',
+        `remember: () => ${writer}()`,
+      );
+      expect(rules(valid, extra)).toEqual([]);
+      expect(rules(`${valid} ${writer}();`, extra)).toEqual(['store']);
+    };
+    const own =
+      "import * as store from './thing-store'; import { saveThing } from './thing-store';";
+    it.each([
+      ['default-export member', `${own} export default { saveThing };`, 'D', 'D.saveThing'],
+      [
+        'default-export renamed member',
+        `${own} export default { keep: saveThing };`,
+        'D',
+        'D.keep',
+      ],
+      [
+        'nested default-export member',
+        `${own} export default { store };`,
+        'D',
+        'D.store.saveThing',
+      ],
+      ['parenthesized default export', `${own} export default (saveThing);`, 'keep', 'keep'],
+      ['asserted default export', `${own} export default saveThing as () => void;`, 'keep', 'keep'],
+      [
+        'satisfies alias',
+        `${own} const keep = saveThing satisfies unknown; export default keep;`,
+        'keep',
+        'keep',
+      ],
+      [
+        'inline export destructuring',
+        `${own} export const { saveThing: keep } = store;`,
+        '{ keep }',
+        'keep',
+      ],
+      [
+        'generic-instantiation alias',
+        `${own} const keep = saveThing<never>; export { keep };`,
+        '{ keep }',
+        'keep',
+      ],
+      ['literal element access', `${own} export { store };`, '{ store }', "store['saveThing']"],
+      // A `.ts` file read as TSX took `<T>` for JSX and lost every export after it.
+      [
+        'an export after a type assertion in a .ts barrel',
+        `const id = <T>(x: unknown) => x as T; export { saveThing as keep } from './thing-store';`,
+        '{ keep }',
+        'keep',
+      ],
+    ])('%s', (_label, alias, binding, writer) =>
+      writeThrough(alias, `import ${binding} from '@/lib/alias';`, writer),
+    );
+
+    it("React's useActionState through a generic-instantiation alias is found and refused", () => {
+      const form =
+        "import { saveThing } from '@/lib/thing-store'; import { useActionState } from 'react'; const uas = (useActionState<unknown, FormData>); export const Form = () => uas(() => saveThing(), null);";
+      expect(fencedForms(tree(form))).toEqual(['app/thing/ThingForm.tsx']);
+      expect(rules(form)).toEqual(expect.arrayContaining(['state', 'store']));
+    });
+
+    it('wrapped boundary, callback and completion handlers are read through', () => {
+      const valid = COMPLIANT.replace('return submitThroughSlot({', 'return (submitThroughSlot(({')
+        .replace(
+          'failed: () => null,\n          });',
+          'failed: () => null,\n          }) as never)) as never;',
+        )
+        .replace('useSlotActionState(send, null)', 'useSlotActionState((send as never), null)');
+      expect(rules(valid)).toEqual([]);
+      for (const handler of [
+        '(submitThing(previous, form).catch)',
+        "submitThing(previous, form)['then']",
+      ]) {
+        const bypass = valid.replace(
+          'send: () => submitThing(previous, form),',
+          `send: () => ${handler}(() => null),`,
+        );
+        expect(rules(bypass)).toEqual(['completion']);
+      }
+    });
+
+    it.each([
+      [
+        'parenthesized and asserted',
+        'export const make = ((p) => fencedSlot(p)) as typeof fencedSlot;',
+        "import { make } from './factory'; const slot = make(",
+      ],
+      [
+        'satisfies, default',
+        'export default (function () { return fencedSlot(); }) satisfies unknown;',
+        "import make from './factory'; const slot = make(",
+      ],
+      [
+        'an alias of a definition',
+        'const build = () => fencedSlot(); const make = build; export { make };',
+        "import { make } from './factory'; const slot = make(",
+      ],
+      [
+        'an object member',
+        'export default { make: () => fencedSlot() };',
+        "import F from './factory'; const slot = F.make(",
+      ],
+    ])('a factory defined %s is found at its definition', (_label, factory, use) => {
+      const extra = {
+        'lib/factory.ts': `import { fencedSlot } from './unresolved-tenancy'; ${factory}`,
+        'lib/thing-store.ts': STORE.replace(
+          "import { fencedSlot } from './unresolved-tenancy';\n    const slot = fencedSlot(",
+          use,
+        ),
+      };
+      expect(fencedModules(tree(COMPLIANT, extra)).has('lib/thing-store.ts')).toBe(true);
+      expect(rules(COMPLIANT, extra)).toEqual([]);
+      expect(rules(`${COMPLIANT} saveThing();`, extra)).toEqual(['store']);
+    });
+
+    it('refuses when resolution is exhausted, keeping where it stopped', () => {
+      const cycle = {
+        'lib/a.ts': "export { x } from './b'; export * from './thing-store';",
+        'lib/b.ts': "export { x } from './a';",
+      };
+      expect(rules(`${COMPLIANT} import { missing } from '@/lib/thing-store'; missing();`)).toEqual(
+        ['unresolved'],
+      );
+      expect(rules(`${COMPLIANT} import { x } from '@/lib/a'; x(); <x />;`, cycle)).toEqual([
+        'unresolved',
+        'unresolved',
+      ]);
+      // An unfollowable hook in a file that refers to a store is a form, held to every rule.
+      const hidden = "import { x } from '@/lib/a'; export const Form = () => x(() => null, null);";
+      expect(fencedForms(tree(hidden, cycle))).toEqual(['app/thing/ThingForm.tsx']);
+      expect(rules(hidden, cycle)).toEqual(
+        expect.arrayContaining(['unresolved', 'boundary', 'drawn']),
+      );
+      // A tag that may be the gate is refused in any file.
+      expect(
+        rules(COMPLIANT, {
+          ...cycle,
+          'app/other/X.tsx': "import { x as G } from '@/lib/b';\nexport const X = () => <G />;",
+        }),
+      ).toEqual(['unresolved']);
+    });
+  });
+
   it('QuarantineGate drawn by any other file is refused, also aliased or through a barrel', () => {
     expect(
       rules(COMPLIANT, {
