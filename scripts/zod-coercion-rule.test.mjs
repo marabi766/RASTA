@@ -500,6 +500,8 @@ it('F3 keeps a validated string receiver through a method alias', () =>
 
 // F3 codecs validate decode against `in` and encode against `out` independently.
 for (const code of [
+  `z.core._int(z.ZodCodec,{in:z.unknown(),out:z.number(),transform:Number,reverseTransform:v=>v});`,
+  `z.core._string(z.ZodCodec,{in:z.number(),out:z.unknown(),transform:v=>v,reverseTransform:Number});`,
   `z.codec(z.string({checks:[z.overwrite(()=>true)]}),z.number(),{decode:Number,encode:v=>v});`,
   `z.codec(z.number(),z.string().min(0,{when:p=>{p.value=true;return false;}}),{decode:v=>v,encode:Number});`,
   `new z.ZodCodec({type:'pipe',in:z.string({checks:[z.overwrite(()=>true)]}),out:z.number(),transform:Number,reverseTransform:v=>v});`,
