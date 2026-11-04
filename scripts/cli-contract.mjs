@@ -357,14 +357,21 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/ci-integration-split-lib.mjs': { other: ['--filter', '--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
+  // FU-077: and the argument shapes of the tools it reads as inert (prettier, tsc, jest).
   'scripts/ci-node-test-timeouts-lib.mjs': {
     other: [
+      '--check',
       '--enable-source-maps',
       '--filter',
+      '--frozen-lockfile',
       '--import',
+      '--noEmit',
       '--no-warnings',
+      '--passWithNoTests',
+      '--selectProjects',
       '--test',
       '--test-timeout',
+      '-p',
     ],
   },
   // Trivy's own options, passed to the pinned trivy binary (download and canary

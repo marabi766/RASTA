@@ -403,3 +403,26 @@ test('tokenizeShell joins continuations and splits at every separator', () => {
   assert.equal(commands[0].startLine, 0);
   assert.equal(commands.at(-1).startLine, 3);
 });
+
+// FU-077 R1: bash reads a carriage return as a word character, so `echo a\r# ; docker
+// run x` runs docker. The pin guard reads shell text through the shared policy and
+// refuses it instead of splitting there (it used to treat CR as a blank).
+test('FU-077: a carriage return or control character is refused, not read past', () => {
+  for (const src of ['echo a\r# ; docker run node:22', 'docker run node:22', 'true\x0b'])
+    assert.throws(() => tokenizeShell(src), /carriage return, control or invisible blank/);
+  const { errors } = validateDockerfilePins([file(`FROM node:22@${A}\rFROM node:latest\n`)]);
+  assert.ok(
+    errors.some((error) => /cannot be read: a carriage return/.test(error)),
+    errors.join(),
+  );
+  const workflow = stringify({
+    jobs: { j: { steps: [{ run: 'echo a\r# ; docker run node:22' }] } },
+  });
+  const infra = validateInfraImagePins([
+    { kind: 'workflow', name: '.github/workflows/x.yml', text: workflow },
+  ]);
+  assert.ok(
+    infra.errors.some((error) => /carriage return/.test(error)),
+    infra.errors.join(),
+  );
+});

@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -23,6 +25,7 @@ import {
   EXEMPT_SCRIPTS,
   nodeTestSegments,
   nodeTestTimeoutProblems,
+  parseCommands,
   reachableScripts,
   runsNodeTest,
   UNIT_STEP,
@@ -32,9 +35,37 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const realWorkflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
 const realScripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
 const realDoc = parse(realWorkflow);
-const contracts = JSON.parse(readFileSync(join(root, 'packages/contracts/package.json'), 'utf8'));
-const realPackages = { [contracts.name]: contracts.scripts };
+// FU-077: EVERY workspace package (only `dir/*` patterns are understood; another one
+// throws) and the task graph of every turbo.json, which turbo commands are read against.
+const pnpmWorkspace = parse(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8'));
+const turboTasks = (file) =>
+  JSON.parse(readFileSync(file, 'utf8').replace(/^\s*\/\/.*$/gm, '')).tasks ?? {};
+const realTurbo = {};
+const addTurbo = (tasks) => {
+  for (const [name, task] of Object.entries(tasks)) {
+    realTurbo[name] = [...new Set([...(realTurbo[name] ?? []), ...(task.dependsOn ?? [])])];
+  }
+};
+addTurbo(turboTasks(join(root, 'turbo.json')));
+const realPackages = {};
+for (const pattern of pnpmWorkspace.packages) {
+  const dir = /^([a-z]+)\/\*$/.exec(pattern)?.[1];
+  if (!dir) throw new Error(`workspace pattern ${pattern} is not read`);
+  for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+    const base = join(root, dir, entry.name);
+    if (!entry.isDirectory() || !existsSync(join(base, 'package.json'))) continue;
+    const manifest = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8'));
+    realPackages[manifest.name] = manifest.scripts ?? {};
+    if (existsSync(join(base, 'turbo.json'))) addTurbo(turboTasks(join(base, 'turbo.json')));
+  }
+}
+const realWorkspace = { turbo: realTurbo };
 const [exception] = UNBOUNDED_EXCEPTIONS;
+// FU-077 R1: run text with a CR or another control character is refused by the shared
+// policy (ci-shell-text-lib.mjs) before any grammar, so the CRLF/CR variants of the
+// matrices below expect that refusal instead of what the LF form finds.
+const CR_REFUSAL = /unsupported shell construct: a carriage return, control or invisible blank/;
+const unlessCr = (run, pattern) => (/[\r\v]/.test(run) ? CR_REFUSAL : pattern);
 const unitStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === 'Unit tests');
 const securityStep = (doc) =>
   doc.jobs[exception.job].steps.find((step) => step.name === exception.step);
@@ -67,8 +98,9 @@ const timeoutProblemsAfter = (edit, scripts = realScripts) => {
   const doc = structuredClone(realDoc);
   const copy = structuredClone(scripts);
   const packages = structuredClone(realPackages);
-  edit(doc, copy, packages);
-  return nodeTestTimeoutProblems(doc, copy, packages);
+  const workspace = structuredClone(realWorkspace);
+  edit(doc, copy, packages, workspace);
+  return nodeTestTimeoutProblems(doc, copy, packages, workspace);
 };
 const boundedStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === UNIT_STEP.step);
 const qualityNodeTestScripts = [
@@ -79,7 +111,8 @@ const qualityNodeTestScripts = [
   ),
 ].filter((name) => nodeTestSegments(realScripts[name]).length > 0);
 test('task 310: the real quality job bounds every node --test', () => {
-  assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts, realPackages), []);
+  assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts, realPackages, realWorkspace), []);
+  assert.ok(Object.keys(realPackages).length >= 20, Object.keys(realPackages).join());
   // The class is found, not listed: the step that hung and the slowest others.
   for (const name of [UNIT_STEP.script, 'test:backup-restore-drill-lib', 'test:ci-trivy-db'])
     assert.ok(qualityNodeTestScripts.includes(name), name);
@@ -573,8 +606,8 @@ const pnpmStdout = (scripts, argv, extra = {}) =>
   });
 const refusedAtBoth = (run, reason, edit = () => {}) => {
   for (const where of ['step', 'script']) {
-    const problems = timeoutProblemsAfter((doc, all, packages) => {
-      edit(all, packages);
+    const problems = timeoutProblemsAfter((doc, all, packages, workspace) => {
+      edit(all, packages, workspace);
       if (where === 'script') all['test:escape'] = run;
       const command = where === 'step' ? run : 'pnpm run test:escape';
       doc.jobs.quality.steps.push({ name: 'Escape', run: command });
@@ -691,7 +724,11 @@ test('task 4003: F5 a pnpm target is resolved and read, never exempted by script
       inContract('build', 'node --test x'),
     ],
     [`pnpm --filter ${contract} build`, /prebuild: the command sh/, inContract('prebuild', 'sh x')],
-    [`pnpm --filter ${contract} run test:unit`, /test:unit: the command jest/],
+    [
+      `pnpm --filter ${contract} run test:unit`,
+      /test:unit: an argument shape of jest/,
+      inContract('test:unit', 'jest --testRunner ./x.cjs'),
+    ],
     [`pnpm --filter ${contract} run missing`, /an unknown script missing/],
     [`pnpm --filter ${contract} lint`, /a pnpm form that is not/],
     [`pnpm --filter ${contract}... build`, /a package that was not read/],
@@ -1058,7 +1095,11 @@ function cliFixture(t) {
     writeFileSync(join(fixture, path), text);
   };
   mkdirSync(join(fixture, 'scripts'));
-  for (const name of ['check-unit-step-concurrency.mjs', 'check-unit-step-concurrency-lib.mjs'])
+  for (const name of [
+    'check-unit-step-concurrency.mjs',
+    'check-unit-step-concurrency-lib.mjs',
+    'ci-shell-text-lib.mjs',
+  ])
     cpSync(join(root, 'scripts', name), join(fixture, 'scripts', name));
   symlinkSync(join(root, 'node_modules'), join(fixture, 'node_modules'), 'dir');
   write('package.json', JSON.stringify({ type: 'module', scripts: realScripts }));
@@ -1193,7 +1234,7 @@ for (const [file, document] of scannedLocations) {
             { 'ci.yml': realWorkflow, [file]: stringify(document(run)) },
             realScripts,
           ),
-          /literal unbounded unit invocation/,
+          unlessCr(run, /literal unbounded unit invocation/),
         );
       });
     }
@@ -1352,7 +1393,7 @@ for (const [file, document] of scannedLocations) {
     for (const newline of [null, '\n', '\r\n']) {
       const run = newline ? command.replaceAll(' ', ` \\${newline}`) : command;
       test(`r4 implicit and path matrix ${file}: ${JSON.stringify(run)}`, () => {
-        refused(grammarProblems(file, document, run), /literal unbounded/);
+        refused(grammarProblems(file, document, run), unlessCr(run, /literal unbounded/));
       });
     }
   }
@@ -1386,7 +1427,7 @@ const refusalCases = [
   ["$\\\n'pnpm' run test:unit", 'unrecognised dollar construct'],
   ["pnpm $\\\n'test:unit'", 'unrecognised dollar construct'],
   ['$\\\n"pnpm" run test:unit', 'unrecognised dollar construct'],
-  ['pnpm $\\\r\n"test:unit"', 'unrecognised dollar construct'],
+  ['pnpm $\\\r\n"test:unit"', 'a carriage return, control or invisible blank'],
   ['echo "$\\\n(pnpm test)"', 'unrecognised dollar construct'],
   ['echo $', 'unrecognised dollar construct'],
   ["echo 'unterminated", 'unterminated single quote'],
@@ -1429,7 +1470,7 @@ const refusalCases = [
   ['echo safe <> output', 'unsupported redirection operator'],
   ['echo safe >', 'missing redirection target'],
   ['echo safe > > output', 'missing redirection target'],
-  ['echo safe\vdata', 'unmodelled character'],
+  ['echo safe\vdata', 'a carriage return, control or invisible blank'],
 ];
 for (const [file, document] of scannedLocations) {
   for (const [run, construct] of refusalCases) {
@@ -1464,7 +1505,7 @@ for (const [run, pattern] of [
 ]) {
   test(`modelled command boundary finds invocation: ${run}`, () => {
     for (const [file, document] of scannedLocations)
-      refused(grammarProblems(file, document, run), pattern);
+      refused(grammarProblems(file, document, run), unlessCr(run, pattern));
   });
 }
 
@@ -1582,12 +1623,12 @@ for (const [file, document] of scannedLocations) {
       for (const wrapper of r6Wrappers) {
         const run = continued(`${wrapper} ${command}`, newline);
         test(`r6 A wrapper FOUND ${file}: ${JSON.stringify(run)}`, () =>
-          refused(grammarProblems(file, document, run), /literal unbounded/));
+          refused(grammarProblems(file, document, run), unlessCr(run, /literal unbounded/)));
       }
       for (const evaluation of r6Evaluations) {
         const run = continued(evaluation(command), newline);
         test(`r6 B literal eval FOUND ${file}: ${JSON.stringify(run)}`, () =>
-          refused(grammarProblems(file, document, run), /literal unbounded/));
+          refused(grammarProblems(file, document, run), unlessCr(run, /literal unbounded/)));
       }
     }
     for (const interpreter of r6Interpreters) {
@@ -1600,7 +1641,7 @@ for (const [file, document] of scannedLocations) {
               : `${interpreter} ${operator}${delimiter}`;
             const run = continued(`${header}\n${tab}pnpm run test:unit\n${tab}TXT`, newline);
             test(`r6 C interpreter FOUND ${file}: ${JSON.stringify(run)}`, () =>
-              refused(grammarProblems(file, document, run), /literal unbounded/));
+              refused(grammarProblems(file, document, run), unlessCr(run, /literal unbounded/)));
           }
         }
       }
@@ -1670,7 +1711,7 @@ for (const [file, document] of scannedLocations) {
     "echo safe | bash <<'TXT'\npnpm run test:unit\nTXT",
   ]) {
     test(`r6 branch FOUND ${file}: ${JSON.stringify(run)}`, () =>
-      refused(grammarProblems(file, document, run), /literal unbounded/));
+      refused(grammarProblems(file, document, run), unlessCr(run, /literal unbounded/)));
   }
   for (const [run, pattern] of [
     ...Object.keys({
@@ -1695,7 +1736,7 @@ for (const [file, document] of scannedLocations) {
     ['source -bad', /unmodelled evaluation option/],
   ]) {
     test(`r6 branch REFUSED ${file}: ${JSON.stringify(run)}`, () =>
-      refused(grammarProblems(file, document, run), pattern));
+      refused(grammarProblems(file, document, run), unlessCr(run, pattern)));
   }
 }
 for (const site of ['source', '.']) {
@@ -1946,7 +1987,7 @@ for (const [file, document] of scannedLocations) {
     for (const original of r7Found) {
       const run = continued(original, newline);
       test(`r7 boundary FOUND ${file}: ${JSON.stringify(run)}`, () =>
-        refused(r7Problems(file, document, run), /literal unbounded/));
+        refused(r7Problems(file, document, run), unlessCr(run, /literal unbounded/)));
     }
   }
   for (const run of [
@@ -1989,7 +2030,7 @@ for (const [file, document] of scannedLocations) {
     ['builtin --unknown eval pnpm test', /unmodelled wrapper option/],
   ]) {
     test(`r7 boundary REFUSED ${file}: ${JSON.stringify(run)}`, () =>
-      refused(r7Problems(file, document, run), pattern));
+      refused(r7Problems(file, document, run), unlessCr(run, pattern)));
   }
 }
 
@@ -2066,7 +2107,7 @@ for (const [file, document] of scannedLocations) {
       `eval "pnpm run 'test:unit' ${parameter}"`,
     ]) {
       test(`r7 parameter FOUND ${file}: ${JSON.stringify(run)}`, () =>
-        refused(r7Problems(file, document, run), /literal unbounded/));
+        refused(r7Problems(file, document, run), unlessCr(run, /literal unbounded/)));
     }
     test(`r7 parameter scanned script ${file}: ${parameter}`, () => {
       const reader = (path) =>
@@ -2132,11 +2173,17 @@ for (const [file, document] of scannedLocations) {
   for (const launch of r7UnitTokenLaunches) {
     test(`r7 script precheck FOUND ${file}: ${JSON.stringify(launch)}`, () => {
       const reader = (path) => ({ path, text: `set -eu\nhelper() { echo safe; }\n${launch}` });
-      refused(r7Problems(file, document, 'bash ./ci/unit.sh', reader), /literal unbounded/);
+      refused(
+        r7Problems(file, document, 'bash ./ci/unit.sh', reader),
+        unlessCr(launch, /literal unbounded/),
+      );
     });
     test(`r7 script precheck REFUSED ${file}: ${JSON.stringify(launch)}`, () => {
       const reader = (path) => ({ path, text: `${r7InfraText}\n${launch}` });
-      refused(r7Problems(file, document, 'sh ./ci/unit.sh', reader), /array assignment/);
+      refused(
+        r7Problems(file, document, 'sh ./ci/unit.sh', reader),
+        unlessCr(launch, /array assignment/),
+      );
     });
   }
 }
@@ -2233,13 +2280,13 @@ for (const [file, document] of scannedLocations) {
         const original = `${shell} ${options} 'pnpm run test:unit' <<< 'echo safe'`;
         const run = continued(original, newline);
         test(`r8 options FOUND ${file} ${JSON.stringify(newline)}: ${original}`, () => {
-          refused(r7Problems(file, document, run), /literal unbounded/);
+          refused(r7Problems(file, document, run), unlessCr(run, /literal unbounded/));
           // The same vector must work when reached through a repository script.
           for (const site of r8Entries) {
             const reader = (path) => ({ path, text: run });
             refused(
               r7Problems(file, document, `${site} ./ci/options.sh`, reader),
-              /literal unbounded/,
+              unlessCr(run, /literal unbounded/),
             );
           }
         });
@@ -2247,14 +2294,14 @@ for (const [file, document] of scannedLocations) {
       for (const options of ['+Q -c', '-c -Q', '-c +Q', '--unknown -c', '-eo pipefail -c']) {
         const run = continued(`${shell} ${options} 'pnpm run test:unit'`, newline);
         test(`r8 options REFUSED ${file} ${JSON.stringify(newline)}: ${run}`, () => {
-          refused(r7Problems(file, document, run), /shell input option/);
+          refused(r7Problems(file, document, run), unlessCr(run, /shell input option/));
           for (const site of r8Entries) {
             refused(
               r7Problems(file, document, `${site} ./ci/options.sh`, (path) => ({
                 path,
                 text: run,
               })),
-              /shell input option/,
+              unlessCr(run, /shell input option/),
             );
           }
         });
@@ -2270,11 +2317,14 @@ for (const [file, document] of scannedLocations) {
         for (const evaluate of r8EvalSites) {
           const run = continued(evaluate(payload), newline);
           test(`r8 literal CLOSED ${file} ${JSON.stringify(newline)}: ${run}`, () => {
-            refused(r7Problems(file, document, run, r8Reader), r8Closed);
+            refused(r7Problems(file, document, run, r8Reader), unlessCr(run, r8Closed));
             for (const site of r8Entries) {
               const reader = (path) =>
                 path === './ci/outer.sh' ? { path, text: run } : r8Reader(path);
-              refused(r7Problems(file, document, `${site} ./ci/outer.sh`, reader), r8Closed);
+              refused(
+                r7Problems(file, document, `${site} ./ci/outer.sh`, reader),
+                unlessCr(run, r8Closed),
+              );
             }
           });
         }
@@ -2285,8 +2335,9 @@ for (const [file, document] of scannedLocations) {
         const failing = r8Eval(`${failure} $args`);
         const run = before ? `pnpm test; ${failing}` : `${failing}; pnpm test`;
         test(`r8 independent commands ${file}: ${run}`, () => {
-          const problems = r7Problems(file, document, continued(run, newline), r8Reader);
-          refused(problems, /literal unbounded/);
+          const text = continued(run, newline);
+          const problems = r7Problems(file, document, text, r8Reader);
+          refused(problems, unlessCr(text, /literal unbounded/));
           refused(problems, /unsupported shell construct|unreadable repo script/);
         });
       }
@@ -2301,7 +2352,7 @@ for (const [file, document] of scannedLocations) {
       for (const evaluate of r8EvalSites) {
         const run = continued(evaluate(payload), newline);
         test(`r8 reviewer CLOSED ${file} ${JSON.stringify(newline)}: ${run}`, () =>
-          refused(r7Problems(file, document, run, r8Reader), r8Closed));
+          refused(r7Problems(file, document, run, r8Reader), unlessCr(run, r8Closed)));
       }
     }
   }
@@ -2441,14 +2492,17 @@ for (const [file, document] of scannedLocations) {
           for (const wrapper of r9Wrappers) {
             const run = continued(`${wrapper} ${enter(`${program} ${args}`)}`.trim(), newline);
             test(`r9 order REFUSED ${file} ${JSON.stringify(newline)}: ${run}`, () => {
-              refused(r7Problems(file, document, run), /unmodelled evaluation option/);
+              refused(
+                r7Problems(file, document, run),
+                unlessCr(run, /unmodelled evaluation option/),
+              );
               for (const site of r8Entries) {
                 // The existing token-bearing-script rule must reach this same
                 // boundary without an actual unbounded invocation in the file.
                 const reader = (path) => ({ path, text: `# test:unit\n${run}` });
                 refused(
                   r7Problems(file, document, `${site} ./ci/options.sh`, reader),
-                  /unmodelled evaluation option/,
+                  unlessCr(run, /unmodelled evaluation option/),
                 );
               }
             });
@@ -2473,3 +2527,83 @@ for (const [file, document] of scannedLocations) {
     }
   }
 }
+
+// FU-077: every guard reads commands and their context the same, fail-closed way.
+test('FU-077 R1: a carriage return is a word character to bash, in every guard', () => {
+  // bash runs the command after `echo a\r#`: the `#` is inside a word, not a comment.
+  assert.match(bashStderr('echo a\r# ; node --test /dev/null'), UNBUDGETED);
+  for (const run of ['echo a\r# ; pnpm run test:unit', 'true\r', 'echo \u00a0#; true'])
+    refused(extraRun(run), /carriage return, control or invisible blank/);
+  // A repository script is not exempted as token-free when a CR hides the token.
+  const readRepoFile = (path) =>
+    path === './ci/x.sh' ? { path: 'ci/x.sh', text: 'pnpm --filter a\r test' } : null;
+  const doc = structuredClone(realDoc);
+  doc.jobs.quality.steps.push({ name: 'Script', run: 'bash ./ci/x.sh' });
+  refused(parsedProblems({ 'ci.yml': doc }, realScripts, { readRepoFile }), /carriage return/);
+  refusedAtBoth('echo a\r# ; true', /carriage return/);
+});
+test('FU-077 R4: argv boundaries are kept, never joined into a known form', () => {
+  const name = 'install --frozen-lockfile';
+  // pnpm runs ONE word it does not know as the script of that name.
+  assert.match(pnpmStdout({ [name]: 'echo HERE' }, [name]), /^HERE$/m);
+  refusedAtBoth(`pnpm "${name}"`, /a pnpm form that is not/, (all) => {
+    all[name] = 'node --test /dev/null';
+  });
+});
+test('FU-077 R4 sibling: the unit step command is compared argv entry by argv entry', () => {
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc).run = `pnpm "run\n${UNIT_STEP.script}"`)),
+    /must run test:unit-step-concurrency unconditionally/,
+  );
+});
+test('FU-077 R5: an allow-listed tool is inert only in an allow-listed argument shape', () => {
+  for (const run of [
+    'eslint --format ./x.mjs scripts',
+    'eslint -c x.mjs scripts',
+    'prettier --check --plugin=./x.mjs a',
+    'prettier --write a',
+    'tsc --build',
+    'tsc -p "$X"',
+    'jest --testRunner ./x.js',
+    'prisma db execute --file x.sql',
+    'true x',
+    'turbo test:unit',
+    'turbo run test:unit --filter=x',
+    'turbo run "$TASK"',
+  ])
+    refusedAtBoth(run, /an argument shape of|a turbo form that is not/);
+  // turbo runs package scripts: the real e2e package's node --test is read through it,
+  // and every task the requested one depends on in the task graph.
+  const e2e = '@rasta/e2e';
+  assert.ok(realPackages[e2e]?.['test:unit'], Object.keys(realPackages).join());
+  refused(
+    timeoutProblemsAfter((_doc, _all, packages) => {
+      packages[e2e]['test:unit'] = packages[e2e]['test:unit'].replace(/ --test-timeout=\d+/, '');
+    }),
+    new RegExp(`${e2e} test:unit: node --test`),
+  );
+  refusedAtBoth('turbo run typecheck', /@rasta\/contracts build: node --test/, (_all, packages) => {
+    packages['@rasta/contracts'].build = 'node --test /dev/null';
+  });
+  refusedAtBoth('turbo run test:unit', /task graph that was not read/, (_all, _p, ws) => {
+    delete ws.turbo;
+  });
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages),
+    /task graph that was not read/,
+  );
+  for (const edit of [
+    (ws) => (ws.turbo['@rasta/web#build'] = []),
+    (ws) => (ws.turbo['//#test:unit'] = []),
+    (ws) => ws.turbo['test:unit'].push('@rasta/web#build'),
+  ])
+    refusedAtBoth('turbo run test:unit', /a turbo task .* that is not read/, (_all, _p, ws) =>
+      edit(ws),
+    );
+});
+test('FU-077: the shared tokenizer is one module, re-exported where it was', async () => {
+  const shared = await import('./ci-shell-text-lib.mjs');
+  assert.equal(shared.parseCommands, parseCommands);
+  assert.equal(shared.shellTextProblem('a\rb') !== null, true);
+  assert.equal(shared.shellTextProblem('echo "a — b"'), null);
+});

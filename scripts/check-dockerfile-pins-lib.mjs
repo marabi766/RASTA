@@ -1,4 +1,5 @@
 import { LineCounter, parseDocument } from 'yaml';
+import { shellTextProblem } from './ci-shell-text-lib.mjs';
 
 /**
  * Every Dockerfile's base image is pinned by digest, and all share one (L7-45).
@@ -26,6 +27,12 @@ export function validateDockerfilePins(dockerfiles) {
 
   for (const { name, text } of dockerfiles) {
     const stages = new Set();
+    // FU-077 R1: the shared character policy; a CR or control character is not read past.
+    const unreadable = shellTextProblem(text);
+    if (unreadable) {
+      errors.push(`${name}: cannot be read: ${unreadable}`);
+      continue;
+    }
     text.split('\n').forEach((line, index) => {
       const from = line.match(/^FROM\s+(\S+)(?:\s+AS\s+(\S+))?/i);
       if (from) {
@@ -228,6 +235,8 @@ class ShellSyntaxError extends Error {}
  * scripts with the line they start on. Lines are 0-based.
  */
 export function tokenizeShell(src) {
+  const unreadable = shellTextProblem(src);
+  if (unreadable) throw new ShellSyntaxError(unreadable); // FU-077 R1: one character policy
   const commands = [];
   const nested = [];
   const heredocs = [];
@@ -333,7 +342,7 @@ export function tokenizeShell(src) {
       }
       continue;
     }
-    if (c === ' ' || c === '\t' || c === '\r') {
+    if (c === ' ' || c === '\t') {
       pushWord();
       i += 1;
       continue;
