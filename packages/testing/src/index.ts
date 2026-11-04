@@ -114,7 +114,11 @@ export {
   guardedFetch,
   guardFetch,
   guardRequestContext,
+  guardEveryRequestContext,
+  installRequestContextGuard,
   RedirectRefusedError,
   REFUSED_REDIRECT_STATUSES,
 } from './guarded-http';
 export type { GuardableRequestContext, GuardedFetch } from './guarded-http';
+
+export { REQUEST_CONTEXT_ROUTES, rawContextFromFactory } from './request-routes';
