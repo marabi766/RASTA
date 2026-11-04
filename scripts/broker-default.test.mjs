@@ -361,3 +361,100 @@ test('deletion with an unresolved read/SET cluster refuses before connecting', a
     assert.equal(opened, false);
   }
 });
+
+// FU-006 r2: the real KafkaJS Broker/ConnectionPool with replaceable in-memory
+// sockets (no network). Each socket stands for one cluster and answers
+// ApiVersions v2, Metadata v2 and IncrementalAlterConfigs v0 with encoded frames.
+async function memorySockets(script) {
+  const { createRequire } = await import('node:module');
+  const { EventEmitter } = await import('node:events');
+  const require = createRequire(import.meta.url);
+  const Encoder = require('kafkajs/src/protocol/encoder');
+  const Decoder = require('kafkajs/src/protocol/decoder');
+  const log = [];
+  const bodies = {
+    18: () =>
+      new Encoder()
+        .writeInt16(0)
+        .writeArray(
+          [
+            [18, 0, 2],
+            [3, 0, 2],
+            [44, 0, 0],
+          ].map(([key, min, max]) => new Encoder().writeInt16(key).writeInt16(min).writeInt16(max)),
+        )
+        .writeInt32(0),
+    3: (cluster) => new Encoder().writeArray([]).writeString(cluster).writeInt32(-1).writeArray([]),
+    44: () =>
+      new Encoder()
+        .writeInt32(0)
+        .writeArray([new Encoder().writeInt16(0).writeString(null).writeInt8(4).writeString('')]),
+  };
+  let index = 0;
+  const factory = ({ onConnect }) => {
+    const { cluster, finAfter } = script[index++] ?? {};
+    const socket = new EventEmitter();
+    log.push(`socket:${cluster}`);
+    socket.setKeepAlive = () => {};
+    socket.unref = () => {};
+    socket.end = () => {};
+    socket.write = (buffer) => {
+      const request = new Decoder(buffer);
+      request.readInt32();
+      const apiKey = request.readInt16();
+      request.readInt16();
+      const correlationId = request.readInt32();
+      log.push(`${apiKey}:${cluster}`);
+      const body = new Encoder().writeInt32(correlationId).writeEncoder(bodies[apiKey](cluster));
+      const frame = new Encoder().writeInt32(body.size()).writeEncoder(body).buffer;
+      setImmediate(() => {
+        socket.emit('data', frame);
+        // The FIN arrives with the response, before the client's next request.
+        if (apiKey === finAfter) socket.emit('end');
+      });
+    };
+    setImmediate(onConnect);
+    return socket;
+  };
+  return { factory, log };
+}
+
+async function realPool(script) {
+  const { deleteBrokerDefault, openBroker } = await import('./broker-default-delete.mjs');
+  const { factory, log } = await memorySockets(script);
+  const run = () =>
+    deleteBrokerDefault(
+      { ...target, clusterId: 'cluster-A' },
+      { open: (endpoint, options) => openBroker(endpoint, options, factory) },
+    );
+  return { run, log };
+}
+
+test('real pool: deletion is written on the socket that reported the read/SET cluster', async () => {
+  const { run, log } = await realPool([{ cluster: 'cluster-A' }]);
+  await run();
+  assert.deepEqual(log, ['socket:cluster-A', '18:cluster-A', '3:cluster-A', '44:cluster-A']);
+});
+
+test('real pool: a peer FIN after the cluster check refuses instead of reconnecting', async () => {
+  const { run, log } = await realPool([
+    { cluster: 'cluster-A', finAfter: 3 },
+    { cluster: 'cluster-B' },
+  ]);
+  await assert.rejects(
+    run(),
+    /^KafkaJSConnectionError: Failed to connect: BROKER_DEFAULT broker UNCONFIRMED$/,
+  );
+  assert.ok(!log.includes('socket:cluster-B'), log.join(' -> '));
+  assert.ok(!log.some((entry) => entry.startsWith('44:')), log.join(' -> '));
+});
+
+test('one-socket factory refuses every socket after the first', async () => {
+  const { oneSocket } = await import('./broker-default-delete.mjs');
+  let created = 0;
+  const factory = oneSocket(() => ++created);
+  assert.equal(factory({}), 1);
+  assert.throws(() => factory({}), /^Error: BROKER_DEFAULT broker UNCONFIRMED$/);
+  assert.throws(() => factory({}), /^Error: BROKER_DEFAULT broker UNCONFIRMED$/);
+  assert.equal(created, 1);
+});

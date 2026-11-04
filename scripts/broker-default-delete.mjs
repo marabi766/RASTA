@@ -53,7 +53,21 @@ export const deleteRequest = {
 const CLUSTER_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const BROKER_UNCONFIRMED = 'BROKER_DEFAULT broker UNCONFIRMED';
 
-function openBroker(endpoint, { ssl, sasl, clientId }) {
+// FU-006 r2: KafkaJS's ConnectionPool reconnects a closed connection on the
+// next send, and a new socket may reach another cluster. The adapter therefore
+// owns ONE physical socket for its lifetime: any second socket is refused, so a
+// disconnect after the cluster check invalidates it instead of re-routing the
+// DELETE. A caller wanting a retry opens a new adapter and repeats the check.
+export function oneSocket(factory) {
+  let opened = false;
+  return (options) => {
+    if (opened) throw new Error(BROKER_UNCONFIRMED);
+    opened = true;
+    return factory(options);
+  };
+}
+
+export function openBroker(endpoint, { ssl, sasl, clientId }, rawSocketFactory = socketFactory()) {
   const logger = createLogger({ level: 0, logCreator: () => () => {} });
   const connectionPool = new ConnectionPool({
     host: endpoint.hostname,
@@ -62,7 +76,7 @@ function openBroker(endpoint, { ssl, sasl, clientId }) {
     sasl,
     clientId,
     logger,
-    socketFactory: socketFactory(),
+    socketFactory: oneSocket(rawSocketFactory),
     connectionTimeout: 5000,
     requestTimeout: 5000,
     enforceRequestTimeout: true,
@@ -80,8 +94,9 @@ function openBroker(endpoint, { ssl, sasl, clientId }) {
 /**
  * DELETE the broker-default override on the cluster `clusterId` names: the one
  * the caller's reads and SETs resolved. The broker reached here must report the
- * same cluster on the same connection that sends the DELETE; unresolved,
- * malformed or mismatched ⇒ refuse before sending (FU-006).
+ * same cluster on the same physical socket that sends the DELETE (no
+ * reconnection); unresolved, malformed, mismatched or disconnected ⇒ refuse
+ * before sending (FU-006).
  */
 export async function deleteBrokerDefault(
   { brokers, ssl, sasl, clientId, clusterId },
