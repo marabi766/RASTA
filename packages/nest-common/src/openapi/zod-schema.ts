@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
+import { publishedIsoDateTimeZone } from '@rasta/contracts';
 
 /**
  * Converts the Zod schemas a service validates with into JSON Schema, so its
@@ -95,7 +96,12 @@ export function toJsonSchema(schema: z.ZodType): JsonSchema {
       ? convert(defOf(schema))
       : { type: 'boolean', default: queryBooleanDefaultValue };
 
-  return description ? { ...base, description } : base;
+  if (!description) return base;
+  // A schema's own words come first; a bound its format carries (FU-035) is kept after them.
+  return {
+    ...base,
+    description: base.description ? `${description} ${String(base.description)}` : description,
+  };
 }
 
 /** The bounds a `codePointLength` check on `def` publishes, if any. */
@@ -292,7 +298,7 @@ const STRING_FORMATS: Record<string, string> = {
 function stringSchema(def: any): JsonSchema {
   const out: JsonSchema = { type: 'string' };
 
-  for (const { def: check } of checkDefs(def)) {
+  for (const { check: instance, def: check } of checkDefs(def)) {
     if (check.check === 'min_length') out.minLength = check.minimum;
     if (check.check === 'max_length') out.maxLength = check.maximum;
     if (check.check !== 'string_format') continue;
@@ -302,6 +308,13 @@ function stringSchema(def: any): JsonSchema {
     // runs rather than a re-spelling of it. Only a `.regex()` publishes its
     // pattern: a format's pattern is zod's implementation of it.
     if (check.format === 'regex') out.pattern = (check.pattern as RegExp).source;
+    // `format: date-time` admits offsets the platform's `isoDateTime()` refuses (RFC 3339 allows
+    // ±23:59; the UTC-only form takes none), so its accepted zone is published with it (FU-035).
+    const zone = publishedIsoDateTimeZone(instance);
+    if (zone) {
+      out.pattern = zone.pattern;
+      out.description = zone.description;
+    }
   }
 
   return out;
