@@ -362,6 +362,10 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
+  `import {formMessage} from 'unknown'; z.string().min(1,formMessage('Required')).transform(Number);`,
+  `import {formMessage} from '@/lib/form-issues'; z.string().min(1,formMessage(unknown)).transform(Number);`,
+  `import {moneyInputMessage} from '@/lib/format'; z.transform(v=>moneyInputMessage(v,unknown));`,
+  `import {IRR} from '@/lib/format'; z.transform(v=>IRR(v));`,
   `z.core._string(z.ZodTransform,{transform:Number});`,
   `z.core._int(z.ZodTransform,{transform:(v,ctx,n=Number(v))=>n});`,
   `const C=z.ZodTransform; z.core._url(C,{transform:Number});`,
@@ -471,6 +475,10 @@ for (const [index, code] of transformFailures.entries())
       code,
     ));
 for (const code of [
+  `import {formMessage} from '@/lib/form-issues'; z.string().min(1,formMessage('Required')).transform(Number);`,
+  "import {formMessage} from '@/lib/form-issues'; z.string().regex(/.*/,formMessage(`Bound ${1}`)).transform(Number);",
+  `import {moneyInputMessage,IRR} from '@/lib/format'; z.transform(v=>moneyInputMessage(v,IRR));`,
+  `import {formMessage} from '@/lib/form-issues'; z.codec(z.string().min(1,formMessage('Input')),z.string().min(1,formMessage('Output')),{decode:Number,encode:Number});`,
   `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
   `z.string({error:'Required'}).min(1,{message:'Length'}).transform(Number);`,
   'z.string().min(1, `Known bound ${1}`).transform(Number);',

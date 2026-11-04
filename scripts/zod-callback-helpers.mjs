@@ -23,6 +23,15 @@ const helpers = [
   ],
   // Validates digits and scale before exact BigInt conversion; dependencies pinned below.
   ['apps/web/src/lib/format', 'apps/web/src/lib/format/index.ts', ['parseMoneyInput'], 'bigint'],
+  // Fixed failure sentences: only the source-pinned IRR currency may supply formatting data.
+  [
+    'apps/web/src/lib/format',
+    'apps/web/src/lib/format/index.ts',
+    ['moneyInputMessage'],
+    'money-message',
+  ],
+  // Named currency data for those sentences, never a callable or a string-input proof.
+  ['apps/web/src/lib/format', 'apps/web/src/lib/format/index.ts', ['IRR'], 'currency'],
   // Regex checked calendar fields before constructing a bounded Tehran instant.
   ['apps/web/src/server/drivers', 'apps/web/src/server/drivers.ts', ['localDateToIso'], 'verified'],
   // Regex checked calendar/time fields before constructing a bounded Tehran instant.

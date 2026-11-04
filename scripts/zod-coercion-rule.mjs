@@ -618,7 +618,11 @@ export default {
             !value ||
             globalName(value, 'undefined') ||
             typeof constant(value) === 'string' ||
-            value.type === 'TemplateLiteral'
+            value.type === 'TemplateLiteral' ||
+            (value.type === 'CallExpression' &&
+              reviewedHelper(value.callee) === 'string' &&
+              (typeof constant(value.arguments[0]) === 'string' ||
+                value.arguments[0]?.type === 'TemplateLiteral'))
           )
             return true;
           return (
@@ -812,8 +816,10 @@ export default {
           const reviewed = reviewedHelper(callee);
           if (reviewed)
             return (
-              reviewed === 'money-limit' ||
-              (reviewed !== 'predicate' && !stringValue(args[0], callee, new Set(), parameters))
+              ['money-limit', 'currency'].includes(reviewed) ||
+              (reviewed === 'money-message'
+                ? reviewedHelper(args[1]) !== 'currency'
+                : reviewed !== 'predicate' && !stringValue(args[0], callee, new Set(), parameters))
             );
           if (globalName(callee, 'Date') && !args.length && callee !== callback) return false;
           if ((numeric(callee) || '').includes('.')) return true;
