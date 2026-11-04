@@ -1186,6 +1186,8 @@ export default {
               if (
                 kind === 'string' &&
                 name === 'replace' &&
+                args[1] &&
+                unwrap(args[1]).type !== 'Literal' &&
                 !stringValue(args[0], callee, new Set(), parameters) &&
                 !unwrap(args[0])?.regex
               )
