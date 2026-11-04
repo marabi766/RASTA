@@ -897,7 +897,7 @@ for (const body of [
     assert.deepEqual(messages(`z.array(z.string()).transform(v=>{${body}});`), []));
 
 // FU-069b: alternate resolved files never inherit a reviewed source's hash.
-for (const ext of ['mjs', 'cjs', 'tsx'])
+for (const ext of ['mjs', 'cjs', 'tsx', 'jsx', 'mts', 'cts'])
   it(`FU-069b refuses unregistered ${ext} import`, () =>
     assert.ok(
       messages(
@@ -911,7 +911,7 @@ it('FU-069b resolves exact sources and dependency siblings', () => {
     cpSync(join(ROOT, path + '.ts'), join(root, path + '.ts'));
     for (const spelling of [path, path + '.ts', path + '.js'])
       assert.equal(verifiedCallbackHelper(root, spelling, 'isOrderCommand'), 'predicate');
-    for (const ext of ['mjs', 'cjs', 'tsx']) {
+    for (const ext of ['mjs', 'cjs', 'tsx', 'jsx', 'mts', 'cts', 'js']) {
       appendFileSync(join(root, path + '.' + ext), 'export const isOrderCommand=Number;');
       assert.equal(verifiedCallbackHelper(root, path + '.' + ext, 'isOrderCommand'), undefined);
       assert.equal(verifiedCallbackHelper(root, path, 'isOrderCommand'), undefined);
