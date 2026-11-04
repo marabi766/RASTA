@@ -36,7 +36,7 @@ const UNLINTED = [
   [/^eslint\.config\.mjs$|\/eslint\.config\.mjs$/, 'lint configuration, loaded by ESLint itself'],
   [
     /(^|\/)jest\.[\w.-]+\.c?js$/,
-    'Jest configuration and launchers (scripts/disclosure-jest-launchers.mjs)',
+    'test-runner configuration and setup, pinned by the disclosure guard',
   ],
   [/^apps\/web\/(next|postcss)\.config\.mjs$/, 'Next/PostCSS build configuration'],
   [/^apps\/web\/upload-limit\.cjs$/, 'a constant the Next config reads; no I/O'],
