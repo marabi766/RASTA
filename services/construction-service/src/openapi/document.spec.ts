@@ -3,13 +3,17 @@ import { refusal, type RefusalArea } from '../shared/refusal';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
+import { ModulesContainer } from '@nestjs/core';
+import { ALLOW_SERVICE_KEY } from '@rasta/nest-common';
 import {
   REFUSAL_REASONS,
   RESPONSE_BODIES,
   buildConstructionOpenApiDocument,
   buildDocumentationApp,
+  enrichOpenApiDocument,
   formatDocument,
   refusalStatusOf,
+  SERVICE_ROUTES,
 } from './document';
 
 /**
@@ -77,14 +81,78 @@ describe('the committed OpenAPI document', () => {
 
     expect(operations.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     for (const { key, operation } of operations) {
-      expect(operation.security).toEqual(
-        key.startsWith('GET /v1/internal/') ? [{ internalToken: [] }] : [{ bearer: [] }],
-      );
+      // Which scheme: `documents a service token on every @AllowService route` below.
+      expect(operation.security).toBeDefined();
       const success = RESPONSE_BODIES[key]?.status;
       expect(operation.responses[success ?? 'missing']).toBeDefined();
       const other = success === '201' ? '200' : '201';
       expect(operation.responses[other]).toBeUndefined();
     }
+  });
+
+  // FU-008: the token requirement comes from the handler's `@AllowService`, not the path. Read
+  // here straight from the controllers, so this cannot agree with the generator by construction.
+  // `src/access/access.ts` ("Service callers") points at this test.
+  it('documents a service token on every @AllowService route, and only there', () => {
+    const allowServiceHandlers = new Set<string>();
+    for (const nestModule of app.get(ModulesContainer).values()) {
+      for (const { metatype } of nestModule.controllers.values()) {
+        if (typeof metatype !== 'function') continue;
+        for (const name of Object.getOwnPropertyNames(metatype.prototype)) {
+          if (name === 'constructor') continue;
+          const allowed: unknown =
+            Reflect.getMetadata(ALLOW_SERVICE_KEY, metatype.prototype[name]) ??
+            Reflect.getMetadata(ALLOW_SERVICE_KEY, metatype);
+          if (allowed !== undefined) allowServiceHandlers.add(`${metatype.name}_${name}`);
+        }
+      }
+    }
+    expect(allowServiceHandlers.size).toBeGreaterThan(0);
+
+    const withServiceToken = new Set<string>();
+    const document = buildConstructionOpenApiDocument(app);
+    for (const [path, item] of Object.entries(document.paths ?? {})) {
+      for (const [method, operation] of Object.entries(
+        item as Record<string, { operationId: string; security: Record<string, string[]>[] }>,
+      )) {
+        const key = `${method.toUpperCase()} ${path}`;
+        const handler = operation.operationId.replace(/_v\d+$/, '');
+        const schemes = operation.security.map((entry) => Object.keys(entry).join('+')).sort();
+        const service = allowServiceHandlers.has(handler);
+        if (service) withServiceToken.add(handler);
+        expect({ key, schemes }).toEqual({
+          key,
+          schemes: service
+            ? SERVICE_ROUTES[key]?.users === 'refused'
+              ? ['internalToken']
+              : ['bearer', 'internalToken']
+            : ['bearer'],
+        });
+      }
+    }
+    expect([...withServiceToken].sort()).toEqual([...allowServiceHandlers].sort());
+    // The award read is called by contract-service (CON-003) and by the owner's users.
+    expect(document.paths?.['/v1/tenders/{id}/award']?.get?.security).toEqual([
+      { bearer: [] },
+      { internalToken: [] },
+    ]);
+  });
+
+  it('refuses to document a route whose @AllowService metadata is unknown or unlisted', () => {
+    const document = () => buildConstructionOpenApiDocument(app);
+    expect(() => enrichOpenApiDocument(document(), new Map())).toThrow(
+      /no reflected @AllowService/,
+    );
+    const noDecorators = new Map<string, readonly string[] | undefined>();
+    for (const item of Object.values(document().paths ?? {})) {
+      for (const operation of Object.values(item as Record<string, { operationId: string }>)) {
+        noDecorators.set(operation.operationId, undefined);
+      }
+    }
+    // The award read losing its decorator, while SERVICE_ROUTES still lists it, is refused.
+    expect(() => enrichOpenApiDocument(document(), noDecorators)).toThrow(
+      /SERVICE_ROUTES disagree/,
+    );
   });
 
   it('documents 409 and 422 only where a command can produce them', () => {
