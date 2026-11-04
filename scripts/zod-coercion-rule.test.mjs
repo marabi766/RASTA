@@ -353,6 +353,10 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
+  `z.core._string(z.ZodTransform,{transform:Number});`,
+  `z.core._int(z.ZodTransform,{transform:(v,ctx,n=Number(v))=>n});`,
+  `const C=z.ZodTransform; z.core._url(C,{transform:Number});`,
+  `import {z as legacy} from 'zod/v3'; z.core._string(legacy.ZodEffects,{schema:legacy.unknown(),effect:{type:'transform',transform:Number}});`,
   `z.string({checks:[z.overwrite(()=>true)]}).transform(Number);`,
   `const opts={checks:[z.overwrite(()=>true)]}; z.string(opts).transform(Number);`,
   `z.array(z.string(),{checks:[z.overwrite(()=>[true])]}).transform(v=>v.map(Number));`,
