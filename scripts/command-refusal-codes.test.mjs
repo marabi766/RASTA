@@ -12,7 +12,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import {
   REFUSAL_CODES,
@@ -38,9 +37,6 @@ import { parseVacuumOptions, vacuumService } from './outbox-b2-vacuum.mjs';
 import { prismaPort } from './outbox-b2-prisma-port.mjs';
 
 const root = resolve(import.meta.dirname, '..');
-const require = createRequire(import.meta.url);
-const config = () => require('../packages/config/dist/index.js');
-const nestCommon = () => require('../packages/nest-common/dist/index.js');
 
 const TAIL = 'diagnostics withheld; prior work may have committed — reconcile before retrying';
 const refused = (code) => `command refused (code ${code}); ${TAIL}`;
@@ -76,6 +72,30 @@ function assertCliRefusal(code, entry, args, exit) {
   assertNoSentinel(result.stdout + result.stderr, entry);
 }
 
+/**
+ * A guard from a built package (`dist/`), run in a child so the build is loaded
+ * as the CLIs load it; the child reports through the *source* reporter, so a
+ * pass also proves both module copies share one registry.
+ */
+function assertBuiltRefusal(code, body) {
+  covered.add(code);
+  const script = `
+    const { commandFailure } = require('./packages/config/src/command-failure.js');
+    (async () => { ${body} })().then(
+      () => process.stdout.write('no refusal'),
+      (error) => process.stdout.write(commandFailure(error)),
+    );`;
+  const result = spawnSync(process.execPath, ['-e', script], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { PATH: process.env.PATH, NODE_ENV: 'test' },
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.stdout, refused(code), result.stderr);
+  assertNoSentinel(result.stdout + result.stderr, code);
+}
+
 // --- usage -------------------------------------------------------------------
 
 test('usage: B2 backfill and vacuum option parsers', async () => {
@@ -106,15 +126,20 @@ test('node-env: B2 interlock refuses production and an unrecognised NODE_ENV', a
   await assertRefusal('node-env', () => assertEnvironment({ NODE_ENV: SENTINELS[0] }));
 });
 
-test('owner-credential: the built guard is reported by the source reporter (one registry)', async () => {
-  await assertRefusal('owner-credential', () =>
-    config().assertNoMigratorCredentials({ [`DATABASE_URL_${KEY_SENTINELS[0]}_MIGRATOR`]: 'x' }),
+test('owner-credential: the built guard is reported by the source reporter (one registry)', () => {
+  assertBuiltRefusal(
+    'owner-credential',
+    `require('./packages/config/dist/index.js').assertNoMigratorCredentials({
+      DATABASE_URL_${KEY_SENTINELS[0]}_MIGRATOR: 'x',
+    });`,
   );
 });
 
-test('configuration: a service environment that does not validate', async () => {
-  const { loadAssetEnv } = require('../services/asset-service/dist/config/env.js');
-  await assertRefusal('configuration', () => loadAssetEnv({ PORT: SENTINELS[0] }));
+test('configuration: a service environment that does not validate', () => {
+  assertBuiltRefusal(
+    'configuration',
+    `require('./services/asset-service/dist/config/env.js').loadAssetEnv({ PORT: '${SENTINELS[0]}' });`,
+  );
 });
 
 test('database-url-unset: B2 backfill and vacuum without a per-service URL', async () => {
@@ -141,7 +166,7 @@ test('database-url-unset: B2 backfill and vacuum without a per-service URL', asy
 
 // --- runtime role ------------------------------------------------------------
 
-const facts = {
+const facts = JSON.stringify({
   role: 'rasta_document',
   sessionRole: 'rasta_document',
   database: 'rasta',
@@ -156,21 +181,24 @@ const facts = {
   createOnDatabase: false,
   createOnSchemas: [],
   memberOf: [],
-};
-const client = (answer) => ({ $queryRawUnsafe: answer, $disconnect: async () => undefined });
-const roleOptions = { service: 'probe', runtimeVariable: 'DATABASE_URL_DOCUMENT' };
+});
+const preflight = (open) => `
+  await require('./packages/nest-common/dist/index.js').preflightRuntimeRole(${open}, {
+    service: 'probe',
+    runtimeVariable: 'DATABASE_URL_DOCUMENT',
+  });`;
 
-test('runtime-role: the preflight refuses a role that could act as an owner', async () => {
-  await assertRefusal('runtime-role', () =>
-    nestCommon().preflightRuntimeRole(() => client(async () => [facts]), roleOptions),
+test('runtime-role: the preflight refuses a role that could act as an owner', () => {
+  assertBuiltRefusal(
+    'runtime-role',
+    preflight(`() => ({ $queryRawUnsafe: async () => [${facts}], $disconnect: async () => {} })`),
   );
 });
 
-test('runtime-role-unverified: the preflight cannot ask the database', async () => {
-  await assertRefusal('runtime-role-unverified', () =>
-    nestCommon().preflightRuntimeRole(() => {
-      throw new Error(SENTINELS[0]);
-    }, roleOptions),
+test('runtime-role-unverified: the preflight cannot ask the database', () => {
+  assertBuiltRefusal(
+    'runtime-role-unverified',
+    preflight(`() => { throw new Error('${SENTINELS[0]}'); }`),
   );
 });
 
@@ -276,12 +304,11 @@ test('vacuum-unproven: the counters never move', async () => {
 
 // --- fleet drain check -------------------------------------------------------
 
-test('lag-unreadable: an expected topic the principal cannot see', async () => {
-  const {
-    checkConsumerGroupDrained,
-  } = require('../services/fleet-service/dist/fleet/drain-check.command.js');
-  await assertRefusal('lag-unreadable', () =>
-    checkConsumerGroupDrained({ listTopics: async () => [] }, 'probe-group', ['probe.topic']),
+test('lag-unreadable: an expected topic the principal cannot see', () => {
+  assertBuiltRefusal(
+    'lag-unreadable',
+    `await require('./services/fleet-service/dist/fleet/drain-check.command.js')
+      .checkConsumerGroupDrained({ listTopics: async () => [] }, 'probe-group', ['probe.topic']);`,
   );
 });
 
