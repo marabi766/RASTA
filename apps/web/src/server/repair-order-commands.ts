@@ -1,4 +1,3 @@
-import { MAX_AMOUNT_MINOR as MAX_STORABLE_AMOUNT_MINOR } from '@rasta/contracts';
 import {
   ID_PREFIXES,
   legacyParse,
@@ -21,6 +20,7 @@ import {
   CANCEL_REPAIR_FIELDS,
   COMPLETE_REPAIR_FIELDS,
   DIRECT_COST_CATEGORIES,
+  MAX_AMOUNT_MINOR,
   PART_SOURCES,
   RECORD_COST_FIELDS,
   RECORD_LABOUR_FIELDS,
@@ -144,7 +144,7 @@ function rialAmount(label: string, options: { readonly allowZero: boolean }) {
     }
     // The ledger's own bound (BIGINT), not the platform's 30 digits: an amount
     // past it passes the schema and then fails in the database.
-    if (minor > MAX_STORABLE_AMOUNT_MINOR) {
+    if (minor > BigInt(MAX_AMOUNT_MINOR)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} بیش از حد بزرگ است` });
       return z.NEVER;
     }

@@ -1,4 +1,3 @@
-import { MAX_AMOUNT_MINOR as MAX_STORABLE_AMOUNT_MINOR } from '@rasta/contracts';
 import { z } from 'zod';
 import { legacyParse } from '@rasta/contracts';
 
@@ -20,6 +19,7 @@ import {
   parseMoneyInput,
   toPersianDigits,
 } from '@/lib/format';
+import { MAX_AMOUNT_MINOR } from '@/lib/repair-order-fields';
 
 import { ASSET_DISPLAY_TEXT, firstIssuePerField, readFields } from './asset-commands';
 import { readFromGateway, type ReadResult } from './assets';
@@ -307,7 +307,7 @@ const optionalRials = (label: string) =>
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} نمی‌تواند منفی باشد` });
       return z.NEVER;
     }
-    if (minor > MAX_STORABLE_AMOUNT_MINOR) {
+    if (minor > BigInt(MAX_AMOUNT_MINOR)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} بیش از حد بزرگ است` });
       return z.NEVER;
     }

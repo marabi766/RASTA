@@ -5,6 +5,13 @@ import { resolve } from 'node:path';
 // Named reviewed helper capabilities, never a file or method-name exemption.
 // A changed/unreadable source refuses until its implementation is reviewed again.
 const helpers = [
+  // Exact immutable decimal BIGINT limit; this allowance is data, never a callable helper.
+  [
+    'apps/web/src/lib/repair-order-fields',
+    'apps/web/src/lib/repair-order-fields.ts',
+    ['MAX_AMOUNT_MINOR'],
+    'money-limit',
+  ],
   // Declares a validated string sentence; checks controls without converting its value.
   ['apps/web/src/lib/form-issues', 'apps/web/src/lib/form-issues.ts', ['formMessage'], 'string'],
   // String-only letter/digit normalization; dependencies pinned below.
@@ -39,6 +46,8 @@ const helpers = [
 ];
 // Published-parent and reviewed fixed-message formatter versions.
 const pins = {
+  'apps/web/src/lib/repair-order-fields.ts':
+    'b80e6b6a0fccce159661427e3c1e0dce973c93e1837ea632d7b47533a9944b13',
   'packages/contracts/src/common/iso-datetime.ts':
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
   'packages/contracts/src/index.ts':

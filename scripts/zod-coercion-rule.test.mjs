@@ -320,6 +320,19 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
       );
       assert.equal(verifiedCallbackHelper(root, `apps/web/src/server/${module}`, name), 'verified');
     }
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/repair-order-fields.ts'),
+      join(root, 'apps/web/src/lib/repair-order-fields.ts'),
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'),
+      'money-limit',
+    );
+    appendFileSync(join(root, 'apps/web/src/lib/repair-order-fields.ts'), '\n// changed source\n');
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'),
+      undefined,
+    );
     appendFileSync(join(root, 'apps/web/src/lib/format/digits.ts'), '\n// changed helper\n');
     assert.equal(
       verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
@@ -340,6 +353,9 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
+  `import {MAX_AMOUNT_MINOR} from 'unknown'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
+  `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(v=>MAX_AMOUNT_MINOR('1'));`,
+  `import {other} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(other));`,
   `const def={effect:{type:'transform',transform:v=>v}}; def.effect.transform=Number; new z.ZodEffects(def);`,
   `const def={effect:{type:'transform',transform:v=>v}}; const effect=def.effect; effect.transform=Number; new z.ZodEffects(def);`,
   `const def={effect:{type:'transform',transform:v=>v}}; mutate(def.effect); new z.ZodEffects(def);`,
@@ -425,6 +441,7 @@ for (const [index, code] of transformFailures.entries())
       code,
     ));
 for (const code of [
+  `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
   `z.string().transform(Number);`,
   `z.string().transform(v=>Number(v));`,
   `const f=async v=>Number(v); z.string().transform(f);`,
