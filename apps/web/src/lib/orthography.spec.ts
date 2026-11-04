@@ -99,6 +99,29 @@ describe('the spelling matcher', () => {
     },
   );
 
+  it('rejects every Unicode compatibility carrier without hiding a separate hamza', () => {
+    let carriers = 0;
+    for (let code = 0; code <= 0x10ffff; code += 1) {
+      if (code >= 0xd800 && code <= 0xdfff) continue;
+      const point = String.fromCodePoint(code);
+      const expanded = point.normalize('NFKC');
+      if (point === expanded || !/[اٱويىی]\p{M}*$/u.test(expanded.normalize('NFD'))) continue;
+      carriers += 1;
+      for (const marks of ['', '\u064e', '\u0651\u064e', '\u0640', '\u200c']) {
+        for (const hamza of ['\u0654', '\u0655']) {
+          expect([code, marks, hamza, nonStandardSpelling(point + marks + hamza)]).not.toContain(
+            null,
+          );
+        }
+      }
+    }
+    expect(carriers).toBeGreaterThan(150); // includes ligatures and supplementary letters
+    for (const standard of ['أ', 'إ', 'ؤ', 'ئ', '\ufe83', '\ufe85', '\ufe89', '\ufef7']) {
+      expect(nonStandardSpelling(standard)).toBeNull();
+    }
+    expect(nonStandardSpelling('\ufee9\u0654')).toBeNull(); // presentation heh: ezafe
+  });
+
   it('looks for the combining hamza before normalising (composition or stripping would hide it)', () => {
     const decomposed = 'تا\u064e\u0654مین';
     // NFC composes it away and stripping the marks deletes it; neither form is flagged by words alone…
@@ -107,6 +130,15 @@ describe('the spelling matcher', () => {
     expect(nonStandardSpelling(decomposed)).not.toBeNull();
     expect(nonStandardSpelling('تا\u0654مین')).not.toBeNull();
   });
+
+  it.each(['أ', 'إ', 'آ', 'ؤ', 'ئ', '\ufe83', '\ufe85', '\ufe89', '\ufef7'])(
+    'rejects an extra separate hamza on the composed carrier %s',
+    (carrier) => {
+      for (const hamza of ['\u0654', '\u0655']) {
+        expect(nonStandardSpelling(carrier + '\u064e' + hamza)).not.toBeNull();
+      }
+    },
+  );
 
   it('allows the ezafe: heh + combining hamza', () => {
     expect(nonStandardSpelling('شماره\u0654 دارایی')).toBeNull();
@@ -199,6 +231,72 @@ describe('the scan, on a fixture workspace', () => {
     expect(
       workspace({ 'apps/web/src/x.ts': `export const t = '${cssEscaped}';` }).offenders,
     ).toEqual([]);
+  });
+
+  it.each([
+    ['trailing comma', '{"a": 1,}'],
+    ['single quotes', "{'a': 1}"],
+    ['comment', '{/* copy */"a": 1}'],
+    ['NaN', '{"a": NaN}'],
+    ['undefined', '{"a": undefined}'],
+    ['empty document', ''],
+    ['extra root', '{} {}'],
+    ['invalid escape', '{"a": "\\x61"}'],
+    ['unescaped control', '{"a": "a\nb"}'],
+  ])('refuses strict JSON: %s', (_, source) => {
+    const scan = workspace({ 'apps/web/src/copy.json': source });
+    expect(scan.failures).toContainEqual(expect.stringContaining('copy.json:1: parse error: JSON'));
+  });
+
+  it('validates dependency manifests before discovery can skip them', () => {
+    const scan = workspace({ 'packages/unused/package.json': '{"name": "@x/unused",}' });
+    expect(scan.failures).toContainEqual(
+      expect.stringContaining('packages/unused/package.json:1: parse error: JSON'),
+    );
+  });
+
+  it('accepts JSONC build configuration and still checks its strings', () => {
+    expect(
+      workspace({ 'apps/web/tsconfig.json': '{/* config */"include": ["src",],}' }).failures,
+    ).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+    const scan = workspace({ 'apps/web/tsconfig.guard.json': `{/* config */"label": "${word}",}` });
+    expect(scan.failures).toEqual([]);
+    expect(scan.offenders).not.toEqual([]);
+  });
+
+  it.each([
+    ['apps/web/turbo.json', '{/* config */"tasks": {},}'],
+    ['packages/copy/tsconfig.json', '{/* config */"include": [],}'],
+  ])('accepts the declared JSONC grammar at %s', (path, source) => {
+    expect(workspace({ [path]: source }).failures).toEqual([]);
+  });
+
+  it.each(['apps/web/src/tsconfig.json', 'apps/web/src/turbo.json'])(
+    'refuses JSONC in ordinary source inputs: %s',
+    (path) => {
+      expect(workspace({ [path]: '{/* not a root config */"a": 1,}' }).failures).not.toEqual([]);
+    },
+  );
+
+  it.each(['apps/web/src/tsconfig.json', 'apps/web/turbo.json', 'apps/web/tsconfig.json'])(
+    'refuses invalid JSON/JSONC at %s',
+    (path) => {
+      expect(workspace({ [path]: '{"a": NaN}' }).failures).not.toEqual([]);
+    },
+  );
+
+  it.each([
+    ['unclosed block', 'a { color: red;'],
+    ['unclosed comment', '/* unfinished'],
+    ['unclosed string', 'a { content: "unfinished; }'],
+    ['missing colon', 'a { color red; }'],
+    ['unclosed bracket', 'a { color: var(--x; }'],
+    ['extra closing brace', 'a {} }'],
+  ])('refuses CSS parse errors: %s', (_, source) => {
+    expect(workspace({ 'apps/web/src/copy.css': source }).failures).toContainEqual(
+      expect.stringContaining('copy.css:1: parse error: CSS'),
+    );
   });
 
   it.each([

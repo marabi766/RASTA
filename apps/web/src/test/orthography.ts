@@ -10,11 +10,10 @@
  * of a word that takes one. A combining hamza on heh is the ezafe
  * («شمارهٔ دارایی») and is the standard spelling, so it is allowed.
  *
- * Order matters. The combining hamza is looked for in the text as written,
- * BEFORE anything is normalised: NFC/NFKC would compose «ا» + U+0654 into «أ»,
- * and stripping marks would delete it, so either step first would turn the
- * non-standard form into a standard one. Only then is the text normalised for
- * word matching.
+ * Expand each Unicode code point with NFKC before checking the carriers.
+ * Never normalise the whole string first: that would compose a separate hamza
+ * with its carrier and hide the violation. Per-code-point expansion preserves
+ * standard precomposed letters while exposing ligatures and astral carriers.
  */
 
 /** Hamza-less spellings, in Persian letters (ی U+06CC, ک U+06A9); matched as word stems. */
@@ -66,14 +65,17 @@ const HAMZA_LESS = new RegExp(
 const CARRIERS = new Set(['\u0627', '\u0671', '\u0648', '\u064a', '\u0649', '\u06cc']);
 const SKIPPED = new RegExp(`^${INVISIBLE}$`, 'u');
 
-/** A combining hamza on alef, waw or yeh, however many marks sit between them. Raw text only. */
+/** Compatibility expansion must not compose a hamza with the preceding code point. */
 function decomposedHamza(text: string): string | null {
-  for (let at = 0; at < text.length; at += 1) {
-    if (text[at] !== '\u0654' && text[at] !== '\u0655') continue;
+  const expanded = [...text].flatMap((point) => [...point.normalize('NFKC')]);
+  for (let at = 0; at < expanded.length; at += 1) {
+    if (expanded[at] !== '\u0654' && expanded[at] !== '\u0655') continue;
     let base = at - 1;
-    while (base >= 0 && SKIPPED.test(text[base] as string)) base -= 1;
-    if (base >= 0 && CARRIERS.has((text[base] as string).normalize('NFKC'))) {
-      return text.slice(base, at + 1);
+    while (base >= 0 && SKIPPED.test(expanded[base] as string)) base -= 1;
+    // A precomposed carrier may itself be followed by an extra, separate hamza.
+    const carrier = base < 0 ? '' : (expanded[base] as string).normalize('NFD')[0];
+    if (carrier !== undefined && CARRIERS.has(carrier)) {
+      return expanded.slice(base, at + 1).join('');
     }
   }
   return null;
