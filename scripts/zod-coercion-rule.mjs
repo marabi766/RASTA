@@ -61,7 +61,8 @@ const DATA_RESULTS = new Set(
   validateAsync isOptional isNullable toJSONSchema config getErrorMap formatError flattenError
   treeifyError prettifyError registry get`.split(/\s+/),
 );
-const SCHEMA_FIELDS = new Set(
+const SCHEMA_FIELDS = new Set(['element', 'keyType', 'valueType', 'innerType', 'in', 'out']);
+const DEFINITION_SCHEMA_FIELDS = new Set(
   'element keyType valueType innerType in out left right rest catchall type schema input output args returns'.split(
     ' ',
   ),
@@ -88,6 +89,7 @@ const optionsIndex = ({ name, raw, method, owner } = {}) => {
   const kind = api?.replace(/^\$?Zod(?:Mini)?/, '').toLowerCase();
   if (name === 'clone') return method ? 0 : raw ? 1 : 0;
   if (name === 'constructor') return 0;
+  if (name === 'init' && (owner === 'constructor' || /^\$?Zod/.test(owner ?? ''))) return 1;
   if (name === 'create') return owner ? optionsIndex({ name: owner, raw: true }) : 0;
   if (api === 'hash') return 1 + core;
   if (api === 'stringFormat') return 2 + core;
@@ -131,7 +133,7 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
       api === 'codec'
         ? 2
         : ['clone', 'constructor'].includes(api)
-          ? name === 'clone' && !receiverSchema
+          ? (name === 'clone' && !receiverSchema) || init
             ? 1
             : 0
           : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|CheckOverwrite)/.test(api)
@@ -233,11 +235,38 @@ export default {
       zodModule(def.parent.source?.value) &&
       def.parent.importKind !== 'type' &&
       def.node.importKind !== 'type';
+    const mergeOrigins = (...results) => {
+      const variants = results.flatMap((result) => result?.variants ?? (result ? [result] : []));
+      if (variants.length < 2) return variants[0];
+      const primary =
+        variants.find((result) => result.raw) ??
+        variants.find((result) => result.opaque) ??
+        variants.find((result) => result.schema) ??
+        variants.find((result) => result.container) ??
+        variants[0];
+      return { ...primary, variants };
+    };
     const access = (result, name, receiver) => {
       // Containers carry schema capability, never raw namespace capability. Their
       // children must survive aliases and patterns without tainting ordinary data.
       if (name?.rest || result.opaque) return result;
-      if (name === undefined && result.container) return { opaque: true };
+      if (result.variants)
+        return mergeOrigins(
+          ...result.variants.map((variant) =>
+            access(
+              { ...variant, ambiguous: result.ambiguous || variant.ambiguous },
+              name,
+              receiver,
+            ),
+          ),
+        );
+      if (name === undefined && result.container === 'literal')
+        return mergeOrigins(
+          ...result.children.values(),
+          result.spread && access(result.spread, name),
+        );
+      if (name === undefined && result.container && !['shape', 'list'].includes(result.container))
+        return { opaque: true };
       if (result.container) {
         if (result.container === 'literal')
           return (
@@ -256,8 +285,11 @@ export default {
           if (result.container === 'list' && name === 'length') return undefined;
           return { schema: true, ambiguous: result.ambiguous };
         }
+        if (result.container === 'internals' && name === 'constr')
+          return { raw: true, name: 'constructor', ambiguous: result.ambiguous };
         if (result.container === 'internals' && name === 'def') return { container: 'definition' };
-        if (SCHEMA_FIELDS.has(name)) return { schema: true, ambiguous: result.ambiguous };
+        if (DEFINITION_SCHEMA_FIELDS.has(name))
+          return { schema: true, ambiguous: result.ambiguous };
         const container = Object.hasOwn(SCHEMA_CONTAINERS, name)
           ? SCHEMA_CONTAINERS[name]
           : undefined;

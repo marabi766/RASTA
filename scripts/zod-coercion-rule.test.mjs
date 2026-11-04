@@ -648,6 +648,9 @@ for (const code of [
   `z.union([z.number(),z.string()]).options.slice()[0].clone({coerce:true});`,
   `z.discriminatedUnion('k',[]).optionsMap.values().next().value.clone({coerce:true});`,
   `const data=z.any().safeParse({n:z.number()}).data; data[getKey()].constructor({coerce:true});`,
+  `const C=z.object({n:z.number()}).shape.n._zod.constr; new C({type:'number',coerce:true});`,
+  `z.number()._zod.constr.init({}, {type:'number',coerce:true});`,
+  `z.number().constructor.init({}, {type:'number',coerce:true});`,
   `let child; [child]=z.union([z.number(),z.string()]).options; child.clone({coerce:true});`,
 ])
   it(`F1 container propagation: ${code}`, () =>
@@ -661,6 +664,9 @@ for (const code of [
   `const [n]=z.union([z.number(),z.string()]).options; n.clone({coerce:false});`,
   `const {data:n}=z.any().safeParse(z.number()); n.clone({coerce:false});`,
   `const {n}=z.object({n:z.number()}).shape; n.clone({coerce:false});`,
+  `z.object({}).catchall(z.number()); z.tuple([]).rest(z.number());`,
+  `const schemas={a:z.object({}),b:z.number()}; schemas[owner].safeParse(data);`,
+  `const schemas={a:{1:z.object({})},b:{1:z.number()}}; schemas[owner][version].parse(data);`,
   `const count=z.union([z.number(),z.string()]).options.length; use(count);`,
   `const data=z.object({n:z.number()}).parse({n:1}); data.n;`,
   `const meta=z.number().meta(); meta.clone({coerce:true});`,
