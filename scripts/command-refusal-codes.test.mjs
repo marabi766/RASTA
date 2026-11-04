@@ -39,9 +39,8 @@ import { prismaPort } from './outbox-b2-prisma-port.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
-const built = (path) => require(resolve(root, path));
-const config = () => built('packages/config/dist/index.js');
-const nestCommon = () => built('packages/nest-common/dist/index.js');
+const config = () => require('../packages/config/dist/index.js');
+const nestCommon = () => require('../packages/nest-common/dist/index.js');
 
 const TAIL = 'diagnostics withheld; prior work may have committed — reconcile before retrying';
 const refused = (code) => `command refused (code ${code}); ${TAIL}`;
@@ -114,7 +113,7 @@ test('owner-credential: the built guard is reported by the source reporter (one 
 });
 
 test('configuration: a service environment that does not validate', async () => {
-  const { loadAssetEnv } = built('services/asset-service/dist/config/env.js');
+  const { loadAssetEnv } = require('../services/asset-service/dist/config/env.js');
   await assertRefusal('configuration', () => loadAssetEnv({ PORT: SENTINELS[0] }));
 });
 
@@ -278,9 +277,9 @@ test('vacuum-unproven: the counters never move', async () => {
 // --- fleet drain check -------------------------------------------------------
 
 test('lag-unreadable: an expected topic the principal cannot see', async () => {
-  const { checkConsumerGroupDrained } = built(
-    'services/fleet-service/dist/fleet/drain-check.command.js',
-  );
+  const {
+    checkConsumerGroupDrained,
+  } = require('../services/fleet-service/dist/fleet/drain-check.command.js');
   await assertRefusal('lag-unreadable', () =>
     checkConsumerGroupDrained({ listTopics: async () => [] }, 'probe-group', ['probe.topic']),
   );
