@@ -191,7 +191,7 @@ export const JEST_LAUNCHERS = {
       'Spawns git fixture commands and Turbo lint --dry=json snapshots; test runner names are registration fixtures, never executed.',
     sha256: {
       'scripts/lint-scripts-registration.test.mjs':
-        'e611dc8ccaf8232cfbe179cb4b8f3f5d4443b50424f4cffd0deba6e0c89284a0',
+        '575871c749f538eb505cafc6ce29bbf242d018d7eb4cfeab11ee9520d7cebcd7',
     },
   },
 };
