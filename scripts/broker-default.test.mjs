@@ -1,10 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  BROKER_DEFAULT_ALREADY_ABSENT,
-  brokerDefaultDeleteOutcome,
-  withBrokerDefault,
-} from './broker-default.mjs';
+import { withBrokerDefault } from './broker-default.mjs';
 
 for (const [label, before, target] of [
   ['add', undefined, 3145728],
@@ -166,25 +162,6 @@ test('failed compensation cannot be confirmed by stale matching reads', async ()
   assert.equal(reads, 1);
 });
 
-test('Kafka deletion recognises only the exact known absence refusal; all other errors refuse', () => {
-  const missing = { status: 1, stdout: '', stderr: 'Invalid config(s): message.max.bytes\n' };
-  assert.equal(brokerDefaultDeleteOutcome(missing), BROKER_DEFAULT_ALREADY_ABSENT);
-  assert.equal(brokerDefaultDeleteOutcome({ status: 0, stdout: '', stderr: '' }), undefined);
-  for (const altered of [
-    { status: 2 },
-    { status: null },
-    { stdout: 'unexpected' },
-    { stderr: 'authentication failed' },
-    { stderr: 'connection reset' },
-    { stderr: 'Invalid config(s): other.config' },
-    { stderr: 'Invalid config(s): message.max.bytes\nforeign error' },
-  ])
-    assert.throws(
-      () => brokerDefaultDeleteOutcome({ ...missing, ...altered }),
-      /deletion unconfirmed/,
-    );
-});
-
 for (const failure of ['committed', 'lost-response', 'no-op setup']) {
   test(`stale absence for the entire window after ${failure} cannot confirm compensation`, async () => {
     let current;
@@ -200,7 +177,7 @@ for (const failure of ['committed', 'lost-response', 'no-op setup']) {
           current = 3145728;
         },
         {
-          // The snapshot, every CLI precheck and every readback stay absent.
+          // The snapshot and every readback stay absent; every deletion is refused.
           read: async () => {
             reads += 1;
             return undefined;
@@ -210,7 +187,7 @@ for (const failure of ['committed', 'lost-response', 'no-op setup']) {
             if (value !== undefined) {
               current = value;
               if (failure === 'lost-response') throw new Error('setup response lost');
-            } else return BROKER_DEFAULT_ALREADY_ABSENT;
+            } else throw new Error('deletion refused');
           },
           pause: async () => {
             pauses += 1;
@@ -227,7 +204,7 @@ for (const failure of ['committed', 'lost-response', 'no-op setup']) {
   });
 }
 
-test('stale absent CLI refusals never skip deletion when the committed override becomes visible', async () => {
+test('stale absent describes and refused deletions never skip deletion when the committed override becomes visible', async () => {
   let current;
   let writes = 0;
   let pauses = 0;
@@ -240,7 +217,7 @@ test('stale absent CLI refusals never skip deletion when the committed override 
           current = value;
           throw new Error('setup response lost');
         }
-        if (writes < 5) return BROKER_DEFAULT_ALREADY_ABSENT;
+        if (writes < 5) throw new Error('deletion refused');
         current = value;
       },
       pause: async () => {
@@ -255,7 +232,7 @@ test('stale absent CLI refusals never skip deletion when the committed override 
 });
 
 for (const issue of ['unknown-write', 'unreadable', 'override-present', 'wrong-provenance']) {
-  test(`known absence cannot mask ${issue}`, async () => {
+  test(`refused deletions cannot mask ${issue}`, async () => {
     let writes = 0;
     let reads = 0;
     const before = issue === 'wrong-provenance' ? 1100000 : undefined;
@@ -268,7 +245,7 @@ for (const issue of ['unknown-write', 'unreadable', 'override-present', 'wrong-p
         },
         set: async () => {
           if (++writes === 10 && issue === 'unknown-write') throw new Error('unconfirmed');
-          return BROKER_DEFAULT_ALREADY_ABSENT;
+          throw new Error('deletion refused');
         },
         pause: async () => {},
       }),
@@ -311,10 +288,76 @@ test('direct deletion encodes only message.max.bytes and requires the exact succ
 
 test('malformed deletion endpoint refuses without retaining configuration input', async () => {
   const { deleteBrokerDefault } = await import('./broker-default-delete.mjs');
-  await assert.rejects(deleteBrokerDefault({ brokers: ['[invalid-private-endpoint'] }), (error) => {
-    assert.equal(error.message, 'BROKER_DEFAULT endpoint UNCONFIRMED');
-    assert.equal(error.input, undefined);
-    assert.equal(error.cause, undefined);
-    return true;
+  await assert.rejects(
+    deleteBrokerDefault({
+      brokers: ['[invalid-private-endpoint'],
+      clusterId: 'rasta-ci-cluster-000001',
+    }),
+    (error) => {
+      assert.equal(error.message, 'BROKER_DEFAULT endpoint UNCONFIRMED');
+      assert.equal(error.input, undefined);
+      assert.equal(error.cause, undefined);
+      return true;
+    },
+  );
+});
+
+// FU-006: the DELETE must reach the cluster the reads/SETs resolved, checked on
+// the very connection that sends it.
+function fakeBroker(reportedClusterId, log) {
+  return () => ({
+    connect: async () => log.push('connect'),
+    versions: () => ({ 44: { minVersion: 0, maxVersion: 1 } }),
+    metadata: async () => {
+      log.push('metadata');
+      return { clusterId: reportedClusterId };
+    },
+    send: async (request) => {
+      log.push(`send:${request.request.apiKey}`);
+    },
+    disconnect: async () => log.push('disconnect'),
   });
+}
+const target = { brokers: ['localhost:9092'], clientId: 'rasta-admin' };
+
+test('deletion is sent only on a connection that reports the read/SET cluster', async () => {
+  const { deleteBrokerDefault } = await import('./broker-default-delete.mjs');
+  const log = [];
+  await deleteBrokerDefault(
+    { ...target, clusterId: 'rasta-ci-cluster-000001' },
+    { open: fakeBroker('rasta-ci-cluster-000001', log) },
+  );
+  assert.deepEqual(log, ['connect', 'metadata', 'send:44', 'disconnect']);
+
+  for (const reported of ['another-cluster-000002', undefined, null, '']) {
+    const other = [];
+    await assert.rejects(
+      deleteBrokerDefault(
+        { ...target, clusterId: 'rasta-ci-cluster-000001' },
+        { open: fakeBroker(reported, other) },
+      ),
+      /^Error: BROKER_DEFAULT broker UNCONFIRMED$/,
+    );
+    assert.deepEqual(other, ['connect', 'metadata', 'disconnect']);
+  }
+});
+
+test('deletion with an unresolved read/SET cluster refuses before connecting', async () => {
+  const { deleteBrokerDefault } = await import('./broker-default-delete.mjs');
+  for (const clusterId of [undefined, null, '', ' ', 'a b', 'x'.repeat(65), 42, 'Cluster ID: x']) {
+    let opened = false;
+    await assert.rejects(
+      deleteBrokerDefault(
+        { ...target, clusterId },
+        {
+          open: () => {
+            opened = true;
+            return fakeBroker(clusterId, [])();
+          },
+        },
+      ),
+      /^Error: BROKER_DEFAULT broker UNCONFIRMED$/,
+    );
+    assert.equal(opened, false);
+  }
 });

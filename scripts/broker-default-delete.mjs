@@ -48,11 +48,12 @@ export const deleteRequest = {
   },
 };
 
-export async function deleteBrokerDefault({ brokers, ssl, sasl, clientId }) {
-  // Tests have one disposable broker. Bad/missing endpoints fail closed.
-  const endpoint = readUrl(`tcp://${brokers[0]}`, {
-    refusal: 'BROKER_DEFAULT endpoint UNCONFIRMED',
-  });
+// The cluster a read/SET path resolved, passed in by the caller. Never derived
+// from this adapter's own endpoint: that would bind the check to itself.
+const CLUSTER_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const BROKER_UNCONFIRMED = 'BROKER_DEFAULT broker UNCONFIRMED';
+
+function openBroker(endpoint, { ssl, sasl, clientId }) {
   const logger = createLogger({ level: 0, logCreator: () => () => {} });
   const connectionPool = new ConnectionPool({
     host: endpoint.hostname,
@@ -67,11 +68,40 @@ export async function deleteBrokerDefault({ brokers, ssl, sasl, clientId }) {
     enforceRequestTimeout: true,
   });
   const broker = new Broker({ connectionPool, logger, authenticationTimeout: 5000 });
+  return {
+    connect: () => broker.connect(),
+    versions: () => broker.versions,
+    metadata: () => broker.metadata([]),
+    send: (request) => connectionPool.send(request),
+    disconnect: () => broker.disconnect(),
+  };
+}
+
+/**
+ * DELETE the broker-default override on the cluster `clusterId` names: the one
+ * the caller's reads and SETs resolved. The broker reached here must report the
+ * same cluster on the same connection that sends the DELETE; unresolved,
+ * malformed or mismatched ⇒ refuse before sending (FU-006).
+ */
+export async function deleteBrokerDefault(
+  { brokers, ssl, sasl, clientId, clusterId },
+  { open = openBroker } = {},
+) {
+  if (typeof clusterId !== 'string' || !CLUSTER_ID.test(clusterId)) {
+    throw new Error(BROKER_UNCONFIRMED);
+  }
+  // Tests have one disposable broker. Bad/missing endpoints fail closed.
+  const endpoint = readUrl(`tcp://${brokers[0]}`, {
+    refusal: 'BROKER_DEFAULT endpoint UNCONFIRMED',
+  });
+  const broker = open(endpoint, { ssl, sasl, clientId });
   try {
     await broker.connect();
-    const version = broker.versions[API_KEY];
+    const version = broker.versions()?.[API_KEY];
     if (!version || version.minVersion > 0) throw new Error('incremental deletion unavailable');
-    return await connectionPool.send(deleteRequest);
+    const metadata = await broker.metadata();
+    if (metadata?.clusterId !== clusterId) throw new Error(BROKER_UNCONFIRMED);
+    return await broker.send(deleteRequest);
   } finally {
     await broker.disconnect();
   }
