@@ -121,6 +121,17 @@ export interface ClaimFence<T> {
  */
 export type ReplayGuard<T> = (stored: T) => Promise<void>;
 
+/**
+ * How a request is recognised: the digest stored with its claim, and whether a later request is
+ * the same one. The default is the plain SHA-256 of the caller and the canonical body; a command
+ * whose body is a secret (a quotation's price, plan PR 8) passes a keyed, salted one, whose
+ * digests never compare as strings — so recognising is `matches`, never equality.
+ */
+export interface RequestHasher {
+  hash(body: unknown): string;
+  matches(stored: string, body: unknown): boolean;
+}
+
 type Claim =
   | { kind: 'PROCEED'; token: string; claimedAt: Date }
   | { kind: 'REPLAY'; status: number; body: unknown };
@@ -197,8 +208,9 @@ export class IdempotencyStore {
     successStatus: number,
     work: (fence: ClaimFence<T>) => Promise<T>,
     stillVisible: ReplayGuard<T>,
+    hasher: RequestHasher = this.sha256,
   ): Promise<{ result: T; executed: boolean }> {
-    const claim = await this.claim(endpoint, key, body);
+    const claim = await this.claim(endpoint, key, body, hasher);
     if (claim.kind === 'REPLAY') {
       const stored = claim.body as T;
       await stillVisible(stored);
@@ -305,16 +317,27 @@ export class IdempotencyStore {
     return hashRequest({ caller: getContext().userId ?? null, body });
   }
 
+  private readonly sha256: RequestHasher = {
+    hash: (body) => this.hash(body),
+    matches: (stored, body) => stored === this.hash(body),
+  };
+
   /**
    * Reserves the key, waits on it while another request holds it, or reports the stored
    * response to replay. The two conflicts throw.
    */
-  async claim(endpoint: string, key: string, body: unknown): Promise<Claim> {
-    const requestHash = this.hash(body);
+  async claim(
+    endpoint: string,
+    key: string,
+    body: unknown,
+    hasher: RequestHasher = this.sha256,
+  ): Promise<Claim> {
+    const requestHash = hasher.hash(body);
+    const sameRequest = (stored: string) => hasher.matches(stored, body);
     const deadline = Date.now() + IN_FLIGHT_WAIT_MS;
     let retries = 0;
     for (;;) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, requestHash, sameRequest, deadline);
       if (outcome === RETRY_CLAIM) {
         retries += 1;
         if (retries >= CLAIM_ATTEMPTS) throw inFlight(endpoint);
@@ -344,6 +367,7 @@ export class IdempotencyStore {
     endpoint: string,
     key: string,
     requestHash: string,
+    sameRequest: (stored: string) => boolean,
     deadline: number,
   ): Promise<Claim | typeof RETRY_CLAIM | typeof IN_FLIGHT> {
     const organizationId = getOrganizationId();
@@ -389,7 +413,7 @@ export class IdempotencyStore {
 
     // Before anything about the stored state: another request or another caller learns
     // nothing of it, not even that it is still in flight.
-    if (existing.requestHash !== requestHash) throw RastaError.idempotencyKeyReused();
+    if (!sameRequest(existing.requestHash)) throw RastaError.idempotencyKeyReused();
 
     if (existing.state === 'IN_PROGRESS') return IN_FLIGHT;
 
