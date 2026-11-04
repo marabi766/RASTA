@@ -2,7 +2,8 @@ import request from 'supertest';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from '../src/openapi/document';
 import type { Server } from 'node:http';
-import { runUnscoped } from '@rasta/nest-common';
+import { inspect } from 'node:util';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
 import {
   apiKey,
   apiTenant,
@@ -15,8 +16,9 @@ import {
   type ApiHarness,
 } from './api-helpers';
 import { cleanup, testEnv } from './helpers';
-import { expectNotDisclosed } from '@rasta/testing';
+import { expectNotDisclosed, recordCalls } from '@rasta/testing';
 import { ORDER_NOTE_NOT_STORED, RECEIPT_NOTE_NOT_STORED } from '../src/order/dto';
+import { OrderSagaClient } from '../src/temporal/saga.client';
 
 /**
  * The order HTTP surface, every path including the refusals.
@@ -235,6 +237,180 @@ describe('order API', () => {
         .expect(422);
 
       expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+    });
+
+    describe('a derived total past the largest storable amount (marketplace audit F4)', () => {
+      const MAX = '9223372036854775807';
+
+      /**
+       * Every line the application could write: the filter's logger and the streams. `text()`
+       * answers from a snapshot once `restore()` has run — a restored spy has no history.
+       */
+      function captureLogs(): { text: () => string; restore: () => void } {
+        const logger = harness.app.get<Record<string, unknown>>(EXCEPTION_FILTER_LOGGER);
+        const record = recordCalls([
+          ...['fatal', 'error', 'warn', 'info', 'debug', 'trace']
+            .filter((level) => typeof logger[level] === 'function')
+            .map((level) => jest.spyOn(logger as Record<string, () => void>, level)),
+          jest.spyOn(process.stdout, 'write'),
+          jest.spyOn(process.stderr, 'write'),
+        ]);
+        return {
+          text: () => inspect(record.calls(), { depth: null, maxStringLength: null }),
+          restore: () => record.restore(),
+        };
+      }
+
+      /** What a refused placement must have left exactly as it was. */
+      async function effects(key: string, offerIds: string[]) {
+        return runUnscoped(
+          'the suite reads what a refused placement could have written',
+          async () => ({
+            orders: await harness.prisma.client.order.count({
+              where: { organizationId: buyerOrg, idempotencyKey: key },
+            }),
+            available: (
+              await harness.prisma.client.offer.findMany({
+                where: { id: { in: offerIds } },
+                select: { id: true, availableQuantity: true },
+                orderBy: { id: 'asc' },
+              })
+            ).map((offer) => [offer.id, offer.availableQuantity]),
+            outbox: await harness.prisma.client.outboxMessage.count({
+              where: { organizationId: buyerOrg, eventName: 'ORDER_CREATED' },
+            }),
+          }),
+        );
+      }
+
+      /**
+       * Runs `act` with the application's writers and the saga start observed. What was observed
+       * is read from snapshots taken before the spies are restored: a restored spy has an empty
+       * history, and every "nothing was written / started" assertion would pass on it.
+       */
+      async function observing<T>(act: () => Promise<T>) {
+        const saga = harness.app.get(OrderSagaClient);
+        const starts = recordCalls([jest.spyOn(saga, 'start')]);
+        const logs = captureLogs();
+        let result: T;
+        try {
+          result = await act();
+        } finally {
+          logs.restore();
+          starts.restore();
+        }
+        return { result, logs, sagaStarts: starts.calls() };
+      }
+
+      async function refusedPlacement(lines: { offerId: string; quantity: number }[]) {
+        const key = apiKey('api-amount-bound');
+        const offerIds = lines.map((line) => line.offerId);
+        const before = await effects(key, offerIds);
+        const {
+          result: response,
+          logs,
+          sagaStarts,
+        } = await observing(() =>
+          request(http)
+            .post('/v1/orders')
+            .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+            .set('idempotency-key', key)
+            .send({ lines }),
+        );
+        return { response, before, after: await effects(key, offerIds), logs, sagaStarts, key };
+      }
+
+      /**
+       * Positive control for `observing`: what it reads back after the restore is what happened
+       * while it was active. A helper that lost its history (restore before read) or never
+       * installed its spies fails here, so the "nothing logged / started" assertions below
+       * cannot pass on an empty record.
+       */
+      it('the observation records a logged figure and a saga start, and still has them after the restore', async () => {
+        const figure = '9223372036854775807';
+        const logger =
+          harness.app.get<Record<string, (message: string) => void>>(EXCEPTION_FILTER_LOGGER);
+        const level = (['error', 'warn', 'info'] as const).find(
+          (name) => typeof logger[name] === 'function',
+        )!;
+        const { logs, sagaStarts } = await observing(async () => {
+          logger[level](`forbidden figure ${figure}`);
+          // Whatever `start` then does is beside the point: the spy sees the call.
+          await harness.app
+            .get(OrderSagaClient)
+            .start('ORD_POSITIVE_CONTROL')
+            .catch(() => undefined);
+        });
+        expect(logs.text()).toContain(figure);
+        expect(() => expectNotDisclosed(logs.text(), [figure])).toThrow();
+        expect(sagaStarts).toEqual([['ORD_POSITIVE_CONTROL']]);
+      });
+
+      it('the observation of an act that does nothing is empty', async () => {
+        const { logs, sagaStarts } = await observing(async () => undefined);
+        expect(sagaStarts).toEqual([]);
+        expect(() => expectNotDisclosed(logs.text(), ['9223372036854775807'])).not.toThrow();
+      });
+
+      it('places an order whose total is exactly the bound', async () => {
+        const offerId = await publishOffer({ price: MAX, quantity: 2 });
+        const response = await placeOrder(offerId, 1);
+        expect(response.body.totalAmountMinor).toBe(MAX);
+      });
+
+      it('refuses the largest price times two with 422 and its closed reason, and changes nothing', async () => {
+        const offerId = await publishOffer({ price: MAX, quantity: 2 });
+        const { response, before, after, logs, sagaStarts } = await refusedPlacement([
+          { offerId, quantity: 2 },
+        ]);
+
+        expect(response.status).toBe(422);
+        expect(response.body).toEqual({
+          code: 'BUSINESS_RULE_VIOLATION',
+          message: 'The order total exceeds the largest amount the platform can record',
+          details: [
+            {
+              path: 'lines[0].quantity',
+              code: 'ORDER_AMOUNT_EXCEEDS_LIMIT',
+              message: 'The order total exceeds the largest amount the platform can record',
+            },
+          ],
+          correlationId: expect.any(String),
+          timestamp: expect.any(String),
+          path: '/v1/orders',
+        });
+        // No figure — the price, the product of it or the overflow — in the
+        // answer or in anything the application wrote while refusing.
+        const figures = [MAX, (BigInt(MAX) * 2n).toString()];
+        expectNotDisclosed(response.body, figures);
+        expectNotDisclosed(logs.text(), figures);
+        expect(after).toEqual(before);
+        expect(after.orders).toBe(0);
+        expect(sagaStarts).toEqual([]);
+      });
+
+      it('refuses two lines that are each storable but sum one past the bound, and changes nothing', async () => {
+        const first = await publishOffer({ price: MAX, quantity: 1 });
+        const second = await publishOffer({ price: '1', quantity: 1 });
+        const { response, before, after, sagaStarts } = await refusedPlacement([
+          { offerId: first, quantity: 1 },
+          { offerId: second, quantity: 1 },
+        ]);
+
+        expect(response.status).toBe(422);
+        expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+        expect(response.body.details).toEqual([
+          expect.objectContaining({ path: 'lines', code: 'ORDER_AMOUNT_EXCEEDS_LIMIT' }),
+        ]);
+        expect(after).toEqual(before);
+        expect(after.available).toEqual(
+          [
+            [first, 1],
+            [second, 1],
+          ].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        );
+        expect(sagaStarts).toEqual([]);
+      });
     });
 
     it('replays the original response for the same key and body', async () => {

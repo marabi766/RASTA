@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTestPhaseInputs } from './check-test-phases.mjs';
@@ -283,10 +285,13 @@ test('CI losing the exclusive invocation or its security selection is caught', (
   const direct = real();
   direct.ciWorkflow = replaceOnce(
     direct.ciWorkflow,
-    '          pnpm run test:integration\n',
+    '          pnpm run test:integration --shard=identity -- --verbose\n',
     '          pnpm exec turbo run test:integration\n',
   );
-  expectProblem(direct, /"Integration tests" must run `pnpm run test:integration`/);
+  expectProblem(
+    direct,
+    /"Integration tests" must run `pnpm run test:integration --shard=identity`/,
+  );
   expectProblem(direct, /through turbo directly, bypassing the two-phase orchestrator/);
 
   const narrowed = real();
@@ -494,4 +499,117 @@ test('passWithNoTests: a script that runs no jest, or the wrong project, is refu
   const bare = services();
   bare['services/asset-service'].scripts['test:integration'] = 'jest --runInBand';
   expectServiceProblem(bare, /asset-service.*must select the "integration" project/);
+});
+
+test('shard plans use exact positive filters and stress belongs only to identity', () => {
+  const expected = {
+    identity: [
+      'identity',
+      'analytics',
+      'api-gateway',
+      'asset',
+      'document',
+      'fleet',
+      'maintenance',
+      'notification',
+      'organization',
+      'supplier',
+    ],
+    construction: ['construction'],
+    economic: ['economic', 'procurement'],
+    contract: ['contract', 'inventory', 'marketplace', 'audit'],
+  };
+  for (const [shard, packages] of Object.entries(expected)) {
+    const names = packages.map(
+      (name) => `@rasta/${name === 'api-gateway' ? name : name + '-service'}`,
+    );
+    const plan = planTestRun(['test:integration', `--shard=${shard}`]);
+    assert.deepEqual(plan[0], {
+      phase: 'workspace',
+      args: ['run', 'test:integration', ...names.map((name) => `--filter=${name}`)],
+    });
+    assert.equal(plan.length, shard === 'identity' ? 2 : 1);
+    if (shard === 'identity')
+      assert.deepEqual(plan[1].args, [
+        'run',
+        'test:aggregation-stress',
+        '--filter=@rasta/identity-service',
+      ]);
+  }
+  for (const args of [
+    ['--shard=unknown'],
+    ['--shard='],
+    ['--shard=identity', '--shard=contract'],
+    ['--filter=@rasta/identity-service'],
+  ]) {
+    assert.throws(() => planTestRun(['test:integration', ...args]), /before `--`/);
+  }
+  assert.throws(() => planTestRun(['test', '--shard=identity']), /before `--`/);
+});
+
+test('the executable identity shard runs stress after workspace failure and preserves failure', (t) => {
+  const root = mkdtempSync(resolve(tmpdir(), 'shard-runner-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(resolve(root, 'scripts'));
+  mkdirSync(resolve(root, 'node_modules/turbo/bin'), { recursive: true });
+  for (const file of ['run-test-phases.mjs', 'test-phases-lib.mjs', 'integration-partitions.mjs'])
+    copyFileSync(resolve(here, file), resolve(root, 'scripts', file));
+  writeFileSync(resolve(root, 'package.json'), '{}');
+  writeFileSync(resolve(root, 'node_modules/turbo/package.json'), '{}');
+  writeFileSync(
+    resolve(root, 'node_modules/turbo/bin/turbo'),
+    `const fs = require('node:fs'); fs.appendFileSync(process.env.SHARD_TRACE, JSON.stringify(process.argv.slice(2)) + '\n'); process.exit(process.argv[3] === 'test:integration' ? 7 : 0);`.replace(
+      "+ '\n'",
+      "+ '\\n'",
+    ),
+  );
+  const trace = resolve(root, 'trace');
+  const result = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'scripts/run-test-phases.mjs'),
+      'test:integration',
+      '--shard=identity',
+      '--',
+      '--testNamePattern=concurren',
+    ],
+    { encoding: 'utf8', env: { ...process.env, SHARD_TRACE: trace } },
+  );
+  assert.equal(result.status, 7, result.stderr);
+  const calls = readFileSync(trace, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][1], 'test:integration');
+  assert.deepEqual(calls[1], [
+    'run',
+    'test:aggregation-stress',
+    '--filter=@rasta/identity-service',
+    '--',
+    '--testNamePattern=concurren',
+  ]);
+  // Refuse every ownership shape that could widen Turbo's selectors or omit stress.
+  for (const members of [
+    [],
+    null,
+    'all',
+    ['@rasta/*'],
+    ['@rasta/identity-service...'],
+    ['!@rasta/identity-service'],
+    ['@rasta/identity-service', '@rasta/identity-service'],
+  ]) {
+    rmSync(trace, { force: true });
+    writeFileSync(
+      resolve(root, 'scripts/integration-partitions.mjs'),
+      `export const INTEGRATION_PARTITIONS = ${JSON.stringify({ 'Integration tests': members })};`,
+    );
+    const refused = spawnSync(
+      process.execPath,
+      [resolve(root, 'scripts/run-test-phases.mjs'), 'test:integration', '--shard=identity'],
+      { encoding: 'utf8', env: { ...process.env, SHARD_TRACE: trace } },
+    );
+    assert.equal(refused.status, 2, refused.stderr);
+    assert.throws(() => readFileSync(trace), /ENOENT/);
+  }
 });

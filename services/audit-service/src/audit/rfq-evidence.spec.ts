@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto';
-import { DLQ_REASONS, eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
+import {
+  DLQ_REASONS,
+  QUOTATION_RECEIPT_GENESIS_LABEL,
+  eventEnvelopeSchema,
+  quotationRevisedPayloadSchema,
+  quotationSubmittedPayloadSchema,
+  type EventEnvelope,
+} from '@rasta/contracts';
 import { UnprocessableEventError } from '@rasta/nest-common';
 import {
   RFQ_RECEIPT_GENESIS_LABEL,
@@ -7,12 +14,14 @@ import {
   RfqEvidenceUnmappableError,
   RFQ_RECEIPT_EVENT_VERSIONS,
   genesisReceipt,
+  quotationReceiptPayloadSchema,
   toRfqEvidenceEvent,
 } from './rfq-evidence';
 
 const digest = (seed: string): string => createHash('sha256').update(seed).digest('hex');
 
-const RFQ = 'RFQ_01';
+// Identifiers in the form procurement-service mints them (the producer's contract checks the form).
+const RFQ = 'RFQ_01JBQ0000000000000000000AB';
 const BUYER = 'ORG_BUYER';
 
 const envelope = (eventName: string, payload: object, overrides: object = {}): EventEnvelope =>
@@ -29,12 +38,12 @@ const envelope = (eventName: string, payload: object, overrides: object = {}): E
     ...overrides,
   }) as EventEnvelope;
 
-/** A `QUOTATION_SUBMITTED` payload as ADR-070 § 9 fixes it (and the producer's `.strict()` shape adds only `submittedBy`). */
+/** A `QUOTATION_SUBMITTED` payload as ADR-070 § 9 fixes it (the producer's `.strict()` shape adds only `submittedBy`). */
 const payload = (overrides: object = {}): object => ({
   rfqId: RFQ,
-  quotationId: 'QUO_01',
+  quotationId: 'QOT_01JBQ0000000000000000000CD',
   organizationId: BUYER,
-  supplierOrganizationId: 'ORG_SUPPLIER',
+  supplierOrganizationId: 'ORG_01JBQ0000000000000000000EF',
   revision: 1,
   receivedAt: '2026-11-02T09:59:00.000Z',
   contentCommitment: digest('commitment'),
@@ -79,7 +88,11 @@ describe('toRfqEvidenceEvent', () => {
   it.each(['QUOTATION_SUBMITTED', 'QUOTATION_REVISED'])('reads the receipt of a %s', (name) => {
     const event = toRfqEvidenceEvent(envelope(name, payload()));
     expect(event?.eventId).toBe('01JAAAAAAAAAAAAAAAAAAAAAAA');
-    expect(event?.payload).toMatchObject({ rfqId: RFQ, quotationId: 'QUO_01', revision: 1 });
+    expect(event?.payload).toMatchObject({
+      rfqId: RFQ,
+      quotationId: 'QOT_01JBQ0000000000000000000CD',
+      revision: 1,
+    });
   });
 
   it('keeps only what it reads: a field a later producer adds is not refused, and is not kept', () => {
@@ -174,5 +187,31 @@ describe('toRfqEvidenceEvent', () => {
       expect((error as Error).message).not.toContain('ORG_SECRET');
       expect((error as Error).message).not.toContain(BUYER);
     }
+  });
+});
+
+describe('the producer’s contract (@rasta/contracts, COM-007 PR 8) and this consumer', () => {
+  it('share the genesis label', () => {
+    expect(QUOTATION_RECEIPT_GENESIS_LABEL).toBe(RFQ_RECEIPT_GENESIS_LABEL);
+  });
+
+  it.each([
+    ['QUOTATION_SUBMITTED', quotationSubmittedPayloadSchema, 1],
+    ['QUOTATION_REVISED', quotationRevisedPayloadSchema, 2],
+  ] as const)(
+    '%s: the producer’s strict schema accepts this consumer’s fixture, and the consumer reads it',
+    (name, producer, revision) => {
+      const fixture = payload({ revision });
+      expect(producer.safeParse(fixture).success).toBe(true);
+      expect(toRfqEvidenceEvent(envelope(name, fixture))?.payload).toMatchObject({ revision });
+    },
+  );
+
+  it('reads no field the producer does not publish, each with the producer’s name', () => {
+    const produced = Object.keys(quotationSubmittedPayloadSchema.shape);
+    for (const field of Object.keys(quotationReceiptPayloadSchema.shape)) {
+      expect(produced).toContain(field);
+    }
+    expect(Object.keys(quotationRevisedPayloadSchema.shape).sort()).toEqual(produced.sort());
   });
 });

@@ -61,7 +61,7 @@ export const CLI_CONTRACT = Object.freeze({
   'apps/web/scripts/build-supervisor.mjs': { other: ['-axo'] },
   'apps/web/src/app/fonts.ts': { other: ['--font-vazirmatn'] },
   // Test helper of the build-binding specs: runs the build scripts in a child Node.
-  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },
+  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-axo', '-e'] },
 
   // --- packages: test fixtures run by their specs ----------------------------
   // The stock-zod oracle's build child (PR #444 r4): its input arrives on stdin.
@@ -354,7 +354,7 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/check-service-boundaries.mjs': { positionals: [], accepts: { '--root': 'path' } },
   'scripts/check-test-phases.mjs': { positionals: ['script'] },
   'scripts/ci-image-matrix.mjs': { other: ['--run'] },
-  'scripts/ci-integration-split-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
+  'scripts/ci-integration-split-lib.mjs': { other: ['--filter', '--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
   'scripts/ci-node-test-timeouts-lib.mjs': {
@@ -416,6 +416,7 @@ export const CLI_CONTRACT = Object.freeze({
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
   'scripts/marketplace-saga-drain-check.mjs': {
     other: [
+      '--no-json-shorthand-payloads',
       '--address',
       '--namespace',
       '--output',
@@ -487,7 +488,14 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
-    other: ['--passWithNoTests', '--runInBand', '--selectProjects', '--testNamePattern'],
+    other: [
+      '--passWithNoTests',
+      '--runInBand',
+      '--selectProjects',
+      '--shard',
+      '--testNamePattern',
+      '--verbose',
+    ],
   },
   'scripts/verify-audit-correction-command-migration.mjs': {
     positionals: [],

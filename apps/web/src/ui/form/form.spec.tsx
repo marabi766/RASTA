@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { axe } from 'jest-axe';
 import { z } from 'zod';
 
+import { formMessage } from '@/lib/form-issues';
 import { itSnapshotsInBothDirections, renderInDirection } from '@/test/directions';
 
 import { Form, useSchemaForm } from './Form';
@@ -19,7 +20,7 @@ import { TextField } from './TextField';
  * with it and no one has to remember to come here.
  */
 const requestSchema = z.object({
-  title: z.string().min(3, 'عنوان دست‌کم سه نویسه است'),
+  title: z.string().min(3, formMessage('عنوان دست‌کم سه نویسه است')),
   amountMinor: amountMinorSchema,
 });
 
@@ -143,7 +144,9 @@ describe('MoneyField', () => {
     fireEvent.change(amount, { target: { value: 'صد هزار' } });
     fireEvent.blur(amount);
 
-    await waitFor(() => expect(screen.getByText(/نمی‌توان/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText('مبلغ فقط از رقم تشکیل می‌شود')).toBeInTheDocument(),
+    );
     expect(amount.value).toBe('صد هزار');
   });
 
@@ -201,5 +204,23 @@ describe('a message Zod wrote itself', () => {
 
     await waitFor(() => expect(screen.getByText('حداکثر ۵ نویسه مجاز است')).toBeInTheDocument());
     expect(document.body.textContent).not.toMatch(/must contain|character\(s\)/);
+  });
+});
+
+// Last in the file: React's id counter feeds the snapshots above.
+describe('an unreadable amount (Codex PR-439 r1 F1)', () => {
+  // Codex PR-439 r1 F1: the message used to quote what was typed, bidi
+  // controls included. The typed text stays in the box, never in the message.
+  it('says a fixed sentence for an unreadable amount, never the typed text', async () => {
+    renderInDirection(<RequestForm />, 'rtl');
+    const amount = screen.getByLabelText(/مبلغ/) as HTMLInputElement;
+    const typed = '۱۲typed-input-marker\u202e';
+    fireEvent.change(amount, { target: { value: typed } });
+    fireEvent.blur(amount);
+
+    const message = await screen.findByText('مبلغ فقط از رقم تشکیل می‌شود');
+    expect(message.textContent).not.toContain('typed-input-marker');
+    expect(message.textContent).not.toContain('\u202e');
+    expect(amount.value).toBe(typed);
   });
 });

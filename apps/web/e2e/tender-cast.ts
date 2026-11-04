@@ -257,14 +257,16 @@ export async function castForRun(
       estimatedCostMinor: '5000000000',
     }),
   );
-  const need = withId.parse(
+  const need = versioned.parse(
     await gateway(author, 'POST', `/v1/projects/${project.id}/needs`, 201, {
+      expectedProjectVersion: project.version,
       title: 'Contractor',
       description: 'Resurfacing works, two kilometres',
     }),
   );
   await gateway(author, 'POST', `/v1/projects/${project.id}/needs/${need.id}/submit`, 200, {
-    expectedVersion: 1,
+    expectedProjectVersion: project.version,
+    expectedVersion: need.version,
   });
   await gateway(author, 'POST', `/v1/projects/${project.id}/approvals`, 200, {
     expectedVersion: project.version,

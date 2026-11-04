@@ -70,32 +70,9 @@ export const AGGREGATE_NAME = 'Integration and security tests';
 export const SPLIT_PREFIX = 'integration-';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/**
- * Current workspace phase ownership, keyed by its exact-command inventory step.
- * This is deliberately independent of discovery. The follow-up replaces this
- * single partition with explicit jobs; adding a workspace must update ownership.
- */
-export const INTEGRATION_PARTITIONS = Object.freeze({
-  'Integration tests': Object.freeze([
-    '@rasta/analytics-service',
-    '@rasta/api-gateway',
-    '@rasta/asset-service',
-    '@rasta/audit-service',
-    '@rasta/construction-service',
-    '@rasta/contract-service',
-    '@rasta/document-service',
-    '@rasta/economic-service',
-    '@rasta/fleet-service',
-    '@rasta/identity-service',
-    '@rasta/inventory-service',
-    '@rasta/maintenance-service',
-    '@rasta/marketplace-service',
-    '@rasta/notification-service',
-    '@rasta/organization-service',
-    '@rasta/procurement-service',
-    '@rasta/supplier-service',
-  ]),
-});
+import { planTestRun } from './test-phases-lib.mjs';
+import { INTEGRATION_PARTITIONS } from './integration-partitions.mjs';
+export { INTEGRATION_PARTITIONS };
 
 /** Read every configured workspace root; never infer membership from the registry. */
 export function discoverIntegrationPackages(root = ROOT) {
@@ -240,20 +217,106 @@ const postgresGuard = (command) => ({ run: [command], env: POSTGRES, timeout: 5 
  * ANY), and the most minutes it may take.
  */
 export const STEP_INVENTORY = Object.freeze({
-  'Integration tests': {
-    run: withKafka('tests', 'pnpm run test:integration'),
-    env: {
-      ...KAFKA_TESTS,
-      ...databases(...SERVICES),
-      ...BUCKET,
-      ...SCANNER,
-      REDIS_URL: ANY,
-      ...MAILPIT,
-    },
-    // Stopgap until the integration step is sharded (owner, 2026-10-24); back to 12 then.
-    // 21 = ceil(806 s x 1.5 / 60): the slowest of the last 20 green runs took 806 s.
-    timeout: 21,
-  },
+  ...Object.fromEntries(
+    Object.entries({
+      'Integration tests': 'identity',
+      'Integration construction': 'construction',
+      'Integration economic': 'economic',
+      'Integration contract': 'contract',
+    }).map(([name, shard]) => {
+      return [
+        name,
+        {
+          shard,
+          run: withKafka('tests', `pnpm run test:integration --shard=${shard} -- --verbose`),
+          env: {
+            KAFKA_SECRETS_DIR: '${{ runner.temp }}/rasta-kafka-secrets',
+            NODE_ENV: 'test',
+            KAFKA_BROKERS: 'localhost:9092',
+            REQUIRE_MAILPIT: '1',
+            MAILPIT_API_URL: 'http://localhost:8025',
+            NOTIFICATION_SMTP_HOST: 'localhost',
+            NOTIFICATION_SMTP_PORT: '1025',
+            DATABASE_URL_IDENTITY:
+              'postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public',
+            DATABASE_URL_IDENTITY_MIGRATOR:
+              'postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public',
+            DATABASE_URL_ORGANIZATION:
+              'postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public',
+            DATABASE_URL_ORGANIZATION_MIGRATOR:
+              'postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public',
+            DATABASE_URL_ASSET:
+              'postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public',
+            DATABASE_URL_ASSET_MIGRATOR:
+              'postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public',
+            DATABASE_URL_FLEET:
+              'postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public',
+            DATABASE_URL_FLEET_MIGRATOR:
+              'postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public',
+            DATABASE_URL_MAINTENANCE:
+              'postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public',
+            DATABASE_URL_MAINTENANCE_MIGRATOR:
+              'postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public',
+            DATABASE_URL_ECONOMIC:
+              'postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public',
+            DATABASE_URL_ECONOMIC_MIGRATOR:
+              'postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public',
+            DATABASE_URL_MARKETPLACE:
+              'postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public',
+            DATABASE_URL_MARKETPLACE_MIGRATOR:
+              'postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public',
+            DATABASE_URL_DOCUMENT:
+              'postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public',
+            DATABASE_URL_DOCUMENT_MIGRATOR:
+              'postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public',
+            DATABASE_URL_SUPPLIER:
+              'postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public',
+            DATABASE_URL_SUPPLIER_MIGRATOR:
+              'postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public',
+            DATABASE_URL_CONSTRUCTION:
+              'postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public',
+            DATABASE_URL_CONSTRUCTION_MIGRATOR:
+              'postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public',
+            DATABASE_URL_CONTRACT:
+              'postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public',
+            DATABASE_URL_CONTRACT_MIGRATOR:
+              'postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public',
+            DATABASE_URL_INVENTORY:
+              'postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public',
+            DATABASE_URL_INVENTORY_MIGRATOR:
+              'postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public',
+            DATABASE_URL_ANALYTICS:
+              'postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public',
+            DATABASE_URL_ANALYTICS_MIGRATOR:
+              'postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public',
+            DATABASE_URL_PROCUREMENT:
+              'postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public',
+            DATABASE_URL_PROCUREMENT_MIGRATOR:
+              'postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public',
+            DATABASE_URL_NOTIFICATION:
+              'postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public',
+            DATABASE_URL_NOTIFICATION_MIGRATOR:
+              'postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public',
+            DATABASE_URL_AUDIT:
+              'postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit',
+            DATABASE_URL_AUDIT_MIGRATOR:
+              'postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit',
+            S3_ENDPOINT: 'http://localhost:9000',
+            S3_REGION: 'us-east-1',
+            S3_ACCESS_KEY: 'rasta_minio_admin',
+            S3_SECRET_KEY: 'rasta_minio_ci_password',
+            S3_BUCKET_DOCUMENTS: 'rasta-documents',
+            S3_FORCE_PATH_STYLE: 'true',
+            DOCUMENT_CLAMAV_SOCKET_PATH: '/tmp/clamav-socket/clamd.sock',
+            DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760',
+            REDIS_URL: 'redis://localhost:6379',
+          },
+          exactEnv: true,
+          timeout: { identity: 13, construction: 17, economic: 16, contract: 15 }[shard],
+        },
+      ];
+    }),
+  ),
   'Backup restore SQL on a disposable database': postgresGuard(
     'pnpm run test:backup-restore-drill-pg',
   ),
@@ -284,7 +347,7 @@ export const STEP_INVENTORY = Object.freeze({
     run: withKafka(
       'tests',
       'pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"',
-      'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"',
+      'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose',
     ),
     env: { ...KAFKA_TESTS, ...databases(...SERVICES), ...BUCKET, ...SCANNER },
     timeout: 10,
@@ -358,6 +421,9 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  */
 export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-suites': 8,
+  'integration-construction': 8,
+  'integration-economic': 8,
+  'integration-contract': 8,
   'integration-security': 8,
   'integration-coverage-critical': 8,
   'integration-coverage': 8,
@@ -466,8 +532,107 @@ export function checkIntegrationSplitText(text) {
   return checkIntegrationSplit(workflow);
 }
 
+/** FU-027: ownership, command inventory and executable workflow must agree on step keys. */
+export function integrationPartitionStepProblems(
+  workflow,
+  partitions = INTEGRATION_PARTITIONS,
+  inventory = STEP_INVENTORY,
+) {
+  if (!isMapping(partitions) || !isMapping(inventory))
+    return ['partition steps and suite inventory must be mappings'];
+  const problems = [];
+  const partitionNames = new Set(Object.keys(partitions));
+  // Inventory is independent of ownership: deriving these keys from partitions
+  // would let an ownership rename silently rename its own supposed cross-check.
+  const suiteNames = new Set(
+    Object.entries(inventory)
+      .filter(
+        ([, entry]) =>
+          isMapping(entry) &&
+          (Object.hasOwn(entry, 'shard') || /--shard(?:=|\s)/.test(textOf(entry.run))),
+      )
+      .map(([name]) => name),
+  );
+  const occurrences = new Map([...partitionNames].map((name) => [name, 0]));
+  for (const name of partitionNames) {
+    if (!suiteNames.has(name))
+      problems.push(`${name}: partition step missing from suite inventory`);
+  }
+  for (const name of suiteNames) {
+    if (!partitionNames.has(name)) problems.push(`${name}: suite inventory step has no partition`);
+  }
+  // Scan every job, so a duplicate outside integration-* cannot escape the guard.
+  for (const [id, job] of Object.entries(workflow?.jobs ?? {})) {
+    for (const step of Array.isArray(job?.steps) ? job.steps : []) {
+      if (occurrences.has(step?.name)) occurrences.set(step.name, occurrences.get(step.name) + 1);
+      const integrationRun = /test:integration|run-test-phases\.mjs|--shard(?:=|\s)/.test(
+        textOf(step?.run),
+      );
+      if (integrationRun && !id.startsWith(SPLIT_PREFIX))
+        problems.push(`${id}: integration execution must run in an integration-* job`);
+      if (integrationRun && !Object.hasOwn(inventory, step?.name))
+        problems.push(`${textOf(step?.name)}: workflow integration step missing from inventory`);
+      if (
+        (suiteNames.has(step?.name) || /--shard(?:=|\s)/.test(textOf(step?.run))) &&
+        !partitionNames.has(step?.name)
+      )
+        problems.push(`${textOf(step?.name)}: workflow suite step has no partition`);
+    }
+  }
+  for (const [name, count] of occurrences) {
+    if (count !== 1)
+      problems.push(`${name}: partition step must occur exactly once in workflow, found ${count}`);
+  }
+  return problems;
+}
+
 export function checkIntegrationSplit(workflow) {
-  const problems = integrationPartitionProblems();
+  const problems = [
+    ...integrationPartitionProblems(),
+    ...integrationPartitionStepProblems(workflow),
+  ];
+  // Inspect the exact plan the executable runner consumes, not only ownership.
+  const effective = {};
+  let stressCount = 0;
+  for (const name of Object.keys(INTEGRATION_PARTITIONS)) {
+    const shard = name === 'Integration tests' ? 'identity' : name.split(' ')[1];
+    try {
+      const plan = planTestRun(['test:integration', `--shard=${shard}`]);
+      const workspace = plan[0];
+      if (
+        workspace?.phase !== 'workspace' ||
+        workspace.args[0] !== 'run' ||
+        workspace.args[1] !== 'test:integration' ||
+        workspace.args.slice(2).some((arg) => !arg.startsWith('--filter=@rasta/'))
+      ) {
+        problems.push(`${name}: invalid effective workspace execution`);
+      }
+      effective[name] = workspace.args.slice(2).map((arg) => arg.slice('--filter='.length));
+      if (JSON.stringify(effective[name]) !== JSON.stringify(INTEGRATION_PARTITIONS[name]))
+        problems.push(`${name}: effective filters differ from ownership`);
+      const stress = plan.slice(1);
+      stressCount += stress.length;
+      if (
+        JSON.stringify(stress) !==
+        JSON.stringify(
+          shard === 'identity'
+            ? [
+                {
+                  phase: 'exclusive',
+                  args: ['run', 'test:aggregation-stress', '--filter=@rasta/identity-service'],
+                },
+              ]
+            : [],
+        )
+      )
+        problems.push(`${name}: incorrect exclusive stress plan`);
+    } catch (error) {
+      problems.push(`${name}: effective execution failed: ${error.message}`);
+    }
+  }
+  problems.push(...integrationPartitionProblems(effective));
+  if (stressCount !== 1)
+    problems.push(`expected exactly one exclusive stress phase, found ${stressCount}`);
   const jobs = isMapping(workflow?.jobs) ? workflow.jobs : {};
   const splitIds = Object.keys(jobs).filter((id) => id.startsWith(SPLIT_PREFIX));
   const aggregate = jobs[AGGREGATE_JOB];
@@ -695,6 +860,11 @@ function testStepProblems(label, step, declared, jobMinutes) {
     );
   }
   const env = isMapping(step.env) ? step.env : {};
+  if (declared.exactEnv) {
+    for (const key of Object.keys(env)) {
+      if (!Object.hasOwn(declared.env, key)) problems.push(`${label} has undeclared env ${key}`);
+    }
+  }
   for (const [key, value] of Object.entries(declared.env)) {
     if (!(key in env)) {
       problems.push(`${label} lost ${key} from its env`);

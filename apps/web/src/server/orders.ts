@@ -23,6 +23,7 @@ import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export type { ReadResult };
 
@@ -194,18 +195,20 @@ export function orderCommandFormValues(form: FormData): OrderCommandFormValues {
 }
 
 /**
- * What the buyer reads when a receipt confirmation arrives with a note. Plain
- * words: the note is not kept, nothing was confirmed, and what to do next.
- */
-/**
  * What an operator reads when the decision form names no dispute the page
  * knew of. Plain words: nothing was sent, and the page must be reloaded.
  */
-export const DISPUTE_FORM_STALE =
-  'این فرم به اختلاف مشخصی وصل نیست، پس چیزی ارسال نشد. صفحه را تازه کنید و دوباره تصمیم بگیرید.';
+export const DISPUTE_FORM_STALE = formMessage(
+  'این فرم به اختلاف مشخصی وصل نیست، پس چیزی ارسال نشد. صفحه را تازه کنید و دوباره تصمیم بگیرید.',
+);
 
-export const RECEIPT_NOTE_REFUSAL =
-  'یادداشت هنگام تأیید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تأیید کنید.';
+/**
+ * What the buyer reads when a receipt confirmation arrives with a note. Plain
+ * words: the note is not kept, nothing was confirmed, and what to do next.
+ */
+export const RECEIPT_NOTE_REFUSAL = formMessage(
+  'یادداشت هنگام تأیید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تأیید کنید.',
+);
 
 /** An optional free-text field: blank means "not given", so it is left out. */
 const optionalText = (max: number, message: string) =>
@@ -230,11 +233,11 @@ const COMMAND_SCHEMAS = {
   FULFILL: z.object({
     trackingReference: optionalText(
       LIMITS.trackingReference.max,
-      `کد رهگیری نباید بیش از ${digits(LIMITS.trackingReference.max)} نویسه باشد`,
+      formMessage(`کد رهگیری نباید بیش از ${digits(LIMITS.trackingReference.max)} نویسه باشد`),
     ),
     note: optionalText(
       LIMITS.note.max,
-      `یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`,
+      formMessage(`یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`),
     ),
   }),
 
@@ -259,11 +262,13 @@ const COMMAND_SCHEMAS = {
       .trim()
       .min(
         LIMITS.disputeReason.min,
-        `دلیل اختلاف را دست‌کم در ${digits(LIMITS.disputeReason.min)} نویسه بنویسید — کسی که رسیدگی می‌کند باید بداند موضوع چیست`,
+        formMessage(
+          `دلیل اختلاف را دست‌کم در ${digits(LIMITS.disputeReason.min)} نویسه بنویسید — کسی که رسیدگی می‌کند باید بداند موضوع چیست`,
+        ),
       )
       .max(
         LIMITS.disputeReason.max,
-        `دلیل نباید بیش از ${digits(LIMITS.disputeReason.max)} نویسه باشد`,
+        formMessage(`دلیل نباید بیش از ${digits(LIMITS.disputeReason.max)} نویسه باشد`),
       ),
   }),
 
@@ -273,19 +278,22 @@ const COMMAND_SCHEMAS = {
     // since. Missing — a page drawn from a service that did not send it — is
     // refused here rather than posted unnamed.
     disputeId: z.string().regex(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/, DISPUTE_FORM_STALE),
-    outcome: z.enum(DISPUTE_OUTCOMES, { error: 'نتیجه را انتخاب کنید' }),
+    outcome: z.enum(DISPUTE_OUTCOMES, { error: formMessage('نتیجه را انتخاب کنید') }),
     resolution: z
       .string()
       .trim()
       .min(
         LIMITS.resolution.min,
-        `شرح تصمیم را دست‌کم در ${digits(LIMITS.resolution.min)} نویسه بنویسید`,
+        formMessage(`شرح تصمیم را دست‌کم در ${digits(LIMITS.resolution.min)} نویسه بنویسید`),
       )
-      .max(LIMITS.resolution.max, `شرح نباید بیش از ${digits(LIMITS.resolution.max)} نویسه باشد`),
+      .max(
+        LIMITS.resolution.max,
+        formMessage(`شرح نباید بیش از ${digits(LIMITS.resolution.max)} نویسه باشد`),
+      ),
     // Required, never defaulted: ADR-052 rule 14 forbids reading
     // responsibility out of the outcome or out of free text.
     responsibility: z.enum(RESPONSIBILITIES, {
-      error: 'مسئول را صریحاً مشخص کنید',
+      error: formMessage('مسئول را صریحاً مشخص کنید'),
     }),
   }),
 
@@ -293,21 +301,21 @@ const COMMAND_SCHEMAS = {
     reason: z
       .string()
       .trim()
-      .min(LIMITS.cancelReason.min, 'دلیل لغو را بنویسید')
+      .min(LIMITS.cancelReason.min, formMessage('دلیل لغو را بنویسید'))
       .max(
         LIMITS.cancelReason.max,
-        `دلیل نباید بیش از ${digits(LIMITS.cancelReason.max)} نویسه باشد`,
+        formMessage(`دلیل نباید بیش از ${digits(LIMITS.cancelReason.max)} نویسه باشد`),
       ),
   }),
 
   REVIEW: z.object({
     rating: z
       .string()
-      .regex(/^[1-5]$/, 'امتیازی از ۱ تا ۵ انتخاب کنید')
+      .regex(/^[1-5]$/, formMessage('امتیازی از ۱ تا ۵ انتخاب کنید'))
       .transform((value) => Number(value)),
     comment: optionalText(
       LIMITS.reviewComment.max,
-      `نظر نباید بیش از ${digits(LIMITS.reviewComment.max)} نویسه باشد`,
+      formMessage(`نظر نباید بیش از ${digits(LIMITS.reviewComment.max)} نویسه باشد`),
     ),
   }),
 } satisfies Record<OrderCommand, z.ZodTypeAny>;

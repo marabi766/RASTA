@@ -26,6 +26,7 @@ import { utcInstant } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export type { ReadResult };
 
@@ -235,8 +236,14 @@ const textSchema = (field: DisputeField, what: string, why: string) =>
   z
     .string()
     .trim()
-    .min(LIMITS[field].min, `${what} را دست‌کم در ${digits(LIMITS[field].min)} نویسه بنویسید${why}`)
-    .max(LIMITS[field].max, `${what} نباید بیش از ${digits(LIMITS[field].max)} نویسه باشد`);
+    .min(
+      LIMITS[field].min,
+      formMessage(`${what} را دست‌کم در ${digits(LIMITS[field].min)} نویسه بنویسید${why}`),
+    )
+    .max(
+      LIMITS[field].max,
+      formMessage(`${what} نباید بیش از ${digits(LIMITS[field].max)} نویسه باشد`),
+    );
 
 const COMMAND_SCHEMAS = {
   DISPUTE: z.object({

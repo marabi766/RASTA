@@ -52,11 +52,9 @@ function stubFetch(response: { status: number; body: unknown }) {
       headers: init.headers as Record<string, string>,
       ...(init.body ? { body: JSON.parse(init.body as string) as unknown } : {}),
     });
-    return {
-      ok: response.status >= 200 && response.status < 300,
+    return new Response(response.status === 204 ? null : JSON.stringify(response.body), {
       status: response.status,
-      text: async () => JSON.stringify(response.body),
-    } as Response;
+    });
   };
 
   return { calls, impl };
@@ -552,7 +550,7 @@ describe('finding the order’s obligation by its exact key (review of #334 roun
     globalThis.fetch = (async (url: string) => {
       urls.push(new URL(url));
       const page = pages[Math.min(urls.length, pages.length) - 1];
-      return { ok: true, status: 200, text: async () => JSON.stringify(page) } as Response;
+      return new Response(JSON.stringify(page), { status: 200 });
     }) as typeof fetch;
     return urls;
   }

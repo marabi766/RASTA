@@ -202,9 +202,9 @@ export class OrderRepository {
    *
    * A local transition reads this under the order's row lock, so another
    * attempt of the same step has either committed its record or not begun.
-   * A key that answers for a different activity is refused: Temporal never
-   * reuses one, so that is a broken invariant, and replaying another step's
-   * answer would be the wrong thing done quietly.
+   * A key includes the workflow, run and activity ids: a restart or reset may
+   * reuse activity ids, but belongs to a different run. A record for another
+   * activity violates that identity and is refused rather than replayed.
    */
   async findSagaStep(
     client: ExtendedPrismaClient,
@@ -334,8 +334,10 @@ export class OrderRepository {
  * One scheduled saga activity, the same on every Temporal retry of it (D-053).
  *
  * `key` is `<workflowId>/<runId>/<activityId>`. The activity id is the
- * workflow's own sequence number for the call, so a second settlement attempt
- * or a second reminder is a different step, while a retry of either is not.
+ * workflow's own sequence for the call (legacy numeric or `saga-step-N`).
+ * A second settlement attempt or reminder is a different step, while a retry
+ * is not. Restarts and resets get a new run id. Continue-As-New is safe because
+ * checkpoints occur only with no activity in flight; no step spans two runs.
  */
 export interface SagaStep {
   key: string;

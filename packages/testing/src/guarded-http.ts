@@ -87,12 +87,37 @@ interface ResponseLike {
 type Sender = (urlOrRequest: never, options?: never) => Promise<ResponseLike>;
 export type GuardableRequestContext = Record<(typeof SENDERS)[number], Sender>;
 
+/** A redirect status is refused before anything reads the response. */
+function refusingRedirect(response: ResponseLike): ResponseLike {
+  if (REFUSED_REDIRECT_STATUSES.includes(response.status())) {
+    void response.dispose().catch(() => undefined);
+    throw new RedirectRefusedError();
+  }
+  return response;
+}
+
 /**
- * The same policy for a Playwright `APIRequestContext`: every sending method
- * goes out with `maxRedirects: 0` (Playwright then answers the 3xx instead of
- * following it, and it keeps `authorization` on a same-origin hop) and a
- * redirect status is refused. The caller's `maxRedirects` is overridden; every
- * other method (`dispose`, `storageState`) is the context's own.
+ * A sending method with the redirect policy applied: `maxRedirects: 0` is set
+ * after the caller's options (Playwright then answers the 3xx instead of
+ * following it, and it keeps `authorization` on a same-origin hop), and a
+ * redirect status is refused.
+ */
+function withoutRedirects(
+  send: (this: unknown, urlOrRequest: unknown, options?: object) => unknown,
+): (this: unknown, urlOrRequest: unknown, options?: object) => Promise<ResponseLike> {
+  return async function (this: unknown, urlOrRequest, options) {
+    return refusingRedirect(
+      (await send.call(this, urlOrRequest, { ...options, maxRedirects: 0 })) as ResponseLike,
+    );
+  };
+}
+
+/**
+ * The same policy for one Playwright `APIRequestContext`: every sending method
+ * goes out with `maxRedirects: 0` and a redirect status is refused. The
+ * caller's `maxRedirects` is overridden; every other method (`dispose`,
+ * `storageState`) is the context's own. This guards the context it is given;
+ * {@link guardEveryRequestContext} guards every other one.
  */
 export function guardRequestContext<C extends GuardableRequestContext>(context: C): C {
   const senders: readonly string[] = SENDERS;
@@ -101,17 +126,56 @@ export function guardRequestContext<C extends GuardableRequestContext>(context: 
       const value: unknown = Reflect.get(target, property, target);
       if (typeof value !== 'function') return value;
       if (typeof property !== 'string' || !senders.includes(property)) return value.bind(target);
-      return async (urlOrRequest: unknown, options?: object) => {
-        const response = (await value.call(target, urlOrRequest, {
-          ...options,
-          maxRedirects: 0,
-        })) as ResponseLike;
-        if (REFUSED_REDIRECT_STATUSES.includes(response.status())) {
-          void response.dispose().catch(() => undefined);
-          throw new RedirectRefusedError();
-        }
-        return response;
-      };
+      return withoutRedirects(value as (urlOrRequest: unknown, options?: object) => unknown).bind(
+        target,
+      );
     },
   });
+}
+
+/** Guarded prototype methods: installation is idempotent across fixtures and global setup. */
+const GUARDED_SENDERS = new WeakSet<object>();
+
+/**
+ * Guard the request class before specs/hooks run. All instances, including
+ * page.request, context.request and factory-created contexts, share these
+ * public senders. Language-level aliases therefore retain the same policy.
+ * An incompatible Playwright shape aborts fixture setup instead of opening
+ * an unguarded path. No private Playwright API is patched.
+ */
+export function guardEveryRequestContext(sample: GuardableRequestContext): void {
+  for (const name of SENDERS) {
+    if (Object.hasOwn(sample, name))
+      throw new Error(`guardEveryRequestContext: own "${name}" sender is unsupported`);
+    let owner: object | null = Object.getPrototypeOf(sample);
+    while (owner !== null && owner !== Object.prototype && !Object.hasOwn(owner, name))
+      owner = Object.getPrototypeOf(owner);
+    const descriptor = owner && Object.getOwnPropertyDescriptor(owner, name);
+    const original: unknown = descriptor?.value;
+    if (
+      !owner ||
+      owner === Object.prototype ||
+      typeof original !== 'function' ||
+      !descriptor?.configurable
+    )
+      throw new Error(`guardEveryRequestContext: "${name}" cannot be replaced`);
+    if (GUARDED_SENDERS.has(original)) continue;
+    const wrapper = withoutRedirects(
+      original as (this: unknown, urlOrRequest: unknown, options?: object) => unknown,
+    );
+    Object.defineProperty(owner, name, { ...descriptor, value: wrapper });
+    GUARDED_SENDERS.add(wrapper);
+  }
+}
+
+/** Install from the factory without leaving a sample context alive. */
+export async function installRequestContextGuard(factory: {
+  newContext(): Promise<GuardableRequestContext & { dispose(): Promise<void> }>;
+}): Promise<void> {
+  const sample = await factory.newContext();
+  try {
+    guardEveryRequestContext(sample);
+  } finally {
+    await sample.dispose();
+  }
 }

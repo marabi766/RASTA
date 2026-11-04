@@ -58,6 +58,7 @@ import {
   type InventoryFormState,
   type UnconfirmedInventory,
 } from './inventory-form-state';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * One inventory command this viewer may issue — a warehouse, a receipt, an
@@ -350,7 +351,7 @@ function CommandFields({
   values: InventoryFormValues | null;
   fieldErrors: Errors;
 }) {
-  const typed = (name: string): string => values?.[name] ?? '';
+  const typed = (name: string): string => ownValue(values, name) ?? '';
   switch (command) {
     case 'CREATE_WAREHOUSE':
       return (
@@ -553,7 +554,7 @@ function ShipmentFields({
   fieldErrors: Errors;
 }) {
   const [legs, setLegs] = useState(() => initialLegCount(values));
-  const typed = (name: string): string => values?.[name] ?? '';
+  const typed = (name: string): string => ownValue(values, name) ?? '';
   return (
     <>
       <Field

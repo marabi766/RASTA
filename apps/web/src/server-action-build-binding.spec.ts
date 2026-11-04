@@ -24,6 +24,8 @@ import {
   startDriver,
   SCRIPTS,
   url,
+  liveMembers,
+  waitGone,
   WEB,
   type Result,
 } from './test/build-scripts';
@@ -779,6 +781,9 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
   const dirs: Record<string, string> = {};
   const results: Record<string, Result> = {};
   const lifecycles: Record<string, 'COMPLETED' | 'LOST'> = {};
+  // Live members of each fixture's writer (`writer.pid`) as its wrapper's driver ended, i.e. at
+  // the lock release. `sharedCleanup` kills what is left, so this cannot be probed in the test.
+  const liveAtReturn: Record<string, number[]> = {};
   let sharedCleanup: unknown;
   let root: string;
   beforeAll(async () => {
@@ -794,7 +799,19 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
         env: f.env && { ...f.env, NODE_OPTIONS: `--require=${JSON.stringify(fault)}` },
       }),
     );
-    const done = await Promise.all(drivers.map((d) => d.done));
+    const done = await Promise.all(
+      drivers.map((d, i) =>
+        d.done.then((result) => {
+          const writerFile = join(dirs[FIXTURES[i].name], 'writer.pid');
+          if (existsSync(writerFile)) {
+            liveAtReturn[FIXTURES[i].name] = liveMembers([
+              Number(readFileSync(writerFile, 'utf8')),
+            ])[0];
+          }
+          return result;
+        }),
+      ),
+    );
     FIXTURES.forEach((f, i) => (results[f.name] = done[i]));
     // R6-1: consume every lifecycle outcome here, before the first afterEach.
     const ended = await Promise.all(drivers.map((d) => d.ended));
@@ -915,7 +932,7 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
     ['writerAfterFailure', 'failed'],
   ])(
     '%s: `next build` %s while a process it started still writes: refused, and that process is gone before the lock is (r4 F1 c, B)',
-    (name) => {
+    async (name) => {
       const { status, problems } = results[name];
       expect(status).toBe(1);
       expect(problems).toEqual([
@@ -924,8 +941,11 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
       const writer = Number(readFileSync(join(dirs[name], 'writer.pid'), 'utf8'));
       // The case is not vacuous: the writer did write into `.next` during the build ...
       expect(existsSync(join(dirs[name], '.next/from-writer'))).toBe(true);
-      // ... and it was stopped and awaited before the wrapper returned and released the lock.
-      expect(alive(writer)).toBe(false);
+      // ... and it was stopped and awaited before the wrapper returned and released the lock:
+      // no live writer when the driver ended (FU-040) ...
+      expect(liveAtReturn[name]).toEqual([]);
+      // ... and it is gone altogether (a zombie may await its reaping).
+      await waitGone(writer, 'writer `next build` started');
       expect(existsSync(join(dirs[name], LOCK))).toBe(false);
       expect(existsSync(join(dirs[name], '.next/server-action-build-receipt.json'))).toBe(false);
     },
@@ -1042,8 +1062,7 @@ describe('two invocations in one package (r3 F1: real `next build`)', () => {
     const b = await runDriver(dir, { lockWaitMs: 5_000 });
     expect(b).toMatchObject({ status: 0, problems: [] });
     // A's `next build` never got past the preload: it wrote no record, no output.
-    for (let i = 0; i < 300 && alive(pid); i += 1) await new Promise((r) => setTimeout(r, 100));
-    expect(alive(pid)).toBe(false);
+    await waitGone(pid, 'orphaned `next build` of the killed wrapper', 30_000);
     expect(existsSync(capturePath)).toBe(false);
     rmSync(join(capturePath, '..'), { recursive: true, force: true });
     expect(checkReceipt(dir)).toEqual([]);

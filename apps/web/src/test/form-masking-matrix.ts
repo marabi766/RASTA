@@ -3,7 +3,7 @@ import { inspect } from 'node:util';
 import { z } from 'zod';
 import { legacyParse, type LegacyRefusal } from '@rasta/contracts';
 
-import { firstIssuePerField, formIssueMessage } from '../lib/form-issues';
+import { firstIssuePerField, formIssueMessage, formMessage } from '../lib/form-issues';
 import { legacyFormResolver } from '../lib/form-resolver';
 
 /**
@@ -71,15 +71,18 @@ export type Wording =
   | { kind: 'returns nothing' }
   | { kind: "zod's own text" };
 
-/** The Persian sentence a dynamic author message is built from: it repeats the input. */
+/** A Persian sentence an author built from the input (never declared, so never shown: PR-439 r1 F1). */
 export const dynamicMessage = (input: unknown): string => `مقدار ${String(input)} پذیرفته نیست`;
 
 function errorParam(wording: Wording): { error?: z.core.$ZodErrorMap } {
   switch (wording.kind) {
     case 'default':
       return {};
-    case 'static':
-      return { error: () => wording.text };
+    case 'static': {
+      // An author's fixed sentence, declared as the portal's schemas declare theirs.
+      const text = formMessage(wording.text);
+      return { error: () => text };
+    }
     case 'dynamic':
       return { error: (issue) => dynamicMessage(issue.input) };
     case 'returns nothing':

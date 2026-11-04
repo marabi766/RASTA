@@ -16,6 +16,7 @@ import {
   type OwnerCommand,
 } from './tender-owner-fields';
 import { formatScaledDecimal, parseScaledDecimalInput, toPersianDigits } from './format';
+import { ownValue, setOwn } from './own-key';
 
 /**
  * Reading an owner command's form — client-safe: the form reads it to decide
@@ -137,7 +138,7 @@ export function ownerValuesOf(
   const values: Record<string, string> = {};
   for (const name of ownerFields(command, context)) {
     const value = form.get(name);
-    values[name] = typeof value === 'string' ? value : '';
+    setOwn(values, name, typeof value === 'string' ? value : '');
   }
   return values;
 }
@@ -148,7 +149,7 @@ export function parseOwnerForm(
   values: OwnerValues,
   context: OwnerFormContext,
 ): ParsedOwnerForm {
-  const text = (name: string): string => values[name] ?? '';
+  const text = (name: string): string => ownValue(values, name) ?? '';
   const fail = (fieldErrors: Partial<Record<string, string>>): ParsedOwnerForm => ({
     ok: false,
     values,
@@ -190,7 +191,7 @@ export function parseOwnerForm(
         const scaled = parseScaledDecimalInput(raw, 2);
         const top = cell.maxScore * SCORE_SCALE;
         if (scaled === null || scaled > top || (cell.passFail && scaled !== 0 && scaled !== top)) {
-          errors[field] = scoreMessage(cell);
+          setOwn(errors, field, scoreMessage(cell));
           continue;
         }
         scores.push({

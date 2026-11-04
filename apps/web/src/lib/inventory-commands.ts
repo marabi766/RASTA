@@ -1,5 +1,6 @@
 import { normalizePersianText, toLatinDigits, toPersianDigits } from './format';
 import { MAX_STOCK_QUANTITY } from './inventory-fields';
+import { ownValue, setOwn } from './own-key';
 
 /**
  * The operator commands of `/inventory` (EXP-004 criterion 1 and 2;
@@ -128,7 +129,10 @@ export const DIRECTION_LABELS: Readonly<Record<Direction, string>> = {
   DECREASE: 'کاهش یا خروج از موجودی',
 };
 
-export function legField(index: number, part: 'carrierName' | 'carrierReference'): string {
+export function legField(
+  index: number,
+  part: 'carrierName' | 'carrierReference',
+): `${typeof LEG_PREFIX}${number}.${'carrierName' | 'carrierReference'}` {
   return `${LEG_PREFIX}${index}.${part}`;
 }
 
@@ -158,7 +162,7 @@ export function inventoryFormValues(form: FormData): InventoryFormValues {
   const values: Record<string, string> = {};
   for (const [name, value] of form.entries()) {
     if (typeof value !== 'string') continue;
-    if (SCALAR_FIELDS.includes(name) || LEG_FIELD.test(name)) values[name] = value;
+    if (SCALAR_FIELDS.includes(name) || LEG_FIELD.test(name)) setOwn(values, name, value);
   }
   return values;
 }
@@ -218,12 +222,12 @@ export const INVENTORY_FORM_MESSAGES = {
 } as const;
 
 function text(values: InventoryFormValues, name: string): string {
-  return normalizePersianText(values[name] ?? '');
+  return normalizePersianText(ownValue(values, name) ?? '');
 }
 
 /** Latin, trimmed, no inner space: how an id is typed and compared. */
 function identifier(values: InventoryFormValues, name: string): string {
-  return toLatinDigits(values[name] ?? '')
+  return toLatinDigits(ownValue(values, name) ?? '')
     .replace(/\s+/g, '')
     .toUpperCase();
 }
@@ -291,7 +295,7 @@ function optionalReference(
 ): string | null {
   const typed = identifier(values, name);
   if (typed === '') return null;
-  if (!pattern.test(typed)) errors[name] = message;
+  if (!pattern.test(typed)) setOwn(errors, name, message);
   return typed;
 }
 
@@ -427,7 +431,7 @@ export function hasFields(command: InventoryCommand): boolean {
 export function valuesOfBody(command: InventoryCommand, body: InventoryBody): InventoryFormValues {
   const values: Record<string, string> = {};
   const put = (name: string, value: string | number | null) => {
-    if (value !== null) values[name] = String(value);
+    if (value !== null) setOwn(values, name, String(value));
   };
   switch (command) {
     case 'CREATE_WAREHOUSE': {
@@ -481,7 +485,7 @@ export const SHIPMENT_STATUS_LABELS: Readonly<Record<string, string>> = {
 
 /** A status this portal does not know is shown as it arrived, never guessed (`lib/labels.ts`). */
 export function shipmentStatusLabel(status: string): string {
-  return SHIPMENT_STATUS_LABELS[status] ?? status;
+  return ownValue(SHIPMENT_STATUS_LABELS, status) ?? status;
 }
 
 export const MOVEMENT_TYPE_LABELS: Readonly<Record<string, string>> = {
@@ -493,7 +497,7 @@ export const MOVEMENT_TYPE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function movementTypeLabel(type: string): string {
-  return MOVEMENT_TYPE_LABELS[type] ?? type;
+  return ownValue(MOVEMENT_TYPE_LABELS, type) ?? type;
 }
 
 /** The person recorded on a movement is shown as a role of the system only when it is the service itself. */

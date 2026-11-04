@@ -23,6 +23,7 @@ import {
   SubmitQualificationForm,
   SuspendSupplierForm,
 } from '../SupplierForms';
+import { setOwn } from '@/lib/own-key';
 
 /**
  * What the supplier page offers to do, drawn from the token's roles and the
@@ -124,7 +125,9 @@ export function supplierCommandsFor(
     for (const qualification of supplier.qualifications) {
       if (qualification.state !== 'SUBMITTED') continue;
       const capabilityLabel = supplierCapabilityLabel(qualification.capability);
-      decisions[qualification.id] = (
+      setOwn(
+        decisions,
+        qualification.id,
         <div className="flex flex-col gap-4">
           <Disclosure summary="تأیید صلاحیت…">
             <ApproveQualificationForm
@@ -140,7 +143,7 @@ export function supplierCommandsFor(
               capabilityLabel={capabilityLabel}
             />
           </Disclosure>
-        </div>
+        </div>,
       );
     }
     // Each signed with the episode it was drawn on (Codex review of PR 366,

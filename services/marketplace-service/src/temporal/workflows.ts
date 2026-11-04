@@ -1,5 +1,8 @@
 import {
   ActivityFailure,
+  continueAsNew,
+  workflowInfo,
+  type ActivityOptions,
   ApplicationFailure,
   CancellationScope,
   condition,
@@ -113,6 +116,24 @@ export interface OrderSagaInput {
    * by a client older than this field still runs.
    */
   recheckIntervalHours?: number;
+  /** Internal lower threshold for deterministic rollover tests; never raises production limits. */
+  historyEventThreshold?: number;
+  resume?: SagaResume;
+}
+
+export interface SagaResume {
+  status: SagaStatus;
+  mirroredDispute?: string;
+  mirroredEconomicDispute?: string;
+  waitingIn: SagaOrderView['status'];
+  nextReminderAt?: number;
+  /**
+   * The other windows' deadlines (`reminderDue`), so a rollover during a
+   * dispute does not buy the resumed order a fresh window (D-083). Absent from
+   * a run continued before D-083.
+   */
+  reminderDue?: [SagaOrderView['status'], number][];
+  activitySequence: number;
 }
 
 /**
@@ -121,14 +142,7 @@ export interface OrderSagaInput {
  * A business rule does not become true on a second attempt; retrying only
  * reports the same refusal later. A tenant mismatch is the same.
  */
-const {
-  createObligation,
-  authoriseSettlement,
-  settle,
-  compensate,
-  disputeObligation,
-  resolveObligationDispute,
-} = proxyActivities<OrderActivities>({
+const ECONOMIC_OPTIONS = {
   startToCloseTimeout: '30 seconds',
   retry: {
     initialInterval: '1 second',
@@ -142,7 +156,8 @@ const {
       'NOT_FOUND',
     ],
   },
-});
+} satisfies ActivityOptions;
+const legacyEconomic = proxyActivities<OrderActivities>(ECONOMIC_OPTIONS);
 
 /**
  * Reads, and writes to this service's own database: retried until they answer.
@@ -156,18 +171,7 @@ const {
  * local outage now delays the saga; it never decides anything. A refusal by
  * the state machine is still final, because it is not an outage.
  */
-const {
-  readOrder,
-  findObligation,
-  markFundsHeld,
-  markFailed,
-  markSettling,
-  markSettlementFailed,
-  markObligationDisputed,
-  markCompleted,
-  markCancelled,
-  recordReminder,
-} = proxyActivities<OrderActivities>({
+const LOCAL_OPTIONS = {
   startToCloseTimeout: '30 seconds',
   retry: {
     initialInterval: '1 second',
@@ -181,7 +185,8 @@ const {
       'NOT_FOUND',
     ],
   },
-});
+} satisfies ActivityOptions;
+const legacyLocal = proxyActivities<OrderActivities>(LOCAL_OPTIONS);
 
 /**
  * The `patched()` marker of D-083's changes to the waits: a window keeps its
@@ -200,6 +205,23 @@ const SETTLEMENT_ATTEMPTS = 5;
 /** The env default, for a saga started by a client that did not pass one. */
 const DEFAULT_RECHECK_HOURS = 24;
 
+// Conservative checkpoints below Temporal defaults: 51,200 events / 50 MiB
+// hard limits, 10,240 events / 10 MiB warnings. Also honor the server suggestion.
+export const SAGA_HISTORY_EVENTS = 2000;
+export const SAGA_HISTORY_BYTES = 2 * 1024 * 1024;
+const ROLLOVER_PATCH = 'order-saga-durable-rollover-v1';
+
+export function shouldRollSaga(
+  info: { continueAsNewSuggested: boolean; historyLength: number; historySize: number },
+  eventThreshold = SAGA_HISTORY_EVENTS,
+): boolean {
+  return (
+    info.continueAsNewSuggested ||
+    info.historyLength >= eventThreshold ||
+    info.historySize >= SAGA_HISTORY_BYTES
+  );
+}
+
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
@@ -209,7 +231,73 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   const { orderId } = input;
   const recheckMs = (input.recheckIntervalHours ?? DEFAULT_RECHECK_HOURS) * HOUR;
 
-  const status: SagaStatus = {
+  let activitySequence = input.resume?.activitySequence ?? 0;
+  let durable = Boolean(input.resume);
+  if (!Number.isSafeInteger(activitySequence) || activitySequence < 0) {
+    throw ApplicationFailure.nonRetryable('Invalid saga activity sequence', 'SAGA_INCONSISTENT');
+  }
+  const eventThreshold = input.historyEventThreshold ?? SAGA_HISTORY_EVENTS;
+  if (
+    !Number.isSafeInteger(eventThreshold) ||
+    eventThreshold < 16 ||
+    eventThreshold > SAGA_HISTORY_EVENTS
+  ) {
+    throw ApplicationFailure.nonRetryable('Invalid saga history threshold', 'SAGA_INCONSISTENT');
+  }
+  function activities(options: ActivityOptions, legacy: OrderActivities): OrderActivities {
+    return new Proxy(legacy, {
+      get(target, property: string) {
+        return (...args: unknown[]): Promise<unknown> => {
+          // Checking again permits a pre-change run to adopt the patch once
+          // replay reaches new work, without changing historical commands.
+          durable = patched(ROLLOVER_PATCH) || durable;
+          if (!durable) {
+            const original = Reflect.get(target, property) as (
+              ...values: unknown[]
+            ) => Promise<unknown>;
+            return original(...args);
+          }
+          if (!Number.isSafeInteger(activitySequence + 1)) {
+            throw ApplicationFailure.nonRetryable(
+              'Saga activity sequence exhausted',
+              'SAGA_INCONSISTENT',
+            );
+          }
+          activitySequence += 1;
+          const scheduled = proxyActivities<
+            Record<string, (...values: unknown[]) => Promise<unknown>>
+          >({
+            ...options,
+            heartbeatTimeout: '10 seconds',
+            activityId: `saga-step-${activitySequence}`,
+          });
+          return scheduled[property](...args);
+        };
+      },
+    });
+  }
+  const {
+    createObligation,
+    authoriseSettlement,
+    settle,
+    compensate,
+    disputeObligation,
+    resolveObligationDispute,
+  } = activities(ECONOMIC_OPTIONS, legacyEconomic);
+  const {
+    readOrder,
+    findObligation,
+    markFundsHeld,
+    markFailed,
+    markSettling,
+    markSettlementFailed,
+    markObligationDisputed,
+    markCompleted,
+    markCancelled,
+    recordReminder,
+  } = activities(LOCAL_OPTIONS, legacyLocal);
+
+  const status: SagaStatus = input.resume?.status ?? {
     phase: 'PLACING',
     deferredSteps: ['RESERVE_STOCK', 'NOTIFY_SUPPLIER'],
     remindersRecorded: 0,
@@ -232,18 +320,22 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
   // When each windowed wait is next due a reminder, in workflow time — kept
   // when the order leaves that status for a dispute, so a resumed order waits
-  // out what remained of its window rather than a new one (D-083).
-  const reminderDue = new Map<OrderStatus, number>();
+  // out what remained of its window rather than a new one (D-083). A rollover
+  // carries them on.
+  const reminderDue = new Map<OrderStatus, number>(input.resume?.reminderDue);
+  if (input.resume?.nextReminderAt !== undefined) {
+    reminderDue.set(input.resume.waitingIn, input.resume.nextReminderAt);
+  }
 
   // The dispute economic-service has been told about and not yet told is
   // resolved. An id, not a flag: a second dispute on the same order is a
   // different dispute, and is mirrored under its own key.
-  let mirroredDispute: string | undefined;
+  let mirroredDispute: string | undefined = input.resume?.mirroredDispute;
   // economic-service's identity of that same dispute, when it gave one. The
   // resolution names it, so it decides that dispute and not one raised there
   // since (Codex on #318 round 2, N1). Undefined for a dispute mirrored by a
   // step recorded before economic-service had identities: resolved unnamed.
-  let mirroredEconomicDispute: string | undefined;
+  let mirroredEconomicDispute: string | undefined = input.resume?.mirroredEconomicDispute;
 
   /** The order now, with the mirrored dispute's resolution when there is one. */
   const read = (): Promise<SagaOrderView> =>
@@ -346,6 +438,9 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     disputeId?: string,
   ): Promise<SagaOrderView> {
     let windowElapsed = false;
+    // The deadline a rollover hands to the next run (`SagaResume`).
+    let nextReminderAt =
+      input.resume?.waitingIn === waitingIn ? input.resume.nextReminderAt : undefined;
     let windowScope: CancellationScope | undefined;
     const sleepFor = (ms: number): void => {
       const scope = new CancellationScope();
@@ -364,14 +459,20 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     // Since D-083 a window is a deadline, kept across a dispute; a history
     // recorded before the change replays the old timers (`armWindow`).
     const keepsDeadlines = window !== undefined && patched(DISPUTE_RESUME_PATCH);
-    const armWindow = (days: number): void => {
+    const armWindow = (days: number, resumeAt?: number): void => {
       if (!keepsDeadlines) {
-        sleepFor(days * DAY);
+        // new Date is Temporal's deterministic workflow clock; no host clock I/O.
+        nextReminderAt = resumeAt ?? new Date().getTime() + days * DAY;
+        // Memory only, so no command changes: a dispute after the replay ends
+        // resumes to this deadline, not to a fresh window or a passed one.
+        reminderDue.set(waitingIn, nextReminderAt);
+        sleepFor(durable ? Math.max(0, nextReminderAt - new Date().getTime()) : days * DAY);
         return;
       }
       armUntil(Date.now() + days * DAY);
     };
     const armUntil = (dueAt: number): void => {
+      nextReminderAt = dueAt;
       reminderDue.set(waitingIn, dueAt);
       const remaining = dueAt - Date.now();
       // Due while the order was disputed: the reminder is recorded at the
@@ -382,11 +483,30 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
     if (window) {
       const due = keepsDeadlines ? reminderDue.get(waitingIn) : undefined;
-      if (due === undefined) armWindow(window.firstDays);
+      if (due === undefined) armWindow(window.firstDays, nextReminderAt);
       else armUntil(due);
     }
     try {
       for (;;) {
+        if (patched(ROLLOVER_PATCH)) {
+          const info = workflowInfo();
+          if (shouldRollSaga(info, eventThreshold)) {
+            // No activity or async signal handler is in flight here. Financial
+            // effects are already recorded by their owner before this checkpoint.
+            await continueAsNew<typeof orderSaga>({
+              ...input,
+              resume: {
+                status,
+                mirroredDispute,
+                mirroredEconomicDispute,
+                waitingIn,
+                nextReminderAt,
+                reminderDue: [...reminderDue],
+                activitySequence,
+              },
+            });
+          }
+        }
         await condition(() => nudged || windowElapsed, recheckMs);
         // Cleared before the read, not after: a signal that arrives while the
         // read is in flight may be about a commit the read did not see, and it
@@ -566,6 +686,12 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   // Not two: creating the obligation and holding the money separately leaves a
   // window in which the buyer can spend what they have just committed.
   let order = await read();
+  if (input.resume && order.status === 'PENDING') {
+    throw ApplicationFailure.nonRetryable(
+      'A resumed saga cannot repeat initial hold placement',
+      'SAGA_INCONSISTENT',
+    );
+  }
 
   if (order.status === 'PENDING') {
     status.phase = 'CREATING_OBLIGATION';

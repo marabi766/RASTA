@@ -2800,6 +2800,27 @@
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
   },
   {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 52,
+    "hash": "88327ddf15c3b94282545225c756e3dbb0853a7f2481fff6e2136d058692b7a0",
+    "occurrence": 0,
+    "decision": "platform-wide: invitations are owned by buyers; an invited supplier share-locks the buyer RFQ only through the join to its own invitation, binding supplier_organization_id from the token"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 69,
+    "hash": "b47ee6c994ffc09c71f845457dea6e8d3c4b48fd219352314b9d202b1971f48f",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/procurement-service/src/quotation/quotation.repository.ts",
+    "line": 182,
+    "hash": "e2bf218d5c6baa98e6a6ea867a6f80c946d36007be1997ddd01456b658950625",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-scoped advisory lock keyed by the RFQ id the caller already share-locked through its own invitation; reads and returns no row"
+  },
+  {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
     "line": 136,
     "hash": "bcaea0a38c62cb337c146f1b69238f796e5af005a88f8a1e2f12ca76917c9bb7",

@@ -105,8 +105,10 @@ export interface StatementLineValues {
 export const EMPTY_LINE: StatementLineValues = { description: '', amount: '', milestoneId: '' };
 
 /** The form field of row `index`, as the draft form names it. */
-export const lineField = (index: number, part: keyof StatementLineValues): string =>
-  `line.${index}.${part}`;
+export const lineField = (
+  index: number,
+  part: keyof StatementLineValues,
+): `line.${number}.${keyof StatementLineValues}` => `line.${index}.${part}`;
 
 export const LINE_FIELD_LABELS: Readonly<Record<keyof StatementLineValues, string>> = {
   description: 'شرح کار',

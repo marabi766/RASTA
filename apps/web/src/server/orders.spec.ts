@@ -1,6 +1,7 @@
 /**
  * @jest-environment node
  */
+import { GENERIC_FIELD_MESSAGE } from '@/lib/form-issues';
 import { EMPTY_ORDER_COMMAND_FORM, type OrderCommandFormValues } from '@/lib/order-fields';
 
 import {
@@ -8,6 +9,7 @@ import {
   fetchOrder,
   fetchOrders,
   DISPUTE_FORM_STALE,
+  RECEIPT_NOTE_REFUSAL,
   issueOrderCommand,
   orderCommandFormValues,
   parseOrderCommand,
@@ -304,6 +306,29 @@ describe('an operator’s decision names the dispute the page showed (D-083)', (
       ok: false,
       fieldErrors: { disputeId: DISPUTE_FORM_STALE },
     });
+  });
+
+  it('shows the stale-form sentence as written: declared, so not the generic message', () => {
+    const parsed = parseOrderCommand(values({ ...decision, disputeId: '' }));
+    expect(parsed).toMatchObject({ ok: false });
+    if (parsed.ok) throw new Error('expected a refusal');
+    expect(parsed.fieldErrors.disputeId).toBe(DISPUTE_FORM_STALE);
+    expect(parsed.fieldErrors.disputeId).not.toBe(GENERIC_FIELD_MESSAGE);
+  });
+
+  it('shows the outcome sentence as written: declared, so not the generic message', () => {
+    const parsed = parseOrderCommand(values({ ...decision, disputeId: DISPUTE, outcome: '' }));
+    expect(parsed).toMatchObject({
+      ok: false,
+      fieldErrors: { outcome: 'نتیجه را انتخاب کنید' },
+    });
+  });
+
+  it('shows the receipt note refusal as written: declared, so not a length message', () => {
+    const parsed = parseOrderCommand(
+      values({ command: 'CONFIRM_RECEIPT', acknowledge: 'yes', note: 'یادداشت' }),
+    );
+    expect(parsed).toMatchObject({ ok: false, fieldErrors: { note: RECEIPT_NOTE_REFUSAL } });
   });
 
   it('reads the open dispute off the order, and null when the service sends none', async () => {
