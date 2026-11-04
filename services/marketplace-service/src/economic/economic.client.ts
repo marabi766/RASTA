@@ -40,6 +40,8 @@ import { economicCallDuration, economicCallsTotal } from '../observability/metri
 
 /** Transport ceiling, including error envelopes and paged obligation lookups. */
 export const ECONOMIC_RESPONSE_MAX_BYTES = 1024 * 1024;
+/** First owned read buffer; doubled as the body grows, never past the ceiling. */
+const ECONOMIC_RESPONSE_MIN_BUFFER_BYTES = 256;
 
 async function readEconomicJson(response: Response, deadlineAt: number): Promise<unknown> {
   const length = response.headers.get('content-length');
@@ -51,9 +53,11 @@ async function readEconomicJson(response: Response, deadlineAt: number): Promise
     throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
   }
   const reader = response.body.getReader();
-  // Memory follows the body actually received, never the ceiling (FU-044):
-  // chunks are kept as read and joined once, at exactly `size` bytes.
-  const chunks: Uint8Array[] = [];
+  // Memory follows the bytes actually received, never the ceiling and never
+  // the number of chunks (FU-044): each chunk is copied into one owned buffer
+  // that grows geometrically up to the ceiling and is then dropped, so a body
+  // delivered one byte at a time costs no more than one delivered whole.
+  let owned: Buffer | undefined;
   let size = 0;
   try {
     for (;;) {
@@ -61,13 +65,25 @@ async function readEconomicJson(response: Response, deadlineAt: number): Promise
       if (performance.now() >= deadlineAt) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
       const { done, value } = await reader.read();
       if (done) break;
-      // Refused before the chunk that would cross the ceiling is kept.
+      // Refused before the chunk that would cross the ceiling is copied.
       if (value.byteLength > ECONOMIC_RESPONSE_MAX_BYTES - size)
         throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-      chunks.push(value);
-      size += value.byteLength;
+      const needed = size + value.byteLength;
+      if (!owned || needed > owned.byteLength) {
+        const grown = Math.min(
+          ECONOMIC_RESPONSE_MAX_BYTES,
+          Math.max(needed, ECONOMIC_RESPONSE_MIN_BUFFER_BYTES, (owned?.byteLength ?? 0) * 2),
+        );
+        const next = Buffer.alloc(grown);
+        if (owned) owned.copy(next, 0, 0, size);
+        owned = next;
+      }
+      owned.set(value, size);
+      size = needed;
     }
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size));
+    const text = owned
+      ? new TextDecoder('utf-8', { fatal: true }).decode(owned.subarray(0, size))
+      : '';
     if (!text && response.status !== 204) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
     return text ? (JSON.parse(text) as unknown) : undefined;
   } finally {
