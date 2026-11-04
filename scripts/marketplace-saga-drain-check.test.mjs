@@ -20,6 +20,8 @@ import { fileURLToPath } from 'node:url';
 import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./marketplace-saga-drain-check.mjs', import.meta.url));
+const STOP_TIME = '2026-01-01T00:00:00.000Z';
+const CONTINUED_QUERY = `WorkflowType="orderSaga" AND ExecutionStatus="ContinuedAsNew" AND CloseTime >= "${STOP_TIME}"`;
 const QUERY = 'WorkflowType="orderSaga" AND ExecutionStatus="Running"';
 
 const FAKE_CLI = `#!/usr/bin/env node
@@ -27,7 +29,8 @@ import { appendFileSync, readFileSync } from 'node:fs';
 const scenario = JSON.parse(readFileSync(process.env.FAKE_TEMPORAL_SCENARIO, 'utf8'));
 const args = process.argv.slice(2);
 const keyOf = (a) => {
-  const key = a[0] + ' ' + a[1];
+  let key = a[0] + ' ' + a[1];
+  if (a.includes('--query') && a[a.indexOf('--query') + 1].includes('ContinuedAsNew')) key += ' continued';
   return key === 'workflow describe' ? key + ' ' + a[a.indexOf('--workflow-id') + 1] : key;
 };
 appendFileSync(process.env.FAKE_TEMPORAL_CALLS, JSON.stringify(args) + '\\n');
@@ -78,6 +81,8 @@ function drained() {
     'task-queue describe': { stdout: { reachability: null, pollers: null, stats } },
     'workflow count': { stdout: { count: '2' } },
     'workflow list': { stdout: [execution('A'), execution('B')] },
+    'workflow count continued': { stdout: {} },
+    'workflow list continued': { stdout: [] },
     'workflow describe order-A': { stdout: description('A') },
     'workflow describe order-B': { stdout: description('B', []) },
   };
@@ -87,6 +92,7 @@ const SETTINGS = {
   TEMPORAL_ADDRESS: 'temporal.internal:7233',
   TEMPORAL_NAMESPACE: 'rasta-prod',
   MARKETPLACE_TEMPORAL_TASK_QUEUE: 'rasta-order',
+  MARKETPLACE_SAGA_STOP_TIME: STOP_TIME,
 };
 
 function run(scenario, { settings = SETTINGS, cli } = {}) {
@@ -143,9 +149,133 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
       '--output',
       'json',
     ],
+    ['workflow', 'count', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
+    ['workflow', 'list', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
+    ['workflow', 'count', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
     ['workflow', 'count', ...common, '--query', QUERY, '--output', 'json'],
   ]);
 });
+
+// The predecessor is visible; its current successor need not be indexed yet.
+const predecessor = (id, runId = `previous-${id}`) => ({
+  ...execution(id),
+  execution: { workflowId: `order-${id}`, runId },
+  status: 'WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW',
+});
+function continued(current = description('C')) {
+  return {
+    ...drained(),
+    'workflow count continued': { stdout: { count: '1' } },
+    'workflow list continued': { stdout: [predecessor('C')] },
+    'workflow describe order-C': { stdout: current },
+  };
+}
+
+test('blocks a continued-as-new successor absent from running visibility, even without activities', () => {
+  const { status, stdout, stderr, calls } = run(continued());
+  assert.equal(status, 1);
+  assert.doesNotMatch(stdout, /OK/);
+  assert.match(stderr, /current running order saga is absent from visibility/);
+  const current = calls.find((args) => args.includes('order-C'));
+  assert.ok(current);
+  assert.equal(current.includes('--run-id'), false);
+});
+
+test('blocks an unlisted continued-as-new successor with a pending financial activity', () => {
+  const result = run(continued(description('C', [pendingHold])));
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stdout, /OK/);
+});
+
+test('blocks when describing the current continued-as-new successor fails', () => {
+  const scenario = continued();
+  scenario['workflow describe order-C'] = { status: 1, stderr: SENTINELS.join(' ') };
+  const { status, stderr } = run(scenario);
+  assert.equal(status, 1);
+  assert.match(stderr, /temporal workflow describe failed/);
+  assertNoSentinel(stderr);
+});
+
+test('passes a continued-as-new chain whose current run has completed', () => {
+  const current = description('C');
+  current.workflowExecutionInfo.execution.runId = 'current-C';
+  current.workflowExecutionInfo.status = 'WORKFLOW_EXECUTION_STATUS_COMPLETED';
+  assert.equal(run(continued(current)).status, 0);
+});
+
+test('inspects a visible current run again by workflow id, even across multiple continuations', () => {
+  const scenario = continued();
+  scenario['workflow count continued'] = { stdout: { count: '2' } };
+  scenario['workflow list continued'].stdout = [predecessor('A'), predecessor('A', 'earlier-A')];
+  const { status, calls } = run(scenario);
+  assert.equal(status, 0);
+  const current = calls.filter((args) => args.includes('order-A'));
+  assert.equal(current.length, 2);
+  assert.equal(current[1].includes('--run-id'), false);
+});
+
+const CONTINUED_FAILURES = {
+  'wrong predecessor status': { 'workflow list continued': { stdout: [execution('C')] } },
+  'incomplete pagination': { 'workflow count continued': { stdout: { count: '2' } } },
+  'duplicate predecessors': {
+    'workflow list continued': { stdout: [predecessor('C'), predecessor('C')] },
+  },
+  'unknown list shape or pagination envelope': {
+    'workflow list continued': { stdout: { executions: [], nextPageToken: 'more' } },
+  },
+  'malformed count': { 'workflow count continued': { stdout: { count: null } } },
+  'changed count': {
+    'workflow count continued': {
+      sequence: [{ stdout: { count: '1' } }, { stdout: { count: '2' } }],
+    },
+  },
+  'unknown current description': { 'workflow describe order-C': { stdout: {} } },
+  'unknown current status': {
+    'workflow describe order-C': {
+      stdout: {
+        ...description('C'),
+        workflowExecutionInfo: { ...execution('C'), status: 'UNKNOWN' },
+      },
+    },
+  },
+  'closed predecessor returned as current': {
+    'workflow describe order-C': {
+      stdout: {
+        ...description('C'),
+        workflowExecutionInfo: {
+          ...execution('C'),
+          status: 'WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW',
+        },
+      },
+    },
+  },
+};
+for (const [name, answers] of Object.entries(CONTINUED_FAILURES)) {
+  test(`blocks continued-as-new with ${name}`, () => {
+    const completed = description('C');
+    completed.workflowExecutionInfo.status = 'WORKFLOW_EXECUTION_STATUS_COMPLETED';
+    const result = run({ ...continued(completed), ...answers });
+    assert.equal(result.status, 1);
+    assert.doesNotMatch(result.stdout, /OK/);
+  });
+}
+
+for (const stopTime of [
+  'garbage',
+  '2026-02-30T00:00:00.000Z',
+  '2999-01-01T00:00:00.000Z',
+  '2026-01-01T00:00:00Z',
+  '2026-01-01T00:00:00.000Z" OR WorkflowType="other',
+]) {
+  test(`blocks an invalid or future stop time ${stopTime}`, () => {
+    const result = run(drained(), {
+      settings: { ...SETTINGS, MARKETPLACE_SAGA_STOP_TIME: stopTime },
+    });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls, []);
+    assert.match(result.stderr, /must be a past canonical UTC timestamp/);
+  });
+}
 
 test('passes with no running saga at all (the CLI prints {} for a zero count)', () => {
   const scenario = {
@@ -244,12 +374,12 @@ const UNVERIFIABLE = {
   'visibility lists fewer sagas than it counts': [
     { ...drained(), 'workflow count': { stdout: { count: '3' } } },
     {},
-    /counts 3 running order sagas but lists 2/,
+    /counts 3 order sagas but lists 2/,
   ],
   'visibility lists more sagas than it counts': [
     { ...drained(), 'workflow count': { stdout: { count: '1' } } },
     {},
-    /counts 1 running order sagas but lists 2/,
+    /counts 1 order sagas but lists 2/,
   ],
   'a saga starts during the check': [
     {

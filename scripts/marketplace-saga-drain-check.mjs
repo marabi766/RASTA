@@ -12,7 +12,12 @@
  *      counts, none twice (`workflow list` against `workflow count`, before
  *      and after; a (workflow id, run id) listed twice is unverifiable);
  *   3. not one of them has a pending activity (`workflow describe`, each
- *      listed run exactly once: visibility does not index pending activities).
+ *      listed run: visibility does not index pending activities);
+ *   4. all orderSaga runs closed as ContinuedAsNew since the recorded stop
+ *      time are enumerated (count/list/count); their CURRENT runs are described
+ *      by workflow id alone, and any unlisted running successor blocks.
+ * This is an observation after workers stop, not proof that workflows have
+ * completed or that funds cannot move when workers resume.
  * Exit 1: a poller or a pending activity was found, or anything could not
  * be checked — a missing setting, the CLI absent or failing, output it does
  * not recognise. Both block the deployment; there is no exception.
@@ -30,7 +35,9 @@
  *
  * Settings, all required (no default: a check against the wrong namespace or
  * queue finds nothing and would pass): TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE,
- * MARKETPLACE_TEMPORAL_TASK_QUEUE — the values the service runs with. TLS or
+ * MARKETPLACE_TEMPORAL_TASK_QUEUE — the values the service runs with.
+ * MARKETPLACE_SAGA_STOP_TIME — canonical UTC timestamp recorded before stopping
+ * all old replicas (YYYY-MM-DDTHH:mm:ss.sssZ); required, never a future time. TLS or
  * an API key: the `temporal` CLI's own TEMPORAL_* variables, inherited.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
@@ -77,13 +84,13 @@ function temporal(cli, args) {
   }
 }
 
-function countRunning(cli, common) {
+function countExecutions(cli, common, query = QUERY) {
   const answer = temporal(cli, [
     'workflow',
     'count',
     ...common,
     '--query',
-    QUERY,
+    query,
     '--output',
     'json',
   ]);
@@ -106,11 +113,67 @@ function countOf(answer) {
   return Number.isSafeInteger(count) && count >= 0 ? count : null;
 }
 
+function listExecutions(cli, common, query, expected, status = 'RUNNING') {
+  const listed = temporal(cli, [
+    'workflow',
+    'list',
+    ...common,
+    '--query',
+    query,
+    '--output',
+    'json',
+  ]);
+  if (!Array.isArray(listed)) throw new Unverifiable('temporal workflow list: not a list');
+  // Every entry is checked, and no execution may be listed twice, before the
+  // list is compared with the count or anything is described: a duplicate
+  // could otherwise make up the number for a run that is not listed at all,
+  // which would then never be described (Codex r4 on #283).
+  const executions = [];
+  const seen = new Set();
+  for (const entry of listed) {
+    const workflowId = entry?.execution?.workflowId;
+    const runId = entry?.execution?.runId;
+    if (
+      typeof workflowId !== 'string' ||
+      !workflowId ||
+      typeof runId !== 'string' ||
+      !runId ||
+      entry?.type?.name !== 'orderSaga' ||
+      entry?.status !== `WORKFLOW_EXECUTION_STATUS_${status}`
+    ) {
+      throw new Unverifiable('temporal workflow list: an entry without an orderSaga execution');
+    }
+    const identity = JSON.stringify([workflowId, runId]);
+    if (seen.has(identity)) {
+      throw new Unverifiable('temporal workflow list: an execution is listed twice');
+    }
+    seen.add(identity);
+    executions.push({ workflowId, runId });
+  }
+  if (executions.length !== expected) {
+    throw new Unverifiable(
+      `visibility counts ${expected} order sagas but lists ${executions.length}`,
+    );
+  }
+
+  return executions;
+}
+
 function check() {
   const cli = process.env.TEMPORAL_CLI?.trim() || 'temporal';
   const address = setting('TEMPORAL_ADDRESS');
   const namespace = setting('TEMPORAL_NAMESPACE');
   const taskQueue = setting('MARKETPLACE_TEMPORAL_TASK_QUEUE');
+  const stopTime = setting('MARKETPLACE_SAGA_STOP_TIME');
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(stopTime) ||
+    !Number.isFinite(Date.parse(stopTime)) ||
+    new Date(stopTime).toISOString() !== stopTime ||
+    Date.parse(stopTime) > Date.now()
+  ) {
+    throw new Unverifiable('MARKETPLACE_SAGA_STOP_TIME must be a past canonical UTC timestamp');
+  }
+  const continuedQuery = `WorkflowType="orderSaga" AND ExecutionStatus="ContinuedAsNew" AND CloseTime >= "${stopTime}"`;
   const common = ['--address', address, '--namespace', namespace];
   const blockers = [];
 
@@ -135,60 +198,25 @@ function check() {
     blockers.push('task queue has an active poller; details withheld');
   }
 
-  const before = countRunning(cli, common);
-  const listed = temporal(cli, [
-    'workflow',
-    'list',
-    ...common,
-    '--query',
-    QUERY,
-    '--output',
-    'json',
-  ]);
-  if (!Array.isArray(listed)) throw new Unverifiable('temporal workflow list: not a list');
-  // Every entry is checked, and no execution may be listed twice, before the
-  // list is compared with the count or anything is described: a duplicate
-  // could otherwise make up the number for a run that is not listed at all,
-  // which would then never be described (Codex r4 on #283).
-  const executions = [];
-  const seen = new Set();
-  for (const entry of listed) {
-    const workflowId = entry?.execution?.workflowId;
-    const runId = entry?.execution?.runId;
-    if (
-      typeof workflowId !== 'string' ||
-      typeof runId !== 'string' ||
-      entry?.type?.name !== 'orderSaga'
-    ) {
-      throw new Unverifiable('temporal workflow list: an entry without an orderSaga execution');
-    }
-    const identity = JSON.stringify([workflowId, runId]);
-    if (seen.has(identity)) {
-      throw new Unverifiable('temporal workflow list: an execution is listed twice');
-    }
-    seen.add(identity);
-    executions.push({ workflowId, runId });
-  }
-  if (executions.length !== before) {
-    throw new Unverifiable(
-      `visibility counts ${before} running order sagas but lists ${executions.length}`,
-    );
-  }
+  const before = countExecutions(cli, common);
+  const executions = listExecutions(cli, common, QUERY, before);
+  const seen = new Set(
+    executions.map(({ workflowId, runId }) => JSON.stringify([workflowId, runId])),
+  );
 
-  for (const { workflowId, runId } of executions) {
+  const inspect = ({ workflowId, runId }) => {
     const described = temporal(cli, [
       'workflow',
       'describe',
       ...common,
       '--workflow-id',
       workflowId,
-      '--run-id',
-      runId,
+      ...(runId === undefined ? [] : ['--run-id', runId]),
       '--output',
       'json',
     ]);
-    // Proof only about this very run: the same workflow id AND run id, an
-    // orderSaga on the queue whose pollers were checked. An empty list is
+    // Match the workflow id and, when pinned, the run id. Current lookups must
+    // return a known terminal status or a running execution we also listed. An empty list is
     // omitted from the JSON; anything else that is not a list is not an answer.
     const info = isRecord(described) ? described.workflowExecutionInfo : undefined;
     const pending = isRecord(described)
@@ -198,11 +226,22 @@ function check() {
       : undefined;
     if (
       info?.execution?.workflowId !== workflowId ||
-      info?.execution?.runId !== runId ||
+      typeof info?.execution?.runId !== 'string' ||
+      !info.execution.runId ||
+      (runId !== undefined && info.execution.runId !== runId) ||
+      !['RUNNING', 'COMPLETED', 'FAILED', 'CANCELED', 'TERMINATED', 'TIMED_OUT'].some(
+        (status) => info?.status === `WORKFLOW_EXECUTION_STATUS_${status}`,
+      ) ||
       info?.type?.name !== 'orderSaga' ||
       !Array.isArray(pending)
     ) {
       throw new Unverifiable('temporal workflow describe: not a description of that run');
+    }
+    if (
+      info.status === 'WORKFLOW_EXECUTION_STATUS_RUNNING' &&
+      !seen.has(JSON.stringify([workflowId, info.execution.runId]))
+    ) {
+      throw new Unverifiable('current running order saga is absent from visibility');
     }
     const queueOfRun = described.executionConfig?.taskQueue?.name;
     if (queueOfRun !== taskQueue) {
@@ -211,9 +250,28 @@ function check() {
     for (let i = 0; i < pending.length; i += 1) {
       blockers.push('workflow has a pending activity; details withheld');
     }
+  };
+  for (const execution of executions) inspect(execution);
+
+  // A successor can be absent from RUNNING visibility while its predecessor
+  // is already indexed. Resolve CURRENT by workflow id, never the closed run id.
+  // Count/list/count refuses partial pagination, duplicates and index changes.
+  const continuedBefore = countExecutions(cli, common, continuedQuery);
+  const continued = listExecutions(
+    cli,
+    common,
+    continuedQuery,
+    continuedBefore,
+    'CONTINUED_AS_NEW',
+  );
+  for (const workflowId of new Set(continued.map((execution) => execution.workflowId))) {
+    inspect({ workflowId });
+  }
+  if (countExecutions(cli, common, continuedQuery) !== continuedBefore) {
+    throw new Unverifiable('continued-as-new order saga count changed during the check');
   }
 
-  const after = countRunning(cli, common);
+  const after = countExecutions(cli, common);
   if (after !== before) {
     throw new Unverifiable(`running order sagas went from ${before} to ${after} during the check`);
   }

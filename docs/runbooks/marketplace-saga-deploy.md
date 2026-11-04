@@ -36,12 +36,16 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 
 ### گام ۳ — Gate
 
+پیش از گام ۲ زمان UTC را با `date -u +%Y-%m-%dT%H:%M:%S.000Z` ثبت کن و در همهٔ تکرارهای Gate
+همان مقدار را در `MARKETPLACE_SAGA_STOP_TIME` نگه دار؛ زمان را به جلو نبر. بررسی باید پیش از انقضای
+Retention تاریخچه و Visibility انجام شود؛ پس از آن، تطبیق عملیاتی لازم است.
+
 از ریشهٔ مخزن، با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر سه اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
 TEMPORAL_ADDRESS='<as the service>' TEMPORAL_NAMESPACE='<as the service>' \
-  MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' \
+  MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' MARKETPLACE_SAGA_STOP_TIME='<recorded UTC time>' \
   node scripts/marketplace-saga-drain-check.mjs
 ```
 
@@ -55,22 +59,27 @@ temporal task-queue describe "${C[@]}" --task-queue "$MARKETPLACE_TEMPORAL_TASK_
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # n
 temporal workflow list "${C[@]}" --query "$Q" --output json                                           # باید دقیقاً n اجرای یکتا باشد، بی تکرار
 temporal workflow describe "${C[@]}" --workflow-id <id> --run-id <runId> --output json                 # هر ردیف یک بار: .pendingActivities نیست یا []
+CQ="WorkflowType=\"orderSaga\" AND ExecutionStatus=\"ContinuedAsNew\" AND CloseTime >= \"$MARKETPLACE_SAGA_STOP_TIME\""
+temporal workflow count "${C[@]}" --query "$CQ" --output json                                         # c
+temporal workflow list "${C[@]}" --query "$CQ" --output json                                          # دقیقاً c اجرای یکتا
+temporal workflow describe "${C[@]}" --workflow-id <id> --output json                                # اجرای جاری هر workflowId، بدون run-id
+temporal workflow count "${C[@]}" --query "$CQ" --output json                                         # باز همان c
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # باز همان n
 ```
 
 Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی‌کند؛ شکل‌ها همان خروجی CLI ـِ Image سنجاق‌شده (`temporalio/auto-setup:1.26.2`)
 روی سرور توسعه‌اند. هر شکل دیگر کد ۱ است (Codex دور ۳ روی #283):
 
-| فرمان                 | تنها شکل پذیرفته                                                                                                                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflow count`      | `{"count": "<n>"}` (رشتهٔ رقمی) یا `{"count": <n>}` (عدد صحیح نامنفی)، و `{}` برای صفر (CLI صفر را نمی‌نویسد)؛ هیچ کلید دیگری نه                                                          |
-| `task-queue describe` | شیئی با کلید `pollers` (`null` یا فهرست) و `stats` (فهرست)                                                                                                                                |
-| `workflow list`       | فهرستی که هر ردیفش `execution.workflowId` و `execution.runId` و نوع `orderSaga` دارد و هیچ جفت (`workflowId`، `runId`) در آن دو بار نیست (Codex دور ۴)                                    |
-| `workflow describe`   | `workflowExecutionInfo.execution` با همان `workflowId` **و** همان `runId` ردیف فهرست، نوع `orderSaga`، `executionConfig.taskQueue.name` همان Queue؛ `pendingActivities` نیست یا فهرست است |
+| فرمان                 | تنها شکل پذیرفته                                                                                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflow count`      | `{"count": "<n>"}` (رشتهٔ رقمی) یا `{"count": <n>}` (عدد صحیح نامنفی)، و `{}` برای صفر (CLI صفر را نمی‌نویسد)؛ هیچ کلید دیگری نه                                                                                    |
+| `task-queue describe` | شیئی با کلید `pollers` (`null` یا فهرست) و `stats` (فهرست)                                                                                                                                                          |
+| `workflow list`       | فهرستی که هر ردیفش `execution.workflowId` و `execution.runId` و نوع `orderSaga` دارد و هیچ جفت (`workflowId`، `runId`) در آن دو بار نیست (Codex دور ۴)                                                              |
+| `workflow describe`   | `workflowExecutionInfo.execution` با همان `workflowId` (و برای اجرای سنجاق‌شده همان `runId`)، وضعیت شناخته‌شده، نوع `orderSaga`، `executionConfig.taskQueue.name` همان Queue؛ `pendingActivities` نیست یا فهرست است |
 
 | کد خروج | معنا                                                                                                                                                                                                                          | استقرار      |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `0`     | هیچ Poller روی Queue، شمار و فهرست یکی، هیچ Activity در انتظار                                                                                                                                                                | مجاز (گام ۴) |
+| `0`     | هیچ Poller روی Queue، هر دو شمار و فهرست یکی، اجرای جاری بررسی شده، هیچ Activity در انتظار                                                                                                                                    | مجاز (گام ۴) |
 | `1`     | Poller یا Activity در انتظار یافت شد؛ جزئیات خروجی CLI چاپ نمی‌شود                                                                                                                                                            | **متوقف**    |
 | `1`     | `cannot verify — deployment blocked`: تنظیمی نیست، CLI نیست یا شکست خورد، پاسخی با شکلی جز جدول بالا، اجرایی دو بار فهرست شده، شمار و اجراهای یکتای فهرست نمی‌خوانند، شمار در حین بررسی عوض شد، Workflow ـی روی Queue ـی دیگر | **متوقف**    |
 
@@ -129,3 +138,21 @@ that shortens retention after deleting older history also requires operator revi
 two minutes. Local Prometheus loads the rule; external notification routing remains
 a deployment responsibility. Starter shutdown aborts active RPCs, joins database
 work and stops polling before Prisma disconnects.
+
+## Continued-as-new visibility gap (FU-046)
+
+The gate uses continued-as-new predecessors closed at or after the recorded stop
+time, then describes each distinct workflow's **current** run by workflow id
+without a run id. This preserves deployment with idle running sagas while checking
+successors that RUNNING visibility may not have indexed. Both lists must contain
+unique executions and match their counts; count changes, partial pagination,
+unknown output/status, and describe failures block. A current running successor
+absent from the running list also blocks, even with no pending activities.
+
+Exit 0 proves only the observations made during this check: no listed poller,
+complete count-matched lists, and no pending activities in the inspected listed
+and current runs. It does not prove zero running workflows, completed settlements,
+or that held funds cannot move after workers resume. All old replicas must remain
+stopped, no other worker may poll this queue, and the stop timestamp must precede
+the shutdown and remain within history/visibility retention. This is not an atomic
+snapshot or an independent guarantee that Temporal visibility is fully up to date.

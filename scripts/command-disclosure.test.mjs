@@ -296,6 +296,7 @@ test('Temporal unexpected exception discards stack, own properties and cause', (
           TEMPORAL_ADDRESS: 'unused',
           TEMPORAL_NAMESPACE: 'unused',
           MARKETPLACE_TEMPORAL_TASK_QUEUE: 'unused',
+          MARKETPLACE_SAGA_STOP_TIME: '2026-01-01T00:00:00.000Z',
         },
       },
     );
