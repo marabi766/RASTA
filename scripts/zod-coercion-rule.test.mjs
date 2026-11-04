@@ -353,6 +353,9 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
 
 // F3 transform family: every callback entry uses the same fail-closed helper analysis.
 const transformFailures = [
+  `z.core._url(getConstructor(),{});`,
+  `z.core._int(getConstructor(),{});`,
+  `let C=z.core.$ZodString; C=unresolved; z.core._string(C,{});`,
   `z.core._transform(getConstructor(),v=>v);`,
   `import {C} from 'unknown'; z.core._transform(C,v=>v);`,
   `function build(C) { return z.core._transform(C,v=>v); }`,

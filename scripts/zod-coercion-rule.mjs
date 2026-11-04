@@ -512,7 +512,9 @@ export default {
         if (index === COERCING_API) report(node);
         if (index >= 0) options(node.arguments[index], new Set(), true);
         const api = callbackSignature(factory);
-        if (api.slot === 1) {
+        const classArgument =
+          factory.name?.startsWith('_') && (api.slot === 1 || index > 0 || index === COERCING_API);
+        if (classArgument) {
           const ctor = origin(node.arguments[0]);
           if (!ctor?.raw || ctor.ambiguous || !/^\$?Zod/.test(ctor.name ?? ''))
             report(node, 'preprocess');
