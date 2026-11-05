@@ -1935,6 +1935,277 @@ describe('the order saga', () => {
         expect(result).toBe('COMPLETED');
       });
     });
+
+    describe('the filing and the refund (FU-117)', () => {
+      const SIBLING_MARKER = 'economic-sibling-call-durable-wait-v1';
+      const toldFinal = (): Error =>
+        ApplicationFailure.create({
+          message: 'The obligation is SETTLED',
+          type: 'OBLIGATION_ALREADY_FINAL',
+          nonRetryable: true,
+          details: [OWNER_STATE_IS_FINAL],
+        });
+      const unlisted = (code: string) => (): Error => ApplicationFailure.nonRetryable('no', code);
+
+      /** One economic call failing with whatever `economic.failure` says until `recovered`. */
+      function failingOn(
+        order: FakeOrder,
+        operation: 'disputeObligation' | 'compensate',
+        failure: () => Error = down,
+      ) {
+        const economic = { recovered: false, failure, sent: [] as unknown[][] };
+        const recording = recordingActivities(order);
+        (recording.activities as unknown as Record<string, unknown>)[operation] = async (
+          ...args: unknown[]
+        ) => {
+          recording.calls.push(operation);
+          economic.sent.push(args);
+          if (!economic.recovered) throw economic.failure();
+          return operation === 'disputeObligation' ? 'E' : undefined;
+        };
+        return { ...recording, economic };
+      }
+      const toCancelled = async (ctx: { party: Party; held: () => Promise<void> }) => {
+        await ctx.held();
+        await ctx.party.cancel('changed their mind');
+      };
+      const toDisputed = async (ctx: { party: Party; held: () => Promise<void> }) => {
+        await ctx.held();
+        await ctx.party.dispute('it arrived broken');
+      };
+      const SITES = [
+        ['compensate', toCancelled, 'COMPENSATION_UNCONFIRMED', 'markCancelled'],
+        ['disputeObligation', toDisputed, 'DISPUTE_UNCONFIRMED', 'resolveObligationDispute'],
+      ] as const;
+
+      describe.each(SITES)('%s', (operation, reach, phase, after) => {
+        it('exhausted: the saga stays, moves nothing, and goes on once answered', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, economic } = failingOn(order, operation);
+          let seen: WorkflowHandle | undefined;
+          const outcome = await run(
+            order,
+            activities,
+            async (ctx) => {
+              seen = ctx.handle;
+              await reach(ctx);
+              await phaseIs(ctx.handle, phase);
+              await until(() => rounds.length > 0, 'a round');
+              await atRest(ctx.handle);
+              await env.sleep('3 hours');
+              expect(rounds.length).toBeGreaterThanOrEqual(3);
+              expect(calls).not.toContain(after);
+              expect((await ctx.handle.query<SagaStatus, []>('status')).phase).toBe(phase);
+              await atRest(ctx.handle);
+              economic.recovered = true;
+              await ctx.handle.signal(retryDisputeRelease);
+              if (operation === 'disputeObligation') {
+                await phaseIs(ctx.handle, 'DISPUTED');
+                await atRest(ctx.handle);
+                await ctx.party.resolve('REFUND', 'the supplier agreed');
+              }
+            },
+            { input: NO_RECHECK },
+          );
+          expect(outcome).toBe('CANCELLED');
+          expect(calls).toContain(after);
+          // The same words, so the same idempotency key, on every round.
+          const sameWords = economic.sent.map((args) =>
+            JSON.stringify(args.filter((arg) => arg !== true)),
+          );
+          expect(new Set(sameWords).size).toBe(1);
+          // In doubt from the second scheduling on, never before it.
+          expect(economic.sent[0]?.at(-1)).not.toBe(true);
+          expect(economic.sent.at(-1)?.at(-1)).toBe(true);
+          const handle = seen as WorkflowHandle;
+          const ids = await patchIds(handle);
+          expect(ids).toContain(SIBLING_MARKER);
+          expect(ids).not.toContain(MARKER);
+          await Worker.runReplayHistory(
+            { workflowsPath: require.resolve('./workflows') },
+            await handle.fetchHistory(),
+            handle.workflowId,
+          );
+        });
+
+        it('a refusal marked as its first attempt ends the saga, with no wait', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities } = failingOn(order, operation, refused);
+          await expect(run(order, activities, reach)).rejects.toMatchObject({
+            cause: { cause: { type: 'INVALID_STATE_TRANSITION' } },
+          });
+          expect(rounds).toEqual([]);
+          expect(calls).not.toContain(after);
+        });
+
+        it.each(['IDEMPOTENCY_KEY_REUSED', 'SOMETHING_NEW'])('%s waits', async (code) => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities } = failingOn(order, operation, unlisted(code));
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              await reach(ctx);
+              await phaseIs(ctx.handle, phase);
+              await until(() => rounds.length > 0, 'a round');
+              await atRest(ctx.handle);
+            },
+            { keepRunning: true },
+          );
+          expect(calls).not.toContain(after);
+        });
+
+        it('in doubt, a marked refusal does not end it; the owner’s final state does', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, economic } = failingOn(order, operation);
+          await expect(
+            run(order, activities, async (ctx) => {
+              await reach(ctx);
+              await phaseIs(ctx.handle, phase);
+              await until(() => rounds.length > 0, 'a round');
+              await atRest(ctx.handle);
+              economic.failure = refused;
+              await ctx.handle.signal(retryDisputeRelease);
+              await until(() => rounds.length > 1, 'a refused round to stay');
+              expect((await ctx.handle.query<SagaStatus, []>('status')).phase).toBe(phase);
+              await atRest(ctx.handle);
+              economic.failure = toldFinal;
+              await ctx.handle.signal(retryDisputeRelease);
+            }),
+          ).rejects.toMatchObject({ cause: { cause: { type: 'OBLIGATION_ALREADY_FINAL' } } });
+          expect(calls).not.toContain(after);
+        });
+
+        it('with an authorisation in doubt, a first attempt’s refusal does not end it', async () => {
+          const order = new FakeOrder();
+          const { rounds, activities, economic } = failingOn(order, operation, refused);
+          // The authorisation goes unconfirmed, then the order moves.
+          activities.authoriseSettlement = async () => {
+            throw down();
+          };
+          activities.findObligation = async () => ({ transactionId: TRANSACTION });
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              await toWait(ctx, () => rounds.length);
+              const before = rounds.length;
+              await atRest(ctx.handle);
+              ctx.party.silently((o) => o.raiseDispute('it arrived broken'));
+              if (operation === 'compensate') {
+                ctx.party.silently((o) => o.resolveDispute('REFUND', 'the supplier agreed'));
+              }
+              await ctx.handle.signal(retryDisputeRelease);
+              await phaseIs(ctx.handle, phase);
+              await until(() => rounds.length > before, 'a round of it');
+              await atRest(ctx.handle);
+              expect(economic.sent.length).toBeGreaterThan(0);
+              expect(economic.sent[0]?.at(-1)).toBe(true);
+            },
+            { keepRunning: true, input: NO_RECHECK },
+          );
+        });
+      });
+
+      it('a saga protocol 4 left in the wait of an authorisation waits at the refund after the deploy', async () => {
+        const order = new FakeOrder();
+        const { rounds, activities, economic } = failingOn(order, 'compensate');
+        activities.authoriseSettlement = async () => {
+          throw down();
+        };
+        activities.findObligation = async () => ({ transactionId: TRANSACTION });
+        const taskQueue = `protocol-4-${(queues += 1)}`;
+        const handle = await env.client.workflow.start(orderSaga, {
+          taskQueue,
+          workflowId: taskQueue,
+          args: [{ ...INPUT, ...NO_RECHECK }],
+        });
+        const party = new Party(order, handle);
+        const before = await Worker.create({
+          connection: env.nativeConnection,
+          taskQueue,
+          workflowsPath: require.resolve('./workflows'),
+          activities,
+          maxCachedWorkflows: 0,
+          // What protocol 4 writes: every marker but this one.
+          patchActivationCallback: ({ patchId }) => patchId !== SIBLING_MARKER,
+        });
+        await before.runUntil(async () => {
+          await toWait(
+            {
+              party,
+              handle,
+              held: () => until(() => order.status !== 'PENDING', 'the hold'),
+            },
+            () => rounds.length,
+          );
+        });
+        expect(await patchIds(handle)).toContain(MARKER);
+        expect(await patchIds(handle)).not.toContain(SIBLING_MARKER);
+
+        const after = await Worker.create({
+          connection: env.nativeConnection,
+          taskQueue,
+          workflowsPath: require.resolve('./workflows'),
+          activities,
+        });
+        const outcome = await after.runUntil(async () => {
+          party.silently((o) => o.raiseDispute('it arrived broken'));
+          party.silently((o) => o.resolveDispute('REFUND', 'the supplier agreed'));
+          await handle.signal(retryDisputeRelease);
+          await phaseIs(handle, 'COMPENSATION_UNCONFIRMED');
+          await atRest(handle);
+          economic.recovered = true;
+          await handle.signal(retryDisputeRelease);
+          return within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish');
+        });
+        expect(outcome).toBe('CANCELLED');
+        expect(await patchIds(handle)).toContain(SIBLING_MARKER);
+        await Worker.runReplayHistory(
+          { workflowsPath: require.resolve('./workflows') },
+          await handle.fetchHistory(),
+          handle.workflowId,
+        );
+      });
+
+      it('a filing sent on while the order moved: mirrored and released before the refund', async () => {
+        const order = new FakeOrder();
+        const { calls, rounds, activities, economic } = failingOn(order, 'disputeObligation');
+        const refunded: unknown[][] = [];
+        const released: unknown[][] = [];
+        activities.compensate = async (...args: unknown[]) => {
+          calls.push('compensate');
+          refunded.push(args);
+        };
+        activities.resolveObligationDispute = async (...args: unknown[]) => {
+          calls.push('resolveObligationDispute');
+          released.push(args);
+        };
+        const outcome = await run(
+          order,
+          activities,
+          async (ctx) => {
+            await toDisputed(ctx);
+            await until(() => rounds.length > 0, 'a round');
+            await atRest(ctx.handle);
+            await ctx.party.resolve('REFUND', 'the supplier agreed');
+            await atRest(ctx.handle);
+            expect(calls).not.toContain('compensate');
+            economic.recovered = true;
+            await ctx.handle.signal(retryDisputeRelease);
+          },
+          { input: NO_RECHECK },
+        );
+        expect(outcome).toBe('CANCELLED');
+        const release = calls.indexOf('resolveObligationDispute');
+        expect(calls.lastIndexOf('disputeObligation')).toBeLessThan(release);
+        expect(release).toBeLessThan(calls.indexOf('compensate'));
+        // What the filing answered is what the release names.
+        expect(released[0]?.at(-1)).toBe('E');
+        // Answered, the filing's doubt is gone: the refund goes as a first send.
+        expect(refunded[0]).toHaveLength(3);
+      });
+    });
   });
 
   it('refunds when a dispute is resolved against the supplier', async () => {

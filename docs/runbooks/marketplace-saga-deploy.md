@@ -211,7 +211,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 4); an absent field means protocol **0**, the strictest legacy
+support (this build: 5); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue. An incompatible
@@ -222,9 +222,10 @@ bypass the gate: it must preserve both continuation state and patched commands.
 
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
-**3**, `economic-call-durable-wait-v1` **4**. A marker the gate does not list blocks every target until the gate learns
+**3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
+**5**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
-(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4; any unlisted field blocks; so does an
+(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
 history requires.
 
@@ -280,10 +281,11 @@ protocol-2 target passes the gate and then ends that saga as before this wait.
 
 `RastaMarketplaceSagaEconomicCallUnconfirmed` is the same wait for another economic
 call, labelled `operation`, with the same limit: it counts rounds, so it clears
-with workers stopped. Today that is `authoriseSettlement`, in phase
-`AUTHORISATION_UNCONFIRMED`; `disputeObligation` and `compensate` still end the
-saga when their attempts run out. economic-service gave no answer proving the call
-changed nothing, so it may have committed; the call is repeated under the same key,
+with workers stopped. Those calls are `authoriseSettlement` (phase
+`AUTHORISATION_UNCONFIRMED`), `disputeObligation` (`DISPUTE_UNCONFIRMED`) and
+`compensate` (`COMPENSATION_UNCONFIRMED`). `createObligation` is not: exhausted with
+an empty lookup it still records `FAILED`. economic-service gave no answer proving the
+call changed nothing, so it may have committed; the call is repeated under the same key,
 doubling from one minute to one hour, and nothing settles meanwhile. After restoring
 economic-service, try now with the same signal, which keeps its name:
 `--name retryDisputeRelease`.
@@ -303,6 +305,14 @@ ends the saga (`OBLIGATION_ALREADY_FINAL`), since no late request can move them.
 Anything else stays in this phase, `HELD` included: an earlier request can still
 commit, so `HELD` proves nothing.
 
+The filing and the refund (FU-117) follow the same rules with their own effects:
+`DISPUTED` with this dispute's words for the filing, `REFUNDED` for the refund. Every
+other terminal status (`SETTLED` included) ends the saga the same way. While an
+authorisation the saga moved on from is still in doubt, even their first attempt's
+refusal does not end it. A filing is sent until answered even once the order has left
+that dispute, because filed unseen it would leave the obligation `DISPUTED` with nothing
+to release it; once answered, the saga mirrors the decision before anything else.
+
 A wait that will not clear shows why in the log line's code: fix the route or
 configuration and signal. For a real refusal at `HELD` (a persistent
 `IDEMPOTENCY_KEY_REUSED`, say) read the transaction at economic-service and reconcile
@@ -311,13 +321,19 @@ receipt, follow `marketplace-receipt-evidence.md`. A dispute also takes the saga
 the wait; the doubt goes with it, so if the order comes back to settlement the call
 is sent as in doubt, not as new, and a failure returns to this phase.
 
-Each round reads the order first, and a party's signal starts one early. Once a
-dispute is raised or decided the authorisation stops being sent, but the saga stays
+Each round of an authorisation reads the order first, and a party's signal starts one
+early; a filing's or refund's round does neither, and only the signal above starts one.
+Once a dispute is raised or decided the authorisation stops being sent, but the saga stays
 in this phase until economic-service answers a read of the obligation; only then
-does it file the dispute or refund, and those calls can still end it. One rollback
-edge, as for the release: an authorisation whose last attempt failed just as workers
-stopped has no marker yet, so a protocol-3 target passes the gate and ends that saga
-as before this wait.
+does it file the dispute or refund. One rollback edge, as for the release: a call
+whose last attempt failed just as workers stopped has no marker yet, so a target one protocol
+below it (3 for an authorisation, 4 for a filing or refund) passes the gate and ends
+that saga as before this wait.
+
+Protocol 5 is forward-only like the others, with its own marker: a protocol-4 history
+carrying `economic-call-durable-wait-v1` from an authorisation may have ended at a
+filing or refund, and replays that end. A protocol-4 saga still running when this build
+deploys takes the new wait at its next such call.
 
 ## Continued-as-new visibility gap (FU-046)
 

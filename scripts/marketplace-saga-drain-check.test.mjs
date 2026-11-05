@@ -714,6 +714,7 @@ const PATCHES = {
   'dispute-settle-resumes-order': 2,
   'dispute-release-durable-wait-v1': 3,
   'economic-call-durable-wait-v1': 4,
+  'economic-sibling-call-durable-wait-v1': 5,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -1173,6 +1174,7 @@ const RESUME_FIELDS = {
   reminderDue: 2,
   releaseRounds: 3,
   unconfirmedCall: 4,
+  siblingCall: 5,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1317,7 +1319,7 @@ for (const [name, edits, reason = /cannot enumerate the saga (input|resume)/] of
   });
 }
 
-test("a continuation rolled over in a sibling call's wait needs protocol 4", () => {
+test('a continuation rolled over in the wait of an authorisation needs protocol 4', () => {
   const rolled = withHistory(
     history({
       resume: {
@@ -1328,6 +1330,19 @@ test("a continuation rolled over in a sibling call's wait needs protocol 4", () 
   );
   assert.match(run(rolled, targetOf(3)).stderr, /requires saga protocol 4; incompatible/);
   assert.equal(run(rolled, targetOf(4)).status, 0);
+});
+
+test('a continuation rolled over in the wait of a filing or refund needs protocol 5', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        siblingCall: { operation: 'compensate', rounds: 2, transactionId: 'T' },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(4)).stderr, /requires saga protocol 5; incompatible/);
+  assert.equal(run(rolled, targetOf(5)).status, 0);
 });
 
 test('a continuation rolled over in the release wait needs protocol 3', () => {
@@ -1341,6 +1356,10 @@ for (const [name, required] of [
   ['pre-fu080-release-refused', 2],
   ['fu080-release-wait', 3],
   ['fu103-authorise-wait', 4],
+  ['fu103-wait-then-refund-exhausted', 4],
+  ['fu103-wait-then-dispute-exhausted', 4],
+  ['fu117-compensate-wait', 5],
+  ['fu117-dispute-wait', 5],
 ]) {
   test(`a real captured history (${name}) requires protocol ${required}`, () => {
     const real = JSON.parse(

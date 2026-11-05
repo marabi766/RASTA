@@ -169,8 +169,12 @@ export interface DisputedObligation {
   economicDisputeId?: string | null;
 }
 
-/** The economic calls that wait for confirmation beside the release (FU-103). */
-export const UNCONFIRMED_OPERATIONS = ['authoriseSettlement'] as const;
+/** The economic calls that wait for confirmation beside the release (FU-103, FU-117). */
+export const UNCONFIRMED_OPERATIONS = [
+  'authoriseSettlement',
+  'disputeObligation',
+  'compensate',
+] as const;
 export type UnconfirmedOperation = (typeof UNCONFIRMED_OPERATIONS)[number];
 
 /** What `authoriseSettlement` answers. Undefined: authorised. */
@@ -639,7 +643,12 @@ export function createActivities(deps: ActivityDependencies) {
      * After receipt confirmation `docs/08` § 8.4 forbids automatic financial
      * compensation entirely.
      */
-    async compensate(orderId: string, transactionId: string, reason: string): Promise<void> {
+    async compensate(
+      orderId: string,
+      transactionId: string,
+      reason: string,
+      inDoubt = false,
+    ): Promise<void> {
       await economicStep(
         orderId,
         'compensate',
@@ -658,6 +667,11 @@ export function createActivities(deps: ActivityDependencies) {
           // with the buyer, which is all compensation is for.
           answer: (transaction) =>
             transaction.status === 'REFUNDED' ? { result: undefined } : null,
+          // Refunded is the effect, above. No late refund can move these.
+          confirmed: {
+            inDoubt,
+            isFinal: ({ status }) => ['SETTLED', 'CANCELLED', 'FAILED'].includes(status),
+          },
         },
       );
     },
@@ -680,6 +694,7 @@ export function createActivities(deps: ActivityDependencies) {
       transactionId: string,
       disputeId: string,
       reason: string,
+      inDoubt = false,
     ): Promise<string | null> {
       return economicStep(
         orderId,
@@ -704,6 +719,13 @@ export function createActivities(deps: ActivityDependencies) {
             transaction.status === 'DISPUTED' && transaction.disputeReason === reason
               ? { result: transaction.disputeId ?? null }
               : null,
+          // Disputed by another's words can still move, and so can HELD or
+          // PENDING_SETTLEMENT: a late filing can land on those.
+          confirmed: {
+            inDoubt,
+            isFinal: ({ status }) =>
+              ['SETTLED', 'REFUNDED', 'CANCELLED', 'FAILED'].includes(status),
+          },
         },
       );
     },
@@ -784,7 +806,7 @@ export function createActivities(deps: ActivityDependencies) {
 
     /**
      * Reports a round of another economic call whose outcome is unknown
-     * (FU-103), as `noteReleaseUnconfirmed` does for the release.
+     * (FU-103, FU-117), as `noteReleaseUnconfirmed` does for the release.
      */
     async noteEconomicCallUnconfirmed(
       orderId: string,
@@ -795,7 +817,7 @@ export function createActivities(deps: ActivityDependencies) {
       economicCallsUnconfirmedTotal.inc({ service: SERVICE_NAME, operation });
       logger.error(
         `The ${operation} call of order ${orderId} is unconfirmed after round ${round} ` +
-          `(${failure}); its outcome is unknown, its funds stay held and the saga keeps trying ` +
+          `(${failure}); its outcome is unknown and the saga keeps trying ` +
           '(docs/runbooks/marketplace-saga-deploy.md)',
       );
     },

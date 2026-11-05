@@ -94,8 +94,8 @@ export { PROVEN_REFUSALS };
  * that proves the call changed nothing (`PROVEN_REFUSALS`) takes the path it
  * always took; anything else — a 5xx, a timeout, a lost response, a code nobody
  * listed — says nothing about the money, so the saga stays and asks again under
- * the same key. Authorisation is behind it; `disputeObligation` and `compensate`
- * are not yet, and still end the saga when their attempts run out.
+ * the same key. `siblingCall` does the same for the dispute filing and the refund
+ * (FU-117). The hold still records FAILED on an empty lookup, as it always did.
  *
  * A code speaks for one attempt, never for the attempts before it. So the proof
  * is the activity's own refusal on the first attempt this run scheduled, which it
@@ -159,7 +159,20 @@ export interface OrderSagaInput {
   resume?: SagaResume;
 }
 
-/** An economic call in its wait for confirmation, for the next run to go on counting. */
+/**
+ * The dispute filing or the refund in its wait (FU-117), with what the
+ * next run cannot read back: a refund's lookup would find the obligation REFUNDED
+ * and stop, and the order may have left the dispute being filed.
+ */
+export interface UnconfirmedSibling {
+  operation: UnconfirmedOperation;
+  rounds: number;
+  transactionId?: string;
+  disputeId?: string;
+  reason?: string;
+}
+
+/** An authorisation in its wait for confirmation, for the next run to go on counting. */
 export interface UnconfirmedCall {
   operation: UnconfirmedOperation;
   rounds: number;
@@ -185,8 +198,10 @@ export interface SagaResume {
   activitySequence: number;
   /** Rounds of an unconfirmed release so far, when rolled over inside its wait. */
   releaseRounds?: number;
-  /** The economic call in its wait, when rolled over there or since (FU-103). */
+  /** The authorisation in its wait, when rolled over there or since (FU-103). */
   unconfirmedCall?: UnconfirmedCall;
+  /** The other call in its wait, when rolled over there (FU-117). */
+  siblingCall?: UnconfirmedSibling;
 }
 
 /**
@@ -266,9 +281,25 @@ export const RELEASE_WAIT_PATCH = 'dispute-release-durable-wait-v1';
  */
 export const ECONOMIC_WAIT_PATCH = 'economic-call-durable-wait-v1';
 
+/**
+ * The same, for the dispute filing and the refund (FU-117). Not the
+ * marker above: a history carrying that one from an authorisation may end at one
+ * of these calls, and must replay that end.
+ */
+export const SIBLING_WAIT_PATCH = 'economic-sibling-call-durable-wait-v1';
+
 /** What the status query shows while each call waits. */
 const UNCONFIRMED_PHASE: Record<UnconfirmedOperation, string> = {
   authoriseSettlement: 'AUTHORISATION_UNCONFIRMED',
+  disputeObligation: 'DISPUTE_UNCONFIRMED',
+  compensate: 'COMPENSATION_UNCONFIRMED',
+};
+
+/** The order status each call waits at, for the rollover to name. */
+const UNCONFIRMED_AT: Record<UnconfirmedOperation, OrderStatus> = {
+  authoriseSettlement: 'RECEIPT_CONFIRMED',
+  disputeObligation: 'DISPUTED',
+  compensate: 'CANCELLING',
 };
 
 /**
@@ -425,6 +456,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   let mirroredEconomicDispute: string | undefined = input.resume?.mirroredEconomicDispute;
   let releaseRounds = input.resume?.releaseRounds ?? 0;
   let unconfirmed: UnconfirmedCall | undefined = input.resume?.unconfirmedCall;
+  let sibling: UnconfirmedSibling | undefined = input.resume?.siblingCall;
 
   /** What a rollover hands to the next run. */
   const resumeFrom = (waitingIn: OrderStatus, nextReminderAt?: number): SagaResume => ({
@@ -437,6 +469,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     activitySequence,
     ...(releaseRounds > 0 ? { releaseRounds } : {}),
     ...(unconfirmed ? { unconfirmedCall: unconfirmed } : {}),
+    ...(sibling ? { siblingCall: sibling } : {}),
   });
 
   /** The order now, with the mirrored dispute's resolution when there is one. */
@@ -448,12 +481,12 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     try {
       return await readOnce();
     } catch (error) {
-      const pending = unconfirmed;
+      const pending = sibling ?? unconfirmed;
       if (!pending || !releaseCanWait(error)) throw error;
       return waitForConfirmation(
         {
           phase: UNCONFIRMED_PHASE[pending.operation],
-          at: 'RECEIPT_CONFIRMED',
+          at: UNCONFIRMED_AT[pending.operation],
           call: readOnce,
           canWait: releaseCanWait,
           report: (round, failure) =>
@@ -609,6 +642,71 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         failureOf(error),
       );
     }
+  }
+
+  /**
+   * A call the saga stays on until it is answered, whatever the order has become:
+   * nothing goes on until economic-service answers it. An unconfirmed
+   * authorisation the saga moved on from counts as doubt here too, so a code alone
+   * does not end the saga on the way. `waited` tells the caller its order is old
+   * news. A call answered first time adds no command.
+   */
+  async function siblingCall<T>(
+    carried: Omit<UnconfirmedSibling, 'rounds'>,
+    call: (inDoubt: boolean) => Promise<T>,
+  ): Promise<{ answer: T; waited: boolean }> {
+    const inDoubt = (): boolean => unconfirmed !== undefined || sibling !== undefined;
+    const canWait = (error: unknown): boolean => outcomeUnknown(error, inDoubt());
+    let answer: T;
+    let waited = false;
+    try {
+      answer = await call(inDoubt());
+    } catch (error) {
+      if (!canWait(error) || !patched(SIBLING_WAIT_PATCH)) throw error;
+      const pending: UnconfirmedSibling = sibling ?? { ...carried, rounds: 0 };
+      sibling = pending;
+      answer = await waitForConfirmation(
+        {
+          phase: UNCONFIRMED_PHASE[pending.operation],
+          at: UNCONFIRMED_AT[pending.operation],
+          call: () => call(true),
+          canWait,
+          report: (round, failure) =>
+            noteEconomicCallUnconfirmed(orderId, pending.operation, round, failure),
+          nextRound: () => (pending.rounds += 1),
+        },
+        failureOf(error),
+      );
+      waited = true;
+    }
+    sibling = undefined;
+    return { answer, waited };
+  }
+
+  /**
+   * economic-service is told too, so a direct settlement command there is refused
+   * independently of anything this service does (ADR-040 § 5). Sent until answered
+   * even if the order has moved on: filed unseen, the obligation would stay DISPUTED
+   * with nothing to release it, so the saga has to know it and mirror the decision.
+   * `true` when it waited.
+   */
+  async function fileDispute(
+    transactionId: string,
+    disputeId: string,
+    reason: string,
+  ): Promise<boolean> {
+    const { answer, waited } = await siblingCall(
+      { operation: 'disputeObligation', transactionId, disputeId, reason },
+      (inDoubt) =>
+        inDoubt
+          ? disputeObligation(orderId, transactionId, disputeId, reason, true)
+          : disputeObligation(orderId, transactionId, disputeId, reason),
+    );
+    mirroredDispute = disputeId;
+    // Null from an economic-service without identities; undefined from a step
+    // recorded before this one answered with it.
+    mirroredEconomicDispute = answer ?? undefined;
+    return waited;
   }
 
   /**
@@ -955,6 +1053,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   //
   // Not two: creating the obligation and holding the money separately leaves a
   // window in which the buyer can spend what they have just committed.
+  // A filing the last run could not confirm comes first, whatever the order has
+  // become since: the read below already depends on what it mirrors.
+  if (sibling?.operation === 'disputeObligation') {
+    await fileDispute(
+      sibling.transactionId as string,
+      sibling.disputeId as string,
+      sibling.reason as string,
+    );
+  }
+
   let order = await read();
   if (input.resume && order.status === 'PENDING') {
     throw ApplicationFailure.nonRetryable(
@@ -1038,18 +1146,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
             order = await read();
             break;
           }
-          // economic-service is told too, so a direct settlement command there
-          // is refused independently of anything this service does (ADR-040 § 5).
-          const economicDispute = await disputeObligation(
-            orderId,
-            heldTransaction(order),
-            order.dispute.id,
-            order.dispute.reason,
-          );
-          mirroredDispute = order.dispute.id;
-          // Null from an economic-service without identities; undefined from
-          // a step recorded before this one answered with it.
-          mirroredEconomicDispute = economicDispute ?? undefined;
+          if (await fileDispute(heldTransaction(order), order.dispute.id, order.dispute.reason)) {
+            order = await read();
+            break;
+          }
         }
         // No window. A dispute that expired into anything would be worse than
         // one that waits: money would move because nobody looked. Since D-083
@@ -1083,8 +1183,19 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         const reason = order.cancellationReason ?? 'Cancelled';
         // An order cancelled before its hold was recorded may still have one:
         // economic-service is asked rather than assumed, as in step 1.
-        const transactionId = order.economicTransactionId ?? (await findOwnObligation());
-        if (transactionId) await compensate(orderId, transactionId, reason);
+        // Refunded unconfirmed and rolled over, the lookup would find it REFUNDED
+        // and stop: the next run keeps the transaction it was refunding.
+        const carried = sibling?.operation === 'compensate' ? sibling.transactionId : undefined;
+        const transactionId = order.economicTransactionId ?? carried ?? (await findOwnObligation());
+        // Nothing moves a CANCELLING order but this saga (`ORDER_TRANSITIONS`), so
+        // the refund does not stop being wanted, and `markCancelled` follows its answer.
+        if (transactionId) {
+          await siblingCall({ operation: 'compensate', transactionId }, (inDoubt) =>
+            inDoubt
+              ? compensate(orderId, transactionId, reason, true)
+              : compensate(orderId, transactionId, reason),
+          );
+        }
         await markCancelled(orderId, reason);
         status.phase = 'CANCELLED';
         return 'CANCELLED';

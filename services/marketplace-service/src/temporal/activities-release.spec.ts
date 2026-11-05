@@ -58,6 +58,15 @@ it('reports another economic call by operation, from a series at zero (FU-103)',
   }
 });
 
+it('starts every call behind the wait at zero, not only the first (FU-117)', async () => {
+  createActivities({ orders: {} as OrderService, economic: {} as EconomicClient });
+  const { values } = await economicCallsUnconfirmedTotal.get();
+  const operations = values.map((value) => value.labels.operation);
+  expect(operations).toEqual(
+    expect.arrayContaining(['authoriseSettlement', 'disputeObligation', 'compensate']),
+  );
+});
+
 it.each([
   ['an outage', RastaError.upstreamUnavailable('economic-service'), true],
   ['a request in flight', new RastaError('CONFLICT', 'busy'), true],
@@ -121,6 +130,8 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       economic: {
         authoriseSettlement: failing,
         refund: failing,
+        settle: failing,
+        dispute: failing,
         readObligation: async () => {
           reads += 1;
           return read();
@@ -282,13 +293,81 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       throw refuse('INVALID_STATE_TRANSITION');
     };
     const held = over(stateRefused, obligation('HELD'), () => 2);
-    const caught = await failure(held.activities.compensate('ORD', 'TXN', 'why'));
+    const caught = await failure(held.activities.settle('ORD', 'TXN'));
     expect(caught.type).toBe('INVALID_STATE_TRANSITION');
     expect(caught.details ?? []).toEqual([]);
 
     const unread = over(stateRefused, refused, () => 1);
-    expect(await failure(unread.activities.compensate('ORD', 'TXN', 'why'))).toMatchObject({
+    expect(await failure(unread.activities.settle('ORD', 'TXN'))).toMatchObject({
       type: 'RECONCILIATION_READ_FAILED',
+    });
+  });
+
+  describe.each([
+    [
+      'compensate',
+      (a: ReturnType<typeof createActivities>, inDoubt?: boolean) =>
+        a.compensate('ORD', 'TXN', 'why', inDoubt),
+      { status: 'REFUNDED' },
+      ['SETTLED', 'CANCELLED', 'FAILED'],
+    ],
+    [
+      'disputeObligation',
+      (a: ReturnType<typeof createActivities>, inDoubt?: boolean) =>
+        a.disputeObligation('ORD', 'TXN', 'DSP', 'why', inDoubt),
+      { status: 'DISPUTED', disputeReason: 'why', disputeId: 'E' },
+      ['SETTLED', 'REFUNDED', 'CANCELLED', 'FAILED'],
+    ],
+  ] as const)('%s behind the wait (FU-117)', (_name, call, effect, finals) => {
+    it('its first attempt is proof, unread', async () => {
+      const first = over(refused, obligation('HELD'), () => 1);
+      const caught = await failure(call(first.activities));
+      expect(caught.type).toBe('FORBIDDEN');
+      expect(caught.details).toEqual([REFUSED_ON_FIRST_ATTEMPT]);
+      expect(first.reads()).toBe(0);
+    });
+
+    it.each([
+      ['a later attempt', undefined, 2],
+      ['the workflow’s word', true, 1],
+    ] as const)('in doubt by %s: unmarked, and asks the owner', async (_how, inDoubt, attempt) => {
+      const later = over(refused, obligation('HELD'), () => attempt);
+      const caught = await failure(call(later.activities, inDoubt));
+      expect(caught.type).toBe('FORBIDDEN');
+      expect(caught.details ?? []).toEqual([]);
+      expect(later.reads()).toBe(1);
+    });
+
+    it('in doubt, its effect is the answer', async () => {
+      const { activities } = over(
+        refused,
+        () => effect,
+        () => 2,
+      );
+      await expect(call(activities)).resolves.not.toThrow();
+    });
+
+    it.each(finals)('in doubt, %s is final: no late request can move it', async (status) => {
+      const { activities } = over(refused, obligation(status), () => 2);
+      const caught = await failure(call(activities));
+      expect(caught.type).toBe('OBLIGATION_ALREADY_FINAL');
+      expect(caught.details).toEqual([OWNER_STATE_IS_FINAL]);
+    });
+
+    // DISPUTED: no words of this filing's on it, and neither call's final state.
+    it.each(['HELD', 'PENDING_SETTLEMENT', 'CREATED', 'DISPUTED'])(
+      'in doubt, %s proves nothing',
+      async (status) => {
+        const { activities } = over(refused, obligation(status), () => 2);
+        expect((await failure(call(activities))).details ?? []).toEqual([]);
+      },
+    );
+
+    it('in doubt, a failed read is a read', async () => {
+      const { activities } = over(refused, refused, () => 2);
+      expect(await failure(call(activities))).toMatchObject({
+        type: 'RECONCILIATION_READ_FAILED',
+      });
     });
   });
 });

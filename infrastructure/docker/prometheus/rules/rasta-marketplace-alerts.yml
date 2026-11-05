@@ -29,5 +29,5 @@ groups:
           severity: critical
         annotations:
           summary: "A saga's {{ $labels.operation }} call is unconfirmed"
-          description: economic-service has given no answer proving the call changed nothing, so its outcome is unknown and the funds stay held. The saga keeps trying and moves nothing else; the log names the order.
+          description: economic-service has given no answer proving the call changed nothing, so its outcome is unknown. The saga keeps trying and moves nothing else; the log names the order.
           runbook: docs/runbooks/marketplace-saga-deploy.md

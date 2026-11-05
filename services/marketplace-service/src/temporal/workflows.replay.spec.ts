@@ -71,6 +71,16 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     // (`7ac5e936`), and the new code must end the same way; with it, the wait.
     'pre-fu103-authorise-exhausted',
     'fu103-authorise-wait',
+    // FU-117: each site before it (`0a3b973a`) ended the run, and must replay that
+    // end. So must protocol 4's own history, carrying the
+    // FU-103 marker from an authorisation and then ending at the refund or the
+    // filing: the reason these sites have a marker of their own. With it, the wait.
+    'pre-fu117-compensate-exhausted',
+    'pre-fu117-dispute-exhausted',
+    'fu103-wait-then-refund-exhausted',
+    'fu103-wait-then-dispute-exhausted',
+    'fu117-compensate-wait',
+    'fu117-dispute-wait',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(
