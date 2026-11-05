@@ -183,6 +183,20 @@ export const IMAGES_ON_TRAIN_NOTE =
   'Images are built and scanned on the merge train (mq/train-*) and on main, not on ordinary pull requests.';
 
 /**
+ * The test jobs the "Images built and scanned" check demands to have
+ * succeeded whenever images were selected: the ones `containers` waited for
+ * before it ran beside the tests (FU-111). An exact list, pinned by
+ * scripts/container-scope.test.mjs against the workflow's needs.
+ */
+export const IMAGE_TEST_GATES = Object.freeze([
+  'quality',
+  'security',
+  'integration',
+  'migration-reversibility',
+  'e2e',
+]);
+
+/**
  * The verdict of the one aggregate check, "Images built and scanned", from
  * the `needs` context of its job (toJSON(needs)). Success only when
  *
@@ -191,6 +205,10 @@ export const IMAGES_ON_TRAIN_NOTE =
  *  - a merge-train run selected none, which `servicesToBuild` allows only for
  *    docs/ and tests/ (the reviewed exemption) — the image job must have been
  *    skipped, not failed or cancelled.
+ *
+ * Wherever images were selected, every job in IMAGE_TEST_GATES must also have
+ * succeeded: the images are built beside the tests (FU-111), so this check is
+ * what keeps a commit with a failed test from being accepted on its images.
  *
  * A skipped, cancelled, failed or missing image job fails a run that selected
  * images, and so does anything unreadable. A required check counts "skipped"
@@ -230,10 +248,23 @@ export function imagesGateVerdict(needs) {
       ? { ok: true, message: 'No image is affected by this change (docs/ and tests/ only).' }
       : fail(`${mode} run selected no image`);
   }
-  return containers.result === 'success'
-    ? {
-        ok: true,
-        message: `Built and scanned ${services.length} image(s) (${mode} run): ${services.join(', ')}.`,
-      }
-    : fail(`the image job ${containers.result} for ${services.length} selected image(s)`);
+  if (containers.result !== 'success') {
+    return fail(`the image job ${containers.result} for ${services.length} selected image(s)`);
+  }
+  // The images are built beside the tests (FU-111), so this verdict, not the
+  // image job's `if`, is where a failed test turns the images check red.
+  // Anything but a recorded "success" is red: failed, cancelled, skipped, a
+  // result that is not a string, or a job missing from needs.
+  const notPassed = IMAGE_TEST_GATES.filter((name) => needs?.[name]?.result !== 'success');
+  if (notPassed.length > 0) {
+    return fail(
+      `${notPassed
+        .map((name) => `${name} ${String(needs?.[name]?.result ?? 'missing')}`)
+        .join(', ')}: images are only accepted on a commit whose tests passed`,
+    );
+  }
+  return {
+    ok: true,
+    message: `Built and scanned ${services.length} image(s) (${mode} run): ${services.join(', ')}.`,
+  };
 }

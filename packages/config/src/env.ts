@@ -8,6 +8,7 @@ import {
   withUtcSession,
 } from './database-session';
 import { envIssues, type EnvIssue } from './env-issues';
+import { markRefusal } from './command-failure';
 import { tryReadUrl } from './url-reader';
 
 export type { EnvIssue } from './env-issues';
@@ -609,6 +610,7 @@ export class EnvValidationError extends Error {
     const detail = issues.map((i) => `  - ${i.path}: ${i.message}`).join('\n');
     super(`Invalid environment configuration:\n${detail}`);
     this.name = 'EnvValidationError';
+    markRefusal(this, 'configuration');
   }
 }
 

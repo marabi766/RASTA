@@ -21,10 +21,25 @@ import ts from 'typescript';
  * of one of those. A valid form written any of these ways passes; a bypass
  * written any of these ways is refused.
  *
+ * FU-037: one normalizer (`bare`) reads every expression, binding and
+ * definition through parentheses, `as`, `satisfies`, `<T>x`, `!` and a generic
+ * instantiation (`uas<S, F>`); `ns['x']` is `ns.x`; inline export
+ * destructuring is an export; a member of an object literal (also a default
+ * export: `D.saveThing`) is followed to its value, and any other member keeps
+ * its origin. A name whose resolution is exhausted — a missing export, a
+ * cycle, the depth limit — keeps where it stopped and is **refused** where it
+ * is called or drawn (`unresolved`), never read as "not ours".
+ *
+ * An invocation adapter — `f.call(t, …)`, `f.apply(t, args)`, `f.bind(t)(…)`,
+ * `Reflect.apply(f, t, args)` — invokes `f`: every rule reads the call as a
+ * call of `f`, with `f`'s own identity and member path (PR 698 r1 F1).
+ *
  * ## Discovery is by what the code does, not by a list
  *
  * - A **slot factory** is `fencedSlot`, and any function whose body calls a
- *   slot factory (the marker stores' `markerStore`).
+ *   slot factory (the marker stores' `markerStore`), found at its definition
+ *   (a declaration, a `const`, a default export, an object literal's member)
+ *   so every alias of it resolves there.
  * - A **store module** is any file — under `lib/` or `app/` — that calls a slot
  *   factory.
  * - A **form** is any file that refers to something a store module defines
@@ -39,7 +54,7 @@ import ts from 'typescript';
  *    (the session verdict of a failed call reaches the view only through it);
  * 1. its action callback returns only `submitThroughSlot(...)` — no other
  *    return (an early `HELD` or `UNCONFIRMED`), no `await` of its own;
- * 2. no `try`, `.catch(`, `.then(` or `.finally(` anywhere in it, and no
+ * 2. no `try`, and no `.catch`, `.then` or `.finally` (called or not) anywhere in it, and no
  *    reference to `isRedirect` or `sessionHasEnded`: a completion is never
  *    handled outside the boundary;
  * 3. its server action (a `'use server'` module, or an `…actions` module) is
@@ -59,12 +74,14 @@ import ts from 'typescript';
  * not statically proved). A reviewer checks, by reading, any form that:
  *
  * - loads a store, the boundary or an action dynamically (`import()`,
- *   `require`), or reaches one through a computed member (`ns[name]`);
+ *   `require`), or reaches one through a computed member (`ns[name]`, not a
+ *   literal `ns['x']`);
  * - holds its state through a hook of its own that wraps `useActionState` in a
  *   file that does not itself refer to a store (a **wrapper hook**): the form
  *   then calls no action-state hook the guard can see;
  * - passes the boundary, a store writer or an action through a parameter, a
- *   reassigned `let`, an object property or another function's return value;
+ *   reassigned `let`, an array element, a spread, an object made at run time
+ *   or another function's return value;
  * - shadows an imported name with a local one (resolution is by name).
  */
 
@@ -126,29 +143,90 @@ function resolvePath(from: string, specifier: string, sources: Sources): string 
 // ---------------------------------------------------------------------------
 // Symbols: where a name is defined
 
-/** An expression that only names something defined elsewhere (`x`, `ns.x`, `(x as T)`). */
-function isAlias(node: ts.Expression): boolean {
-  return (
-    ts.isIdentifier(node) ||
-    ts.isPropertyAccessExpression(node) ||
-    ((ts.isParenthesizedExpression(node) ||
-      ts.isAsExpression(node) ||
-      ts.isNonNullExpression(node)) &&
-      isAlias(node.expression))
-  );
+type Wrapper =
+  | ts.ParenthesizedExpression
+  | ts.AsExpression
+  | ts.SatisfiesExpression
+  | ts.TypeAssertion
+  | ts.NonNullExpression
+  | ts.ExpressionWithTypeArguments
+  | ts.PartiallyEmittedExpression;
+
+/** Syntax that names nothing of its own: `(x)`, `x as T`, `x satisfies T`, `<T>x`, `x!`, `f<T>`. */
+const wraps = (node: ts.Node): node is Wrapper =>
+  ts.isParenthesizedExpression(node) ||
+  ts.isAsExpression(node) ||
+  ts.isSatisfiesExpression(node) ||
+  ts.isTypeAssertionExpression(node) ||
+  ts.isNonNullExpression(node) ||
+  ts.isExpressionWithTypeArguments(node) ||
+  ts.isPartiallyEmittedExpression(node);
+
+/**
+ * The one normalizer (FU-037): every rule, every binding and every definition
+ * reads an expression through it, so a wrapper never hides what it wraps.
+ */
+function bare(node: ts.Expression): ts.Expression;
+function bare(node: ts.Node): ts.Node;
+function bare(node: ts.Node): ts.Node {
+  while (wraps(node)) node = node.expression;
+  return node;
 }
 
-/** A definition: a module (a source path, or a package specifier) and an export name; `*` is the module itself. */
+/** The node that holds `node`, past any wrapper around it. */
+function holder(node: ts.Node): ts.Node | undefined {
+  let child = node;
+  while (child.parent && wraps(child.parent)) child = child.parent;
+  return child.parent;
+}
+
+/** `ns.x`, or `ns['x']`: a member named by a literal. */
+function memberName(node: ts.Node): string | null {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression))
+    return node.argumentExpression.text;
+  return null;
+}
+
+/** A property's static name; null for a computed one. */
+function propertyName(name: ts.PropertyName): string | null {
+  return ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)
+    ? name.text
+    : null;
+}
+
+type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression;
+
+/** An expression that only names something defined elsewhere (`x`, `ns.x`, `(x as T)`, `f<T>`, `f.bind(t)`). */
+function isAlias(node: ts.Expression): boolean {
+  const inner = bare(node);
+  if (ts.isCallExpression(inner)) {
+    const fn = bare(inner.expression);
+    return memberName(fn) === 'bind' && isAlias((fn as Access).expression);
+  }
+  return ts.isIdentifier(inner) || memberName(inner) !== null;
+}
+
+/**
+ * A definition: a module (a source path, or a package specifier) and an export
+ * name; `*` is the module itself. `unresolved` keeps where resolution stopped
+ * (a cycle, a missing export, the depth limit): such a name is refused.
+ */
 interface Sym {
   readonly module: string;
   readonly name: string;
   readonly member?: string;
+  readonly unresolved?: true;
 }
 
 const NAMESPACE = '*';
 const key = (sym: Sym) => `${sym.module}#${sym.name}${sym.member ? `.${sym.member}` : ''}`;
 const is = (sym: Sym | null, module: string, ...names: string[]) =>
-  sym !== null && sym.member === undefined && sym.module === module && names.includes(sym.name);
+  sym !== null &&
+  !sym.unresolved &&
+  sym.member === undefined &&
+  sym.module === module &&
+  names.includes(sym.name);
 
 const REACT = 'react';
 const BOUNDARY_MODULE = 'lib/fenced-submission.ts';
@@ -158,7 +236,7 @@ const GATE_MODULE = 'app/UnresolvedQuarantine.tsx';
 
 type Imported = { readonly module: string; readonly name: string };
 type Exported =
-  | { readonly kind: 'LOCAL'; readonly local: string }
+  | { readonly kind: 'LOCAL'; readonly local: string; readonly expression?: ts.Expression }
   | { readonly kind: 'FROM'; readonly module: string; readonly name: string };
 
 interface Module {
@@ -189,7 +267,9 @@ class Program {
     const cached = this.modules.get(file);
     if (cached) return cached;
     const text = this.sources.get(file) ?? '';
-    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    // By extension: a `.ts` file read as TSX takes `<T>x` for JSX and loses the rest of the file.
+    const kind = file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
     const imports = new Map<string, Imported>();
     const exports = new Map<string, Exported>();
     const stars: string[] = [];
@@ -240,9 +320,15 @@ class Program {
           ?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
         if (ts.isVariableStatement(statement)) {
           for (const declaration of statement.declarationList.declarations) {
-            if (ts.isIdentifier(declaration.name)) {
-              exports.set(declaration.name.text, { kind: 'LOCAL', local: declaration.name.text });
-            }
+            // `export const x =`, and inline destructuring `export const { a: x } = ns`.
+            const names = ts.isIdentifier(declaration.name)
+              ? [declaration.name]
+              : declaration.name.elements.flatMap((element) =>
+                  ts.isBindingElement(element) && ts.isIdentifier(element.name)
+                    ? [element.name]
+                    : [],
+                );
+            for (const name of names) exports.set(name.text, { kind: 'LOCAL', local: name.text });
           }
         } else if (
           (ts.isFunctionDeclaration(statement) ||
@@ -250,7 +336,9 @@ class Program {
             ts.isInterfaceDeclaration(statement) ||
             ts.isTypeAliasDeclaration(statement) ||
             ts.isEnumDeclaration(statement)) &&
-          (statement.name || (isDefault && ts.isFunctionDeclaration(statement)))
+          (statement.name ||
+            (isDefault &&
+              (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement))))
         ) {
           const name = statement.name?.text ?? 'default';
           exports.set(isDefault ? 'default' : name, {
@@ -259,10 +347,14 @@ class Program {
           });
         }
       } else if (ts.isExportAssignment(statement)) {
-        exports.set('default', {
-          kind: 'LOCAL',
-          local: ts.isIdentifier(statement.expression) ? statement.expression.text : 'default',
-        });
+        // `export default (x as T)` is `x`; any other expression is kept to be read.
+        const expression = bare(statement.expression);
+        exports.set(
+          'default',
+          ts.isIdentifier(expression)
+            ? { kind: 'LOCAL', local: expression.text }
+            : { kind: 'LOCAL', local: 'default', expression },
+        );
       }
     }
     const first = source.statements[0];
@@ -318,6 +410,11 @@ class Program {
     const entry = parsed.exports.get(name);
     if (entry?.kind === 'FROM') return this.exported(entry.module, entry.name, seen);
     if (entry?.kind === 'LOCAL') {
+      // `export default store.saveThing`: the alias's own definition.
+      if (entry.expression) {
+        const aliased = isAlias(entry.expression) ? this.resolve(module, entry.expression) : null;
+        return aliased ?? { module, name: entry.local };
+      }
       const imported = parsed.imports.get(entry.local);
       if (imported) return this.imported(imported, seen);
       // `export const keep = answerThing`: the alias's own definition.
@@ -342,7 +439,14 @@ class Program {
     if (imported.name === 'default' && !this.sources.has(imported.module)) {
       return { module: imported.module, name: NAMESPACE };
     }
-    return this.exported(imported.module, imported.name, seen);
+    // A name our module does not export (or a cycle): kept, and refused where used.
+    return (
+      this.exported(imported.module, imported.name, seen) ?? {
+        module: imported.module,
+        name: imported.name,
+        unresolved: true,
+      }
+    );
   }
 
   /** Every module `module` re-exports, itself included, followed through barrels (cycle-safe). */
@@ -362,18 +466,23 @@ class Program {
 
   /** Where the expression `node` in `file` is defined, when it is a name the guard can follow. */
   resolve(file: string, node: ts.Node, depth = 0): Sym | null {
-    if (depth > 16) return null;
+    // Exhausted: refused where used, never read as "not one of ours".
+    if (depth > 16) return { module: file, name: '', unresolved: true };
     const parsed = this.module(file);
-    if (
-      ts.isParenthesizedExpression(node) ||
-      ts.isAsExpression(node) ||
-      ts.isNonNullExpression(node)
-    ) {
-      return this.resolve(file, node.expression, depth + 1);
+    node = bare(node);
+    const memberOf = memberName(node);
+    if (memberOf !== null) {
+      const base = this.resolve(file, (node as Access).expression, depth + 1);
+      return this.member(base, memberOf, depth + 1);
     }
-    if (ts.isPropertyAccessExpression(node)) {
-      const base = this.resolve(file, node.expression, depth + 1);
-      return this.member(base, node.name.text);
+    // `f.bind(t)` is `f`, unless `bind` is a definition of its own (its result is then unknown).
+    if (ts.isCallExpression(node)) {
+      const fn = bare(node.expression);
+      if (memberName(fn) !== 'bind') return null;
+      const own = this.resolve(file, fn, depth + 1);
+      if (own !== null && (own.unresolved || own.member === undefined))
+        return own.unresolved ? own : null;
+      return this.resolve(file, (fn as Access).expression, depth + 1);
     }
     if (!ts.isIdentifier(node)) return null;
     const name = node.text;
@@ -385,7 +494,7 @@ class Program {
     if (local) {
       const base = this.resolve(file, local.from, depth + 1);
       if (local.member === undefined) return base;
-      return this.member(base, local.member);
+      return this.member(base, local.member, depth + 1);
     }
     // Defined in this file at the top level.
     for (const statement of parsed.source.statements) {
@@ -399,10 +508,75 @@ class Program {
     return null;
   }
 
-  /** Namespace exports and object members retain their origin through every alias. */
-  private member(base: Sym | null, name: string): Sym | null {
-    if (base === null || base.member !== undefined) return null;
-    return base.name === NAMESPACE ? this.exported(base.module, name) : { ...base, member: name };
+  /**
+   * Namespace exports and object members retain their origin through every
+   * alias: an object literal's property is followed to its own definition, and
+   * any other member — nested too — keeps the module and name it came from.
+   */
+  private member(base: Sym | null, name: string, depth: number): Sym | null {
+    if (base === null) return null;
+    if (base.unresolved || base.member !== undefined) return { ...base, member: name };
+    if (base.name === NAMESPACE) {
+      return this.exported(base.module, name) ?? { module: base.module, name, unresolved: true };
+    }
+    const property = this.property(base, name);
+    return (property && this.resolve(base.module, property, depth)) ?? { ...base, member: name };
+  }
+
+  /** The value `{ name: value }` / `{ name }` gives `name` in the object literal `sym` is defined as. */
+  private property(sym: Sym, name: string): ts.Node | null {
+    if (!this.sources.has(sym.module)) return null;
+    const parsed = this.module(sym.module);
+    const local = parsed.locals.get(sym.name);
+    const exported = parsed.exports.get(sym.name);
+    const definition =
+      local?.member === undefined && local
+        ? local.from
+        : exported?.kind === 'LOCAL'
+          ? exported.expression
+          : undefined;
+    const literal = definition && bare(definition);
+    if (!literal || !ts.isObjectLiteralExpression(literal)) return null;
+    for (const element of literal.properties) {
+      if (element.name === undefined || propertyName(element.name) !== name) continue;
+      if (ts.isPropertyAssignment(element)) return element.initializer;
+      if (ts.isShorthandPropertyAssignment(element)) return element.name;
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * What `call` invokes, read through the invocation adapters — `f.call(t, …)`,
+   * `f.apply(t, args)`, `Reflect.apply(f, t, args)`, and `f.bind(t)(…)` (in
+   * `resolve`) — keeping `f`'s own identity and member path; with the arguments
+   * `f` receives when they are written out one by one (`null`: not known). A
+   * definition of its own named `call` or `apply` is the callee itself.
+   */
+  invoked(
+    file: string,
+    call: ts.CallExpression,
+  ): { readonly sym: Sym | null; readonly args: readonly ts.Expression[] | null } {
+    let callee: ts.Expression = call.expression;
+    let args: readonly ts.Expression[] | null = call.arguments;
+    for (let depth = 0; ; depth++) {
+      // Exhausted: refused where used.
+      if (depth > 16) return { sym: { module: file, name: '', unresolved: true }, args };
+      const sym = this.resolve(file, callee);
+      const fn = bare(callee);
+      const adapter = memberName(fn);
+      if (adapter !== 'call' && adapter !== 'apply') return { sym, args };
+      if (sym !== null && (sym.unresolved || sym.member === undefined)) return { sym, args };
+      const base = bare((fn as Access).expression);
+      if (sym === null && adapter === 'apply' && ts.isIdentifier(base) && base.text === 'Reflect') {
+        if (!args?.[0]) return { sym, args };
+        callee = args[0];
+        args = null;
+      } else {
+        callee = base;
+        args = adapter === 'call' && args ? args.slice(1) : null;
+      }
+    }
   }
 
   /** Whether `sym` is defined in a `'use server'` module, or in an `…actions` module. */
@@ -432,27 +606,40 @@ function calls(source: ts.SourceFile): ts.CallExpression[] {
   return found;
 }
 
-/** The function a declaration or `const` defines under `name` at the top level of `source`. */
-function topLevelFunction(source: ts.SourceFile, name: string): ts.Node | null {
-  for (const statement of source.statements) {
-    if (ts.isFunctionDeclaration(statement) && (statement.name?.text ?? 'default') === name)
-      return statement;
-    if (name === 'default' && ts.isExportAssignment(statement) && isFunction(statement.expression))
-      return statement.expression;
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (
-          ts.isIdentifier(declaration.name) &&
-          declaration.name.text === name &&
-          declaration.initializer &&
-          isFunction(declaration.initializer)
-        ) {
-          return declaration.initializer;
+/**
+ * Every function `source` defines at the top level, under the name a resolved
+ * reference to it carries: `make`, `default`, or `api.make` for a member of an
+ * object literal. Wrappers are read through (`(() => …) as Factory`).
+ */
+function definitions(source: ts.SourceFile): [string, ts.Node][] {
+  const out: [string, ts.Node][] = [];
+  const define = (name: string, value: ts.Expression) => {
+    const inner = bare(value);
+    if (isFunction(inner)) out.push([name, inner]);
+    else if (ts.isObjectLiteralExpression(inner)) {
+      for (const element of inner.properties) {
+        const member = element.name && propertyName(element.name);
+        if (!member) continue;
+        if (ts.isMethodDeclaration(element)) out.push([`${name}.${member}`, element]);
+        else if (ts.isPropertyAssignment(element)) {
+          const fn = bare(element.initializer);
+          if (isFunction(fn)) out.push([`${name}.${member}`, fn]);
         }
       }
     }
+  };
+  for (const statement of source.statements) {
+    if (ts.isFunctionDeclaration(statement))
+      out.push([statement.name?.text ?? 'default', statement]);
+    else if (ts.isExportAssignment(statement)) define('default', statement.expression);
+    else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer)
+          define(declaration.name.text, declaration.initializer);
+      }
+    }
   }
-  return null;
+  return out;
 }
 
 interface Discovery {
@@ -469,23 +656,21 @@ function discover(sources: Sources): Discovery {
     let found = false;
     walk(within, (node) => {
       if (!found && ts.isCallExpression(node)) {
-        const callee = program.resolve(file, node.expression);
-        found = callee !== null && factories.has(key(callee));
+        const callee = program.invoked(file, node).sym;
+        // A callee the guard cannot follow may be a factory: fail closed.
+        found = callee !== null && (callee.unresolved === true || factories.has(key(callee)));
       }
     });
     return found;
   };
+  // A factory is found at its definition; every alias of it resolves there.
   for (let grew = true; grew;) {
     grew = false;
     for (const file of program.files()) {
-      const parsed = program.module(file);
-      for (const [name, entry] of parsed.exports) {
-        if (entry.kind !== 'LOCAL' || factories.has(key({ module: file, name: entry.local })))
-          continue;
-        const fn = topLevelFunction(parsed.source, entry.local);
-        if (fn !== null && callsFactory(file, fn)) {
-          factories.add(key({ module: file, name: entry.local }));
-          if (name !== entry.local) factories.add(key({ module: file, name }));
+      for (const [name, fn] of definitions(program.module(file).source)) {
+        const id = `${file}#${name}`;
+        if (!factories.has(id) && callsFactory(file, fn)) {
+          factories.add(id);
           grew = true;
         }
       }
@@ -509,18 +694,33 @@ function refersToStore(file: string, { program, stores }: Discovery): boolean {
   for (const [name, imported] of parsed.imports) {
     const sym = program.resolve(file, ts.factory.createIdentifier(name));
     if (sym !== null && stores.has(sym.module)) return true;
-    // A namespace exposes all its exports; an unresolved barrel is gated too.
-    const module = sym?.name === NAMESPACE ? sym.module : sym === null ? imported.module : null;
-    if (module !== null && [...program.reexported(module)].some((m) => stores.has(m))) return true;
+    // A namespace exposes all its exports; an unresolved name keeps its whole provenance gated.
+    const open =
+      sym === null || sym.unresolved
+        ? [imported.module, ...(sym ? [sym.module] : [])]
+        : sym.name === NAMESPACE
+          ? [sym.module]
+          : [];
+    for (const module of open) {
+      if ([...program.reexported(module)].some((m) => stores.has(m))) return true;
+    }
   }
   return false;
 }
 
-function actionStateCalls(file: string, program: Program) {
-  return calls(program.module(file).source).flatMap((call) => {
-    const callee = program.resolve(file, call.expression);
-    if (is(callee, REACT, 'useActionState')) return [{ call, raw: true }];
-    if (is(callee, BOUNDARY_MODULE, 'useSlotActionState')) return [{ call, raw: false }];
+/** The action-state hook calls; a callee the guard cannot follow may be one (fail closed). */
+type Hook = {
+  readonly call: ts.CallExpression;
+  readonly args: readonly ts.Expression[] | null;
+  readonly hook: 'REACT' | 'SLOT' | 'UNRESOLVED';
+};
+
+function actionStateCalls(file: string, program: Program): Hook[] {
+  return calls(program.module(file).source).flatMap((call): Hook[] => {
+    const { sym: callee, args } = program.invoked(file, call);
+    if (is(callee, REACT, 'useActionState')) return [{ call, args, hook: 'REACT' }];
+    if (is(callee, BOUNDARY_MODULE, 'useSlotActionState')) return [{ call, args, hook: 'SLOT' }];
+    if (callee?.unresolved) return [{ call, args, hook: 'UNRESOLVED' }];
     return [];
   });
 }
@@ -557,10 +757,14 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
         : detail,
     });
   const resolve = (node: ts.Node) => program.resolve(file, node);
-  const isBoundaryCall = (node: ts.Node | undefined): node is ts.CallExpression =>
-    node !== undefined &&
-    ts.isCallExpression(node) &&
-    is(resolve(node.expression), BOUNDARY_MODULE, 'submitThroughSlot');
+  const isBoundaryCall = (node: ts.Node | undefined): boolean => {
+    const call = node && bare(node);
+    return (
+      call !== undefined &&
+      ts.isCallExpression(call) &&
+      is(resolve(call.expression), BOUNDARY_MODULE, 'submitThroughSlot')
+    );
+  };
 
   /** Whether `node` lies inside the argument of a boundary call — in its `property`, when named. */
   const insideBoundary = (node: ts.Node, property?: string): boolean => {
@@ -574,7 +778,7 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       if (
         member !== null &&
         ts.isObjectLiteralExpression(member.parent) &&
-        isBoundaryCall(member.parent.parent)
+        isBoundaryCall(holder(member.parent))
       ) {
         return property === undefined || member.name.getText() === property;
       }
@@ -583,8 +787,8 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
   };
 
   /** The function a state hook is given: a function, or a name for one, or `useCallback` of one. */
-  const reducerOf = (call: ts.CallExpression): ts.FunctionLikeDeclaration | null => {
-    let argument: ts.Expression | undefined = call.arguments[0];
+  const reducerOf = (args: readonly ts.Expression[] | null): ts.FunctionLikeDeclaration | null => {
+    let argument: ts.Expression | undefined = args?.[0] && bare(args[0]);
     if (argument && ts.isIdentifier(argument)) {
       const name = argument.text;
       let initializer: ts.Expression | undefined;
@@ -597,14 +801,14 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
           initializer = node.initializer;
         }
       });
-      argument = initializer;
+      argument = initializer && bare(initializer);
     }
     if (
       argument &&
       ts.isCallExpression(argument) &&
       is(resolve(argument.expression), REACT, 'useCallback')
     ) {
-      argument = argument.arguments[0];
+      argument = argument.arguments[0] && bare(argument.arguments[0]);
     }
     return argument && (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument))
       ? argument
@@ -613,10 +817,12 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
 
   // 0, 1. The state is the slot hook's; its callback returns only the boundary and awaits nothing.
   let boundary = false;
-  for (const { call, raw } of actionStateCalls(file, program)) {
-    if (raw)
+  for (const { call, args, hook } of actionStateCalls(file, program)) {
+    // An unresolved hook is refused by the call scan below.
+    if (hook === 'UNRESOLVED') continue;
+    if (hook === 'REACT')
       flag('state', call, "React's useActionState: hold the state through useSlotActionState");
-    const fn = reducerOf(call);
+    const fn = reducerOf(args);
     if (fn === null) {
       flag('callback', call, 'the state hook is not given a function (or useCallback of one)');
       continue;
@@ -650,12 +856,10 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
   walk(source, (node) => {
     // 2. No completion handled here.
     if (ts.isTryStatement(node)) flag('completion', node, 'a try statement');
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ['catch', 'then', 'finally'].includes(node.expression.name.text)
-    ) {
-      flag('completion', node, `.${node.expression.name.text}(...)`);
+    // Any reach for a completion handler — called, parenthesized, `['then']` or kept aside.
+    const handler = memberName(node);
+    if (handler !== null && ['catch', 'then', 'finally'].includes(handler)) {
+      flag('completion', node, `.${handler}`);
     }
     if (
       (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) &&
@@ -666,7 +870,10 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
     }
 
     if (ts.isCallExpression(node)) {
-      const callee = resolve(node.expression);
+      // Through `.call`, `.apply`, `.bind(…)()` and `Reflect.apply`: the target, not the adapter.
+      const callee = program.invoked(file, node).sym;
+      if (callee?.unresolved)
+        flag('unresolved', node, `${node.expression.getText()}(...): the guard cannot follow it`);
       // 3. The server action only inside the boundary's `send`.
       if (program.isServerAction(callee) && !insideBoundary(node, 'send')) {
         flag('transport', node, `${node.expression.getText()}(...) outside the boundary's send`);
@@ -675,8 +882,11 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       if (callee !== null && factories.has(key(callee))) {
         flag('store', node, `${node.expression.getText()}(...): a slot made in the form`);
       }
+      // A store's writer, also as a member (`D.saveThing` of a default-exported object).
       const writer =
-        callee !== null && stores.has(callee.module) && /^(save|answer|settle)/.test(callee.name);
+        callee !== null &&
+        stores.has(callee.module) &&
+        /^(save|answer|settle)/.test(callee.member ?? callee.name);
       const slotWrite =
         callee !== null &&
         stores.has(callee.module) &&
@@ -690,6 +900,7 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
     // 5. Drawn the one way.
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const tag = resolve(node.tagName);
+      if (tag?.unresolved) flag('unresolved', node, `<${node.tagName.getText()}>: cannot follow`);
       if (is(tag, GATE_MODULE, 'UnresolvedForm')) drawn = true;
       if (is(tag, GATE_MODULE, 'QuarantineGate'))
         flag('drawn', node, 'draws QuarantineGate directly');
@@ -703,18 +914,25 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
 export function fencedFormViolations(sources: Sources): Violation[] {
   const discovery = discover(sources);
   const out: Violation[] = [];
-  for (const file of formsOf(discovery)) out.push(...checkForm(file, discovery));
+  const forms = formsOf(discovery);
+  for (const file of forms) out.push(...checkForm(file, discovery));
   const { program } = discovery;
   for (const file of program.files()) {
     if (file === GATE_MODULE) continue;
     const { source } = program.module(file);
     // Resolve every JSX tag through the same graph used by form discovery.
     walk(source, (node) => {
-      if (
-        (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
-        is(program.resolve(file, node.tagName), GATE_MODULE, 'QuarantineGate')
-      ) {
+      if (!ts.isJsxOpeningElement(node) && !ts.isJsxSelfClosingElement(node)) return;
+      const tag = program.resolve(file, node.tagName);
+      if (is(tag, GATE_MODULE, 'QuarantineGate')) {
         out.push({ file, rule: 'drawn', detail: 'draws QuarantineGate outside UnresolvedForm' });
+      } else if (tag?.unresolved && !forms.includes(file)) {
+        // It may be the gate: a tag the guard cannot follow is refused everywhere (a form's, above).
+        out.push({
+          file,
+          rule: 'unresolved',
+          detail: `<${node.tagName.getText()}>: cannot follow`,
+        });
       }
     });
   }

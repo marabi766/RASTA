@@ -559,6 +559,8 @@ export function plantFakeNext(root: string): { nextFrom: string; fault: string }
 const [ms, loadsAfterMs, ignoreTerm, startupMs] = process.argv.slice(2).map(Number);
 if (startupMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupMs);
 if (ignoreTerm) process.on('SIGTERM', () => {});
+// Atomic: a reader that sees linger.pid sees the whole pid (FU-095: an empty file read as pid 0,
+// and kill(0, 0) probes the test's own group, so it never "ended").
 fs.writeFileSync('linger.pid.tmp', String(process.pid));
 fs.renameSync('linger.pid.tmp', 'linger.pid');
 const timer = setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-linger', String(Date.now())); }, 50);

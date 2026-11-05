@@ -7,6 +7,7 @@ import {
   loadEnv,
   outboxPurgeEnvSchema,
   serviceUrlSchema,
+  markRefusal,
 } from '@rasta/config';
 import {
   CONSUMER_SESSION_TIMEOUT_MS,
@@ -347,7 +348,12 @@ export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv 
   // Fail closed at startup: an invalid combination would fail every replay of
   // a state event at run time instead (#240 r9, r10).
   const problem = assetSyncBudgetProblem(env);
-  if (problem) throw new Error(`Invalid fleet-service configuration: ${problem}`);
+  if (problem) {
+    throw markRefusal(
+      new Error(`Invalid fleet-service configuration: ${problem}`),
+      'configuration',
+    );
+  }
   return env;
 }
 
