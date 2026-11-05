@@ -1,4 +1,5 @@
 import { compareActors, type ActorIdentity } from '@rasta/nest-common';
+import { createHash } from 'node:crypto';
 import { ulid } from 'ulid';
 import {
   DeductionRuleRepository,
@@ -10,6 +11,7 @@ import {
 } from '../src/deduction/deduction-rule-change.state-machine';
 import {
   canonicalDeductionRuleName,
+  deductionRuleNameKey,
   isCanonicalDeductionRuleName,
 } from '../src/deduction/deduction-rule-name';
 import {
@@ -403,6 +405,68 @@ describe('deduction rule changes', () => {
           expect(row!.accepted).toEqual(accepted);
         },
         120_000,
+      );
+
+      // One digest of every key, so the 1,112,063 results need not cross the wire to be compared.
+      it.each([
+        ['alone', '', ''],
+        ['inside Latin', 'T', 'x'],
+        ['between Persian letters', 'ب', 'ب'],
+        ['after heh', 'ه', 'ب'],
+        ['beside blanks and capitals', 'A ', '\u200cZ'],
+      ])(
+        'the application and PostgreSQL give the same key for every code point %s',
+        async (_where, before, after) => {
+          const [row] = await w.prisma.client.$queryRawUnsafe<{ digest: string }[]>(
+            `SELECT md5(string_agg(deduction_rule_name_key(${quoted(before)} || chr(cp) || ${quoted(after)}), E'\n' ORDER BY cp)) AS digest
+               FROM generate_series(1, ${LAST_CODE_POINT}) cp
+              WHERE cp NOT BETWEEN 55296 AND 57343`,
+          );
+          const keys: string[] = [];
+          for (let cp = 1; cp <= LAST_CODE_POINT; cp += 1) {
+            if (isSurrogate(cp)) continue;
+            keys.push(deductionRuleNameKey(`${before}${String.fromCodePoint(cp)}${after}`));
+          }
+          expect(createHash('md5').update(keys.join('\n')).digest('hex')).toBe(row!.digest);
+        },
+        120_000,
+      );
+
+      it.each([
+        ['case', 'Tax', 'TAX'],
+        ['a space and a half-space', 'حق بیمه', 'حق\u200cبیمه'],
+        ['a space and none', 'Tax A', 'taxa'],
+      ])(
+        'names that differ by %s hold neither a second pending change nor a second rule, in one organization only',
+        async (_by, typed, other) => {
+          const org = employer();
+          const first = `DRC_${ulid()}`;
+          const key = /Key \(organization_id, deduction_rule_name_key\(name\)\)/;
+          await exec(proposeCreateSql(org, first, typed));
+          await refuses(exec(proposeCreateSql(org, `DRC_${ulid()}`, other)), key);
+          const rule = `DDR_${ulid()}`;
+          await atomically(moveSql(first, 'APPROVED'), ruleSql(org, rule, first, typed));
+
+          const second = `DRC_${ulid()}`;
+          await exec(proposeCreateSql(org, second, other));
+          await refuses(
+            atomically(moveSql(second, 'APPROVED'), ruleSql(org, `DDR_${ulid()}`, second, other)),
+            key,
+          );
+          // Shown as typed, and another employer's rule of the same key is not this one's.
+          const [stored] = await w.prisma.client.$queryRawUnsafe<{ name: string }[]>(
+            'SELECT name FROM deduction_rule WHERE id = $1',
+            rule,
+          );
+          expect(stored!.name).toBe(typed);
+          const another = employer();
+          const theirs = `DRC_${ulid()}`;
+          await exec(proposeCreateSql(another, theirs, other));
+          await atomically(
+            moveSql(theirs, 'APPROVED'),
+            ruleSql(another, `DDR_${ulid()}`, theirs, other),
+          );
+        },
       );
 
       it('the application and PostgreSQL agree on where a blank, a half-space and the mark may stand, and on the limit', async () => {
@@ -989,6 +1053,21 @@ describe('deduction rule changes', () => {
       const other = await proposeCreate(org, 'حقبیمه');
       await expect(approve(act(other))).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
       expect(await statusOf(other)).toBe('PENDING_APPROVAL');
+    });
+
+    it('a name another case of one in force is told apart by nothing: a conflict, then free once that rule is retired, and each stays as typed', async () => {
+      const org = employer();
+      const rule = await inForce(org, 'TAX Rate');
+      expect(rule.name).toBe('TAX Rate');
+      const waiting = await proposeCreate(org, 'tax rate');
+      expect(waiting.name).toBe('tax rate');
+      await expect(proposeCreate(org, 'Tax  Rate')).rejects.toMatchObject({
+        code: 'ALREADY_EXISTS',
+      });
+      await expect(approve(act(waiting))).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+      await approve(act(await proposeRetire(org, rule.id)));
+      const { rule: next } = await approve(act(waiting));
+      expect(next.name).toBe('tax rate');
     });
 
     it('a CREATE named like a rule in force may wait, but is not approved until that rule is retired, and the refusal changes nothing', async () => {

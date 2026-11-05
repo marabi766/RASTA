@@ -1,4 +1,8 @@
-import { canonicalDeductionRuleName, isCanonicalDeductionRuleName } from './deduction-rule-name';
+import {
+  canonicalDeductionRuleName,
+  deductionRuleNameKey,
+  isCanonicalDeductionRuleName,
+} from './deduction-rule-name';
 
 const LAST_CODE_POINT = 0x10ffff;
 const everyCodePoint = function* () {
@@ -115,6 +119,60 @@ describe('the one form of a deduction rule name', () => {
           (isCanonicalDeductionRuleName(canonical) &&
             canonicalDeductionRuleName(canonical) === canonical);
         if (!fixed || (isCanonicalDeductionRuleName(raw) && canonical !== raw)) broken.push(raw);
+      }
+    }
+    expect(broken).toEqual([]);
+  });
+});
+
+describe('the key two rule names are compared by (FU-083)', () => {
+  it.each([
+    ['Tax', 'TAX'],
+    ['tax', 'tAx'],
+    ['Tax A', 'tax a'],
+    ['Tax A', 'TaxA'],
+    ['حق بیمه', 'حق\u200cبیمه'],
+    ['حق بیمه', 'حقبیمه'],
+    ['خانه\u0654 ما', 'خانه\u0654\u200cما'],
+  ])('%j and %j are one name, and each keeps its form', (one, other) => {
+    expect(canonicalDeductionRuleName(one)).toBe(one);
+    expect(canonicalDeductionRuleName(other)).toBe(other);
+    expect(deductionRuleNameKey(one)).toBe(deductionRuleNameKey(other));
+  });
+
+  it.each([
+    ['Tax', 'Taxes'],
+    ['Rule 1', 'Rule 2'],
+    ['A-B', 'AB'],
+    ['کسر', 'کثر'],
+  ])('%j and %j stay two names', (one, other) => {
+    expect(deductionRuleNameKey(one)).not.toBe(deductionRuleNameKey(other));
+  });
+
+  it('what folds to a capital before the form is one name with it; what has no form is refused, not folded', () => {
+    expect(deductionRuleNameKey(canonicalDeductionRuleName('TA\u212a')!)).toBe('tak');
+    expect(deductionRuleNameKey(canonicalDeductionRuleName('\uff34ax')!)).toBe('tax');
+    for (const lookalike of ['\u0130x', '\u0131x', 'Stra\u00dfe', '\u0391bc']) {
+      expect(canonicalDeductionRuleName(lookalike)).toBeNull();
+    }
+  });
+
+  it('over every code point in the form, the key is Unicode’s own case mapping, and folding it again changes nothing', () => {
+    const blanks = /[ \u200c]/g;
+    const broken: number[] = [];
+    for (const cp of everyCodePoint()) {
+      const char = String.fromCodePoint(cp);
+      for (const name of [char, `T${char}x`, `ب${char}ب`, `ه${char}ب`]) {
+        if (!isCanonicalDeductionRuleName(name)) continue;
+        const key = deductionRuleNameKey(name);
+        const bare = name.replace(blanks, '');
+        if (
+          key !== bare.toLowerCase() ||
+          key !== bare.toUpperCase().toLowerCase() ||
+          deductionRuleNameKey(key) !== key
+        ) {
+          broken.push(cp);
+        }
       }
     }
     expect(broken).toEqual([]);
