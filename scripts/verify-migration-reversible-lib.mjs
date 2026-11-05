@@ -2949,6 +2949,7 @@ export const EXPECTED = {
       'tg_deduction_rule_change_no_truncate',
       'tg_deduction_rule_change_effect',
       'tg_deduction_rule_insert',
+      'tg_statement_deduction_00_lock_rule',
     ],
     functions: [
       'contract_guard',
@@ -2959,6 +2960,7 @@ export const EXPECTED = {
       'deduction_rule_change_guard',
       'deduction_rule_change_effect',
       'deduction_rule_insert_guard',
+      'statement_deduction_lock_rule',
       'deduction_rule_name_is_canonical',
       'deduction_rule_name_key',
     ],
