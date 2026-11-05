@@ -347,13 +347,6 @@ export const REVIEWED_SITES = [
       'backlog gauge (count, oldest age); claimDue gates on next_attempt_at and lease_until only',
   },
   {
-    site: 'services/marketplace-service/src/temporal/saga-start.store.ts#unconfirmedCalls',
-    columns: ['resolved_at', 'opened_at'],
-    verdict: 'not-eligibility',
-    reason:
-      'unconfirmed-release gauge (count by operation) for an alert (FU-104); no saga or order state changes on it',
-  },
-  {
     site: 'services/audit-service/src/audit/tender-evidence.repository.ts#pendingSummary',
     columns: ['held_at'],
     verdict: 'not-eligibility',

@@ -242,8 +242,11 @@ above; a history change during inspection requires another drain/check.
 
 ## Unconfirmed dispute release (FU-080)
 
-`RastaMarketplaceSagaDisputeReleaseUnconfirmed` از وضعیت پایدار خوانده می‌شود، نه از نرخ شمارنده؛ بخش بعد را ببین.
-A decided dispute's
+`RastaMarketplaceSagaDisputeReleaseUnconfirmed` fires from the first round of
+`rasta_marketplace_saga_release_unconfirmed_total` until two hours after the last.
+It counts rounds, not stuck sagas, and rounds need a running worker: with workers
+stopped or failed it clears while the funds are still held. A resolved alert is
+not a confirmed release; the saga's status query is. A decided dispute's
 resolution has not been confirmed by economic-service: the obligation stays
 DISPUTED and its funds held. The saga does not end. It waits in phase
 `RELEASE_UNCONFIRMED` (`workflow query --name status`) and calls again with the
@@ -273,92 +276,48 @@ pending, so follow the gate's pending-activity case above. One rollback edge: a
 release whose last attempt failed just as workers stopped has no marker yet, so a
 protocol-2 target passes the gate and then ends that saga as before this wait.
 
-## هشدارهای پایش Saga (FU-104)
+## رکورد فراخوانی‌های تأییدنشده (FU-104)
 
-آزادسازی تأییدنشده نباید بی‌صدا بماند. دو چیز جدا سنجیده می‌شود، هر دو از فرایند API و بی‌نیاز به Worker، و هر ۱۵ ثانیه:
-ردیف‌های جدول `saga_unconfirmed_call`، و Poller هایی که خود Temporal روی Queue می‌بیند.
-
-| هشدار                                           | چه زمانی                                                                                 | معنا                                                                                                          |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `RastaMarketplaceSagaDisputeReleaseUnconfirmed` | یک نمونه شمار مثبت گزارش کند، یا تازه‌ترین خواندن مثبت از تازه‌ترین خواندن صفر عقب نباشد | اختلافی بیش از ۵ دقیقه پیش تصمیم گرفته شده و economic-service آزادسازی‌اش را تأیید نکرده است؛ وجه در Hold است |
-| `RastaMarketplaceSagaUnconfirmedCallsUnread`    | زمان آخرین خواندن جدول بیش از ۲ دقیقه کهنه یا سری غایب، به مدت ۲ دقیقه                   | شمار خوانده نمی‌شود، پس خاموش بودن هشدار بالا چیزی را ثابت نمی‌کند: پایگاه داده یا خود سرویس را بررسی کن      |
-| `RastaMarketplaceSagaWorkerNotPolling`          | زمان آخرین Poll بیش از ۳ دقیقه کهنه یا سری غایب، به مدت ۲ دقیقه                          | هیچ Worker ـی Queue را Poll نمی‌کند، یا هیچ نمونه‌ای نمی‌تواند از Temporal بپرسد؛ Saga ها جلو نمی‌روند        |
-
-### آزادسازی تأییدنشده
-
-ردیف از لحظه‌ای که economic-service ممکن است اختلاف را نگه دارد نوشته می‌شود و فقط با تأیید آزادسازی بسته می‌شود. هشدار از
-تصمیم اختلاف می‌شمارد، پس Worker یا Saga ـی لازم ندارد: Saga ـی که پیش‌تر بسته شده یا Workflow Task ـی که مدام شکست می‌خورد
-هشدار را خاموش نگه نمی‌دارد.
-
-توقف Worker فرایند را هم می‌بندد، پس ممکن است هیچ نمونه‌ای جدول را نخواند. هر خواندن زمانش را با ساعت پایگاه داده می‌نویسد
-(`..._seen_timestamp_seconds` برای خواندن مثبت، `..._cleared_timestamp_seconds` برای صفر)، و هشدار فقط با خواندن صفری پاک می‌شود که پس
-از پایان آخرین خواندن مثبت آغاز شده باشد، از هر نمونه‌ای. پس صفرِ قدیمی‌ترِ نمونه‌ای دیگر، از دست رفتن نمونه‌ها یا Restart ـِ Prometheus
-هشدار را پاک نمی‌کند: همهٔ این‌ها از نمونه‌های TSDB خوانده می‌شود، نه از وضعیت خود هشدار. پنجرهٔ این خواندن ۷ روز است، برابر
-`--storage.tsdb.retention.time` در `docker-compose.yml`؛ اگر Retention کوتاه‌تر شد، پنجرهٔ قاعده را هم کوتاه کن. اگر ۷ روز هیچ نمونه‌ای نخواند،
-یا TSDB از دست برود، این هشدار دیگر چیزی نمی‌داند و `RastaMarketplaceSagaUnconfirmedCallsUnread` روشن است تا خواندن بعدی از نو پاسخ دهد.
-مرجع نهایی همچنان پرس‌وجوی وضعیت Saga است.
-سفارش‌ها را این‌گونه فهرست کن:
+`saga_unconfirmed_call` رکورد پایدار فراخوانی‌هایی به economic-service است که نتیجه‌شان تأیید نشده است. ردیف پیش از فراخوانی نوشته می‌شود،
+هر تلاش تازه آن را دوباره باز می‌کند و `generation` را جلو می‌برد، و فقط تأیید همان تلاش آن را می‌بندد؛ پس تأیید دیرهنگام تلاشی قدیمی‌تر چیزی را نمی‌بندد،
+و ردیف با توقف Worker یا پایان Saga از بین نمی‌رود. فعلاً فقط `resolveObligationDispute` ثبت می‌شود، پس ردیف بسته فقط تأیید همان آزادسازی است و ثابت نمی‌کند بازپرداخت یا تسویهٔ پس از آن هم انجام شده است.
+این جدول فقط ثبت می‌کند: هنوز هیچ هشداری آن را نمی‌خواند، پس برای دیدن ردیف‌های باز این پرس‌وجو را اجرا کن (`opened_at` زمان نخستین بازشدن است و با تلاش تازه جلو نمی‌رود):
 
 ```sql
-SELECT organization_id, order_id, subject AS dispute_id, opened_at
+SELECT organization_id, order_id, operation, subject AS dispute_id, generation, opened_at
 FROM saga_unconfirmed_call WHERE confirmed_at IS NULL ORDER BY opened_at;
 ```
 
-ردیف را برای خاموش کردن هشدار دستی نبند: Saga ـی که هنوز منتظر است تا تلاش بعدی‌اش بی‌هشدار می‌ماند. هر تلاش تازه، حتی پس از یک
-تأیید، ردیف را دوباره باز می‌کند و فقط پاسخ همان تلاش آن را می‌بندد؛ تأیید دیرهنگام تلاشی قدیمی‌تر چیزی را نمی‌بندد. پس تکرار یک Activity پس
-از تأیید می‌تواند هشدار کوتاه‌مدت یا، اگر آن تلاش جان نبرد، هشدار نادرست بسازد: آن را هم با همین مسیر تطبیق ببند. تنها
-استثنا تصمیم ثبت‌شدهٔ تطبیق است، یعنی همان مسیری که پایان دادن به Saga را مجاز می‌کند (بخش پیش): نخست Saga پایان یابد، سپس
-تصمیم در Change Record ثبت شود و فقط همان ردیف بسته شود. همین مسیر برای ردیفی است که پس از Rollback باز مانده: کد قدیمی
-آزادسازی را تأیید می‌کند ولی ردیف را نمی‌بندد؛ اگر آزادسازی در economic-service ثابت است، این را ثبت کن و ردیف را ببند.
+ردیف باز ثابت نمی‌کند وجه هنوز در Hold است؛ ثابت می‌کند که کسی خلافش را ثابت نکرده است. پس آن را با economic-service تطبیق بده (اختلاف باز هنوز چیزی برای آزادسازی ندارد).
+ردیف را فقط با تصمیم ثبت‌شدهٔ تطبیق ببند، و با همان `generation` که خوانده‌ای، تا تلاشی که پس از خواندن تو آغاز شده بسته نشود. اگر `UPDATE 0` برگشت، دوباره بخوان و دوباره تطبیق بده:
 
 ```sql
 UPDATE saga_unconfirmed_call SET confirmed_at = now()
-WHERE organization_id = '<org>' AND order_id = '<order>'
-  AND operation = 'resolveObligationDispute' AND subject = '<dispute>' AND confirmed_at IS NULL;
+WHERE organization_id = '<org>' AND order_id = '<order>' AND operation = 'resolveObligationDispute'
+  AND subject = '<dispute>' AND generation = <generation> AND confirmed_at IS NULL;
 ```
 
-این Migration گذشته را پر می‌کند: هر اختلافی که سفارشش `COMPLETED` یا `CANCELLED` نیست و رسید آزادسازی پس از تصمیم، بی‌اعلام اختلاف تازه‌ای پس از آن،
-ندارد ردیف می‌گیرد، چه Saga ـش زنده باشد چه بسته. اختلاف باز هم ردیف می‌گیرد، چون Saga ـی که خبرش را داده و از کار افتاده دیگر تماسی نمی‌گیرد، و از لحظهٔ
-تصمیم شمرده می‌شود؛ اختلاف تصمیم‌گرفته بی‌درنگ شمرده می‌شود. این پایگاه داده economic-service را نمی‌بیند، پس اختلافی که economic-service هرگز از آن خبر
-نداشته هم ردیف می‌گیرد و هشدار پس از استقرار ممکن است روشن شود. Saga ـی که منتظر است ردیف خود را می‌بندد (`retryDisputeRelease` زودترش می‌کند). بقیه را
-با economic-service تطبیق بده و با همان مسیر بالا ببند، و ثبت کن.
+### پرکردن گذشته
 
-Migration پیش از توقف نسخهٔ قدیمی اجرا می‌شود (گام ۱) و آن نسخه تا گام ۲ هنوز می‌تواند اختلافی را تصمیم بگیرد. پس **میان گام ۲ و ۴ این پرکردن را دوباره اجرا کن**؛
-تکرارش بی‌خطر است و ردیف موجود را تغییر نمی‌دهد. کد خروج غیرصفر استقرار را متوقف می‌کند و خروجی در Change Record ثبت می‌شود:
+Migration برای **هر** اختلافی که سفارشش `COMPLETED` یا `CANCELLED` نیست ردیف می‌نویسد، چه اختلاف باز باشد چه تصمیم‌گرفته، چه Saga ـش زنده باشد چه بسته. هیچ رسید و هیچ زمانی
+این را تغییر نمی‌دهد: رسید آزادسازی نمی‌گوید پاسخ کدام اختلاف است، زمانش با ساعت دیگری از زمان تصمیم ثبت می‌شود، و ممکن است دیر برسد یا هرگز نوشته نشود. پس آزادسازی‌ای که واقعاً
+انجام شده هم ردیف می‌گیرد: Saga ـی که منتظر است ردیف خود را با تلاش بعدی‌اش می‌بندد (در فاز `RELEASE_UNCONFIRMED`، `retryDisputeRelease` آن را زودتر می‌کند)، و بقیه را با economic-service تطبیق بده، با همان مسیر بالا ببند و ثبت کن.
+
+Migration پیش از توقف نسخهٔ قدیمی اجرا می‌شود (گام ۱) و آن نسخه تا گام ۲ هنوز می‌تواند اختلافی را ثبت کند. پس **در هر تلاش استقرار، میان گام ۲ و ۴ این پرکردن را دوباره اجرا کن**، از جمله پس از Rollback: `db:migrate` دوم کاری نمی‌کند، و اختلافی که نسخهٔ قدیمی در این میان ثبت کرده ردیف نمی‌گیرد؛
+همان عبارت Migration است، تکرارش بی‌خطر است و ردیف موجود را تغییر نمی‌دهد. از ریشهٔ مخزن اجرا کن. کد خروج غیرصفر (از جمله وقتی عبارتی پیدا نشود) استقرار را متوقف می‌کند،
+و سطر `INSERT 0 <n>` در Change Record ثبت می‌شود:
 
 ```bash
+set -o pipefail
 sed -n '/^-- BACKFILL BEGIN/,/^-- BACKFILL END/p' \
   services/marketplace-service/prisma/migrations/20261105130000_saga_unconfirmed_call/migration.sql |
-  psql "${DATABASE_URL_MARKETPLACE_MIGRATOR%%\?*}" -v ON_ERROR_STOP=1
+  node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 -f - |
+  grep -E '^INSERT 0 [0-9]+$'
 ```
 
-`down.sql` این Migration رکورد آزادسازی‌های باز را از بین می‌برد: پیش از اجرایش همین فهرست را ثبت کن.
+`scripts/psql-prisma-url.mjs` تنها تبدیل نشانی Prisma به libpq است: `psql` پارامتر `?schema=` را نمی‌پذیرد، و این ابزار آن را به `search_path` تبدیل می‌کند، پس Schema ـی غیر از `public` هم از دست نمی‌رود.
 
-### Worker
-
-- **شکست در آغاز:** با `MARKETPLACE_TEMPORAL_ENABLED=true` نمونه‌ای که Worker ـش بالا نیاید با کد ۱ خارج می‌شود و `listen` نمی‌کند.
-  پس نمونه‌ای که هنگام قطعی Temporal بالا می‌آید تا بازگشت Temporal از دسترس بیرون است. قطعی سرور نمونه‌های در حال اجرا را نمی‌بندد،
-  چون Core دوباره تلاش می‌کند؛ ولی پاسخی که Core تکرارش نمی‌کند (اعتبارنامهٔ باطل، Namespace حذف‌شده) همهٔ نمونه‌ها را حدود یک دقیقه بعد می‌بندد.
-- **توقف بعدی:** اگر `run()` بی‌درخواست `stop()` پایان یابد، نمونه از مسیر عادی Shutdown با کد ۱ خارج می‌شود. Restart را
-  Supervisor انجام می‌دهد؛ تکرارش `RastaConsumerServiceRestartLoop` را روشن می‌کند. برای بررسی، پیام
-  `The order saga worker stopped by itself` در Log نمونه است.
-- **بررسی دستی:** `temporal task-queue describe "${C[@]}" --task-queue "$MARKETPLACE_TEMPORAL_TASK_QUEUE"`. Temporal Worker
-  متوقف‌شده را تا حدود پنج دقیقه با `lastAccessTime` ثابت فهرست می‌کند، پس معیار زمان است، نه حضور در فهرست.
-- **استقرار:** میان گام ۲ و ۴ توالی بالا `RastaMarketplaceSagaWorkerNotPolling` و `RastaMarketplaceSagaUnconfirmedCallsUnread` طبق انتظار روشن می‌شوند،
-  و هشدار آزادسازی اگر روشن است روشن می‌ماند. آن‌ها را در Change Record ثبت کن، و `MARKETPLACE_TEMPORAL_ENABLED=false`
-  را راه خاموش کردنش نکن: این تنظیم سری را حذف می‌کند و هشدار روشن می‌ماند.
-- **محیط بی‌Worker:** `RastaMarketplaceSagaWorkerNotPolling` هر جا که Worker انتظار می‌رود، با Temporal خاموش یا از دسترس خارج هم روشن است. محیطی که
-  عمداً Worker ندارد این را صریح اعلام می‌کند: `MARKETPLACE_SAGA_WORKER_EXPECTED=false` همراه با `MARKETPLACE_TEMPORAL_ENABLED=false`. این ترکیب تنها راه
-  خاموش کردن این هشدار است؛ با Temporal روشن، سرویس هنگام آغاز آن را رد می‌کند. هشدار فقط وقتی خاموش است که در یک ساعت گذشته هیچ نمونه‌ای انتظار Worker را
-  گزارش نکرده باشد، و سرویسی که هیچ گزارشی نمی‌دهد چیزی اعلام نکرده است، پس هشدار روشن می‌ماند.
-
-### آنچه این پایش ثابت نمی‌کند
-
-- Poll کردن پیشرفت نیست: Worker ـی که Workflow Task ـش مدام شکست می‌خورد (مثلاً ناسازگاری Replay) Poll می‌کند و هشدار Worker روشن
-  نمی‌شود. هشدار آزادسازی پس از تصمیم اختلاف می‌بیندش، ولی پیش از آن هیچ هشداری نیست.
-- زمان Poll با ساعت Temporal است و Prometheus با ساعت خودش می‌سنجد؛ ساعتی که چند دقیقه جلوتر باشد کشف را به همان اندازه دیر می‌کند.
-- `saga_unconfirmed_call` فعلاً فقط `resolveObligationDispute` را ثبت می‌کند. آستانهٔ ۳ دقیقه روی سرور Compose
-  (`temporalio/auto-setup:1.26.2`) سنجیده شده است؛ پس از استقرار با تنظیمات واقعی دوباره بسنج.
+`down.sql` این Migration رکورد فراخوانی‌های باز را از بین می‌برد: پیش از اجرایش همین فهرست را ثبت کن.
 
 ## Continued-as-new visibility gap (FU-046)
 

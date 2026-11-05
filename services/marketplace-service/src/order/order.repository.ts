@@ -267,7 +267,7 @@ export class OrderRepository {
   /**
    * A saga call to economic-service is about to be made (FU-104). Every attempt
    * opens it again, whatever an earlier one confirmed: only this attempt's outcome
-   * says anything about the funds now (#769 r1 F3). A false alarm from a late attempt
+   * says anything about the funds now (#769 r1 F3). A false open row from a late attempt
    * is an operator's to close; a closed row over a held dispute is silent.
    *
    * @returns the generation this attempt confirms with.

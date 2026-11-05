@@ -172,8 +172,7 @@ function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>)
 
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
-  // At zero from the start: `increase()` cannot see a series' first increment,
-  // and an operator reads the rounds with it.
+  // At zero from the start: `increase()` cannot see a series' first increment.
   releasesUnconfirmedTotal.inc({ service: SERVICE_NAME }, 0);
 
   /**
@@ -222,7 +221,7 @@ export function createActivities(deps: ActivityDependencies) {
 
   const currentStep = deps.currentStep ?? temporalStep;
 
-  /** The record the release alert reads (FU-104), under the order's own tenant. */
+  /** The durable record of an unconfirmed release (FU-104), under the order's own tenant. */
   const openRelease = (orderId: string, disputeId: string): Promise<number> =>
     asSystemFor(orderId, (order) =>
       deps.orders.openSagaCall(
@@ -545,11 +544,9 @@ export function createActivities(deps: ActivityDependencies) {
       economicDisputeId?: string | null,
     ): Promise<ObligationDisputeTaken> {
       const step = currentStep();
-      const taken = await asSystemFor(orderId, () =>
+      return asSystemFor(orderId, () =>
         deps.orders.markObligationDisputed(orderId, reason, step, economicDisputeId ?? null),
       );
-      if (taken.disputeId) await openRelease(orderId, taken.disputeId);
-      return taken;
     },
 
     async markSettlementFailed(orderId: string): Promise<OrderStatus> {
@@ -652,10 +649,10 @@ export function createActivities(deps: ActivityDependencies) {
      *
      * Confirmed on every way this answers, including a retry answered from the
      * step's record. The record, opened when economic-service was told of the
-     * dispute and again by every attempt here, keeps the alert on once the
-     * dispute is decided, whether or not a saga is left to make this call
-     * (FU-104). An attempt after an earlier one confirmed is open until it answers
-     * itself, and an earlier attempt's late confirmation cannot close it.
+     * dispute and again by every attempt here, stays open whether or not a saga
+     * is left to make this call (FU-104). An attempt after an earlier one confirmed
+     * is open until it answers itself, and an earlier attempt's late confirmation
+     * cannot close it.
      */
     async resolveObligationDispute(
       orderId: string,

@@ -2443,7 +2443,7 @@ export const EXPECTED = {
       'order_status_history',
       // 20261015120000_saga_step (D-053): replay records of saga activities.
       'saga_step',
-      // 20261105130000_saga_unconfirmed_call (FU-104): the state the release alert reads.
+      // 20261105130000_saga_unconfirmed_call (FU-104): the record of unconfirmed economic calls.
       'saga_unconfirmed_call',
       // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
       'return_request',
@@ -4443,6 +4443,44 @@ export function libpqInvocation(url) {
   target.password = '';
   const kept = [...target.searchParams].filter(([name]) => name !== 'password');
   return { target: withLibpqQuery(target, kept), env: password ? { PGPASSWORD: password } : {} };
+}
+
+/** What {@link psqlInvocation} refuses a schema with: a fixed text, as the URL is secret. */
+export const UNUSABLE_PRISMA_SCHEMA =
+  'the schema parameter of the database URL is not one plain lowercase identifier, so psql cannot be pointed at it; its value is not repeated';
+
+/** What it refuses a URL with that could still override `PGOPTIONS` or the schema. */
+export const UNUSABLE_PRISMA_OPTIONS =
+  'the database URL names a service or repeats options, so what psql is told could be overridden; its value is not repeated';
+
+/**
+ * {@link libpqInvocation} that also lands where Prisma would (FU-128): `?schema=`,
+ * `public` when absent as for Prisma, becomes `search_path`.
+ *
+ * All through `PGOPTIONS`, never the URL's `options`: libpq lets that override
+ * `PGOPTIONS`, which would silently drop what the operator set there, such as
+ * `default_transaction_read_only=on`. So the URL's own `options` move over, the
+ * operator's come after them and win, and the schema comes last: the URL decides it.
+ * A service file's `options` would override `PGOPTIONS` too, so `service` is refused.
+ */
+export function psqlInvocation(url, inheritedOptions) {
+  const schemas = readUrl(url, { refusal: UNREADABLE_DATABASE_URL }).searchParams.getAll('schema');
+  const schema = schemas.length === 0 ? 'public' : schemas[0];
+  if (schemas.length > 1 || !/^[a-z_][a-z0-9_]*$/.test(schema)) {
+    throw new Error(UNUSABLE_PRISMA_SCHEMA);
+  }
+  const { target, env } = libpqInvocation(url);
+  const parsed = readUrl(target, { refusal: UNREADABLE_DATABASE_URL });
+  const urlOptions = parsed.searchParams.getAll('options');
+  if (parsed.searchParams.has('service') || urlOptions.length > 1) {
+    throw new Error(UNUSABLE_PRISMA_OPTIONS);
+  }
+  const kept = [...parsed.searchParams].filter(([name]) => name !== 'options');
+  const options = [...urlOptions, inheritedOptions, `-c search_path=${schema}`].filter(Boolean);
+  return {
+    target: withLibpqQuery(parsed, kept),
+    env: { ...env, PGOPTIONS: options.join(' ') },
+  };
 }
 
 /**

@@ -492,16 +492,15 @@ describe('order saga activities (real database)', () => {
       expect(calls[3].input.disputeId).toBe(dispute!.id);
     });
 
-    it('holds a told dispute on record, counted once decided, until the release is confirmed (FU-104)', async () => {
+    const openReleases = async (orderId: string) =>
+      (await new SagaStartStore(prisma).openUnconfirmedCalls(1_000_000)).calls.filter(
+        (call) => call.orderId === orderId && call.operation === 'resolveObligationDispute',
+      ).length;
+
+    it('holds a told dispute on record, decided or not, until the release is confirmed (FU-104)', async () => {
       const { orderId } = await placeOrder();
       const { economic } = stubEconomic();
       const acts = activitiesWith(economic);
-      const store = new SagaStartStore(prisma);
-      const count = async (graceSeconds = 0) =>
-        (await store.unconfirmedCalls(graceSeconds)).calls.find(
-          (row) => row.operation === 'resolveObligationDispute',
-        )?.count ?? 0;
-      const before = await count();
 
       const held = await acts.createObligation(orderId);
       await acts.markFundsHeld(orderId, held.transactionId);
@@ -514,16 +513,14 @@ describe('order saga activities (real database)', () => {
         () => wiring.orders.raiseDispute(orderId, { reason: 'the part does not fit' }),
       );
       const { dispute } = await acts.readOrder(orderId);
+      expect(await openReleases(orderId)).toBe(0);
       await acts.disputeObligation(
         orderId,
         held.transactionId,
         dispute!.id,
         'the part does not fit',
       );
-      // Nothing to release while it is open.
-      expect(await count()).toBe(before);
-      // Older than the decision to come, so that the grace below tells them apart.
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      expect(await openReleases(orderId)).toBe(1);
 
       await asActor(
         { organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-ACT-OPS' },
@@ -534,13 +531,11 @@ describe('order saga activities (real database)', () => {
             responsibility: 'SUPPLIER',
           }),
       );
-      // No saga has called: the decision alone is what puts it on the alert.
-      expect(await count()).toBe(before + 1);
-      // Grace runs from the decision, not from the record.
-      expect(await count(1)).toBe(before);
+      // No saga has called: the decision closes nothing.
+      expect(await openReleases(orderId)).toBe(1);
 
       await acts.resolveObligationDispute(orderId, held.transactionId, dispute!.id, 'REFUND');
-      expect(await count()).toBe(before);
+      expect(await openReleases(orderId)).toBe(0);
     });
 
     /** A decided dispute economic-service was told of, as the saga has it at the release. */
@@ -574,11 +569,7 @@ describe('order saga activities (real database)', () => {
             responsibility: 'SUPPLIER',
           }),
       );
-      const store = new SagaStartStore(prisma);
-      const count = async () =>
-        (await store.unconfirmedCalls(0)).calls.find(
-          (row) => row.operation === 'resolveObligationDispute',
-        )?.count ?? 0;
+      const count = () => openReleases(orderId);
       return { orderId, transactionId: held.transactionId, disputeId: dispute!.id, count };
     }
 

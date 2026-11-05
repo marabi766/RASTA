@@ -426,17 +426,16 @@ model SagaStep {
   @@map("saga_step")
 }
 
-/// A saga call to economic-service owed from the moment economic-service may hold
-/// a dispute until the release is confirmed (FU-104): the state an alert reads,
-/// so that it stays on whether or not any worker or saga is running. A row is
-/// never deleted; `confirmedAt` is its end.
+/// A saga call to economic-service whose outcome nothing has confirmed, on record
+/// from before the call (FU-104), whether or not any worker or saga is left. A row
+/// is never deleted; `confirmedAt` is its end.
 model SagaUnconfirmedCall {
   organizationId String @map("organization_id")
 
   orderId String @map("order_id")
   order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_saga_unconfirmed_call_tenant", onUpdate: Restrict, onDelete: Cascade)
 
-  /// The activity making the call.
+  /// The call that ends this record, whichever step opened it.
   operation String
 
   /// What the call is about: for a dispute release, the order's dispute.

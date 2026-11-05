@@ -31,18 +31,13 @@ it('counts each round from a series that starts at zero, and logs the order', as
 });
 
 /**
- * The record the alert reads (FU-104): on before the call, off only once it is
- * confirmed. The order of the calls is the point, so one log records them all.
+ * The durable record (FU-104): on before the call, off only once it is confirmed.
+ * The order of the calls is the point, so one log records them all.
  */
 describe('resolveObligationDispute on record', () => {
-  function build(options: {
-    resolveDispute: () => Promise<unknown>;
-    recorded?: boolean;
-    taken?: string;
-  }) {
+  function build(options: { resolveDispute: () => Promise<unknown>; recorded?: boolean }) {
     const log: string[] = [];
     const orders = {
-      markObligationDisputed: async () => ({ disputeId: options.taken }),
       describe: async () => ({
         id: 'ORD_R',
         buyerOrganizationId: 'ORG_B',
@@ -106,16 +101,6 @@ describe('resolveObligationDispute on record', () => {
     await activities.disputeObligation('ORD_R', 'TX', 'DSP', 'it does not fit');
 
     expect(log).toEqual([`open ${args}`, 'tell']);
-  });
-
-  it('opens for the dispute the order takes from economic-service, only if it takes one', async () => {
-    const taking = build({ resolveDispute: async () => ({}), taken: 'DSP' });
-    await taking.activities.markObligationDisputed('ORD_R', 'it does not fit', 'ECO');
-    expect(taking.log).toEqual([`open ${args}`]);
-
-    const none = build({ resolveDispute: async () => ({}) });
-    await none.activities.markObligationDisputed('ORD_R', 'it does not fit', 'ECO');
-    expect(none.log).toEqual([]);
   });
 
   it('stays open when the call fails', async () => {

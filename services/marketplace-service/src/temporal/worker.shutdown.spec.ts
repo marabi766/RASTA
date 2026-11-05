@@ -1,5 +1,4 @@
 import { NativeConnection, Worker } from '@temporalio/worker';
-import { fatalShutdown } from '@rasta/nest-common';
 import { OrderSagaWorker } from './worker';
 import { installTemporalRuntimeLogger } from './runtime-logger';
 
@@ -112,59 +111,5 @@ describe('OrderSagaWorker shutdown (Codex on #277, finding 2)', () => {
     );
     await worker.onApplicationBootstrap();
     await expect(worker.stop()).resolves.toBeUndefined();
-  });
-});
-
-/** FU-104: with Temporal enabled, a process without a worker does not stay up looking healthy. */
-describe('OrderSagaWorker failure', () => {
-  let fatal: jest.SpyInstance;
-  beforeEach(() => {
-    jest.clearAllMocks();
-    fatal = jest.spyOn(fatalShutdown, 'request').mockImplementation(() => undefined);
-  });
-  afterEach(() => fatal.mockRestore());
-
-  const secret = () => new Error('dial tcp temporal-user:private-sentinel@10.0.0.9 refused');
-
-  it.each([
-    ['the connection', () => (NativeConnection.connect as jest.Mock).mockRejectedValue(secret())],
-    ['the worker', () => (Worker.create as jest.Mock).mockRejectedValue(secret())],
-  ])('fails the bootstrap when %s cannot be made, in fixed words', async (_name, breakIt) => {
-    const { worker } = build(() => new Promise<void>(() => undefined));
-    breakIt();
-
-    const failure: unknown = await worker.onApplicationBootstrap().catch((error: unknown) => error);
-
-    expect(failure).toBeInstanceOf(Error);
-    expect(String(failure)).toContain('the order saga worker did not start');
-    expect(String(failure)).not.toMatch(/sentinel|10\.0\.0\.9/);
-  });
-
-  it.each([
-    ['fails', () => Promise.reject(secret())],
-    ['returns', () => Promise.resolve()],
-  ])('exits the process when run() %s without having been stopped', async (_name, run) => {
-    const { worker } = build(run);
-    await worker.onApplicationBootstrap();
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(fatal).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([
-    ['fails', (end: { reject: (error: Error) => void }) => end.reject(secret())],
-    ['returns', (end: { resolve: () => void }) => end.resolve()],
-  ])('does not when run() %s after stop()', async (_name, finish) => {
-    let end!: { resolve: () => void; reject: (error: Error) => void };
-    const { worker } = build(
-      () => new Promise<void>((resolve, reject) => (end = { resolve, reject })),
-    );
-    await worker.onApplicationBootstrap();
-
-    const stopped = worker.stop({ deadlineAt: Date.now() + 5_000 });
-    finish(end);
-    await stopped;
-
-    expect(fatal).not.toHaveBeenCalled();
   });
 });

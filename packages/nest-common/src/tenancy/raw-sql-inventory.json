@@ -2423,10 +2423,10 @@
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 110,
-    "hash": "34b66ee427920499853205559d9e181093e8873de734c06713c4d4723049c1da",
+    "line": 116,
+    "hash": "d373004300b71097952e1d4769f2dd7b977aef99fc3941fc6cb81c82acd899e6",
     "occurrence": 0,
-    "decision": "platform-wide: unconfirmed saga release count by operation name and the database's read times only; no tenant labels, identifiers or amounts leave the database"
+    "decision": "platform-wide: the open records of unconfirmed saga calls, for a platform reader never served to a party; identifiers and times only, each row carries its tenant, no amounts"
   },
   {
     "file": "services/notification-service/src/notification/notification.repository.ts",

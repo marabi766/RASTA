@@ -12,12 +12,6 @@ import {
   sagaStartBacklogAge,
   sagaStartBacklogCount,
   sagaStartDeliveries,
-  sagaUnconfirmedCalls,
-  sagaUnconfirmedCallsClearedAt,
-  sagaUnconfirmedCallsReadAt,
-  sagaUnconfirmedCallsSeenAt,
-  sagaWorkerExpected,
-  sagaWorkerLastPoll,
 } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import { ENV } from '../tokens';
@@ -33,9 +27,6 @@ const START_RPC_TIMEOUT_MS = 5000;
 const START_CONNECT_TIMEOUT_MS = 1000;
 const RETENTION_MARGIN_MS = 60_000;
 const START_POLL_INTERVAL_MS = 10_000;
-const SAMPLE_INTERVAL_MS = 15_000;
-/** `temporal.api.enums.v1.TaskQueueType`: a worker polls for both. */
-const POLLED_TASK_TYPES = [1 /* WORKFLOW */, 2 /* ACTIVITY */];
 
 @Injectable()
 export class OrderSagaClient implements OnModuleDestroy {
@@ -46,8 +37,6 @@ export class OrderSagaClient implements OnModuleDestroy {
 
   private timer?: NodeJS.Timeout;
   private ticking?: Promise<void>;
-  private sampler?: NodeJS.Timeout;
-  private sampling?: Promise<void>;
   private stopped = false;
   private readonly abort = new AbortController();
   private readonly active = new Set<Promise<void>>();
@@ -62,84 +51,6 @@ export class OrderSagaClient implements OnModuleDestroy {
     void this.tick();
     this.timer = setInterval(() => void this.tick(), START_POLL_INTERVAL_MS);
     this.timer.unref();
-    void this.sample();
-    this.sampler = setInterval(() => void this.sample(), SAMPLE_INTERVAL_MS);
-    this.sampler.unref();
-  }
-
-  /**
-   * What the alerts read to know a stuck money call is not going unseen
-   * (FU-104). From this process and its own timer, because it must not need a
-   * worker, and apart from `tick` so that a failed claim cannot stop it. Each
-   * half only moves its series when it has an answer: an outage leaves a
-   * timestamp going stale, and the alert fires on that.
-   */
-  sample(): Promise<void> {
-    if (this.stopped) return Promise.resolve();
-    this.sampling ??= this.track(async () => {
-      await Promise.all([this.sampleUnconfirmedCalls(), this.sampleWorkerPolls()]);
-    }).finally(() => {
-      this.sampling = undefined;
-    });
-    return this.sampling;
-  }
-
-  private async sampleUnconfirmedCalls(): Promise<void> {
-    try {
-      const { calls, startedAt, finishedAt } = await this.store.unconfirmedCalls();
-      sagaUnconfirmedCalls.reset();
-      const counts = new Map([['resolveObligationDispute', 0]]);
-      for (const { operation, count } of calls) counts.set(operation, count);
-      for (const [operation, count] of counts) {
-        const labels = { service: SERVICE_NAME, operation };
-        sagaUnconfirmedCalls.set(labels, count);
-        // Each stamped on its cautious side: only a read that began after a
-        // positive one finished can clear it.
-        if (count > 0) sagaUnconfirmedCallsSeenAt.set(labels, finishedAt);
-        else sagaUnconfirmedCallsClearedAt.set(labels, startedAt);
-      }
-      sagaUnconfirmedCallsReadAt.set({ service: SERVICE_NAME }, startedAt);
-    } catch (error) {
-      this.logger.warn(
-        { failure: foreignFailure(error) },
-        'Could not read the unconfirmed saga calls',
-      );
-    }
-  }
-
-  /** Disabled, no series: an instance without a worker proves nothing. */
-  private async sampleWorkerPolls(): Promise<void> {
-    sagaWorkerExpected.set(
-      { service: SERVICE_NAME },
-      this.env.MARKETPLACE_SAGA_WORKER_EXPECTED ? 1 : 0,
-    );
-    if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) return;
-    try {
-      const client = await this.getClient();
-      const polled = await client.connection.withAbortSignal(this.abort.signal, () =>
-        client.connection.withDeadline(Date.now() + START_RPC_TIMEOUT_MS, () =>
-          Promise.all(
-            POLLED_TASK_TYPES.map(async (taskQueueType) => {
-              const { pollers } = await client.workflowService.describeTaskQueue({
-                namespace: this.env.TEMPORAL_NAMESPACE,
-                taskQueue: { name: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE },
-                taskQueueType,
-              });
-              // Temporal lists a stopped worker for minutes, with this time frozen.
-              return Math.max(0, ...(pollers ?? []).map((p) => Number(p.lastAccessTime?.seconds)));
-            }),
-          ),
-        ),
-      );
-      // NaN (a malformed answer) and 0 (no poller) both fail this.
-      const proven = Math.min(...polled);
-      if (proven > 0) sagaWorkerLastPoll.set({ service: SERVICE_NAME }, proven);
-    } catch (error) {
-      this.logger.warn(
-        { failure: foreignFailure(error) },
-        'Could not read the pollers of the order saga queue',
-      );
-    }
   }
 
   /** Fast path after commit; a failure never changes the placement response. */
@@ -193,7 +104,6 @@ export class OrderSagaClient implements OnModuleDestroy {
   async stop(_options?: OutboxStopOptions): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
-    if (this.sampler) clearInterval(this.sampler);
     this.abort.abort();
     await Promise.all([...this.active]);
   }

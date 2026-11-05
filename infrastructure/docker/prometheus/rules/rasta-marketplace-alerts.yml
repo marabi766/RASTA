@@ -12,60 +12,13 @@ groups:
           runbook: docs/runbooks/marketplace-saga-deploy.md
   - name: rasta-marketplace-saga-release
     rules:
-      # State, not rounds (FU-104): saga_unconfirmed_call, read by the API process,
-      # needs no worker. On while any replica reports a call, and after that until
-      # a read that began after the last positive one ended finds none: both times
-      # are the database's, and held in the samples for as long as the TSDB keeps
-      # them (7d), so losing a replica or this server's state clears nothing. Past
-      # that, UnconfirmedCallsUnread has been firing throughout, and the next read
-      # answers again. Keep the window within --storage.tsdb.retention.time.
+      # A saga on a running worker adds a round at least hourly, so two hours
+      # never misses one. Rounds need a worker: this clears if none is running.
       - alert: RastaMarketplaceSagaDisputeReleaseUnconfirmed
-        expr: >-
-          max(rasta_marketplace_saga_unconfirmed_calls{operation="resolveObligationDispute"}) > 0
-          or
-          max(max_over_time(rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{operation="resolveObligationDispute"}[7d]))
-          >=
-          (
-            max(max_over_time(rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{operation="resolveObligationDispute"}[7d]))
-            or vector(0)
-          )
+        expr: sum(increase(rasta_marketplace_saga_release_unconfirmed_total[2h])) > 0
         labels:
           severity: critical
         annotations:
           summary: A decided dispute's release is unconfirmed
-          description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. This stays on until a read of the database finds it confirmed, with or without a worker; the runbook lists the orders.
-          runbook: docs/runbooks/marketplace-saga-deploy.md
-      # A count nobody can read is not a zero. Also the service being down.
-      - alert: RastaMarketplaceSagaUnconfirmedCallsUnread
-        expr: >-
-          time() - max(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds) > 120
-          or absent(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds)
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: Unconfirmed saga calls cannot be counted
-          description: No marketplace-service instance has read saga_unconfirmed_call for minutes, so a release alert that is off cannot be trusted, and one that is on holds. Funds may be held unseen.
-          runbook: docs/runbooks/marketplace-saga-deploy.md
-      # Temporal's own record of the worker polling both task types. It lists a
-      # stopped worker for about five minutes with the time frozen, and advances
-      # the time about once a minute for a live one, so three minutes is not a
-      # slow poll. Absent also covers a service that is down or has Temporal off.
-      # Silent only where every instance has reported MARKETPLACE_SAGA_WORKER_EXPECTED=false
-      # for an hour: a replica that expected one and exited with its worker still counts,
-      # and an instance that reports nothing has stated nothing.
-      - alert: RastaMarketplaceSagaWorkerNotPolling
-        expr: >-
-          (
-            time() - max(rasta_marketplace_saga_worker_last_poll_timestamp_seconds) > 180
-            or absent(rasta_marketplace_saga_worker_last_poll_timestamp_seconds)
-          )
-          unless on ()
-          (max(max_over_time(rasta_marketplace_saga_worker_expected[1h])) == 0)
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: No worker is polling the order saga queue
-          description: Temporal has seen no worker poll the order saga task queue for minutes, or no instance can ask it. Sagas are not moving, so no money call is being made or retried.
+          description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. The saga keeps trying; the log names the order.
           runbook: docs/runbooks/marketplace-saga-deploy.md

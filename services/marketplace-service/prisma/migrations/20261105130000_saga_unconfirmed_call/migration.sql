@@ -1,12 +1,9 @@
 -- =============================================================================
--- saga_unconfirmed_call: a saga call to economic-service owed from the moment
--- economic-service may hold a dispute until its release is confirmed (FU-104).
---
--- The alert on an unconfirmed dispute release read a counter's rate. Rounds need
--- a worker, so with workers stopped it cleared with the funds still held. It now
--- reads this table, through a gauge the API process samples, once the order's
--- dispute is decided. What is already owed at this point is written below, so that
--- an empty inventory can mean nothing is owed (#769 r1 F2).
+-- saga_unconfirmed_call: the durable record of a saga call to economic-service
+-- whose outcome nothing has confirmed (FU-104). Written before the call, opened
+-- again by every attempt, and closed only by that attempt's own confirmation, so
+-- a call that failed, was never answered or was made by a saga now gone stays on
+-- record with no worker or saga needed. This table records; it decides nothing.
 --
 -- New table: nothing existing is rewritten or locked beyond the foreign key's
 -- brief SHARE ROW EXCLUSIVE on "order". The runtime role's DML comes from
@@ -27,7 +24,7 @@ CREATE TABLE "saga_unconfirmed_call" (
     CONSTRAINT "saga_unconfirmed_call_pkey" PRIMARY KEY ("organization_id","order_id","operation","subject")
 );
 
--- What the sampler walks: only what is still open, however many have ended.
+-- What a reader walks: only what is still open, however many have ended.
 CREATE INDEX "ix_saga_unconfirmed_call_open" ON "saga_unconfirmed_call"("opened_at")
   WHERE "confirmed_at" IS NULL;
 
@@ -39,15 +36,15 @@ ALTER TABLE "saga_unconfirmed_call" ADD CONSTRAINT "fk_saga_unconfirmed_call_ten
 ALTER TABLE "saga_unconfirmed_call" ADD CONSTRAINT "ck_saga_unconfirmed_call_not_blank"
   CHECK (length(btrim("operation")) > 0 AND length(btrim("subject")) > 0);
 
--- What this database can prove about a dispute from before this table: it cannot see
--- economic-service, so every dispute is owed unless proven otherwise, open ones too:
--- a saga that told economic-service and died will never call for it, and the count
--- skips it until it is decided. Proven: the order COMPLETED (economic-service settled
--- it) or CANCELLED (it compensated it), both final, or a release receipt on the order
--- from after the decision with no later telling of a dispute (the saga mirrors one at
--- a time, so such a receipt answers for every dispute decided before it). Unproven
--- counts: one economic-service never heard of shows as a row an operator reconciles
--- (the runbook), never as a silent hold.
+-- What was already owed when this table arrived: a row for EVERY dispute of an order
+-- that has not finished. This database cannot see economic-service, and nothing in it
+-- says which dispute a release receipt answered: a receipt names the order, it is
+-- stamped by another clock than the decision, and it may be stored late or never. So
+-- neither a receipt nor a time ends a dispute here (#769 r2 F2), only the order's own
+-- end does: COMPLETED (economic-service settled it) or CANCELLED (it refunded it). Any
+-- other status, FAILED included, proves nothing. A release that did happen shows as a
+-- row: a saga still waiting closes its own, an operator reconciles the rest (the
+-- runbook). A false row costs a look; a missing one leaves funds held in silence.
 --
 -- Idempotent, and read by the runbook between these two markers: an old instance
 -- may decide a dispute after this migration and before it stops.
@@ -57,16 +54,5 @@ SELECT d."organization_id", d."order_id", 'resolveObligationDispute', d."id"
 FROM "order_dispute" d
 JOIN "order" o ON o."organization_id" = d."organization_id" AND o."id" = d."order_id"
 WHERE o."status" NOT IN ('COMPLETED', 'CANCELLED')
-  AND NOT EXISTS (
-    SELECT 1 FROM "saga_step" s
-    WHERE s."organization_id" = d."organization_id" AND s."order_id" = d."order_id"
-      AND s."activity" = 'resolveObligationDispute'
-      AND s."applied_at" >= d."resolved_at" AT TIME ZONE 'UTC'
-      AND NOT EXISTS (
-        SELECT 1 FROM "saga_step" t
-        WHERE t."organization_id" = s."organization_id" AND t."order_id" = s."order_id"
-          AND t."activity" = 'disputeObligation' AND t."applied_at" > s."applied_at"
-      )
-  )
 ON CONFLICT DO NOTHING;
 -- BACKFILL END

@@ -5,6 +5,7 @@ import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
 import type { EconomicClient } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { EventPublisher } from '../src/events/publisher';
 import { restartedSagaSteps } from './fixtures/restarted-saga.workflow';
 import {
   asActor,
@@ -942,6 +943,53 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           raisedBy: 'economic-service',
         },
       ]);
+    });
+
+    /** FU-104: economic-service already holds it, so the record may not come after. */
+    describe('the record of the release it now owes', () => {
+      const recordOf = (orderId: string) =>
+        runUnscoped('the test reads the record the step left', () =>
+          prisma.client.sagaUnconfirmedCall.findMany({ where: { orderId } }),
+        );
+
+      it('is written with the dispute, under the buyer, and a retry does not reopen it', async () => {
+        const econ = expiredEconomic();
+        const { orderId, saga } = await receiptConfirmed(econ.economic);
+
+        const taken = await saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION));
+        await saga.run(5, 2, (a) => a.markObligationDisputed(orderId, OBJECTION));
+
+        expect(await recordOf(orderId)).toEqual([
+          expect.objectContaining({
+            organizationId: org.buyer,
+            operation: 'resolveObligationDispute',
+            subject: taken.disputeId,
+            generation: 1,
+            confirmedAt: null,
+          }),
+        ]);
+      });
+
+      it('commits or fails with the dispute: nothing half-written', async () => {
+        const econ = expiredEconomic();
+        const { orderId, saga } = await receiptConfirmed(econ.economic);
+        const lost = jest
+          .spyOn(EventPublisher.prototype, 'enqueue')
+          .mockRejectedValueOnce(new Error('connection lost'));
+        try {
+          await expect(
+            saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION)),
+          ).rejects.toThrow();
+        } finally {
+          lost.mockRestore();
+        }
+        expect(await disputesOf(orderId)).toEqual([]);
+        expect(await recordOf(orderId)).toEqual([]);
+
+        const taken = await saga.run(5, 2, (a) => a.markObligationDisputed(orderId, OBJECTION));
+
+        expect(await recordOf(orderId)).toMatchObject([{ subject: taken.disputeId }]);
+      });
     });
 
     it('reads the mirrored dispute by its id, not as the most recent one', async () => {

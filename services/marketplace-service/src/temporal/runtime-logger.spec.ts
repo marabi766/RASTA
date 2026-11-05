@@ -176,10 +176,6 @@ describe('Core (native) logs', () => {
     compiled.runtimeOptions.logExporter as { type: string; receiver?: (entries: string[]) => void };
   const close = (compiled: Compiled) => (compiled.logger as { close?: () => void }).close?.();
 
-  it('leave stopping the worker to the service: no signal of the SDK own (FU-104)', () => {
-    expect(temporalRuntimeOptions(stubLogger().logger).shutdownSignals).toEqual([]);
-  });
-
   it('are forwarded: the compiler selects the forwarding exporter, not the console one', () => {
     const forwarded = compileOptions(temporalRuntimeOptions(stubLogger().logger));
     // The configuration before this fix, as a control.

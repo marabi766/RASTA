@@ -464,6 +464,8 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
+  // The name of a DATABASE_URL_* variable, never its value, then what psql is to be told.
+  'scripts/psql-prisma-url.mjs': { positionals: ['identifier', 'forwarded'] },
   'scripts/replay-dlq-lib.mjs': {
     accepts: {
       '--allow-stale': 'identifier',

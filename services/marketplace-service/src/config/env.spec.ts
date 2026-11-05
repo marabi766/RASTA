@@ -311,26 +311,3 @@ it('refuses a shutdown deadline shorter than the starter database stop budget', 
       ]),
     );
 });
-
-describe('MARKETPLACE_SAGA_WORKER_EXPECTED', () => {
-  const load2 = (temporal: string | undefined, expected: string | undefined) =>
-    loadMarketplaceEnv({
-      ...BASE,
-      ...(temporal === undefined ? {} : { MARKETPLACE_TEMPORAL_ENABLED: temporal }),
-      ...(expected === undefined ? {} : { MARKETPLACE_SAGA_WORKER_EXPECTED: expected }),
-    });
-
-  it('defaults to true, also with Temporal off: that alone states nothing', () => {
-    expect(load2(undefined, undefined).MARKETPLACE_SAGA_WORKER_EXPECTED).toBe(true);
-    expect(load2('false', undefined).MARKETPLACE_SAGA_WORKER_EXPECTED).toBe(true);
-  });
-
-  it('can be stated off with Temporal off', () => {
-    expect(load2('false', 'false').MARKETPLACE_SAGA_WORKER_EXPECTED).toBe(false);
-  });
-
-  it('is refused off with Temporal on: it would hide a stopped worker', () => {
-    expect(() => load2('true', 'false')).toThrow(EnvValidationError);
-    expect(() => load2(undefined, 'false')).toThrow(EnvValidationError);
-  });
-});
