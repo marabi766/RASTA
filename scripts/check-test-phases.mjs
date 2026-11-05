@@ -27,7 +27,7 @@ import {
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-function listFiles(base, dir) {
+export function listFiles(base, dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     // `generated` is git-ignored Prisma output, regenerated while other tasks run (FU-090).
     if (

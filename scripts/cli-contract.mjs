@@ -490,6 +490,8 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: ['script'],
     other: ['--depth', '--no-tags', '--quiet', '--verify'],
   },
+  // `git -C <root> ls-files | check-ignore -q --no-index`: is a vanished generated path ignored?
+  'scripts/testing-dev-only-source.mjs': { other: ['--no-index', '-C', '-q'] },
   'scripts/testing-dev-only.mjs': {
     // `image <ref>` | `tree <dir> <entry>`: each checked against IMAGE_REF or
     // REPO_PATH before any use.
