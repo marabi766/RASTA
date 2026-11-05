@@ -11,7 +11,7 @@ import { DEFAULT_STALL_MS, stallBudget } from './test-stall-watchdog.mjs';
 const watchdog = fileURLToPath(new URL('./test-stall-watchdog.mjs', import.meta.url));
 
 /** Run `node --test` with the watchdog preloaded on a fixture test file. */
-function runFixture(t, source, env = {}, preloads = []) {
+function runFixture(t, source, env = {}, preloads = [], options = []) {
   const directory = mkdtempSync(join(tmpdir(), 'stall-watchdog-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const file = join(directory, 'fixture.test.mjs');
@@ -21,11 +21,20 @@ function runFixture(t, source, env = {}, preloads = []) {
   const { NODE_TEST_CONTEXT: _context, ...inherited } = process.env;
   const result = spawnSync(
     process.execPath,
-    ['--test', ...preloads.flatMap((path) => ['--import', path]), '--import', watchdog, file],
+    [
+      '--test',
+      ...options,
+      ...preloads.flatMap((path) => ['--import', path]),
+      '--require',
+      watchdog,
+      file,
+    ],
     {
       cwd: directory,
       encoding: 'utf8',
       timeout: 30_000,
+      // A runner stuck in its own loop ignores SIGTERM (nodejs/node#62693).
+      killSignal: 'SIGKILL',
       env: { ...inherited, RASTA_TEST_STALL_MS: '1500', ...env },
     },
   );
@@ -139,3 +148,41 @@ for (const [direction, delta] of [
     assert.ok(result.ms < 5500, `killed in ${Math.round(result.ms)} ms`);
   });
 }
+
+// FU-118: the Node 22 runner hang itself (nodejs/node#62693). The child writes report
+// frames exactly as Node's v8 reporter does, split right after a length byte of 0xFF, with
+// the next frames in the same write: the parent reorders the 0xFF, reads a false header with
+// a huge length and, once the file ends, loops forever in #drainRawBuffer with the child
+// already gone. Without the runner watchdog this run printed nothing and ignored
+// --test-timeout until killed (CI runs 42043438996, 42035896072).
+test('a node --test runner stuck in the v8 frame drain loop is killed and named', (t) => {
+  const result = runFixture(
+    t,
+    `import test from 'node:test';
+     import { writeSync } from 'node:fs';
+     import v8 from 'node:v8';
+     const frame = (item) => {
+       const s = new v8.Serializer();
+       s.writeHeader(); s.writeRawBytes(Buffer.alloc(4)); s.writeHeader(); s.writeValue(item);
+       const b = s.releaseBuffer();
+       b.writeUInt32BE(b.length - 6, 2);
+       return b;
+     };
+     const note = (message) => frame({ type: 'test:diagnostic', data: { nesting: 0, message, file: 'x' } });
+     const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+     test('writes a frame split after a 0xFF length byte', () => {
+       let message;
+       for (let pad = 0; (message = note('p'.repeat(pad)))[5] !== 0xff; pad++);
+       writeSync(1, message.subarray(0, 6));
+       pause(300);
+       writeSync(1, Buffer.concat([message.subarray(6), note('a'), note('b')]));
+       pause(300);
+     });`,
+    {},
+    [],
+    ['--test-timeout=20000'],
+  );
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /TEST STALL: the node --test runner \(parent process\) stopped/);
+  assert.ok(result.ms < 15_000, `killed in ${Math.round(result.ms)} ms`);
+});
