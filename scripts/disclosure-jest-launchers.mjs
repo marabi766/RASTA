@@ -151,12 +151,12 @@ export const JEST_LAUNCHERS = {
   'scripts/check-unit-step-concurrency.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; the added timeout helper only parses command strings. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
+      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
     sha256: {
       'scripts/ci-node-test-timeouts-lib.mjs':
-        '73f4adbb236d634ff18c58c513eedae4988f66e1f6854f14ccd3c076b0ace679',
+        'e20caf184e1e09d7308bcc27cf868f8f7b06cb2f08cf0743aa7151f91704f810',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '08458ba01284f457a712c4189210c0ea2397e9ba221cd54d2bdb2f6b4a06c96d',
+        'b11ab2be12c9d2301f11f68c0f6cae0320c879c57cbe080e5390634fcb0a8272',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
@@ -169,7 +169,7 @@ export const JEST_LAUNCHERS = {
       'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
     sha256: {
       'scripts/exchange-deadline-rule.test.mjs':
-        '723acb43475ede39c864af5e0c8c2850e2527e284ddcdd1d6169365607741b70',
+        '1b3a35b144a1d10fcfec2b1a496e134d8f30c744c13d27845aa7bbc89676763c',
     },
   },
   'scripts/testing-dev-only.test.mjs': {
