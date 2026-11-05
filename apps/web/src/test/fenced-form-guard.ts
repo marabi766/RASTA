@@ -177,8 +177,8 @@ const wraps = (node: ts.Node): node is Wrapper =>
   ts.isPartiallyEmittedExpression(node);
 
 /**
- * The one normalizer (FU-037): every rule, every binding and every definition
- * reads an expression through it, so a wrapper never hides what it wraps.
+ * Value/name normalizer (FU-037): wrappers and comma tails cannot hide an identity.
+ * Exact-return checks and method receivers must preserve comma expressions.
  */
 function bare(node: ts.Expression): ts.Expression;
 function bare(node: ts.Node): ts.Node;
@@ -522,9 +522,14 @@ class Program {
       const made = this.invoked(file, node, depth);
       if (made.sym?.unresolved) return made.sym;
       if (!isIntrinsic(made.sym, 'bind')) return null;
-      const target = made.receiver
-        ? this.resolve(made.receiver.file, made.receiver.node, depth + 1)
-        : { module: file, name: 'bind', unresolved: true as const };
+      const receiver = made.receiver && bare(made.receiver.node);
+      // A literal function target is known, even though it has no exported identity (FU-106).
+      const target =
+        receiver && (ts.isArrowFunction(receiver) || ts.isFunctionExpression(receiver))
+          ? { module: made.receiver!.file, name: '<inline>' }
+          : made.receiver
+            ? this.resolve(made.receiver.file, made.receiver.node, depth + 1)
+            : { module: file, name: 'bind', unresolved: true as const };
       const bound = { target, receiver: made.args?.[0], args: made.args && made.args.slice(1) };
       return { module: INTRINSIC, name: 'bound', bound };
     }
@@ -850,7 +855,9 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
     });
   const resolve = (node: ts.Node) => program.provenance(program.resolve(file, node));
   const isBoundaryCall = (node: ts.Node | undefined): boolean => {
-    const call = node && bare(node);
+    // A comma returns the tail's value but also evaluates discarded operands.
+    let call = node;
+    while (call && wraps(call)) call = call.expression;
     return (
       call !== undefined &&
       ts.isCallExpression(call) &&
@@ -934,12 +941,6 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       flag('callback', call, 'the state hook is not given a function (or useCallback of one)');
       continue;
     }
-    if (fn.body && !ts.isBlock(fn.body)) {
-      if (!isBoundaryCall(fn.body))
-        flag('callback', fn.body, 'returns something other than submitThroughSlot(...)');
-      else boundary = true;
-      continue;
-    }
     const returns: ts.ReturnStatement[] = [];
     const awaits: ts.Node[] = [];
     const visit = (node: ts.Node) => {
@@ -949,13 +950,19 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       ts.forEachChild(node, visit);
     };
     ts.forEachChild(fn, visit);
+    for (const node of awaits) flag('callback', node, 'awaits outside the boundary');
+    if (fn.body && !ts.isBlock(fn.body)) {
+      if (!isBoundaryCall(fn.body))
+        flag('callback', fn.body, 'returns something other than submitThroughSlot(...)');
+      else boundary = true;
+      continue;
+    }
     if (returns.length === 0) flag('callback', fn, 'never returns submitThroughSlot(...)');
     for (const statement of returns) {
       if (!isBoundaryCall(statement.expression)) {
         flag('callback', statement, 'returns something other than submitThroughSlot(...)');
       } else boundary = true;
     }
-    for (const node of awaits) flag('callback', node, 'awaits outside the boundary');
   }
   if (!boundary) flag('boundary', null, 'no state callback returns submitThroughSlot(...)');
 
@@ -993,7 +1000,8 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       const writer =
         callee !== null &&
         stores.has(callee.module) &&
-        /^(save|answer|settle)/.test(callee.member ?? callee.name);
+        // An anonymous bound target retains its module, but cannot prove it is a read.
+        (callee.name === '<inline>' || /^(save|answer|settle)/.test(callee.member ?? callee.name));
       const slotWrite =
         callee !== null &&
         stores.has(callee.module) &&
