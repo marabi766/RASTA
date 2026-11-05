@@ -143,6 +143,13 @@ function optionalRoleList(name: string) {
  *                                       milestones. Default `ORGANIZATION_ADMIN`; empty means nobody.
  *   CONTRACT_MILESTONE_LIMIT            The most milestones one contract holds (default 100):
  *                                       protection of the service, not a business rule.
+ *   CONTRACT_DEDUCTION_WRITER_ROLES     CON-003-1, Q-125. Who, in the employer's organization,
+ *                                       proposes a change to its deduction rules. **No default**:
+ *                                       unset means nobody, so the routes refuse (fail closed). It
+ *                                       may not name CONTRACTOR: a contractor never chooses what is
+ *                                       withheld from it. Who approves is not configured: a platform
+ *                                       SYSTEM_ADMIN and another person (D-115), and four eyes has
+ *                                       no switch, because Q-125 makes it a product rule.
  *   CONTRACT_IDEMPOTENCY_TTL_HOURS / _CLAIM_LEASE_SECONDS
  *                                       How long a completed command's response is replayed,
  *                                       and how long an in-flight claim holds its key before a
@@ -252,6 +259,17 @@ export const contractEnvSchema = baseEnvSchema
       .string()
       .prefault('ORGANIZATION_ADMIN')
       .pipe(optionalRoleList('CONTRACT_AMENDMENT_ROLES')),
+
+    /** Who, in the employer's organization, proposes a deduction rule change (CON-003-1, Q-125). */
+    CONTRACT_DEDUCTION_WRITER_ROLES: z
+      .string()
+      .prefault('')
+      .pipe(optionalRoleList('CONTRACT_DEDUCTION_WRITER_ROLES'))
+      .refine((roles) => !roles.includes('CONTRACTOR'), {
+        message: fixed(
+          'CONTRACT_DEDUCTION_WRITER_ROLES may not name CONTRACTOR: a contractor never chooses what is withheld from it',
+        ),
+      }),
 
     /** The closed list of reasons an amendment is proposed for; descriptive codes, no legal meaning. */
     CONTRACT_AMENDMENT_REASON_CODES: z
