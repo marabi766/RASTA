@@ -56,6 +56,7 @@ export const COMPLETED_ORDER: Order = {
   cancellationReason: null,
   failureReason: null,
   createdAt: '2026-09-30T08:00:00.000Z',
+  openDisputeId: null,
   availableActions: [],
 };
 

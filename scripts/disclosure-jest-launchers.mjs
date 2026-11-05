@@ -82,7 +82,7 @@ export const JEST_LAUNCHERS = {
       'scripts/integration-partitions.mjs':
         'd593876d547a32a50cc030ccf345f9d153c529eeae54d1dbf11138aef5ac3f7c',
       'scripts/test-phases.test.mjs':
-        'f9343feabd3e2fc1977ac04edff8b135a2011ce9dafb3c52792d23680c52bacd',
+        '2b51ab3aed7f785f404179fd467422cc6dd16b7858e6c2af4447200e5fbc046b',
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
@@ -154,9 +154,9 @@ export const JEST_LAUNCHERS = {
       'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
     sha256: {
       'scripts/ci-node-test-timeouts-lib.mjs':
-        '721791c653278351886ce612fe85e5743ee79b498c8a17d7eeb7fe799458f8f0',
+        'a07201011f4b69273ab5c9ec658f407423814ab43ba3bb58b5f0376ea851351e',
       'scripts/check-unit-step-concurrency.test.mjs':
-        'd1787fc4deaca297028aabce0f460a61da5f9d14a3810f01e3a7d00d9544361b',
+        '8646335dfd49062b0a7a2ce1479902fc84c933c85c588e8c9c884c84792063db',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
@@ -191,11 +191,11 @@ export const JEST_LAUNCHERS = {
       'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
     sha256: {
       'scripts/testing-dev-only.test.mjs':
-        '7e5223788548f0e6b7fc16366fbd39e735bc8b53c33a215116f4676f7d3b27c6',
+        '8d315c9824364fdbbd6795dc2cb86c0171cb7e65c60599fa299331934aa07c2d',
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
-        '579f4d5a3b4539ca9304b5742fb23b7c826c1f83c085509c0911976775873ab3',
+        '8dde8b52864b7b218461e7a822e0b5cf38bcb106d2ed1a90a9fc39031fdb278b',
     },
   },
   'scripts/lint-scripts-registration.test.mjs': {

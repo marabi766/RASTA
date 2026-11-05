@@ -125,3 +125,6 @@ export {
 export type { GuardableRequestContext, GuardedFetch } from './guarded-http';
 
 export { REQUEST_CONTEXT_ROUTES, rawContextFromFactory } from './request-routes';
+
+export { findKeyReaders } from './key-readers';
+export type { KeyReaderOptions, KeyReaderSite } from './key-readers';

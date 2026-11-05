@@ -713,6 +713,7 @@ describe('an open circuit answers 503 with Retry-After from the breaker’s rema
     const proxy = proxyTo(upstream, {
       timeoutMs: 2000,
       failureThreshold: 1,
+      organizationsToOpen: 1,
       resetAfterMs,
       now: () => clock,
     });

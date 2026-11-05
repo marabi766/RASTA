@@ -10,6 +10,7 @@ import {
   httpStatusToCode,
   requestPath,
   type InternalTokenService,
+  type RequestContext,
 } from '@rasta/nest-common';
 import { apiErrorSchema, type ApiError } from '@rasta/contracts';
 import type { GatewayEnv } from '../config/env';
@@ -120,6 +121,8 @@ export interface ProxyOptions {
   timeoutMs: number;
   failureThreshold: number;
   resetAfterMs: number;
+  /** Distinct organizations a failure run needs to open a circuit; the breaker's default if unset. */
+  organizationsToOpen?: number;
   /**
    * Requests whose owning service may legitimately work longer than `timeoutMs`, each with its
    * own deadline (Codex r2 on #250, G1). The first match wins; anything else gets `timeoutMs`.
@@ -149,6 +152,7 @@ export function proxyOptionsOf(env: GatewayEnv): ProxyOptions {
     timeoutMs: env.GATEWAY_UPSTREAM_TIMEOUT_MS,
     failureThreshold: env.GATEWAY_CIRCUIT_FAILURE_THRESHOLD,
     resetAfterMs: env.GATEWAY_CIRCUIT_RESET_MS,
+    organizationsToOpen: env.GATEWAY_CIRCUIT_ORGANIZATIONS_TO_OPEN,
     routeDeadlines: TENDER_OPENING_ROUTES.map((route) => ({
       ...route,
       timeoutMs: env.GATEWAY_TENDER_OPEN_TIMEOUT_MS,
@@ -170,6 +174,9 @@ export class ProxyService {
       failureThreshold: options.failureThreshold,
       resetAfterMs: options.resetAfterMs,
       now: options.now ?? (() => performance.now()),
+      ...(options.organizationsToOpen !== undefined
+        ? { organizationsToOpen: options.organizationsToOpen }
+        : {}),
     });
   }
 
@@ -194,7 +201,15 @@ export class ProxyService {
     // HALF_OPEN probe is taken. Otherwise this request holds a permit, and the
     // `finally` below settles it on every exit — the probe slot is never
     // left taken.
-    const permit = this.circuits.admit(request.service);
+    // The organization is the verified context's, a membership of the signed
+    // token (AuthGuard): a header can only choose among the token's own, and the
+    // person behind it is one vote however many it holds.
+    const context = getContext();
+    const permit = this.circuits.admit(
+      request.service,
+      context.organizationId,
+      circuitPerson(context),
+    );
     // What this request proved about the service, decided exactly once. Until
     // an answer is complete it proved nothing: a gateway-local fault (token
     // issuance, a transport refusal of the request) or a caller gone away before
@@ -587,6 +602,18 @@ function unstorableText(): RastaError {
   return new RastaError('MALFORMED_REQUEST', 'The request holds characters it cannot carry');
 }
 
+/**
+ * Who is behind a request, for the breaker: the identity provider's subject (one
+ * per person, unlike `userId`, #188), the calling service, or nobody (anonymous).
+ * A verified caller whose subject is unknown is one shared unknown person: it can
+ * never be several votes.
+ */
+export function circuitPerson(context: RequestContext): string | undefined {
+  if (context.authType === 'USER') return `user:${context.subject ?? '?'}`;
+  if (context.authType === 'SERVICE') return `service:${context.callerService ?? '?'}`;
+  return undefined;
+}
+
 /** A NUL in a request target. Once decoded it is what {@link assertStorableText} refuses. */
 const ENCODED_NUL = '%00';
 
@@ -596,8 +623,8 @@ const LONE_SURROGATE = /\p{Cs}/u;
 /**
  * Text no service can hold. PostgreSQL refuses NUL (22021) and Prisma a lone
  * surrogate, whichever the field, and a schema's bare `z.string()` lets both
- * through: to a service they are a 500, and five of those open the breaker for
- * every tenant.
+ * through: to a service they are a 500, and each one counts against the
+ * breaker every tenant shares.
  */
 function assertStorableText(text: string): void {
   if (text.includes('\u0000') || LONE_SURROGATE.test(text)) throw unstorableText();
