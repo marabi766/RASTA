@@ -29,6 +29,7 @@ import {
   templateHash,
 } from './eligibility-clock-guard.mjs';
 import { stripComments } from './eligibility-clock-sql.mjs';
+import { workspaceDirectories } from './workspace-roots-lib.mjs';
 
 // #452's clock rule (one reading per object literal), from main: the tests at the end use it.
 /**
@@ -126,9 +127,9 @@ function sourceFiles(dir) {
  * packages, the portal and tests/e2e.
  */
 function testCodeFiles(repository) {
-  return ['services', 'packages', 'apps', 'tests']
-    .filter((top) => readdirSync(repository).includes(top))
-    .flatMap((top) => sourceFiles(join(repository, top)))
+  // Members come from pnpm-workspace.yaml (fails closed), not from four hard-coded roots.
+  return workspaceDirectories(repository)
+    .flatMap((directory) => sourceFiles(join(repository, directory)))
     .map((path) => relative(repository, path))
     .filter(
       (path) =>
@@ -176,6 +177,8 @@ function repository(files, run) {
   const dir = mkdtempSync(join(tmpdir(), 'eligibility-guard-'));
   const base = {
     'package.json': '{"name":"fixture-root","scripts":{}}',
+    'pnpm-workspace.yaml':
+      "packages:\n  - 'apps/*'\n  - 'services/*'\n  - 'packages/*'\n  - 'tests/*'\n",
     'services/sample/package.json': '{"name":"@rasta/sample"}',
     'services/sample/prisma/schema.prisma': [
       'model Hold {',
@@ -944,6 +947,16 @@ test('the clock rule scans test code beside the source, in packages, the portal 
       'tests/e2e/specs/sample.e2e-spec.ts',
       'tests/e2e/src/fixture.ts',
     ];
+    // The fixture declares its workspace like the real repository: members are
+    // what pnpm-workspace.yaml names, each with a manifest.
+    writeFileSync(
+      join(fixture, 'pnpm-workspace.yaml'),
+      "packages:\n  - 'apps/*'\n  - 'services/*'\n  - 'packages/*'\n  - 'tests/*'\n",
+    );
+    for (const member of ['services/sample-service', 'packages/sample', 'apps/web', 'tests/e2e']) {
+      mkdirSync(join(fixture, member), { recursive: true });
+      writeFileSync(join(fixture, member, 'package.json'), '{}');
+    }
     for (const file of [...files, 'services/sample-service/src/sample.service.ts']) {
       mkdirSync(join(fixture, file, '..'), { recursive: true });
       writeFileSync(join(fixture, file), twice);

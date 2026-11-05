@@ -169,7 +169,20 @@ export const JEST_LAUNCHERS = {
       'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
     sha256: {
       'scripts/exchange-deadline-rule.test.mjs':
-        '1b3a35b144a1d10fcfec2b1a496e134d8f30c744c13d27845aa7bbc89676763c',
+        'c744d65515dff65bc511c293445a6deb56b696aac675e9151c5fe1594e9e8dc0',
+    },
+  },
+  'scripts/ci-integration-split.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
+    sha256: {
+      'scripts/ci-integration-split.test.mjs':
+        '4241d21f47e953752999acb65fadf69709586ea59db8951341744b14c4555217',
+      'scripts/ci-integration-split-lib.mjs':
+        'c1749b54c13c707abffe5cc684a763fd9db540c81c452b95f944d70e1dfd7d70',
+      'scripts/workspace-roots-lib.mjs':
+        '4da347ee566298cb7b2f3aea50d1c69d338983b74f610b85ac7cee4a7282e634',
     },
   },
   'scripts/testing-dev-only.test.mjs': {

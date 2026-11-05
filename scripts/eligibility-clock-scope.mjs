@@ -33,6 +33,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve as resolvePath } from 'node:path';
 import ts from 'typescript';
 import { SOURCE, files, walk } from './eligibility-clock-derive.mjs';
+import { workspaceDirectories } from './workspace-roots-lib.mjs';
 
 const TEST_FILE =
   /\.(?:spec|test|int-spec|e2e-spec|live-spec)\.[cm]?[jt]sx?$|\.pg\.test\.[cm]?[jt]s$/;
@@ -108,14 +109,15 @@ function resolveAbsolute(repository, absolute) {
 const workspaceCache = new Map();
 function findWorkspace(repository, name) {
   if (!workspaceCache.size)
-    for (const base of ['apps', 'packages', 'services', 'tests'])
-      for (const path of files(join(repository, base)).filter((p) => p.endsWith('/package.json'))) {
-        try {
-          workspaceCache.set(JSON.parse(readFileSync(path, 'utf8')).name, dirname(path));
-        } catch {
-          /* not a workspace manifest */
-        }
+    // Members come from pnpm-workspace.yaml (fails closed), not from four hard-coded roots.
+    for (const directory of workspaceDirectories(repository)) {
+      const path = join(repository, directory, 'package.json');
+      try {
+        workspaceCache.set(JSON.parse(readFileSync(path, 'utf8')).name, dirname(path));
+      } catch {
+        /* not a workspace manifest */
       }
+    }
   return workspaceCache.get(name) ?? null;
 }
 
@@ -353,8 +355,8 @@ const REVIEWED_COMPUTED_IMPORTS = [
 function packageScriptEntries(repository) {
   const entries = [];
   const manifests = [join(repository, 'package.json')];
-  for (const base of ['apps', 'packages', 'services', 'tests'])
-    manifests.push(...files(join(repository, base)).filter((p) => p.endsWith('/package.json')));
+  for (const directory of workspaceDirectories(repository))
+    manifests.push(join(repository, directory, 'package.json'));
   for (const manifest of manifests) {
     const scripts = JSON.parse(readFileSync(manifest, 'utf8')).scripts ?? {};
     for (const [name, command] of Object.entries(scripts)) {
