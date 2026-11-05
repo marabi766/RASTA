@@ -36,12 +36,22 @@
  * job's setup allowance, and 35 limits do not fit in the job.
  */
 export const MAX_FILE_BUDGET_MS = 540_000;
+/**
+ * FU-111: the former `quality` job is five parallel `quality-*` jobs and an aggregate
+ * named `quality`. Every `quality-*` job is read here, found by its prefix so a job added
+ * later is read too, never skipped; the aggregate runs no test.
+ */
+export const QUALITY_JOB_PREFIX = 'quality-';
 export const UNIT_STEP = {
-  job: 'quality',
+  job: 'quality-unit',
   step: 'Unit-step concurrency is bounded',
   script: 'test:unit-step-concurrency',
   maxMinutes: 10,
   watchdog: './scripts/test-stall-watchdog.mjs',
+  // FU-118: --require, not --import. On Node 22 the `node --test` runner (the parent)
+  // executes --require preloads but not --import ones, and the runner itself can hang
+  // (nodejs/node#62693); the watchdog guards it only when the runner loads it too.
+  preload: '--require',
 };
 /** Scripts the guard does not read, each with the reason; a stale entry is refused. */
 export const EXEMPT_SCRIPTS = {
@@ -256,12 +266,12 @@ function nodeCommand(args, found, unconditional) {
     const { value, dynamic } = args[at];
     if (dynamic) return found.problems.push(`a computed node option (${text})`);
     if (value === '--' || !value.startsWith('-') || value === '-') break; // first file argument
-    if (value === '--import') {
+    if (value === '--import' || value === '--require') {
       const next = args[++at];
       // Any other preload is code the guard does not read, even inline (a data: URL).
       if (next?.value !== UNIT_STEP.watchdog || next.dynamic)
-        return found.problems.push(`a node --import that is not the watchdog (${text})`);
-      options.imports.push(next.value);
+        return found.problems.push(`a node ${value} that is not the watchdog (${text})`);
+      options.imports.push(`${value} ${next.value}`);
     } else if (value.startsWith('--test-timeout=')) options.timeouts.push(value.slice(15));
     else if (value === '--test-timeout') options.timeouts.push('');
     else if (value === '--test') options.test = true;
@@ -383,14 +393,14 @@ const isMap = (value) => value !== null && typeof value === 'object' && !Array.i
  * repository root (so a root script means the root script), and `env` a plain map
  * of KNOWN_ENV names, the same policy as a shell assignment. Anything else is refused.
  */
-function contextProblems(doc, job) {
+function contextProblems(doc, job, id) {
   const problems = [];
   const levels = [
     ['workflow', doc, doc?.defaults?.run, doc?.defaults],
     ['job', job, job?.defaults?.run, job?.defaults],
   ];
   for (const [label, owner, run, defaults] of levels) {
-    const name = label === 'job' ? `job ${UNIT_STEP.job}` : 'the workflow';
+    const name = label === 'job' ? `job ${id}` : 'the workflow';
     if (defaults !== undefined && !isMap(defaults))
       problems.push(`${name} has defaults that cannot be read`);
     else if (run !== undefined && !isMap(run))
@@ -434,23 +444,33 @@ function envProblems(name, env) {
 /** `packages`: the scripts of each workspace package a `--filter` may name; unread ones are refused. */
 export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
   const problems = [];
-  const job = doc?.jobs?.[UNIT_STEP.job];
-  const steps = job?.steps;
-  if (!Array.isArray(steps)) return [`job ${UNIT_STEP.job} has no readable steps`];
-  // A different shell, directory or shell-reading environment changes what the text means.
-  problems.push(...contextProblems(doc, job));
+  const ids = Object.keys(isMap(doc?.jobs) ? doc.jobs : {}).filter((id) =>
+    id.startsWith(QUALITY_JOB_PREFIX),
+  );
+  if (!ids.includes(UNIT_STEP.job)) return [`job ${UNIT_STEP.job} has no readable steps`];
   const queue = [];
-  for (const step of steps) {
-    if (step?.run === undefined) continue;
-    // A command that cannot be read is not proven free of node --test.
-    if (typeof step.run !== 'string') {
-      problems.push(`step "${step.name}": run is not text`);
+  for (const id of ids) {
+    const job = doc.jobs[id];
+    const steps = job?.steps;
+    if (!Array.isArray(steps)) {
+      problems.push(`job ${id} has no readable steps`);
       continue;
     }
-    queue.push(
-      ...textProblems(`step "${step.name}"`, step.run, scripts, packages, problems).follows,
-    );
+    // A different shell, directory or shell-reading environment changes what the text means.
+    problems.push(...contextProblems(doc, job, id));
+    for (const step of steps) {
+      if (step?.run === undefined) continue;
+      // A command that cannot be read is not proven free of node --test.
+      if (typeof step.run !== 'string') {
+        problems.push(`step "${step.name}": run is not text`);
+        continue;
+      }
+      queue.push(
+        ...textProblems(`step "${step.name}"`, step.run, scripts, packages, problems).follows,
+      );
+    }
   }
+  const steps = doc.jobs[UNIT_STEP.job].steps ?? [];
   const names = new Set();
   while (queue.length) {
     const name = queue.pop();
@@ -499,10 +519,10 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
     watched.problems.length > 0 ||
     tests.length !== 1 ||
     !tests[0].unconditional ||
-    tests[0].imports.join('\n') !== UNIT_STEP.watchdog
+    tests[0].imports.join('\n') !== `${UNIT_STEP.preload} ${UNIT_STEP.watchdog}`
   )
     problems.push(
-      `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (--import ${UNIT_STEP.watchdog}) and nothing else, before its files`,
+      `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (${UNIT_STEP.preload} ${UNIT_STEP.watchdog}, which the runner loads too) and nothing else, before its files`,
     );
   return problems;
 }

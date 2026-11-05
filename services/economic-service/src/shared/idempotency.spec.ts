@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
 import { AllExceptionsFilter, createSystemContext, runWithContext } from '@rasta/nest-common';
@@ -10,6 +11,7 @@ import {
   targeted,
   type IdempotentAnswer,
 } from './idempotency';
+import { canonicalBodyPipe } from './canonical';
 import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 import type { EconomicEnv } from '../config/env';
 
@@ -289,6 +291,87 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       kind: 'REPLAY',
       status: 200,
       body: { id: 'TXN_OLD' },
+    });
+  });
+
+  describe('a key stored before its route put bodies in canonical form (task 129)', () => {
+    const schema = z.object({ reason: z.string().trim().min(3) }).strict();
+    const sent = { reason: 'line one\r\nline two' };
+    /** The body as the pipe hands it over: as sent, its canonical form beside it. */
+    const piped = () =>
+      canonicalBodyPipe(schema).transform(sent, { type: 'body' }) as { reason: string };
+    const storedAs = (requestHash: string, canonicalHash: string | null = null) =>
+      storeWith({
+        create: jest.fn().mockRejectedValue(uniqueViolation),
+        findUnique: jest.fn().mockResolvedValue({
+          requestHash,
+          canonicalHash,
+          actorHash: null,
+          state: 'COMPLETED',
+          responseStatus: 200,
+          responseBody: { id: 'TXN_OLD' },
+          expiresAt: new Date(Date.now() + hour),
+        }),
+      });
+
+    it('replays the unchanged retry of a record that holds the hash of the body as sent', async () => {
+      const { store } = storedAs(hashRequestBody(targeted('TXN_1', sent)));
+      await expect(
+        asTenant(() => store.claim('POST /x', 'K', targeted('TXN_1', piped()))),
+      ).resolves.toEqual({ kind: 'REPLAY', status: 200, body: { id: 'TXN_OLD' } });
+    });
+
+    it('still refuses another body, and a body that did not come through the pipe', async () => {
+      const { store } = storedAs(hashRequestBody(targeted('TXN_1', sent)));
+      await expect(
+        asTenant(() => store.claim('POST /x', 'K', targeted('TXN_2', piped()))),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      await expect(
+        asTenant(() =>
+          store.claim('POST /x', 'K', targeted('TXN_1', { reason: 'line one\nline two' })),
+        ),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    });
+
+    // Codex PR-747 r2, F3: the previous release compares `requestHash` alone,
+    // so that is where the hash it computes goes.
+    it('writes the hash the previous release computes, and the canonical one beside it', async () => {
+      const { store, idempotencyKey } = storeWith({ create: jest.fn().mockResolvedValue({}) });
+      await asTenant(() => store.claim('POST /x', 'K', targeted('TXN_1', piped())));
+      expect(idempotencyKey.create.mock.calls[0][0].data).toMatchObject({
+        requestHash: hashRequestBody(targeted('TXN_1', sent)),
+        canonicalHash: hashRequestBody({ id: 'TXN_1', body: { reason: 'line one\nline two' } }),
+      });
+      // Nothing changed: one hash, in both.
+      await asTenant(() =>
+        store.claim('POST /x', 'K2', targeted('TXN_1', { reason: 'line one\nline two' })),
+      );
+      const plain = hashRequestBody(targeted('TXN_1', { reason: 'line one\nline two' }));
+      expect(idempotencyKey.create.mock.calls[1][0].data).toMatchObject({
+        requestHash: plain,
+        canonicalHash: plain,
+      });
+    });
+
+    it('replays another spelling of a record this release wrote, by its canonical hash', async () => {
+      const { store } = storedAs(
+        hashRequestBody(targeted('TXN_1', sent)),
+        hashRequestBody(targeted('TXN_1', { reason: 'line one\nline two' })),
+      );
+      await expect(
+        asTenant(() =>
+          store.claim('POST /x', 'K', targeted('TXN_1', { reason: 'line one\nline two' })),
+        ),
+      ).resolves.toMatchObject({ kind: 'REPLAY' });
+      const other = storedAs(
+        hashRequestBody(targeted('TXN_1', sent)),
+        hashRequestBody(targeted('TXN_1', { reason: 'line one\nline two' })),
+      );
+      await expect(
+        asTenant(() =>
+          other.store.claim('POST /x', 'K', targeted('TXN_1', { reason: 'another\nreason' })),
+        ),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
     });
   });
 
