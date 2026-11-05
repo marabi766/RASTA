@@ -50,7 +50,8 @@ export const alive = (target: number): boolean => {
  */
 export async function waitGone(target: number, what: string, ms = 15_000): Promise<void> {
   // 0 is the caller's own group and NaN is no process: either would wait out `ms` for nothing.
-  if (!Number.isSafeInteger(target) || target === 0) throw new Error(`${what}: not a pid or group (${target})`);
+  if (!Number.isSafeInteger(target) || target === 0)
+    throw new Error(`${what}: not a pid or group (${target})`);
   const deadline = Date.now() + ms;
   while (alive(target) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   if (alive(target)) {
