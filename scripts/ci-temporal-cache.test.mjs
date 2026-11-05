@@ -87,6 +87,13 @@ function runsTemporal(run, cwd = '.', stack = []) {
 
 function problems(doc) {
   const errors = [];
+  for (const env of [doc.env, ...Object.values(doc.jobs).map((j) => j.env)]) {
+    assert.doesNotMatch(
+      JSON.stringify(env ?? {}),
+      /\$\{\{\s*runner\b/,
+      'runner context requires step env',
+    );
+  }
   for (const [id, job] of Object.entries(doc.jobs)) {
     for (const [index, step] of (job.steps ?? []).entries()) {
       if (
@@ -152,6 +159,18 @@ test('Turbo passes the directory and every server caller uses the shared helper'
   for (const path of sources.filter((p) => /\.[cm]?tsx?$/.test(p))) {
     if (/TestWorkflowEnvironment\.create(?:TimeSkipping|Local)\s*\(/.test(read(path))) {
       assert.equal(path, 'services/marketplace-service/test/temporal-environment.ts', path);
+    }
+  }
+});
+
+test('runner context at workflow or job env is refused before GitHub rejects the file', () => {
+  for (const owner of [workflow, workflow.jobs['integration-contract']]) {
+    const env = owner.env;
+    try {
+      owner.env = { TEMPORAL_TEST_SERVER_DIR: cacheDir };
+      assert.throws(() => problems(workflow), /runner context requires step env/);
+    } finally {
+      owner.env = env;
     }
   }
 });

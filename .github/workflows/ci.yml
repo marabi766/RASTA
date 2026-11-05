@@ -1737,6 +1737,7 @@ jobs:
           eval "${kafka_credentials}"
           pnpm run test:integration --shard=identity -- --verbose
         env: &integration_suite_env
+          TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -1998,8 +1999,6 @@ jobs:
     # Suite cap + the existing full-provisioning setup allowance (8 minutes).
     timeout-minutes: 23
     services: *integration_services
-    env:
-      TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
     steps:
       - *integration_setup_0
       - *temporal_test_server_cache
@@ -2063,8 +2062,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-    env:
-      TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - *temporal_test_server_cache
@@ -2375,6 +2372,7 @@ jobs:
           pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
           pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose
         env:
+          TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -2694,8 +2692,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-    env:
-      TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - *temporal_test_server_cache
@@ -2941,6 +2937,7 @@ jobs:
           eval "${kafka_credentials}"
           pnpm --filter @rasta/marketplace-service run test:coverage
         env:
+          TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
