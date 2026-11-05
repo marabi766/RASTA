@@ -1,6 +1,8 @@
 # Integration suite sharding (tasks 1204 A / 1224 B / 1236)
 
-Slice B uses four explicit suite jobs, each needing `quality`, with exact package
+Slice B uses four explicit suite jobs, each needing `quality-types` (the type check, the one part of
+the former single `quality` job they wait for since FU-111; the required `quality` check now
+aggregates five parallel `quality-*` jobs and is not a need of theirs), with exact package
 filters produced by `run-test-phases.mjs --shard=<name>`. The aggregate retains
 its required-check name and needs all four jobs plus the existing coverage,
 security and backup jobs. Missing, duplicate or unknown packages fail independent

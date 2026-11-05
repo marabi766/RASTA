@@ -222,6 +222,7 @@ const COMMANDS = [
       c.resolveDispute(
         id,
         {
+          disputeId: 'DSP_01JAAAAAAAAAAAAAAAAAAAAAAA',
           outcome: 'REFUND',
           resolution: 'The supplier agreed to take the parts back.',
           responsibility: 'SUPPLIER',

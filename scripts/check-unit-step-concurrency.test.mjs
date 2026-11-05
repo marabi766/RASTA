@@ -35,7 +35,7 @@ const realDoc = parse(realWorkflow);
 const contracts = JSON.parse(readFileSync(join(root, 'packages/contracts/package.json'), 'utf8'));
 const realPackages = { [contracts.name]: contracts.scripts };
 const [exception] = UNBOUNDED_EXCEPTIONS;
-const unitStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === 'Unit tests');
+const unitStep = (doc) => doc.jobs['quality-unit'].steps.find((step) => step.name === 'Unit tests');
 const securityStep = (doc) =>
   doc.jobs[exception.job].steps.find((step) => step.name === exception.step);
 const problemsAfter = (edit, scripts = realScripts) => {
@@ -48,7 +48,7 @@ const refused = (problems, pattern) =>
     problems.some((problem) => pattern.test(problem)),
     JSON.stringify(problems),
   );
-const extraRun = (run, job = 'quality') =>
+const extraRun = (run, job = 'quality-unit') =>
   problemsAfter((doc) => doc.jobs[job].steps.push({ name: 'Another command', run }));
 
 test('real workflow passes as YAML and as parsed text', () => {
@@ -70,14 +70,55 @@ const timeoutProblemsAfter = (edit, scripts = realScripts) => {
   edit(doc, copy, packages);
   return nodeTestTimeoutProblems(doc, copy, packages);
 };
-const boundedStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === UNIT_STEP.step);
+const boundedStep = (doc) =>
+  doc.jobs['quality-unit'].steps.find((step) => step.name === UNIT_STEP.step);
+// Every quality-* job (FU-111 split the one quality job into five), not the aggregate.
+const qualityJobIds = Object.keys(realDoc.jobs).filter((id) => id.startsWith('quality-'));
 const qualityNodeTestScripts = [
   ...new Set(
-    realDoc.jobs.quality.steps.flatMap((step) =>
-      typeof step.run === 'string' ? [...reachableScripts(step.run, realScripts)] : [],
+    qualityJobIds.flatMap((id) =>
+      realDoc.jobs[id].steps.flatMap((step) =>
+        typeof step.run === 'string' ? [...reachableScripts(step.run, realScripts)] : [],
+      ),
     ),
   ),
 ].filter((name) => nodeTestSegments(realScripts[name]).length > 0);
+test('FU-111: every quality-* job is read for node --test, and a later one too', () => {
+  assert.deepEqual(qualityJobIds, [
+    'quality-guards',
+    'quality-lint',
+    'quality-types',
+    'quality-unit',
+    'quality-build',
+  ]);
+  for (const id of qualityJobIds) {
+    refused(
+      timeoutProblemsAfter((doc) =>
+        doc.jobs[id].steps.push({ name: 'Unbounded', run: 'node --test scripts/x.test.mjs' }),
+      ),
+      /Unbounded|--test-timeout/,
+    );
+  }
+  refused(
+    timeoutProblemsAfter((doc) => {
+      doc.jobs['quality-later'] = {
+        'runs-on': 'ubuntu-latest',
+        steps: [{ name: 'Later', run: 'node --test scripts/x.test.mjs' }],
+      };
+    }),
+    /Later|--test-timeout/,
+  );
+  refused(
+    timeoutProblemsAfter(
+      (doc) => (doc.jobs['quality-lint'].defaults = { run: { shell: 'python {0}' } }),
+    ),
+    /job quality-lint sets defaults\.run/,
+  );
+  refused(
+    timeoutProblemsAfter((doc) => delete doc.jobs['quality-unit']),
+    /job quality-unit has no readable steps/,
+  );
+});
 test('task 310: the real quality job bounds every node --test', () => {
   assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts, realPackages), []);
   // The class is found, not listed: the step that hung and the slowest others.
@@ -122,7 +163,7 @@ test('task 310: a new node --test is found directly and through script chains', 
   ]) {
     const problems = timeoutProblemsAfter((doc, all) => {
       Object.assign(all, scripts);
-      doc.jobs.quality.steps.push({ name: 'Brand new step', run });
+      doc.jobs['quality-unit'].steps.push({ name: 'Brand new step', run });
     });
     refused(
       problems,
@@ -132,7 +173,7 @@ test('task 310: a new node --test is found directly and through script chains', 
   // A bounded one passes; so does a step in another job.
   assert.deepEqual(
     timeoutProblemsAfter((doc) => {
-      doc.jobs.quality.steps.push({
+      doc.jobs['quality-unit'].steps.push({
         name: 'Fine',
         run: 'node --test --test-timeout=300000 scripts/x.test.mjs',
       });
@@ -205,10 +246,10 @@ for (const [label, run] of Object.entries(ineffectiveForms)) {
       const problems = timeoutProblemsAfter((doc, all) => {
         all['test:bounded'] = `node --test ${B} scripts/bounded.test.mjs`;
         all.exec = `node --test ${B} scripts/exec.test.mjs`; // shadowed by the pnpm built-in
-        if (where === 'step') doc.jobs.quality.steps.push({ name: 'Escape', run });
+        if (where === 'step') doc.jobs['quality-unit'].steps.push({ name: 'Escape', run });
         else {
           all['test:escape'] = run;
-          doc.jobs.quality.steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+          doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
         }
       });
       assert.notDeepEqual(problems, [], run);
@@ -234,7 +275,7 @@ test('task 312: the commands the quality job really uses are still accepted', ()
   ]) {
     const problems = timeoutProblemsAfter((doc, all) => {
       all['test:bounded'] = `node --test ${B} scripts/bounded.test.mjs`;
-      doc.jobs.quality.steps.push({ name: 'Fine', run });
+      doc.jobs['quality-unit'].steps.push({ name: 'Fine', run });
     });
     assert.deepEqual(problems, [], run);
   }
@@ -243,13 +284,17 @@ test('task 312: a step that changes the shell or directory is not readable as ro
   for (const extra of [{ shell: 'python {0}' }, { 'working-directory': 'services/x' }])
     refused(
       timeoutProblemsAfter((doc) =>
-        doc.jobs.quality.steps.push({ name: 'Odd', run: 'pnpm run test:progress', ...extra }),
+        doc.jobs['quality-unit'].steps.push({
+          name: 'Odd',
+          run: 'pnpm run test:progress',
+          ...extra,
+        }),
       ),
       /"Odd" sets shell or working-directory/,
     );
   refused(
     timeoutProblemsAfter((doc) => {
-      doc.jobs.quality.defaults = { run: { 'working-directory': 'x' } };
+      doc.jobs['quality-unit'].defaults = { run: { 'working-directory': 'x' } };
     }),
     /sets defaults\.run/,
   );
@@ -329,10 +374,10 @@ for (const [label, [construct, reason]] of Object.entries(REFUSALS)) {
     for (const where of ['step', 'script'])
       test(`task 322: ${label} as ${position} is refused (${where})`, () => {
         const problems = timeoutProblemsAfter((doc, all) => {
-          if (where === 'step') doc.jobs.quality.steps.push({ name: 'Escape', run });
+          if (where === 'step') doc.jobs['quality-unit'].steps.push({ name: 'Escape', run });
           else {
             all['test:escape'] = run;
-            doc.jobs.quality.steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+            doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
           }
         });
         refused(problems, reason);
@@ -353,10 +398,10 @@ for (const [label, run] of Object.entries({
   for (const where of ['step', 'script'])
     test(`task 322: reviewer reproduction ${label} is refused (${where})`, () => {
       const problems = timeoutProblemsAfter((doc, all) => {
-        if (where === 'step') doc.jobs.quality.steps.push({ name: 'Escape', run });
+        if (where === 'step') doc.jobs['quality-unit'].steps.push({ name: 'Escape', run });
         else {
           all['test:escape'] = run;
-          doc.jobs.quality.steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+          doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
         }
       });
       assert.notDeepEqual(problems, [], run);
@@ -370,7 +415,7 @@ test('task 322: expansions and substitutions that are fully understood are still
     `base="$(true)" SERVICE_ENV_WITHHELD_BASE=\${HOME} node --test ${B} x`,
   ]) {
     const problems = timeoutProblemsAfter((doc) =>
-      doc.jobs.quality.steps.push({ name: 'Fine', run }),
+      doc.jobs['quality-unit'].steps.push({ name: 'Fine', run }),
     );
     assert.deepEqual(problems, [], run);
   }
@@ -411,20 +456,20 @@ const CONTEXT_EDITS = {
     /the workflow has defaults that cannot be read/,
   ],
   'job python shell': [
-    (doc) => (doc.jobs.quality.defaults = { run: { shell: 'python {0}' } }),
-    /job quality sets defaults\.run/,
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: { shell: 'python {0}' } }),
+    /job quality-unit sets defaults\.run/,
   ],
   'job working directory': [
-    (doc) => (doc.jobs.quality.defaults = { run: { 'working-directory': 'x' } }),
-    /job quality sets defaults\.run/,
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: { 'working-directory': 'x' } }),
+    /job quality-unit sets defaults\.run/,
   ],
   'job run as text': [
-    (doc) => (doc.jobs.quality.defaults = { run: 'bash' }),
-    /job quality sets defaults\.run to something/,
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: 'bash' }),
+    /job quality-unit sets defaults\.run to something/,
   ],
   'job defaults as a list': [
-    (doc) => (doc.jobs.quality.defaults = []),
-    /job quality has defaults that cannot be read/,
+    (doc) => (doc.jobs['quality-unit'].defaults = []),
+    /job quality-unit has defaults that cannot be read/,
   ],
   'step python shell': [
     (doc) => (boundedStep(doc).shell = 'python {0}'),
@@ -447,7 +492,10 @@ const CONTEXT_EDITS = {
     (doc) => (doc.env.NODE_OPTIONS = '--x'),
     /the workflow sets NODE_OPTIONS/,
   ],
-  'job PATH': [(doc) => (doc.jobs.quality.env = { PATH: '/x' }), /job quality sets PATH/],
+  'job PATH': [
+    (doc) => (doc.jobs['quality-unit'].env = { PATH: '/x' }),
+    /job quality-unit sets PATH/,
+  ],
   'step BASH_FUNC': [
     (doc) => (boundedStep(doc).env = { 'BASH_FUNC_node%%': '() { :; }' }),
     /sets BASH_FUNC_node%%/,
@@ -463,11 +511,11 @@ const CONTEXT_EDITS = {
 };
 for (const uses of ['./.github/actions/x', './', 'docker://alpine'])
   CONTEXT_EDITS[`step uses ${uses}`] = [
-    (doc) => doc.jobs.quality.steps.push({ name: 'Local', uses }),
+    (doc) => doc.jobs['quality-unit'].steps.push({ name: 'Local', uses }),
     /step "Local" uses .* which cannot be read/,
   ];
 CONTEXT_EDITS['a step that is not a map'] = [
-  (doc) => doc.jobs.quality.steps.push(null),
+  (doc) => doc.jobs['quality-unit'].steps.push(null),
   /step "undefined" cannot be read/,
 ];
 for (const name of [
@@ -481,15 +529,15 @@ for (const name of [
   'NODE_OPTIONS',
 ])
   CONTEXT_EDITS[`job ${name} (shell-read variable)`] = [
-    (doc) => (doc.jobs.quality.env = { [name]: 'x' }),
-    new RegExp(`job quality sets ${name}`),
+    (doc) => (doc.jobs['quality-unit'].env = { [name]: 'x' }),
+    new RegExp(`job quality-unit sets ${name}`),
   ];
 for (const [label, [edit, reason]] of Object.entries(CONTEXT_EDITS))
   test(`task 322: ${label} is refused`, () => refused(timeoutProblemsAfter(edit), reason));
 test('task 322: a plain bash or sh at any level, and ordinary env names, are accepted', () => {
   for (const edit of [
     (doc) => (doc.defaults = { run: { shell: 'bash' } }),
-    (doc) => (doc.jobs.quality.defaults = { run: { shell: 'sh' } }),
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: { shell: 'sh' } }),
     (doc) => (boundedStep(doc).shell = 'bash'),
     (doc) => (boundedStep(doc).env = { TEMPORAL_TEST_SERVER_DIR: 'x', NODE_VERSION: '22' }),
   ])
@@ -577,7 +625,7 @@ const refusedAtBoth = (run, reason, edit = () => {}) => {
       edit(all, packages);
       if (where === 'script') all['test:escape'] = run;
       const command = where === 'step' ? run : 'pnpm run test:escape';
-      doc.jobs.quality.steps.push({ name: 'Escape', run: command });
+      doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: command });
     });
     refused(problems, reason);
   }
@@ -632,7 +680,7 @@ test('task 4003: F3 inline assignments, env files and shell overrides meet one p
   ]);
   for (const name of spellings) {
     refusedAtBoth(`${name}=/bin/true pnpm run test:progress`, new RegExp(`assignment to ${name} `));
-    for (const level of [(doc) => doc, (doc) => doc.jobs.quality, boundedStep])
+    for (const level of [(doc) => doc, (doc) => doc.jobs['quality-unit'], boundedStep])
       refused(
         timeoutProblemsAfter((doc) => (level(doc).env = { [name]: '/bin/true' })),
         new RegExp(`sets ${name}, which may change`),
@@ -749,16 +797,21 @@ test('task 310: cycles terminate, inherited names are not scripts, other command
   assert.equal(runsNodeTest('echo "node-test" && pnpm run build', { build: 'tsc' }), false);
   assert.equal(runsNodeTest('pnpm run a', { a: 'node --test x' }), true);
   assert.deepEqual(
-    timeoutProblemsAfter((doc) => doc.jobs.quality.steps.push({ name: 'Plain', run: 'echo done' })),
+    timeoutProblemsAfter((doc) =>
+      doc.jobs['quality-unit'].steps.push({ name: 'Plain', run: 'echo done' }),
+    ),
     [],
   );
 });
 test('task 310: an unreadable run or job is refused, not assumed free of node --test', () => {
   refused(
-    timeoutProblemsAfter((doc) => doc.jobs.quality.steps.push({ name: 'Odd', run: ['a'] })),
+    timeoutProblemsAfter((doc) => doc.jobs['quality-unit'].steps.push({ name: 'Odd', run: ['a'] })),
     /"Odd": run is not text/,
   );
-  refused(nodeTestTimeoutProblems({ jobs: { quality: {} } }, realScripts), /no readable steps/);
+  refused(
+    nodeTestTimeoutProblems({ jobs: { 'quality-unit': {} } }, realScripts),
+    /no readable steps/,
+  );
 });
 test('task 310: an exemption that no longer applies is refused', () => {
   refused(
@@ -810,7 +863,7 @@ test('task 310: the unit-step step keeps its step limit, file budget and watchdo
     );
   refused(
     timeoutProblemsAfter((doc) => {
-      doc.jobs.quality.steps = doc.jobs.quality.steps.filter(
+      doc.jobs['quality-unit'].steps = doc.jobs['quality-unit'].steps.filter(
         (step) => step.name !== UNIT_STEP.step,
       );
     }),
@@ -850,7 +903,9 @@ for (const [name, edit, pattern] of [
   [
     'missing',
     (doc) => {
-      doc.jobs.quality.steps = doc.jobs.quality.steps.filter((step) => step.name !== 'Unit tests');
+      doc.jobs['quality-unit'].steps = doc.jobs['quality-unit'].steps.filter(
+        (step) => step.name !== 'Unit tests',
+      );
     },
     /found 0/,
   ],
@@ -865,21 +920,23 @@ for (const [name, edit, pattern] of [
     'moved job',
     (doc) => {
       doc.jobs.security.steps.push(unitStep(doc));
-      doc.jobs.quality.steps = doc.jobs.quality.steps.filter((step) => step.name !== 'Unit tests');
+      doc.jobs['quality-unit'].steps = doc.jobs['quality-unit'].steps.filter(
+        (step) => step.name !== 'Unit tests',
+      );
     },
     /found 0/,
   ],
   [
     'duplicate',
     (doc) => {
-      doc.jobs.quality.steps.push({ ...unitStep(doc) });
+      doc.jobs['quality-unit'].steps.push({ ...unitStep(doc) });
     },
     /found 2/,
   ],
   [
     'duplicate with different run',
     (doc) => {
-      doc.jobs.quality.steps.push({ name: 'Unit tests', run: 'echo test' });
+      doc.jobs['quality-unit'].steps.push({ name: 'Unit tests', run: 'echo test' });
     },
     /found 2/,
   ],
@@ -913,7 +970,7 @@ for (const level of ['step', 'job']) {
       test(`${level} ${key}: ${value} is refused`, () => {
         refused(
           problemsAfter((doc) => {
-            (level === 'step' ? unitStep(doc) : doc.jobs.quality)[key] = value;
+            (level === 'step' ? unitStep(doc) : doc.jobs['quality-unit'])[key] = value;
           }),
           new RegExp(`${level} must not set ${key}`),
         );
@@ -946,7 +1003,7 @@ for (const command of [
   test(`literal unbounded invocation refused: ${command}`, () =>
     refused(extraRun(command), /literal unbounded unit invocation/));
 }
-for (const job of ['quality', 'security', 'integration-security']) {
+for (const job of ['quality', 'quality-lint', 'quality-unit', 'security', 'integration-security']) {
   test(`all jobs scanned: ${job}`, () =>
     refused(extraRun('echo start\npnpm test', job), /literal unbounded/));
 }
@@ -1001,7 +1058,7 @@ for (const [name, edit] of [
   [
     'changed job',
     (doc) => {
-      doc.jobs.quality.steps.push(securityStep(doc));
+      doc.jobs['quality-unit'].steps.push(securityStep(doc));
       doc.jobs[exception.job].steps = doc.jobs[exception.job].steps.filter(
         (step) => step.name !== exception.step,
       );
@@ -1082,7 +1139,7 @@ function cliFixture(t) {
 }
 test('CLI follows arbitrary local uses recursively, both metadata extensions, and handles cycles', (t) => {
   const fixture = cliFixture(t);
-  fixture.doc.jobs.quality.steps.push({ uses: './ci/outer' });
+  fixture.doc.jobs['quality-unit'].steps.push({ uses: './ci/outer' });
   fixture.workflow();
   fixture.write(
     'ci/outer/action.yml',
@@ -1108,7 +1165,7 @@ test('CLI follows arbitrary local uses recursively, both metadata extensions, an
 for (const metadata of ['missing', 'malformed', 'unreadable']) {
   test(`CLI refuses ${metadata} referenced action metadata`, (t) => {
     const fixture = cliFixture(t);
-    fixture.doc.jobs.quality.steps.push({ uses: './ci/broken' });
+    fixture.doc.jobs['quality-unit'].steps.push({ uses: './ci/broken' });
     fixture.workflow();
     if (metadata === 'malformed') fixture.write('ci/broken/action.yml', 'runs: [');
     // A directory at the metadata path is unreadable as a file even as root.
@@ -1140,7 +1197,7 @@ test('CLI scans conventional action metadata even before a workflow references i
 
 test('CLI normalizes CR-only workflow and composite metadata before discovery', (t) => {
   const fixture = cliFixture(t);
-  fixture.doc.jobs.quality.steps.push({ uses: './ci/outer' });
+  fixture.doc.jobs['quality-unit'].steps.push({ uses: './ci/outer' });
   fixture.write('.github/workflows/ci.yml', stringify(fixture.doc).replaceAll('\n', '\r'));
   fixture.write(
     'ci/outer/action.yml',
@@ -1315,7 +1372,7 @@ for (const option of ['-e', '--eval', '-p', '--print']) {
 // without reparsing unrelated production steps thousands of times.
 const grammarWorkflow = stringify({
   jobs: {
-    quality: { steps: [unitStep(realDoc)] },
+    'quality-unit': { steps: [unitStep(realDoc)] },
     [exception.job]: { steps: [securityStep(realDoc)] },
   },
 });
@@ -1701,7 +1758,7 @@ for (const [file, document] of scannedLocations) {
 for (const site of ['source', '.']) {
   test(`r6 B repo source recursively scanned via CLI: ${site}`, (t) => {
     const fixture = cliFixture(t);
-    fixture.doc.jobs.quality.steps.push({ run: `${site} ./ci/one.sh` });
+    fixture.doc.jobs['quality-unit'].steps.push({ run: `${site} ./ci/one.sh` });
     fixture.workflow();
     fixture.write('ci/one.sh', '# test:unit\n. ./ci/two.sh');
     fixture.write('ci/two.sh', 'pnpm run test:unit');
@@ -1719,7 +1776,7 @@ for (const site of ['source', '.']) {
 }
 test('r6 B unreadable repo source refuses via CLI', (t) => {
   const fixture = cliFixture(t);
-  fixture.doc.jobs.quality.steps.push({ run: 'source ./ci/directory' });
+  fixture.doc.jobs['quality-unit'].steps.push({ run: 'source ./ci/directory' });
   fixture.workflow();
   fixture.write('ci/directory/child', '');
   const result = fixture.run();
@@ -1848,7 +1905,7 @@ test('r6 B repo source path boundaries via CLI', (t) => {
   symlinkSync(join(fixture.directory, 'ci/local.sh'), join(fixture.directory, 'ci/inside-link.sh'));
   symlinkSync(join(outside, 'external.sh'), join(fixture.directory, 'ci/outside-link.sh'));
   const step = { run: 'source ./ci/inside-link.sh' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   fixture.workflow();
   let result = fixture.run();
   assert.equal(result.status, 1, result.stderr);
@@ -1997,7 +2054,7 @@ test('r7 repo source and shell scripts use real filesystem via CLI', (t) => {
   const fixture = cliFixture(t);
   fixture.write('ci/unit.sh', 'pnpm run test:unit');
   const step = { run: '' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   for (const run of [
     'source ./ci/unit.sh "$x"',
     '. ./ci/unit.sh "$x"',
@@ -2144,7 +2201,7 @@ for (const [file, document] of scannedLocations) {
 test('r7 script precheck real infra, unit scripts, and recursive paths via CLI', (t) => {
   const fixture = cliFixture(t);
   const step = { run: '' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   fixture.write('ci/infra.sh', r7InfraText);
   for (const path of [
     'infrastructure/docker/postgres/00-init-databases.sh',
@@ -2349,7 +2406,7 @@ test('r8 CLI propagates unreadable repo script and interpreter-input refusals th
   mkdirSync(join(fixture.directory, 'ci/unreadable.sh'), { recursive: true });
   fixture.write('ci/array.sh', 'values=(one two)\npnpm run test:unit');
   const step = { run: '' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   for (const payload of [
     'source ./ci/unreadable.sh $args',
     'source ./ci/array.sh $args',
@@ -2420,7 +2477,7 @@ test('r9 CLI refuses known prefixes directly and through all five repository ent
     const path = `./ci/options-${index}.sh`;
     fixture.write(path, `# test:unit\n${run}`);
     for (const entry of [run, ...r8Entries.map((site) => `${site} ${path}`)])
-      fixture.doc.jobs.quality.steps.push({ name: 'r9 prefix', run: entry });
+      fixture.doc.jobs['quality-unit'].steps.push({ name: 'r9 prefix', run: entry });
   }
   fixture.workflow();
   const result = fixture.run();

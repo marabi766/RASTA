@@ -122,12 +122,16 @@ describe('a union administrator decides a dispute only within its union (docs/24
     responsibility: 'SUPPLIER',
   };
 
+  /** The dispute each order was disputed with — what a decision names (D-083). */
+  const disputeOf = new Map<string, string>();
+
+  /** Names the order's dispute, as the operator's form drawn for it does. */
   const resolve = (orderId: string, token: string, key: string, body: object) =>
     request(http)
       .post(`/v1/orders/${orderId}/disputes/resolve`)
       .set('authorization', token)
       .set('idempotency-key', key)
-      .send(body);
+      .send({ disputeId: disputeOf.get(orderId), ...body });
 
   /** A B→C order, disputed by B. */
   async function disputedOrder(): Promise<string> {
@@ -172,12 +176,13 @@ describe('a union administrator decides a dispute only within its union (docs/24
         `TXN_DDA_${orderId}`,
       ),
     );
-    await request(http)
+    const raised = await request(http)
       .post(`/v1/orders/${orderId}/disputes`)
       .set('authorization', asBuyer())
       .set('idempotency-key', apiKey('dda-raise'))
       .send({ reason: 'the supplier has not delivered anything at all' })
       .expect(200);
+    disputeOf.set(orderId, raised.body.openDisputeId as string);
     return orderId;
   }
 
@@ -235,7 +240,8 @@ describe('a union administrator decides a dispute only within its union (docs/24
   afterEach(() => jest.restoreAllMocks());
 
   it.each([
-    ['SETTLE', SETTLE, 'RECEIPT_CONFIRMED', 'RESOLVED_SETTLE'],
+    // Disputed from FUNDS_HELD: SETTLE resumes it there (D-083).
+    ['SETTLE', SETTLE, 'FUNDS_HELD', 'RESOLVED_SETTLE'],
     ['REFUND', REFUND, 'CANCELLING', 'RESOLVED_REFUND'],
   ] as const)(
     '%s: a UNION_ADMIN acting for U decides for a buyer of its subtree, asked about the buyer, and records it',
