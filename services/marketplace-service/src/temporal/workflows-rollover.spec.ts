@@ -1,6 +1,8 @@
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TestWorkflowEnvironment, MockActivityEnvironment } from '@temporalio/testing';
+import { MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { Context } from '@temporalio/activity';
 import { temporalStep, type OrderActivities, type SagaOrderView } from './activities';
@@ -62,7 +64,7 @@ describe('history rollover on real Temporal', () => {
   let env: TestWorkflowEnvironment;
   let serial = 0;
   beforeAll(async () => {
-    env = await TestWorkflowEnvironment.createTimeSkipping();
+    env = await createTemporalTestEnvironment();
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();

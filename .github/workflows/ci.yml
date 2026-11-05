@@ -392,7 +392,8 @@ jobs:
       - name: Type check
         run: pnpm run typecheck
 
-      - name: Cache the Temporal time-skipping test server
+      - &temporal_test_server_cache
+        name: Cache the Temporal time-skipping test server
         # marketplace-service's saga specs run on it, and it is a ~300 MB
         # download. Fetched on every run it made the specs' setup hook exceed
         # its timeout whenever the network was slow (2026-09-25).
@@ -400,6 +401,9 @@ jobs:
         with:
           path: ${{ runner.temp }}/temporal-test-server
           key: temporal-test-server-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Temporal specs share a cached test server
+        run: pnpm run test:ci-temporal-cache
 
       - name: Unit-step concurrency is bounded
         # Static tripwire for accidental changes to the root bound or a second
@@ -1994,8 +1998,11 @@ jobs:
     # Suite cap + the existing full-provisioning setup allowance (8 minutes).
     timeout-minutes: 23
     services: *integration_services
+    env:
+      TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
     steps:
       - *integration_setup_0
+      - *temporal_test_server_cache
       - *integration_setup_1
       - *integration_setup_2
       - *integration_setup_3
@@ -2056,8 +2063,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+    env:
+      TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - *temporal_test_server_cache
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
@@ -2684,8 +2694,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+    env:
+      TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - *temporal_test_server_cache
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:

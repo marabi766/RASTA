@@ -1,4 +1,5 @@
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
 import { WorkflowFailedError, type WorkflowHandle } from '@temporalio/client';
@@ -284,16 +285,7 @@ describe('the order saga', () => {
   let queues = 0;
 
   beforeAll(async () => {
-    // CI points TEMPORAL_TEST_SERVER_DIR at a cached directory. The time-skipping
-    // server is a ~300 MB download, and fetching it on every run was what made
-    // this hook exceed its timeout on a slow network: the whole file failed
-    // before a single saga ran. Locally it falls back to the system temp dir.
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
+    env = await createTemporalTestEnvironment();
   }, 300_000);
 
   afterAll(async () => {
