@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import ts from 'typescript';
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 
 import {
   AMOUNT_FIELD,
@@ -297,8 +298,11 @@ describe('the bodies', () => {
       expect(published.description).toContain(
         'Constraints after a value-changing step are omitted',
       );
-      for (const key of ['minLength', 'maxLength', 'pattern'])
-        expect(published).not.toHaveProperty(key);
+      for (const key of ['minLength', 'maxLength']) expect(published).not.toHaveProperty(key);
+      // plainText checks bidi controls on raw text; referenceId's pattern follows trim.
+      expect(published.pattern).toBe(
+        field === 'carrierReference' ? undefined : WITHOUT_BIDI_CONTROL.source,
+      );
     }
     expect(squash(topLevelConst(shipmentDto, 'MAX_SHIPMENT_LEGS').getText())).toBe(
       String(MAX_SHIPMENT_LEGS),

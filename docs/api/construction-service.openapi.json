@@ -9958,7 +9958,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["label", "criteria"],
@@ -10504,7 +10505,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion"],
@@ -12192,7 +12194,7 @@
                           "additionalProperties": false
                         },
                         "maxItems": 50,
-                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "note": {
                         "type": "string",
@@ -12299,7 +12301,7 @@
                                   "additionalProperties": false
                                 },
                                 "maxItems": 50,
-                                "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                                "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "note": {
                                 "type": "string",
@@ -12726,7 +12728,7 @@
                             "additionalProperties": false
                           },
                           "maxItems": 50,
-                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "note": {
                           "type": "string",
@@ -13175,7 +13177,7 @@
                           "additionalProperties": false
                         },
                         "maxItems": 50,
-                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "note": {
                         "type": "string",
@@ -13269,7 +13271,7 @@
                             "additionalProperties": false
                           },
                           "maxItems": 50,
-                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "note": {
                           "type": "string",
@@ -15652,7 +15654,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["scores"],

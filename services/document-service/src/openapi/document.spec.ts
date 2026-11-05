@@ -1,3 +1,4 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { VersioningType } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -253,6 +254,7 @@ it('omits transformed document body constraints in the served document (FU-120)'
     const body = JSON.parse(JSON.stringify(document.paths['/v1/documents']!.post!.requestBody));
     expect(body.content['application/json'].schema.properties.ownerResourceType).toEqual({
       type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
       description: expect.stringContaining('Constraints after a value-changing step are omitted'),
     });
     expect(

@@ -1,3 +1,4 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { withdrawDemandSchema } from '../demand/dto';
 import { errorEnvelopeProblems } from '@rasta/nest-common';
 import { refusal, type RefusalArea, type ReasonOf, REFUSAL_REASONS } from '../shared/refusal';
@@ -39,6 +40,7 @@ describe('the committed OpenAPI document', () => {
     );
     expect(body.content['application/json'].schema.properties.reason).toEqual({
       type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
       description: expect.stringContaining('Constraints after a value-changing step are omitted'),
     });
     const field = withdrawDemandSchema.shape.reason;

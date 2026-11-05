@@ -1,3 +1,4 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { registerSupplierSchema } from '../supplier/dto';
 import { VersioningType, type INestApplication, type Type } from '@nestjs/common';
 import { MODULE_METADATA } from '@nestjs/common/constants';
@@ -33,6 +34,7 @@ describe('published security equals the guard decision (FU-075)', () => {
     const body = JSON.parse(JSON.stringify(document.paths['/v1/suppliers']!.post!.requestBody));
     expect(body.content['application/json'].schema.properties.displayName).toEqual({
       type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
       description: expect.stringContaining('Constraints after a value-changing step are omitted'),
     });
     const field = registerSupplierSchema.shape.displayName;

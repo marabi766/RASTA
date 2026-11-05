@@ -146,13 +146,14 @@ function convert(def: any): JsonSchema {
       const array: JsonSchema = { type: 'array', items: toJsonSchema(def.element as z.ZodType) };
       let minItems: number | undefined;
       let maxItems: number | undefined;
-      for (const { def: check } of checkDefs(def)) {
+      const { checks, changed } = rawChecks(def);
+      for (const { def: check } of checks) {
         if (check.check === 'min_length') minItems = check.minimum as number;
         if (check.check === 'max_length') maxItems = check.maximum as number;
       }
       if (minItems !== undefined) array.minItems = minItems;
       if (maxItems !== undefined) array.maxItems = maxItems;
-      return array;
+      return changed ? transformedConstraints(array) : array;
     }
 
     case 'record':
@@ -280,15 +281,22 @@ const VALUE_PRESERVING_CHECKS = new Set([
   'multiple_of',
 ]);
 
+/** Checks before the first check not proven value-preserving, in execution order. */
+function rawChecks(def: any): { checks: ReturnType<typeof checkDefs>; changed: boolean } {
+  const checks = checkDefs(def);
+  const barrier = checks.findIndex(
+    ({ check, def: definition }) =>
+      !CODE_POINT_BOUNDS.has(check) && !VALUE_PRESERVING_CHECKS.has(definition.check as string),
+  );
+  return {
+    checks: barrier < 0 ? checks : checks.slice(0, barrier),
+    changed: barrier >= 0,
+  };
+}
+
 function changesValue(schema: z.ZodType): boolean {
   const def = defOf(schema);
-  if (
-    checkDefs(def).some(
-      ({ check, def: definition }) =>
-        !CODE_POINT_BOUNDS.has(check) && !VALUE_PRESERVING_CHECKS.has(definition.check as string),
-    )
-  )
-    return true;
+  if (rawChecks(def).changed) return true;
   if (def.type === 'pipe') return changesValue(def.in) || changesValue(def.out);
   if (def.type === 'optional' || def.type === 'nullable') return changesValue(def.innerType);
   return !VALUE_PRESERVING_TYPES.has(def.type as string) || def.coerce === true;
@@ -328,14 +336,8 @@ function stringSchema(def: any): JsonSchema {
   if (def.coerce === true) return transformedConstraints();
   const out: JsonSchema = { type: 'string' };
 
-  for (const { check: instance, def: check } of checkDefs(def)) {
-    // Zod executes checks in declaration order. An overwrite is a transform
-    // inside that list (.trim, .toLowerCase, .normalize, .overwrite, ...).
-    // Unknown callbacks may also replace the payload. Later checks are not
-    // proven raw; earlier raw checks stay.
-    if (!CODE_POINT_BOUNDS.has(instance) && !VALUE_PRESERVING_CHECKS.has(check.check as string)) {
-      return transformedConstraints(out);
-    }
+  const { checks, changed } = rawChecks(def);
+  for (const { check: instance, def: check } of checks) {
     const bounds = CODE_POINT_BOUNDS.get(instance);
     if (bounds) Object.assign(out, bounds);
     if (check.check === 'min_length') out.minLength = check.minimum;
@@ -356,13 +358,15 @@ function stringSchema(def: any): JsonSchema {
     }
   }
 
-  return out;
+  return changed ? transformedConstraints(out) : out;
 }
 
 function numberSchema(def: any): JsonSchema {
+  if (def.coerce === true) return transformedConstraints();
   const out: JsonSchema = { type: 'number' };
 
-  for (const { def: check } of checkDefs(def)) {
+  const { checks, changed } = rawChecks(def);
+  for (const { def: check } of checks) {
     if (check.check === 'number_format' && String(check.format).includes('int')) {
       out.type = 'integer';
     }
@@ -370,7 +374,7 @@ function numberSchema(def: any): JsonSchema {
     if (check.check === 'less_than') out.maximum = check.value;
   }
 
-  return out;
+  return changed ? transformedConstraints(out) : out;
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 

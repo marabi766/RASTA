@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { isoDateTime, parsableUrl, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { codePointLength, toJsonSchema, type JsonSchema } from '@rasta/nest-common';
 import {
   aggregationViewSchema,
@@ -202,6 +202,7 @@ describe('the real demand DTOs', () => {
       const properties = toJsonSchema(schema).properties as Record<string, JsonSchema>;
       expect(properties.reason).toEqual({
         type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
         description: expect.stringContaining('Constraints after a value-changing step are omitted'),
       });
     },

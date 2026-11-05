@@ -17,6 +17,7 @@ import {
   decommissionSchema,
   updateAssetSchema,
   listAssetsQuerySchema,
+  nearbyQuerySchema,
 } from '../asset/dto';
 import { canonicalIdentifier } from '../asset/identifier';
 
@@ -79,23 +80,34 @@ describe('the served OpenAPI document', () => {
     expect(JSON.stringify(schema)).not.toContain('string');
   });
 
-  it('publishes the rest of the radius search too', () => {
-    // The parameters were validated on every request and described nowhere:
-    // before this the operation carried none at all.
-    expect(parameters.latitude).toMatchObject({
-      required: true,
-      schema: { type: 'number', minimum: -90, maximum: 90 },
+  it('publishes every numeric parameter like the same body field (P1, FU-120)', () => {
+    expect(nearbyQuerySchema.parse({ latitude: '', longitude: '', limit: '0x10' })).toMatchObject({
+      latitude: 0,
+      longitude: 0,
+      limit: 16,
     });
-    expect(parameters.radiusMeters).toMatchObject({
-      required: false,
-      schema: { type: 'integer', default: 50_000, maximum: 500_000 },
-    });
-    expect(parameters.limit).toMatchObject({
-      required: false,
-      schema: { type: 'integer', default: 25, maximum: 100 },
-    });
-    expect(parameters.type).toMatchObject({ required: false });
-    expect((parameters.type?.schema as { type: string }).type).toBe('string');
+    for (const name of ['latitude', 'longitude', 'radiusMeters', 'limit'] as const) {
+      const field = nearbyQuerySchema.shape[name];
+      const body = toJsonSchema(z.object({ [name]: field })).properties as Record<string, unknown>;
+      expect(parameters[name]?.schema).toEqual(body[name]);
+      expect(parameters[name]?.schema).not.toHaveProperty('type');
+      expect(parameters[name]?.schema).not.toHaveProperty('minimum');
+      expect(parameters[name]?.schema).not.toHaveProperty('maximum');
+      expect(parameters[name]?.schema).toHaveProperty(
+        'description',
+        expect.stringContaining('Constraints after a value-changing step are omitted'),
+      );
+      expect(parameters[name]?.required).toBe(name === 'latitude' || name === 'longitude');
+    }
+    expect(parameters.radiusMeters?.schema).toHaveProperty('default', 50_000);
+    expect(parameters.limit?.schema).toHaveProperty('default', 25);
+    const expiry = parametersOf(listAssetsQuerySchema).find(
+      (p) => 'name' in p && p.name === 'expiringWithinDays',
+    );
+    const expirySchema = expiry && 'schema' in expiry ? expiry.schema : undefined;
+    expect(expirySchema).toEqual(toJsonSchema(listAssetsQuerySchema.shape.expiringWithinDays));
+    expect(expirySchema).not.toHaveProperty('type');
+    expect(parameters.type).toMatchObject({ required: false, schema: { type: 'string' } });
   });
 });
 
@@ -284,10 +296,10 @@ describe('the character rule in the published request bodies', () => {
     ['update', 'model', updateAssetSchema.shape.model],
     ['status', 'reason', changeStatusSchema.shape.reason],
     ['decommission', 'reason', decommissionSchema.shape.reason],
-  ] as const)('%s.%s marks its post-trim bidi rule as omitted (FU-120)', (body, field, schema) => {
+  ] as const)('%s.%s publishes the raw bidi pattern (F3, FU-120)', (body, field, schema) => {
     expect(regexSources(schema)).toEqual([WITHOUT_BIDI_CONTROL.source]);
     expect(schema.safeParse('   ').success).toBe(false);
-    expect(bodies[body]!.properties[field]?.pattern).toBeUndefined();
+    expect(bodies[body]!.properties[field]?.pattern).toBe(WITHOUT_BIDI_CONTROL.source);
     expect(bodies[body]!.properties[field]).toHaveProperty(
       'description',
       expect.stringContaining('Constraints after a value-changing step are omitted'),

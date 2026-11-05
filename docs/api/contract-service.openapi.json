@@ -1106,6 +1106,7 @@
                   },
                   "note": {
                     "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
                     "description": "Optional free text, trimmed, up to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "expectedVersion": {
@@ -1695,6 +1696,7 @@
                   },
                   "reasonText": {
                     "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
                     "description": "Why, in the proposer’s words: trimmed, 1 to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "expectedVersion": {
@@ -2693,6 +2695,7 @@
                 "properties": {
                   "title": {
                     "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
                     "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "plannedDate": {
@@ -3140,6 +3143,7 @@
                 "properties": {
                   "title": {
                     "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
                     "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "plannedDate": {
@@ -4062,6 +4066,7 @@
                       "properties": {
                         "description": {
                           "type": "string",
+                          "pattern": "^[^\\p{Bidi_Control}]*$",
                           "description": "What is claimed: trimmed, 1 to 500 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "amountMinor": {

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { isoDateTime, parsableUrl, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { toJsonSchema } from '@rasta/nest-common';
 import {
   deleteDocumentSchema,
@@ -168,6 +168,7 @@ describe('the real document DTOs', () => {
     expect(schema.required).toEqual(['reason']);
     expect((schema.properties as Record<string, unknown>).reason).toEqual({
       type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
       description: expect.stringContaining('Constraints after a value-changing step are omitted'),
     });
   });

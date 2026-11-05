@@ -1,3 +1,4 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { createWarehouseSchema } from '../warehouse/dto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -48,6 +49,7 @@ describe('the committed OpenAPI document', () => {
     );
     expect(body.content['application/json'].schema.properties.name).toEqual({
       type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
       description: expect.stringContaining('Constraints after a value-changing step are omitted'),
     });
     const field = createWarehouseSchema.shape.name;

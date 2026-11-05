@@ -2,7 +2,7 @@ import { policyRejectionSchema } from '../policy/dto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
-import { ERROR_CODES } from '@rasta/contracts';
+import { ERROR_CODES, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { errorEnvelopeProblems } from '@rasta/nest-common';
 import {
   INTERNAL_TOKEN_SCHEME,
@@ -269,6 +269,7 @@ describe('the committed OpenAPI document', () => {
       expect(body.properties.reasonCode?.pattern).toBe('^[A-Z][A-Z0-9_]{1,63}$');
       expect(body.properties.note).toEqual({
         type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
         description: expect.stringContaining('Constraints after a value-changing step are omitted'),
       });
     });
@@ -379,6 +380,7 @@ describe('the committed OpenAPI document', () => {
       expect(request.properties.deltaMinor?.type).toBe('string');
       expect(request.properties.reasonText).toEqual({
         type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
         description: expect.stringContaining('Constraints after a value-changing step are omitted'),
       });
       const milestone = operation('/v1/contracts/{id}/milestones', 'post').requestBody!.content[

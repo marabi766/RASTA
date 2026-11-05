@@ -1,7 +1,7 @@
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import { z } from 'zod';
-import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { isoDateTime, parsableUrl, plainText, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { codePointLength, objectShapeOf, toJsonSchema } from './zod-schema';
 
@@ -140,6 +140,83 @@ describe('toJsonSchema', () => {
       description:
         'Constraints after a value-changing step are omitted; validation applies them to the transformed value.',
     });
+  });
+
+  it.each(['overwrite', 'custom check'] as const)(
+    'omits number checks after %s but keeps the raw prefix (P2/P4, FU-120)',
+    (step) => {
+      const prefix = z.number().min(0).max(100);
+      const schema = (
+        step === 'overwrite'
+          ? prefix.overwrite(() => 5)
+          : prefix.check((ctx) => {
+              ctx.value = 5;
+            })
+      )
+        .int()
+        .min(1)
+        .max(5);
+      expect(schema.parse(99.5)).toBe(5);
+      const published = toJsonSchema(schema);
+      expect(published).toMatchObject({ type: 'number', minimum: 0, maximum: 100 });
+      expect(published.description).toContain(
+        'Constraints after a value-changing step are omitted',
+      );
+      expect(new Ajv().compile(published)(99.5)).toBe(true);
+    },
+  );
+
+  it.each(['overwrite', 'custom check'] as const)(
+    'omits array checks after %s but keeps the raw prefix (P3, FU-120)',
+    (step) => {
+      const prefix = z.array(z.string()).min(1).max(10);
+      const schema = (
+        step === 'overwrite'
+          ? prefix.overwrite((v) => v.slice(0, 1))
+          : prefix.check((ctx) => {
+              ctx.value = ctx.value.slice(0, 1);
+            })
+      )
+        .min(1)
+        .max(2);
+      const raw = ['x', 'x', 'x'];
+      expect(schema.parse(raw)).toEqual(['x']);
+      const published = toJsonSchema(schema);
+      expect(published).toMatchObject({ type: 'array', minItems: 1, maxItems: 10 });
+      expect(published.description).toContain(
+        'Constraints after a value-changing step are omitted',
+      );
+      expect(new Ajv().compile(published)(raw)).toBe(true);
+    },
+  );
+
+  it('omits the output type and bounds of numeric coercion', () => {
+    // eslint-disable-next-line zod/coercion-boundary -- Diagnostic schema: coerced numbers are not raw numeric input.
+    const schema = z.coerce.number().int().min(0).max(5);
+    expect(schema.parse('')).toBe(0);
+    expect(toJsonSchema(schema)).toEqual({
+      description:
+        'Constraints after a value-changing step are omitted; validation applies them to the transformed value.',
+    });
+  });
+
+  it('publishes the plainText bidi pattern before trim without changing accepted text (F3)', () => {
+    const schema = plainText().min(1).max(3);
+    const published = toJsonSchema(schema);
+    expect(published.pattern).toBe(WITHOUT_BIDI_CONTROL.source);
+    expect(published.minLength).toBeUndefined();
+    expect(published.maxLength).toBeUndefined();
+    expect(schema.parse('  abc  ')).toBe('abc');
+    const pattern = new RegExp(String(published.pattern), 'u');
+    // Every Bidi_Control, including the Arabic letter mark; none is removed by trim.
+    for (const cp of [
+      0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068,
+      0x2069,
+    ]) {
+      const raw = ` ${String.fromCodePoint(cp)}a `;
+      expect(pattern.test(raw)).toBe(false);
+      expect(schema.safeParse(raw).success).toBe(false);
+    }
   });
 
   it('keeps the omission marker through pipe descriptions and optional/nullable wrappers', () => {

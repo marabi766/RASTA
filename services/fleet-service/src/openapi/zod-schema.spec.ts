@@ -1,3 +1,4 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { z } from 'zod';
 import { toJsonSchema } from '@rasta/nest-common';
 import {
@@ -46,6 +47,7 @@ describe('zod to JSON Schema', () => {
       >;
       expect(props.employeeNo).toEqual({
         type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
         description: expect.stringContaining('Constraints after a value-changing step are omitted'),
       });
       expect(props.licenceValidTo).toMatchObject({ type: 'string', format: 'date-time' });
