@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { TestWorkflowEnvironment, MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { ApplicationFailure, Context } from '@temporalio/activity';
+import { REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
 import { temporalStep, type OrderActivities, type SagaOrderView } from './activities';
 import {
   orderSaga,
@@ -100,7 +101,10 @@ describe('history rollover on real Temporal', () => {
     // independently verifies. Disable patch adoption only for the first worker:
     // it stands for a release before both markers, so it records neither.
     const dir = mkdtempSync(join(__dirname, '.legacy-'));
-    const source = readFileSync(require.resolve('./workflows.ts'), 'utf8');
+    const source = readFileSync(require.resolve('./workflows.ts'), 'utf8').replaceAll(
+      "'./economic-refusal'",
+      "'../economic-refusal'",
+    );
     writeFileSync(
       join(dir, 'workflows.ts'),
       source
@@ -632,9 +636,11 @@ describe('history rollover on real Temporal', () => {
         expect(await resumeOf(second)).toMatchObject({
           unconfirmedCall: { operation: 'authoriseSettlement', rounds: expect.any(Number) },
         });
-        expect(new Set(sent.map((args) => JSON.stringify(args)))).toEqual(
+        // The same words, so the same key; each round adds only that it is in doubt.
+        expect(new Set(sent.map((args) => JSON.stringify(args.slice(0, 2))))).toEqual(
           new Set([JSON.stringify([INPUT.orderId, 'TXN_AUTH'])]),
         );
+        expect(sent.at(-1)?.[2]).toBe(true);
         expect((await latest.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
 
         await atRest(taskQueue);
@@ -802,6 +808,19 @@ describe('history rollover on real Temporal', () => {
         await latest.signal('retryDisputeRelease');
         await eventually(() => filed.length > 0);
         expect(filed).toEqual([[INPUT.orderId, 'TXN_MOVED', 'DSP_MOVED', 'broken']]);
+        // Rolled over in the dispute's wait, the next run knows the call is still
+        // in doubt, and that it left the wait.
+        await atRest(taskQueue);
+        const beforeDispute = (await latest.describe()).runId;
+        await env.sleep('8 hours');
+        const { runId } = await latest.describe();
+        expect(runId).not.toBe(beforeDispute);
+        const history = await env.client.workflow.getHandle(taskQueue, runId).fetchHistory();
+        const data = history.events?.[0]?.workflowExecutionStartedEventAttributes?.input
+          ?.payloads?.[0]?.data as Uint8Array;
+        expect((JSON.parse(Buffer.from(data).toString()) as OrderSagaInput).resume).toMatchObject({
+          unconfirmedCall: { operation: 'authoriseSettlement', movedOn: true },
+        });
         // A terminated activity would stall the server's clock for the next test.
         await atRest(taskQueue);
       } finally {
@@ -809,6 +828,170 @@ describe('history rollover on real Temporal', () => {
       }
     });
   });
+
+  it('a run resumed after leaving that wait does not go back to it, and is still in doubt on its way back (FU-103)', async () => {
+    const state: SagaOrderView = {
+      status: 'DISPUTED',
+      economicTransactionId: 'TXN_LEFT',
+      cancellationReason: null,
+      dispute: { id: 'DSP_LEFT', reason: 'broken', resolution: null },
+    };
+    const sent: unknown[][] = [];
+    const rounds: number[] = [];
+    let asked = 0;
+    let filed = 0;
+    const taskQueue = `rollover-left-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => state,
+        findObligation: async () => {
+          asked += 1;
+          return { transactionId: 'TXN_LEFT' };
+        },
+        disputeObligation: async () => {
+          filed += 1;
+          return 'ECON_LEFT';
+        },
+        resolveObligationDispute: async () => undefined,
+        authoriseSettlement: async (...args: unknown[]) => {
+          sent.push(args);
+          // Even marked as a first attempt's, which a real round's activity never is.
+          throw ApplicationFailure.create({
+            message: 'refused',
+            type: 'FORBIDDEN',
+            nonRetryable: true,
+            details: [REFUSED_ON_FIRST_ATTEMPT],
+          });
+        },
+        noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+          rounds.push(round);
+        },
+        markSettling: async () => 'DISPUTED',
+      } as unknown as Partial<OrderActivities>,
+    });
+    await worker.runUntil(async () => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'DISPUTED',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: 'DISPUTED',
+              activitySequence: 5,
+              unconfirmedCall: { operation: 'authoriseSettlement', rounds: 3, movedOn: true },
+            },
+          },
+        ],
+      });
+      try {
+        await eventually(() => filed > 0);
+        expect(asked).toBe(0);
+        await atRest(taskQueue);
+
+        state.status = 'RECEIPT_CONFIRMED';
+        state.dispute = null;
+        await handle.signal('disputeResolved', 'SETTLE');
+        await eventually(() => rounds.length > 0);
+        expect(rounds[0]).toBe(4);
+        expect(sent[0]).toEqual([INPUT.orderId, 'TXN_LEFT', true]);
+        expect((await handle.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
+        await atRest(taskQueue);
+      } finally {
+        await handle.terminate();
+      }
+    });
+  });
+
+  it.each([
+    ['in that wait', false, 'RECEIPT_CONFIRMED'],
+    ['after leaving it for a dispute', true, 'DISPUTED'],
+  ] as const)(
+    'a resumed run whose order read is refused, %s: the call is unconfirmed, so the saga stays (FU-103)',
+    async (_name, movedOn, orderStatus) => {
+      const state: SagaOrderView = {
+        status: orderStatus,
+        economicTransactionId: 'TXN_READ',
+        cancellationReason: null,
+        dispute: movedOn ? { id: 'DSP_READ', reason: 'broken', resolution: null } : null,
+      };
+      const rounds: number[] = [];
+      let readable = false;
+      const went: string[] = [];
+      const taskQueue = `rollover-read-${++serial}`;
+      const worker = await Worker.create({
+        connection: env.nativeConnection,
+        taskQueue,
+        workflowsPath: require.resolve('./workflows'),
+        activities: {
+          readOrder: async () => {
+            if (!readable) throw ApplicationFailure.nonRetryable('refused', 'NOT_FOUND');
+            return state;
+          },
+          authoriseSettlement: async () => {
+            went.push('authoriseSettlement');
+            throw ApplicationFailure.retryable('down', 'UPSTREAM_UNAVAILABLE');
+          },
+          disputeObligation: async () => {
+            went.push('disputeObligation');
+            return 'ECON_READ';
+          },
+          noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+            rounds.push(round);
+          },
+        } as unknown as Partial<OrderActivities>,
+      });
+      await worker.runUntil(async () => {
+        const handle = await env.client.workflow.start(orderSaga, {
+          workflowId: taskQueue,
+          taskQueue,
+          args: [
+            {
+              ...INPUT,
+              recheckIntervalHours: 1,
+              resume: {
+                status: {
+                  phase: 'SETTLING',
+                  deferredSteps: [],
+                  remindersRecorded: 0,
+                  settlementAttempts: 0,
+                },
+                waitingIn: orderStatus,
+                activitySequence: 5,
+                unconfirmedCall: { operation: 'authoriseSettlement', rounds: 2, movedOn },
+              },
+            },
+          ],
+        });
+        try {
+          await eventually(() => rounds.length > 0);
+          expect(rounds[0]).toBe(3);
+          expect(went).toEqual([]);
+          expect((await handle.query<SagaStatus>('status')).phase).toBe(
+            'AUTHORISATION_UNCONFIRMED',
+          );
+          await atRest(taskQueue);
+          readable = true;
+          await handle.signal('retryDisputeRelease');
+          await eventually(() => went.length > 0);
+          expect(went[0]).toBe(movedOn ? 'disputeObligation' : 'authoriseSettlement');
+          await atRest(taskQueue);
+        } finally {
+          await handle.terminate();
+        }
+      });
+    },
+  );
 
   it('a rollover during a dispute does not buy the resumed order a fresh window (D-083)', async () => {
     const dispute = { id: 'DSP_WINDOW', reason: 'not answered', resolution: null as string | null };
@@ -963,7 +1146,10 @@ describe('history rollover on real Temporal', () => {
     'a wait entered before the D-083 marker still hands its live deadline to the resumed order: %s',
     async (_case, resumeInHours, remindersBeforeDeadline) => {
       const dir = mkdtempSync(join(__dirname, '.legacy-'));
-      const source = readFileSync(require.resolve('./workflows.ts'), 'utf8');
+      const source = readFileSync(require.resolve('./workflows.ts'), 'utf8').replaceAll(
+        "'./economic-refusal'",
+        "'../economic-refusal'",
+      );
       writeFileSync(
         join(dir, 'workflows.ts'),
         source.replaceAll('patched(DISPUTE_RESUME_PATCH)', 'false'),

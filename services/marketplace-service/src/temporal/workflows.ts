@@ -22,6 +22,13 @@ import type {
   SettledResult,
   UnconfirmedOperation,
 } from './activities';
+import {
+  OWNER_STATE_IS_FINAL,
+  PROVEN_REFUSALS,
+  REFUSED_ON_FIRST_ATTEMPT,
+} from './economic-refusal';
+
+export { PROVEN_REFUSALS };
 
 /**
  * `OrderSagaWorkflow` — the platform's first real Temporal workflow (ADR-039).
@@ -90,6 +97,14 @@ import type {
  * the same key. Authorisation is behind it; `disputeObligation` and `compensate`
  * are not yet, and still end the saga when their attempts run out.
  *
+ * A code speaks for one attempt, never for the attempts before it. So the proof
+ * is the activity's own refusal on the first attempt this run scheduled, which it
+ * marks; once any attempt went unconfirmed, no code ends the wait. Only the
+ * obligation as economic-service has it does: the call's effect there, or a
+ * terminal status no late request can move (`outcomeUnknown`). HELD is neither,
+ * as an earlier request can still commit, so the saga stays. A read refused while
+ * a call is unconfirmed waits too (`read`).
+ *
  * ## What expiry does NOT do
  *
  * There is no timer that confirms receipt, cancels an order, or moves money
@@ -148,6 +163,11 @@ export interface OrderSagaInput {
 export interface UnconfirmedCall {
   operation: UnconfirmedOperation;
   rounds: number;
+  /**
+   * The saga left the wait to follow a moved order, the call still unconfirmed.
+   * A later return to the call goes on from here, not as a first send.
+   */
+  movedOn?: boolean;
 }
 
 export interface SagaResume {
@@ -245,41 +265,6 @@ export const RELEASE_WAIT_PATCH = 'dispute-release-durable-wait-v1';
  * that end.
  */
 export const ECONOMIC_WAIT_PATCH = 'economic-call-durable-wait-v1';
-
-/**
- * The only answers taken as proof an economic call changed nothing, by code: the
- * request or the money was refused, and economic-service stores an effect and
- * its key's answer in one commit, so a retry of a committed call is answered
- * from it instead. A guard or a route answers before the key is looked up, so a
- * routing or configuration fault between two attempts can still end the saga.
- *
- * Moving a code changes what a live history replays: it needs a new patch.
- * Closed on purpose. Everything else is an unknown outcome: every 5xx, timeout
- * and reset, an unlisted code, and these 4xx, which refuse only this attempt or
- * say nothing of the transaction: `CONFLICT` (the key's request is in flight),
- * `IDEMPOTENCY_KEY_REUSED` and `REPLAY_WINDOW_CLOSED` (the key was used, perhaps
- * to effect), `OPTIMISTIC_LOCK_FAILED`, `RATE_LIMIT_EXCEEDED`, and the 401s of a
- * token this service mints afresh per call.
- */
-export const PROVEN_REFUSALS: ReadonlySet<string> = new Set([
-  'VALIDATION_FAILED',
-  'MALFORMED_REQUEST',
-  'PAYLOAD_TOO_LARGE',
-  'UNSUPPORTED_MEDIA_TYPE',
-  'FORBIDDEN',
-  'INSUFFICIENT_ROLE',
-  'TENANT_MISMATCH',
-  'SERVICE_TENANT_CONTEXT_INVALID',
-  'NOT_FOUND',
-  'ALREADY_EXISTS',
-  'INVALID_STATE_TRANSITION',
-  'ACTOR_IDENTITY_UNKNOWN',
-  'BUSINESS_RULE_VIOLATION',
-  'INSUFFICIENT_BALANCE',
-  'LEDGER_UNBALANCED',
-  'NO_ACTIVE_RULE',
-  'BUSINESS_LINE_REQUIRED',
-]);
 
 /** What the status query shows while each call waits. */
 const UNCONFIRMED_PHASE: Record<UnconfirmedOperation, string> = {
@@ -455,8 +440,30 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   });
 
   /** The order now, with the mirrored dispute's resolution when there is one. */
-  const read = (): Promise<SagaOrderView> =>
+  const readOnce = (): Promise<SagaOrderView> =>
     mirroredDispute === undefined ? readOrder(orderId) : readOrder(orderId, mirroredDispute);
+
+  /** The same, except that a read refused with a call unconfirmed says nothing of the call. */
+  async function read(): Promise<SagaOrderView> {
+    try {
+      return await readOnce();
+    } catch (error) {
+      const pending = unconfirmed;
+      if (!pending || !releaseCanWait(error)) throw error;
+      return waitForConfirmation(
+        {
+          phase: UNCONFIRMED_PHASE[pending.operation],
+          at: 'RECEIPT_CONFIRMED',
+          call: readOnce,
+          canWait: releaseCanWait,
+          report: (round, failure) =>
+            noteEconomicCallUnconfirmed(orderId, pending.operation, round, failure),
+          nextRound: () => (pending.rounds += 1),
+        },
+        failureOf(error),
+      );
+    }
+  }
 
   /**
    * Tells economic-service that the dispute it holds is decided, with that
@@ -567,28 +574,28 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   }
 
   /**
-   * An economic call that ends the saga only on what `canWait` refuses; on
-   * anything else it waits for confirmation. `later` is what each round sends,
-   * for a call that may no longer be wanted by then. A call answered first time
-   * adds no command.
+   * An economic call that ends the saga only on proof it changed nothing
+   * (`outcomeUnknown`); on anything else it waits for confirmation. `later` is
+   * what each round sends, for a call that may no longer be wanted by then. A
+   * call answered first time adds no command. `unconfirmed` stays set on the way
+   * out: the caller knows whether what came back was an answer about the call.
    */
   async function confirmedCall<T>(
     operation: UnconfirmedOperation,
     at: OrderStatus,
     call: () => Promise<T>,
     later: () => Promise<T>,
-    canWait: (error: unknown) => boolean,
     wakes: () => boolean,
   ): Promise<T> {
+    // Read at each failure: the first one may be what puts the call in doubt.
+    const canWait = (error: unknown): boolean => outcomeUnknown(error, unconfirmed !== undefined);
     try {
-      const answer = await call();
-      unconfirmed = undefined;
-      return answer;
+      return await call();
     } catch (error) {
       if (!canWait(error) || !patched(ECONOMIC_WAIT_PATCH)) throw error;
       const pending: UnconfirmedCall = { operation, rounds: unconfirmed?.rounds ?? 0 };
       unconfirmed = pending;
-      const answer = await waitForConfirmation(
+      return await waitForConfirmation(
         {
           phase: UNCONFIRMED_PHASE[operation],
           at,
@@ -601,8 +608,6 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         },
         failureOf(error),
       );
-      unconfirmed = undefined;
-      return answer;
     }
   }
 
@@ -853,16 +858,12 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     // not follow the order until economic-service answers, here to a read: from
     // that answer on it can dispute or refund the obligation authorised or not,
     // and a dispute settled back brings the saga here again, under the same key.
-    // Only the send's own refusal ends the saga: a failed read says nothing of it.
-    let sending = true;
     const send = (): Promise<AuthorisationResult> => authoriseSettlement(orderId, transactionId);
     const askAgain = async (): Promise<AuthorisationResult | 'MOVED'> => {
-      sending = false;
       nudged = false;
-      const now = await read();
+      const now = await readOnce();
       if (now.status === 'RECEIPT_CONFIRMED' || now.status === 'SETTLING') {
-        sending = true;
-        return send();
+        return authoriseSettlement(orderId, transactionId, true);
       }
       await askEconomic(orderId);
       return 'MOVED';
@@ -872,11 +873,15 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       'RECEIPT_CONFIRMED',
       unconfirmed ? askAgain : send,
       askAgain,
-      (error) => (sending ? outcomeUnknown(error) : releaseCanWait(error)),
       // A dispute is filed as soon as it is raised, not at the next backoff.
       () => nudged,
     );
-    if (authorisation === 'MOVED') return false;
+    if (authorisation === 'MOVED') {
+      // Not an answer about the call: the doubt goes with the saga.
+      if (unconfirmed) unconfirmed.movedOn = true;
+      return false;
+    }
+    unconfirmed = undefined;
     if (authorisation?.disputed) {
       await takeObligationDispute(authorisation);
       return false;
@@ -979,7 +984,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
   // A run that rolled over in the wait goes back to it before following the
   // order, whatever the order has become since.
-  if (unconfirmed) {
+  if (unconfirmed && !unconfirmed.movedOn) {
     if (await settleOrder(heldTransaction(order))) return 'COMPLETED';
     order = await read();
   }
@@ -1107,12 +1112,19 @@ function releaseCanWait(error: unknown): boolean {
   return error instanceof ActivityFailure && !isCancellation(error);
 }
 
-/** A failed call whose answer does not prove it changed nothing (`PROVEN_REFUSALS`). */
-export function outcomeUnknown(error: unknown): boolean {
+/**
+ * A failed call that does not prove it changed nothing. The proof is what the
+ * activity marked, never a code alone, which may be a local read's or a later
+ * attempt's. In doubt (`inDoubt`, an earlier attempt went unconfirmed), only the
+ * obligation's own state is proof.
+ */
+export function outcomeUnknown(error: unknown, inDoubt: boolean): boolean {
   if (!releaseCanWait(error)) return false;
   const cause = (error as ActivityFailure).cause;
-  const code = cause instanceof ApplicationFailure ? cause.type : undefined;
-  return !code || !PROVEN_REFUSALS.has(code);
+  if (!(cause instanceof ApplicationFailure)) return true;
+  const proof: unknown = cause.details?.[0];
+  if (proof === OWNER_STATE_IS_FINAL) return false;
+  return inDoubt || proof !== REFUSED_ON_FIRST_ATTEMPT || !PROVEN_REFUSALS.has(cause.type ?? '');
 }
 
 /** The obligation an order past `PENDING` holds. The row constraint guarantees one. */

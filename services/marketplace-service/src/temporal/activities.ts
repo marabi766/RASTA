@@ -23,6 +23,11 @@ import {
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
 import {
+  OWNER_STATE_IS_FINAL,
+  PROVEN_REFUSALS,
+  REFUSED_ON_FIRST_ATTEMPT,
+} from './economic-refusal';
+import {
   economicCallsUnconfirmedTotal,
   releasesUnconfirmedTotal,
   settlementsExhaustedTotal,
@@ -78,6 +83,16 @@ export interface ActivityDependencies {
    * suite that runs the activities outside a worker supplies one.
    */
   currentStep?: () => SagaStep;
+  /** Which attempt this is. Temporal's own; not known counts as a retry. */
+  currentAttempt?: () => number;
+}
+
+function temporalAttempt(): number | undefined {
+  try {
+    return Context.current().info.attempt;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The running activity's identity: the same on every retry of it, unique otherwise. */
@@ -231,6 +246,7 @@ export function createActivities(deps: ActivityDependencies) {
   }
 
   const currentStep = deps.currentStep ?? temporalStep;
+  const currentAttempt = deps.currentAttempt ?? temporalAttempt;
 
   /**
    * An economic-service call, made at most once per scheduled activity
@@ -247,6 +263,16 @@ export function createActivities(deps: ActivityDependencies) {
    * authorised (`disputedSinceAuthorised`): the saga takes it to the order's
    * dispute. Anything else — another refusal, a transaction that is not this
    * order's, a state the command does not produce — stays the refusal it was.
+   *
+   * A failed read is never that refusal: it is reported as a read
+   * (`RECONCILIATION_READ_FAILED`), an unknown outcome, whatever code it got.
+   *
+   * With `confirmed`, for a call the saga waits on (`confirmedCall`), the only
+   * failure marked as proof is this step's own refusal, by `requires` or the send,
+   * on the first attempt of this scheduling. In doubt — a retry, or a round after
+   * an unconfirmed attempt — a failed send asks the obligation, because a code
+   * then says nothing of the attempts before it: its effect is the answer,
+   * `isFinal` is the proof, and anything else stays unknown.
    */
   async function economicStep<T>(
     orderId: string,
@@ -256,9 +282,23 @@ export function createActivities(deps: ActivityDependencies) {
       transactionId: string;
       /** This command's effect on the obligation, as its answer; null when not there. */
       answer: (transaction: TransactionDetailView) => { result: T } | null;
+      confirmed?: {
+        inDoubt: boolean;
+        /** A terminal status without this command's effect as the answer, which nothing can move. */
+        isFinal: (transaction: TransactionDetailView) => boolean;
+        /**
+         * What must hold before asking at all. Its refusal is never reconciled: the
+         * obligation's state cannot stand in for a condition of this order's.
+         */
+        requires?: (order: Awaited<ReturnType<OrderService['describe']>>) => void;
+      };
     },
   ): Promise<T> {
     const step = currentStep();
+    const confirmed = applied?.confirmed;
+    const inDoubt = confirmed !== undefined && (confirmed.inDoubt || currentAttempt() !== 1);
+    const unanswered = (refusal: unknown): unknown =>
+      confirmed && !inDoubt ? provenIfListed(refusal) : refusal;
     return asSystemFor(orderId, (order) =>
       deps.orders.onceForSaga(
         { id: order.id, organizationId: order.buyerOrganizationId },
@@ -266,20 +306,39 @@ export function createActivities(deps: ActivityDependencies) {
         activity,
         async () => {
           try {
+            confirmed?.requires?.(order);
+          } catch (refusal) {
+            throw unanswered(refusal);
+          }
+          try {
             return await call(order);
           } catch (refusal) {
-            if (!applied || !refusedForState(refusal)) throw refusal;
-            const transaction = await deps.economic.readObligation({
-              orderId: order.id,
-              transactionId: applied.transactionId,
-              buyerOrganizationId: order.buyerOrganizationId,
-              correlationId: order.correlationId,
-            });
+            if (!applied || !(inDoubt || refusedForState(refusal))) throw unanswered(refusal);
+            const transaction = await deps.economic
+              .readObligation({
+                orderId: order.id,
+                transactionId: applied.transactionId,
+                buyerOrganizationId: order.buyerOrganizationId,
+                correlationId: order.correlationId,
+              })
+              .catch((failure: unknown) => {
+                throw reconciliationReadFailed(activity, failure);
+              });
             const answer = transaction ? applied.answer(transaction) : null;
-            if (!answer) throw refusal;
+            if (!answer) {
+              if (inDoubt && transaction && confirmed?.isFinal(transaction)) {
+                throw ApplicationFailure.create({
+                  message: `The obligation is ${transaction.status}: terminal, and nothing further can move it`,
+                  type: 'OBLIGATION_ALREADY_FINAL',
+                  nonRetryable: true,
+                  details: [OWNER_STATE_IS_FINAL],
+                });
+              }
+              throw unanswered(refusal);
+            }
             logger.warn(
-              `Saga step ${activity} of order ${order.id} was refused for the transaction's state, ` +
-                `which already shows its effect (${transaction?.status}); answering from economic-service's record`,
+              `Saga step ${activity} of order ${order.id} was refused, and the transaction's state ` +
+                `already shows its effect (${transaction?.status}); answering from economic-service's record`,
             );
             return answer.result;
           }
@@ -431,29 +490,20 @@ export function createActivities(deps: ActivityDependencies) {
     /**
      * Authorises settlement. Undefined once authorised; a
      * {@link DisputedObligation} when a retry finds its own authorisation
-     * disputed since in economic-service.
+     * disputed since in economic-service. `inDoubt` is the workflow's word that
+     * an earlier scheduling of this call went unconfirmed, which this attempt
+     * cannot see. Omitted, the workflow still ends nothing on a mark it did not
+     * ask for: it ignores the mark while in doubt (`outcomeUnknown`).
      */
     async authoriseSettlement(
       orderId: string,
       transactionId: string,
+      inDoubt = false,
     ): Promise<AuthorisationResult> {
       return economicStep<AuthorisationResult>(
         orderId,
         'authoriseSettlement',
         async (order) => {
-          // The buyer's receipt is what authorises settlement; without it on
-          // the row, nothing is asked of economic-service. An order an older
-          // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
-          // otherwise authorise an obligation migration 20261103121000 put
-          // back in HELD (#625 round 2 self-review). Refused for good: the
-          // saga stops with the funds held, for the runbook
-          // (docs/runbooks/marketplace-receipt-evidence.md).
-          if (!order.receiptConfirmed) {
-            throw RastaError.businessRule(
-              'Settlement is authorised only for an order whose receipt the buyer confirmed',
-              { orderId: order.id },
-            );
-          }
           await deps.economic.authoriseSettlement({
             orderId: order.id,
             transactionId,
@@ -475,6 +525,27 @@ export function createActivities(deps: ActivityDependencies) {
             }
             const disputed = disputedSinceAuthorised(transaction, orderId);
             return disputed ? { result: disputed } : null;
+          },
+          confirmed: {
+            inDoubt,
+            // SETTLED is the effect, above. DISPUTED and HELD can still move.
+            isFinal: ({ status }) => ['REFUNDED', 'CANCELLED', 'FAILED'].includes(status),
+            // The buyer's receipt is what authorises settlement; without it on
+            // the row, nothing is asked of economic-service. An order an older
+            // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
+            // otherwise authorise an obligation migration 20261103121000 put
+            // back in HELD (#625 round 2 self-review). Refused for good, with
+            // the funds held, for the runbook
+            // (docs/runbooks/marketplace-receipt-evidence.md): the saga stops on
+            // a first attempt, and in doubt it waits, never reading as authorised.
+            requires: (order) => {
+              if (!order.receiptConfirmed) {
+                throw RastaError.businessRule(
+                  'Settlement is authorised only for an order whose receipt the buyer confirmed',
+                  { orderId: order.id },
+                );
+              }
+            },
           },
         },
       );
@@ -830,6 +901,27 @@ function disputedSinceAuthorised(
         economicDisputeId: transaction.disputeId ?? null,
       }
     : null;
+}
+
+/** The step's own refusal, nothing before it: non-retryable, as a retry would be in doubt. */
+function provenIfListed(refusal: unknown): unknown {
+  return isRastaError(refusal) && PROVEN_REFUSALS.has(refusal.code)
+    ? ApplicationFailure.create({
+        message: refusal.message,
+        type: refusal.code,
+        nonRetryable: true,
+        details: [REFUSED_ON_FIRST_ATTEMPT],
+      })
+    : refusal;
+}
+
+/** A read behind a step's reconciliation failed: retried, and never its code as the step's. */
+function reconciliationReadFailed(activity: SagaActivity, failure: unknown): ApplicationFailure {
+  const said = isRastaError(failure) ? failure.code : 'no answer';
+  return ApplicationFailure.retryable(
+    `Saga step ${activity} could not read the obligation to reconcile (${said})`,
+    'RECONCILIATION_READ_FAILED',
+  );
 }
 
 function asTemporalFailure(error: unknown): Error {

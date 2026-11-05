@@ -288,14 +288,28 @@ doubling from one minute to one hour, and nothing settles meanwhile. After resto
 economic-service, try now with the same signal, which keeps its name:
 `--name retryDisputeRelease`.
 
-Only a refusal of the call itself with a code in `PROVEN_REFUSALS` (`workflows.ts`)
-ends the wait's saga, with the funds held for a person and no alert of its own.
-Everything else waits: 5xx, timeouts, resets, unlisted codes, the 4xx that refuse
-only one attempt, and any failure to read the order. A persistent
-`IDEMPOTENCY_KEY_REUSED` will not clear on its own: read the transaction at
-economic-service and reconcile by hand before terminating anything. A routing or
-configuration fault can answer a listed code before the key is looked up, so after
-such a fault check the obligation of any saga that failed on one.
+Only a refusal the activity marks as proof ends the saga, with the funds held for a
+person and no alert of its own: its own refusal, by the receipt guard or the send,
+with a code in `PROVEN_REFUSALS` (`economic-refusal.ts`), on the first attempt this
+run scheduled. A `temporal workflow reset` starts a new run with first attempts and no
+memory of the old ones, so read the obligation before resetting such a saga. A code
+says nothing of the attempts before it, so once any attempt went unconfirmed no code
+ends the wait: not a listed 4xx, not a routing or configuration fault, not a failed
+read of the order or of the obligation (`RECONCILIATION_READ_FAILED`). From then on
+each failed send reads the obligation.
+Its effect (`PENDING_SETTLEMENT`, `SETTLED`, or disputed after this saga's own
+authorisation) is the answer and the saga goes on. `REFUNDED`, `CANCELLED` or `FAILED`
+ends the saga (`OBLIGATION_ALREADY_FINAL`), since no late request can move them.
+Anything else stays in this phase, `HELD` included: an earlier request can still
+commit, so `HELD` proves nothing.
+
+A wait that will not clear shows why in the log line's code: fix the route or
+configuration and signal. For a real refusal at `HELD` (a persistent
+`IDEMPOTENCY_KEY_REUSED`, say) read the transaction at economic-service and reconcile
+by hand before terminating anything. For `BUSINESS_RULE_VIOLATION` on an order with no
+receipt, follow `marketplace-receipt-evidence.md`. A dispute also takes the saga out of
+the wait; the doubt goes with it, so if the order comes back to settlement the call
+is sent as in doubt, not as new, and a failure returns to this phase.
 
 Each round reads the order first, and a party's signal starts one early. Once a
 dispute is raised or decided the authorisation stops being sent, but the saga stays
