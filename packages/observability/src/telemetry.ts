@@ -1,10 +1,16 @@
-import { NodeSDK, core, logs } from '@opentelemetry/sdk-node';
-// NodeSDK's own builders for the span pipeline it derives from its config and
-// the environment. The package has no `exports` map, and `NodeSDK.start()`
-// calls exactly these; see `exportingSpanProcessors`.
+import { NodeSDK, core, logs, metrics as sdkMetrics } from '@opentelemetry/sdk-node';
+// NodeSDK's own builders for the pipelines it derives from its config and the
+// environment. The package has no `exports` map; `NodeSDK` calls exactly these
+// (see `spanPipeline` and `metricReadersFromEnv`).
 import { createBatchSpanProcessorFromEnv } from '@opentelemetry/sdk-node/build/src/create-from-env';
-import { getSpanProcessorsFromEnv } from '@opentelemetry/sdk-node/build/src/utils';
+import {
+  getOtlpMetricExporterFromEnv,
+  getPeriodicExportingMetricReaderFromEnv,
+  getSpanProcessorsFromEnv,
+} from '@opentelemetry/sdk-node/build/src/utils';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
+import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
+import { logs as logsApi } from '@opentelemetry/api-logs';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
@@ -18,6 +24,7 @@ import {
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace-node';
 import {
+  diag,
   trace,
   metrics,
   context as otelContext,
@@ -111,6 +118,10 @@ export class RastaSampler implements Sampler {
 }
 
 let sdk: NodeSDK | undefined;
+/** True while `initTelemetry` builds: a call made from inside it is refused. */
+let building = false;
+/** The shutdown in progress: until it settles no SDK may start. */
+let stopping: Promise<void> | undefined;
 
 type Instrumentations = ReturnType<typeof getNodeAutoInstrumentations>;
 
@@ -120,6 +131,14 @@ type Instrumentations = ReturnType<typeof getNodeAutoInstrumentations>;
  */
 export const UNREADABLE_OTLP_ENDPOINT =
   'OTEL_EXPORTER_OTLP_ENDPOINT cannot be read as a URL; its value is not repeated';
+
+/** What `initTelemetry` refuses a call made while it is still building the SDK with. */
+export const TELEMETRY_ALREADY_STARTING =
+  'initTelemetry was called while it was already building the SDK; the inner call is refused';
+
+/** What `initTelemetry` refuses a call made before a pending shutdown settled with. */
+export const TELEMETRY_STILL_STOPPING =
+  'initTelemetry was called while shutdownTelemetry was still stopping the SDK; await it first';
 
 /**
  * Why telemetry did not start, or did not stop cleanly: a fixed text naming
@@ -137,28 +156,69 @@ export const TELEMETRY_SHUTDOWN_FAILED =
   'configured values';
 
 /**
+ * What a start builds, kept so that a refusal can release all of it and a
+ * commit can start what holds a resource (#426 r1 F3).
+ *
+ * Built inert, committed last: every part that would hold a process resource
+ * (the Prometheus listener, a periodic reader's export timer) is built with
+ * that resource deferred, and `activations` starts them only once nothing of
+ * the start can throw any more. So a refusal is reported with nothing of
+ * this start listening or scheduled — there is no closure to wait for — and
+ * `releases` shuts down, without flushing, every exporter and reader it was
+ * handed or built. What the SDK's own builders make and lose when one of them
+ * throws part-way (an exporter `getSpanProcessorsFromEnv` built before the
+ * next one refused) holds nothing until its first export, which never comes:
+ * `telemetry-ownership.spec.ts` proves the process holds exactly what it held
+ * before, for every exporter kind built ahead of a refusing one.
+ */
+interface Construction {
+  /** Run on refusal, each guarded: shut one part down, dropping what it reports. */
+  readonly releases: (() => unknown)[];
+  /** Run at commit, in order: start what holds a resource. */
+  readonly activations: (() => void)[];
+}
+
+/**
  * Builds and starts the SDK once per process; later calls return the same SDK.
  *
- * Everything of the SDK that reads configuration runs inside one boundary —
- * the auto-instrumentations, the `NodeSDK` constructor (which builds the
- * metric readers and their exporters, even under `OTEL_SDK_DISABLED`), and
- * `start()` (which builds the span and log exporters and their processors:
- * OTLP over http/json, http/protobuf or gRPC, Zipkin, console; gRPC metadata
- * from `*_HEADERS`). Whatever any of them throws is discarded and replaced by
- * a fresh {@link TelemetryRefusedError} naming the stage's registered
- * settings. What the SDK reports instead of throwing — during start, an
- * export, a shutdown — goes to `diag`, whose only logger is the safe one
- * (diagnostics.ts).
+ * Synchronous on purpose: every service's main.ts and its `pnpm dev` preload
+ * call it before the application graph is imported, and the instrumentations
+ * it installs patch modules as they load.
  *
- * A refused start leaves nothing behind: the instrumentations are disabled,
- * whatever the SDK registered globally is unregistered and its providers are
- * shut down, and no SDK is kept — so a later call builds afresh (and refuses
- * again under the same configuration) rather than returning a half-built one.
+ * Everything of the SDK that reads configuration runs inside one boundary —
+ * the auto-instrumentations, the metric readers and their exporters (built
+ * here, as the `NodeSDK` constructor would build them, even under
+ * `OTEL_SDK_DISABLED`), the `NodeSDK` constructor, and `start()` (which builds
+ * the span and log exporters and their processors: OTLP over http/json,
+ * http/protobuf or gRPC, Zipkin, console; gRPC metadata from `*_HEADERS`).
+ * Whatever any of them throws is discarded and replaced by a fresh
+ * {@link TelemetryRefusedError} naming the stage's registered settings. What
+ * the SDK reports instead of throwing — during start, an export, a shutdown —
+ * goes to `diag`, whose only logger is the safe one (diagnostics.ts).
+ *
+ * A refused start leaves nothing behind (see {@link Construction}): the
+ * instrumentations are disabled, whatever the SDK registered globally is
+ * unregistered, nothing of it is listening or scheduled, every exporter and
+ * reader is shut down, and no SDK is kept — so a later call builds afresh
+ * (and refuses again under the same configuration) rather than returning a
+ * half-built one, and finds the Prometheus port free. A call made while one
+ * is building, or while {@link shutdownTelemetry} is still stopping the SDK,
+ * is refused.
  */
 export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   if (config.enabled === false) return undefined;
   if (sdk) return sdk;
+  if (building) throw new TelemetryRefusedError(TELEMETRY_ALREADY_STARTING);
+  if (stopping) throw new TelemetryRefusedError(TELEMETRY_STILL_STOPPING);
+  building = true;
+  try {
+    return buildAndStart(config);
+  } finally {
+    building = false;
+  }
+}
 
+function buildAndStart(config: TelemetryConfig): NodeSDK {
   // Before anything of the SDK runs — `getNodeAutoInstrumentations` below reads
   // its own variables, and the constructor reads the rest, `OTEL_SDK_DISABLED`
   // first: whatever they report goes through the safe logger (diagnostics.ts).
@@ -176,13 +236,13 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
     'deployment.environment': config.environment ?? process.env.NODE_ENV ?? 'development',
   });
 
+  const construction: Construction = { releases: [], activations: [] };
   let spanProcessors: SpanProcessor[] | undefined;
   // Which part of the SDK is being built, for the refusal's names.
   let stage: TelemetryStage = 'instrumentations';
   let instrumentations: Instrumentations = [];
+  let registering = false;
   let built: NodeSDK | undefined;
-  let started = false;
-  let refused = false;
   try {
     instrumentations = getNodeAutoInstrumentations({
       // Filesystem spans are enormous in volume and near-useless for
@@ -197,64 +257,77 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
         },
       },
     });
-    // The constructor builds the metric readers from the environment.
     stage = 'metrics';
     // With OTEL_LOG_LEVEL hidden, so the constructor installs no console logger
     // of its own over the safe one.
-    built = withoutSdkLogLevel(
-      () =>
-        new NodeSDK({
-          resource,
-          // Sanitizes what a span is started with before the SDK cuts it; the
-          // redacting span processor below takes everything written after.
-          sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
-          // Built when `start()` reads it — after NodeSDK has registered its meter
-          // provider, at the point where it would build the same processors itself —
-          // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.
-          // Read last before the log exporters, which `start()` builds next.
-          get spanProcessors(): SpanProcessor[] {
-            stage = 'traces';
-            spanProcessors ??= spanPipeline(config);
-            stage = 'logs';
-            return spanProcessors;
-          },
-          logRecordProcessors: config.logRecordExporter
-            ? [new logs.SimpleLogRecordProcessor({ exporter: config.logRecordExporter })]
-            : undefined,
-          instrumentations: [instrumentations],
-        }),
-    );
+    built = withoutSdkLogLevel(() => {
+      const metricReaders = metricReadersFromEnv(construction);
+      const logExporter = config.logRecordExporter;
+      if (logExporter) construction.releases.push(() => logExporter.shutdown());
+      return new NodeSDK({
+        resource,
+        // Sanitizes what a span is started with before the SDK cuts it; the
+        // redacting span processor below takes everything written after.
+        sampler: new RedactingSampler(new RastaSampler(config.sampleRatio ?? 1)),
+        metricReaders,
+        // Built when `start()` reads it — after NodeSDK has registered its meter
+        // provider, at the point where it would build the same processors itself —
+        // and not at all under `OTEL_SDK_DISABLED`, where `start()` reads nothing.
+        // Read last before the log exporters, which `start()` builds next.
+        get spanProcessors(): SpanProcessor[] {
+          stage = 'traces';
+          spanProcessors ??= spanPipeline(config, construction);
+          stage = 'logs';
+          return spanProcessors;
+        },
+        logRecordProcessors: logExporter
+          ? [new logs.SimpleLogRecordProcessor({ exporter: logExporter })]
+          : undefined,
+        instrumentations: [instrumentations],
+      });
+    });
     // Again, after construction and after start, should anything have replaced it.
     reinstallDiagnostics();
     stage = 'sdk';
-    started = true;
+    registering = true;
     built.start();
     reinstallDiagnostics();
   } catch {
     // Nothing of the error is kept: not its message, cause, stack or properties.
-    refused = true;
-  }
-  if (refused) {
-    discardPartialStart(built, instrumentations, started);
+    discardPartialStart(instrumentations, registering, construction);
     reinstallDiagnostics();
     throw new TelemetryRefusedError(telemetryRefusal(stage, process.env));
   }
+  // The commit: nothing below throws. Only now does anything listen or tick.
+  for (const activate of construction.activations) {
+    try {
+      activate();
+    } catch {
+      diag.error(READER_NOT_STARTED);
+    }
+  }
   sdk = built;
-  return sdk;
+  return built;
 }
+
+/** What `diag` is told when a committed reader cannot start; nothing of its error. */
+const READER_NOT_STARTED =
+  'A metric reader could not start (OTEL_METRICS_EXPORTER, OTEL_EXPORTER_PROMETHEUS_HOST, ' +
+  'OTEL_EXPORTER_PROMETHEUS_PORT); its error is withheld';
 
 /**
  * Undoes what a refused start did: disables the instrumentations (they patch
  * modules as they are built), unregisters what `start()` registers globally —
  * the context manager, the propagator, and the meter and tracer providers
  * (the logger provider is registered last, so a refused start never reached
- * it) — and shuts the built SDK's providers down. The shutdown is not awaited;
- * whatever it reports goes to `diag`, and a rejection is dropped.
+ * it) — and runs every release. Nothing of this start listens or is scheduled
+ * (see {@link Construction}), so the refusal waits for nothing; what a release
+ * throws or rejects with is dropped, unread.
  */
 function discardPartialStart(
-  built: NodeSDK | undefined,
   instrumentations: Instrumentations,
-  started: boolean,
+  registering: boolean,
+  construction: Construction,
 ): void {
   for (const instrumentation of instrumentations) {
     try {
@@ -263,13 +336,98 @@ function discardPartialStart(
       // Best effort; its error is not reported, for the same reason.
     }
   }
-  if (started) {
-    trace.disable();
-    metrics.disable();
-    otelContext.disable();
-    propagation.disable();
+  if (registering) unregisterGlobals();
+  for (const release of construction.releases) {
+    try {
+      Promise.resolve(release()).catch(() => undefined);
+    } catch {
+      // Dropped, unread, like the rejection.
+    }
   }
-  built?.shutdown().catch(() => undefined);
+}
+
+/** Unregisters everything `NodeSDK.start()` registers with the API. */
+function unregisterGlobals(): void {
+  trace.disable();
+  metrics.disable();
+  logsApi.disable();
+  otelContext.disable();
+  propagation.disable();
+}
+
+/**
+ * The metric readers the `NodeSDK` constructor would build from
+ * `OTEL_METRICS_EXPORTER` — the same kinds, order and settings, through the
+ * same builders (`getMetricReadersFromEnv` in sdk-node's sdk.js, which it does
+ * not export; `telemetry-ownership.spec.ts` compares the two) — but inert: the
+ * Prometheus exporter does not listen and a periodic reader does not schedule
+ * its export when the meter provider registers them. Both are deferred to
+ * the commit, and only for a reader the SDK did register: under
+ * `OTEL_SDK_DISABLED` nothing is.
+ */
+function metricReadersFromEnv(construction: Construction): sdkMetrics.MetricReader[] {
+  const readers: sdkMetrics.MetricReader[] = [];
+  const enabled = Array.from(new Set(core.getStringListFromEnv('OTEL_METRICS_EXPORTER') ?? []));
+  if (enabled.length === 0) {
+    diag.debug('OTEL_METRICS_EXPORTER is empty. Using default otlp exporter.');
+    enabled.push('otlp');
+  }
+  if (enabled.includes('none')) {
+    diag.info('OTEL_METRICS_EXPORTER contains "none". Metric provider will not be initialized.');
+    return readers;
+  }
+  const periodic = (exporter: sdkMetrics.PushMetricExporter, reader: () => unknown): void => {
+    construction.releases.push(() => exporter.shutdown());
+    const built = reader() as sdkMetrics.MetricReader;
+    readers.push(deferInitialization(built, construction, () => undefined));
+  };
+  for (const name of enabled) {
+    if (name === 'otlp') {
+      const exporter = getOtlpMetricExporterFromEnv();
+      periodic(exporter, () => getPeriodicExportingMetricReaderFromEnv(exporter));
+    } else if (name === 'console') {
+      const exporter = new sdkMetrics.ConsoleMetricExporter();
+      periodic(exporter, () => new sdkMetrics.PeriodicExportingMetricReader({ exporter }));
+    } else if (name === 'prometheus') {
+      const exporter = new PrometheusExporter({ preventServerStart: true });
+      construction.releases.push(() => exporter.shutdown());
+      readers.push(
+        deferInitialization(exporter, construction, () => {
+          // A refused listen (the port taken) is reported, as NodeSDK's own
+          // exporter reports it — but with nothing of its error.
+          exporter.startServer().catch(() => {
+            diag.error(READER_NOT_STARTED);
+          });
+        }),
+      );
+    } else {
+      diag.warn(
+        `Unsupported OTEL_METRICS_EXPORTER value: "${name}". Supported values are: otlp, console, prometheus, none.`,
+      );
+    }
+  }
+  return readers;
+}
+
+/**
+ * `reader`, with what the meter provider calls when it registers it —
+ * `onInitialized`, where a periodic reader starts its export timer — deferred
+ * to the commit, followed there by `thenStart` (the Prometheus listener).
+ */
+function deferInitialization<T extends sdkMetrics.MetricReader>(
+  reader: T,
+  construction: Construction,
+  thenStart: () => void,
+): T {
+  const hook = reader as unknown as { onInitialized(): void };
+  const initialize = hook.onInitialized.bind(reader);
+  hook.onInitialized = () => {
+    construction.activations.push(() => {
+      initialize();
+      thenStart();
+    });
+  };
+  return reader;
 }
 
 /**
@@ -288,17 +446,26 @@ function discardPartialStart(
  * every exporting processor only ever sees — and exports — the sanitized span. With no
  * exporting processor (`OTEL_TRACES_EXPORTER=none`) the pipeline is empty, and
  * NodeSDK then registers no tracer provider, as it did before.
+ *
+ * Each exporter is released on refusal as soon as it exists: an explicit one
+ * itself, the environment's through the processor around it (no span has
+ * ended yet, so its shutdown flushes nothing).
  */
-function spanPipeline(config: TelemetryConfig): SpanProcessor[] {
+function spanPipeline(config: TelemetryConfig, construction: Construction): SpanProcessor[] {
   // NodeSDK's SDK self-metrics meter: its own provider, which `start()` has
   // registered globally by now, when the opt-in variable is set.
   const selfMetrics = core.getBooleanFromEnv('OTEL_NODE_EXPERIMENTAL_SDK_METRICS')
     ? metrics.getMeterProvider()
     : undefined;
   const exporter = config.traceExporter ?? otlpTraceExporter(config.otlpEndpoint);
-  const exporting = exporter
-    ? [createBatchSpanProcessorFromEnv(exporter, selfMetrics)]
-    : getSpanProcessorsFromEnv(selfMetrics);
+  let exporting: SpanProcessor[];
+  if (exporter) {
+    construction.releases.push(() => exporter.shutdown());
+    exporting = [createBatchSpanProcessorFromEnv(exporter, selfMetrics)];
+  } else {
+    exporting = getSpanProcessorsFromEnv(selfMetrics);
+    for (const processor of exporting) construction.releases.push(() => processor.shutdown());
+  }
   return exporting.length > 0 ? [new RedactingSpanProcessor(), ...exporting] : [];
 }
 
@@ -312,20 +479,37 @@ function otlpTraceExporter(otlpEndpoint: string | undefined): SpanExporter | und
 }
 
 /**
- * Flushes and stops the SDK. Rejects, when the SDK's shutdown does, with a
- * fresh {@link TelemetryRefusedError} ({@link TELEMETRY_SHUTDOWN_FAILED}): the
+ * Flushes and stops the SDK, then unregisters it from the API, so that a later
+ * {@link initTelemetry} starts a new one that is really used. Concurrent calls
+ * share one outcome — none resolves before the Prometheus listener has
+ * closed — and until it settles `initTelemetry` refuses.
+ *
+ * Rejects, when the SDK's shutdown does, with a fresh
+ * {@link TelemetryRefusedError} ({@link TELEMETRY_SHUTDOWN_FAILED}): the
  * SDK's own rejection — an exporter's, quoting its endpoint or a collector's
  * answer — is dropped, since the caller logs what it is given.
  */
-export async function shutdownTelemetry(): Promise<void> {
+export function shutdownTelemetry(): Promise<void> {
+  if (stopping) return stopping;
   const current = sdk;
-  if (!current) return;
+  if (!current) return Promise.resolve();
   sdk = undefined;
-  let failed = false;
-  await current.shutdown().catch(() => {
-    failed = true;
+  const stop = async (): Promise<void> => {
+    let failed = false;
+    // Through `then`, so a shutdown that throws instead of rejecting is caught alike.
+    await Promise.resolve()
+      .then(() => current.shutdown())
+      .catch(() => {
+        failed = true;
+      });
+    unregisterGlobals();
+    if (failed) throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
+  };
+  const pending = stop().finally(() => {
+    stopping = undefined;
   });
-  if (failed) throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
+  stopping = pending;
+  return pending;
 }
 
 // ---------------------------------------------------------------------------
