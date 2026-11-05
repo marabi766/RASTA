@@ -249,13 +249,14 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
-  // `git ls-files -co --exclude-standard -z`, `check-ignore --no-index -z --stdin`, `init -q --bare`: the one listing.
+  // `git ls-files -co --exclude-standard -z`, `check-ignore --no-index -z --stdin`, `init -q --bare`, `--literal-pathspecs`: the one listing.
   'scripts/authored-source-inventory.cjs': {
     other: [
       '--bare',
       '--cached',
       '--deleted',
       '--exclude-standard',
+      '--literal-pathspecs',
       '--no-index',
       '--others',
       '--stdin',

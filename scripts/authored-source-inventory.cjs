@@ -21,10 +21,11 @@
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const { tmpdir } = require('node:os');
+const { TextDecoder } = require('node:util');
 const { join, relative, resolve, sep, isAbsolute } = require('node:path');
 
 const REPO_ROOT = resolve(__dirname, '..');
-const DECODER = new TextDecoder('utf-8', { fatal: true });
+const DECODER = new TextDecoder('utf-8', { fatal: true }); // from node:util: a jsdom Jest environment has no global
 
 const inside = (base, path) => {
   const rel = relative(base, path);
