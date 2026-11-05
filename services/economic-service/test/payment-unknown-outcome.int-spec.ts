@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import {
+  bareObligation,
   asActor,
   cleanup,
   newPrisma,
@@ -83,15 +84,16 @@ describe('payment outcomes that must not be guessed (real database)', () => {
 
   /** Takes `amountMinor` out of the wallet's available balance with a hold. */
   async function spend(organizationId: string, walletId: string, amountMinor: bigint) {
+    const reference = await bareObligation(wiring.prisma, organizationId);
     await asActor({ organizationId }, () =>
       wiring.prisma.transaction(async (tx) => {
         const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
         await wiring.wallets.placeHold(tx, {
           wallet: locked!,
           amountMinor,
-          reference: `TXN_${ulid()}`,
+          reference,
           referenceType: 'TRANSACTION',
-          transactionId: `TXN_${ulid()}`,
+          transactionId: reference,
           placedBy: 'unknown-outcome-itest',
         });
       }),

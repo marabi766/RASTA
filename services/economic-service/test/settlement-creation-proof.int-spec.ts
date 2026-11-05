@@ -40,6 +40,13 @@ const UNSETTLED = /moves its transaction to SETTLED/;
 const JOURNAL = /SETTLEMENT journal its own transaction posted/;
 const LEGS = /legs of a settlement journal are exactly the settlement/;
 const HOLD = /debits escrow exactly when its journal released the hold/;
+const NEVER_DELETED = /never deleted: nothing else ever answers to its id/;
+const IDENTITY = /Who pays whom, how much/;
+const HOLD_WALLET = /on a wallet of its own organization/;
+const HOLD_TRANSACTION = /names a transaction of its own organization/;
+const HOLD_PURPOSE = /for anything else names no transaction/;
+const HOLD_FIXED = /Whose a hold is and what it is for never changes/;
+const HOLD_BOUND = 'trg_wallet_hold_reference_bound';
 
 interface Leg {
   accountId: string;
@@ -127,8 +134,10 @@ describe('the proof of a settlement at its creation (real database, runtime role
   };
 
   /** An authorised transaction, through the service: ready to settle, nothing else true yet. */
-  async function pending(options: { to?: string; holdFunds?: boolean; line?: boolean } = {}) {
-    const { to = chargedPayee, holdFunds = false, line = true } = options;
+  async function pending(
+    options: { to?: string; holdFunds?: boolean; line?: boolean; authorised?: boolean } = {},
+  ) {
+    const { to = chargedPayee, holdFunds = false, line = true, authorised = true } = options;
     const transaction = await asActor({ organizationId: payer }, () =>
       wiring.transactions.create({
         transactionType: 'MARKETPLACE_ORDER',
@@ -139,9 +148,11 @@ describe('the proof of a settlement at its creation (real database, runtime role
         holdFunds,
       }),
     );
-    await asActor({ organizationId: payer }, () =>
-      wiring.transactions.authoriseSettlement(transaction.id),
-    );
+    if (authorised) {
+      await asActor({ organizationId: payer }, () =>
+        wiring.transactions.authoriseSettlement(transaction.id),
+      );
+    }
     return transaction.id;
   }
 
@@ -168,7 +179,7 @@ describe('the proof of a settlement at its creation (real database, runtime role
     tx.$executeRawUnsafe(INSERT_ROW(table), JSON.stringify(row));
 
   const insertJournal = async (tx: Tx, transactionId: string, overrides: Row = {}) => {
-    const id = `JRN_${ulid()}`;
+    const id = (overrides.id as string | undefined) ?? `JRN_${ulid()}`;
     const now = new Date();
     await insertRow(tx, 'journal', {
       id,
@@ -295,12 +306,11 @@ describe('the proof of a settlement at its creation (real database, runtime role
         await tx.$executeRawUnsafe(
           `UPDATE "transaction"
               SET status = 'SETTLED', settled_at = $2::timestamp(3), commission_amount_minor = $3::bigint,
-                  net_amount_minor = $4::bigint
+                  net_amount_minor = gross_amount_minor - $3::bigint
             WHERE id = $1`,
           transactionId,
           settledAt,
           REVENUE,
-          NET,
         );
       }
     });
@@ -494,9 +504,10 @@ describe('the proof of a settlement at its creation (real database, runtime role
       ['its payer', `organization_id = 'ORG-ELSEWHERE'`],
       ['its currency', `currency = 'USD'`],
       ['its line', `business_line = 'LOGISTICS'`],
+      ['its id', `id = 'TXN_SHADOW'`],
     ])('%s never changes', async (_label, assignment) => {
       const transactionId = await pending();
-      await expect(update(transactionId, assignment)).rejects.toThrow(/Who pays whom, how much/);
+      await expect(update(transactionId, assignment)).rejects.toThrow(IDENTITY);
     });
 
     it('moved to SETTLED alone, nothing else written, it is refused at commit', async () => {
@@ -536,6 +547,187 @@ describe('the proof of a settlement at its creation (real database, runtime role
       const transactionId = await pending();
       await settleForReal(transactionId);
       await expect(update(transactionId, assignment)).rejects.toThrow(/settled at never changes/);
+    });
+  });
+
+  /**
+   * #762 r1, F1. The proof compares a settlement with the row under its id, so that row
+   * is what must not be replaced. Replayed whole: on a schema without the freeze each
+   * of these commits, and the forged settlement is accepted.
+   */
+  describe('replacing a transaction under its original id', () => {
+    const rowOf = async (transactionId: string) => {
+      const [found] = await owner.$queryRawUnsafe<{ row: Row }[]>(
+        `SELECT to_jsonb(t) AS row FROM "transaction" t WHERE id = $1`,
+        transactionId,
+      );
+      return found!.row;
+    };
+
+    /** The forgery that agrees with a replacement of this payee and gross, and nothing else. */
+    const settlementOf = async (to: string, gross: bigint): Promise<Forgery> => {
+      const net = gross - REVENUE;
+      const payeeWallet = await accountOf(to, 'WALLET');
+      return {
+        settlement: {
+          payee_organization_id: to,
+          gross_amount_minor: Number(gross),
+          net_amount_minor: Number(net),
+        },
+        commission: { organization_id: to, gross_amount_minor: Number(gross) },
+        legs: (from) => [
+          { accountId: from.payerWallet, organizationId: payer, direction: 'DEBIT', amount: gross },
+          { accountId: payeeWallet, organizationId: to, direction: 'CREDIT', amount: net },
+          {
+            accountId: from.revenue,
+            organizationId: PLATFORM_ORGANIZATION_ID,
+            direction: 'CREDIT',
+            amount: REVENUE,
+          },
+        ],
+      };
+    };
+
+    const REPLACEMENTS = [
+      ['another payee', () => stranger, GROSS],
+      ['a lower gross', () => chargedPayee, 2_000n],
+    ] as const;
+
+    /** The real settlement afterwards still pays whom the original said, what it said. */
+    const stillTheOriginal = async (transactionId: string, original: Row) => {
+      expect(await rowOf(transactionId)).toEqual(original);
+      await settleForReal(transactionId);
+      const [settled] = await owner.$queryRawUnsafe<{ payee: string; gross: bigint }[]>(
+        `SELECT payee_organization_id AS payee, gross_amount_minor AS gross
+           FROM settlement WHERE transaction_id = $1`,
+        transactionId,
+      );
+      expect(settled).toEqual({ payee: chargedPayee, gross: GROSS });
+    };
+
+    it.each(REPLACEMENTS)(
+      'its legs and row deleted, written again with %s, then settled by hand',
+      async (_label, to, gross) => {
+        const transactionId = await pending();
+        const original = await rowOf(transactionId);
+        const forgery = await settlementOf(to(), gross);
+        const replayed = (async () => {
+          await runtime.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(
+              'DELETE FROM transaction_leg WHERE transaction_id = $1',
+              transactionId,
+            );
+            await tx.$executeRawUnsafe('DELETE FROM "transaction" WHERE id = $1', transactionId);
+            await insertRow(tx, '"transaction"', {
+              ...original,
+              counterparty_organization_id: to(),
+              gross_amount_minor: Number(gross),
+            });
+          });
+          await write(transactionId, forgery);
+        })();
+        await expect(replayed).rejects.toThrow(NEVER_DELETED);
+        await stillTheOriginal(transactionId, original);
+      },
+    );
+
+    it.each(REPLACEMENTS)(
+      'renamed, its id reused with %s, then settled by hand',
+      async (_label, to, gross) => {
+        const transactionId = await pending();
+        const original = await rowOf(transactionId);
+        const forgery = await settlementOf(to(), gross);
+        const replayed = (async () => {
+          await runtime.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(
+              `UPDATE "transaction" SET id = $2, idempotency_key = NULL, source_reference = NULL
+                WHERE id = $1`,
+              transactionId,
+              `${transactionId}-SHADOW`,
+            );
+            await insertRow(tx, '"transaction"', {
+              ...original,
+              counterparty_organization_id: to(),
+              gross_amount_minor: Number(gross),
+            });
+          });
+          await write(transactionId, forgery);
+        })();
+        await expect(replayed).rejects.toThrow(IDENTITY);
+        await stillTheOriginal(transactionId, original);
+      },
+    );
+
+    it('renamed, its id reused by a row already SETTLED, which reserved it', async () => {
+      const transactionId = await pending();
+      const original = await rowOf(transactionId);
+      const replayed = runtime.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          `UPDATE "transaction" SET id = $2, idempotency_key = NULL, source_reference = NULL
+            WHERE id = $1`,
+          transactionId,
+          `${transactionId}-SHADOW`,
+        );
+        await insertRow(tx, '"transaction"', {
+          ...original,
+          counterparty_organization_id: stranger,
+          gross_amount_minor: 1,
+          commission_amount_minor: 0,
+          net_amount_minor: 1,
+          status: 'SETTLED',
+          settled_at: new Date(),
+        });
+      });
+      await expect(replayed).rejects.toThrow(IDENTITY);
+      await stillTheOriginal(transactionId, original);
+    });
+
+    it('an upsert on its id is the same update', async () => {
+      const transactionId = await pending();
+      const original = await rowOf(transactionId);
+      await expect(
+        runtime.$executeRawUnsafe(
+          `INSERT INTO "transaction" SELECT * FROM jsonb_populate_record(NULL::"transaction", $1::jsonb)
+           ON CONFLICT (id) DO UPDATE SET counterparty_organization_id = 'ORG-ELSEWHERE'`,
+          JSON.stringify(original),
+        ),
+      ).rejects.toThrow(IDENTITY);
+    });
+
+    it('no kind of obligation is deleted, by the runtime role or the owner', async () => {
+      const kinds = await owner.$queryRawUnsafe<{ kind: string }[]>(
+        `SELECT unnest(enum_range(NULL::"TransactionType"))::text AS kind`,
+      );
+      expect(kinds.length).toBeGreaterThanOrEqual(6);
+      for (const { kind } of kinds) {
+        const transactionId = `TXN_${ulid()}`;
+        await runtime.$executeRawUnsafe(
+          `INSERT INTO "transaction" (id, organization_id, transaction_type, status, gross_amount_minor,
+                                      occurred_at, correlation_id, updated_at, created_by)
+           VALUES ($1, $2, $3::"TransactionType", 'CREATED', 1, now(), 'itest', now(), 'itest')`,
+          transactionId,
+          payer,
+          kind,
+        );
+        for (const client of [runtime, owner]) {
+          await expect(
+            client.$executeRawUnsafe('DELETE FROM "transaction" WHERE id = $1', transactionId),
+          ).rejects.toThrow(NEVER_DELETED);
+        }
+      }
+    });
+
+    it.each([
+      ['transaction', '"transaction" CASCADE'],
+      ['wallet_hold', 'wallet_hold'],
+    ])('%s is not emptied', async (table, target) => {
+      await expect(
+        // ISOLATION-ALLOW-UNBOUNDED: refused by the trigger under test, in a transaction rolled back below.
+        owner.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`TRUNCATE ${target}`);
+          throw new Error('rolled back: it was not refused');
+        }),
+      ).rejects.toThrow(`${table} records what is owed and held`);
     });
   });
 
@@ -848,7 +1040,6 @@ describe('the proof of a settlement at its creation (real database, runtime role
 
     it.each([
       ['released by another journal', (id: string) => ({ resolved_journal_id: `${id}X` })],
-      ['of another organization', () => ({ organization_id: 'ORG-ELSEWHERE' })],
       ['for another amount', () => ({ amount_minor: 1 })],
       ['in another currency', () => ({ currency: 'USD' })],
       ['refunded by this journal, not released', () => ({ status: 'REFUNDED' })],
@@ -872,7 +1063,7 @@ describe('the proof of a settlement at its creation (real database, runtime role
               currency: 'IRR',
               status: 'RELEASED',
               reference: transactionId,
-              reference_type: 'OTHER',
+              reference_type: 'TRANSACTION',
               resolved_journal_id: journalId,
               placed_at: now,
               placed_by: 'itest',
@@ -882,6 +1073,283 @@ describe('the proof of a settlement at its creation (real database, runtime role
         },
         HOLD,
       );
+    });
+  });
+
+  /**
+   * #762 r1, F2. Two tenants: the payer's transaction, and {@link stranger}'s rows
+   * naming its id. `lifted` plants what the guard now refuses: a row from before it.
+   */
+  describe('whose hold counts', () => {
+    const walletOf = async (organizationId: string) => {
+      const [wallet] = await owner.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM wallet WHERE organization_id = $1 AND currency = 'IRR'`,
+        organizationId,
+      );
+      return wallet!.id;
+    };
+
+    const holdRow = async (transactionId: string, overrides: Row & { of?: string }) => {
+      const { of = payer, ...rest } = overrides;
+      return {
+        id: `HLD_${ulid()}`,
+        organization_id: of,
+        wallet_id: await walletOf(of),
+        amount_minor: Number(GROSS),
+        currency: 'IRR',
+        status: 'ACTIVE',
+        reference: transactionId,
+        reference_type: 'TRANSACTION',
+        placed_at: new Date(),
+        placed_by: 'itest',
+        ...rest,
+      };
+    };
+
+    const planted = async (transactionId: string, overrides: Row & { of?: string }) => {
+      const row = await holdRow(transactionId, overrides);
+      await lifted('wallet_hold', HOLD_BOUND, (tx) => insertRow(tx, 'wallet_hold', row));
+      return row.id;
+    };
+
+    const written = async (transactionId: string, overrides: Row & { of?: string }) =>
+      insertRow(runtime, 'wallet_hold', await holdRow(transactionId, overrides));
+
+    describe('a new hold names what is its own', () => {
+      it.each([
+        ['another organization’s, for this transaction', () => ({ of: stranger }), HOLD_TRANSACTION],
+        [
+          'another organization’s, for anything else',
+          () => ({ of: stranger, reference_type: 'OTHER' }),
+          HOLD_PURPOSE,
+        ],
+        [
+          'its own, for anything else',
+          () => ({ reference_type: 'OTHER' }),
+          HOLD_PURPOSE,
+        ],
+        [
+          'claiming the payer, on another organization’s wallet',
+          () => ({ of: stranger, organization_id: payer }),
+          HOLD_WALLET,
+        ],
+        ['for a transaction that is not there', () => ({ reference: 'TXN_NONE' }), HOLD_TRANSACTION],
+      ])('%s is refused', async (_label, overrides, because) => {
+        const transactionId = await pending();
+        await expect(written(transactionId, overrides())).rejects.toThrow(because);
+      });
+
+      it('anything else, naming no transaction, is not this guard’s', async () => {
+        await written(`RESTORE-${ulid()}`, { reference_type: 'OTHER' });
+      });
+    });
+
+    describe('a hold cannot step out of the answer', () => {
+      it.each([
+        ['what it names', `reference = 'ELSEWHERE'`],
+        ['its purpose', `reference_type = 'OTHER'`],
+        ['its organization', `organization_id = 'ORG-ELSEWHERE'`],
+        ['its wallet', `wallet_id = 'WLT_ELSEWHERE'`],
+        ['its id', `id = 'HLD_ELSEWHERE'`],
+      ])('%s never changes', async (_label, assignment) => {
+        const transactionId = await pending({ holdFunds: true });
+        await expect(
+          runtime.$executeRawUnsafe(
+            `UPDATE wallet_hold SET ${assignment} WHERE reference = $1`,
+            transactionId,
+          ),
+        ).rejects.toThrow(HOLD_FIXED);
+      });
+
+      it.each([
+        ['to another organization', `organization_id = 'ORG-ELSEWHERE'`],
+        ['under another id', `id = 'WLT_ELSEWHERE'`],
+      ])('and the wallet under it does not move %s', async (_label, assignment) => {
+        await expect(
+          runtime.$executeRawUnsafe(
+            `UPDATE wallet SET ${assignment} WHERE id = $1`,
+            await walletOf(stranger),
+          ),
+        ).rejects.toThrow(/A wallet never changes hands/);
+      });
+
+      it('and it is never deleted, by the runtime role or the owner', async () => {
+        const transactionId = await pending({ holdFunds: true });
+        for (const client of [runtime, owner]) {
+          await expect(
+            client.$executeRawUnsafe('DELETE FROM wallet_hold WHERE reference = $1', transactionId),
+          ).rejects.toThrow(/A hold is never deleted/);
+        }
+      });
+    });
+
+    describe('a row from before the guard does not count', () => {
+      const FOREIGN = [
+        ['another organization’s, for this transaction', () => ({ of: stranger })],
+        [
+          'another organization’s, for anything else',
+          () => ({ of: stranger, reference_type: 'OTHER' }),
+        ],
+      ] as const;
+      const UNBOUND = [
+        ...FOREIGN,
+        [
+          'claiming the payer, on another organization’s wallet',
+          () => ({ of: stranger, organization_id: payer }),
+        ],
+        ['its own, for anything else', () => ({ reference_type: 'OTHER' })],
+      ] as const;
+
+      it.each(FOREIGN)('%s, ACTIVE, does not veto the real settlement', async (_label, row) => {
+        const transactionId = await pending();
+        await planted(transactionId, row());
+        await settleForReal(transactionId);
+        expect(await rowsOf(transactionId)).toMatchObject({ settlements: 1n, status: 'SETTLED' });
+      });
+
+      it('the payer’s own for anything else: settle() takes it for the escrow, and the proof refuses', async () => {
+        // Escrow that really is there, another transaction's, so the debit itself goes through.
+        await pending({ holdFunds: true });
+        const transactionId = await pending();
+        await planted(transactionId, { reference_type: 'OTHER' });
+        await expect(settleForReal(transactionId)).rejects.toThrow(HOLD);
+        expect(await rowsOf(transactionId)).toMatchObject({
+          settlements: 0n,
+          status: 'PENDING_SETTLEMENT',
+        });
+      });
+
+      // Not this migration's to close: `TransactionRepository.lockForUpdate` reads `fundsHeld` by
+      // reference and purpose only. It fails closed, no new row can reach it, and it wants src/.
+      it('another organization’s for this transaction, unauthorised: the service’s own read still refuses', async () => {
+        const transactionId = await pending({ authorised: false });
+        await runtime.$executeRawUnsafe(
+          `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = $1`,
+          transactionId,
+        );
+        await planted(transactionId, { of: stranger });
+        await expect(settleForReal(transactionId)).rejects.toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+        });
+        expect(await rowsOf(transactionId)).toMatchObject({ settlements: 0n });
+      });
+
+      it.each(UNBOUND)('%s, ACTIVE, is no hold left active', async (_label, row) => {
+        const transactionId = await pending();
+        await planted(transactionId, row());
+        await write(transactionId);
+        expect(await rowsOf(transactionId)).toMatchObject({ settlements: 1n, status: 'SETTLED' });
+      });
+
+      it.each(UNBOUND)(
+        '%s, RELEASED by this journal, is not the hold escrow was released from',
+        async (_label, row) => {
+          const transactionId = await pending();
+          const journalId = `JRN_${ulid()}`;
+          await planted(transactionId, {
+            ...row(),
+            status: 'RELEASED',
+            resolved_journal_id: journalId,
+            resolved_at: new Date(),
+          });
+          await refused(
+            transactionId,
+            {
+              journal: { id: journalId },
+              legs: (from) => [
+                { accountId: from.payerEscrow, organizationId: payer, direction: 'DEBIT', amount: GROSS },
+                ...walletLegs(from).slice(1),
+              ],
+            },
+            HOLD,
+          );
+        },
+      );
+
+      it.each(UNBOUND)(
+        '%s, is no held funds a settlement needs authority for',
+        async (_label, row) => {
+          const transactionId = await pending({ authorised: false });
+          await runtime.$executeRawUnsafe(
+            `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = $1`,
+            transactionId,
+          );
+          await planted(transactionId, row());
+          await write(transactionId);
+          expect(await rowsOf(transactionId)).toMatchObject({ settlements: 1n, status: 'SETTLED' });
+        },
+      );
+
+      it.each([FOREIGN[0], UNBOUND[2]])(
+        '%s, is not released on the authority of the transaction it names',
+        async (_label, row) => {
+          // The payer's real hold stands beside it: being one of this transaction's is the point.
+          const transactionId = await pending({ holdFunds: true });
+          const id = await planted(transactionId, row());
+          await expect(
+            runtime.$executeRawUnsafe(
+              `UPDATE wallet_hold SET status = 'RELEASED', resolved_journal_id = 'JRN_X', resolved_at = now(),
+                                      resolved_by = 'itest'
+                WHERE id = $1`,
+              id,
+            ),
+          ).rejects.toThrow(/released to the payee only/);
+        },
+      );
+
+      it.each(UNBOUND)(
+        '%s, does not send a resolved dispute back to HELD',
+        async (_label, row) => {
+          const transactionId = await pending({ authorised: false });
+          await planted(transactionId, row());
+          await runtime.$executeRawUnsafe(
+            `UPDATE "transaction" SET status = 'DISPUTED', disputed_at = now(), dispute_reason = 'itest'
+              WHERE id = $1`,
+            transactionId,
+          );
+          await runtime.$executeRawUnsafe(
+            `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT', dispute_resolved_at = now()
+              WHERE id = $1`,
+            transactionId,
+          );
+          expect(await rowsOf(transactionId)).toMatchObject({ status: 'PENDING_SETTLEMENT' });
+        },
+      );
+    });
+
+    it('the payer’s own hold still counts everywhere: the control', async () => {
+      const held = await pending({ holdFunds: true, authorised: false });
+      await expect(
+        runtime.$executeRawUnsafe(
+          `UPDATE wallet_hold SET status = 'RELEASED', resolved_journal_id = 'JRN_X', resolved_at = now(),
+                                  resolved_by = 'itest'
+            WHERE reference = $1`,
+          held,
+        ),
+      ).rejects.toThrow(/released to the payee only/);
+      await expect(
+        runtime.$executeRawUnsafe(
+          `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = $1`,
+          held,
+        ),
+      ).resolves.toBeDefined();
+      await expect(write(held)).rejects.toThrow(/settles only once its settlement is authorised/);
+    });
+
+    it('and it still sends a resolved dispute back to HELD: the control', async () => {
+      const held = await pending({ holdFunds: true, authorised: false });
+      await runtime.$executeRawUnsafe(
+        `UPDATE "transaction" SET status = 'DISPUTED', disputed_at = now(), dispute_reason = 'itest'
+          WHERE id = $1`,
+        held,
+      );
+      await expect(
+        runtime.$executeRawUnsafe(
+          `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT', dispute_resolved_at = now()
+            WHERE id = $1`,
+          held,
+        ),
+      ).rejects.toThrow(/where its settlement authority stands/);
     });
   });
 

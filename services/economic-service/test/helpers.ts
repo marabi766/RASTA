@@ -397,6 +397,24 @@ export async function readBalances(prisma: PrismaService, walletId: string) {
  * function may delete or alter a row it cannot show it owns —
  * `isolation-controls.int-spec.ts` seeds a foreign tenant and proves it.
  */
+/**
+ * An obligation of this organization and nothing else: what a hold placed directly
+ * through `WalletService` has to name (`trg_wallet_hold_reference_bound`).
+ */
+export async function bareObligation(prisma: PrismaService, organizationId: string) {
+  const id = `TXN_${ulid()}`;
+  await runUnscoped('the suite records an obligation for a hold to secure', () =>
+    prisma.client.$executeRawUnsafe(
+      `INSERT INTO "transaction" (id, organization_id, transaction_type, status, gross_amount_minor,
+                                  occurred_at, correlation_id, updated_at, created_by)
+       VALUES ($1, $2, 'MARKETPLACE_ORDER', 'CREATED', 1, now(), 'itest', now(), 'itest')`,
+      id,
+      organizationId,
+    ),
+  );
+  return id;
+}
+
 export async function cleanup(
   prisma: PrismaService,
   organizationIds: readonly string[],
@@ -689,25 +707,6 @@ export async function cleanup(
           'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_pricing_fixed',
         );
 
-        // A statement obligation is never deleted (CON-003 PR 6b), so this
-        // run's own go here, with the guard lifted in this transaction only;
-        // their legs, settlements and commissions are already gone above.
-        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_statement_obligation_fixed',
-        );
-        await tx.$executeRawUnsafe(
-          `DELETE FROM "transaction"
-            WHERE source_type = 'STATEMENT'
-              AND (organization_id LIKE ANY($1::text[])
-                   OR counterparty_organization_id LIKE ANY($1::text[]))`,
-          orgs,
-        );
-        // ISOLATION-ALLOW-UNBOUNDED: as above.
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_statement_obligation_fixed',
-        );
-
         for (const [table, trigger] of [
           ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
           ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
@@ -733,7 +732,6 @@ export async function cleanup(
       'payment_reconciliation_task',
       'payment_refund_decline',
       'payment_intent',
-      'wallet_hold',
       'idempotency_key',
     ]) {
       await client.$executeRawUnsafe(
@@ -741,11 +739,41 @@ export async function cleanup(
         orgs,
       );
     }
-    await client.$executeRawUnsafe(
-      `DELETE FROM "transaction" WHERE organization_id LIKE ANY($1::text[])
-         OR counterparty_organization_id LIKE ANY($1::text[])`,
-      orgs,
-    );
+    // A hold and an obligation of any kind are never deleted (ADR-068 § 6; FU-097), so
+    // this run's own go by the owner, with the guards lifted in this transaction only;
+    // their legs, settlements and commissions are already gone above.
+    const recordsOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await recordsOwner.$transaction(
+        async (tx) => {
+          const guards = [
+            'wallet_hold DISABLE TRIGGER trg_wallet_hold_reference_bound',
+            '"transaction" DISABLE TRIGGER trg_transaction_statement_obligation_fixed',
+            '"transaction" DISABLE TRIGGER trg_transaction_terms_fixed',
+          ];
+          for (const guard of guards) {
+            // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+            await tx.$executeRawUnsafe(`ALTER TABLE ${guard}`);
+          }
+          await tx.$executeRawUnsafe(
+            `DELETE FROM wallet_hold WHERE organization_id LIKE ANY($1::text[])`,
+            orgs,
+          );
+          await tx.$executeRawUnsafe(
+            `DELETE FROM "transaction" WHERE organization_id LIKE ANY($1::text[])
+               OR counterparty_organization_id LIKE ANY($1::text[])`,
+            orgs,
+          );
+          for (const guard of guards) {
+            // ISOLATION-ALLOW-UNBOUNDED: as above.
+            await tx.$executeRawUnsafe(`ALTER TABLE ${guard.replace('DISABLE', 'ENABLE')}`);
+          }
+        },
+        { timeout: 30_000 },
+      );
+    } finally {
+      await recordsOwner.$disconnect();
+    }
     await client.$executeRawUnsafe(
       `DELETE FROM wallet WHERE organization_id LIKE ANY($1::text[])`,
       orgs,

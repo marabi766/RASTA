@@ -43,11 +43,33 @@
 --
 -- It reads `transaction`, so a transaction that could be rewritten around it proves
 -- nothing: terms lowered, settled for them, terms and status put back, and the real
--- settlement refused on the key. `trg_transaction_terms_fixed`: who pays whom, how much,
--- in what, on which line never changes, as a statement obligation's already never did.
--- `trg_transaction_status_edges`: SETTLED only from PENDING_SETTLEMENT and left only by
--- a reversal, and what it settled at stays. The service's one writer of these,
+-- settlement refused on the key. Nor one that could be replaced: deleted, or renamed
+-- and its id reused, and written again under that id with another payee or gross; the
+-- proof would compare the settlement with the replacement. `trg_transaction_terms_fixed`
+-- holds every kind of obligation to what the proof reads, as a statement obligation
+-- already was: never deleted, and its id, who pays whom, how much, in what and on which
+-- line never change. Not its source or kind, which the proof does not read and ADR-032's
+-- `quarantine_transaction_source` corrects. `trg_transaction_no_truncate` answers the
+-- statement a row trigger never sees. `trg_transaction_status_edges`: SETTLED only from PENDING_SETTLEMENT and left
+-- only by a reversal, and what it settled at stays. The service's one writer of these,
 -- `TransactionRepository.transition`, only ever sets the rest.
+--
+-- ## Whose hold counts
+--
+-- `wallet_hold.reference` is free text, unique only per wallet, so a hold of another
+-- organization, or for another purpose, could name this transaction's id and veto its
+-- settlement. `transaction_holds` is the one answer to "the holds of this transaction":
+-- purpose TRANSACTION, the payer's, on the payer's wallet. Every predicate here asks it:
+-- the proof, the settlement authority of a transaction and of a release, and where a
+-- resolved dispute returns to. `trg_wallet_hold_reference_bound` keeps the rows true for
+-- it: a new hold is on a wallet of its own organization; for a transaction, it names one of
+-- its own organization; for anything else, it names no transaction. Whose it is and what it
+-- is for never change, a wallet never changes hands, and a hold is never deleted, or a hold
+-- could step out of that answer.
+-- A row from before this breaks none of it silently: no such hold counts, and the
+-- migration says how many there are. What it cannot tell apart: a hold written by hand in
+-- the payer's own name, on the payer's own wallet. That is the payer's hold: refused
+-- settlements, no money moved.
 --
 -- ## The foreign keys
 --
@@ -82,7 +104,8 @@
 --
 -- Bounded: the tables are locked in `settle()`'s own write order, so one in flight
 -- finishes first and none starts until commit; waited for at most `lock_timeout`.
--- `transaction` too, last, as `settle()` moves it last. The
+-- `transaction` too, last, as `settle()` moves it last. A create with a hold writes
+-- `transaction` first, so it can lose a deadlock here: it rolls back, nothing moved. The
 -- scans are bounded by `statement_timeout` (default 5 s, raised for one run by
 -- `RASTA_MIGRATION_STATEMENT_TIMEOUT`).
 SET LOCAL lock_timeout = '3s';
@@ -90,7 +113,8 @@ SELECT set_config('statement_timeout',
                   COALESCE(NULLIF(current_setting('rasta.migration_statement_timeout', true), ''), '5s'),
                   true);
 
-LOCK TABLE "journal", "commission", "settlement", "transaction" IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE "journal", "wallet_hold", "wallet", "commission", "settlement", "transaction"
+  IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE TABLE "settlement_creation_quarantine" (
     "source_table" TEXT NOT NULL,
@@ -228,6 +252,21 @@ ALTER TABLE "commission"
   ADD CONSTRAINT "commission_journal_id_fkey" FOREIGN KEY ("journal_id")
   REFERENCES "journal"("id") ON DELETE RESTRICT ON UPDATE RESTRICT NOT VALID;
 
+-- The one answer to "the holds of this transaction". The payer's: `transaction.organization_id`.
+CREATE OR REPLACE FUNCTION transaction_holds(transaction_id TEXT, payer TEXT)
+RETURNS SETOF "wallet_hold" AS $$
+  SELECT h.*
+    FROM "wallet_hold" h
+    JOIN "wallet" w ON w."id" = h."wallet_id" AND w."organization_id" = h."organization_id"
+   WHERE h."reference" = transaction_id
+     AND h."reference_type" = 'TRANSACTION'
+     AND h."organization_id" = payer;
+$$ LANGUAGE sql STABLE;
+
+-- The triggers run as the writer, and PUBLIC has no EXECUTE on what the migrator
+-- creates (service-privilege-split.bash). SECURITY INVOKER, as is everything here.
+GRANT EXECUTE ON FUNCTION transaction_holds(TEXT, TEXT) TO rasta_economic;
+
 -- By the rows, not by a quarantine reason: a row keeps only the first it fails.
 DO $validate_settlement_creation_proof$
 DECLARE
@@ -246,6 +285,18 @@ BEGIN
   IF found > 0 THEN
     RAISE WARNING 'settlement: % row(s) could not be proven and were quarantined; they are left as they are and back no reversal', found
       USING HINT = 'List them with: SELECT * FROM settlement_creation_quarantine; each needs the owner to decide.';
+  END IF;
+  -- What `trg_wallet_hold_reference_bound` refuses from here on, as one scan of the table.
+  SELECT count(*) INTO found
+    FROM "wallet_hold" h
+    LEFT JOIN "transaction" t ON t."id" = h."reference"
+    LEFT JOIN "wallet" w ON w."id" = h."wallet_id"
+   WHERE w."organization_id" IS DISTINCT FROM h."organization_id"
+      OR (h."reference_type" = 'TRANSACTION' AND t."organization_id" IS DISTINCT FROM h."organization_id")
+      OR (h."reference_type" <> 'TRANSACTION' AND t."id" IS NOT NULL);
+  IF found > 0 THEN
+    RAISE WARNING 'wallet_hold: % row(s) are not bound to their tenant and purpose; no settlement counts them, and they are left as they are', found
+      USING HINT = 'TransactionRepository.lockForUpdate and WalletRepository.findActiveHold do not ask transaction_holds: read these rows before settling what they name.';
   END IF;
 END
 $validate_settlement_creation_proof$;
@@ -344,16 +395,14 @@ BEGIN
   END IF;
 
   held := EXISTS (
-    SELECT 1 FROM "wallet_hold" h
-     WHERE h."reference" = settled."transaction_id"
-       AND h."status" = 'RELEASED'
+    SELECT 1 FROM transaction_holds(settled."transaction_id", settled."payer_organization_id") h
+     WHERE h."status" = 'RELEASED'
        AND h."resolved_journal_id" = settled."journal_id"
-       AND h."organization_id" = settled."payer_organization_id"
        AND h."amount_minor" = settled."gross_amount_minor"
        AND h."currency" = settled."currency");
   IF held <> (legs.escrow_legs = 1)
-     OR EXISTS (SELECT 1 FROM "wallet_hold" h
-                 WHERE h."reference" = settled."transaction_id" AND h."status" = 'ACTIVE') THEN
+     OR EXISTS (SELECT 1 FROM transaction_holds(settled."transaction_id", settled."payer_organization_id") h
+                 WHERE h."status" = 'ACTIVE') THEN
     RAISE EXCEPTION 'A settlement debits escrow exactly when its journal released the hold, and leaves no hold active'
       USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_settlement_creation_proven';
   END IF;
@@ -381,20 +430,153 @@ CREATE CONSTRAINT TRIGGER "trg_transaction_settled_proven"
 -- In the body, not a WHEN: a WHEN would hold the columns against an older down.sql.
 CREATE OR REPLACE FUNCTION reject_transaction_terms_change() RETURNS TRIGGER AS $$
 BEGIN
-  IF (OLD."organization_id", OLD."counterparty_organization_id", OLD."business_line",
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'A recorded obligation is never deleted: nothing else ever answers to its id'
+      USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_transaction_terms_fixed';
+  END IF;
+  IF (OLD."id", OLD."organization_id", OLD."counterparty_organization_id", OLD."business_line",
       OLD."gross_amount_minor", OLD."currency")
      IS DISTINCT FROM
-     (NEW."organization_id", NEW."counterparty_organization_id", NEW."business_line",
+     (NEW."id", NEW."organization_id", NEW."counterparty_organization_id", NEW."business_line",
       NEW."gross_amount_minor", NEW."currency") THEN
-    RAISE EXCEPTION 'Who pays whom, how much, in what and on which line never changes'
+    RAISE EXCEPTION 'Who pays whom, how much, in what and on which line never changes, nor the id it answers to'
       USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_transaction_terms_fixed';
   END IF;
   RETURN NEW;
 END; $$ LANGUAGE plpgsql;
 
+-- Named to run after `trg_transaction_statement_obligation_fixed`, which keeps its own words.
 CREATE TRIGGER "trg_transaction_terms_fixed"
-  BEFORE UPDATE ON "transaction"
+  BEFORE UPDATE OR DELETE ON "transaction"
   FOR EACH ROW EXECUTE FUNCTION reject_transaction_terms_change();
+
+-- The statement-level half of the same freeze, for both tables the proof reads.
+CREATE OR REPLACE FUNCTION reject_obligation_record_truncate() RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION '% records what is owed and held: never emptied', TG_TABLE_NAME
+    USING ERRCODE = 'restrict_violation';
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_transaction_no_truncate"
+  BEFORE TRUNCATE ON "transaction"
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_obligation_record_truncate();
+
+CREATE TRIGGER "trg_wallet_hold_no_truncate"
+  BEFORE TRUNCATE ON "wallet_hold"
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_obligation_record_truncate();
+
+-- The wallet's owner and the transaction's identity are what this reads. Neither can
+-- change (above and below), so what is true at the insert stays true.
+CREATE OR REPLACE FUNCTION enforce_wallet_hold_reference() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'A hold is never deleted'
+      USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF (OLD."id", OLD."organization_id", OLD."wallet_id", OLD."reference", OLD."reference_type")
+       IS DISTINCT FROM
+       (NEW."id", NEW."organization_id", NEW."wallet_id", NEW."reference", NEW."reference_type") THEN
+      RAISE EXCEPTION 'Whose a hold is and what it is for never changes'
+        USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM "wallet" w
+                  WHERE w."id" = NEW."wallet_id" AND w."organization_id" = NEW."organization_id") THEN
+    RAISE EXCEPTION 'A hold is on a wallet of its own organization'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
+  END IF;
+  IF NEW."reference_type" = 'TRANSACTION' THEN
+    IF NOT EXISTS (SELECT 1 FROM "transaction" t
+                    WHERE t."id" = NEW."reference" AND t."organization_id" = NEW."organization_id") THEN
+      RAISE EXCEPTION 'A hold for a transaction names a transaction of its own organization'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
+    END IF;
+  ELSIF EXISTS (SELECT 1 FROM "transaction" t WHERE t."id" = NEW."reference") THEN
+    RAISE EXCEPTION 'A hold for anything else names no transaction'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_wallet_hold_reference_bound"
+  BEFORE INSERT OR UPDATE OR DELETE ON "wallet_hold"
+  FOR EACH ROW EXECUTE FUNCTION enforce_wallet_hold_reference();
+
+-- `transaction_holds` asks whose wallet a hold is on: moving one would step its holds out.
+CREATE OR REPLACE FUNCTION reject_wallet_owner_change() RETURNS TRIGGER AS $$
+BEGIN
+  IF (OLD."id", OLD."organization_id") IS DISTINCT FROM (NEW."id", NEW."organization_id") THEN
+    RAISE EXCEPTION 'A wallet never changes hands'
+      USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_wallet_owner_fixed';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_wallet_owner_fixed"
+  BEFORE UPDATE ON "wallet"
+  FOR EACH ROW EXECUTE FUNCTION reject_wallet_owner_change();
+
+-- 20261103121000's three bodies, each hold predicate asking `transaction_holds`.
+CREATE OR REPLACE FUNCTION enforce_transaction_settlement_authority() RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD."settlement_authorised_at" IS NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM "settlement_authority_reconciliation" r
+        WHERE r."transaction_id" = OLD."id" AND r."outcome" = 'AUTHORISED_UNRECORDED')
+     AND EXISTS (SELECT 1 FROM transaction_holds(OLD."id", OLD."organization_id")) THEN
+    -- Fixed words: no identifier or amount in the message the service logs.
+    RAISE EXCEPTION 'A transaction whose funds were held settles only once its settlement is authorised'
+      USING ERRCODE = 'check_violation',
+            CONSTRAINT = 'trg_transaction_settlement_authority';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_hold_release_settlement_authority() RETURNS TRIGGER AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM "transaction" t, transaction_holds(t."id", t."organization_id") h
+     WHERE t."id" = OLD."reference"
+       AND h."id" = OLD."id"
+       AND (t."settlement_authorised_at" IS NOT NULL
+            OR EXISTS (
+              SELECT 1 FROM "settlement_authority_reconciliation" r
+               WHERE r."transaction_id" = t."id" AND r."outcome" = 'AUTHORISED_UNRECORDED'))
+  ) THEN
+    RAISE EXCEPTION 'Escrowed funds are released to the payee only once settlement is authorised'
+      USING ERRCODE = 'check_violation',
+            CONSTRAINT = 'trg_wallet_hold_release_settlement_authority';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_transaction_dispute_resolution() RETURNS TRIGGER AS $$
+DECLARE
+  supported TEXT;
+BEGIN
+  IF OLD."status" <> 'DISPUTED' OR NEW."status" NOT IN ('PENDING_SETTLEMENT', 'HELD') THEN
+    RETURN NEW;
+  END IF;
+  IF OLD."settlement_authorised_at" IS NOT NULL
+     OR EXISTS (
+       SELECT 1 FROM "settlement_authority_reconciliation" r
+        WHERE r."transaction_id" = OLD."id" AND r."outcome" = 'AUTHORISED_UNRECORDED') THEN
+    supported := 'PENDING_SETTLEMENT';
+  ELSIF EXISTS (SELECT 1 FROM transaction_holds(OLD."id", OLD."organization_id") h
+                 WHERE h."status" = 'ACTIVE') THEN
+    supported := 'HELD';
+  ELSE
+    supported := 'PENDING_SETTLEMENT';
+  END IF;
+  IF NEW."status"::TEXT <> supported THEN
+    RAISE EXCEPTION 'A resolved dispute returns a transaction to where its settlement authority stands'
+      USING ERRCODE = 'check_violation',
+            CONSTRAINT = 'trg_transaction_dispute_resolution';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION enforce_transaction_settlement_edges() RETURNS TRIGGER AS $$
 BEGIN

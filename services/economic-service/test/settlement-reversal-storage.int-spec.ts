@@ -1648,13 +1648,19 @@ describe('settlement reversal storage (real database, runtime role)', () => {
       });
       await plantSettlement(rowFor(transactionId, journalId));
       await expect(
-        rolledBack((tx) =>
-          tx.$executeRawUnsafe(
+        owner.$transaction(async (tx) => {
+          // The transaction's own guard refuses first (FU-097); lifted, so this one answers.
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; rolled back with the rest.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_terms_fixed',
+          );
+          await tx.$executeRawUnsafe(
             `UPDATE "transaction" SET id = $2 WHERE id = $1`,
             transactionId,
             `TXN_${ulid()}`,
-          ),
-        ),
+          );
+          throw new Error('rolled back: nothing was refused');
+        }),
       ).rejects.toThrow(/A settlement is append-only/);
     });
 

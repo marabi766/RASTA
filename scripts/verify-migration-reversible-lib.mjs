@@ -703,6 +703,22 @@ END $$;`;
   return `${toggle('DISABLE')}\n${sql}\n${toggle('ENABLE')}`;
 };
 
+const TERMS_TRIGGER_HERE = `SELECT 1 FROM pg_trigger
+  WHERE tgname = 'trg_transaction_terms_fixed' AND tgrelid = '"transaction"'::regclass`;
+
+/** Removes probe obligations; an obligation is never deleted, so the owner lifts the guard, where it stands. */
+const TRANSACTION_MIGCHECK_REMOVE = (where) => `
+DO $$
+BEGIN
+  IF EXISTS (${TERMS_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "transaction" DISABLE TRIGGER "trg_transaction_terms_fixed"';
+  END IF;
+  DELETE FROM "transaction" WHERE ${where};
+  IF EXISTS (${TERMS_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "transaction" ENABLE TRIGGER "trg_transaction_terms_fixed"';
+  END IF;
+END $$;`;
+
 /** Removes every commission probe row; the owner lifts the append-only trigger for them only. */
 const COMMISSION_MIGCHECK_CLEANUP = `
 DO $$
@@ -716,7 +732,7 @@ BEGIN
   END IF;
 END $$;
 DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';
-DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%';`;
+${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%'`)}`;
 
 /**
  * Commission by business line (ADR-045, docs/23 D-057), rolled back and
@@ -1092,7 +1108,7 @@ const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
   {
     label: 'dispute resolution: clean up the probe rows',
     sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_DSP_%';
-          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_DSP_%';`,
+          ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_DSP_%'`)}`,
   },
 ];
 
@@ -1287,7 +1303,7 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   {
     label: 'resolved dispute: clean up the probe rows',
     sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_RSD_%';
-          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_RSD_%';`,
+          ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_RSD_%'`)}`,
   },
 ];
 
@@ -1691,7 +1707,7 @@ DELETE FROM "settlement" WHERE "id" IN (${ids('STL')});
 DELETE FROM "commission" WHERE "id" IN (${ids('CMS')});
 DELETE FROM "ledger_entry" WHERE "journal_id" IN (${ids('JRN')});
 DELETE FROM "journal" WHERE "id" IN (${ids('JRN')});
-DELETE FROM "transaction" WHERE "id" IN (${ids('TXN')});
+${TRANSACTION_MIGCHECK_REMOVE(`"id" IN (${ids('TXN')})`)}
 ALTER TABLE "settlement" ENABLE TRIGGER "trg_settlement_append_only";
 ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only";
 ALTER TABLE "ledger_entry" ENABLE TRIGGER "trg_ledger_entry_immutable";
@@ -2544,6 +2560,10 @@ export const EXPECTED = {
       'trg_transaction_settled_proven',
       'trg_transaction_terms_fixed',
       'trg_transaction_status_edges',
+      'trg_transaction_no_truncate',
+      'trg_wallet_hold_no_truncate',
+      'trg_wallet_hold_reference_bound',
+      'trg_wallet_owner_fixed',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2592,6 +2612,10 @@ export const EXPECTED = {
       'reject_commission_truncate',
       'reject_transaction_terms_change',
       'enforce_transaction_settlement_edges',
+      'transaction_holds',
+      'reject_obligation_record_truncate',
+      'enforce_wallet_hold_reference',
+      'reject_wallet_owner_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
