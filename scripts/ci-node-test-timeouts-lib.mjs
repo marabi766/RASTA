@@ -41,8 +41,14 @@ import { parseCommands } from './ci-shell-text-lib.mjs';
 /** The shared tokenizer lives in ci-shell-text-lib.mjs (FU-077); re-exported for existing callers. */
 export { parseCommands };
 export const MAX_FILE_BUDGET_MS = 540_000;
+/**
+ * FU-111: the former `quality` job is five parallel `quality-*` jobs and an aggregate
+ * named `quality`. Every `quality-*` job is read here, found by its prefix so a job added
+ * later is read too, never skipped; the aggregate runs no test.
+ */
+export const QUALITY_JOB_PREFIX = 'quality-';
 export const UNIT_STEP = {
-  job: 'quality',
+  job: 'quality-unit',
   step: 'Unit-step concurrency is bounded',
   script: 'test:unit-step-concurrency',
   maxMinutes: 10,
@@ -301,14 +307,14 @@ const isMap = (value) => value !== null && typeof value === 'object' && !Array.i
  * repository root (so a root script means the root script), and `env` a plain map
  * of KNOWN_ENV names, the same policy as a shell assignment. Anything else is refused.
  */
-function contextProblems(doc, job) {
+function contextProblems(doc, job, id) {
   const problems = [];
   const levels = [
     ['workflow', doc, doc?.defaults?.run, doc?.defaults],
     ['job', job, job?.defaults?.run, job?.defaults],
   ];
   for (const [label, owner, run, defaults] of levels) {
-    const name = label === 'job' ? `job ${UNIT_STEP.job}` : 'the workflow';
+    const name = label === 'job' ? `job ${id}` : 'the workflow';
     if (defaults !== undefined && !isMap(defaults))
       problems.push(`${name} has defaults that cannot be read`);
     else if (run !== undefined && !isMap(run))
@@ -471,23 +477,34 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}, workspace =
   const { turbo } = workspace;
   for (const reason of workspace.problems ?? [])
     problems.push(`the turbo task graph cannot be read: ${reason}`);
-  const job = doc?.jobs?.[UNIT_STEP.job];
-  const steps = job?.steps;
-  if (!Array.isArray(steps)) return [`job ${UNIT_STEP.job} has no readable steps`];
-  // A different shell, directory or shell-reading environment changes what the text means.
-  problems.push(...contextProblems(doc, job));
+  const ids = Object.keys(isMap(doc?.jobs) ? doc.jobs : {}).filter((id) =>
+    id.startsWith(QUALITY_JOB_PREFIX),
+  );
+  if (!ids.includes(UNIT_STEP.job)) return [`job ${UNIT_STEP.job} has no readable steps`];
   const queue = [];
-  for (const step of steps) {
-    if (step?.run === undefined) continue;
-    // A command that cannot be read is not proven free of node --test.
-    if (typeof step.run !== 'string') {
-      problems.push(`step "${step.name}": run is not text`);
+  for (const id of ids) {
+    const job = doc.jobs[id];
+    const steps = job?.steps;
+    if (!Array.isArray(steps)) {
+      problems.push(`job ${id} has no readable steps`);
       continue;
     }
-    queue.push(
-      ...textProblems(`step "${step.name}"`, step.run, scripts, packages, turbo, problems).follows,
-    );
+    // A different shell, directory or shell-reading environment changes what the text means.
+    problems.push(...contextProblems(doc, job, id));
+    for (const step of steps) {
+      if (step?.run === undefined) continue;
+      // A command that cannot be read is not proven free of node --test.
+      if (typeof step.run !== 'string') {
+        problems.push(`step "${step.name}": run is not text`);
+        continue;
+      }
+      queue.push(
+        ...textProblems(`step "${step.name}"`, step.run, scripts, packages, turbo, problems)
+          .follows,
+      );
+    }
   }
+  const steps = doc.jobs[UNIT_STEP.job].steps ?? [];
   const names = new Set();
   while (queue.length) {
     const name = queue.pop();

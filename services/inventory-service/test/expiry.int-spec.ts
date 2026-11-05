@@ -131,10 +131,26 @@ describe('reservation expiry', () => {
 
   it('the central expiry guard refuses an invalid instant even if its caller bypasses the DTO', () => {
     const service = api.app.get(ReservationService);
-    expect(() => service['expiryOf']('not a date', new Date())).toThrow();
+    const at = new Date();
+    // An hour ahead, so with `-15:00`/`-14:01` (which `Date` parses) the instant is still in range:
+    // only the guard's own syntax check refuses them.
+    const base = new Date(at.getTime() + 3600_000).toISOString().slice(0, -1);
+    for (const expiresAt of ['not a date', `${base}-15:00`, `${base}-14:01`, `${base}+24:00`]) {
+      let refused: unknown;
+      try {
+        service['expiryOf'](expiresAt, at);
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).toMatchObject({
+        details: [expect.objectContaining({ code: 'EXPIRY_OUT_OF_RANGE' })],
+      });
+    }
   });
 
-  it.each(['+24:00', '+99:99', '-00:60'])(
+  // Pinned to the DTO, not the guard: the base instant is an hour ahead (in range), so the
+  // offset is the only reason to refuse, and the refusing layer is the request pipe (FU-035).
+  it.each(['+14:01', '+15:00', '-15:00', '+24:00', '+99:99', '-00:60'])(
     'refuses malformed expiry offset %s without effects',
     async (offset) => {
       const a = org();
@@ -145,11 +161,15 @@ describe('reservation expiry', () => {
       const beforeMovements = await raw.stockMovement.count({ where: { organizationId: a } });
       const beforeOutbox = await raw.outboxMessage.count({ where: { organizationId: a } });
       const beforeKeys = await raw.idempotencyKey.count({ where: { organizationId: a } });
+      const base = new Date(Date.now() + 3600_000).toISOString().slice(0, -1);
       const response = await owner.reserve([{ stockItemId, quantity: 2 }], {
-        expiresAt: `2026-11-02T00:00:00${offset}`,
+        expiresAt: `${base}${offset}`,
       });
-      expect([400, 422]).toContain(response.status);
-      expect(response.body).toEqual(expect.objectContaining({ code: expect.any(String) }));
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual(expect.objectContaining({ code: 'VALIDATION_FAILED' }));
+      expect(response.body.details).toEqual([
+        expect.objectContaining({ path: 'expiresAt', code: 'invalid_string' }),
+      ]);
       expect((await owner.stockItem(stockItemId)).body).toEqual(beforeStock.body);
       expect(await raw.stockReservation.count({ where: { organizationId: a } })).toBe(
         beforeReservations,

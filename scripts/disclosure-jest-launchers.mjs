@@ -156,13 +156,13 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-shell-text-lib.mjs':
         'd857a0774e7f6d3e8dd4e4782b6b413054e83894cb63cabecedca2101a6c4bc6',
       'scripts/ci-node-test-timeouts-lib.mjs':
-        '858f53c77f6374ea505b7e2599169be2b312b905219079e2b84a963113941ca4',
+        'ab66bd1b75361c9ea8fd526cc699b79aeb03b15eae3fc4a90538921ba8e47dec',
       'scripts/check-unit-step-concurrency.test.mjs':
-        'a67fe22002065d4e538b3c01dc97138fc30d43f401cd40d588359ef87652f254',
+        '1be941164f055c7e3e56624dd617ea57775b8d69ec2c22b87478281c8dedd0c3',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
-        '1b92ca1bfb7a2a540d08c5252d5602dcaa304a061bb57e794750176ac8cec0b1',
+        'cf298af03890815894a8b4e09524e230638a78bc9c703621a53096b517c6fbe6',
     },
   },
   'scripts/exchange-deadline-rule.test.mjs': {
@@ -171,7 +171,7 @@ export const JEST_LAUNCHERS = {
       'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
     sha256: {
       'scripts/exchange-deadline-rule.test.mjs':
-        '723acb43475ede39c864af5e0c8c2850e2527e284ddcdd1d6169365607741b70',
+        '1b3a35b144a1d10fcfec2b1a496e134d8f30c744c13d27845aa7bbc89676763c',
     },
   },
   'scripts/testing-dev-only.test.mjs': {

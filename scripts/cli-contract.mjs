@@ -444,7 +444,9 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
+  // It reads argv only to refuse any argument at all (#673 r1 F2).
   'scripts/marketplace-saga-drain-check.mjs': {
+    positionals: [],
     other: [
       '--no-json-shorthand-payloads',
       '--address',

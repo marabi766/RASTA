@@ -58,7 +58,7 @@
 import { parse as parseYaml } from 'yaml';
 import { shellTextProblem } from './ci-shell-text-lib.mjs';
 
-export const BOUNDED = { workflow: 'ci.yml', job: 'quality', step: 'Unit tests' };
+export const BOUNDED = { workflow: 'ci.yml', job: 'quality-unit', step: 'Unit tests' };
 export const BOUNDED_COMMAND = 'pnpm run test:unit:ci';
 
 export const UNBOUNDED_EXCEPTIONS = [
@@ -928,7 +928,7 @@ export function parsedProblems(docs, rootScripts, context = {}) {
     }
   }
   if (bounded !== 1)
-    problems.push(`quality must have exactly one Unit tests step, found ${bounded}`);
+    problems.push(`quality-unit must have exactly one Unit tests step, found ${bounded}`);
   for (const [entry, count] of exceptionUses) {
     if (count !== 1)
       problems.push(
