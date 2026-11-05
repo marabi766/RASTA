@@ -907,6 +907,8 @@ const CONVERTED = {
   'packages/contracts/src/common/zod-compat-patch.spec.ts': 2,
   'services/audit-service/test/append-only.int-spec.ts': 0,
   'services/procurement-service/src/shared/body-parser.spec.ts': 0,
+  'packages/testing/src/key-readers.ts': 0,
+  'scripts/marketplace-saga-drain-check.test.mjs': 0,
 };
 test('the allow-list refuses an unlisted file and a listed file that no longer lists', () => {
   const allowed = new Set(['old.mjs', 'gone.mjs']);
