@@ -1,12 +1,15 @@
 /**
  * @jest-environment node
  */
+import { GENERIC_FIELD_MESSAGE } from '@/lib/form-issues';
 import { EMPTY_ORDER_COMMAND_FORM, type OrderCommandFormValues } from '@/lib/order-fields';
 
 import {
   ORDER_COMMAND_TABLE,
   fetchOrder,
   fetchOrders,
+  DISPUTE_FORM_STALE,
+  RECEIPT_NOTE_REFUSAL,
   issueOrderCommand,
   orderCommandFormValues,
   parseOrderCommand,
@@ -263,6 +266,118 @@ describe('one form into one command body', () => {
       fieldErrors: { responsibility: expect.any(String) },
     });
   });
+});
+
+describe('an operator’s decision names the dispute the page showed (D-083)', () => {
+  const DISPUTE = 'DSP_01JC0000000000000000000000';
+  const decision = {
+    command: 'RESOLVE_DISPUTE',
+    outcome: 'SETTLE',
+    resolution: 'فروشنده نشان داد کالا مطابق پیشنهاد است.',
+    responsibility: 'BUYER',
+    acknowledge: 'yes',
+  } as const;
+
+  it('sends the dispute id from the hidden field with the decision', () => {
+    const form = new FormData();
+    for (const [name, value] of Object.entries({ ...decision, disputeId: DISPUTE })) {
+      form.set(name, value);
+    }
+    expect(parseOrderCommand(orderCommandFormValues(form))).toEqual({
+      ok: true,
+      request: {
+        command: 'RESOLVE_DISPUTE',
+        body: {
+          disputeId: DISPUTE,
+          outcome: 'SETTLE',
+          resolution: decision.resolution,
+          responsibility: 'BUYER',
+        },
+      },
+    });
+  });
+
+  it.each([
+    ['missing', ''],
+    ['not a dispute id', 'ORD_01JC0000000000000000000000'],
+  ])('refuses a decision whose dispute id is %s, sending nothing', (_case, disputeId) => {
+    const parsed = parseOrderCommand(values({ ...decision, disputeId }));
+    expect(parsed).toMatchObject({
+      ok: false,
+      fieldErrors: { disputeId: DISPUTE_FORM_STALE },
+    });
+  });
+
+  it('shows the stale-form sentence as written: declared, so not the generic message', () => {
+    const parsed = parseOrderCommand(values({ ...decision, disputeId: '' }));
+    expect(parsed).toMatchObject({ ok: false });
+    if (parsed.ok) throw new Error('expected a refusal');
+    expect(parsed.fieldErrors.disputeId).toBe(DISPUTE_FORM_STALE);
+    expect(parsed.fieldErrors.disputeId).not.toBe(GENERIC_FIELD_MESSAGE);
+  });
+
+  it('shows the outcome sentence as written: declared, so not the generic message', () => {
+    const parsed = parseOrderCommand(values({ ...decision, disputeId: DISPUTE, outcome: '' }));
+    expect(parsed).toMatchObject({
+      ok: false,
+      fieldErrors: { outcome: 'نتیجه را انتخاب کنید' },
+    });
+  });
+
+  it('shows the receipt note refusal as written: declared, so not a length message', () => {
+    const parsed = parseOrderCommand(
+      values({ command: 'CONFIRM_RECEIPT', acknowledge: 'yes', note: 'یادداشت' }),
+    );
+    expect(parsed).toMatchObject({ ok: false, fieldErrors: { note: RECEIPT_NOTE_REFUSAL } });
+  });
+
+  it('reads the open dispute off the order, and null when the service sends none', async () => {
+    const { impl } = answering({ ...ORDER, status: 'DISPUTED', openDisputeId: DISPUTE });
+    const withDispute = await withFetch(impl, () => fetchOrder(SESSION, 'ORD_1'));
+    expect(withDispute).toMatchObject({ kind: 'OK', data: { openDisputeId: DISPUTE } });
+
+    const { impl: older } = answering(ORDER);
+    const without = await withFetch(older, () => fetchOrder(SESSION, 'ORD_1'));
+    expect(without).toMatchObject({ kind: 'OK', data: { openDisputeId: null } });
+  });
+
+  it.each([
+    [
+      'DISPUTE_DECISION_STALE',
+      409,
+      'CONFLICT',
+      'disputeId',
+      'This decision is about a dispute the order no longer holds; reload the order',
+      'دیگر روی سفارش باز نیست',
+    ],
+    [
+      'DISPUTE_ORIGIN_UNKNOWN',
+      422,
+      'BUSINESS_RULE_VIOLATION',
+      'outcome',
+      'Where this dispute found the order is not recorded; it can be refunded, not settled',
+      'فقط با بازگشت وجه',
+    ],
+  ])(
+    'reports the service’s %s refusal in Persian',
+    async (code, status, errorCode, path, message, persian) => {
+      const { impl } = answering(
+        { code: errorCode, message, details: [{ path, code, message }] },
+        status,
+      );
+      const result = await withFetch(impl, () =>
+        issueOrderCommand(
+          SESSION,
+          'ORD_1',
+          { command: 'RESOLVE_DISPUTE', body: {} },
+          'sub_aaaaaaaaaaaaaaaaaaaa',
+        ),
+      );
+      expect(result.kind).toBe('INVALID');
+      expect(JSON.stringify(result)).toContain(persian);
+      expect(JSON.stringify(result)).not.toContain(message);
+    },
+  );
 });
 
 describe('the commands that cannot be walked back', () => {

@@ -1,6 +1,6 @@
 import type { OrderStatus } from '../generated/prisma';
 import type { OrderViewerParties } from '../access/access';
-import { canTransition } from './state-machine';
+import { DISPUTE_ORIGINS, canTransition } from './state-machine';
 
 /**
  * Which commands the current viewer may issue on this order, right now.
@@ -32,7 +32,13 @@ import { canTransition } from './state-machine';
  * and the client would have been lying about what was possible.
  *
  * So this module states each command's real precondition once, beside the
- * others, and the view carries the result.
+ * others, and the view carries the result — and `OrderService` takes each
+ * command's source states from here too ({@link COMMAND_FROM}), so what a
+ * viewer is offered and what the service accepts are one list, not two
+ * copies. Since D-083 `DISPUTED` leads back to every pre-receipt status, and
+ * a command read off the table alone would be offered — and, without its own
+ * `from`, accepted — on a disputed order: the supplier's `confirm` resuming
+ * it. Every command now names its source states.
  *
  * ## What this is not
  *
@@ -69,58 +75,72 @@ interface CommandRule {
    */
   readonly to: OrderStatus | null;
   /**
-   * The command's own narrowing, when `OrderService` passes a `from` list
-   * stricter than the transition table — quoted from the call site so the two
-   * can be compared by eye.
+   * The states the command may be issued from — `OrderService` passes exactly
+   * this list as its `from` ({@link COMMAND_FROM}). Required: the table says
+   * which moves are legal, not which command may make them.
    */
-  readonly only?: readonly OrderStatus[];
+  readonly from: readonly OrderStatus[];
 }
 
 const COMMANDS: Readonly<Record<OrderAction, CommandRule>> = {
   /** `OrderService.confirm` — the supplier accepts. */
-  CONFIRM: { party: 'supplier', to: 'CONFIRMED' },
+  CONFIRM: { party: 'supplier', to: 'CONFIRMED', from: ['FUNDS_HELD'] },
 
   /** `OrderService.fulfill` — the supplier records delivery. */
-  FULFILL: { party: 'supplier', to: 'AWAITING_RECEIPT_CONFIRMATION' },
+  FULFILL: { party: 'supplier', to: 'AWAITING_RECEIPT_CONFIRMATION', from: ['CONFIRMED'] },
 
   /**
-   * `OrderService.confirmReceipt` — `from: ['AWAITING_RECEIPT_CONFIRMATION']`.
+   * `OrderService.confirmReceipt`.
    *
-   * The narrowing that matters: without `only`, the table would also permit
-   * this from `DISPUTED`.
+   * The narrowing that matters: the table also permits `RECEIPT_CONFIRMED`
+   * from `DISPUTED`, for an operator's SETTLE of a dispute raised after
+   * receipt.
    */
   CONFIRM_RECEIPT: {
     party: 'buyer',
     to: 'RECEIPT_CONFIRMED',
-    only: ['AWAITING_RECEIPT_CONFIRMATION'],
+    from: ['AWAITING_RECEIPT_CONFIRMATION'],
   },
 
   /** `OrderService.raiseDispute` — the buyer stops settlement. */
-  RAISE_DISPUTE: { party: 'buyer', to: 'DISPUTED' },
-
-  /** `OrderService.resolveDispute` — `from: ['DISPUTED']`, platform only. */
-  RESOLVE_DISPUTE: { party: 'platform', to: null, only: ['DISPUTED'] },
+  RAISE_DISPUTE: { party: 'buyer', to: 'DISPUTED', from: DISPUTE_ORIGINS },
 
   /**
-   * `OrderService.cancel` — `from: ['PENDING', 'FUNDS_HELD', 'CONFIRMED',
-   * 'AWAITING_RECEIPT_CONFIRMATION']`.
+   * `OrderService.resolveDispute` — platform only. Its target depends on the
+   * outcome and on where the dispute found the order (D-083), so the table
+   * has nothing to add to `from`.
+   */
+  RESOLVE_DISPUTE: { party: 'platform', to: null, from: ['DISPUTED'] },
+
+  /**
+   * `OrderService.cancel`.
    *
    * The second narrowing of the same kind: the table also permits
    * `DISPUTED → CANCELLING`, for the operator's `ResolveDispute(REFUND)`.
-   * Without `only`, the buyer would be offered a way out of their own dispute.
+   * Without it, the buyer would be offered a way out of their own dispute.
    */
   CANCEL: {
     party: 'buyer',
     to: 'CANCELLING',
-    only: ['PENDING', 'FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'],
+    from: ['PENDING', 'FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'],
   },
 
   /**
    * `OrderService.submitReview` — only a `COMPLETED` order, and `Review.orderId`
    * is `@unique`, so only once. The "once" half needs the row, not the status.
    */
-  REVIEW: { party: 'buyer', to: null, only: ['COMPLETED'] },
+  REVIEW: { party: 'buyer', to: null, from: ['COMPLETED'] },
 };
+
+/**
+ * The states each command may be issued from: what `OrderService` passes as
+ * its `from`, and what {@link availableOrderActions} offers by. One list.
+ */
+export const COMMAND_FROM: Readonly<Record<OrderAction, readonly OrderStatus[]>> =
+  Object.fromEntries(ORDER_ACTIONS.map((action) => [action, COMMANDS[action].from])) as Record<
+    OrderAction,
+    readonly OrderStatus[]
+  >;
 
 /** What the decision needs from the order beyond who is asking. */
 export interface OrderActionSubject {
@@ -130,10 +150,10 @@ export interface OrderActionSubject {
 }
 
 function isLegalFrom(rule: CommandRule, status: OrderStatus): boolean {
-  if (rule.only && !rule.only.includes(status)) return false;
-  // No target status means the command does not move the order, so the
-  // transition table has nothing to say and `only` is the whole rule.
-  if (rule.to === null) return rule.only !== undefined;
+  if (!rule.from.includes(status)) return false;
+  // No target status means the command's target is not one status, so the
+  // transition table has nothing to say and `from` is the whole rule.
+  if (rule.to === null) return true;
   return canTransition(status, rule.to);
 }
 

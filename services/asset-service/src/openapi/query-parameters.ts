@@ -1,10 +1,10 @@
-import { applyDecorators } from '@nestjs/common';
-import { ApiQuery, type ApiQueryOptions } from '@nestjs/swagger';
+import type { ApiQueryOptions } from '@nestjs/swagger';
 import { queryBooleanDefault } from '@rasta/config';
 import { z } from 'zod';
 
 /**
- * Publishes a Zod query schema as OpenAPI parameters.
+ * A Zod query schema as OpenAPI parameters, published by `ValidatedQuery` (`./validated.ts`) from
+ * the same registration that validates the query (FU-078).
  *
  * This service builds its document from decorators alone — there is no
  * document-enrichment step like economic-service's — so without this, a query
@@ -21,11 +21,6 @@ import { z } from 'zod';
  * nothing else. A schema that needs more than this should say so by failing
  * review, not by being silently published as `{}`.
  */
-export function ApiQueryFromSchema(schema: z.ZodObject): MethodDecorator {
-  return applyDecorators(...parametersOf(schema).map((parameter) => ApiQuery(parameter)));
-}
-
-/** Exported for its own test: what gets published has to be assertable. */
 export function parametersOf(schema: z.ZodObject): ApiQueryOptions[] {
   return Object.entries(schema.shape).map(([name, field]) => describe(name, field as z.ZodType));
 }

@@ -5,6 +5,7 @@ import {
   isTerminal,
   nextStatus,
   resolvedStatus,
+  reversedStatus,
   TERMINAL_STATUSES,
   type TransactionEvent,
 } from './state-machine';
@@ -32,6 +33,8 @@ const ALL_STATUSES: TransactionStatus[] = [
   'PENDING_SETTLEMENT',
   'DISPUTED',
   'SETTLED',
+  'PARTIALLY_REVERSED',
+  'REVERSED',
   'REFUNDED',
   'CANCELLED',
   'FAILED',
@@ -46,6 +49,7 @@ const ALL_EVENTS: TransactionEvent[] = [
   'FAIL',
   'DISPUTE',
   'RESOLVE_DISPUTE',
+  'REVERSE_SETTLEMENT',
 ];
 
 describe('the happy path', () => {
@@ -190,6 +194,72 @@ describe('settlement requires authorisation', () => {
   });
 });
 
+describe('a settlement is undone only by a reversal, as far as money moved (docs/24 Q-76, D-115 A)', () => {
+  const progress = (reversedGrossMinor: bigint) => ({
+    settlementGrossMinor: 1_000n,
+    reversedGrossMinor,
+  });
+
+  it('leaves SETTLED by no other event', () => {
+    const exits = ALL_EVENTS.filter((event) => canTransition('SETTLED', event));
+    expect(exits).toEqual(['REVERSE_SETTLEMENT']);
+  });
+
+  it.each(['SETTLED', 'PARTIALLY_REVERSED'] as const)(
+    'goes from %s as far as the applied reversals say',
+    (from) => {
+      expect(nextStatus('TXN_1', from, 'REVERSE_SETTLEMENT', progress(1n))).toBe(
+        'PARTIALLY_REVERSED',
+      );
+      expect(nextStatus('TXN_1', from, 'REVERSE_SETTLEMENT', progress(999n))).toBe(
+        'PARTIALLY_REVERSED',
+      );
+      expect(nextStatus('TXN_1', from, 'REVERSE_SETTLEMENT', progress(1_000n))).toBe('REVERSED');
+    },
+  );
+
+  it('leaves PARTIALLY_REVERSED by no other event, and REVERSED by none at all', () => {
+    expect(ALL_EVENTS.filter((event) => canTransition('PARTIALLY_REVERSED', event))).toEqual([
+      'REVERSE_SETTLEMENT',
+    ]);
+    expect(isTerminal('REVERSED')).toBe(true);
+    expect(() => nextStatus('TXN_1', 'REVERSED', 'REVERSE_SETTLEMENT', progress(1_000n))).toThrow(
+      expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }),
+    );
+  });
+
+  it.each([0n, -1n, 1_001n])('refuses a reversed total of %s rather than round it', (total) => {
+    expect(() => reversedStatus(progress(total))).toThrow(
+      expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }),
+    );
+    expect(() => nextStatus('TXN_1', 'SETTLED', 'REVERSE_SETTLEMENT', progress(total))).toThrow(
+      expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }),
+    );
+  });
+
+  it('decides exactly above what a number can hold', () => {
+    const big = 2n ** 62n;
+    expect(reversedStatus({ settlementGrossMinor: big + 1n, reversedGrossMinor: big })).toBe(
+      'PARTIALLY_REVERSED',
+    );
+  });
+
+  it('refuses to guess without the facts, or with the wrong ones', () => {
+    expect(() => nextStatus('TXN_1', 'SETTLED', 'REVERSE_SETTLEMENT')).toThrow(
+      'needs its progress',
+    );
+    expect(() =>
+      nextStatus('TXN_1', 'SETTLED', 'REVERSE_SETTLEMENT', {
+        settlementAuthorised: true,
+        fundsHeld: false,
+      }),
+    ).toThrow('needs its progress');
+    expect(() => nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', progress(1n))).toThrow(
+      'needs its settlement authority',
+    );
+  });
+});
+
 describe('terminal states', () => {
   it.each(TERMINAL_STATUSES)('%s admits no further move', (status) => {
     expect(isTerminal(status)).toBe(true);
@@ -254,9 +324,11 @@ describe('refusals', () => {
       'HELD:AUTHORISE_SETTLEMENT',
       'HELD:DISPUTE',
       'HELD:REFUND',
+      'PARTIALLY_REVERSED:REVERSE_SETTLEMENT',
       'PENDING_SETTLEMENT:DISPUTE',
       'PENDING_SETTLEMENT:REFUND',
       'PENDING_SETTLEMENT:SETTLE',
+      'SETTLED:REVERSE_SETTLEMENT',
     ]);
   });
 });
@@ -295,6 +367,7 @@ describe('the refusal message', () => {
     ['SETTLED', 'HOLD_PLACED', 'have funds held against it'],
     ['SETTLED', 'AUTHORISE_SETTLEMENT', 'be authorised for settlement'],
     ['CREATED', 'SETTLE', 'be settled'],
+    ['CREATED', 'REVERSE_SETTLEMENT', 'have its settlement reversed'],
     ['CREATED', 'REFUND', 'be refunded'],
     ['HELD', 'CANCEL', 'be cancelled'],
     ['HELD', 'FAIL', 'be marked failed'],

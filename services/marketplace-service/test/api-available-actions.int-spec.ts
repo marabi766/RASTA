@@ -188,15 +188,17 @@ describe('available actions, along a real order lifecycle', () => {
     expect(await actionsFor(id, asSupplier())).toEqual([]);
 
     const resolved = await post(id, 'disputes/resolve', asOperator(), {
+      disputeId: disputed.body.openDisputeId,
       outcome: 'SETTLE',
       resolution: 'بررسی شد؛ کالا مطابق سفارش بود و آسیب پس از تحویل رخ داده است.',
       responsibility: 'BUYER',
     }).expect(200);
-    expect(resolved.body.status).toBe('RECEIPT_CONFIRMED');
-
-    // Back on the settlement path — and the buyer may dispute again, because
-    // RECEIPT_CONFIRMED still has that edge.
-    expect(await actionsFor(id, asBuyer())).toEqual(['RAISE_DISPUTE']);
+    // Disputed before the buyer confirmed receipt: resumed where it was, and
+    // the receipt is still the buyer's to confirm (D-083).
+    expect(resolved.body.status).toBe('AWAITING_RECEIPT_CONFIRMATION');
+    expect(resolved.body.receiptConfirmedAt).toBeNull();
+    expect(await actionsFor(id, asBuyer())).toEqual(['CONFIRM_RECEIPT', 'RAISE_DISPUTE', 'CANCEL']);
+    expect(await actionsFor(id, asSupplier())).toEqual([]);
   });
 
   it('leaves both exits from DISPUTED to the operator alone', async () => {
@@ -207,11 +209,12 @@ describe('available actions, along a real order lifecycle', () => {
     await holdFunds(id);
     await post(id, 'confirm', asSupplier()).expect(200);
     await post(id, 'fulfill', asSupplier()).expect(200);
-    await post(id, 'disputes', asBuyer(), {
+    const disputed = await post(id, 'disputes', asBuyer(), {
       reason: 'قطعهٔ تحویلی با مشخصات سفارش همخوانی ندارد.',
     }).expect(200);
 
     const resolution = {
+      disputeId: disputed.body.openDisputeId,
       outcome: 'SETTLE',
       resolution: 'طرفین توافق کردند که کالا پذیرفته شود و تسویه انجام گیرد.',
       responsibility: 'UNDETERMINED',

@@ -191,6 +191,12 @@ importers:
       jest-environment-jsdom:
         specifier: ^29.7.0
         version: 29.7.0(supports-color@8.1.1)
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
+      postcss:
+        specifier: 8.5.28
+        version: 8.5.28
       rimraf:
         specifier: ^6.0.1
         version: 6.1.3

@@ -172,6 +172,7 @@ function WhatNext({
           command={command}
           csrfToken={csrfToken}
           submissionId={mintSubmissionId()}
+          disputeId={order.openDisputeId}
         />
       ))}
     </div>
