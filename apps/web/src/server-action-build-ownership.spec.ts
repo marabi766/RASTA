@@ -1204,7 +1204,10 @@ setInterval(() => {}, 1000);`,
       problems: ['next build: a process it started was still running after it exited; refusing'],
     });
     await goneAtBoundary([
-      [await waitForPidFile(join(dir, 'linger.pid'), false, 0), 'surviving writer that ignores TERM'],
+      [
+        await waitForPidFile(join(dir, 'linger.pid'), false, 0),
+        'surviving writer that ignores TERM',
+      ],
     ]);
     expect(existsSync(join(dir, LOCK))).toBe(false);
   });
