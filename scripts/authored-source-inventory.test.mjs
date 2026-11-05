@@ -314,7 +314,6 @@ test('the matcher agrees with git on classes, star runs and whitespace (PR #751 
     ['q/****', paths('q/a', 'q/a/b')],
     ['q[!a]x', paths('q/x', 'qbx', 'qax')],
     ['q/[a-]', paths('q/a', 'q/-', 'q/b')],
-    ['q/a**/z', paths('q/a/z', 'q/ax/z', 'q/a/b/z', 'q/az')],
     ['q/a***', paths('q/abc', 'q/a/b')],
     ['***/z', paths('z', 'a/z', 'a/b/z')],
     ['q/end\t', paths('q/end', 'q/end\t')],
@@ -334,6 +333,7 @@ test('the matcher agrees with git on classes, star runs and whitespace (PR #751 
     'a\\/b',
     'a//b',
     'a**\\/b',
+    'q/a**/z', // git 2.43 and 2.56 read this differently (CI runs 2.56)
   ])
     assert.throws(() => ignoreMatcher(line), /\.gitignore/, line);
 });

@@ -67,11 +67,17 @@ function globSource(glob) {
       if (i >= glob.length) throw new Error('.gitignore: a pattern ends in a backslash');
       out += glob[i].replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
     } else if (c === '*') {
-      // A run of stars. Two or more before a `/` are `**/` wherever they stand (git: `q/a**/z` ignores
-      // `q/az` and `q/a/b/z`); at the very end they are `**` after a `/`; anywhere else they are one `*`.
+      // A run of stars. Two or more that are a whole path component before a `/` are `**/`; at the very
+      // end they are `**` after a `/`; anywhere else they are one `*`. Two or more glued to text before a
+      // `/` (`q/a**/z`) mean different things in different git versions (2.43 crosses directories, 2.56
+      // does not), so that shape is refused, never guessed.
       let end = i;
       while (glob[end + 1] === '*') end += 1;
       const after = glob[end + 1];
+      if (end > i && after === '/' && i > 0 && glob[i - 1] !== '/')
+        throw new Error(
+          `.gitignore: unsupported escape in ${glob} (** glued to text before a slash differs between git versions)`,
+        );
       if (end > i && after === '/') {
         out += '(?:.*/)?';
         end += 1;
