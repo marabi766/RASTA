@@ -118,9 +118,15 @@ export class RastaSampler implements Sampler {
 }
 
 let sdk: NodeSDK | undefined;
+/** What the running SDK owns: {@link shutdownTelemetry} releases all of it. */
+let owned: Construction | undefined;
 /** True while `initTelemetry` builds: a call made from inside it is refused. */
 let building = false;
-/** The shutdown in progress: until it settles no SDK may start. */
+/**
+ * The teardown in progress — a shutdown's, or a refused start's releases —
+ * until every part of it has settled (see {@link fence}): no SDK may start
+ * before. Never rejects unhandled.
+ */
 let stopping: Promise<void> | undefined;
 
 type Instrumentations = ReturnType<typeof getNodeAutoInstrumentations>;
@@ -156,26 +162,118 @@ export const TELEMETRY_SHUTDOWN_FAILED =
   'configured values';
 
 /**
- * What a start builds, kept so that a refusal can release all of it and a
- * commit can start what holds a resource (#426 r1 F3).
+ * What a start builds or is handed — the ownership ledger, kept so that a
+ * refusal, and later {@link shutdownTelemetry}, can release all of it and a
+ * commit can start what holds a resource (#426 r1 F3, #749 r2).
  *
  * Built inert, committed last: every part that would hold a process resource
  * (the Prometheus listener, a periodic reader's export timer) is built with
  * that resource deferred, and `activations` starts them only once nothing of
  * the start can throw any more. So a refusal is reported with nothing of
- * this start listening or scheduled — there is no closure to wait for — and
- * `releases` shuts down, without flushing, every exporter and reader it was
- * handed or built. What the SDK's own builders make and lose when one of them
+ * this start listening or scheduled, and `releases` shuts down, without
+ * flushing, every exporter it was handed or built; until those have settled
+ * they are the restart {@link fence}. What the SDK's own builders make and lose when one of them
  * throws part-way (an exporter `getSpanProcessorsFromEnv` built before the
  * next one refused) holds nothing until its first export, which never comes:
  * `telemetry-ownership.spec.ts` proves the process holds exactly what it held
  * before, for every exporter kind built ahead of a refusing one.
  */
 interface Construction {
-  /** Run on refusal, each guarded: shut one part down, dropping what it reports. */
-  readonly releases: (() => unknown)[];
+  /** Disabled on refusal and on shutdown: they patch modules as they are built. */
+  instrumentations: Instrumentations;
+  /**
+   * Released on refusal, without a flush, and last on shutdown: every exporter
+   * handed in or built (the Prometheus reader too), the environment's span
+   * processors, the log record processors. Adopted as each part exists.
+   */
+  readonly releases: Release[];
+  /**
+   * Released on shutdown only, before `releases`: what flushes into an
+   * exporter — a registered periodic reader, the explicit exporter's batch
+   * processor. On refusal they hold nothing (a reader's timer is deferred) and
+   * a flush would export.
+   */
+  readonly pipelines: Release[];
   /** Run at commit, in order: start what holds a resource. */
   readonly activations: (() => void)[];
+}
+
+/** One owned part's shutdown, made idempotent by {@link own}: it never throws. */
+type Release = () => Promise<unknown>;
+
+/**
+ * Owns `part`, built here or by the SDK: its `shutdown` becomes idempotent —
+ * the SDK's own call (a provider shutting down its processors and readers) and
+ * the fence's share one promise, so the fence waits for the very closure the
+ * SDK started — and is kept in `into`. A shutdown that throws becomes a rejection.
+ */
+function own(into: Release[], part: { shutdown(): Promise<unknown> }): void {
+  const once = releaseOnce(part.shutdown.bind(part));
+  part.shutdown = once;
+  into.push(once);
+}
+
+/**
+ * Owns `part`, handed in by the caller, as {@link own} does — but through a
+ * stand-in given to the SDK in its place, so the caller's object is untouched.
+ */
+function ownHandedIn<T extends { shutdown(): Promise<unknown> }>(into: Release[], part: T): T {
+  const once = releaseOnce(() => part.shutdown());
+  into.push(once);
+  return new Proxy(part, {
+    get(target, key) {
+      if (key === 'shutdown') return once;
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+    },
+  });
+}
+
+function releaseOnce(shutdown: () => unknown): Release {
+  let settling: Promise<unknown> | undefined;
+  return () => (settling ??= invoke(shutdown));
+}
+
+function invoke(call: () => unknown): Promise<unknown> {
+  try {
+    return Promise.resolve(call());
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
+/**
+ * Runs each tier of releases once the previous tier has settled — every
+ * member, not the first to fail (`NodeSDK.shutdown()` and each provider's are
+ * fail-fast `Promise.all`s: their rejection does not mean the rest finished).
+ * Resolves whether every one succeeded; never rejects.
+ */
+async function settleAll(tiers: readonly (readonly Release[])[]): Promise<boolean> {
+  let clean = true;
+  for (const tier of tiers) {
+    const outcomes = await Promise.allSettled(tier.map((release) => release()));
+    if (outcomes.some((outcome) => outcome.status === 'rejected')) clean = false;
+  }
+  return clean;
+}
+
+/**
+ * Makes `teardown` the restart fence: `initTelemetry` refuses until it has
+ * settled, and {@link shutdownTelemetry} returns it — rejecting with
+ * {@link TELEMETRY_SHUTDOWN_FAILED}, nothing of the parts' errors, when one
+ * failed. A refused start's fence has no caller, so its rejection is handled.
+ */
+function fence(teardown: Promise<boolean>): Promise<void> {
+  const pending: Promise<void> = teardown
+    .then((clean) => {
+      if (!clean) throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
+    })
+    .finally(() => {
+      if (stopping === pending) stopping = undefined;
+    });
+  pending.catch(() => undefined);
+  stopping = pending;
+  return pending;
 }
 
 /**
@@ -198,12 +296,13 @@ interface Construction {
  *
  * A refused start leaves nothing behind (see {@link Construction}): the
  * instrumentations are disabled, whatever the SDK registered globally is
- * unregistered, nothing of it is listening or scheduled, every exporter and
- * reader is shut down, and no SDK is kept — so a later call builds afresh
- * (and refuses again under the same configuration) rather than returning a
+ * unregistered, nothing of it is listening or scheduled, every exporter is
+ * being shut down, and no SDK is kept — so a later call builds afresh (and
+ * refuses again under the same configuration) rather than returning a
  * half-built one, and finds the Prometheus port free. A call made while one
- * is building, or while {@link shutdownTelemetry} is still stopping the SDK,
- * is refused.
+ * is building, or before a teardown — {@link shutdownTelemetry}'s, or a
+ * refused start's releases — has settled, is refused: await
+ * `shutdownTelemetry()` first.
  */
 export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
   if (config.enabled === false) return undefined;
@@ -223,7 +322,19 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
   // its own variables, and the constructor reads the rest, `OTEL_SDK_DISABLED`
   // first: whatever they report goes through the safe logger (diagnostics.ts).
   const reinstallDiagnostics = installSafeDiagnostics();
+  const construction: Construction = {
+    instrumentations: [],
+    releases: [],
+    pipelines: [],
+    activations: [],
+  };
+  // Owned before anything can refuse: a refusal releases what it was handed.
+  const traceExporter =
+    config.traceExporter && ownHandedIn(construction.releases, config.traceExporter);
+  const logExporter =
+    config.logRecordExporter && ownHandedIn(construction.releases, config.logRecordExporter);
   if (config.otlpEndpoint !== undefined && tryReadUrl(config.otlpEndpoint) === null) {
+    discardPartialStart(construction, false);
     throw new TelemetryRefusedError(UNREADABLE_OTLP_ENDPOINT);
   }
 
@@ -236,15 +347,13 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
     'deployment.environment': config.environment ?? process.env.NODE_ENV ?? 'development',
   });
 
-  const construction: Construction = { releases: [], activations: [] };
   let spanProcessors: SpanProcessor[] | undefined;
   // Which part of the SDK is being built, for the refusal's names.
   let stage: TelemetryStage = 'instrumentations';
-  let instrumentations: Instrumentations = [];
   let registering = false;
   let built: NodeSDK | undefined;
   try {
-    instrumentations = getNodeAutoInstrumentations({
+    construction.instrumentations = getNodeAutoInstrumentations({
       // Filesystem spans are enormous in volume and near-useless for
       // diagnosing a distributed system.
       '@opentelemetry/instrumentation-fs': { enabled: false },
@@ -262,8 +371,6 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
     // of its own over the safe one.
     built = withoutSdkLogLevel(() => {
       const metricReaders = metricReadersFromEnv(construction);
-      const logExporter = config.logRecordExporter;
-      if (logExporter) construction.releases.push(() => logExporter.shutdown());
       return new NodeSDK({
         resource,
         // Sanitizes what a span is started with before the SDK cuts it; the
@@ -276,14 +383,14 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
         // Read last before the log exporters, which `start()` builds next.
         get spanProcessors(): SpanProcessor[] {
           stage = 'traces';
-          spanProcessors ??= spanPipeline(config, construction);
+          spanProcessors ??= spanPipeline(config, traceExporter, construction);
           stage = 'logs';
           return spanProcessors;
         },
         logRecordProcessors: logExporter
           ? [new logs.SimpleLogRecordProcessor({ exporter: logExporter })]
           : undefined,
-        instrumentations: [instrumentations],
+        instrumentations: [construction.instrumentations],
       });
     });
     // Again, after construction and after start, should anything have replaced it.
@@ -291,10 +398,12 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
     stage = 'sdk';
     registering = true;
     built.start();
+    ownLogRecordProcessors(built, construction);
     reinstallDiagnostics();
   } catch {
     // Nothing of the error is kept: not its message, cause, stack or properties.
-    discardPartialStart(instrumentations, registering, construction);
+    if (built) ownLogRecordProcessors(built, construction);
+    discardPartialStart(construction, registering);
     reinstallDiagnostics();
     throw new TelemetryRefusedError(telemetryRefusal(stage, process.env));
   }
@@ -307,7 +416,27 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
     }
   }
   sdk = built;
+  owned = construction;
   return built;
+}
+
+/**
+ * Owns the log record processors `start()` gave its logger provider: the
+ * caller's, or the ones NodeSDK built from `OTEL_LOGS_EXPORTER` itself
+ * (`configureLoggerProviderFromEnv`, which it does not export, keeps them
+ * here). `telemetry-ownership.spec.ts` fails should the field move.
+ */
+function ownLogRecordProcessors(built: NodeSDK, construction: Construction): void {
+  const config = (
+    built as unknown as {
+      _loggerProviderConfig?: { logRecordProcessors?: logs.LogRecordProcessor[] };
+    }
+  )._loggerProviderConfig;
+  for (const processor of config?.logRecordProcessors ?? []) {
+    if (!construction.releases.includes(processor.shutdown as Release)) {
+      own(construction.releases, processor);
+    }
+  }
 }
 
 /** What `diag` is told when a committed reader cannot start; nothing of its error. */
@@ -316,32 +445,27 @@ const READER_NOT_STARTED =
   'OTEL_EXPORTER_PROMETHEUS_PORT); its error is withheld';
 
 /**
- * Undoes what a refused start did: disables the instrumentations (they patch
- * modules as they are built), unregisters what `start()` registers globally —
- * the context manager, the propagator, and the meter and tracer providers
- * (the logger provider is registered last, so a refused start never reached
- * it) — and runs every release. Nothing of this start listens or is scheduled
- * (see {@link Construction}), so the refusal waits for nothing; what a release
- * throws or rejects with is dropped, unread.
+ * Undoes what a refused start did: disables the instrumentations, unregisters
+ * what `start()` registers globally — the context manager, the propagator, and
+ * the meter and tracer providers (the logger provider is registered last, so a
+ * refused start never reached it) — and starts every release. Nothing of this
+ * start listens or is scheduled (see {@link Construction}), so the refusal is
+ * thrown at once; but a release may still be settling, so they are the
+ * restart {@link fence}: a retry is refused until each has settled, and
+ * `shutdownTelemetry()` waits for them and reports whether one failed.
  */
-function discardPartialStart(
-  instrumentations: Instrumentations,
-  registering: boolean,
-  construction: Construction,
-): void {
+function discardPartialStart(construction: Construction, registering: boolean): void {
+  disableAll(construction.instrumentations);
+  if (registering) unregisterGlobals();
+  if (construction.releases.length > 0) fence(settleAll([construction.releases]));
+}
+
+function disableAll(instrumentations: Instrumentations): void {
   for (const instrumentation of instrumentations) {
     try {
       instrumentation.disable();
     } catch {
       // Best effort; its error is not reported, for the same reason.
-    }
-  }
-  if (registering) unregisterGlobals();
-  for (const release of construction.releases) {
-    try {
-      Promise.resolve(release()).catch(() => undefined);
-    } catch {
-      // Dropped, unread, like the rejection.
     }
   }
 }
@@ -377,9 +501,9 @@ function metricReadersFromEnv(construction: Construction): sdkMetrics.MetricRead
     return readers;
   }
   const periodic = (exporter: sdkMetrics.PushMetricExporter, reader: () => unknown): void => {
-    construction.releases.push(() => exporter.shutdown());
+    own(construction.releases, exporter);
     const built = reader() as sdkMetrics.MetricReader;
-    readers.push(deferInitialization(built, construction, () => undefined));
+    readers.push(deferInitialization(built, construction, () => undefined, true));
   };
   for (const name of enabled) {
     if (name === 'otlp') {
@@ -390,7 +514,7 @@ function metricReadersFromEnv(construction: Construction): sdkMetrics.MetricRead
       periodic(exporter, () => new sdkMetrics.PeriodicExportingMetricReader({ exporter }));
     } else if (name === 'prometheus') {
       const exporter = new PrometheusExporter({ preventServerStart: true });
-      construction.releases.push(() => exporter.shutdown());
+      own(construction.releases, exporter);
       readers.push(
         deferInitialization(exporter, construction, () => {
           // A refused listen (the port taken) is reported, as NodeSDK's own
@@ -413,15 +537,18 @@ function metricReadersFromEnv(construction: Construction): sdkMetrics.MetricRead
  * `reader`, with what the meter provider calls when it registers it —
  * `onInitialized`, where a periodic reader starts its export timer — deferred
  * to the commit, followed there by `thenStart` (the Prometheus listener).
+ * A `periodic` reader, once registered, is owned: shutdown flushes it.
  */
 function deferInitialization<T extends sdkMetrics.MetricReader>(
   reader: T,
   construction: Construction,
   thenStart: () => void,
+  periodic = false,
 ): T {
   const hook = reader as unknown as { onInitialized(): void };
   const initialize = hook.onInitialized.bind(reader);
   hook.onInitialized = () => {
+    if (periodic) own(construction.pipelines, reader);
     construction.activations.push(() => {
       initialize();
       thenStart();
@@ -451,20 +578,28 @@ function deferInitialization<T extends sdkMetrics.MetricReader>(
  * itself, the environment's through the processor around it (no span has
  * ended yet, so its shutdown flushes nothing).
  */
-function spanPipeline(config: TelemetryConfig, construction: Construction): SpanProcessor[] {
+function spanPipeline(
+  config: TelemetryConfig,
+  traceExporter: SpanExporter | undefined,
+  construction: Construction,
+): SpanProcessor[] {
   // NodeSDK's SDK self-metrics meter: its own provider, which `start()` has
   // registered globally by now, when the opt-in variable is set.
   const selfMetrics = core.getBooleanFromEnv('OTEL_NODE_EXPERIMENTAL_SDK_METRICS')
     ? metrics.getMeterProvider()
     : undefined;
-  const exporter = config.traceExporter ?? otlpTraceExporter(config.otlpEndpoint);
+  // An explicit exporter is owned already; the OTLP one is as soon as it exists.
+  const otlp = traceExporter ? undefined : otlpTraceExporter(config.otlpEndpoint);
+  if (otlp) own(construction.releases, otlp);
+  const exporter = traceExporter ?? otlp;
   let exporting: SpanProcessor[];
   if (exporter) {
-    construction.releases.push(() => exporter.shutdown());
-    exporting = [createBatchSpanProcessorFromEnv(exporter, selfMetrics)];
+    const batch = createBatchSpanProcessorFromEnv(exporter, selfMetrics);
+    own(construction.pipelines, batch);
+    exporting = [batch];
   } else {
     exporting = getSpanProcessorsFromEnv(selfMetrics);
-    for (const processor of exporting) construction.releases.push(() => processor.shutdown());
+    for (const processor of exporting) own(construction.releases, processor);
   }
   return exporting.length > 0 ? [new RedactingSpanProcessor(), ...exporting] : [];
 }
@@ -479,37 +614,36 @@ function otlpTraceExporter(otlpEndpoint: string | undefined): SpanExporter | und
 }
 
 /**
- * Flushes and stops the SDK, then unregisters it from the API, so that a later
+ * Disables the instrumentations, flushes and stops the SDK, then shuts down
+ * every part it owns — each one the SDK's own shutdown reached or did not
+ * (a registered reader, a processor, then every exporter) — and only when all
+ * of them have settled unregisters it from the API, so that a later
  * {@link initTelemetry} starts a new one that is really used. Concurrent calls
- * share one outcome — none resolves before the Prometheus listener has
- * closed — and until it settles `initTelemetry` refuses.
+ * share one outcome, and until it settles `initTelemetry` refuses (the
+ * {@link fence}). After a refused start it returns that start's fence.
  *
- * Rejects, when the SDK's shutdown does, with a fresh
- * {@link TelemetryRefusedError} ({@link TELEMETRY_SHUTDOWN_FAILED}): the
- * SDK's own rejection — an exporter's, quoting its endpoint or a collector's
- * answer — is dropped, since the caller logs what it is given.
+ * Rejects, when any part failed, with a fresh {@link TelemetryRefusedError}
+ * ({@link TELEMETRY_SHUTDOWN_FAILED}) — after every part has settled: the
+ * parts' own rejections — an exporter's, quoting its endpoint or a
+ * collector's answer — are dropped, since the caller logs what it is given.
  */
 export function shutdownTelemetry(): Promise<void> {
   if (stopping) return stopping;
   const current = sdk;
-  if (!current) return Promise.resolve();
+  const parts = owned;
+  if (!current || !parts) return Promise.resolve();
   sdk = undefined;
-  const stop = async (): Promise<void> => {
-    let failed = false;
-    // Through `then`, so a shutdown that throws instead of rejecting is caught alike.
-    await Promise.resolve()
-      .then(() => current.shutdown())
-      .catch(() => {
-        failed = true;
-      });
+  owned = undefined;
+  disableAll(parts.instrumentations);
+  const teardown = settleAll([
+    [() => invoke(() => current.shutdown())],
+    parts.pipelines,
+    parts.releases,
+  ]).then((clean) => {
     unregisterGlobals();
-    if (failed) throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
-  };
-  const pending = stop().finally(() => {
-    stopping = undefined;
+    return clean;
   });
-  stopping = pending;
-  return pending;
+  return fence(teardown);
 }
 
 // ---------------------------------------------------------------------------

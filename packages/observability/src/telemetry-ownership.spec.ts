@@ -2,11 +2,18 @@ import { createServer as createHttpServer, get, type Server as HttpServer } from
 import { Server as NetServer, createServer, type AddressInfo } from 'node:net';
 import { inspect } from 'node:util';
 import { metrics, trace } from '@opentelemetry/api';
-import { NodeSDK, type metrics as sdkMetrics } from '@opentelemetry/sdk-node';
+import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
+import {
+  NodeSDK,
+  logs as sdkLogs,
+  metrics as sdkMetricsRuntime,
+  type metrics as sdkMetrics,
+} from '@opentelemetry/sdk-node';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-node';
 import { telemetryRefusal, type TelemetryStage } from './diagnostics';
 import {
   TELEMETRY_ALREADY_STARTING,
+  TELEMETRY_SHUTDOWN_FAILED,
   TELEMETRY_STILL_STOPPING,
   TelemetryRefusedError,
   initTelemetry,
@@ -268,15 +275,25 @@ describe('a refused start listens on nothing: the same port binds at once', () =
       const atRefusal = held();
       const rebound = bind(port, host);
       expect({ listens, timers }).toEqual({ listens: 0, timers: 0 });
-      for (const refusal of refusals) {
-        expect(refusal?.message).toBe(telemetryRefusal('metrics', env));
-        expect(everythingOf(refusal)).not.toMatch(SENTINEL);
-      }
+      // The second call, in the same tick, meets the first one's releases still settling (r2 F1).
+      expect(refusals.map((refusal) => refusal?.message)).toEqual([
+        telemetryRefusal('metrics', env),
+        TELEMETRY_STILL_STOPPING,
+      ]);
+      for (const refusal of refusals) expect(everythingOf(refusal)).not.toMatch(SENTINEL);
       expect(output).not.toMatch(SENTINEL);
       expect(added(before, atRefusal)).toEqual([]);
       await expect(rebound).resolves.toBe('bound');
       await nextMacrotask();
       expect(added(before, held())).toEqual([]);
+      // Once they settled, the configuration is refused for itself again.
+      await shutdownTelemetry();
+      const again = captured(() =>
+        started(() => refusalOf(() => initTelemetry({ serviceName: 'ownership-spec' }))),
+      ).result;
+      expect(again.result?.message).toBe(telemetryRefusal('metrics', env));
+      expect({ listens: again.listens, timers: again.timers }).toEqual({ listens: 0, timers: 0 });
+      await shutdownTelemetry();
       // Again once any lookup a listen would have waited for is long done.
       await new Promise((done) => setTimeout(done, 50));
       await expect(bind(port, host)).resolves.toBe('bound');
@@ -618,4 +635,236 @@ describe('the metric readers are the ones the NodeSDK constructor builds', () =>
       expect(readersOf(ours as NodeSDK).map(describeReader)).toEqual(expected);
     },
   );
+});
+
+/** A promise held open until `open()`. */
+function gate(): { opened: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => (open = resolve));
+  return { opened, open };
+}
+
+/** Whether `promise` has settled after a few turns of the event loop. */
+async function settledYet(promise: Promise<unknown>): Promise<boolean> {
+  let settled = false;
+  promise.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  for (let turn = 0; turn < 5; turn += 1) await nextMacrotask();
+  return settled;
+}
+
+/** A span exporter whose shutdown rejects, quoting both sentinels. */
+const rejectingTraceExporter = (): { export: () => void; shutdown: () => Promise<void> } => ({
+  export: () => undefined,
+  shutdown: () => Promise.reject(new Error(`could not flush to ${BAD_URL}`)),
+});
+
+/** A log record exporter whose shutdown is counted and resolves when `until` does. */
+const countedLogExporter = (until: Promise<void> = Promise.resolve()) => ({
+  export: (_records: unknown, done: (result: { code: number }) => void) => done({ code: 0 }),
+  shutdown: jest.fn(() => until),
+});
+
+describe('teardown is a fence: nothing of the old SDK is still closing when a new one starts (r2 F1)', () => {
+  type Closing = { prototype: { shutdown?: unknown; stopServer?: unknown } };
+
+  it.each([
+    [
+      'the Prometheus listener',
+      { OTEL_METRICS_EXPORTER: 'prometheus', OTEL_LOGS_EXPORTER: 'none' },
+      PrometheusExporter as Closing,
+      'stopServer',
+    ],
+    [
+      'a periodic reader’s console metric exporter',
+      { OTEL_METRICS_EXPORTER: 'console', OTEL_LOGS_EXPORTER: 'none' },
+      sdkMetricsRuntime.ConsoleMetricExporter as Closing,
+      'shutdown',
+    ],
+    [
+      'the environment’s console log exporter',
+      { OTEL_METRICS_EXPORTER: 'none', OTEL_LOGS_EXPORTER: 'console' },
+      sdkLogs.ConsoleLogRecordExporter as Closing,
+      'shutdown',
+    ],
+  ] as const)(
+    'the trace exporter rejects while %s is still closing: the shutdown and a restart wait for it',
+    async (_name, env, Kind, method) => {
+      setOtelEnv({ ...env, OTEL_EXPORTER_PROMETHEUS_PORT: String(await freePort()) });
+      const closing = gate();
+      const real = Kind.prototype[method] as (this: unknown) => Promise<void>;
+      const spy = jest
+        .spyOn(Kind.prototype as Record<string, () => Promise<void>>, method)
+        .mockImplementation(function (this: unknown) {
+          return closing.opened.then(() => real.call(this));
+        });
+      try {
+        captured(() =>
+          initTelemetry({
+            serviceName: 'ownership-spec',
+            traceExporter: rejectingTraceExporter() as never,
+          }),
+        );
+        await nextMacrotask();
+        const stop = shutdownTelemetry();
+        stop.catch(() => undefined);
+        expect(await settledYet(stop)).toBe(false);
+        expect(spy).toHaveBeenCalled();
+        expect(refusalOf(() => initTelemetry({ serviceName: 'ownership-spec' }))?.message).toBe(
+          TELEMETRY_STILL_STOPPING,
+        );
+        closing.open();
+        const failed: unknown = await stop.catch((error: unknown) => error);
+        expect((failed as Error).message).toBe(TELEMETRY_SHUTDOWN_FAILED);
+        expect(everythingOf(failed)).not.toMatch(SENTINEL);
+        // The fence waited for the SDK's own call; it did not close the part a second time.
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(
+        captured(() => initTelemetry({ serviceName: 'ownership-spec' })).result,
+      ).toBeInstanceOf(NodeSDK);
+    },
+  );
+
+  it.each([
+    ['resolves', undefined],
+    ['rejects', TELEMETRY_SHUTDOWN_FAILED],
+  ] as const)(
+    'a refusal whose release is still pending: a retry is refused until it settled; shutdownTelemetry waits for it and %s',
+    async (how, failure) => {
+      const env = {
+        OTEL_METRICS_EXPORTER: 'none',
+        OTEL_TRACES_EXPORTER: 'zipkin',
+        OTEL_EXPORTER_ZIPKIN_ENDPOINT: BAD_URL,
+      };
+      setOtelEnv(env);
+      const release = gate();
+      const exporter = countedLogExporter(
+        release.opened.then(() => {
+          if (how === 'rejects') throw new Error(`could not flush to ${BAD_URL}`);
+        }),
+      );
+      const start = (): unknown =>
+        initTelemetry({ serviceName: 'ownership-spec', logRecordExporter: exporter as never });
+      expect(refusalOf(start)?.message).toBe(telemetryRefusal('traces', env));
+      expect(exporter.shutdown).toHaveBeenCalledTimes(1);
+      expect(refusalOf(start)?.message).toBe(TELEMETRY_STILL_STOPPING);
+      const waited = shutdownTelemetry();
+      waited.catch(() => undefined);
+      expect(await settledYet(waited)).toBe(false);
+      expect(refusalOf(start)?.message).toBe(TELEMETRY_STILL_STOPPING);
+      release.open();
+      const outcome: unknown = await waited.then(
+        () => undefined,
+        (error: unknown) => (error as Error).message,
+      );
+      expect(outcome).toBe(failure);
+      // The fence is gone: the same configuration refuses for itself again, a fixed one starts.
+      expect(refusalOf(start)?.message).toBe(telemetryRefusal('traces', env));
+      await shutdownTelemetry().catch(() => undefined);
+      process.env.OTEL_TRACES_EXPORTER = 'none';
+      expect(refusalOf(start)).toBeNull();
+    },
+  );
+
+  it('the SDK’s own shutdown throws before it reached the meter provider: each registered reader is still shut down', async () => {
+    setOtelEnv({ OTEL_METRICS_EXPORTER: 'console,otlp', OTEL_LOGS_EXPORTER: 'none' });
+    const sdk = captured(() =>
+      initTelemetry({ serviceName: 'ownership-spec', traceExporter: new InMemorySpanExporter() }),
+    ).result as NodeSDK;
+    const readers = (
+      sdk as unknown as { _meterProviderConfig: { readers: { _shutdown: boolean }[] } }
+    )._meterProviderConfig.readers;
+    const thrown = jest.spyOn(sdk, 'shutdown').mockImplementation(() => {
+      throw new Error(`could not flush to ${BAD_URL}`);
+    });
+    const failed: unknown = await captured(() => shutdownTelemetry()).result.catch(
+      (error: unknown) => error,
+    );
+    thrown.mockRestore();
+    expect((failed as Error).message).toBe(TELEMETRY_SHUTDOWN_FAILED);
+    expect(readers.map((reader) => reader._shutdown)).toEqual([true, true]);
+  });
+});
+
+describe('every part a start was handed or built is released on every path (r2 F2)', () => {
+  const explicit = () => {
+    const traceExporter = new InMemorySpanExporter();
+    return {
+      traceExporter,
+      traceStops: jest.spyOn(traceExporter, 'shutdown'),
+      logRecordExporter: countedLogExporter(),
+    };
+  };
+
+  it.each([
+    [
+      'the metrics refuse before either exporter is used',
+      {
+        OTEL_METRICS_EXPORTER: 'otlp',
+        OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: 'grpc',
+        OTEL_EXPORTER_OTLP_METRICS_HEADERS: `${USER}%C3%A9=${PASSWORD}`,
+      },
+      undefined,
+    ],
+    [
+      'an unreadable explicit endpoint is refused first',
+      { OTEL_METRICS_EXPORTER: 'none' },
+      BAD_URL,
+    ],
+  ] as const)('%s: both explicit exporters are shut down', async (_name, env, otlpEndpoint) => {
+    setOtelEnv(env);
+    const parts = explicit();
+    const refusal = captured(() =>
+      refusalOf(() =>
+        initTelemetry({
+          serviceName: 'ownership-spec',
+          otlpEndpoint,
+          traceExporter: parts.traceExporter,
+          logRecordExporter: parts.logRecordExporter as never,
+        }),
+      ),
+    ).result;
+    expect(refusal).not.toBeNull();
+    await shutdownTelemetry();
+    expect(parts.traceStops).toHaveBeenCalledTimes(1);
+    expect(parts.logRecordExporter.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('under OTEL_SDK_DISABLED, shutdownTelemetry releases what the SDK never registered', async () => {
+    setOtelEnv({ OTEL_SDK_DISABLED: 'true', OTEL_METRICS_EXPORTER: 'console' });
+    const metricStops = jest.spyOn(sdkMetricsRuntime.ConsoleMetricExporter.prototype, 'shutdown');
+    try {
+      const parts = explicit();
+      initTelemetry({
+        serviceName: 'ownership-spec',
+        traceExporter: parts.traceExporter,
+        logRecordExporter: parts.logRecordExporter as never,
+      });
+      await shutdownTelemetry();
+      expect(parts.traceStops).toHaveBeenCalledTimes(1);
+      expect(parts.logRecordExporter.shutdown).toHaveBeenCalledTimes(1);
+      expect(metricStops).toHaveBeenCalledTimes(1);
+    } finally {
+      metricStops.mockRestore();
+    }
+  });
+
+  it('a successful shutdown disables every instrumentation the start installed', async () => {
+    setOtelEnv({ OTEL_METRICS_EXPORTER: 'none', OTEL_LOGS_EXPORTER: 'none' });
+    const sdk = initTelemetry({
+      serviceName: 'ownership-spec',
+      traceExporter: new InMemorySpanExporter(),
+    });
+    const installed = (sdk as unknown as { _instrumentations: { isEnabled(): boolean }[] })
+      ._instrumentations;
+    expect(installed.length).toBeGreaterThan(10);
+    expect(installed.some((instrumentation) => instrumentation.isEnabled())).toBe(true);
+    await shutdownTelemetry();
+    expect(installed.filter((instrumentation) => instrumentation.isEnabled())).toEqual([]);
+  });
 });
