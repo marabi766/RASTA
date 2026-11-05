@@ -160,6 +160,14 @@
     {
       "job": "quality-guards",
       "ci": {
+        "name": "Every HTTP service installs the strict query parser (FU-072)",
+        "run": "pnpm run test:strict-query-parser-wiring"
+      },
+      "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
         "name": "Local PostgreSQL defaults contract",
         "run": "pnpm run test:local-postgres-config\npnpm run check:local-postgres-config\n"
       },
