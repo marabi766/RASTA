@@ -295,6 +295,49 @@ test('the matcher agrees with git on every gitignore pattern shape', () => {
   assert.throws(() => ignoreMatcher('[[:alpha:]]x'), /unsupported/); // a shape it does not know is refused
 });
 
+test('the matcher agrees with git on classes, star runs and whitespace (PR #751 r2 F3)', () => {
+  const paths = (...names) =>
+    names.flatMap((n) => [
+      [n, true],
+      [n, false],
+      [`d/${n}`, false],
+    ]);
+  const cases = [
+    // [pattern line, probe names]: each was accepted but read differently by the old matcher
+    ['q/[]a]', paths('q/a', 'q/]', 'q/b')],
+    ['q/[!]]', paths('q/a', 'q/]')],
+    ['q/[\\]]', paths('q/]', 'q/a')],
+    ['q/[a\\-c]', paths('q/a', 'q/-', 'q/b', 'q/c')],
+    ['q/[/-0]', paths('q/0', 'q/.', 'q/1')],
+    ['q/[^a-c]x', paths('q/dx', 'q/bx', 'q/x')],
+    ['q/***/tail', paths('q/tail', 'q/a/tail', 'q/a/b/tail')],
+    ['q/****', paths('q/a', 'q/a/b')],
+    ['q[!a]x', paths('q/x', 'qbx', 'qax')],
+    ['q/[a-]', paths('q/a', 'q/-', 'q/b')],
+    ['q/a**/z', paths('q/a/z', 'q/ax/z', 'q/a/b/z', 'q/az')],
+    ['q/a***', paths('q/abc', 'q/a/b')],
+    ['***/z', paths('z', 'a/z', 'a/b/z')],
+    ['q/end\t', paths('q/end', 'q/end\t')],
+    ['q/sp\\ ', paths('q/sp', 'q/sp ')],
+    ['q/sp   ', paths('q/sp', 'q/sp ')],
+    ['q/in space', paths('q/in space', 'q/in')],
+  ];
+  for (const [line, probes] of cases) agreeWithGit(`${line}\n`, probes);
+  // What it cannot read exactly is refused, never guessed.
+  for (const line of [
+    'q/[a',
+    'q/[a-',
+    'q/[[:alpha:]]',
+    'q/[z-a]',
+    'q/[é]',
+    'q/\\',
+    'a\\/b',
+    'a//b',
+    'a**\\/b',
+  ])
+    assert.throws(() => ignoreMatcher(line), /\.gitignore/, line);
+});
+
 test('the real .gitignore: every line, the review cases, and git itself agree', () => {
   // A probe for every line: its pattern with `*` as nothing and as text, `**` as zero and as two directories.
   const probes = GITIGNORE.split('\n')
@@ -395,7 +438,7 @@ const REFLECTIVE_MODULE = /^(?:node:)?vm$/;
 
 // A text with none of these cannot reach a listing API, an fs module or code built from text.
 const RELEVANT =
-  /readdir|opendir|glob|scandir|\bfs\b|fs\/|\brequire\b|\bimport\s*\(|createRequire|getBuiltinModule|_load|\beval\b|\bFunction\b|\bprocess\b|\bvm\b|klaw|fdir|readdirp/;
+  /\\u|readdir|opendir|glob|scandir|\bfs\b|fs\/|\brequire\b|\bimport\s*\(|createRequire|getBuiltinModule|_load|\beval\b|\bFunction\b|\bprocess\b|\bvm\b|klaw|fdir|readdirp/;
 
 function listingCapabilities(file, text) {
   if (!RELEVANT.test(text)) return [];
@@ -423,23 +466,53 @@ function listingCapabilities(file, text) {
     return n;
   };
   const literal = (n) => (n && ts.isStringLiteralLike(n) ? n.text : undefined);
-  // names that call require(): `require` and anything built by createRequire(...)
+  const memberName = (n) =>
+    ts.isPropertyAccessExpression(n)
+      ? n.name.text
+      : ts.isElementAccessExpression(n)
+        ? literal(n.argumentExpression)
+        : undefined;
+  // names that call require(): `require`, anything built by createRequire(...), and aliases of either
   const requirers = new Set(['require']);
+  const factories = new Set(['createRequire']);
   const all = [];
   const collect = (n) => {
     all.push(n);
     ts.forEachChild(n, collect);
   };
   collect(source);
-  for (const n of all)
-    if (
-      ts.isVariableDeclaration(n) &&
-      ts.isIdentifier(n.name) &&
-      n.initializer &&
-      ts.isCallExpression(strip(n.initializer)) &&
-      /^createRequire$/.test(strip(n.initializer).expression.getText())
-    )
-      requirers.add(n.name.text);
+  const factoryCall = (n) =>
+    n &&
+    ts.isCallExpression(n) &&
+    ((ts.isIdentifier(n.expression) && factories.has(n.expression.text)) ||
+      memberName(strip(n.expression)) === 'createRequire');
+  for (let size = -1; size !== requirers.size + factories.size;) {
+    size = requirers.size + factories.size;
+    for (const n of all) {
+      if (ts.isImportSpecifier(n) && (n.propertyName ?? n.name).text === 'createRequire')
+        factories.add(n.name.text);
+      else if (
+        ts.isBindingElement(n) &&
+        ts.isIdentifier(n.name) &&
+        (n.propertyName ?? n.name).text === 'createRequire'
+      )
+        factories.add(n.name.text);
+      const bound = ts.isVariableDeclaration(n)
+        ? [n.name, n.initializer]
+        : ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          ? [n.left, n.right]
+          : [];
+      const init = strip(bound[1]);
+      if (!init || !bound[0] || !ts.isIdentifier(bound[0])) continue;
+      if (factoryCall(init) || (ts.isIdentifier(init) && requirers.has(init.text)))
+        requirers.add(bound[0].text);
+      else if (
+        (ts.isIdentifier(init) && factories.has(init.text)) ||
+        memberName(init) === 'createRequire'
+      )
+        factories.add(bound[0].text);
+    }
+  }
   const memo = new Map();
   const moduleOf = (n) => {
     n = strip(n);
@@ -454,26 +527,34 @@ function listingCapabilities(file, text) {
     const c = n.expression;
     const isRequire =
       (ts.isIdentifier(c) && requirers.has(c.text)) ||
+      factoryCall(strip(c)) ||
       c.kind === ts.SyntaxKind.ImportKeyword ||
-      (ts.isPropertyAccessExpression(c) &&
-        /^(?:require|getBuiltinModule|_load)$/.test(c.name.text));
+      /^(?:require|getBuiltinModule|_load)$/.test(memberName(strip(c)) ?? '');
     if (!isRequire) return undefined;
-    return literal(n.arguments[0]) ?? null; // null: the module cannot be resolved
+    const specifier = literal(n.arguments[0]);
+    if (specifier !== undefined) return specifier;
+    // `createRequire(url)(resolve(...))` was invisible before: a path built here names a repository file
+    return factoryCall(strip(c)) && builtFilePath(n.arguments[0]) ? '<file path>' : null; // null: cannot be resolved
   };
 
   // fs handles: bindings that hold a whole fs module
   const handles = new Set();
-  const holds = (n) => {
+  const holds = (n, strict = false) => {
     n = strip(n);
     if (!n) return false;
     if (ts.isIdentifier(n)) return handles.has(n.text);
     const m = moduleOf(n);
-    if (m !== undefined) return m === null || FS_MODULE.test(m); // unresolved: may be fs
+    if (m !== undefined) return m === null ? !strict : FS_MODULE.test(m); // unresolved: may be fs
     if (ts.isPropertyAccessExpression(n))
-      return ['promises', 'default'].includes(n.name.text) && holds(n.expression);
+      return ['promises', 'default'].includes(n.name.text) && holds(n.expression, strict);
     if (ts.isElementAccessExpression(n))
-      return holds(n.expression) && !literal(n.argumentExpression);
-    if (ts.isConditionalExpression(n)) return holds(n.whenTrue) || holds(n.whenFalse);
+      return (
+        holds(n.expression, strict) &&
+        (!literal(n.argumentExpression) ||
+          ['promises', 'default'].includes(literal(n.argumentExpression)))
+      );
+    if (ts.isConditionalExpression(n))
+      return holds(n.whenTrue, strict) || holds(n.whenFalse, strict);
     if (ts.isBinaryExpression(n))
       return [
         ts.SyntaxKind.BarBarToken,
@@ -481,10 +562,56 @@ function listingCapabilities(file, text) {
         ts.SyntaxKind.AmpersandAmpersandToken,
         ts.SyntaxKind.CommaToken,
       ].includes(n.operatorToken.kind)
-        ? holds(n.left) || holds(n.right)
+        ? holds(n.left, strict) || holds(n.right, strict)
         : false;
     return false;
   };
+  // values of a module the guard cannot resolve: nothing may be called on them (`require(name).sync(p)`)
+  const unknowns = new Set();
+  // A specifier BUILT as a file path (`resolve(...)`, or `join(dir, ...)` with a base) names a file
+  // of this repository, never a built-in or a package.
+  const builtFilePath = (arg) => {
+    arg = strip(arg);
+    if (!arg || !ts.isCallExpression(arg)) return false;
+    const callee = ts.isIdentifier(arg.expression)
+      ? arg.expression.text
+      : memberName(arg.expression);
+    return (
+      callee === 'resolve' ||
+      (callee === 'join' &&
+        arg.arguments.length > 1 &&
+        !(literal(arg.arguments[0]) !== undefined && !literal(arg.arguments[0]).includes('/')))
+    );
+  };
+  const unresolved = (n) => {
+    n = strip(n);
+    if (!n) return false;
+    if (ts.isCallExpression(n)) return moduleOf(n) === null && !builtFilePath(n.arguments[0]);
+    if (ts.isIdentifier(n)) return unknowns.has(n.text);
+    if (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n))
+      return unresolved(n.expression);
+    return false;
+  };
+  const names = (pattern) =>
+    ts.isIdentifier(pattern)
+      ? [pattern.text]
+      : pattern.elements.flatMap((el) => (ts.isOmittedExpression(el) ? [] : names(el.name)));
+  for (let size = -1; size !== unknowns.size;) {
+    size = unknowns.size;
+    for (const n of all) {
+      const pair = ts.isVariableDeclaration(n)
+        ? [n.name, n.initializer]
+        : ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          ? [n.left, n.right]
+          : [];
+      if (
+        pair[1] &&
+        unresolved(pair[1]) &&
+        (ts.isIdentifier(pair[0]) || ts.isBindingPattern(pair[0]))
+      )
+        for (const name of names(pair[0])) unknowns.add(name);
+    }
+  }
   let grew = true;
   const take = (name) => {
     if (ts.isIdentifier(name) && !handles.has(name.text)) {
@@ -551,6 +678,8 @@ function listingCapabilities(file, text) {
     const m = ts.isCallExpression(n) ? moduleOf(n) : undefined;
     if (m !== undefined && m !== null && (LISTING_PACKAGE.test(m) || REFLECTIVE_MODULE.test(m)))
       note(n, `loads ${m}`);
+    if (ts.isCallExpression(n) && unresolved(n.expression))
+      note(n, 'calls into a module the guard cannot resolve');
     if (m !== undefined && (m === null || FS_MODULE.test(m))) {
       let use = n;
       while (
@@ -582,6 +711,17 @@ function listingCapabilities(file, text) {
       const spec = n.moduleSpecifier?.text;
       if (spec && (LISTING_PACKAGE.test(spec) || REFLECTIVE_MODULE.test(spec)))
         note(n, `imports ${spec}`);
+      const clause = ts.isExportDeclaration(n) ? n.exportClause : undefined;
+      if (
+        ts.isExportDeclaration(n) &&
+        FS_MODULE.test(spec ?? '') &&
+        (!clause ||
+          ts.isNamespaceExport(clause) ||
+          clause.elements.some((e) =>
+            ['promises', 'default'].includes((e.propertyName ?? e.name).text),
+          ))
+      )
+        note(n, `re-exports ${spec} whole`);
       if (
         spec &&
         /^(?:node:)?module$/.test(spec) &&
@@ -600,10 +740,74 @@ function listingCapabilities(file, text) {
         note(n, 'imports node:module as a whole');
     }
     // 3. code from text, process internals
-    if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
-      const c = n.expression;
-      if (ts.isIdentifier(c) && (c.text === 'eval' || c.text === 'Function'))
-        note(n, `builds code from text (${c.text})`);
+    if (ts.isIdentifier(n) && (n.text === 'eval' || n.text === 'Function')) {
+      const p = n.parent;
+      const harmless =
+        ts.isTypeReferenceNode(p) ||
+        ts.isTypeOfExpression(p) ||
+        (ts.isBinaryExpression(p) &&
+          p.right === n &&
+          p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) ||
+        p.name === n ||
+        (ts.isCallExpression(p) && /^(?:any|toBeInstanceOf)$/.test(memberName(p.expression) ?? ''));
+      if (!harmless) note(n, `builds code from text, or aliases it (${n.text})`);
+    }
+    const global = /^(?:globalThis|global|window|self)$/;
+    if (
+      memberName(n) !== undefined &&
+      /^(?:eval|Function)$/.test(memberName(n)) &&
+      global.test(n.expression.getText())
+    )
+      note(n, 'builds code from text through the global object');
+    // process, module and the global object: a member chosen at run time may be a module loader
+    const symbolKey = (k) =>
+      ts.isCallExpression(k) && /^Symbol(?:\.for)?$/.test(k.expression.getText()); // never a name
+    if (
+      ts.isElementAccessExpression(n) &&
+      !literal(n.argumentExpression) &&
+      !symbolKey(n.argumentExpression)
+    ) {
+      const base = strip(n.expression).getText();
+      if (
+        /^(?:process|module|globalThis|global|globalThis\.process|global\.process|module\.constructor|Module|require)$/.test(
+          base,
+        )
+      )
+        note(n, `computed member of ${base}`);
+    }
+    if (/^(?:getBuiltinModule|_load)$/.test(memberName(n) ?? '')) {
+      const p = n.parent;
+      if (!(ts.isCallExpression(p) && p.expression === n))
+        note(n, `${memberName(n)} reached without being called`);
+    }
+    if (
+      ts.isBindingElement(n) &&
+      /^(?:getBuiltinModule|_load)$/.test((n.propertyName ?? n.name).text ?? '')
+    )
+      note(n, `${(n.propertyName ?? n.name).text} taken out of its owner`);
+    // 3b. a module loader (require, createRequire and their aliases) that is not simply called
+    if (ts.isIdentifier(n) && (requirers.has(n.text) || factories.has(n.text))) {
+      const p = n.parent;
+      const plain = (name) => !/^(?:call|apply|bind)$/.test(name);
+      const ok =
+        (ts.isCallExpression(p) && p.expression === n) ||
+        ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p)) &&
+          p.name === n) ||
+        p.name === n ||
+        ts.isImportSpecifier(p) ||
+        ts.isTypeOfExpression(p) ||
+        ts.isTypeQueryNode(p) ||
+        (ts.isVariableDeclaration(p) && p.initializer === n && ts.isIdentifier(p.name)) ||
+        (ts.isBinaryExpression(p) &&
+          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isIdentifier(p.left) &&
+          (p.left === n || p.right === n)) ||
+        (ts.isPropertyAccessExpression(p) && (p.name === n || plain(p.name.text))) ||
+        (ts.isElementAccessExpression(p) &&
+          p.expression === n &&
+          plain(literal(p.argumentExpression) ?? 'call')) ||
+        (ts.isPropertyAssignment(p) && p.name === n);
+      if (!ok) note(n, `module loader ${n.text} used in a way the guard cannot follow`);
     }
     if (
       ts.isPropertyAccessExpression(n) &&
@@ -612,7 +816,10 @@ function listingCapabilities(file, text) {
     )
       note(n, 'reaches Node internals through process');
     // 4. an fs handle the guard cannot follow
-    if (ts.isIdentifier(n) && handles.has(n.text)) {
+    if (
+      (ts.isIdentifier(n) && handles.has(n.text)) ||
+      ((ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) && holds(n, true))
+    ) {
       const p = n.parent;
       const declared =
         (ts.isImportClause(p) ||
@@ -640,7 +847,7 @@ function listingCapabilities(file, text) {
         ts.isQualifiedName(p) ||
         ts.isTypeReferenceNode(p);
       if (!declared && !member && !aliased && !named)
-        note(n, `fs handle ${n.text} used in a way the guard cannot follow`);
+        note(n, `fs handle ${n.getText()} used in a way the guard cannot follow`);
     }
   }
   return [...new Set(found)];
@@ -693,6 +900,51 @@ const REFUSED = {
   'process internals': "process.binding('fs');",
   'delegated through an injected reader': 'run({ readdir: (d) => list(d) });',
   'does not parse': 'process.argv.slice(;',
+  // PR #751 r2 F1: computed or aliased access through an fs expression, an acquisition the guard cannot name
+  'review example: fs.promises[api]':
+    "import fs from 'node:fs'; export const list = (api, dir) => fs.promises[api](dir, { recursive: true });",
+  'optional chain on fs.promises': "import fs from 'node:fs'; fs.promises?.[api]?.(d);",
+  "fs['promises'] aliased": "import fs from 'node:fs'; const p = fs['promises']; p[k](d);",
+  "fs['promises'] computed": "import fs from 'node:fs'; fs['promises'][k](d);",
+  '.default chain': "import fs from 'node:fs'; fs.default.promises[k](d);",
+  'required .default chain': "require('node:fs').default.promises[k](d);",
+  'required promises, computed': "require('node:fs').promises[api](d);",
+  'promises of a required fs, destructured computed':
+    "const { promises: p } = require('fs'); p[k](d);",
+  'require aliased': "const r = require; r('node:fs')[k](d);",
+  'require aliased twice': "const r = require; const s = r; s('node:fs')[k](d);",
+  'require through a comma': "(0, require)('node:fs')[k](d);",
+  'require passed on': "use(require); require('node:fs');",
+  'require.call': "require.call(null, 'node:fs')[k](d);",
+  'createRequire aliased':
+    "import { createRequire } from 'node:module'; const c = createRequire; c(url)('node:fs')[k](d);",
+  'createRequire renamed':
+    "import { createRequire as cr } from 'node:module'; cr(url)('node:fs')[k](d);",
+  'createRequire read from process':
+    "const { createRequire: cr } = process.getBuiltinModule('module'); cr(u)('fs')[k](d);",
+  'computed getBuiltinModule': "process['getBuiltinModule']('fs')[k](d);",
+  'computed member of process': "process[name]('fs')[k](d);",
+  'getBuiltinModule aliased': "const g = process.getBuiltinModule; g('fs')[k](d);",
+  'getBuiltinModule destructured': "const { getBuiltinModule: g } = process; g('fs')[k](d);",
+  'fs star re-export': "export * from 'node:fs';",
+  'fs namespace re-export': "export * as fs from 'node:fs';",
+  'fs default re-export': "export { default } from 'fs';",
+  'fs promises re-export': "export { promises as p } from 'node:fs/promises';",
+  'fs namespace exported': "import * as fs from 'node:fs'; export { fs };",
+  'fs default exported': "import fs from 'node:fs'; export default fs;",
+  'unresolved loader, static member': 'require(name).sync(p);',
+  'unresolved loader built by another call': 'require(pick(name)).sync(p);',
+  'unresolved loader, join without a base': 'require(join(name)).sync(p);',
+  'unresolved loader, member of a held module': 'const g = require(name); g.sync(p);',
+  'unresolved loader, destructured member': 'const { sync } = require(name); sync(p);',
+  'unresolved import, default called': 'const g = (await import(name)).default; g(p);',
+  'eval aliased': "const e = eval; e('x');",
+  'eval through a comma': "(0, eval)('x');",
+  'eval through the global object': "globalThis['eval']('x');",
+  'Function aliased': "const F = Function; new F('return process')();",
+  'Function passed on': "Reflect.construct(Function, ['return process']);",
+  'unicode-escaped loader': "\\u0072equire('\\u0066s')[k](d);",
+  'unicode-escaped lister': 'const f = (d) => \\u0072eaddirSync(d);',
 };
 const ACCEPTED = {
   'reads files': "import { readFileSync } from 'node:fs'; readFileSync(p, 'utf8');",
@@ -703,6 +955,16 @@ const ACCEPTED = {
   'array and record indexing': 'const a = []; a[i]; rec[k];',
   'a comment names it': '// readdirSync(d, { recursive: true })\nconst s = 1;',
   'a literal path': "const page = require('./page');",
+  "fs['promises'] members by name":
+    "import fs from 'node:fs'; await fs['promises'].readFile(p); fs.default.statSync(p);",
+  'require read, not passed': "const r = require; r('./x'); require.resolve('y'); typeof require;",
+  'createRequire for a literal':
+    "import { createRequire } from 'node:module'; createRequire(u)('./x');",
+  'named re-export of file reads': "export { readFileSync } from 'node:fs';",
+  'a repository file loaded by path':
+    "const c = require(resolve(root, 'dist/index.js')); c.build(1);",
+  'matchers and process members':
+    "expect(f).toBeInstanceOf(Function); x instanceof Function; process.env[k]; g[Symbol.for('k')];",
 };
 /** Files with a capability that are not allow-listed, and allow-listed files that no longer have one. */
 function unlisted(found, allowed) {
@@ -784,6 +1046,7 @@ const COVERS_GENERATED_ON_PURPOSE = [
 // scan did not see them; none is known to open generated output, and none is reviewed one by one.
 const OTHER_CAPABILITY = [
   'apps/web/scripts/build-lock.mjs',
+  'apps/web/scripts/capture-next-config.cjs',
   'apps/web/scripts/build-run.mjs',
   'apps/web/src/server-action-build-binding.spec.ts',
   'apps/web/src/server-action-build-ownership.spec.ts',
@@ -927,40 +1190,156 @@ test('the rule is still enforced on the walkers this change converted', () => {
   }
 });
 
-/** Does the CODE compare against, or list, the name `generated`? A comment that still says so does not count. */
-function codeNamesGenerated(file, text) {
+/**
+ * What the pruning guards of a walker DO. Every code mention of the name `generated` (a comparison,
+ * a list, a Set) leads to the `if`/`?:` that decides on it; that test is EVALUATED (module constants
+ * included) for the name `generated` and for `src`, and the branch it selects must skip the entry
+ * for the first and walk it for the second. A guard whose condition is disabled (`&& false`),
+ * inverted, renamed, or whose `continue` is gone does not behave like that. A guard that cannot be
+ * evaluated (it depends on anything but one entry name and constants) is a failure, not a pass.
+ */
+function pruneFailures(file, text) {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-  let found = false;
+  const failures = [];
+  const constants = new Map();
+  for (const statement of source.statements)
+    if (ts.isVariableStatement(statement))
+      for (const d of statement.declarationList.declarations)
+        if (ts.isIdentifier(d.name) && d.initializer) constants.set(d.name.text, d);
+  const guards = new Set();
+  const guardOf = (node) => {
+    for (let n = node; n.parent; n = n.parent) {
+      const p = n.parent;
+      if (ts.isIfStatement(p) && p.expression === n) return p;
+      if (ts.isConditionalExpression(p) && p.condition === n) return p;
+      if (ts.isVariableDeclaration(p) && ts.isSourceFile(p.parent.parent.parent)) return p;
+      if (ts.isFunctionLike(p) || ts.isSourceFile(p)) return undefined;
+    }
+    return undefined;
+  };
   const visit = (node) => {
     if (ts.isStringLiteralLike(node) && node.text === 'generated') {
       const p = node.parent;
-      found ||=
+      if (
         ts.isArrayLiteralExpression(p) ||
         ts.isCaseClause(p) ||
-        (ts.isBinaryExpression(p) && /^[!=]==?$/.test(p.operatorToken.getText()));
+        (ts.isBinaryExpression(p) && /^[!=]==?$/.test(p.operatorToken.getText()))
+      ) {
+        const guard = guardOf(node);
+        if (guard && ts.isVariableDeclaration(guard)) {
+          // a module constant: every test that reads it is a guard
+          const reads = (n) => {
+            if (ts.isIdentifier(n) && n.text === guard.name.text && n !== guard.name) {
+              const g = guardOf(n);
+              if (g && !ts.isVariableDeclaration(g)) guards.add(g);
+            }
+            ts.forEachChild(n, reads);
+          };
+          reads(source);
+        } else if (guard) guards.add(guard);
+        else failures.push(`${file}: 'generated' at ${node.getStart()} guards nothing`);
+      }
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return found;
+  if (guards.size === 0) failures.push(`${file}: no pruning guard found`);
+  const terminal = (s) =>
+    s &&
+    (ts.isContinueStatement(s) ||
+      (ts.isReturnStatement(s) &&
+        (!s.expression ||
+          (ts.isArrayLiteralExpression(s.expression) && s.expression.elements.length === 0))));
+  const outcome = (branch, hasRest) => {
+    if (branch === undefined || ts.isEmptyStatement(branch)) return hasRest ? 'walk' : 'skip';
+    if (ts.isBlock(branch)) {
+      const last = branch.statements.at(-1);
+      return last === undefined ? (hasRest ? 'walk' : 'skip') : terminal(last) ? 'skip' : 'walk';
+    }
+    if (ts.isArrayLiteralExpression(branch)) return branch.elements.length === 0 ? 'skip' : 'walk';
+    return terminal(branch) ? 'skip' : 'walk';
+  };
+  for (const guard of guards) {
+    const test = ts.isIfStatement(guard) ? guard.expression : guard.condition;
+    const [yes, no] = ts.isIfStatement(guard)
+      ? [guard.thenStatement, guard.elseStatement]
+      : [guard.whenTrue, guard.whenFalse];
+    const siblings = ts.isIfStatement(guard) ? guard.parent.statements : undefined;
+    const hasRest = !!siblings && siblings.indexOf(guard) < siblings.length - 1;
+    const free = new Set();
+    const needed = new Set(); // the constants the test reads, and those they read
+    const collectFree = (n) => {
+      const isName = ts.isPropertyAccessExpression(n.parent) && n.parent.name === n;
+      if (ts.isIdentifier(n) && !isName) {
+        if (/^(?:Set|Map|Array|Object|String|RegExp)$/.test(n.text)) return;
+        if (!constants.has(n.text)) free.add(n.text);
+        else if (!needed.has(n.text)) {
+          needed.add(n.text);
+          collectFree(constants.get(n.text).initializer);
+        }
+      }
+      ts.forEachChild(n, collectFree);
+    };
+    collectFree(test);
+    const where = `${file}:${source.getLineAndCharacterOfPosition(guard.getStart()).line + 1}`;
+    if (free.size !== 1) {
+      failures.push(`${where}: the guard depends on ${[...free].join(', ') || 'nothing'}`);
+      continue;
+    }
+    const [variable] = free;
+    const usesName = /\.name\b/.test(test.getText());
+    const js = ts.transpileModule(
+      `${[...needed].map((name) => constants.get(name).parent.parent.getText()).join('\n')}\nexports.test = (${variable}) => (${test.getText()});`,
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+    ).outputText;
+    let verdicts;
+    try {
+      const exported = {};
+      new Function('exports', 'require', js)(exported, () => ({}));
+      const entry = (name) => (usesName ? { name, isDirectory: () => true } : name);
+      verdicts = ['generated', 'src'].map((name) =>
+        outcome(exported.test(entry(name)) ? yes : no, hasRest),
+      );
+    } catch (error) {
+      failures.push(`${where}: the guard cannot be evaluated (${error.message})`);
+      continue;
+    }
+    if (verdicts.join() !== 'skip,walk')
+      failures.push(`${where}: for 'generated' and 'src' the guard does ${verdicts.join(' and ')}`);
+  }
+  return failures;
 }
-test('the walkers that prune by name name generated in code (the behavioural check is the follow-up)', () => {
+test('the walkers that prune by name really skip generated (and only skip what they name)', () => {
   for (const file of PRUNE_BY_NAME)
-    assert.ok(
-      codeNamesGenerated(file, fs.readFileSync(join(root, file), 'utf8')),
-      `${file} does not prune generated`,
-    );
-  assert.ok(
-    !codeNamesGenerated(
-      'x.ts',
-      "for (const n of ls) { // 'generated'\n if (n === 'dist') continue; }",
-    ),
-  );
-  assert.ok(!codeNamesGenerated('x.ts', "log('generated'); if (n === 'dist') continue;"));
-  assert.ok(
-    codeNamesGenerated(
-      'x.ts',
-      "if (['a', 'generated'].includes(n)) continue; if (n !== 'generated') walk(n);",
-    ),
-  );
+    assert.deepEqual(pruneFailures(file, fs.readFileSync(join(root, file), 'utf8')), []);
+  const walker = (guard) =>
+    `const SKIP = new Set(['dist', 'generated']);\nfunction w(d) {\n  for (const entry of readdirSync(d)) {\n    ${guard}\n    w(entry);\n  }\n}`;
+  const good = [
+    "if (entry === 'dist' || entry === 'generated') continue;",
+    "if (['generated', 'dist'].includes(entry)) continue;",
+    'if (SKIP.has(entry)) continue;',
+    "if (entry === 'generated') { continue; }",
+    "entry === 'generated' ? [] : w(entry);",
+  ];
+  for (const guard of good) assert.deepEqual(pruneFailures('x.ts', walker(guard)), [], guard);
+  const disabled = [
+    "if ((entry === 'dist' || entry === 'generated') && false) continue;", // condition disabled
+    "if (entry === 'dist' || entry !== 'generated') continue;", // inverted
+    "if (entry === 'dist' || entry === 'generate') continue;", // renamed
+    "if (entry === 'dist' || entry === 'generated') ;", // the continue is gone
+    "if (entry === 'dist' || entry === 'generated') { }",
+    "if (entry === 'dist' || entry === 'generated') log(entry);",
+    "if (['generated'].includes(entry) && false) continue;",
+    "if (['generated', 'dist'].map((x) => x).includes(entry) && entry.length < 0) continue;",
+    'if (SKIP.has(entry) && false) continue;',
+    "if (entry === 'generated' && other) continue;", // depends on something else
+    "if (check(entry) || entry === 'generated') continue;", // depends on a function
+    "const stale = entry === 'generated'; if (stale && false) continue;",
+    "if (entry === 'generated' || entry.length > 0) continue;", // skips everything
+    "if (entry === 'generated' && process.env.NODE_ENV !== 'x') continue;", // depends on the environment
+    "if (entry.foo.bar === 'generated') continue;", // cannot be evaluated
+  ];
+  for (const guard of disabled)
+    assert.notDeepEqual(pruneFailures('x.ts', walker(guard)), [], guard);
+  assert.notDeepEqual(pruneFailures('x.ts', "log('generated'); if (n === 'dist') continue;"), []);
 });

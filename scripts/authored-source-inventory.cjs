@@ -17,23 +17,48 @@ const { basename, dirname, join, relative, resolve, sep, isAbsolute } = require(
 
 const REPO_ROOT = resolve(__dirname, '..');
 
-/** One character class `[...]` of a gitignore glob, as a RegExp class (or undefined if unclosed). */
+const hex = (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
+
+/**
+ * One character class `[...]` of a gitignore glob as a RegExp, read the way git's wildmatch reads it:
+ * `!` or `^` negates, a `]` first in the class is a member, `\x` is the character x (also as a range
+ * end), `a-c` is a range, and a class never matches `/`. Anything else it does not know throws.
+ */
 function characterClass(glob, start) {
-  let end = start + 1;
-  if (glob[end] === '!' || glob[end] === '^') end += 1;
-  if (glob[end] === ']') end += 1;
-  while (end < glob.length && glob[end] !== ']') end += 1;
-  if (end >= glob.length) return undefined;
-  const body = glob.slice(start + 1, end);
-  if (body.includes('[:') || body.includes('[=') || body.includes('[.'))
-    throw new Error(`.gitignore: unsupported character class ${glob.slice(start, end + 1)}`);
-  const negate = body[0] === '!' || body[0] === '^';
-  const inner = (negate ? body.slice(1) : body).replace(/[\\^]/g, '\\$&');
-  return { end, source: `[${negate ? '^/' : ''}${inner}]` };
+  const unsupported = (why) => {
+    throw new Error(`.gitignore: unsupported ${why} in ${glob}`);
+  };
+  let i = start + 1;
+  const negate = glob[i] === '!' || glob[i] === '^';
+  if (negate) i += 1;
+  const char = () => {
+    let c = glob[i];
+    if (c === '\\') {
+      i += 1;
+      c = glob[i];
+    }
+    if (c === undefined) unsupported('an unclosed character class');
+    if (c.charCodeAt(0) > 0x7e) unsupported('a non-ASCII character in a class'); // git reads bytes
+    return c;
+  };
+  let members = '';
+  for (let first = true; first || glob[i] !== ']'; first = false) {
+    if (glob[i] === '[' && /^\[[:=.]/.test(glob.slice(i))) unsupported('a POSIX character class');
+    const low = char();
+    if (glob[i + 1] === '-' && glob[i + 2] !== undefined && glob[i + 2] !== ']') {
+      i += 2;
+      const high = char();
+      if (high < low) unsupported('a descending range');
+      members += `${hex(low)}-${hex(high)}`;
+    } else members += hex(low);
+    i += 1;
+  }
+  return { end: i, source: `(?!/)[${negate ? '^' : ''}${members}]` };
 }
 
 /** A gitignore glob (no leading `!`, no trailing `/`) as a RegExp source over a `/` path. */
 function globSource(glob) {
+  if (/\\\/|\/\/|\*\*+\\/.test(glob)) throw new Error(`.gitignore: unsupported escape in ${glob}`);
   let out = '';
   for (let i = 0; i < glob.length; i += 1) {
     const c = glob[i];
@@ -41,30 +66,40 @@ function globSource(glob) {
       i += 1;
       if (i >= glob.length) throw new Error('.gitignore: a pattern ends in a backslash');
       out += glob[i].replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-    } else if (c === '*' && glob[i + 1] === '*') {
-      const before = i === 0 || glob[i - 1] === '/';
-      const after = glob[i + 2];
-      if (before && after === '/') {
+    } else if (c === '*') {
+      // A run of stars. Two or more before a `/` are `**/` wherever they stand (git: `q/a**/z` ignores
+      // `q/az` and `q/a/b/z`); at the very end they are `**` after a `/`; anywhere else they are one `*`.
+      let end = i;
+      while (glob[end + 1] === '*') end += 1;
+      const after = glob[end + 1];
+      if (end > i && after === '/') {
         out += '(?:.*/)?';
-        i += 2;
-      } else if (before && after === undefined) {
-        out += '.+';
-        i += 1;
-      } else {
-        out += '[^/]*';
-        i += 1;
-      }
-    } else if (c === '*') out += '[^/]*';
-    else if (c === '?') out += '[^/]';
+        end += 1;
+      } else
+        out += end > i && after === undefined && (i === 0 || glob[i - 1] === '/') ? '.+' : '[^/]*';
+      i = end;
+    } else if (c === '?') out += '[^/]';
     else if (c === '[') {
       const cls = characterClass(glob, i);
-      if (cls) {
-        out += cls.source;
-        i = cls.end;
-      } else out += '\\[';
+      out += cls.source;
+      i = cls.end;
     } else out += c.replace(/[.+^${}()|\]/]/g, '\\$&');
   }
   return out;
+}
+
+/** git's own trim: trailing SPACES go (not tabs), unless a backslash quotes them. */
+function trimTrailingSpaces(line) {
+  let lastSpace = -1;
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === ' ') {
+      if (lastSpace < 0) lastSpace = i;
+    } else {
+      if (line[i] === '\\') i += 1;
+      lastSpace = -1;
+    }
+  }
+  return lastSpace < 0 ? line : line.slice(0, lastSpace);
 }
 
 /**
@@ -75,7 +110,7 @@ function globSource(glob) {
 function ignoreMatcher(text) {
   const rules = [];
   for (const raw of text.split(/\r?\n/)) {
-    const line = raw.replace(/(?<!\\)\s+$/, '');
+    const line = trimTrailingSpaces(raw);
     if (line === '' || line.startsWith('#')) continue;
     const negate = line.startsWith('!');
     let glob = negate ? line.slice(1) : line;
