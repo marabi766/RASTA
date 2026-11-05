@@ -1320,6 +1320,38 @@ test('R1 unsupported shell/inline launchers refuse instead of hiding configurati
   }
 });
 
+// FU-092 (PR #727 r2 F2 residuals): a shell reads its commands from many places and every
+// expansion stage can carry one. Jest hidden in any of them still reaches the effective
+// configuration inspection (a record with its arguments) or refuses (an opaque record). The
+// spelling je''st is read as jest by the shell but is not matched by the token pre-check, so
+// only a real read of the shell text finds it; each of these returned no record on d409a643.
+test('FU-092: Jest behind a shell dispatch, a here-document or an escaped newline stays visible', () => {
+  const jest = "je''st --config alternative.cjs";
+  for (const run of [
+    `<<'EOF' bash\n${jest}\nEOF`,
+    `<<EOF env bash\n${jest}\nEOF`,
+    `bash <<EOF\n# $(${jest})\nEOF`,
+    `cat <<EOF\n$\\\n(${jest})\nEOF`,
+    `bash +c "${jest}"`,
+    `bash +sc "${jest}"`,
+    `bash -eo pipefail -c "${jest}"`,
+    `OPT=-c; bash "$OPT" "${jest}"`,
+    `bash <<< "${jest}"`,
+    `echo "${jest}" | bash -`,
+    `ash -c "${jest}"`,
+    `fish -c "${jest}"`,
+  ]) {
+    const commands = launchControl(run);
+    assert.ok(
+      commands.some((command) => command.opaque || command.args?.includes('alternative.cjs')),
+      `${run}: ${JSON.stringify(commands)}`,
+    );
+  }
+  // the reading is exact: a shell running a script file does not refuse, and data stays data
+  assert.deepEqual(launchControl('bash +c "echo hi"'), []);
+  assert.deepEqual(launchControl("<<'EOF' cat\nje''st --config alternative.cjs\nEOF"), []);
+});
+
 test('R1 unsupported cwd selectors and ambiguous Jest script dispatch refuse', () => {
   for (const prefix of [
     'pnpm -Capps/web exec',

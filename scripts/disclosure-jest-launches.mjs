@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
+import { SHELL_WORD, shellInvocation } from './ci-shell-text-lib.mjs';
 import { JEST_LAUNCHERS } from './disclosure-jest-launchers.mjs';
 import { planTestRun } from './test-phases-lib.mjs';
 
@@ -112,18 +113,32 @@ export function jestCommands(paths, read) {
         cwd = resolve(root, cwd, words[executable + 1] ?? '.');
         continue;
       }
-      // Shell -c is a shell option, never Jest's -c. Recurse regardless of the flags inside it.
-      const shellIndex = words.findIndex((word) =>
-        ['bash', 'sh', 'dash', 'zsh'].includes(word.split('/').at(-1)),
-      );
-      if (
-        shellIndex >= 0 &&
-        words.some((word, index) => index > shellIndex && /^-[^-]*c/.test(word))
-      ) {
-        const index = words.findIndex((word, index) => index > shellIndex && /^-[^-]*c/.test(word));
-        if (!words[index + 1]) refuse(name, 'missing shell body');
-        else inspect(words[index + 1], name, cwd, [...stack, 'shell'], inheritedOpaque);
-        continue;
+      // Shell -c is a shell option, never Jest's -c. FU-092: what a shell runs is decided by the
+      // shared shellInvocation (`+c`, `+sc`, `-eo pipefail -c`, a computed option, `-`), never by
+      // a pattern of its own; a shell that reads a pipe or a here-string reads text we inspect.
+      const shellIndex = words.findIndex((word) => SHELL_WORD.test(word));
+      if (shellIndex >= 0) {
+        const run = shellInvocation(command.words.slice(shellIndex + 1), words[shellIndex]);
+        if (run.problem) {
+          refuse(name, run.problem);
+          continue;
+        }
+        if (run.body) {
+          inspect(run.body.value, name, cwd, [...stack, 'shell'], inheritedOpaque);
+          continue;
+        }
+        if (run.stdin) {
+          const text = command.input.hereString;
+          if (text && !command.input.pipe) {
+            if (text.opaque || text.value.includes('$')) refuse(name, 'computed shell input');
+            else inspect(text.value, name, cwd, [...stack, 'shell'], inheritedOpaque);
+            continue;
+          }
+          if (command.input.pipe) {
+            refuse(name, 'a shell reading a pipe');
+            continue;
+          }
+        }
       }
       const jestIndex = words.findIndex((word) => /(?:^|\/)jest(?:\.js)?$/.test(word));
       const managerIndex = words.findIndex((word) => /(?:^|\/)(?:pnpm|npm|turbo)$/.test(word));
