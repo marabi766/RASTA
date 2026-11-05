@@ -170,6 +170,17 @@ export const releasesUnconfirmedTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * Rounds of another economic call whose outcome is unknown (FU-103): the saga
+ * neither goes on nor ends until economic-service answers.
+ */
+export const economicCallsUnconfirmedTotal = new Counter({
+  name: 'rasta_marketplace_saga_economic_call_unconfirmed_total',
+  help: 'Rounds of a saga economic call whose outcome economic-service has not confirmed',
+  labelNames: ['service', 'operation'] as const,
+  registers: [registry],
+});
+
 export const idempotentReplaysTotal = new Counter({
   name: 'rasta_marketplace_idempotent_replays_total',
   help: 'Requests answered from a stored idempotent response instead of re-executing',

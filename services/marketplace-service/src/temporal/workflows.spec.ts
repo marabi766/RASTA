@@ -1,9 +1,18 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
+import { ERROR_STATUS } from '@rasta/contracts';
 import { ApplicationFailure } from '@temporalio/activity';
-import { WorkflowFailedError, type WorkflowHandle } from '@temporalio/client';
+import {
+  ActivityFailure,
+  CancelledFailure,
+  TimeoutFailure,
+  WorkflowFailedError,
+  type WorkflowHandle,
+} from '@temporalio/client';
 import {
   orderSaga,
+  outcomeUnknown,
+  PROVEN_REFUSALS,
   releaseBackoffMs,
   retryDisputeRelease,
   type OrderSagaInput,
@@ -226,6 +235,13 @@ function recordingActivities(order: FakeOrder, overrides: Partial<OrderActivitie
     noteReleaseUnconfirmed: recorded(
       'noteReleaseUnconfirmed',
       (_id: string, round: number, failure: string) => {
+        rounds.push(round);
+        failures.push(failure);
+      },
+    ),
+    noteEconomicCallUnconfirmed: recorded(
+      'noteEconomicCallUnconfirmed',
+      (_id: string, _operation: string, round: number, failure: string) => {
         rounds.push(round);
         failures.push(failure);
       },
@@ -1309,6 +1325,296 @@ describe('the order saga', () => {
       expect([-5, 0, 1, 2, 3, 6, 7, 8, 1000, 100000].map(releaseBackoffMs)).toEqual(
         [1, 1, 1, 2, 4, 32, 60, 60, 60, 60].map((minutes) => minutes * 60_000),
       );
+    });
+  });
+
+  describe('an authorisation whose outcome is unknown (FU-103)', () => {
+    let shared: TestWorkflowEnvironment;
+    beforeAll(async () => {
+      shared = env;
+      env = await timeSkippingServer();
+    }, 300_000);
+    afterAll(async () => {
+      await env?.teardown();
+      env = shared;
+    });
+
+    const MARKER = 'economic-call-durable-wait-v1';
+    const down = (): Error =>
+      ApplicationFailure.retryable('economic-service is down', 'UPSTREAM_UNAVAILABLE');
+    // Retried by its activity like an outage, and still a proof.
+    const refused = (): Error =>
+      ApplicationFailure.retryable('not in this state', 'INVALID_STATE_TRANSITION');
+
+    function failing(order: FakeOrder, failure = down) {
+      const economic = { recovered: false, failure, sent: [] as unknown[][] };
+      const recording = recordingActivities(order);
+      recording.activities.authoriseSettlement = async (...args: unknown[]) => {
+        recording.calls.push('authoriseSettlement');
+        economic.sent.push(args);
+        if (!economic.recovered) throw economic.failure();
+        return undefined;
+      };
+      return { ...recording, economic };
+    }
+    const patchIds = async (handle: WorkflowHandle): Promise<string[]> =>
+      ((await handle.fetchHistory()).events ?? [])
+        .flatMap((e) => e.markerRecordedEventAttributes?.details?.['patch-data']?.payloads ?? [])
+        .map(
+          (p) => (JSON.parse(Buffer.from(p.data as Uint8Array).toString()) as { id: string }).id,
+        );
+    const phaseIs = (handle: WorkflowHandle, phase: string): Promise<void> =>
+      eventually(async () => (await handle.query<SagaStatus, []>('status')).phase === phase, phase);
+    /** The receipt is confirmed and the saga at rest in the wait, a round reported. */
+    const toWait = async (
+      { party, held, handle }: { party: Party; held: () => Promise<void>; handle: WorkflowHandle },
+      rounds: () => number,
+    ): Promise<void> => {
+      await held();
+      await party.confirm();
+      await party.fulfil();
+      await party.confirmReceipt();
+      await phaseIs(handle, 'AUTHORISATION_UNCONFIRMED');
+      await until(() => rounds() > 0, 'the round to be reported');
+      await atRest(handle);
+    };
+
+    it('exhausted: the saga stays, settles nothing, and goes on once confirmed', async () => {
+      const order = new FakeOrder();
+      const { calls, rounds, activities, economic } = failing(order);
+      let seen: WorkflowHandle | undefined;
+
+      const result = await run(
+        order,
+        activities,
+        async (ctx) => {
+          seen = ctx.handle;
+          await toWait(ctx, () => rounds.length);
+          // The activity's own three attempts, then the round is reported.
+          expect(economic.sent.length).toBeGreaterThanOrEqual(3);
+          await env.sleep('3 hours');
+          expect(rounds.length).toBeGreaterThanOrEqual(4);
+          expect(rounds).toEqual(rounds.map((_, i) => i + 1));
+          expect(calls).not.toContain('markSettling');
+          await atRest(ctx.handle);
+          economic.recovered = true;
+          await ctx.handle.signal(retryDisputeRelease);
+        },
+        { input: NO_RECHECK },
+      );
+
+      expect(result).toBe('COMPLETED');
+      // The same words, so the same idempotency key, on every round.
+      expect(new Set(economic.sent.map((args) => JSON.stringify(args))).size).toBe(1);
+      const handle = seen as WorkflowHandle;
+      expect(await patchIds(handle)).toContain(MARKER);
+      await Worker.runReplayHistory(
+        { workflowsPath: require.resolve('./workflows') },
+        await handle.fetchHistory(),
+        handle.workflowId,
+      );
+    });
+
+    it('proven refused: the saga ends as it always did, unreported and unmarked', async () => {
+      const order = new FakeOrder();
+      const { calls, activities } = failing(order, refused);
+      let seen: WorkflowHandle | undefined;
+
+      await expect(
+        run(order, activities, async ({ party, held, handle }) => {
+          seen = handle;
+          await held();
+          await party.confirm();
+          await party.fulfil();
+          await party.confirmReceipt();
+        }),
+      ).rejects.toBeInstanceOf(WorkflowFailedError);
+
+      expect(calls).not.toContain('noteEconomicCallUnconfirmed');
+      expect(calls).not.toContain('markSettling');
+      expect(await patchIds(seen as WorkflowHandle)).not.toContain(MARKER);
+    });
+
+    it('a round proven refused ends the saga there, in the phase it had', async () => {
+      const order = new FakeOrder();
+      const { calls, rounds, activities, economic } = failing(order);
+
+      await expect(
+        run(order, activities, async (ctx) => {
+          await toWait(ctx, () => rounds.length);
+          economic.failure = refused;
+          await ctx.handle.signal(retryDisputeRelease);
+          await ctx.handle.result().catch(() => undefined);
+          // Queried while the worker is still there to answer.
+          expect((await ctx.handle.query<SagaStatus, []>('status')).phase).toBe('SETTLING');
+        }),
+      ).rejects.toBeInstanceOf(WorkflowFailedError);
+
+      expect(calls).not.toContain('markSettling');
+    });
+
+    it.each([
+      ['a code proving only that the key was used', 'IDEMPOTENCY_KEY_REUSED', false],
+      ['a request still in flight', 'CONFLICT', true],
+      ['a code nobody listed', 'SOMETHING_NEW', false],
+    ])('%s waits, retryable or not', async (_name, code, retryable) => {
+      const order = new FakeOrder();
+      const failure = (): Error =>
+        retryable
+          ? ApplicationFailure.retryable('answered', code as string)
+          : ApplicationFailure.nonRetryable('answered', code as string);
+      const { calls, rounds, activities } = failing(order, failure);
+      await run(order, activities, (ctx) => toWait(ctx, () => rounds.length), {
+        keepRunning: true,
+      });
+      expect(calls).not.toContain('markSettling');
+    });
+
+    it('a dispute raised during the wait wakes it and stops the sending; nothing follows until economic-service answers', async () => {
+      const order = new FakeOrder();
+      const { calls, rounds, activities, economic } = failing(order);
+      activities.findObligation = async () => {
+        calls.push('findObligation');
+        if (!economic.recovered) throw down();
+        return { transactionId: TRANSACTION };
+      };
+
+      const result = await run(
+        order,
+        activities,
+        async (ctx) => {
+          await toWait(ctx, () => rounds.length);
+          const sent = economic.sent.length;
+          await atRest(ctx.handle);
+          // Its own signal is what wakes the wait, an hour before the backoff would.
+          await ctx.party.dispute('it arrived broken');
+          await until(() => calls.includes('findObligation'), 'economic-service to be asked');
+          await atRest(ctx.handle);
+          await env.sleep('2 hours');
+          expect(economic.sent).toHaveLength(sent);
+          expect(calls).not.toContain('disputeObligation');
+          await atRest(ctx.handle);
+          economic.recovered = true;
+          await ctx.handle.signal(retryDisputeRelease);
+          await phaseIs(ctx.handle, 'DISPUTED');
+          await atRest(ctx.handle);
+          await ctx.party.resolve('SETTLE', 'the supplier replaced it');
+        },
+        { input: NO_RECHECK },
+      );
+
+      expect(result).toBe('COMPLETED');
+      expect(calls.filter((c) => c === 'settle')).toHaveLength(1);
+    });
+
+    it('decided REFUND during the wait: nothing is refunded until economic-service answers', async () => {
+      const order = new FakeOrder();
+      const { calls, rounds, activities, economic } = failing(order);
+      activities.findObligation = async () => {
+        calls.push('findObligation');
+        if (!economic.recovered) throw down();
+        return { transactionId: TRANSACTION };
+      };
+
+      const result = await run(
+        order,
+        activities,
+        async (ctx) => {
+          await toWait(ctx, () => rounds.length);
+          await atRest(ctx.handle);
+          ctx.party.silently((o) => o.raiseDispute('it arrived broken'));
+          ctx.party.silently((o) => o.resolveDispute('REFUND', 'the supplier agreed'));
+          await ctx.handle.signal(retryDisputeRelease);
+          await until(() => calls.includes('findObligation'), 'economic-service to be asked');
+          await atRest(ctx.handle);
+          expect(calls).not.toContain('compensate');
+          economic.recovered = true;
+          await ctx.handle.signal(retryDisputeRelease);
+        },
+        { input: NO_RECHECK },
+      );
+
+      expect(result).toBe('CANCELLED');
+      expect(calls.lastIndexOf('findObligation')).toBeLessThan(calls.indexOf('compensate'));
+    });
+
+    it('a failed read of the order in a round says nothing of the call: the saga stays', async () => {
+      const order = new FakeOrder();
+      const { calls, rounds, activities, economic } = failing(order);
+      const { readOrder } = activities;
+      let unreadable = false;
+      activities.readOrder = (...args) => {
+        if (unreadable) throw ApplicationFailure.nonRetryable('gone', 'NOT_FOUND');
+        return readOrder(...args);
+      };
+
+      const result = await run(
+        order,
+        activities,
+        async (ctx) => {
+          await toWait(ctx, () => rounds.length);
+          unreadable = true;
+          const reported = rounds.length;
+          await ctx.handle.signal(retryDisputeRelease);
+          await until(() => rounds.length > reported, 'the next round');
+          await atRest(ctx.handle);
+          expect(calls).not.toContain('markSettling');
+          unreadable = false;
+          economic.recovered = true;
+          await ctx.handle.signal(retryDisputeRelease);
+        },
+        { input: NO_RECHECK },
+      );
+
+      expect(result).toBe('COMPLETED');
+    });
+
+    it('answered first time records no marker', async () => {
+      const order = new FakeOrder();
+      const { activities } = recordingActivities(order);
+      let seen: WorkflowHandle | undefined;
+      await run(order, activities, async ({ party, held, handle }) => {
+        seen = handle;
+        await held();
+        await party.confirm();
+        await party.fulfil();
+        await party.confirmReceipt();
+      });
+      expect(await patchIds(seen as WorkflowHandle)).not.toContain(MARKER);
+    });
+
+    it('every platform code is decided: only a closed list of 4xx proves a refusal', () => {
+      // Each 4xx not on the list is here for a reason (`PROVEN_REFUSALS`). A new
+      // code fails this until somebody decides which it is.
+      const notProof = [
+        'UNAUTHENTICATED',
+        'TOKEN_EXPIRED',
+        'TOKEN_INVALID',
+        'CONFLICT',
+        'IDEMPOTENCY_KEY_REUSED',
+        'REPLAY_WINDOW_CLOSED',
+        'OPTIMISTIC_LOCK_FAILED',
+        'RATE_LIMIT_EXCEEDED',
+      ];
+      for (const [code, status] of Object.entries(ERROR_STATUS)) {
+        const proof = status < 500 && !notProof.includes(code);
+        expect([code, PROVEN_REFUSALS.has(code)]).toEqual([code, proof]);
+      }
+    });
+
+    it('a failure with no code is unknown; a stop is not an outcome', () => {
+      const failed = (cause: Error): ActivityFailure =>
+        new ActivityFailure('failed', 'authorise', '1', 'TIMEOUT' as never, 'worker', cause);
+      const coded = (type: string): Error => ApplicationFailure.create({ message: 'x', type });
+
+      expect(
+        outcomeUnknown(failed(new TimeoutFailure('late', undefined, 'START_TO_CLOSE' as never))),
+      ).toBe(true);
+      expect(outcomeUnknown(failed(new Error('reset')))).toBe(true);
+      expect(outcomeUnknown(failed(coded('UPSTREAM_TIMEOUT')))).toBe(true);
+      expect(outcomeUnknown(failed(coded('NOT_FOUND')))).toBe(false);
+      expect(outcomeUnknown(failed(new CancelledFailure('cancelled')))).toBe(false);
+      expect(outcomeUnknown(coded('SAGA_INCONSISTENT'))).toBe(false);
     });
   });
 

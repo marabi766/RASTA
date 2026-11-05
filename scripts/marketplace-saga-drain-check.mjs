@@ -174,11 +174,13 @@ const PATCH_PROTOCOL = new Map([
   ['order-saga-durable-rollover-v1', 1],
   ['dispute-settle-resumes-order', 2],
   ['dispute-release-durable-wait-v1', 3],
+  ['economic-call-durable-wait-v1', 4],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is
 // the only evidence of what wrote it: `reminderDue` came with protocol 2, and
-// `releaseRounds` means it rolled over inside the release wait of protocol 3.
+// `releaseRounds` means it rolled over inside the release wait of protocol 3,
+// `unconfirmedCall` inside the same wait of another economic call, protocol 4.
 const RESUME_PROTOCOL = new Map([
   ['status', 1],
   ['mirroredDispute', 1],
@@ -188,6 +190,7 @@ const RESUME_PROTOCOL = new Map([
   ['activitySequence', 1],
   ['reminderDue', 2],
   ['releaseRounds', 3],
+  ['unconfirmedCall', 4],
 ]);
 // Every field a saga has ever been started with; any other could mean anything.
 const INPUT_FIELDS = new Set([

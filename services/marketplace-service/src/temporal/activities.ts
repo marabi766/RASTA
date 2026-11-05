@@ -22,7 +22,11 @@ import {
   type TransactionDetailView,
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
-import { releasesUnconfirmedTotal, settlementsExhaustedTotal } from '../observability/metrics';
+import {
+  economicCallsUnconfirmedTotal,
+  releasesUnconfirmedTotal,
+  settlementsExhaustedTotal,
+} from '../observability/metrics';
 
 /**
  * Everything the order saga does that touches the world.
@@ -150,6 +154,10 @@ export interface DisputedObligation {
   economicDisputeId?: string | null;
 }
 
+/** The economic calls that wait for confirmation beside the release (FU-103). */
+export const UNCONFIRMED_OPERATIONS = ['authoriseSettlement'] as const;
+export type UnconfirmedOperation = (typeof UNCONFIRMED_OPERATIONS)[number];
+
 /** What `authoriseSettlement` answers. Undefined: authorised. */
 export type AuthorisationResult = DisputedObligation | undefined;
 
@@ -174,6 +182,9 @@ export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
   // At zero from the start: `increase()` cannot see a series' first increment.
   releasesUnconfirmedTotal.inc({ service: SERVICE_NAME }, 0);
+  for (const operation of UNCONFIRMED_OPERATIONS) {
+    economicCallsUnconfirmedTotal.inc({ service: SERVICE_NAME, operation }, 0);
+  }
 
   /**
    * Runs `fn` as the system, acting for the order's buying organization.
@@ -696,6 +707,24 @@ export function createActivities(deps: ActivityDependencies) {
       logger.error(
         `The dispute release of order ${orderId} is unconfirmed after round ${round} ` +
           `(${failure}); its funds stay held and the saga keeps trying ` +
+          '(docs/runbooks/marketplace-saga-deploy.md)',
+      );
+    },
+
+    /**
+     * Reports a round of another economic call whose outcome is unknown
+     * (FU-103), as `noteReleaseUnconfirmed` does for the release.
+     */
+    async noteEconomicCallUnconfirmed(
+      orderId: string,
+      operation: UnconfirmedOperation,
+      round: number,
+      failure: string,
+    ): Promise<void> {
+      economicCallsUnconfirmedTotal.inc({ service: SERVICE_NAME, operation });
+      logger.error(
+        `The ${operation} call of order ${orderId} is unconfirmed after round ${round} ` +
+          `(${failure}); its outcome is unknown, its funds stay held and the saga keeps trying ` +
           '(docs/runbooks/marketplace-saga-deploy.md)',
       );
     },

@@ -556,6 +556,260 @@ describe('history rollover on real Temporal', () => {
     });
   });
 
+  it('rolls over inside the wait of an authorisation; confirmed, the next rollover no longer claims it (FU-103)', async () => {
+    // Found mid-settlement, so a round must not take it for an order moved on.
+    const state: SagaOrderView = {
+      status: 'SETTLING',
+      economicTransactionId: 'TXN_AUTH',
+      cancellationReason: null,
+      dispute: null,
+    };
+    const sent: unknown[][] = [];
+    const rounds: number[] = [];
+    let recovered = false;
+    const taskQueue = `rollover-authorise-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => state,
+        authoriseSettlement: async (...args: unknown[]) => {
+          sent.push(args);
+          if (!recovered) throw ApplicationFailure.retryable('down', 'UPSTREAM_UNAVAILABLE');
+          return undefined;
+        },
+        noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+          rounds.push(round);
+        },
+        // Disputed just as it could settle: the saga then waits, and rolls over there.
+        markSettling: async () => {
+          state.status = 'DISPUTED';
+          state.dispute = { id: 'DSP_AUTH', reason: 'broken', resolution: null };
+          return 'DISPUTED';
+        },
+        disputeObligation: async () => 'ECON_AUTH',
+      } as unknown as Partial<OrderActivities>,
+    });
+    const resumeOf = async (runId: string): Promise<SagaResume | undefined> => {
+      const history = await env.client.workflow.getHandle(taskQueue, runId).fetchHistory();
+      const start = history.events?.[0]?.workflowExecutionStartedEventAttributes;
+      const data = start?.input?.payloads?.[0]?.data as Uint8Array;
+      return (JSON.parse(Buffer.from(data).toString()) as OrderSagaInput).resume;
+    };
+    await worker.runUntil(async () => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'SETTLING',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: 'RECEIPT_CONFIRMED',
+              activitySequence: 5,
+            },
+          },
+        ],
+      });
+      const latest = env.client.workflow.getHandle(taskQueue);
+      try {
+        const first = (await handle.describe()).runId;
+        await eventually(() => rounds.length > 0);
+        await atRest(taskQueue);
+        await env.sleep('8 hours');
+        const second = (await latest.describe()).runId;
+        expect(second).not.toBe(first);
+        // The count goes on across the rollover, so the backoff does not start again.
+        expect(rounds.length).toBeGreaterThanOrEqual(4);
+        expect(rounds).toEqual(rounds.map((_, i) => i + 1));
+        expect(await resumeOf(second)).toMatchObject({
+          unconfirmedCall: { operation: 'authoriseSettlement', rounds: expect.any(Number) },
+        });
+        expect(new Set(sent.map((args) => JSON.stringify(args)))).toEqual(
+          new Set([JSON.stringify([INPUT.orderId, 'TXN_AUTH'])]),
+        );
+        expect((await latest.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
+
+        await atRest(taskQueue);
+        recovered = true;
+        await latest.signal('retryDisputeRelease');
+        await eventually(() => state.status === 'DISPUTED');
+        await atRest(taskQueue);
+        await env.sleep('12 hours');
+        const third = (await latest.describe()).runId;
+        expect(third).not.toBe(second);
+        const resumed = await resumeOf(third);
+        expect(resumed).toMatchObject({ mirroredDispute: 'DSP_AUTH' });
+        expect(resumed).not.toHaveProperty('unconfirmedCall');
+        for (const runId of [first, second, third]) {
+          await Worker.runReplayHistory(
+            { workflowsPath: require.resolve('./workflows') },
+            await env.client.workflow.getHandle(taskQueue, runId).fetchHistory(),
+            taskQueue,
+          );
+        }
+      } finally {
+        await latest.terminate();
+      }
+    });
+  });
+
+  it('answered at the first call of the next run: the claim ends there (FU-103)', async () => {
+    const state: SagaOrderView = {
+      status: 'RECEIPT_CONFIRMED',
+      economicTransactionId: 'TXN_NEXT',
+      cancellationReason: null,
+      dispute: null,
+    };
+    const taskQueue = `rollover-next-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => state,
+        authoriseSettlement: async () => undefined,
+        markSettling: async () => {
+          state.status = 'DISPUTED';
+          state.dispute = { id: 'DSP_NEXT', reason: 'broken', resolution: null };
+          return 'DISPUTED';
+        },
+        disputeObligation: async () => 'ECON_NEXT',
+      } as unknown as Partial<OrderActivities>,
+    });
+    await worker.runUntil(async () => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'AUTHORISATION_UNCONFIRMED',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: 'RECEIPT_CONFIRMED',
+              activitySequence: 5,
+              unconfirmedCall: { operation: 'authoriseSettlement', rounds: 3 },
+            },
+          },
+        ],
+      });
+      const latest = env.client.workflow.getHandle(taskQueue);
+      try {
+        const first = (await handle.describe()).runId;
+        await eventually(() => state.status === 'DISPUTED');
+        await atRest(taskQueue);
+        await env.sleep('12 hours');
+        const next = (await latest.describe()).runId;
+        expect(next).not.toBe(first);
+        const history = await latest.fetchHistory();
+        const start = history.events?.[0]?.workflowExecutionStartedEventAttributes;
+        const data = start?.input?.payloads?.[0]?.data as Uint8Array;
+        const resumed = (JSON.parse(Buffer.from(data).toString()) as OrderSagaInput).resume;
+        expect(resumed).not.toHaveProperty('unconfirmedCall');
+        await atRest(taskQueue);
+      } finally {
+        await latest.terminate();
+      }
+    });
+  });
+
+  it('rolled over in that wait with the order moved on: the next run does not follow it until economic-service answers (FU-103)', async () => {
+    const state: SagaOrderView = {
+      status: 'RECEIPT_CONFIRMED',
+      economicTransactionId: 'TXN_MOVED',
+      cancellationReason: null,
+      dispute: null,
+    };
+    const filed: unknown[][] = [];
+    const rounds: number[] = [];
+    let recovered = false;
+    let sends = 0;
+    const down = () => ApplicationFailure.retryable('down', 'UPSTREAM_UNAVAILABLE');
+    const taskQueue = `rollover-moved-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => state,
+        authoriseSettlement: async () => {
+          sends += 1;
+          throw down();
+        },
+        findObligation: async () => {
+          if (!recovered) throw down();
+          return { transactionId: 'TXN_MOVED' };
+        },
+        noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+          rounds.push(round);
+        },
+        disputeObligation: async (...args: unknown[]) => {
+          filed.push(args);
+          return 'ECON_MOVED';
+        },
+      } as unknown as Partial<OrderActivities>,
+    });
+    await worker.runUntil(async () => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'SETTLING',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: 'RECEIPT_CONFIRMED',
+              activitySequence: 5,
+            },
+          },
+        ],
+      });
+      const latest = env.client.workflow.getHandle(taskQueue);
+      try {
+        const first = (await handle.describe()).runId;
+        await eventually(() => rounds.length > 0);
+        await atRest(taskQueue);
+        state.status = 'DISPUTED';
+        state.dispute = { id: 'DSP_MOVED', reason: 'broken', resolution: null };
+        const sent = sends;
+        await env.sleep('8 hours');
+        expect((await latest.describe()).runId).not.toBe(first);
+        expect(sends).toBe(sent);
+        expect(filed).toEqual([]);
+        expect((await latest.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
+
+        await atRest(taskQueue);
+        recovered = true;
+        await latest.signal('retryDisputeRelease');
+        await eventually(() => filed.length > 0);
+        expect(filed).toEqual([[INPUT.orderId, 'TXN_MOVED', 'DSP_MOVED', 'broken']]);
+        // A terminated activity would stall the server's clock for the next test.
+        await atRest(taskQueue);
+      } finally {
+        await latest.terminate();
+      }
+    });
+  });
+
   it('a rollover during a dispute does not buy the resumed order a fresh window (D-083)', async () => {
     const dispute = { id: 'DSP_WINDOW', reason: 'not answered', resolution: null as string | null };
     const state: SagaOrderView = {
