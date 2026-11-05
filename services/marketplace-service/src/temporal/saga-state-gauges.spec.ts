@@ -2,6 +2,7 @@ import { registry } from '@rasta/observability';
 import type { SagaStartStore } from './saga-start.store';
 import { OrderSagaClient } from './saga.client';
 import type { MarketplaceEnv } from '../config/env';
+import type { OrderStatus } from '../generated/prisma';
 import {
   DISPUTE_ORIGINS,
   ORDER_TRANSITIONS,
@@ -140,8 +141,8 @@ describe('saga custody (#770 r2 F3)', () => {
     // SETTLE resumes a dispute origin (D-083), REFUND goes to CANCELLING, and a
     // party may move a resumed order on before the saga releases it: every
     // status reachable from DISPUTED, and onward, until the order is terminal.
-    const reachable = new Set<string>();
-    const queue = [...ORDER_TRANSITIONS.DISPUTED];
+    const reachable = new Set<OrderStatus>();
+    const queue: OrderStatus[] = [...ORDER_TRANSITIONS.DISPUTED];
     while (queue.length > 0) {
       const status = queue.shift()!;
       if (reachable.has(status)) continue;
@@ -152,7 +153,7 @@ describe('saga custody (#770 r2 F3)', () => {
       const watched =
         SAGA_CUSTODY[status] === 'TERMINAL' ||
         status === 'DISPUTED' ||
-        RELEASE_WATCHED_STATUSES.includes(status as never);
+        RELEASE_WATCHED_STATUSES.includes(status);
       expect({ status, watched }).toEqual({ status, watched: true });
     }
     for (const origin of DISPUTE_ORIGINS) expect(RELEASE_WATCHED_STATUSES).toContain(origin);
