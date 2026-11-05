@@ -10,6 +10,7 @@ import { OrganizationDirectory } from '../src/organization/organization-director
 import { PolicyAccess } from '../src/policy/policy.access';
 import { PolicyRepository } from '../src/policy/policy.repository';
 import { PolicyService } from '../src/policy/policy.service';
+import { DeductionRuleRepository } from '../src/deduction/deduction-rule.repository';
 import { TenderAwardedConsumer } from '../src/events/tender-awarded.consumer';
 import type { AwardSource } from '../src/award/award-source.client';
 import type { AwardFact } from '../src/award/award-confirm';
@@ -302,6 +303,77 @@ export class FakeHierarchy {
   }
 }
 
+/** Two people the deduction rule changes of a suite can tell apart (`compareActors`: DISTINCT). */
+export const RULE_PROPOSER = {
+  userId: 'USR-RULE-PROPOSER',
+  issuer: 'iss-itest',
+  subject: 'sub-proposer',
+};
+export const RULE_APPROVER = {
+  userId: 'USR-RULE-APPROVER',
+  issuer: 'iss-itest',
+  subject: 'sub-approver',
+};
+
+/**
+ * An employer's deduction rule put in force the one way there is (CON-003-1): proposed by one
+ * person and approved by another. No route does this yet (CON-003-2).
+ */
+export function configureDeductionRule(
+  prisma: PrismaService,
+  organizationId: string,
+  name: string,
+  rateBp: number,
+) {
+  const rules = new DeductionRuleRepository();
+  return prisma.transaction(async (tx) => {
+    const at = new Date();
+    const change = await rules.proposeCreate(tx, {
+      organizationId,
+      name,
+      rateBp,
+      base: 'GROSS',
+      proposer: RULE_PROPOSER,
+      at,
+    });
+    const { rule } = await rules.approve(tx, {
+      organizationId,
+      changeId: change.id,
+      expectedVersion: change.version,
+      actor: RULE_APPROVER,
+      at,
+    });
+    return rule;
+  });
+}
+
+/** A rule in force retired the one way there is (CON-003-1), as of `at`. */
+export function retireDeductionRule(
+  prisma: PrismaService,
+  organizationId: string,
+  deductionRuleId: string,
+  at: Date = new Date(),
+) {
+  const rules = new DeductionRuleRepository();
+  return prisma.transaction(async (tx) => {
+    const change = await rules.proposeRetire(tx, {
+      organizationId,
+      deductionRuleId,
+      reason: 'the suite retires it',
+      proposer: RULE_PROPOSER,
+      at,
+    });
+    const { rule } = await rules.approve(tx, {
+      organizationId,
+      changeId: change.id,
+      expectedVersion: change.version,
+      actor: RULE_APPROVER,
+      at,
+    });
+    return rule;
+  });
+}
+
 export interface Wiring {
   prisma: PrismaService;
   env: ContractEnv;
@@ -576,7 +648,6 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
         ['statement_deduction', 'tg_statement_deduction_guard'],
         ['statement_line', 'tg_statement_line_guard'],
         ['statement', 'tg_statement_guard'],
-        ['deduction_rule', 'tg_deduction_rule_guard'],
       ] as const) {
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
         await tx.$executeRawUnsafe(
@@ -585,6 +656,32 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
         );
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
       }
+      // A rule and its changes refer to each other (CON-003-1): a RETIRE names its rule and a rule
+      // names its CREATE, so the RETIRE changes go first, then the rules, then the CREATE changes.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "deduction_rule_change" DISABLE TRIGGER "tg_deduction_rule_change_guard"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "deduction_rule" DISABLE TRIGGER "tg_deduction_rule_guard"',
+      );
+      await tx.$executeRawUnsafe(
+        `DELETE FROM "deduction_rule_change" WHERE "organization_id" = ANY($1::text[]) AND "kind" = 'RETIRE'`,
+        organizationIds,
+      );
+      await tx.$executeRawUnsafe(
+        'DELETE FROM "deduction_rule" WHERE "organization_id" = ANY($1::text[])',
+        organizationIds,
+      );
+      await tx.$executeRawUnsafe(
+        'DELETE FROM "deduction_rule_change" WHERE "organization_id" = ANY($1::text[])',
+        organizationIds,
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "deduction_rule" ENABLE TRIGGER "tg_deduction_rule_guard"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "deduction_rule_change" ENABLE TRIGGER "tg_deduction_rule_change_guard"',
+      );
       // The amendments (CON-003 PR 3) hang off the contract and the policies: reviews, then
       // signatures, then amendments, then milestones — each never deleted by the service, so each
       // goes with its own guard lifted for this transaction only.
