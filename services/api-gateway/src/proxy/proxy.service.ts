@@ -1,9 +1,10 @@
 import { InternalHttpClient } from '@rasta/nest-common';
-import { HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger, MethodNotAllowedException } from '@nestjs/common';
 import {
   ExchangeCancelledError,
   ExchangeDeadlineError,
   RastaError,
+  RedirectRefusedError,
   exchangeWithDeadline,
   getContext,
   httpStatusToCode,
@@ -89,6 +90,29 @@ const HOP_BY_HOP = new Set([
   'content-length',
 ]);
 
+/**
+ * Request headers about something the gateway already finished with, beside
+ * every `content-*` one. The gateway inflates and parses the caller's body and
+ * sends its own JSON, so what described the caller's bytes (an encoding, a
+ * digest) is false of what is sent; Node has answered `Expect: 100-continue`,
+ * and Undici refuses the header outright.
+ */
+const CONSUMED_REQUEST_HEADERS = new Set(['expect', 'digest', 'repr-digest']);
+
+/**
+ * The methods the gateway forwards; anything else is refused before a permit.
+ * No route needs another, and Fetch rejects some of the rest (`TRACE`) locally.
+ */
+export const FORWARDABLE_METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+/**
+ * How many objects and arrays may nest in a forwarded body. Far above any
+ * contract, and far below what a recursive step here or in a service
+ * (`JSON.stringify`, a `z.lazy` schema) overflows the stack on: 60 KB of JSON
+ * reaches 10,000 levels.
+ */
+export const MAX_FORWARDED_BODY_NESTING = 64;
+
 /** Response headers that belong to the gateway's CORS policy, never an upstream's. */
 const CORS_HEADER_PREFIX = 'access-control-';
 
@@ -162,6 +186,10 @@ export class ProxyService {
   }
 
   async forward(request: ProxyRequest): Promise<ProxyResponse> {
+    // Everything the gateway can refuse by itself is refused before it holds a
+    // permit: what one caller's request cannot become says nothing about the
+    // service, and must not reach a breaker every tenant shares.
+    const prepared = this.prepare(request);
     // Refused here, before anything is sent, when the circuit is OPEN or its
     // HALF_OPEN probe is taken. Otherwise this request holds a permit, and the
     // `finally` below settles it on every exit — the probe slot is never
@@ -169,10 +197,11 @@ export class ProxyService {
     const permit = this.circuits.admit(request.service);
     // What this request proved about the service, decided exactly once. Until
     // an answer is complete it proved nothing: a gateway-local fault (token
-    // issuance) or a caller gone away before anything was sent is a `release`.
+    // issuance, a transport refusal of the request) or a caller gone away before
+    // anything was sent is a `release`.
     let outcome: CircuitOutcome = 'release';
     try {
-      const exchanged = await this.exchange(request, permit);
+      const exchanged = await this.exchange(request, prepared, permit);
       outcome = exchanged.outcome;
       return exchanged.response;
     } catch (error) {
@@ -180,7 +209,7 @@ export class ProxyService {
         outcome = 'failure';
         throw error.reported;
       }
-      if (error instanceof CallerGoneAfterSending) {
+      if (error instanceof SentWithoutVerdict) {
         outcome = error.outcome;
         throw error.reported;
       }
@@ -191,36 +220,17 @@ export class ProxyService {
   }
 
   /**
-   * One exchange with the owning service. Resolves with the response and what
-   * it proved; rejects with an `UpstreamFailure` when the service failed, or
-   * with anything else when it proved nothing.
+   * What will be sent, or a refusal of it. Nothing here touches the breaker or
+   * the network, so nothing here can be counted against the service.
    */
-  private async exchange(
-    request: ProxyRequest,
-    permit: CircuitPermit,
-  ): Promise<{ response: ProxyResponse; outcome: CircuitOutcome }> {
-    const cancelled = request.signal;
-    if (cancelled?.aborted) throw new ClientCancelledError(request.service);
-
+  private prepare(request: ProxyRequest): PreparedRequest {
+    if (!FORWARDABLE_METHODS.includes(request.method.toUpperCase())) {
+      throw new MethodNotAllowedException('This method is not supported');
+    }
+    if (`${request.path}${request.query}`.includes(ENCODED_NUL)) throw unstorableText();
+    const body = this.bodyFor(request.method, request.body);
     const context = getContext();
     const target = `${serviceUrl(this.urls, request.service)}${request.path}${request.query}`;
-
-    // Scoped to this specific service, short-lived, and minted as a RELAY.
-    //
-    // The gateway never acts on its own authority — everything it sends is
-    // somebody else's request being forwarded. Saying so in the token is what
-    // lets the downstream tell a forwarded anonymous request (judged by
-    // `@Public`) from a genuine service-to-service call (judged by
-    // `@AllowService`), without loosening either. It also means a token minted
-    // here can never satisfy `@AllowService` on any service (ADR-020, D-007).
-    const sender = await new InternalHttpClient(this.internalTokens).authorize({
-      from: 'api-gateway',
-      to: `${request.service}-service`,
-      purpose: 'RELAY',
-    });
-    // Gone while the token was minted: nothing has been sent, nothing is.
-    if (cancelled?.aborted) throw new ClientCancelledError(request.service);
-
     const headers: Record<string, string> = {
       ...this.forwardableHeaders(request.headers),
       // Two tokens, carrying two different claims:
@@ -248,6 +258,45 @@ export class ProxyService {
       ...(context.roles.length > 0 ? { 'x-user-roles': context.roles.join(',') } : {}),
     };
 
+    // Fetch's own checks of the URL, method and headers, run while a refusal
+    // still costs nothing: whatever it would reject is not sent.
+    try {
+      new Request(target, { method: request.method, headers });
+    } catch {
+      throw unforwardable(request.service);
+    }
+    return { target, headers, body };
+  }
+
+  /**
+   * One exchange with the owning service. Resolves with the response and what
+   * it proved; rejects with an `UpstreamFailure` when the service failed, or
+   * with anything else when it proved nothing.
+   */
+  private async exchange(
+    request: ProxyRequest,
+    { target, headers, body }: PreparedRequest,
+    permit: CircuitPermit,
+  ): Promise<{ response: ProxyResponse; outcome: CircuitOutcome }> {
+    const cancelled = request.signal;
+    if (cancelled?.aborted) throw new ClientCancelledError(request.service);
+
+    // Scoped to this specific service, short-lived, and minted as a RELAY.
+    //
+    // The gateway never acts on its own authority — everything it sends is
+    // somebody else's request being forwarded. Saying so in the token is what
+    // lets the downstream tell a forwarded anonymous request (judged by
+    // `@Public`) from a genuine service-to-service call (judged by
+    // `@AllowService`), without loosening either. It also means a token minted
+    // here can never satisfy `@AllowService` on any service (ADR-020, D-007).
+    const sender = await new InternalHttpClient(this.internalTokens).authorize({
+      from: 'api-gateway',
+      to: `${request.service}-service`,
+      purpose: 'RELAY',
+    });
+    // Gone while the token was minted: nothing has been sent, nothing is.
+    if (cancelled?.aborted) throw new ClientCancelledError(request.service);
+
     // One deadline for the whole exchange — headers and body alike — ended by
     // whichever comes first: the deadline (an upstream failure) or the caller
     // leaving (no verdict). The response is released with it, read or not.
@@ -265,7 +314,7 @@ export class ProxyService {
           sender.send(target, {
             method: request.method,
             headers,
-            body: this.bodyFor(request.method, request.body),
+            body,
             signal,
           }),
         async (response) => {
@@ -345,7 +394,7 @@ export class ProxyService {
       // received is a `failure`: without its complete body no exemption
       // (#381) can be proven, so none is applied — fail closed.
       if (error instanceof ExchangeCancelledError) {
-        throw new CallerGoneAfterSending(
+        throw new SentWithoutVerdict(
           status !== undefined && status >= 500 ? 'failure' : 'abandoned',
           new ClientCancelledError(request.service),
         );
@@ -359,12 +408,22 @@ export class ProxyService {
         );
       }
 
-      // Refused, reset or cut off mid-body: the service failed.
-      throw new UpstreamFailure(
-        RastaError.upstreamUnavailable(request.service, {
-          message: (error as Error).message,
-        }),
+      const reported = RastaError.upstreamUnavailable(request.service, {
+        message: (error as Error).message,
+      });
+      // Reset, refused by the network, or cut off once an answer had begun: the
+      // service failed.
+      const verdict = status === undefined ? transportVerdict(error) : 'upstream';
+      if (verdict === 'upstream') throw new UpstreamFailure(reported);
+      // The transport refused it before opening a socket: never sent, a `release`.
+      if (verdict === 'local') throw unforwardable(request.service);
+      // Not known to have been refused here, nor to be the service's fault. The
+      // breaker is shared by every tenant, so only proof counts against it; and
+      // the service may have it, so a probe keeps its slot until its deadline.
+      this.logger.warn(
+        `${request.service}: a transport error (${transportCode(error)}) proved nothing`,
       );
+      throw new SentWithoutVerdict('abandoned', reported);
     }
   }
 
@@ -385,6 +444,7 @@ export class ProxyService {
     for (const [name, value] of Object.entries(headers)) {
       const lower = name.toLowerCase();
       if (HOP_BY_HOP.has(lower)) continue;
+      if (CONSUMED_REQUEST_HEADERS.has(lower) || lower.startsWith('content-')) continue;
       // `authorization` is deliberately NOT stripped: the downstream must
       // verify the user itself. Cookies are dropped — they are a browser
       // concern and no internal service reads them.
@@ -444,10 +504,10 @@ export class ProxyService {
     if (verb === 'DELETE') {
       if (body === undefined || body === null) return undefined;
       if (typeof body === 'object' && Object.keys(body as object).length === 0) return undefined;
-      return JSON.stringify(body);
+      return serializedBody(body);
     }
 
-    return JSON.stringify(body ?? {});
+    return serializedBody(body ?? {});
   }
 
   /**
@@ -500,14 +560,106 @@ class UpstreamFailure extends Error {
   }
 }
 
-/** Raised inside `exchange` when the caller left after the request was sent. */
-class CallerGoneAfterSending extends Error {
+/** Raised inside `exchange` when a request that may have been sent ended without proof. */
+class SentWithoutVerdict extends Error {
   constructor(
     readonly outcome: 'abandoned' | 'failure',
-    readonly reported: ClientCancelledError,
+    readonly reported: Error,
   ) {
     super(reported.message);
   }
+}
+
+/** What `prepare` hands to `exchange`: the request as it will be sent. */
+interface PreparedRequest {
+  target: string;
+  headers: Record<string, string>;
+  body: string | undefined;
+}
+
+function unforwardable(service: ServiceName): RastaError {
+  return new RastaError('MALFORMED_REQUEST', 'The request could not be forwarded', {
+    internalContext: { service },
+  });
+}
+
+function unstorableText(): RastaError {
+  return new RastaError('MALFORMED_REQUEST', 'The request holds characters it cannot carry');
+}
+
+/** A NUL in a request target. Once decoded it is what {@link assertStorableText} refuses. */
+const ENCODED_NUL = '%00';
+
+/** A surrogate with no partner; with the `u` flag, a valid pair is one other code point. */
+const LONE_SURROGATE = /\p{Cs}/u;
+
+/**
+ * Text no service can hold. PostgreSQL refuses NUL (22021) and Prisma a lone
+ * surrogate, whichever the field, and a schema's bare `z.string()` lets both
+ * through: to a service they are a 500, and five of those open the breaker for
+ * every tenant.
+ */
+function assertStorableText(text: string): void {
+  if (text.includes('\u0000') || LONE_SURROGATE.test(text)) throw unstorableText();
+}
+
+/**
+ * The caller's parsed body as sent, refused past {@link MAX_FORWARDED_BODY_NESTING}
+ * or holding text no service can store, in a value or a key.
+ */
+function serializedBody(body: unknown): string {
+  // Level by level, without recursion: the body is what may be too deep to recurse into.
+  let level: unknown[] = [body];
+  for (let nesting = 0; level.length > 0; nesting += 1) {
+    const next: unknown[] = [];
+    for (const value of level) {
+      if (typeof value === 'string') assertStorableText(value);
+      if (typeof value !== 'object' || value === null) continue;
+      if (nesting === MAX_FORWARDED_BODY_NESTING) {
+        throw new RastaError('MALFORMED_REQUEST', 'The request body is nested too deeply');
+      }
+      for (const [key, child] of Object.entries(value)) {
+        assertStorableText(key);
+        next.push(child);
+      }
+    }
+    level = next;
+  }
+  return JSON.stringify(body);
+}
+
+/** Undici's refusals of a request it has not begun to send. */
+const LOCAL_TRANSPORT_CODES = new Set(['UND_ERR_INVALID_ARG', 'UND_ERR_NOT_SUPPORTED']);
+
+/**
+ * What only a peer, or the network on the way to it, can cause. An allow-list:
+ * a code absent from it costs one unopened breaker, while a local code wrongly
+ * on it is the cross-tenant denial of service this boundary exists to prevent.
+ */
+const UPSTREAM_TRANSPORT_CODE =
+  /^(?:ECONN(?:REFUSED|RESET|ABORTED)|EPIPE|ETIMEDOUT|EHOST(?:UNREACH|DOWN)|ENET(?:UNREACH|DOWN)|ENOTFOUND|EAI_AGAIN|HPE_[A-Z_]+|UND_ERR_(?:SOCKET|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|HEADERS_OVERFLOW|RES_[A-Z_]+))$/;
+
+/** How far a transport error's `cause` chain is followed: fetch wraps Undici wraps the socket. */
+const MAX_CAUSE_HOPS = 4;
+
+/** The first code on the error's `cause` chain that is shaped like one. */
+function transportCode(error: unknown): string {
+  let link = error;
+  for (let hop = 0; hop <= MAX_CAUSE_HOPS && typeof link === 'object' && link !== null; hop += 1) {
+    const { code, cause } = link as { code?: unknown; cause?: unknown };
+    if (typeof code === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(code)) return code;
+    link = cause;
+  }
+  return 'none';
+}
+
+/** Who a failure to get an answer, before any status line, is proven to be down to. */
+function transportVerdict(error: unknown): 'upstream' | 'local' | 'unproven' {
+  // Answered, with a redirect no internal exchange may follow.
+  if (error instanceof RedirectRefusedError) return 'upstream';
+  const code = transportCode(error);
+  if (LOCAL_TRANSPORT_CODES.has(code)) return 'local';
+  return UPSTREAM_TRANSPORT_CODE.test(code) ? 'upstream' : 'unproven';
 }
 
 /**
