@@ -120,7 +120,7 @@ describe('the published OpenAPI contract (real application)', () => {
       expect(document.components?.securitySchemes?.internalToken).toMatchObject({
         type: 'apiKey',
         in: 'header',
-        name: 'x-internal-token',
+        name: 'X-Internal-Token',
       });
       // It requires the target's own instant, so the read is one partition.
       expect(
