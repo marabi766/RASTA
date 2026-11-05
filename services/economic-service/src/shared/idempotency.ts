@@ -8,7 +8,7 @@ import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
-import { asSentForm } from './canonical';
+import { canonicalForm } from './canonical';
 
 export { CLAIM_WAIT_MS };
 
@@ -141,19 +141,19 @@ export class IdempotencyStore {
   ): Promise<Claim> {
     const fingerprint = (value: unknown) =>
       fingerprintVersion ? `${fingerprintVersion}:${this.hash(value)}` : this.hash(value);
-    // The request as it was validated and executed: canonical, unless its
-    // schema refuses that (`canonicalBodyPipe`).
-    const canonicalHash = fingerprint(body);
-    // The request as the previous release hashes it — the body as sent,
-    // wherever in `body` it is wrapped — when canonicalization changed it.
-    // **Written** as `requestHash`, the one column that release compares, so
-    // the unchanged retry replays on whichever release it reaches during a
-    // rolling update or a rollback (Codex PR-747 r2, F3); and compared, so a
-    // key that release stored replays here (r1).
-    const asSent = asSentForm(body);
+    // The request as it was validated and executed — the body as sent,
+    // wherever in `body` it is wrapped — hashed as the previous release
+    // hashes it. **Written** as `requestHash`, the one column that release
+    // compares, so the unchanged retry replays on whichever release it
+    // reaches during a rolling update or a rollback (Codex PR-747 r2, F3); and
+    // compared, so a key that release stored replays here (r1).
+    const requestHash = fingerprint(body);
+    // The same request in canonical form, when canonicalization changed it
+    // (`canonicalBodyPipe`): only hashed, never executed.
+    const canonical = canonicalForm(body);
     const fingerprints: Fingerprints = {
-      requestHash: asSent === undefined ? canonicalHash : fingerprint(asSent),
-      canonicalHash,
+      requestHash,
+      canonicalHash: canonical === undefined ? requestHash : fingerprint(canonical),
     };
     const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;

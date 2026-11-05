@@ -2,12 +2,12 @@ import { z } from 'zod';
 import { amountMinorSchema, isoDateTime } from '@rasta/contracts';
 import { zodPipe } from '@rasta/nest-common';
 import {
-  asSentForm,
   canonicalAmountMinor,
   canonicalBody,
   canonicalBodyPipe,
   canonicalDecimal,
   canonicalFieldsOf,
+  canonicalForm,
   canonicalInstant,
   canonicalPipe,
   canonicalText,
@@ -38,6 +38,7 @@ import {
   topUpSchema,
 } from '../payment/dto';
 import { conditionMet } from '../reward/rule-engine';
+import { PARTICIPATION_FACTS } from '../reward/participation';
 
 describe('canonical request values (checklist #16)', () => {
   /** What zod records for `isoDateTime()`: `Z` only, any fraction. */
@@ -372,6 +373,11 @@ describe('every idempotent command’s body (task 129)', () => {
   const ZULU = { offset: false, local: false, precision: null };
   const pipeOf = (schema: z.ZodType) => (body: unknown) =>
     canonicalBodyPipe(schema).transform(body, { type: 'body' }) as Record<string, unknown>;
+  /** What the idempotency hash sees of a body: its canonical form, else the body. */
+  const hashedOf = (schema: z.ZodType) => (body: unknown) => {
+    const dto = pipeOf(schema)(body);
+    return (canonicalForm(dto) ?? dto) as Record<string, unknown>;
+  };
   const topUp = topUpSchema.omit({ idempotencyKey: true }).partial({ instrument: true });
   /** What the release before canonicalization did with a body: `zodPipe(schema)`. */
   const previousRelease = (schema: z.ZodType, body: unknown) =>
@@ -390,7 +396,7 @@ describe('every idempotent command’s body (task 129)', () => {
       amountMinor: { kind: 'amountMinor' },
       instrument: { kind: 'form', canonicalize: expect.any(Function) },
     });
-    expect(pipeOf(topUp)({ amountMinor: '01000' })).toEqual({ amountMinor: '1000' });
+    expect(hashedOf(topUp)({ amountMinor: '01000' })).toEqual({ amountMinor: '1000' });
     // Still refused as it was: zero is not positive, however it is spelt.
     expect(() => pipeOf(topUp)({ amountMinor: '000' })).toThrow();
     // A look-alike pattern is not the amount schema.
@@ -414,14 +420,14 @@ describe('every idempotent command’s body (task 129)', () => {
       sourceType: 'FREIGHT',
       sourceReference: 'REF\r\n7',
     };
-    expect(pipeOf(createTransactionSchema)(body)).toMatchObject({
+    expect(hashedOf(createTransactionSchema)(body)).toMatchObject({
       grossAmountMinor: '700',
       sourceReference: 'REF\r\n7',
     });
-    expect(pipeOf(topUp)({ amountMinor: '1', instrument: 'fail:\r\nX' })).toMatchObject({
+    expect(hashedOf(topUp)({ amountMinor: '1', instrument: 'fail:\r\nX' })).toMatchObject({
       instrument: 'fail:\r\nX',
     });
-    expect(pipeOf(settleTransactionSchema)({ transactionId: 'TXN\r\n1' })).toEqual({
+    expect(hashedOf(settleTransactionSchema)({ transactionId: 'TXN\r\n1' })).toEqual({
       transactionId: 'TXN\r\n1',
     });
   });
@@ -437,7 +443,7 @@ describe('every idempotent command’s body (task 129)', () => {
       badges: [{ code: 'SAMPLE_ONE', name: 'four\rfive', threshold: 1 }],
       label: 'six\r\nseven',
     };
-    const canonical = pipeOf(createRecognitionRuleSchema)(body);
+    const canonical = hashedOf(createRecognitionRuleSchema)(body);
     expect(canonical).toEqual({
       ...body,
       levels: [
@@ -459,7 +465,7 @@ describe('every idempotent command’s body (task 129)', () => {
         { name: 'a\nb', threshold: 1 },
       ],
     };
-    expect(pipeOf(createRecognitionRuleSchema)(apart)).toEqual(
+    expect(hashedOf(createRecognitionRuleSchema)(apart)).toEqual(
       previousRelease(createRecognitionRuleSchema, apart),
     );
   });
@@ -478,26 +484,88 @@ describe('every idempotent command’s body (task 129)', () => {
     expect(canonicalFieldsOf(proposeResolutionSchema)).toEqual({ reason: { kind: 'text' } });
   });
 
-  describe('the as-sent form, for keys stored before this change', () => {
+  // Executed and stored as sent (Codex PR-747 r3, F4): what a command writes —
+  // a dispute's reason, a resolution, a level name — is what the previous
+  // release wrote, so a reader that compares it exactly (marketplace before
+  // #747, recovering a step after its stored answer expired) still finds it.
+  // Every idempotent command's schema, with every kind of field spelt as no
+  // canonical form spells it.
+  it('hands every command exactly the body the previous release executed', () => {
+    const corpus: Array<[z.ZodType, unknown]> = [
+      [topUp, { amountMinor: '0001000', instrument: ' fail:\r\nX ' }],
+      [
+        createTransactionSchema,
+        {
+          transactionType: 'LOGISTICS',
+          grossAmountMinor: '0700',
+          occurredAt: '2026-11-05T12:00:00Z',
+          sourceType: 'FREIGHT',
+          sourceReference: 'REF\r\n7',
+          idempotencyKey: 'key-0001\r',
+        },
+      ],
+      [disputeTransactionSchema, { reason: '  line one\r\nline two\r ' }],
+      [resolveDisputeSchema, { resolution: 'decided\rfor the supplier', disputeId: 'TXD_1' }],
+      [refundTransactionSchema, { reason: 'line one\r\nline two' }],
+      [cancelTransactionSchema, { reason: 'line one\r\nline two' }],
+      [settleTransactionSchema, { transactionId: 'TXN_1' }],
+      [refundPaymentSchema, { reason: 'line one\r\nline two' }],
+      [operatorDecisionSchema, { reason: 'line one\r\nline two' }],
+      [
+        proposeResolutionSchema,
+        { providerOutcome: 'DECLINED', evidenceReference: 'TICKET-1', reason: 'a\r\nb c d e f' },
+      ],
+      [
+        createRecognitionRuleSchema,
+        {
+          expectedCurrentVersion: 0,
+          basis: 'REWARD_POINTS_CUMULATIVE',
+          levels: [{ name: 'one\r\ntwo', threshold: 0 }],
+          badges: [{ code: 'SAMPLE_ONE', name: 'four\rfive', threshold: 1 }],
+          label: 'six\r\nseven',
+        },
+      ],
+      [
+        createParticipationRuleSchema,
+        {
+          expectedCurrentVersion: 0,
+          windowDays: 30,
+          contributions: [{ triggerEvent: PARTICIPATION_FACTS[0], weight: 1 }],
+          label: 'six\r\nseven',
+        },
+      ],
+    ];
+    let canonicalized = 0;
+    for (const [schema, body] of corpus) {
+      const before = refusalOf(() => previousRelease(schema, body));
+      if (before !== undefined) {
+        // Refused alike (below); nothing executed to compare.
+        expect({ body, now: refusalOf(() => pipeOf(schema)(body)) }).toEqual({ body, now: before });
+        continue;
+      }
+      const dto = pipeOf(schema)(body);
+      expect({ body, executed: dto }).toEqual({ body, executed: previousRelease(schema, body) });
+      if (canonicalForm(dto) !== undefined) canonicalized += 1;
+    }
+    // The corpus is spelt to be canonicalized: most of it has a canonical
+    // form the hash sees, and none of that form is what is executed.
+    expect(canonicalized).toBe(corpus.length - 1);
+  });
+
+  describe('the canonical form, for the idempotency hash only', () => {
     it('is kept only when canonicalization changed something', () => {
       const changed = pipeOf(disputeTransactionSchema)({ reason: 'line one\r\nline two' });
-      expect(changed).toEqual({ reason: 'line one\nline two' });
-      expect(asSentForm(changed)).toEqual({ reason: 'line one\r\nline two' });
+      expect(changed).toEqual({ reason: 'line one\r\nline two' });
+      expect(canonicalForm(changed)).toEqual({ reason: 'line one\nline two' });
       const unchanged = pipeOf(disputeTransactionSchema)({ reason: 'line one\nline two' });
-      expect(asSentForm(unchanged)).toBeUndefined();
+      expect(canonicalForm(unchanged)).toBeUndefined();
     });
 
-    it('is the body exactly as the previous release validated it — trimmed, defaulted', () => {
-      const dto = pipeOf(createTransactionSchema)({
-        transactionType: 'LOGISTICS',
-        grossAmountMinor: '0700',
-      });
-      expect(asSentForm(dto)).toEqual(
-        zodPipe(createTransactionSchema).transform(
-          { transactionType: 'LOGISTICS', grossAmountMinor: '0700' },
-          { type: 'body' },
-        ),
-      );
+    it('beside the body exactly as the previous release validated it — trimmed, defaulted', () => {
+      const body = { transactionType: 'LOGISTICS', grossAmountMinor: '0700' };
+      const dto = pipeOf(createTransactionSchema)(body);
+      expect(dto).toEqual(zodPipe(createTransactionSchema).transform(body, { type: 'body' }));
+      expect(canonicalForm(dto)).toEqual({ ...dto, grossAmountMinor: '700' });
     });
 
     it('never exists where the previous release refused the body: it is refused (PR-747 r2, F3)', () => {
@@ -518,33 +586,34 @@ describe('every idempotent command’s body (task 129)', () => {
       const dto = pipeOf(operatorDecisionSchema)({ reason: 'line one\r\nline two' });
       const by = { userId: 'USR_1', issuer: 'https://issuer', subject: 'sub-1' };
       // The reconciliation's shape: the target around the actor binding around the body.
-      expect(asSentForm(targeted('PI_1/RES_1', { by, body: dto }))).toEqual({
+      expect(canonicalForm(targeted('PI_1/RES_1', { by, body: dto }))).toEqual({
         id: 'PI_1/RES_1',
-        body: { by, body: { reason: 'line one\r\nline two' } },
+        body: { by, body: { reason: 'line one\nline two' } },
       });
-      expect(asSentForm([{ wrapped: [dto] }, 'x'])).toEqual([
-        { wrapped: [{ reason: 'line one\r\nline two' }] },
+      expect(canonicalForm([{ wrapped: [dto] }, 'x'])).toEqual([
+        { wrapped: [{ reason: 'line one\nline two' }] },
         'x',
       ]);
-      // A wrapper with no body of the pipe in it has no as-sent form; neither
-      // does a copy of one — a copy is not the body the pipe validated.
-      expect(asSentForm({ by, body: { reason: 'line one\nline two' } })).toBeUndefined();
-      expect(asSentForm({ by, body: { ...dto } })).toBeUndefined();
+      // A wrapper with no body of the pipe in it has no canonical form;
+      // neither does a copy of one — a copy is not the body the pipe
+      // validated, and is hashed only as it is (fewer replays, never another).
+      expect(canonicalForm({ by, body: { reason: 'line one\r\nline two' } })).toBeUndefined();
+      expect(canonicalForm({ by, body: { ...dto } })).toBeUndefined();
       // Never walked into: an instance that is not a plain object.
       class Holder {
         constructor(readonly body: unknown) {}
       }
-      expect(asSentForm({ held: new Holder(dto) })).toBeUndefined();
+      expect(canonicalForm({ held: new Holder(dto) })).toBeUndefined();
     });
 
     it('travels with the target id (`targeted`)', () => {
       const dto = pipeOf(disputeTransactionSchema)({ reason: 'line one\r\nline two' });
-      expect(asSentForm(targeted('TXN_1', dto))).toEqual({
+      expect(canonicalForm(targeted('TXN_1', dto))).toEqual({
         id: 'TXN_1',
-        body: { reason: 'line one\r\nline two' },
+        body: { reason: 'line one\nline two' },
       });
-      expect(asSentForm(targeted('TXN_1', { reason: 'plain body' }))).toBeUndefined();
-      expect(asSentForm(targeted('TXN_1'))).toBeUndefined();
+      expect(canonicalForm(targeted('TXN_1', { reason: 'plain body' }))).toBeUndefined();
+      expect(canonicalForm(targeted('TXN_1'))).toBeUndefined();
     });
   });
 
@@ -576,7 +645,7 @@ describe('every idempotent command’s body (task 129)', () => {
       expect(dto).toEqual(previousRelease(schema, body));
       // Hashed as sent — what the previous release stored — with nothing else
       // to compare: no other spelling of it is canonical either.
-      expect(asSentForm(dto)).toBeUndefined();
+      expect(canonicalForm(dto)).toBeUndefined();
       expect(hashRequestBody(targeted('TXN_1', dto))).toBe(
         hashRequestBody(targeted('TXN_1', previousRelease(schema, body))),
       );

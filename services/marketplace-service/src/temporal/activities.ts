@@ -727,9 +727,11 @@ function refusedForState(error: unknown): boolean {
 }
 
 /**
- * The same words, whatever their line endings: economic-service keeps text
- * with LF line endings since it canonicalizes command bodies (task 129) —
- * as sent before it, and still for a body whose LF form it refuses. This service keeps what the person sent.
+ * The same words, whatever their line endings. economic-service keeps the text
+ * as sent; once it keeps it with LF line endings (FU-115), this reader still
+ * finds its own dispute and resolution — which is why this release, reading
+ * both, must be every running worker and the rollback floor before that
+ * writer ships (docs/06 § 6.8). This service keeps what the person sent.
  */
 function sameText(kept: string | null | undefined, sent: string): boolean {
   const lf = (text: string) => text.replace(/\r\n?/g, '\n');

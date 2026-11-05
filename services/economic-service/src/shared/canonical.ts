@@ -15,9 +15,9 @@ import { validateRequestInput } from '@rasta/nest-common';
  * The idempotency hash sorts keys but keeps every string as sent, so a retry
  * that says the same thing differently — `"01000"` for `"1000"`,
  * `…T12:00:00.000Z` for `…T12:00:00Z`, CRLF for LF — was refused as a key
- * reused with another body. Normalized here, before zod, the retry hashes as
- * the first request did and replays it; and the length check, the hash and the
- * service all see the one form.
+ * reused with another body. Its canonical form, hashed beside the body as sent,
+ * replays it. For an idempotent command the canonical form is only hashed: the
+ * command is validated, executed and stored as sent ({@link canonicalBodyPipe}).
  *
  * Rules, per kind:
  *   - an amount: digits only, no leading zeros (`"000"` → `"0"`);
@@ -32,8 +32,8 @@ import { validateRequestInput } from '@rasta/nest-common';
  * rewritten only when it already passes the field's own pattern and its
  * canonical form does too; anything else is left exactly as sent for
  * validation to answer. An idempotent command's body is validated as sent
- * first, with the previous release's limits, and one whose canonical form its
- * schema refuses is answered as that release answered it
+ * first, with the previous release's limits, executed as sent, and one whose
+ * canonical form its schema refuses is hashed only as sent
  * ({@link canonicalBodyPipe}, rollout).
  * Absent, `null` and zero stay distinct: an absent key is not added, `null`
  * is not a string, `"0"` is already canonical.
@@ -284,34 +284,43 @@ export function canonicalPipe(schema: z.ZodObject): PipeTransform {
 }
 
 const CANONICAL_BODY_PIPES = new WeakSet<object>();
-const AS_SENT = new WeakMap<object, unknown>();
+const CANONICAL = new WeakMap<object, unknown>();
 
 /**
- * The body pipe of an idempotent command: the body in canonical form, then
- * validated by `schema` — one pipe, so the two can never be listed apart or
- * in the wrong order (`@Body(canonicalBodyPipe(schema))`).
+ * The body pipe of an idempotent command: the body validated by `schema` as
+ * sent — what the command executes and stores — and its canonical form kept
+ * beside it, for the idempotency hash only (`@Body(canonicalBodyPipe(schema))`).
+ *
+ * **Executed and stored as sent** (Codex PR-747 r3 F4). A command writes
+ * exactly what it wrote before canonicalization: a dispute's reason, a
+ * resolution, a level name, an amount's spelling for the service to parse.
+ * Text kept with LF had a reader that could not find it: marketplace before
+ * #747 compares the dispute and resolution text it sent, exactly, when it
+ * recovers a step whose stored answer expired, and refused its own committed
+ * effect — the saga stopped with the funds held. Storing the canonical form
+ * waits for those readers to be the rollback floor (FU-115).
  *
  * **Rollout, both directions** (Codex PR-747 r1 F2, r2 F3). During a rolling
  * update or an automatic rollback (docs/12 § rollout) a retry can reach either
  * release, so its unchanged retry must replay on both, and neither may refuse
  * what the other accepts:
  *
- *  - **Validation is the previous release's, on the body as sent**, first: a
- *    body it refused is refused with its refusal, and nothing is accepted it
- *    would refuse — a 1 201-unit CRLF reason, 801 once LF, is still over the
- *    1 000 limit. Limits counted after LF are a later step (docs/06 § 6.8,
+ *  - **Validation is the previous release's, on the body as sent**: a body it
+ *    refused is refused with its refusal, and nothing is accepted it would
+ *    refuse — a 1 201-unit CRLF reason, 801 once LF, is still over the 1 000
+ *    limit. Limits counted after LF are a later step (docs/06 § 6.8,
  *    "canonical-only").
- *  - Only then is the canonical form taken. When it changed something, the body
- *    exactly as that release validated it is kept beside the result
- *    ({@link asSentForm}): the idempotency store **writes that form's hash** —
- *    the one the previous release computes and compares — and records the
- *    canonical hash beside it, so a retry of the same bytes replays on either
- *    release, and another spelling replays here.
+ *  - The body the handler gets — and hashes, wherever it wraps it — is the one
+ *    that release validated, so the idempotency store **writes that hash** as
+ *    `request_hash`, the one that release computes and compares. When
+ *    canonicalization changed something, the canonical form is kept beside the
+ *    body ({@link canonicalForm}) and its hash recorded in `canonical_hash`, so
+ *    another spelling replays here.
  *  - A body whose canonical form the schema refuses — a ten-unit CRLF reason,
- *    nine after it; two level names apart only by their line endings — is
- *    executed and hashed as sent, as that release did: never a new permanent
- *    400 for a command another service committed before (marketplace's dispute
- *    and its resolution). No other spelling of it can be canonical either.
+ *    nine after it; two level names apart only by their line endings — has no
+ *    canonical form: hashed only as sent, as that release did, and never a new
+ *    permanent 400 for a command another service committed before
+ *    (marketplace's dispute and its resolution).
  */
 export function canonicalBodyPipe(schema: z.ZodType): PipeTransform {
   const fields = canonicalFieldsOf(objectOf(schema));
@@ -321,10 +330,10 @@ export function canonicalBodyPipe(schema: z.ZodType): PipeTransform {
       const canonical = canonicalBody(value, fields);
       if (canonical === value) return asSent;
       const parsed = legacyParse(schema, canonical);
-      if (!parsed.success) return asSent;
-      const dto: unknown = parsed.data;
-      if (dto !== null && typeof dto === 'object') AS_SENT.set(dto, asSent);
-      return dto;
+      if (parsed.success && asSent !== null && typeof asSent === 'object') {
+        CANONICAL.set(asSent, parsed.data);
+      }
+      return asSent;
     },
   };
   CANONICAL_BODY_PIPES.add(pipe);
@@ -339,25 +348,26 @@ export function isCanonicalBodyPipe(pipe: unknown): boolean {
 /**
  * `request` — what a command hashes: a body from {@link canonicalBodyPipe}, or
  * any wrapper around one (`targeted`, the reconciliation's actor binding) —
- * with every such body in it replaced by its as-sent form; `undefined` when
- * none in it has one.
+ * with every such body in it replaced by its canonical form; `undefined` when
+ * none in it has one. For the idempotency hash only: what is executed is the
+ * body as sent.
  *
  * Found by walking the request, not looked up on it (Codex PR-747 r1, F1): a
- * wrapper is a new object, and a lookup on the outermost one lost the form of
- * the body inside, so the unchanged retry of a pre-change key was refused. Any
- * composition of plain objects and arrays that holds the body itself is seen
- * through, however many layers, with no wrapper having to pass the form on.
+ * wrapper is a new object, and a lookup on the outermost one lost the body
+ * inside. Any composition of plain objects and arrays that holds the body
+ * itself is seen through, however many layers. A copy of the body is not the
+ * body: it has no canonical form, and is hashed only as it is.
  */
-export function asSentForm(request: unknown): unknown {
-  const substituted = withAsSent(request);
+export function canonicalForm(request: unknown): unknown {
+  const substituted = withCanonical(request);
   return substituted === request ? undefined : substituted;
 }
 
-function withAsSent(value: unknown): unknown {
+function withCanonical(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value;
-  if (AS_SENT.has(value)) return AS_SENT.get(value);
+  if (CANONICAL.has(value)) return CANONICAL.get(value);
   if (Array.isArray(value)) {
-    const items = value.map(withAsSent);
+    const items = value.map(withCanonical);
     return items.some((item, index) => item !== value[index]) ? items : value;
   }
   const prototype: unknown = Object.getPrototypeOf(value);
@@ -365,7 +375,7 @@ function withAsSent(value: unknown): unknown {
   const source = value as Record<string, unknown>;
   let copy: Record<string, unknown> | undefined;
   for (const [name, member] of Object.entries(source)) {
-    const replaced = withAsSent(member);
+    const replaced = withCanonical(member);
     if (replaced === member) continue;
     copy ??= { ...source };
     copy[name] = replaced;

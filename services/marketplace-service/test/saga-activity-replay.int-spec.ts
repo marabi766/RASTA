@@ -165,7 +165,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
     let loseNext = false;
     let disputes = 0;
-    // As economic-service keeps text since task 129: LF line endings.
+    // As economic-service will keep text after FU-115: LF line endings — the
+    // reader this release ships first (`sameText`). Today it keeps it as sent.
     const lf = (text: string) => text.replace(/\r\n?/g, '\n');
     const disputed = (reason: string) => {
       disputes += 1;
@@ -1196,8 +1197,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       },
     );
 
-    // economic-service keeps text with LF line endings (task 129); this
-    // service keeps what the person sent. The same words either way.
+    // economic-service with LF line endings (FU-115; today it keeps the text
+    // as sent); this service keeps what the person sent. The same words.
     const CRLF_WORDS = 'the supplier showed\r\na signed delivery note';
 
     it('without an identity, resolved there with the same words in LF: answered', async () => {

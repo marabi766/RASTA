@@ -28,10 +28,11 @@ import { cleanup, id, ITEST_ACTOR, ownerDatabaseUrl } from './helpers';
  * replays a retry that says the same thing differently (pre-review checklist
  * #16; Codex PR-480 r1, R2, task 129).
  *
- * The body is validated as sent, then put in canonical form before it is
- * hashed and executed (`canonicalBodyPipe`, `shared/canonical.ts`): an amount without
- * leading zeros, an instant as `toISOString`, human text with LF line
- * endings. Before, each variant below was answered `409
+ * The body is validated and executed as sent; its canonical form — an amount
+ * without leading zeros, an instant as `toISOString`, human text with LF line
+ * endings — is hashed beside it (`canonicalBodyPipe`, `shared/canonical.ts`),
+ * and what is stored is what the previous release stored (Codex PR-747 r3,
+ * F4). Before, each variant below was answered `409
  * IDEMPOTENCY_KEY_REUSED` — never a second effect, but a legitimate retry
  * refused, and for a top-up a client told "another request" may well send a
  * new key and pay twice. A really different body is still 409.
@@ -302,7 +303,7 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
   const CR = 'The delivered quantity\rdoes not match the obligation.';
   const OTHER = 'The delivered quantity does not match the obligation.';
 
-  it('dispute, then resolve: CRLF, CR and LF replay; the text is executed as LF', async () => {
+  it('dispute, then resolve: CRLF, CR and LF replay; the text is kept as first sent', async () => {
     const transactionId = await held();
     await post(
       `/v1/transactions/${transactionId}/authorise-settlement`,
@@ -317,7 +318,7 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
       [{ reason: LF }, { reason: CR }],
       [{ reason: OTHER }],
     );
-    expect(disputed.body).toMatchObject({ status: 'DISPUTED', disputeReason: LF });
+    expect(disputed.body).toMatchObject({ status: 'DISPUTED', disputeReason: CRLF });
 
     const resolved = await equivalent(
       `/v1/transactions/${transactionId}/resolve-dispute`,
@@ -462,7 +463,7 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
         { ...participation, windowDays: 31 },
       ],
     );
-    expect(scored.body).toMatchObject({ label: 'نمونه\nنیازمند تصویب' });
+    expect(scored.body).toMatchObject({ label: 'نمونه\r\nنیازمند تصویب' });
 
     const recognition = {
       expectedCurrentVersion: await current('/v1/rewards/recognition-rules'),
@@ -479,8 +480,8 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
       [{ ...recognition, levels: level('سطح یک نمونه'), label: 'نمونه\nتصویب' }],
     );
     expect(ranked.body).toMatchObject({
-      levels: [{ name: 'سطح یک\nنمونه', threshold: 0 }],
-      label: 'نمونه\nتصویب',
+      levels: [{ name: 'سطح یک\r\nنمونه', threshold: 0 }],
+      label: 'نمونه\r\nتصویب',
     });
   });
 
