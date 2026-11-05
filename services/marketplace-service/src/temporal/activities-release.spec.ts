@@ -50,7 +50,10 @@ describe('resolveObligationDispute on record', () => {
       }),
       onceForSaga: async (_o: unknown, _s: unknown, _a: unknown, call: () => Promise<unknown>) =>
         options.recorded ? (log.push('answered from the record'), undefined) : call(),
-      openSagaCall: async (...args: unknown[]) => void log.push(`open ${JSON.stringify(args)}`),
+      openSagaCall: async (...args: unknown[]) => {
+        log.push(`open ${JSON.stringify(args)}`);
+        return 7;
+      },
       confirmSagaCall: async (...args: unknown[]) =>
         void log.push(`confirm ${JSON.stringify(args)}`),
     };
@@ -78,13 +81,15 @@ describe('resolveObligationDispute on record', () => {
     'resolveObligationDispute',
     'DSP',
   ]);
+  // With the generation this attempt's own opening was given.
+  const confirmArgs = `${args.slice(0, -1)},7]`;
 
   it('opens before the call and confirms after it, under the buying tenant', async () => {
     const { log, release } = build({ resolveDispute: async () => ({}) });
 
     await release();
 
-    expect(log).toEqual([`open ${args}`, 'call', `confirm ${args}`]);
+    expect(log).toEqual([`open ${args}`, 'call', `confirm ${confirmArgs}`]);
   });
 
   it('confirms a retry answered from the step record', async () => {
@@ -92,7 +97,7 @@ describe('resolveObligationDispute on record', () => {
 
     await release();
 
-    expect(log).toEqual([`open ${args}`, 'answered from the record', `confirm ${args}`]);
+    expect(log).toEqual([`open ${args}`, 'answered from the record', `confirm ${confirmArgs}`]);
   });
 
   it('opens when economic-service is told of the dispute, before the telling', async () => {

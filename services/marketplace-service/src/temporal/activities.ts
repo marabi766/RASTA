@@ -223,13 +223,9 @@ export function createActivities(deps: ActivityDependencies) {
   const currentStep = deps.currentStep ?? temporalStep;
 
   /** The record the release alert reads (FU-104), under the order's own tenant. */
-  const releaseRecord = (
-    write: 'openSagaCall' | 'confirmSagaCall',
-    orderId: string,
-    disputeId: string,
-  ): Promise<void> =>
+  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
     asSystemFor(orderId, (order) =>
-      deps.orders[write](
+      deps.orders.openSagaCall(
         { id: order.id, organizationId: order.buyerOrganizationId },
         'resolveObligationDispute',
         disputeId,
@@ -552,7 +548,7 @@ export function createActivities(deps: ActivityDependencies) {
       const taken = await asSystemFor(orderId, () =>
         deps.orders.markObligationDisputed(orderId, reason, step, economicDisputeId ?? null),
       );
-      if (taken.disputeId) await releaseRecord('openSagaCall', orderId, taken.disputeId);
+      if (taken.disputeId) await openRelease(orderId, taken.disputeId);
       return taken;
     },
 
@@ -617,7 +613,7 @@ export function createActivities(deps: ActivityDependencies) {
       reason: string,
     ): Promise<string | null> {
       // Before the call: a call that fails may still have committed.
-      await releaseRecord('openSagaCall', orderId, disputeId);
+      await openRelease(orderId, disputeId);
       return economicStep(
         orderId,
         'disputeObligation',
@@ -656,9 +652,10 @@ export function createActivities(deps: ActivityDependencies) {
      *
      * Confirmed on every way this answers, including a retry answered from the
      * step's record. The record, opened when economic-service was told of the
-     * dispute and again here for a dispute told before it existed, keeps the
-     * alert on once the dispute is decided, whether or not a saga is left to
-     * make this call (FU-104).
+     * dispute and again by every attempt here, keeps the alert on once the
+     * dispute is decided, whether or not a saga is left to make this call
+     * (FU-104). An attempt after an earlier one confirmed is open until it answers
+     * itself, and an earlier attempt's late confirmation cannot close it.
      */
     async resolveObligationDispute(
       orderId: string,
@@ -667,7 +664,7 @@ export function createActivities(deps: ActivityDependencies) {
       resolution: string,
       economicDisputeId?: string,
     ): Promise<void> {
-      await releaseRecord('openSagaCall', orderId, disputeId);
+      const generation = await openRelease(orderId, disputeId);
       await economicStep(
         orderId,
         'resolveObligationDispute',
@@ -709,7 +706,14 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
-      await releaseRecord('confirmSagaCall', orderId, disputeId);
+      await asSystemFor(orderId, (order) =>
+        deps.orders.confirmSagaCall(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          'resolveObligationDispute',
+          disputeId,
+          generation,
+        ),
+      );
     },
 
     /**

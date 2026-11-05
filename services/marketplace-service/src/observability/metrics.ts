@@ -192,6 +192,34 @@ export const sagaUnconfirmedCallsReadAt = new Gauge({
 });
 
 /**
+ * By the database clock, the last read that found the operation's calls unconfirmed,
+ * and the last that found none. Their order is what clears the release alert, so a
+ * zero read earlier than a positive one clears nothing, whichever replica read it,
+ * and neither needs the replica to still be there (#769 r1 F1). Only a read moves them.
+ */
+export const sagaUnconfirmedCallsSeenAt = new Gauge({
+  name: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds',
+  help: 'When a read of saga_unconfirmed_call last found calls unconfirmed, by the database clock',
+  labelNames: ['service', 'operation'] as const,
+  registers: [registry],
+});
+
+export const sagaUnconfirmedCallsClearedAt = new Gauge({
+  name: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds',
+  help: 'When a read of saga_unconfirmed_call last found no call unconfirmed, by the database clock',
+  labelNames: ['service', 'operation'] as const,
+  registers: [registry],
+});
+
+/** Zero only for a deployment that states it runs no worker (`MARKETPLACE_SAGA_WORKER_EXPECTED`). */
+export const sagaWorkerExpected = new Gauge({
+  name: 'rasta_marketplace_saga_worker_expected',
+  help: 'Whether this deployment expects an order saga worker on the queue',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
  * The older of Temporal's last workflow poll and last activity poll on the saga's
  * task queue, by Temporal's own clock. Moves only on that proof, so anything
  * that prevents the proof reads as a worker that is not polling (FU-104).

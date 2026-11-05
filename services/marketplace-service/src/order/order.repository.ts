@@ -265,29 +265,43 @@ export class OrderRepository {
   }
 
   /**
-   * A saga call to economic-service is about to be made (FU-104). Once per
-   * subject: a late attempt cannot reopen what a later one confirmed.
+   * A saga call to economic-service is about to be made (FU-104). Every attempt
+   * opens it again, whatever an earlier one confirmed: only this attempt's outcome
+   * says anything about the funds now (#769 r1 F3). A false alarm from a late attempt
+   * is an operator's to close; a closed row over a held dispute is silent.
+   *
+   * @returns the generation this attempt confirms with.
    */
   async openSagaCall(
     client: ExtendedPrismaClient,
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
-  ): Promise<void> {
-    await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
-      client.sagaUnconfirmedCall.createMany({
-        data: [{ organizationId: order.organizationId, orderId: order.id, operation, subject }],
-        skipDuplicates: true,
-      }),
+  ): Promise<number> {
+    const key = { organizationId: order.organizationId, orderId: order.id, operation, subject };
+    const { generation } = await runUnscoped(
+      'a saga step records its call on the order it drives, under its tenant',
+      () =>
+        client.sagaUnconfirmedCall.upsert({
+          where: { organizationId_orderId_operation_subject: key },
+          create: key,
+          update: { confirmedAt: null, generation: { increment: 1 } },
+          select: { generation: true },
+        }),
     );
+    return generation;
   }
 
-  /** economic-service has confirmed that call (FU-104). */
+  /**
+   * economic-service has confirmed that call (FU-104). Only the opening's own: an
+   * attempt overtaken by a newer one says nothing about the newer one's outcome.
+   */
   async confirmSagaCall(
     client: ExtendedPrismaClient,
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
+    generation: number,
   ): Promise<void> {
     await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
       client.sagaUnconfirmedCall.updateMany({
@@ -296,6 +310,7 @@ export class OrderRepository {
           orderId: order.id,
           operation,
           subject,
+          generation,
           confirmedAt: null,
         },
         data: { confirmedAt: new Date() },

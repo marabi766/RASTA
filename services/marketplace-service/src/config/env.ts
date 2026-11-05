@@ -110,6 +110,13 @@ export const marketplaceEnvSchema = baseEnvSchema
      * without Temporal gets that, and knows it.
      */
     MARKETPLACE_TEMPORAL_ENABLED: booleanEnv(true),
+    /**
+     * Whether this deployment expects a saga worker. Off states a worker-free
+     * environment, and only that silences `RastaMarketplaceSagaWorkerNotPolling`:
+     * turning Temporal off alone leaves it firing, because that is also how an
+     * order stops advancing by mistake (FU-104). Refused with Temporal on.
+     */
+    MARKETPLACE_SAGA_WORKER_EXPECTED: booleanEnv(true),
 
     // ---- Order windows (ADR-043, Q-11) -----------------------------------
 
@@ -194,6 +201,12 @@ export const marketplaceEnvSchema = baseEnvSchema
       .min(30)
       .max(3_600)
       .prefault(60),
+  })
+  .refine((env) => env.MARKETPLACE_SAGA_WORKER_EXPECTED || !env.MARKETPLACE_TEMPORAL_ENABLED, {
+    path: ['MARKETPLACE_SAGA_WORKER_EXPECTED'],
+    message: fixed(
+      'MARKETPLACE_SAGA_WORKER_EXPECTED=false needs MARKETPLACE_TEMPORAL_ENABLED=false',
+    ),
   })
   .refine((env) => outboxShutdownBudgetMs(env) >= SAGA_START_STOP_BUDGET_MS, {
     path: ['SHUTDOWN_TIMEOUT_MS'],

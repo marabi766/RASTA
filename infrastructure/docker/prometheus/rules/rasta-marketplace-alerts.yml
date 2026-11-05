@@ -12,20 +12,22 @@ groups:
           runbook: docs/runbooks/marketplace-saga-deploy.md
   - name: rasta-marketplace-saga-release
     rules:
-      # State, not rounds (FU-104): the count of saga_unconfirmed_call, read by the
-      # API process, needs no worker. A worker failure takes that process with it,
-      # so once firing this holds for as long as nobody can read the count: only
-      # a read that finds it zero clears it.
+      # State, not rounds (FU-104): saga_unconfirmed_call, read by the API process,
+      # needs no worker. On while any replica reports a call, and after that until
+      # a read that began after the last positive one ended finds none: both times
+      # are the database's, and held in the samples for as long as the TSDB keeps
+      # them (7d), so losing a replica or this server's state clears nothing. Past
+      # that, UnconfirmedCallsUnread has been firing throughout, and the next read
+      # answers again. Keep the window within --storage.tsdb.retention.time.
       - alert: RastaMarketplaceSagaDisputeReleaseUnconfirmed
         expr: >-
           max(rasta_marketplace_saga_unconfirmed_calls{operation="resolveObligationDispute"}) > 0
-          or (
-            max(ALERTS{alertname="RastaMarketplaceSagaDisputeReleaseUnconfirmed",alertstate="firing"})
-            and on ()
-            (
-              time() - max(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds) > 120
-              or absent(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds)
-            )
+          or
+          max(max_over_time(rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{operation="resolveObligationDispute"}[7d]))
+          >=
+          (
+            max(max_over_time(rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{operation="resolveObligationDispute"}[7d]))
+            or vector(0)
           )
         labels:
           severity: critical
@@ -49,10 +51,17 @@ groups:
       # stopped worker for about five minutes with the time frozen, and advances
       # the time about once a minute for a live one, so three minutes is not a
       # slow poll. Absent also covers a service that is down or has Temporal off.
+      # Silent only where every instance has reported MARKETPLACE_SAGA_WORKER_EXPECTED=false
+      # for an hour: a replica that expected one and exited with its worker still counts,
+      # and an instance that reports nothing has stated nothing.
       - alert: RastaMarketplaceSagaWorkerNotPolling
         expr: >-
-          time() - max(rasta_marketplace_saga_worker_last_poll_timestamp_seconds) > 180
-          or absent(rasta_marketplace_saga_worker_last_poll_timestamp_seconds)
+          (
+            time() - max(rasta_marketplace_saga_worker_last_poll_timestamp_seconds) > 180
+            or absent(rasta_marketplace_saga_worker_last_poll_timestamp_seconds)
+          )
+          unless on ()
+          (max(max_over_time(rasta_marketplace_saga_worker_expected[1h])) == 0)
         for: 2m
         labels:
           severity: critical

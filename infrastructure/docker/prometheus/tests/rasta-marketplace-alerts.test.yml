@@ -34,6 +34,14 @@ tests:
         values: '0x25 1x94 0x24'
       - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-2"}'
         values: '0+300x144'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '_x24 7200+300x23 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '0+300x23 _x24 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '_x26 7800+300x94 _x25'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '0+300x25 _x95 36300+300x24'
     alert_rule_test:
       - eval_time: 115m
         alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
@@ -65,6 +73,10 @@ tests:
         values: '1x10 stale _x19 1x10 0x10'
       - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-1"}'
         values: '0+60x10 stale _x19 1860+60x21'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '0+60x10 stale _x19 1860+60x10 _x11'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '_x42 2520+60x10'
     alert_rule_test:
       - eval_time: 12m
         alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
@@ -98,6 +110,10 @@ tests:
         values: '1x10 stale _x19 0x10'
       - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-1"}'
         values: '0+60x10 stale _x19 1860+60x10'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '0+60x10 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '_x31 1860+60x10'
     alert_rule_test:
       - eval_time: 30m
         alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
@@ -117,6 +133,10 @@ tests:
         values: '0x30'
       - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-2"}'
         values: '60x20 1260+60x10'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '0+60x10 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '60x20 1260+60x10'
     alert_rule_test:
       - eval_time: 18m
         alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
@@ -124,12 +144,118 @@ tests:
       - eval_time: 21m
         alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
         exp_alerts: []
+  # #769 r1 F1: replica-1 reads 1 at 600s and is gone at 660s. replica-2's last read,
+  # a zero from before that (540s), is 120s old at 660s, so not yet stale. It is older
+  # than the positive, so it clears nothing, then or once it ages; its read at 1200s does.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unconfirmed_calls{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '0x9 1 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-1"}'
+        values: '0+60x10 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '_x10 600 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '0+60x9 _ stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '0x30'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-2"}'
+        values: '0+60x9 540x9 1200+60x10'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '0+60x9 540x9 1200+60x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 11m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 15m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 19m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 20m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []
+  # replica-1 is gone by 5m, its last positive at 240s. replica-2 read zero at that very
+  # instant, which is not after it (5m), and then after it (6m): that is the confirmation.
+  # Everyone goes at 7m: it was confirmed, so it stays off when that read has aged.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unconfirmed_calls{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '1x4 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '0+60x4 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '0x6 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '0x3 240x1 360 stale'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 5m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 6m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []
+  # Any replica's report holds it: replica-1's reads fail with its 1 frozen, and
+  # replica-2 reads zero after it. Not cleared until replica-1 reports too.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unconfirmed_calls{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '1x10 0x5'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '60x15'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '0x15'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-2",operation="resolveObligationDispute"}'
+        values: '120+60x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 11m
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []
+  # Monitoring was off for days and every replica is gone: nothing here relies on the
+  # alert's own state, so the first evaluation with only old samples still answers.
+  # Past the retention nothing is known of it, and Unread is what is on.
+  - interval: 1h
+    input_series:
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_seen_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '3600x3 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
+        values: '1800x3 stale'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-1"}'
+        values: '3600x3 stale'
+    alert_rule_test:
+      - eval_time: 3d
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: *release-firing
+      - eval_time: 7d4h
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []
+      - eval_time: 7d4h
+        alertname: RastaMarketplaceSagaUnconfirmedCallsUnread
+        exp_alerts: *unread-firing
   # The read keeps failing in a live process: the count is frozen, the time stale.
   - interval: 1m
     input_series:
       - series: 'rasta_marketplace_saga_unconfirmed_calls{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
         values: '0x20'
       - series: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds{service="marketplace-service",instance="replica-1"}'
+        values: '0+60x10 600x10'
+      - series: 'rasta_marketplace_saga_unconfirmed_calls_cleared_timestamp_seconds{service="marketplace-service",instance="replica-1",operation="resolveObligationDispute"}'
         values: '0+60x10 600x10'
     alert_rule_test:
       - eval_time: 10m
@@ -180,6 +306,29 @@ tests:
       - eval_time: 20m
         alertname: RastaMarketplaceSagaWorkerNotPolling
         exp_alerts: []
+  # A deployment that states it runs no worker: no alert. Every instance has to.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_worker_expected{service="marketplace-service",instance="replica-1"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaMarketplaceSagaWorkerNotPolling
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_worker_expected{service="marketplace-service",instance="replica-1"}'
+        values: '0x10'
+      - series: 'rasta_marketplace_saga_worker_expected{service="marketplace-service",instance="replica-2"}'
+        values: '1x5 stale'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RastaMarketplaceSagaWorkerNotPolling
+        exp_alerts: *worker-firing
+      # The replica that expected one exited with it: that does not make it expected less.
+      - eval_time: 8m
+        alertname: RastaMarketplaceSagaWorkerNotPolling
+        exp_alerts: *worker-firing
   # No proof ever, and nothing known of any release: both alerts, not the release one.
   - interval: 1m
     input_series:

@@ -17,6 +17,13 @@ export interface StartClaim {
   token: string;
 }
 
+export interface UnconfirmedCalls {
+  calls: { operation: string; count: number }[];
+  /** Epoch seconds by the database clock, before and after the count's snapshot. */
+  startedAt: number;
+  finishedAt: number;
+}
+
 /** ADR-050 fencing, on the order itself: intent and receipt are never purged.
  * The cross-tenant sweep is platform plumbing. Only persisted ownership is
  * returned; every subsequent mutation fences BOTH that buyer and the token.
@@ -91,22 +98,39 @@ export class SagaStartStore {
    * Counts only, as `backlog`. By the database clock, across tenants: platform
    * plumbing. A dispute still open has nothing to release yet. A row naming no
    * dispute of its order counts: what cannot be read as waiting is not cleared.
+   *
+   * The two times bracket the statement's snapshot, by the one clock replicas
+   * share, so that their reads can be put in order: a zero whose `startedAt` is past
+   * a positive read's `finishedAt` looked strictly later, and a counted call only
+   * leaves the count by being confirmed. The transaction's time, because a prepared
+   * statement takes its snapshot before `statement_timestamp()` last moves.
    */
-  async unconfirmedCalls(
-    graceSeconds = UNCONFIRMED_CALL_GRACE_SECONDS,
-  ): Promise<{ operation: string; count: number }[]> {
+  async unconfirmedCalls(graceSeconds = UNCONFIRMED_CALL_GRACE_SECONDS): Promise<UnconfirmedCalls> {
     const rows = await this.bounded(
-      (tx) => tx.$queryRaw<{ operation: string; count: bigint }[]>`
-      SELECT c.operation, count(*) AS count
-      FROM saga_unconfirmed_call c
-      LEFT JOIN order_dispute d ON d.id = c.subject
-        AND d.organization_id = c.organization_id AND d.order_id = c.order_id
-      WHERE c.confirmed_at IS NULL AND (d.id IS NULL OR d.status <> 'OPEN')
-        AND COALESCE(d.resolved_at AT TIME ZONE 'UTC', c.opened_at)
-          <= clock_timestamp() - ${graceSeconds} * interval '1 second'
-      GROUP BY c.operation
+      (tx) => tx.$queryRaw<
+        { operation: string | null; count: bigint | null; started: number; finished: number }[]
+      >`
+      SELECT g.operation, g.count,
+        EXTRACT(EPOCH FROM transaction_timestamp())::float AS started,
+        EXTRACT(EPOCH FROM clock_timestamp())::float AS finished
+      FROM (SELECT 1) AS one LEFT JOIN (
+        SELECT c.operation, count(*) AS count
+        FROM saga_unconfirmed_call c
+        LEFT JOIN order_dispute d ON d.id = c.subject
+          AND d.organization_id = c.organization_id AND d.order_id = c.order_id
+        WHERE c.confirmed_at IS NULL AND (d.id IS NULL OR d.status <> 'OPEN')
+          AND COALESCE(d.resolved_at AT TIME ZONE 'UTC', c.opened_at)
+            <= clock_timestamp() - ${graceSeconds} * interval '1 second'
+        GROUP BY c.operation
+      ) AS g ON true
     `,
     );
-    return rows.map((row) => ({ operation: row.operation, count: Number(row.count) }));
+    return {
+      startedAt: rows[0].started,
+      finishedAt: Math.max(...rows.map((row) => row.finished)),
+      calls: rows.flatMap((row) =>
+        row.operation === null ? [] : [{ operation: row.operation, count: Number(row.count) }],
+      ),
+    };
   }
 }

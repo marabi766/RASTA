@@ -1224,7 +1224,7 @@ export class OrderService {
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
-  ): Promise<void> {
+  ): Promise<number> {
     return this.repository.openSagaCall(this.prisma.client, order, operation, subject);
   }
 
@@ -1233,8 +1233,15 @@ export class OrderService {
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
+    generation: number,
   ): Promise<void> {
-    return this.repository.confirmSagaCall(this.prisma.client, order, operation, subject);
+    return this.repository.confirmSagaCall(
+      this.prisma.client,
+      order,
+      operation,
+      subject,
+      generation,
+    );
   }
 
   /** What the saga needs to know to drive an order without re-reading it. */

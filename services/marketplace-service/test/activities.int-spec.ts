@@ -3,6 +3,7 @@ import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
 import { SagaStartStore } from '../src/temporal/saga-start.store';
+import { OrderRepository } from '../src/order/order.repository';
 import { EconomicClient, OBLIGATION_LOOKUP_PAGES } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import {
@@ -497,7 +498,7 @@ describe('order saga activities (real database)', () => {
       const acts = activitiesWith(economic);
       const store = new SagaStartStore(prisma);
       const count = async (graceSeconds = 0) =>
-        (await store.unconfirmedCalls(graceSeconds)).find(
+        (await store.unconfirmedCalls(graceSeconds)).calls.find(
           (row) => row.operation === 'resolveObligationDispute',
         )?.count ?? 0;
       const before = await count();
@@ -539,6 +540,123 @@ describe('order saga activities (real database)', () => {
       expect(await count(1)).toBe(before);
 
       await acts.resolveObligationDispute(orderId, held.transactionId, dispute!.id, 'REFUND');
+      expect(await count()).toBe(before);
+    });
+
+    /** A decided dispute economic-service was told of, as the saga has it at the release. */
+    async function decidedRelease() {
+      const { orderId } = await placeOrder();
+      const { economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+      const held = await acts.createObligation(orderId);
+      await acts.markFundsHeld(orderId, held.transactionId);
+      await asActor(
+        { organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-ACT-SUP' },
+        () => wiring.orders.confirm(orderId),
+      );
+      await asActor(
+        { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
+        () => wiring.orders.raiseDispute(orderId, { reason: 'the part does not fit' }),
+      );
+      const { dispute } = await acts.readOrder(orderId);
+      await acts.disputeObligation(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'the part does not fit',
+      );
+      await asActor(
+        { organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-ACT-OPS' },
+        () =>
+          resolveOpenDispute(wiring, orderId, {
+            outcome: 'REFUND',
+            resolution: 'the part does not fit',
+            responsibility: 'SUPPLIER',
+          }),
+      );
+      const store = new SagaStartStore(prisma);
+      const count = async () =>
+        (await store.unconfirmedCalls(0)).calls.find(
+          (row) => row.operation === 'resolveObligationDispute',
+        )?.count ?? 0;
+      return { orderId, transactionId: held.transactionId, disputeId: dispute!.id, count };
+    }
+
+    // A newer dispute there, and the first command's stored answer long expired.
+    const refusingEconomic = (orderId: string, transactionId: string) =>
+      stubEconomic({
+        resolveDispute: async () => {
+          throw new RastaError('INVALID_STATE_TRANSITION', 'held by another dispute');
+        },
+        readObligation: async () =>
+          obligation(orderId, {
+            id: transactionId,
+            status: 'DISPUTED',
+            disputeId: 'TXD_NEWER',
+            disputedAt: new Date().toISOString(),
+          }),
+      }).economic;
+
+    it('a retry past a confirmed release is back on record when it is refused (#769 r1 F3)', async () => {
+      const { orderId, transactionId, disputeId, count } = await decidedRelease();
+      const before = await count();
+      const step = sagaStep();
+      const attempt = (economic: EconomicClient) =>
+        createActivities({
+          orders: wiring.orders,
+          economic,
+          currentStep: () => step,
+        }).resolveObligationDispute(orderId, transactionId, disputeId, 'REFUND', 'TXD_STUB');
+
+      // It succeeds, its receipt is lost, the confirmation persists, and Temporal
+      // never hears: the same step runs again, with nothing recorded to answer it.
+      const lost = jest
+        .spyOn(OrderRepository.prototype, 'recordSagaStep')
+        .mockRejectedValueOnce(new Error('connection lost'));
+      try {
+        await attempt(stubEconomic().economic);
+      } finally {
+        lost.mockRestore();
+      }
+      expect(await count()).toBe(before - 1);
+
+      await expect(attempt(refusingEconomic(orderId, transactionId))).rejects.toThrow();
+      expect(await count()).toBe(before);
+
+      // Answered at last, it closes again.
+      await attempt(stubEconomic().economic);
+      expect(await count()).toBe(before - 1);
+    });
+
+    it('an overtaken attempt confirming late does not close a newer refused one (#769 r1 F3)', async () => {
+      const { orderId, transactionId, disputeId, count } = await decidedRelease();
+      const before = await count();
+      let answer!: () => void;
+      let reached!: () => void;
+      const calling = new Promise<void>((resolve) => (reached = resolve));
+      const slow = stubEconomic({
+        resolveDispute: () =>
+          new Promise((resolve) => {
+            answer = () => resolve(undefined);
+            reached();
+          }),
+      }).economic;
+      const attempt = (economic: EconomicClient) =>
+        activitiesWith(economic).resolveObligationDispute(
+          orderId,
+          transactionId,
+          disputeId,
+          'REFUND',
+          'TXD_STUB',
+        );
+
+      const overtaken = attempt(slow);
+      await calling;
+      await expect(attempt(refusingEconomic(orderId, transactionId))).rejects.toThrow();
+
+      answer();
+      await overtaken;
+
       expect(await count()).toBe(before);
     });
 

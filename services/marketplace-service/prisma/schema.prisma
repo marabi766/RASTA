@@ -442,6 +442,9 @@ model SagaUnconfirmedCall {
   /// What the call is about: for a dispute release, the order's dispute.
   subject String
 
+  /// Moves with every opening; a confirmation of an earlier one closes nothing.
+  generation Int @default(1)
+
   openedAt    DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
   confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(3)
 

@@ -5,7 +5,10 @@ import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@te
 import { foreignFailure } from './foreign-failure';
 import {
   sagaUnconfirmedCalls,
+  sagaUnconfirmedCallsClearedAt,
   sagaUnconfirmedCallsReadAt,
+  sagaUnconfirmedCallsSeenAt,
+  sagaWorkerExpected,
   sagaWorkerLastPoll,
 } from '../observability/metrics';
 import type { SagaStartStore } from './saga-start.store';
@@ -537,13 +540,22 @@ describe('sample', () => {
   });
   const lastPoll = async () => (await sagaWorkerLastPoll.get()).values[0]?.value;
   const stateStore = (read: () => Promise<{ operation: string; count: number }[]>) =>
-    ({ unconfirmedCalls: jest.fn(read) }) as unknown as SagaStartStore;
+    ({
+      unconfirmedCalls: jest.fn(async () => ({
+        calls: await read(),
+        startedAt: 1000,
+        finishedAt: 1001,
+      })),
+    }) as unknown as SagaStartStore;
   const quiet = stateStore(async () => []);
 
   beforeEach(() => {
     sagaWorkerLastPoll.reset();
     sagaUnconfirmedCalls.reset();
     sagaUnconfirmedCallsReadAt.reset();
+    sagaUnconfirmedCallsSeenAt.reset();
+    sagaUnconfirmedCallsClearedAt.reset();
+    sagaWorkerExpected.reset();
   });
 
   it('proves the worker by the older of its last workflow and activity polls', async () => {
@@ -613,6 +625,51 @@ describe('sample', () => {
 
     await new OrderSagaClient(env(), quiet).sample();
     expect(await values()).toEqual([['resolveObligationDispute', 0]]);
+  });
+
+  // #769 r1 F1: a zero clears only what it began reading after.
+  it('stamps a positive read when it ended and a zero when it began, by the database', async () => {
+    stubTemporal({ describeTaskQueue: async () => polls([1]) });
+    const stamps = async () => [
+      (await sagaUnconfirmedCallsSeenAt.get()).values.map((v) => [v.labels.operation, v.value]),
+      (await sagaUnconfirmedCallsClearedAt.get()).values.map((v) => [v.labels.operation, v.value]),
+      (await sagaUnconfirmedCallsReadAt.get()).values.map((v) => v.value),
+    ];
+
+    await new OrderSagaClient(env(), quiet).sample();
+    expect(await stamps()).toEqual([[], [['resolveObligationDispute', 1000]], [1000]]);
+
+    await new OrderSagaClient(
+      env(),
+      stateStore(async () => [{ operation: 'resolveObligationDispute', count: 2 }]),
+    ).sample();
+    expect(await stamps()).toEqual([
+      [['resolveObligationDispute', 1001]],
+      [['resolveObligationDispute', 1000]],
+      [1000],
+    ]);
+  });
+
+  it('a failed read moves neither stamp', async () => {
+    await new OrderSagaClient(
+      env({ MARKETPLACE_TEMPORAL_ENABLED: false }),
+      stateStore(async () => Promise.reject(new Error('down'))),
+    ).sample();
+
+    expect((await sagaUnconfirmedCallsSeenAt.get()).values).toEqual([]);
+    expect((await sagaUnconfirmedCallsClearedAt.get()).values).toEqual([]);
+  });
+
+  it.each([
+    [true, 1],
+    [false, 0],
+  ])('reports MARKETPLACE_SAGA_WORKER_EXPECTED=%s as %i', async (expected, value) => {
+    await new OrderSagaClient(
+      env({ MARKETPLACE_TEMPORAL_ENABLED: false, MARKETPLACE_SAGA_WORKER_EXPECTED: expected }),
+      quiet,
+    ).sample();
+
+    expect((await sagaWorkerExpected.get()).values[0]?.value).toBe(value);
   });
 
   it('on a failed read keeps the last count and does not move the timestamp', async () => {

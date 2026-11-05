@@ -13,7 +13,10 @@ import {
   sagaStartBacklogCount,
   sagaStartDeliveries,
   sagaUnconfirmedCalls,
+  sagaUnconfirmedCallsClearedAt,
   sagaUnconfirmedCallsReadAt,
+  sagaUnconfirmedCallsSeenAt,
+  sagaWorkerExpected,
   sagaWorkerLastPoll,
 } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
@@ -83,13 +86,19 @@ export class OrderSagaClient implements OnModuleDestroy {
 
   private async sampleUnconfirmedCalls(): Promise<void> {
     try {
-      const calls = await this.store.unconfirmedCalls();
+      const { calls, startedAt, finishedAt } = await this.store.unconfirmedCalls();
       sagaUnconfirmedCalls.reset();
-      sagaUnconfirmedCalls.set({ service: SERVICE_NAME, operation: 'resolveObligationDispute' }, 0);
-      for (const { operation, count } of calls) {
-        sagaUnconfirmedCalls.set({ service: SERVICE_NAME, operation }, count);
+      const counts = new Map([['resolveObligationDispute', 0]]);
+      for (const { operation, count } of calls) counts.set(operation, count);
+      for (const [operation, count] of counts) {
+        const labels = { service: SERVICE_NAME, operation };
+        sagaUnconfirmedCalls.set(labels, count);
+        // Each stamped on its cautious side: only a read that began after a
+        // positive one finished can clear it.
+        if (count > 0) sagaUnconfirmedCallsSeenAt.set(labels, finishedAt);
+        else sagaUnconfirmedCallsClearedAt.set(labels, startedAt);
       }
-      sagaUnconfirmedCallsReadAt.set({ service: SERVICE_NAME }, Date.now() / 1000);
+      sagaUnconfirmedCallsReadAt.set({ service: SERVICE_NAME }, startedAt);
     } catch (error) {
       this.logger.warn(
         { failure: foreignFailure(error) },
@@ -100,6 +109,10 @@ export class OrderSagaClient implements OnModuleDestroy {
 
   /** Disabled, no series: an instance without a worker proves nothing. */
   private async sampleWorkerPolls(): Promise<void> {
+    sagaWorkerExpected.set(
+      { service: SERVICE_NAME },
+      this.env.MARKETPLACE_SAGA_WORKER_EXPECTED ? 1 : 0,
+    );
     if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) return;
     try {
       const client = await this.getClient();

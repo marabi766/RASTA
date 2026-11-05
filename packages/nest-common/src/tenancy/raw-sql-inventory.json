@@ -2409,10 +2409,10 @@
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 99,
-    "hash": "4303599198990e65a5c74aca0ecd07f57e7496197a7c3976c858e209a9167a6c",
+    "line": 110,
+    "hash": "34b66ee427920499853205559d9e181093e8873de734c06713c4d4723049c1da",
     "occurrence": 0,
-    "decision": "platform-wide: unconfirmed saga release count by operation name only; no tenant labels, identifiers or amounts leave the database"
+    "decision": "platform-wide: unconfirmed saga release count by operation name and the database's read times only; no tenant labels, identifiers or amounts leave the database"
   },
   {
     "file": "services/notification-service/src/notification/notification.repository.ts",
