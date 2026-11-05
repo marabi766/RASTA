@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { format, resolveConfig } from 'prettier';
-import { pnpmInputPins } from './prepush-parity-lib.mjs';
+import { collectPnpmInputs, pnpmInputPins } from './prepush-parity-lib.mjs';
 
 const root = new URL('../', import.meta.url).pathname;
 const read = (file) => readFileSync(`${root}${file}`, 'utf8');
@@ -13,12 +13,8 @@ const path = `${root}scripts/prepush-parity.json`;
 
 try {
   const manifest = JSON.parse(read('scripts/prepush-parity.json'));
-  const pins = pnpmInputPins(
-    read('.github/workflows/ci.yml'),
-    Object.fromEntries(
-      ['package.json', 'pnpm-workspace.yaml', '.npmrc'].map((file) => [file, read(file)]),
-    ),
-  );
+  const workflow = read('.github/workflows/ci.yml');
+  const pins = pnpmInputPins(workflow, collectPnpmInputs(workflow, read));
   const moved = isDeepStrictEqual(manifest.pnpmInputs, pins) ? 'none' : 'pnpmInputs';
   manifest.pnpmInputs = pins;
   const text = await format(JSON.stringify(manifest, null, 2), {
