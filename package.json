@@ -128,7 +128,9 @@
     "db:rotate-role-passwords": "bash scripts/postgres-exec.bash rotate-role-passwords.bash",
     "db:supplier-privilege-split": "bash scripts/postgres-exec.bash supplier-privilege-split.bash",
     "db:privilege-split": "bash scripts/postgres-exec.bash service-privilege-split.bash",
-    "db:mark-disposable": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/disposable-marker.bash"
+    "db:mark-disposable": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/disposable-marker.bash",
+    "prepush:parity": "node scripts/prepush-parity.mjs",
+    "test:prepush-parity": "node --test --test-timeout=300000 scripts/prepush-parity.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
