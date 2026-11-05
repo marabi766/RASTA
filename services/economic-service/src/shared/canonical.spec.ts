@@ -27,6 +27,7 @@ import {
   cancelTransactionSchema,
   createTransactionSchema,
   disputeTransactionSchema,
+  refundTransactionSchema,
   resolveDisputeSchema,
   settleTransactionSchema,
 } from '../transaction/dto';
@@ -372,6 +373,17 @@ describe('every idempotent command’s body (task 129)', () => {
   const pipeOf = (schema: z.ZodType) => (body: unknown) =>
     canonicalBodyPipe(schema).transform(body, { type: 'body' }) as Record<string, unknown>;
   const topUp = topUpSchema.omit({ idempotencyKey: true }).partial({ instrument: true });
+  /** What the release before canonicalization did with a body: `zodPipe(schema)`. */
+  const previousRelease = (schema: z.ZodType, body: unknown) =>
+    zodPipe(schema).transform(body, { type: 'body' }) as Record<string, unknown>;
+  const refusalOf = (run: () => unknown): unknown => {
+    try {
+      run();
+      return undefined;
+    } catch (error) {
+      return { error: String(error), details: (error as { details?: unknown }).details };
+    }
+  };
 
   it('finds a refined amount — the top-up’s positive one — not only the schema itself', () => {
     expect(canonicalFieldsOf(topUp)).toEqual({
@@ -437,16 +449,19 @@ describe('every idempotent command’s body (task 129)', () => {
     });
     // The request's own arrays and objects are left as they were.
     expect(body.levels[0]!.name).toBe('one\r\ntwo');
-    // Two names that differ only in line endings are one name.
-    expect(() =>
-      pipeOf(createRecognitionRuleSchema)({
-        ...body,
-        levels: [
-          { name: 'a\r\nb', threshold: 0 },
-          { name: 'a\nb', threshold: 1 },
-        ],
-      }),
-    ).toThrow();
+    // Two names that differ only in line endings are one name once LF; the
+    // previous release accepted them as two, so they are kept as sent
+    // (Codex PR-747 r1, F2; below).
+    const apart = {
+      ...body,
+      levels: [
+        { name: 'a\r\nb', threshold: 0 },
+        { name: 'a\nb', threshold: 1 },
+      ],
+    };
+    expect(pipeOf(createRecognitionRuleSchema)(apart)).toEqual(
+      previousRelease(createRecognitionRuleSchema, apart),
+    );
   });
 
   it('normalizes the text of every other command', () => {
@@ -493,6 +508,29 @@ describe('every idempotent command’s body (task 129)', () => {
       expect(asSentForm(dto)).toBeUndefined();
     });
 
+    it('is found inside any wrapper of plain objects and arrays, however deep (PR-747 r1, F1)', () => {
+      const dto = pipeOf(operatorDecisionSchema)({ reason: 'line one\r\nline two' });
+      const by = { userId: 'USR_1', issuer: 'https://issuer', subject: 'sub-1' };
+      // The reconciliation's shape: the target around the actor binding around the body.
+      expect(asSentForm(targeted('PI_1/RES_1', { by, body: dto }))).toEqual({
+        id: 'PI_1/RES_1',
+        body: { by, body: { reason: 'line one\r\nline two' } },
+      });
+      expect(asSentForm([{ wrapped: [dto] }, 'x'])).toEqual([
+        { wrapped: [{ reason: 'line one\r\nline two' }] },
+        'x',
+      ]);
+      // A wrapper with no body of the pipe in it has no as-sent form; neither
+      // does a copy of one — a copy is not the body the pipe validated.
+      expect(asSentForm({ by, body: { reason: 'line one\nline two' } })).toBeUndefined();
+      expect(asSentForm({ by, body: { ...dto } })).toBeUndefined();
+      // Never walked into: an instance that is not a plain object.
+      class Holder {
+        constructor(readonly body: unknown) {}
+      }
+      expect(asSentForm({ held: new Holder(dto) })).toBeUndefined();
+    });
+
     it('travels with the target id (`targeted`)', () => {
       const dto = pipeOf(disputeTransactionSchema)({ reason: 'line one\r\nline two' });
       expect(asSentForm(targeted('TXN_1', dto))).toEqual({
@@ -501,6 +539,80 @@ describe('every idempotent command’s body (task 129)', () => {
       });
       expect(asSentForm(targeted('TXN_1', { reason: 'plain body' }))).toBeUndefined();
       expect(asSentForm(targeted('TXN_1'))).toBeUndefined();
+    });
+  });
+
+  describe('a body whose canonical form the schema refuses (Codex PR-747 r1, F2)', () => {
+    // Ten UTF-16 units as sent, the minimum; nine once LF.
+    const short = '1234\r\n5678';
+
+    it.each([
+      ['a dispute', disputeTransactionSchema, { reason: short }],
+      ['a dispute resolution', resolveDisputeSchema, { resolution: short }],
+      [
+        'a recognition version with two level names apart only by their line endings',
+        createRecognitionRuleSchema,
+        {
+          expectedCurrentVersion: 0,
+          basis: 'REWARD_POINTS_CUMULATIVE',
+          levels: [
+            { name: 'first\r\nsecond', threshold: 0 },
+            { name: 'first\nsecond', threshold: 5 },
+          ],
+          badges: [],
+        },
+      ],
+    ] as const)('%s: answered exactly as the previous release answered it', (_, schema, body) => {
+      expect(schema.safeParse(canonicalBody(body, canonicalFieldsOf(schema))).success).toBe(false);
+      const dto = pipeOf(schema)(body);
+      expect(dto).toEqual(previousRelease(schema, body));
+      // Hashed as sent — what the previous release stored — with nothing else
+      // to compare: no other spelling of it is canonical either.
+      expect(asSentForm(dto)).toBeUndefined();
+      expect(hashRequestBody(targeted('TXN_1', dto))).toBe(
+        hashRequestBody(targeted('TXN_1', previousRelease(schema, body))),
+      );
+    });
+
+    it('a body the previous release refused is refused, with its refusal', () => {
+      const body = { reason: '123\r\n456' };
+      expect(() => previousRelease(disputeTransactionSchema, body)).toThrow();
+      expect(refusalOf(() => pipeOf(disputeTransactionSchema)(body))).toEqual(
+        refusalOf(() => previousRelease(disputeTransactionSchema, body)),
+      );
+    });
+
+    // The other direction is not kept, on purpose: a body over a limit as
+    // sent but within it once LF is accepted (checklist #17; above).
+    it('never refuses what the previous release accepted', () => {
+      const texts = ['', short, '123\r\n456', 'abcd\r\n'.repeat(200), 'abcd\r'.repeat(200), 'a\rb'];
+      const corpus: Array<[z.ZodType, unknown]> = [
+        ...texts.map((reason) => [disputeTransactionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map(
+          (resolution) => [resolveDisputeSchema, { resolution }] as [z.ZodType, unknown],
+        ),
+        ...texts.map((reason) => [refundTransactionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map((reason) => [cancelTransactionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map((reason) => [refundPaymentSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map((reason) => [operatorDecisionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map(
+          (reason) =>
+            [
+              proposeResolutionSchema,
+              { providerOutcome: 'DECLINED', evidenceReference: 'TICKET-1', reason },
+            ] as [z.ZodType, unknown],
+        ),
+        ...['000', '0001000', '01', '1'].map(
+          (amountMinor) => [topUp, { amountMinor }] as [z.ZodType, unknown],
+        ),
+      ];
+      for (const [schema, body] of corpus) {
+        if (refusalOf(() => previousRelease(schema, body)) !== undefined) continue;
+        expect({ body, now: refusalOf(() => pipeOf(schema)(body)) }).toEqual({
+          body,
+          now: undefined,
+        });
+      }
     });
   });
 

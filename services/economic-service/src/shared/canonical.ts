@@ -296,14 +296,29 @@ const AS_SENT = new WeakMap<object, unknown>();
  * Safe for any record, old or new: the as-sent body matches a stored hash only
  * when it is the very request that was stored, or — already canonical — equal
  * to the canonical body anyway.
+ *
+ * **A body whose canonical form the schema refuses** (Codex PR-747 r1, F2) —
+ * a reason of ten characters with a CRLF, nine after it; two level names that
+ * differ only in their line endings, one after it — is the body the previous
+ * release accepted, so it is answered exactly as that release answered it:
+ * validated, hashed and executed as sent. Its unchanged retry then replays a
+ * pre-change key, and a command another service committed before this change
+ * (marketplace's dispute and its resolution) still goes through, never a new
+ * permanent 400. No other spelling of it can be canonical either — they share
+ * its canonical form — so nothing that could replay a canonical record is
+ * answered this way. Only a body refused as sent too is refused, with the
+ * refusal the previous release gave.
  */
 export function canonicalBodyPipe(schema: z.ZodType): PipeTransform {
   const fields = canonicalFieldsOf(objectOf(schema));
   const pipe: PipeTransform = {
     transform: (value: unknown, _metadata: ArgumentMetadata): unknown => {
       const canonical = canonicalBody(value, fields);
-      const dto: unknown = validateRequestInput(schema, canonical);
-      if (canonical !== value && dto !== null && typeof dto === 'object') {
+      if (canonical === value) return validateRequestInput(schema, value);
+      const parsed = legacyParse(schema, canonical);
+      if (!parsed.success) return validateRequestInput(schema, value);
+      const dto: unknown = parsed.data;
+      if (dto !== null && typeof dto === 'object') {
         const asSent = legacyParse(schema, value);
         if (asSent.success) AS_SENT.set(dto, asSent.data);
       }
@@ -320,16 +335,40 @@ export function isCanonicalBodyPipe(pipe: unknown): boolean {
 }
 
 /**
- * The body as the release before canonicalization validated it, where that
- * differs from `body`; otherwise `undefined`.
+ * `request` — what a command hashes: a body from {@link canonicalBodyPipe}, or
+ * any wrapper around one (`targeted`, the reconciliation's actor binding) —
+ * with every such body in it replaced by its as-sent form; `undefined` when
+ * none in it has one.
+ *
+ * Found by walking the request, not looked up on it (Codex PR-747 r1, F1): a
+ * wrapper is a new object, and a lookup on the outermost one lost the form of
+ * the body inside, so the unchanged retry of a pre-change key was refused. Any
+ * composition of plain objects and arrays that holds the body itself is seen
+ * through, however many layers, with no wrapper having to pass the form on.
  */
-export function asSentForm(body: unknown): unknown {
-  return body !== null && typeof body === 'object' ? AS_SENT.get(body) : undefined;
+export function asSentForm(request: unknown): unknown {
+  const substituted = withAsSent(request);
+  return substituted === request ? undefined : substituted;
 }
 
-/** Records `asSent` as `wrapper`'s as-sent form (`targeted`). */
-export function rememberAsSent(wrapper: object, asSent: unknown): void {
-  AS_SENT.set(wrapper, asSent);
+function withAsSent(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (AS_SENT.has(value)) return AS_SENT.get(value);
+  if (Array.isArray(value)) {
+    const items = value.map(withAsSent);
+    return items.some((item, index) => item !== value[index]) ? items : value;
+  }
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const source = value as Record<string, unknown>;
+  let copy: Record<string, unknown> | undefined;
+  for (const [name, member] of Object.entries(source)) {
+    const replaced = withAsSent(member);
+    if (replaced === member) continue;
+    copy ??= { ...source };
+    copy[name] = replaced;
+  }
+  return copy ?? value;
 }
 
 /** The object schema whose fields are normalized: `schema`, or what it refines. */

@@ -4,7 +4,22 @@ import { runUnscoped } from '@rasta/nest-common';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
 import type { RefundRequest, RefundResult } from '../src/payment/provider';
 import { PrismaClient } from '../src/generated/prisma';
+import { zodPipe } from '@rasta/nest-common';
+import type { z } from 'zod';
 import { hashRequestBody, targeted } from '../src/shared/idempotency';
+import {
+  cancelTransactionSchema,
+  createTransactionSchema,
+  disputeTransactionSchema,
+  refundTransactionSchema,
+  resolveDisputeSchema,
+} from '../src/transaction/dto';
+import {
+  operatorDecisionSchema,
+  proposeResolutionSchema,
+  refundPaymentSchema,
+} from '../src/payment/dto';
+import { createParticipationRuleSchema, createRecognitionRuleSchema } from '../src/reward/dto';
 import { admin, apiTenant, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id, ITEST_ACTOR, ownerDatabaseUrl } from './helpers';
 
@@ -479,5 +494,339 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
     const replayed = await post(path, asPayer, key, { reason: CRLF }).expect(200);
     expect(replayed.body).toEqual(first.body);
     await post(path, asPayer, key, { reason: OTHER }).expect(409);
+  });
+
+  // ---- Rollout, at every site (Codex PR-747 r1, F1, F2) ------------------------
+
+  /**
+   * What the release before this change validated and hashed: the body
+   * through `zodPipe(schema)`, as sent, wrapped as each route of that release
+   * wrapped it (`targeted`, the reconciliation's actor binding). Built here
+   * from the old shapes, not from the new code's own as-sent form.
+   */
+  const asSentBefore = (schema: z.ZodType, body: object): unknown =>
+    zodPipe(schema).transform(body, { type: 'body' });
+
+  /** The reconciliation's actor binding, as the previous release built it. */
+  const boundBefore = (token: string, body: unknown) => {
+    const claims = JSON.parse(
+      Buffer.from(token.replace(/^Bearer test\./, ''), 'base64url').toString('utf8'),
+    ) as { sub: string; rastaUserId: string };
+    return {
+      by: {
+        userId: claims.rastaUserId,
+        issuer: process.env.OIDC_ISSUER_URL,
+        subject: claims.sub,
+      },
+      body,
+    };
+  };
+
+  /**
+   * `sent` under a fresh key; its record then rewritten as the previous
+   * release stored it (`fingerprint`, the hash of `sent` as sent); the same
+   * bytes again answer the first answer, nothing run twice — and, where given,
+   * `respelt` is still 409, a record stored as sent proving nothing about
+   * another spelling.
+   */
+  async function storedBefore(options: {
+    path: string;
+    endpoint: string;
+    token: string;
+    organizationId?: string;
+    status: number;
+    sent: object;
+    fingerprint: unknown;
+    respelt?: object;
+  }): Promise<Record<string, unknown>> {
+    const { path, endpoint, token, status, sent } = options;
+    const organizationId = options.organizationId ?? payer;
+    const key = id('canon-before');
+    const first = await post(path, token, key, sent).expect(status);
+    await storeAsBefore(organizationId, endpoint, key, options.fingerprint);
+    const replayed = await post(path, token, key, sent);
+    expect({ endpoint, status: replayed.status }).toEqual({ endpoint, status });
+    expect(replayed.body).toEqual(first.body);
+    if (options.respelt) {
+      const refused = await post(path, token, key, options.respelt);
+      expect({ endpoint, status: refused.status, code: refused.body.code }).toEqual({
+        endpoint,
+        status: 409,
+        code: 'IDEMPOTENCY_KEY_REUSED',
+      });
+    }
+    return first.body as Record<string, unknown>;
+  }
+
+  it('transaction create, refund, cancel, resolve and payment refund: a pre-change key replays', async () => {
+    const create = {
+      transactionType: 'LOGISTICS',
+      counterpartyOrganizationId: payee,
+      grossAmountMinor: '0750',
+      occurredAt: '2026-11-01T10:00:00Z',
+    };
+    await storedBefore({
+      path: '/v1/transactions',
+      endpoint: 'POST /v1/transactions',
+      token: asPayer,
+      status: 201,
+      sent: create,
+      fingerprint: asSentBefore(createTransactionSchema, create),
+      respelt: { ...create, grossAmountMinor: '750' },
+    });
+
+    const refundable = await held();
+    const refund = { reason: 'returned\r\nbefore dispatch' };
+    await storedBefore({
+      path: `/v1/transactions/${refundable}/refund`,
+      endpoint: 'POST /v1/transactions/:id/refund',
+      token: asPayee,
+      organizationId: payee,
+      status: 200,
+      sent: refund,
+      fingerprint: targeted(refundable, asSentBefore(refundTransactionSchema, refund)),
+      respelt: { reason: 'returned\nbefore dispatch' },
+    });
+
+    const cancellable = await post('/v1/transactions', asPayer, id('canon-before-cancel'), {
+      transactionType: 'LOGISTICS',
+      counterpartyOrganizationId: payee,
+      grossAmountMinor: '800',
+    }).expect(201);
+    const cancel = { reason: 'with\r\ndrawn' };
+    await storedBefore({
+      path: `/v1/transactions/${cancellable.body.id as string}/cancel`,
+      endpoint: 'POST /v1/transactions/:id/cancel',
+      token: asPayer,
+      status: 200,
+      sent: cancel,
+      fingerprint: targeted(
+        cancellable.body.id as string,
+        asSentBefore(cancelTransactionSchema, cancel),
+      ),
+      respelt: { reason: 'with\ndrawn' },
+    });
+
+    const disputable = await held();
+    await post(
+      `/v1/transactions/${disputable}/authorise-settlement`,
+      asPayer,
+      id('canon-before-auth'),
+    ).expect(200);
+    await post(`/v1/transactions/${disputable}/dispute`, asPayer, id('canon-before-dispute'), {
+      reason: LF,
+    }).expect(200);
+    const resolve = { resolution: 'Settled after\r\nthe call' };
+    await storedBefore({
+      path: `/v1/transactions/${disputable}/resolve-dispute`,
+      endpoint: 'POST /v1/transactions/:id/resolve-dispute',
+      token: asUnion,
+      status: 200,
+      sent: resolve,
+      fingerprint: targeted(disputable, asSentBefore(resolveDisputeSchema, resolve)),
+      respelt: { resolution: 'Settled after\nthe call' },
+    });
+
+    const topUp = await post(`/v1/wallets/${walletId}/top-up`, asPayer, id('canon-before-pay'), {
+      amountMinor: '650',
+    }).expect(201);
+    const intentId = topUp.body.paymentIntentId as string;
+    const paymentRefund = { reason: 'customer\r\nasked for it back' };
+    await storedBefore({
+      path: `/v1/payment-intents/${intentId}/refund`,
+      endpoint: 'POST /v1/payment-intents/:id/refund',
+      token: asUnion,
+      status: 200,
+      sent: paymentRefund,
+      fingerprint: targeted(intentId, asSentBefore(refundPaymentSchema, paymentRefund)),
+      respelt: { reason: 'customer\nasked for it back' },
+    });
+    const reversals = await runUnscoped('the suite counts the reversals', () =>
+      harness.prisma.client.journal.count({ where: { reversesId: topUp.body.journalId } }),
+    );
+    expect(reversals).toBe(1);
+  });
+
+  it('reconciliation requeue, propose, approve and reject: a pre-change key replays through the actor binding', async () => {
+    const base = (intentId: string) => `/v1/payment-intents/${intentId}/reconciliation`;
+    const endpoint = 'POST /v1/payment-intents/:id/reconciliation';
+
+    const requeueable = await escalated();
+    const requeue = { reason: 'The provider\r\nhas its records back' };
+    await storedBefore({
+      path: `${base(requeueable)}/requeue`,
+      endpoint: `${endpoint}/requeue`,
+      token: alice,
+      status: 200,
+      sent: requeue,
+      fingerprint: targeted(
+        requeueable,
+        boundBefore(alice, asSentBefore(operatorDecisionSchema, requeue)),
+      ),
+      respelt: { reason: 'The provider\nhas its records back' },
+    });
+
+    const approvable = await escalated();
+    const proposal = {
+      providerOutcome: 'DECLINED',
+      evidenceReference: 'TICKET-2026-0044',
+      reason: 'The statement\r\nshows it declined',
+    };
+    const proposed = await storedBefore({
+      path: `${base(approvable)}/resolutions`,
+      endpoint: `${endpoint}/resolutions`,
+      token: alice,
+      status: 200,
+      sent: proposal,
+      fingerprint: targeted(
+        approvable,
+        boundBefore(alice, asSentBefore(proposeResolutionSchema, proposal)),
+      ),
+      respelt: { ...proposal, reason: 'The statement\nshows it declined' },
+    });
+    const resolutionId = proposed.id as string;
+    const approve = { reason: 'Checked\r\nagainst the ticket' };
+    const approved = await storedBefore({
+      path: `${base(approvable)}/resolutions/${resolutionId}/approve`,
+      endpoint: `${endpoint}/resolutions/:resolutionId/approve`,
+      token: bob,
+      status: 200,
+      sent: approve,
+      fingerprint: targeted(
+        `${approvable}/${resolutionId}`,
+        boundBefore(bob, asSentBefore(operatorDecisionSchema, approve)),
+      ),
+      respelt: { reason: 'Checked\nagainst the ticket' },
+    });
+    expect(approved).toMatchObject({ status: 'APPROVED' });
+
+    const rejectable = await escalated();
+    const second = await post(`${base(rejectable)}/resolutions`, alice, id('canon-before-p2'), {
+      ...proposal,
+      reason: 'The statement shows it declined',
+    }).expect(200);
+    const secondId = second.body.id as string;
+    const reject = { reason: 'For another\r\npayment' };
+    const rejected = await storedBefore({
+      path: `${base(rejectable)}/resolutions/${secondId}/reject`,
+      endpoint: `${endpoint}/resolutions/:resolutionId/reject`,
+      token: bob,
+      status: 200,
+      sent: reject,
+      fingerprint: targeted(
+        `${rejectable}/${secondId}`,
+        boundBefore(bob, asSentBefore(operatorDecisionSchema, reject)),
+      ),
+      respelt: { reason: 'For another\npayment' },
+    });
+    expect(rejected).toMatchObject({ status: 'REJECTED' });
+  });
+
+  const currentVersion = async (path: string) => {
+    const listed = await request(http).get(path).set('authorization', asRuleAdmin).expect(200);
+    return (listed.body.items[0]?.version as number | undefined) ?? 0;
+  };
+
+  it('participation and recognition versions: a pre-change key replays', async () => {
+    const participation = {
+      expectedCurrentVersion: await currentVersion('/v1/rewards/participation-rules'),
+      windowDays: 30,
+      contributions: [{ triggerEvent: 'USAGE_RECORDED', weight: 2 }],
+      label: 'نمونه\r\nپیش از تغییر',
+    };
+    await storedBefore({
+      path: '/v1/rewards/participation-rules',
+      endpoint: 'POST /v1/rewards/participation-rules',
+      token: asRuleAdmin,
+      status: 201,
+      sent: participation,
+      fingerprint: asSentBefore(createParticipationRuleSchema, participation),
+      respelt: { ...participation, label: 'نمونه\nپیش از تغییر' },
+    });
+
+    const recognition = {
+      expectedCurrentVersion: await currentVersion('/v1/rewards/recognition-rules'),
+      basis: 'REWARD_POINTS_CUMULATIVE',
+      levels: [{ name: 'سطح\r\nپیش از تغییر', threshold: 0 }],
+      badges: [],
+    };
+    await storedBefore({
+      path: '/v1/rewards/recognition-rules',
+      endpoint: 'POST /v1/rewards/recognition-rules',
+      token: asRuleAdmin,
+      status: 201,
+      sent: recognition,
+      fingerprint: asSentBefore(createRecognitionRuleSchema, recognition),
+      respelt: { ...recognition, levels: [{ name: 'سطح\nپیش از تغییر', threshold: 0 }] },
+    });
+  });
+
+  // Ten UTF-16 units as sent — the minimum both this service and marketplace
+  // check — and nine once LF: the previous release, and marketplace still,
+  // accept it; its canonical form is refused.
+  const SHORT = '1234\r\n5678';
+
+  it('a dispute and its resolution the previous release accepted, canonical form refused: executed, and a pre-change key replays', async () => {
+    const transactionId = await held();
+    await post(
+      `/v1/transactions/${transactionId}/authorise-settlement`,
+      asPayer,
+      id('canon-short-auth'),
+    ).expect(200);
+    // As marketplace forwards a dispute it has committed: not a new 400.
+    const disputed = await storedBefore({
+      path: `/v1/transactions/${transactionId}/dispute`,
+      endpoint: 'POST /v1/transactions/:id/dispute',
+      token: asPayer,
+      status: 200,
+      sent: { reason: SHORT },
+      fingerprint: targeted(
+        transactionId,
+        asSentBefore(disputeTransactionSchema, { reason: SHORT }),
+      ),
+    });
+    // Kept as sent, as before; marketplace compares it line-ending-blind.
+    expect(disputed).toMatchObject({ status: 'DISPUTED', disputeReason: SHORT });
+    // Its LF spelling is the canonical form, still refused.
+    await post(`/v1/transactions/${transactionId}/dispute`, asPayer, id('canon-short-lf'), {
+      reason: '1234\n5678',
+    }).expect(400);
+
+    const resolved = await storedBefore({
+      path: `/v1/transactions/${transactionId}/resolve-dispute`,
+      endpoint: 'POST /v1/transactions/:id/resolve-dispute',
+      token: asUnion,
+      status: 200,
+      sent: { resolution: SHORT, disputeId: disputed.disputeId as string },
+      fingerprint: targeted(
+        transactionId,
+        asSentBefore(resolveDisputeSchema, {
+          resolution: SHORT,
+          disputeId: disputed.disputeId as string,
+        }),
+      ),
+    });
+    expect(resolved).toMatchObject({ status: 'PENDING_SETTLEMENT', disputeResolution: SHORT });
+  });
+
+  it('a recognition version whose level names differ only in line endings: executed as sent, and a pre-change key replays', async () => {
+    const recognition = {
+      expectedCurrentVersion: await currentVersion('/v1/rewards/recognition-rules'),
+      basis: 'REWARD_POINTS_CUMULATIVE',
+      levels: [
+        { name: 'first\r\nsecond', threshold: 0 },
+        { name: 'first\nsecond', threshold: 5 },
+      ],
+      badges: [],
+    };
+    const created = await storedBefore({
+      path: '/v1/rewards/recognition-rules',
+      endpoint: 'POST /v1/rewards/recognition-rules',
+      token: asRuleAdmin,
+      status: 201,
+      sent: recognition,
+      fingerprint: asSentBefore(createRecognitionRuleSchema, recognition),
+    });
+    expect(created).toMatchObject({ levels: recognition.levels });
   });
 });

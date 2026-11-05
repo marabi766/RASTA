@@ -8,7 +8,7 @@ import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
-import { asSentForm, rememberAsSent } from './canonical';
+import { asSentForm } from './canonical';
 
 export { CLAIM_WAIT_MS };
 
@@ -135,7 +135,8 @@ export class IdempotencyStore {
     const requestHash = fingerprint(body);
     // A key stored before its route put bodies in canonical form holds the
     // hash of the body as sent; the client's unchanged retry is that body
-    // (`canonicalBodyPipe`, rollout). Compared, never stored.
+    // (`canonicalBodyPipe`, rollout), wherever in `body` it is wrapped.
+    // Compared, never stored.
     const asSent = asSentForm(body);
     const accepted: [string, ...string[]] =
       asSent === undefined ? [requestHash] : [requestHash, fingerprint(asSent)];
@@ -204,7 +205,8 @@ export class IdempotencyStore {
     actorHash: string,
     deadline: number,
   ): Promise<Claim | typeof RETRY_CLAIM> {
-    // Written in the first form only: the canonical one.
+    // Written in the first form only: the one the request was validated and
+    // executed in — canonical, unless the schema refuses that (`canonicalBodyPipe`).
     const [requestHash] = accepted;
     const organizationId = getOrganizationId();
     const now = new Date();
@@ -707,12 +709,7 @@ function claimLost(endpoint: string): RastaError {
  * already hashed — so its stored keys still match after this change.
  */
 export function targeted(id: string, body?: unknown): { id: string; body?: unknown } {
-  if (body === undefined) return { id };
-  const wrapper = { id, body };
-  // The as-sent form of the body, wrapped the same way (`canonicalBodyPipe`).
-  const asSent = asSentForm(body);
-  if (asSent !== undefined) rememberAsSent(wrapper, { id, body: asSent });
-  return wrapper;
+  return body === undefined ? { id } : { id, body };
 }
 
 /**
