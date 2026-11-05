@@ -344,6 +344,14 @@ export {
   zodRouteInputs,
 } from './openapi/zod-route-inputs';
 export type { RouteDocument, ZodRouteInput } from './openapi/zod-route-inputs';
+export {
+  applyOperationSecurity,
+  documentationModuleFor,
+  routeAccessByOperation,
+  BEARER_SCHEME,
+  INTERNAL_TOKEN_SCHEME,
+} from './openapi/operation-security';
+export type { RouteAccess, ServiceRouteUsers } from './openapi/operation-security';
 // Conformance checks of a published document against the real error bodies; for tests.
 export {
   errorEnvelopeProblems,
