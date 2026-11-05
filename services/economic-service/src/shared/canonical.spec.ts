@@ -500,12 +500,18 @@ describe('every idempotent command’s body (task 129)', () => {
       );
     });
 
-    it('is absent where the previous release refused the body: no record of it can exist', () => {
-      // 1 200 UTF-16 units as sent, over the limit; 800 once LF.
-      const reason = 'abcd\r\n'.repeat(200);
-      const dto = pipeOf(disputeTransactionSchema)({ reason });
-      expect((dto.reason as string).length).toBeLessThanOrEqual(1000);
-      expect(asSentForm(dto)).toBeUndefined();
+    it('never exists where the previous release refused the body: it is refused (PR-747 r2, F3)', () => {
+      // 1 201 UTF-16 units as sent, over the limit; 801 once LF. Accepted
+      // here, it would be refused on a retry the previous release answers.
+      const reason = `${'a\r\n'.repeat(400)}x`;
+      expect(reason).toHaveLength(1201);
+      expect(canonicalBody({ reason }, canonicalFieldsOf(disputeTransactionSchema))).toEqual({
+        reason: expect.stringMatching(/^[^\r]{801}$/),
+      });
+      expect(refusalOf(() => pipeOf(disputeTransactionSchema)({ reason }))).toEqual(
+        refusalOf(() => previousRelease(disputeTransactionSchema, { reason })),
+      );
+      expect(refusalOf(() => pipeOf(disputeTransactionSchema)({ reason }))).toBeDefined();
     });
 
     it('is found inside any wrapper of plain objects and arrays, however deep (PR-747 r1, F1)', () => {
@@ -548,6 +554,8 @@ describe('every idempotent command’s body (task 129)', () => {
 
     it.each([
       ['a dispute', disputeTransactionSchema, { reason: short }],
+      // Trimmed by its schema: the answer is the parsed body, never the raw one.
+      ['a padded dispute', disputeTransactionSchema, { reason: `  ${short}  ` }],
       ['a dispute resolution', resolveDisputeSchema, { resolution: short }],
       [
         'a recognition version with two level names apart only by their line endings',
@@ -582,10 +590,21 @@ describe('every idempotent command’s body (task 129)', () => {
       );
     });
 
-    // The other direction is not kept, on purpose: a body over a limit as
-    // sent but within it once LF is accepted (checklist #17; above).
-    it('never refuses what the previous release accepted', () => {
-      const texts = ['', short, '123\r\n456', 'abcd\r\n'.repeat(200), 'abcd\r'.repeat(200), 'a\rb'];
+    // Both directions (Codex PR-747 r2, F3): a retry can reach either release
+    // during a rolling update or a rollback, so neither may refuse what the
+    // other accepts. Limits counted after LF wait for canonical-only (docs/06).
+    it('refuses exactly what the previous release refused, with its refusal', () => {
+      const texts = [
+        '',
+        short,
+        '123\r\n456',
+        'abcd\r\n'.repeat(200),
+        `${'a\r\n'.repeat(400)}x`,
+        'abcd\r'.repeat(200),
+        'abcd\r'.repeat(201),
+        'a\rb',
+        'within\r\nevery limit',
+      ];
       const corpus: Array<[z.ZodType, unknown]> = [
         ...texts.map((reason) => [disputeTransactionSchema, { reason }] as [z.ZodType, unknown]),
         ...texts.map(
@@ -606,13 +625,16 @@ describe('every idempotent command’s body (task 129)', () => {
           (amountMinor) => [topUp, { amountMinor }] as [z.ZodType, unknown],
         ),
       ];
+      let refused = 0;
       for (const [schema, body] of corpus) {
-        if (refusalOf(() => previousRelease(schema, body)) !== undefined) continue;
-        expect({ body, now: refusalOf(() => pipeOf(schema)(body)) }).toEqual({
-          body,
-          now: undefined,
-        });
+        const before = refusalOf(() => previousRelease(schema, body));
+        if (before !== undefined) refused += 1;
+        expect({ body, now: refusalOf(() => pipeOf(schema)(body)) }).toEqual({ body, now: before });
       }
+      // The corpus holds both: bodies refused as sent (over and under a limit,
+      // in CRLF and CR) and bodies accepted.
+      expect(refused).toBeGreaterThanOrEqual(corpus.length / 3);
+      expect(refused).toBeLessThan(corpus.length);
     });
   });
 

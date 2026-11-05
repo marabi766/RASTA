@@ -31,8 +31,10 @@ import { validateRequestInput } from '@rasta/nest-common';
  * An instant, and a declared form through {@link canonicalWithin}, is
  * rewritten only when it already passes the field's own pattern and its
  * canonical form does too; anything else is left exactly as sent for
- * validation to answer. A whole body whose canonical form its schema refuses
- * is answered as the previous release answered it ({@link canonicalBodyPipe}).
+ * validation to answer. An idempotent command's body is validated as sent
+ * first, with the previous release's limits, and one whose canonical form its
+ * schema refuses is answered as that release answered it
+ * ({@link canonicalBodyPipe}, rollout).
  * Absent, `null` and zero stay distinct: an absent key is not added, `null`
  * is not a string, `"0"` is already canonical.
  *
@@ -289,41 +291,39 @@ const AS_SENT = new WeakMap<object, unknown>();
  * validated by `schema` — one pipe, so the two can never be listed apart or
  * in the wrong order (`@Body(canonicalBodyPipe(schema))`).
  *
- * **Rollout.** A key stored before canonicalization holds the hash of the body
- * as it was sent. When canonicalization changed something, the body exactly
- * as the previous release would have validated it is kept beside the result
- * ({@link asSentForm}), and the idempotency store accepts that form's hash
- * too: the client's unchanged retry of a pre-change key replays its answer
- * instead of a 409 that could send it to a new key and a second payment.
- * Safe for any record, old or new: the as-sent body matches a stored hash only
- * when it is the very request that was stored, or — already canonical — equal
- * to the canonical body anyway.
+ * **Rollout, both directions** (Codex PR-747 r1 F2, r2 F3). During a rolling
+ * update or an automatic rollback (docs/12 § rollout) a retry can reach either
+ * release, so nothing here may answer differently from the previous release
+ * where that release could also be asked:
  *
- * **A body whose canonical form the schema refuses** (Codex PR-747 r1, F2) —
- * a reason of ten characters with a CRLF, nine after it; two level names that
- * differ only in their line endings, one after it — is the body the previous
- * release accepted, so it is answered exactly as that release answered it:
- * validated, hashed and executed as sent. Its unchanged retry then replays a
- * pre-change key, and a command another service committed before this change
- * (marketplace's dispute and its resolution) still goes through, never a new
- * permanent 400. No other spelling of it can be canonical either — they share
- * its canonical form — so nothing that could replay a canonical record is
- * answered this way. Only a body refused as sent too is refused, with the
- * refusal the previous release gave.
+ *  - **Validation is the previous release's, on the body as sent**, first: a
+ *    body it refused is refused with its refusal, and nothing is accepted it
+ *    would refuse — a 1 201-unit CRLF reason, 801 once LF, is still over the
+ *    1 000 limit. Limits counted after LF are a later step (docs/06 § 6.8,
+ *    "canonical-only").
+ *  - Only then is the canonical form taken. When it changed something, the body
+ *    exactly as that release validated it is kept beside the result
+ *    ({@link asSentForm}): the idempotency store **writes that form's hash** —
+ *    the one the previous release computes and compares — and records the
+ *    canonical hash beside it, so a retry of the same bytes replays on either
+ *    release, and another spelling replays here.
+ *  - A body whose canonical form the schema refuses — a ten-unit CRLF reason,
+ *    nine after it; two level names apart only by their line endings — is
+ *    executed and hashed as sent, as that release did: never a new permanent
+ *    400 for a command another service committed before (marketplace's dispute
+ *    and its resolution). No other spelling of it can be canonical either.
  */
 export function canonicalBodyPipe(schema: z.ZodType): PipeTransform {
   const fields = canonicalFieldsOf(objectOf(schema));
   const pipe: PipeTransform = {
     transform: (value: unknown, _metadata: ArgumentMetadata): unknown => {
+      const asSent: unknown = validateRequestInput(schema, value);
       const canonical = canonicalBody(value, fields);
-      if (canonical === value) return validateRequestInput(schema, value);
+      if (canonical === value) return asSent;
       const parsed = legacyParse(schema, canonical);
-      if (!parsed.success) return validateRequestInput(schema, value);
+      if (!parsed.success) return asSent;
       const dto: unknown = parsed.data;
-      if (dto !== null && typeof dto === 'object') {
-        const asSent = legacyParse(schema, value);
-        if (asSent.success) AS_SENT.set(dto, asSent.data);
-      }
+      if (dto !== null && typeof dto === 'object') AS_SENT.set(dto, asSent);
       return dto;
     },
   };

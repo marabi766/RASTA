@@ -28,17 +28,19 @@ import { cleanup, id, ITEST_ACTOR, ownerDatabaseUrl } from './helpers';
  * replays a retry that says the same thing differently (pre-review checklist
  * #16; Codex PR-480 r1, R2, task 129).
  *
- * The body is put in canonical form before it is validated, hashed and
- * executed (`canonicalBodyPipe`, `shared/canonical.ts`): an amount without
+ * The body is validated as sent, then put in canonical form before it is
+ * hashed and executed (`canonicalBodyPipe`, `shared/canonical.ts`): an amount without
  * leading zeros, an instant as `toISOString`, human text with LF line
  * endings. Before, each variant below was answered `409
  * IDEMPOTENCY_KEY_REUSED` — never a second effect, but a legitimate retry
  * refused, and for a top-up a client told "another request" may well send a
  * new key and pay twice. A really different body is still 409.
  *
- * And the rollout: a key stored before this change holds the hash of the
- * body as it was sent. A retry of that same body still replays it (the
- * store also compares the as-sent form), and nothing is ever run twice.
+ * And the rollout, both ways: a key stored before this change holds the hash
+ * of the body as it was sent, and a key stored by this change still holds that
+ * hash — the canonical one beside it — so a retry of that same body replays on
+ * either release, and nothing is ever run twice. Nothing is accepted that the
+ * previous release refuses.
  */
 describe('idempotent commands, canonical before they are hashed (real HTTP)', () => {
   let harness: ApiHarness;
@@ -169,24 +171,50 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
     organizationId_endpoint_key: { organizationId, endpoint, key },
   });
 
-  const storedHash = async (organizationId: string, endpoint: string, key: string) =>
-    (
-      await runUnscoped('the suite reads its key record', () =>
-        harness.prisma.client.idempotencyKey.findUniqueOrThrow({
-          where: keyRecord(organizationId, endpoint, key),
-          select: { requestHash: true },
-        }),
-      )
-    ).requestHash;
+  const storedHashes = (organizationId: string, endpoint: string, key: string) =>
+    runUnscoped('the suite reads its key record', () =>
+      harness.prisma.client.idempotencyKey.findUniqueOrThrow({
+        where: keyRecord(organizationId, endpoint, key),
+        select: { requestHash: true, canonicalHash: true },
+      }),
+    );
 
-  /** What the release before this change stored: the hash of the body as sent. */
+  /**
+   * What the release before this change stored: the hash of the body as sent,
+   * and no canonical hash — it has no such column.
+   */
   const storeAsBefore = (organizationId: string, endpoint: string, key: string, body: unknown) =>
     runUnscoped('the suite writes a key record as the previous release did', () =>
       harness.prisma.client.idempotencyKey.update({
         where: keyRecord(organizationId, endpoint, key),
-        data: { requestHash: hashRequestBody(body) },
+        data: { requestHash: hashRequestBody(body), canonicalHash: null },
       }),
     );
+
+  /**
+   * What the release before this change answers the same retry with, from the
+   * record this release wrote (Codex PR-747 r2, F3): its claim, line for line —
+   * the stored `request_hash` against the hash of `fingerprint`, the body as it
+   * validated and wrapped it; the actor binding is the same code in both.
+   * A rolling update or a rollback can send the retry there.
+   */
+  const previousReleaseAnswers = async (
+    organizationId: string,
+    endpoint: string,
+    key: string,
+    fingerprint: unknown,
+  ) => {
+    const existing = await runUnscoped('the suite reads its key record', () =>
+      harness.prisma.client.idempotencyKey.findUniqueOrThrow({
+        where: keyRecord(organizationId, endpoint, key),
+      }),
+    );
+    if (existing.requestHash !== hashRequestBody(fingerprint)) {
+      return { endpoint, answer: '409 IDEMPOTENCY_KEY_REUSED' };
+    }
+    if (existing.state === 'IN_PROGRESS') return { endpoint, answer: '409 CONFLICT' };
+    return { endpoint, answer: `REPLAY ${existing.responseStatus ?? 200}` };
+  };
 
   /** A held, authorised LOGISTICS obligation of the payer's to the payee. */
   async function held(amountMinor = '900'): Promise<string> {
@@ -232,11 +260,13 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
       [{ amountMinor: '1001' }, { amountMinor: '1000', instrument: 'ok' }],
     );
     expect(await intentsUnder(key)).toBe(1);
-    // Stored in the one form, so a release without the as-sent comparison —
-    // a rollback — still replays every canonical retry.
-    expect(await storedHash(payer, 'POST /v1/wallets/:id/top-up', key)).toBe(
-      hashRequestBody(targeted(walletId, { amountMinor: '1000' })),
-    );
+    // Stored as the previous release hashes the first request — the bytes a
+    // client retries, whichever release the retry reaches (Codex PR-747 r2,
+    // F3) — and in canonical form beside it, for every other spelling here.
+    expect(await storedHashes(payer, 'POST /v1/wallets/:id/top-up', key)).toEqual({
+      requestHash: hashRequestBody(targeted(walletId, { amountMinor: '01000' })),
+      canonicalHash: hashRequestBody(targeted(walletId, { amountMinor: '1000' })),
+    });
   });
 
   it('transaction create: amount and instant spellings replay; omitted, another value is 409', async () => {
@@ -461,6 +491,14 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
     const path = `/v1/wallets/${walletId}/top-up`;
     const endpoint = 'POST /v1/wallets/:id/top-up';
     const first = await post(path, asPayer, key, { amountMinor: '02000' }).expect(201);
+    expect(
+      await previousReleaseAnswers(
+        payer,
+        endpoint,
+        key,
+        targeted(walletId, { amountMinor: '02000' }),
+      ),
+    ).toEqual({ endpoint, answer: 'REPLAY 201' });
     await storeAsBefore(payer, endpoint, key, targeted(walletId, { amountMinor: '02000' }));
 
     // The retry the client was always going to send: the same bytes.
@@ -484,12 +522,11 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
     const key = id('canon-rollout-dispute');
     const path = `/v1/transactions/${transactionId}/dispute`;
     const first = await post(path, asPayer, key, { reason: CRLF }).expect(200);
-    await storeAsBefore(
-      payer,
-      'POST /v1/transactions/:id/dispute',
-      key,
-      targeted(transactionId, { reason: CRLF }),
-    );
+    const endpoint = 'POST /v1/transactions/:id/dispute';
+    expect(
+      await previousReleaseAnswers(payer, endpoint, key, targeted(transactionId, { reason: CRLF })),
+    ).toEqual({ endpoint, answer: 'REPLAY 200' });
+    await storeAsBefore(payer, endpoint, key, targeted(transactionId, { reason: CRLF }));
 
     const replayed = await post(path, asPayer, key, { reason: CRLF }).expect(200);
     expect(replayed.body).toEqual(first.body);
@@ -523,11 +560,15 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
   };
 
   /**
-   * `sent` under a fresh key; its record then rewritten as the previous
-   * release stored it (`fingerprint`, the hash of `sent` as sent); the same
-   * bytes again answer the first answer, nothing run twice — and, where given,
-   * `respelt` is still 409, a record stored as sent proving nothing about
-   * another spelling.
+   * `sent` under a fresh key, and both directions of a rollout:
+   *
+   *  - new → old (Codex PR-747 r2, F3): the previous release, given the same
+   *    bytes, replays the record this release wrote (`fingerprint`, `sent` as
+   *    that release validated and wrapped it);
+   *  - old → new: the record rewritten as the previous release stored it, the
+   *    same bytes again answer the first answer, nothing run twice — and, where
+   *    given, `respelt` is still 409, a record stored as sent proving nothing
+   *    about another spelling.
    */
   async function storedBefore(options: {
     path: string;
@@ -543,6 +584,9 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
     const organizationId = options.organizationId ?? payer;
     const key = id('canon-before');
     const first = await post(path, token, key, sent).expect(status);
+    expect(
+      await previousReleaseAnswers(organizationId, endpoint, key, options.fingerprint),
+    ).toEqual({ endpoint, answer: `REPLAY ${status}` });
     await storeAsBefore(organizationId, endpoint, key, options.fingerprint);
     const replayed = await post(path, token, key, sent);
     expect({ endpoint, status: replayed.status }).toEqual({ endpoint, status });
@@ -828,5 +872,42 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
       fingerprint: asSentBefore(createRecognitionRuleSchema, recognition),
     });
     expect(created).toMatchObject({ levels: recognition.levels });
+  });
+  // ---- Validation, both directions (Codex PR-747 r2, F3) ------------------------
+
+  it('a text over its limit as sent, within it once LF, is refused as the previous release refuses it', async () => {
+    const transactionId = await held();
+    await post(
+      `/v1/transactions/${transactionId}/authorise-settlement`,
+      asPayer,
+      id('canon-long-auth'),
+    ).expect(200);
+    // 1 201 UTF-16 units as sent, over the 1 000 limit; 801 once LF. Accepted
+    // here, its retry would be a 400 on the previous release — and on this one
+    // after a rollback.
+    const reason = `${'a\r\n'.repeat(400)}x`;
+    expect(reason.replace(/\r\n/g, '\n')).toHaveLength(801);
+    let before: unknown;
+    try {
+      asSentBefore(disputeTransactionSchema, { reason });
+    } catch (error) {
+      before = error;
+    }
+    expect(before).toMatchObject({ code: 'VALIDATION_FAILED' });
+    const refused = await post(
+      `/v1/transactions/${transactionId}/dispute`,
+      asPayer,
+      id('canon-long'),
+      { reason },
+    ).expect(400);
+    expect(refused.body).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      details: (before as { details: unknown }).details,
+    });
+    const detail = await request(http)
+      .get(`/v1/transactions/${transactionId}`)
+      .set('authorization', asPayer)
+      .expect(200);
+    expect(detail.body.status).not.toBe('DISPUTED');
   });
 });

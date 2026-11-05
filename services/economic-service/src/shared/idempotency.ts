@@ -13,6 +13,15 @@ import { asSentForm } from './canonical';
 export { CLAIM_WAIT_MS };
 
 /**
+ * What a claim writes and compares (`IdempotencyStore.claim`): `requestHash`,
+ * the hash the previous release computes; `canonicalHash`, this release's.
+ */
+interface Fingerprints {
+  readonly requestHash: string;
+  readonly canonicalHash: string;
+}
+
+/**
  * Idempotent financial writes (docs/06 § 6.8).
  *
  * The platform has declared this mechanism since the API architecture was
@@ -132,18 +141,24 @@ export class IdempotencyStore {
   ): Promise<Claim> {
     const fingerprint = (value: unknown) =>
       fingerprintVersion ? `${fingerprintVersion}:${this.hash(value)}` : this.hash(value);
-    const requestHash = fingerprint(body);
-    // A key stored before its route put bodies in canonical form holds the
-    // hash of the body as sent; the client's unchanged retry is that body
-    // (`canonicalBodyPipe`, rollout), wherever in `body` it is wrapped.
-    // Compared, never stored.
+    // The request as it was validated and executed: canonical, unless its
+    // schema refuses that (`canonicalBodyPipe`).
+    const canonicalHash = fingerprint(body);
+    // The request as the previous release hashes it — the body as sent,
+    // wherever in `body` it is wrapped — when canonicalization changed it.
+    // **Written** as `requestHash`, the one column that release compares, so
+    // the unchanged retry replays on whichever release it reaches during a
+    // rolling update or a rollback (Codex PR-747 r2, F3); and compared, so a
+    // key that release stored replays here (r1).
     const asSent = asSentForm(body);
-    const accepted: [string, ...string[]] =
-      asSent === undefined ? [requestHash] : [requestHash, fingerprint(asSent)];
+    const fingerprints: Fingerprints = {
+      requestHash: asSent === undefined ? canonicalHash : fingerprint(asSent),
+      canonicalHash,
+    };
     const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
-      const outcome = await this.claimOnce(endpoint, key, accepted, actorHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, fingerprints, actorHash, deadline);
       if (outcome !== RETRY_CLAIM) return outcome;
     }
     // Every attempt found the key vanishing under it: other requests are
@@ -201,13 +216,10 @@ export class IdempotencyStore {
   private async claimOnce(
     endpoint: string,
     key: string,
-    accepted: readonly [string, ...string[]],
+    { requestHash, canonicalHash }: Fingerprints,
     actorHash: string,
     deadline: number,
   ): Promise<Claim | typeof RETRY_CLAIM> {
-    // Written in the first form only: the one the request was validated and
-    // executed in — canonical, unless the schema refuses that (`canonicalBodyPipe`).
-    const [requestHash] = accepted;
     const organizationId = getOrganizationId();
     const now = new Date();
     const expiresAt = new Date(
@@ -224,6 +236,7 @@ export class IdempotencyStore {
             organizationId,
             endpoint,
             requestHash,
+            canonicalHash,
             actorHash,
             claimToken,
             state: 'IN_PROGRESS',
@@ -259,10 +272,16 @@ export class IdempotencyStore {
     // refused alike and with nothing of the record (review of #287, finding
     // 1). A record from before actors were bound has none; it is answered only
     // through the replay guard, and only until it expires.
-    if (
-      !accepted.includes(existing.requestHash) ||
-      (existing.actorHash !== null && existing.actorHash !== actorHash)
-    ) {
+    //
+    // The same body: the hash the previous release stored or compares, or —
+    // in either column — this one's canonical hash. A record the previous
+    // release wrote has no canonical hash; another spelling of it is refused,
+    // as that release refuses it.
+    const sameBody =
+      existing.requestHash === requestHash ||
+      existing.requestHash === canonicalHash ||
+      existing.canonicalHash === canonicalHash;
+    if (!sameBody || (existing.actorHash !== null && existing.actorHash !== actorHash)) {
       throw RastaError.idempotencyKeyReused();
     }
 
