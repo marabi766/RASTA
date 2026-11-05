@@ -6,7 +6,7 @@ import { OrderReturnsController, ReturnController } from '../returns/return.cont
 import { ReturnService } from '../returns/return.service';
 import { ReturnDispatchSourceService } from '../returns/dispatch-source';
 import { InternalReturnController } from '../returns/internal-return.controller';
-import { INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME, enrichOpenApiDocument } from './document';
+import { INTERNAL_TOKEN_SCHEME, enrichOpenApiDocument, publishOperationSecurity } from './document';
 
 /**
  * The return-request routes as the running service publishes them (Codex r1 on #310, finding 2).
@@ -29,18 +29,21 @@ async function servedDocument(): Promise<OpenAPIObject> {
   const app = moduleRef.createNestApplication();
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
   await app.init();
-  // The builder as `main.ts` calls it: the bearer scheme and the internal token's.
+  // The builder and the enrichment as `main.ts` calls them.
   const document = SwaggerModule.createDocument(
     app,
     new DocumentBuilder()
       .setTitle('Rasta — Marketplace Service')
       .setVersion('test')
       .addBearerAuth()
-      .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
       .build(),
   );
+  const published = publishOperationSecurity(
+    enrichOpenApiDocument(document, { idempotencyTtlHours: 24 }),
+    app,
+  );
   await app.close();
-  return enrichOpenApiDocument(document, { idempotencyTtlHours: 24 });
+  return published;
 }
 
 interface Operation {
@@ -148,7 +151,7 @@ describe('the served return-request routes', () => {
     expect(keyOf(reconcile)).toMatchObject({ in: 'header', required: true });
     expect(successOf(reconcile)).toEqual(['200']);
     expect(errorsOf(reconcile)).toEqual(['401', '403', '404', '409', '422', '500', '503', '504']);
-    expect(reconcile.security).toBeUndefined();
+    expect(reconcile.security).toEqual([{ bearer: [] }]);
   });
 
   it('publishes the list filters and pagination as query parameters, and no key on a read', () => {
@@ -190,7 +193,7 @@ describe('the served return-request routes', () => {
     expect(reserve.requestBody).toBeUndefined();
     expect(successOf(reserve)).toEqual(['200']);
     expect(errorsOf(reserve)).toEqual(['401', '403', '404', '409', '422', '500']);
-    // The public routes are not described by the internal scheme.
-    expect(operation('/v1/returns/{id}', 'get').security).toBeUndefined();
+    // The user routes are described by the bearer scheme alone (FU-075: before, by none).
+    expect(operation('/v1/returns/{id}', 'get').security).toEqual([{ bearer: [] }]);
   });
 });

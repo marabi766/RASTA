@@ -184,7 +184,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -749,7 +751,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -1461,7 +1465,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -1799,7 +1805,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -1869,7 +1877,8 @@
                   "quotationClosingAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "The quotation deadline (UTC, ISO 8601 with Z; kept to the millisecond). Must be after the database clock at the issue; no minimum or maximum is invented (Q-121 (2)). Quotations are taken before it; the RFQ is closed at or after it."
+                    "pattern": "Z$",
+                    "description": "The quotation deadline (UTC, ISO 8601 with Z; kept to the millisecond). Must be after the database clock at the issue; no minimum or maximum is invented (Q-121 (2)). Quotations are taken before it; the RFQ is closed at or after it. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   },
                   "criteria": {
                     "type": "array",
@@ -2693,7 +2702,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -2999,7 +3010,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -3253,7 +3266,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -3561,7 +3576,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -3930,7 +3947,9 @@
           },
           "timestamp": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "pattern": "Z$",
+            "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
           },
           "path": {
             "type": "string"

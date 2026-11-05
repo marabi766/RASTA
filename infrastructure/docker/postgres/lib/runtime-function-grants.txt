@@ -6,3 +6,5 @@ economic|public.commission_rule_scope_change(text,public."BusinessLine",public."
 economic|public.commission_pricing_scope_lock(text,public."BusinessLine",public."TransactionType")|20261016120000_commission_business_lines
 economic|public.transaction_holds(text,text)|20261105120000_settlement_creation_proof
 procurement|public.demand_aggregation_digest_range(text,text,text,text,integer)|20261017120000_aggregation_window_sweep
+contract|public.deduction_rule_name_is_canonical(text)|20261104100000_deduction_rule_changes
+contract|public.deduction_rule_name_key(text)|20261104100000_deduction_rule_changes
