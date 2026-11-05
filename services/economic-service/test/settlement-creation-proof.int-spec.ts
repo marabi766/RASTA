@@ -1117,23 +1117,27 @@ describe('the proof of a settlement at its creation (real database, runtime role
 
     describe('a new hold names what is its own', () => {
       it.each([
-        ['another organization’s, for this transaction', () => ({ of: stranger }), HOLD_TRANSACTION],
+        [
+          'another organization’s, for this transaction',
+          () => ({ of: stranger }),
+          HOLD_TRANSACTION,
+        ],
         [
           'another organization’s, for anything else',
           () => ({ of: stranger, reference_type: 'OTHER' }),
           HOLD_PURPOSE,
         ],
-        [
-          'its own, for anything else',
-          () => ({ reference_type: 'OTHER' }),
-          HOLD_PURPOSE,
-        ],
+        ['its own, for anything else', () => ({ reference_type: 'OTHER' }), HOLD_PURPOSE],
         [
           'claiming the payer, on another organization’s wallet',
           () => ({ of: stranger, organization_id: payer }),
           HOLD_WALLET,
         ],
-        ['for a transaction that is not there', () => ({ reference: 'TXN_NONE' }), HOLD_TRANSACTION],
+        [
+          'for a transaction that is not there',
+          () => ({ reference: 'TXN_NONE' }),
+          HOLD_TRANSACTION,
+        ],
       ])('%s is refused', async (_label, overrides, because) => {
         const transactionId = await pending();
         await expect(written(transactionId, overrides())).rejects.toThrow(because);
@@ -1257,7 +1261,12 @@ describe('the proof of a settlement at its creation (real database, runtime role
             {
               journal: { id: journalId },
               legs: (from) => [
-                { accountId: from.payerEscrow, organizationId: payer, direction: 'DEBIT', amount: GROSS },
+                {
+                  accountId: from.payerEscrow,
+                  organizationId: payer,
+                  direction: 'DEBIT',
+                  amount: GROSS,
+                },
                 ...walletLegs(from).slice(1),
               ],
             },
@@ -1297,24 +1306,21 @@ describe('the proof of a settlement at its creation (real database, runtime role
         },
       );
 
-      it.each(UNBOUND)(
-        '%s, does not send a resolved dispute back to HELD',
-        async (_label, row) => {
-          const transactionId = await pending({ authorised: false });
-          await planted(transactionId, row());
-          await runtime.$executeRawUnsafe(
-            `UPDATE "transaction" SET status = 'DISPUTED', disputed_at = now(), dispute_reason = 'itest'
+      it.each(UNBOUND)('%s, does not send a resolved dispute back to HELD', async (_label, row) => {
+        const transactionId = await pending({ authorised: false });
+        await planted(transactionId, row());
+        await runtime.$executeRawUnsafe(
+          `UPDATE "transaction" SET status = 'DISPUTED', disputed_at = now(), dispute_reason = 'itest'
               WHERE id = $1`,
-            transactionId,
-          );
-          await runtime.$executeRawUnsafe(
-            `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT', dispute_resolved_at = now()
+          transactionId,
+        );
+        await runtime.$executeRawUnsafe(
+          `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT', dispute_resolved_at = now()
               WHERE id = $1`,
-            transactionId,
-          );
-          expect(await rowsOf(transactionId)).toMatchObject({ status: 'PENDING_SETTLEMENT' });
-        },
-      );
+          transactionId,
+        );
+        expect(await rowsOf(transactionId)).toMatchObject({ status: 'PENDING_SETTLEMENT' });
+      });
     });
 
     it('the payer’s own hold still counts everywhere: the control', async () => {
