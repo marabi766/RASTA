@@ -49,6 +49,8 @@ export const alive = (target: number): boolean => {
  * Fails, naming the pid (negative: the group), when the target outlives `ms`.
  */
 export async function waitGone(target: number, what: string, ms = 15_000): Promise<void> {
+  // 0 is the caller's own group and NaN is no process: either would wait out `ms` for nothing.
+  if (!Number.isSafeInteger(target) || target === 0) throw new Error(`${what}: not a pid or group (${target})`);
   const deadline = Date.now() + ms;
   while (alive(target) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   if (alive(target)) {
@@ -508,7 +510,10 @@ export function plantFakeNext(root: string): { nextFrom: string; fault: string }
 const [ms, loadsAfterMs, ignoreTerm, startupMs] = process.argv.slice(2).map(Number);
 if (startupMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupMs);
 if (ignoreTerm) process.on('SIGTERM', () => {});
-fs.writeFileSync('linger.pid', String(process.pid));
+// Atomic: a reader that sees linger.pid sees the whole pid (FU-095: an empty file read as pid 0,
+// and kill(0, 0) probes the test's own group, so it never "ended").
+fs.writeFileSync('linger.pid.tmp', String(process.pid));
+fs.renameSync('linger.pid.tmp', 'linger.pid');
 const timer = setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-linger', String(Date.now())); }, 50);
 if (loadsAfterMs > 0) setTimeout(() => require('../server/config.js').default('phase-production-build', process.cwd()).catch(() => {}), loadsAfterMs);
 setTimeout(() => { clearInterval(timer); fs.writeFileSync('linger.done', ''); }, ms);
