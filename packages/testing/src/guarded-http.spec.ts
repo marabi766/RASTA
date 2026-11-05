@@ -95,3 +95,17 @@ describe('request class redirect guard', () => {
     expect(bad.dispose).toHaveBeenCalledTimes(1);
   });
 });
+
+// PR #492 N1: these syntax escapes still reach the guarded class.
+it.each([301, 302, 303, 307, 308])('N1 indirect contexts refuse %i', async (status) => {
+  const { make, send } = fixture(status);
+  const page = { request: make() };
+  guardEveryRequestContext(page.request);
+  const parameter = ({ request }: typeof page): typeof request => request;
+  let assigned: GuardableRequestContext = make();
+  ({ request: assigned } = page);
+  for (const request of [parameter(page), assigned, Reflect.get(page, 'request')]) {
+    await expect(request.post('url' as never)).rejects.toBeInstanceOf(RedirectRefusedError);
+    expect(send).toHaveBeenLastCalledWith('url', { maxRedirects: 0 });
+  }
+});

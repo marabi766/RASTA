@@ -197,65 +197,15 @@ const ALLOWED = Object.freeze([
     reason: 'loads pinned KafkaJS transport and codec internals for the disposable-broker harness',
   },
   {
-    file: 'scripts/check-kafka-topic-limits.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason: 'loads only the built repository contracts package for topic limits',
-  },
-  {
-    file: 'scripts/check-test-phases.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason: 'loads only repository Jest configuration to verify test phase registration',
-    line: 53,
-  },
-  {
-    file: 'scripts/check-test-phases.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason: 'loads only repository Jest configuration to verify test phase registration',
-    line: 78,
-  },
-  {
     file: 'scripts/disclosure-jest-launches.mjs',
     call: 'createRequire(import.meta.url)',
     reason:
       'loads only the pinned typescript and yaml packages by literal name to inspect Jest launchers',
   },
   {
-    file: 'scripts/kafka-acl-generate.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason: 'loads only the built repository contracts package to generate broker ACL documents',
-  },
-  {
-    file: 'scripts/outbox-b2-backfill.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason: 'loads only the built config package to enforce the owner-credential startup gate',
-  },
-  {
-    file: 'scripts/outbox-b2-prisma-port.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason:
-      'loads the repository runtime-role gate or the selected service generated Prisma client',
-  },
-  {
-    file: 'scripts/outbox-b2-prisma-port.mjs',
-    call: "createRequire(join(serviceDir, 'package.json'))",
-    reason:
-      'loads the repository runtime-role gate or the selected service generated Prisma client',
-  },
-  {
-    file: 'scripts/replay-dlq.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason: 'loads only the built repository contracts package to validate replay envelopes',
-  },
-  {
     file: 'scripts/run-test-phases.mjs',
     call: "createRequire(join(root, 'package.json'))",
     reason: 'resolves only turbo/package.json to select the installed test runner',
-  },
-  {
-    file: 'scripts/runtime-preflight.e2e.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason:
-      'loads repository config/nest-common and its KafkaJS dependency for the runtime preflight harness',
   },
   {
     file: 'scripts/testing-dev-only-source.mjs',
@@ -298,11 +248,6 @@ const ALLOWED = Object.freeze([
     reason: 'resolves Jest and reads its manifest to run the test independence harness',
   },
   {
-    file: 'scripts/verify-test-independence.mjs',
-    call: 'createRequire(import.meta.url)',
-    reason: 'resolves Jest and reads its manifest to run the test independence harness',
-  },
-  {
     file: 'scripts/prepush-scope-lib.mjs',
     call: "createRequire(join(cwd, 'package.json'))",
     reason: 'resolves only turbo/package.json to locate the installed native Turbo binary',
@@ -311,6 +256,24 @@ const ALLOWED = Object.freeze([
     file: 'scripts/prepush-scope-lib.mjs',
     call: "createRequire(realpathSync(rootRequire.resolve('turbo/package.json')))",
     reason: 'resolves only the installed native Turbo binary package; no module is loaded',
+  },
+  {
+    file: 'packages/testing/src/redirect-probe.ts',
+    call: 'new URL(request.url)',
+    reason:
+      'Request has already validated this URL; only the active probe servers and their own loopback origins are allowed, and the sender forwards that same normalized Request',
+  },
+  {
+    file: 'scripts/raw-http-boundary-rule.mjs',
+    call: 'new URL(source)',
+    reason:
+      'private lint classifier reads literal source module specifiers, never runtime configuration; native URL errors are discarded and executable URL schemes are refused',
+  },
+  {
+    file: 'scripts/workspace-module.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason:
+      'factory stays private; resolve and load accept only canonical local workspace builds/configs or generated Prisma clients, with outside/dependency paths refused',
   },
 ]);
 

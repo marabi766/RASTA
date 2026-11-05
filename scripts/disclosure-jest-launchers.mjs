@@ -17,7 +17,7 @@ export const JEST_LAUNCHERS = {
       'Package-local Jest binary; --selectProjects defaults to integration; whole-file and per-name runs differ only in test selection.',
     sha256: {
       'scripts/verify-test-independence.mjs':
-        '0f9ca1aa3fee4606560fcbd8fe32ce9debe08a74e0010b85426bd9eb846db7ad',
+        '73cdc9c671360b4d144a1fa8c1f29986db1647fd8faa1d13be519e8704ccb28d',
     },
   },
   'scripts/aggregation-evidence.mjs': {
@@ -182,7 +182,7 @@ export const JEST_LAUNCHERS = {
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
-        '579f4d5a3b4539ca9304b5742fb23b7c826c1f83c085509c0911976775873ab3',
+        'b979685cd3f2c003c53fbe9de8f4c739e72244b36087fd96b24ec1954ce14675',
     },
   },
   'scripts/lint-scripts-registration.test.mjs': {

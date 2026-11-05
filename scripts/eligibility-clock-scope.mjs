@@ -305,9 +305,16 @@ const REVIEWED_COMPUTED_IMPORTS = [
     loads: 'the generated Prisma client of a service (external, generated code)',
   },
   {
-    file: 'scripts/outbox-b2-prisma-port.mjs',
-    argument: 'generated',
-    loads: "join(serviceDir, 'src', 'generated', 'prisma'): the generated Prisma client (external)",
+    file: 'scripts/workspace-module.mjs',
+    argument: 'path',
+    loads:
+      'require.resolve only (does not execute): local workspace build/config or generated-client paths; the resolved path is canonicalized and checked before loading',
+  },
+  {
+    file: 'scripts/workspace-module.mjs',
+    argument: 'resolved',
+    loads:
+      'canonical workspace builds (production roots), Jest configs (test entry points), or generated Prisma clients (external); the loader refuses outside/dependency paths before require',
   },
   {
     file: 'scripts/aggregation-campaign-preflight.test.mjs',
