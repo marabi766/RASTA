@@ -325,6 +325,42 @@ test('a name that is not UTF-8 is refused, never mangled', () => {
   }
 });
 
+test('file names survive byte for byte: a leading U+FEFF is part of the name, not a byte-order mark (FU-130)', () => {
+  const names = [
+    'a.ts',
+    '\uFEFFa.ts',
+    '\uFEFFdir/a.ts',
+    'dir/\uFEFFb.ts',
+    'dir/a\uFEFFb.ts',
+    '\uFEFF\uFEFFc.ts',
+    'é/\u{1F600}.ts',
+  ];
+  const dir = fs.mkdtempSync(join(tmpdir(), 'authored-bytes-'));
+  try {
+    for (const name of names) {
+      fs.mkdirSync(dirname(join(dir, name)), { recursive: true });
+      fs.writeFileSync(join(dir, name), 'x');
+    }
+    const listed = authoredFiles(dir).map(rel(dir));
+    assert.deepEqual(new Set(listed).size, names.length, 'two names collapsed into one');
+    assert.deepEqual([...listed].sort(), [...names].sort());
+    // ...and every listed path names the file that is there (the bytes git printed are the bytes on disk)
+    for (const path of authoredFiles(dir)) assert.equal(fs.readFileSync(path, 'utf8'), 'x');
+    // a deleted tracked file is subtracted by its exact name, not by its BOM-less twin
+    const run = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+    run('init', '-q');
+    run('add', '-f', '.');
+    run('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'x');
+    fs.rmSync(join(dir, '\uFEFFa.ts'));
+    assert.deepEqual(
+      authoredFiles(dir).map(rel(dir)).sort(),
+      names.filter((name) => name !== '\uFEFFa.ts').sort(),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the inventory of this repository is exactly what git tracks (plus untracked files that are not ignored)', () => {
   const expected = git('ls-files', '-z', '--cached', '--others', '--exclude-standard')
     .split('\0')
@@ -337,334 +373,440 @@ test('the inventory of this repository is exactly what git tracks (plus untracke
 // Directory listing is a CAPABILITY: outside the inventory, any use of it is refused.
 // ---------------------------------------------------------------------------------------------
 //
-// Not "a recursive walker": that is a shape the next spelling escapes (`recursive: deep`, spread or
-// quoted options, an alias, a computed key, a variable pattern, `glob`, a method, a helper, a loop).
-// The boundary is the capability: the NAME of a listing API however it is imported, aliased or
-// reached; an fs module held in a variable whose member is chosen at run time or that is passed on;
-// a module the guard cannot resolve (treated as possibly fs); a glob library; code built from text.
-// What it cannot follow it refuses (checklist 11). Options and recursion shape do not matter.
+// Not "a recursive walker", and not a list of dangerous spellings: both are shapes the next spelling
+// escapes (PR #772 r2 F1: 96/96). The boundary is the capability, and it is CLOSED: a file is clean only
+// when every module, loader and global it touches is acquired and used in a shape proven below. What
+// the guard cannot follow it refuses (checklist 11) and reports as a finding, never as `[]`.
 
+// The listing capability is closed by PROOF, not by spelling (FU-126, PR #772 r2 F1: 96/96 escapes of
+// the earlier "recognise the dangerous shape" detector). A file passes only if EVERY acquisition and
+// EVERY use of a module, loader or global it contains is one of the shapes below; whatever else it
+// does (an alias, a computed member, a dynamic require/import, a path builder, an object that holds a
+// module, a rest binding, a global evaluator, ...) is a REFUSAL, reported as a finding, never `[]`.
+//
+//  acquisition: a static import / export-from / import-equals / `require('lit')` / `import('lit')` /
+//               `createRequire(u)('lit')` / `const r = createRequire(u)` with a string-literal specifier.
+//               A non-literal specifier (a built path included) is unproven: it may name fs.
+//  fs module:   (the node fs family) may only be a receiver of a LITERAL member in SAFE_FS (or
+//               `promises` / `default`, which are fs again), the initializer of a plain `const x =`,
+//               or destructured by a pattern of literal SAFE keys (no rest, no computed key).
+//  globals:     `process`, `module`, `require`, the global object and `eval` / `Function` are reachable
+//               only through the members listed below; `.constructor` only to read its name.
+//  names:       the NAME of a listing API anywhere (identifier, key, string) is refused as before.
 const LISTERS = new Set([
   'readdir',
-  'readdirSync',
+  'readdirsync',
   'opendir',
-  'opendirSync',
+  'opendirsync',
   'glob',
-  'globSync',
-  'globIterate',
+  'globsync',
+  'globiterate',
   'readdirp',
   'scandir',
+  'scandirsync',
 ]);
-const FS_MODULE = /^(?:node:)?(?:fs|fs\/promises|fs-extra|graceful-fs)$/;
+const FS_MODULE = /^(?:fs|fs\/promises|fs-extra|graceful-fs)$/;
 const LISTING_PACKAGE =
-  /^(?:node:)?(?:glob|fast-glob|globby|tinyglobby|readdirp|fdir|klaw|node-dir|recursive-readdir)$/;
-const REFLECTIVE_MODULE = /^(?:node:)?vm$/;
+  /^(?:glob|fast-glob|globby|tinyglobby|readdirp|fdir|klaw|node-dir|recursive-readdir|walk|walkdir|dir-walker|scandir|@nodelib\/fs\.walk|@nodelib\/fs\.scandir)(?:\/.*)?$/;
+const REFLECTIVE_MODULE = /^(?:vm|worker_threads|repl|inspector|data:.*|https?:.*)$/;
+// members of an fs module that cannot list a directory
+const SAFE_FS = new Set(
+  (
+    'access accessSync appendFile appendFileSync chmod chmodSync chown chownSync close closeSync constants ' +
+    'copyFile copyFileSync cp cpSync createReadStream createWriteStream exists existsSync fchmod fchmodSync fchown ' +
+    'fchownSync fdatasync fdatasyncSync fstat fstatSync fsync fsyncSync ftruncate ftruncateSync futimes ' +
+    'futimesSync lchmod lchmodSync lchown lchownSync link linkSync lstat lstatSync lutimes lutimesSync ' +
+    'mkdir mkdirSync mkdtemp mkdtempSync open openSync read readFile readFileSync readSync readlink ' +
+    'readlinkSync readv readvSync realpath realpathSync rename renameSync rm rmSync rmdir rmdirSync stat ' +
+    'statSync statfs statfsSync symlink symlinkSync truncate truncateSync unlink unlinkSync unwatchFile ' +
+    'utimes utimesSync write writeFile writeFileSync writeSync writev writevSync Stats ' +
+    // fs-extra: file operations only
+    'ensureDir ensureDirSync ensureFile ensureFileSync pathExists pathExistsSync readJson readJsonSync ' +
+    'writeJson writeJsonSync outputFile outputFileSync outputJson outputJsonSync remove removeSync move moveSync'
+  ).split(' '),
+);
+const FS_CHAIN = new Set(['promises', 'default']); // an fs module again
+const SAFE_MODULE = new Set([
+  'createRequire',
+  'builtinModules',
+  'isBuiltin',
+  'syncBuiltinESMExports',
+]);
+const GLOBAL_OBJECT = /^(?:globalThis|global|self|window)$/;
+const GLOBAL_ROOTS = new Set(['process', 'module', 'require', 'eval', 'Function']);
+const PROCESS_OK = new Set(
+  (
+    'argv argv0 arch chdir cwd emitWarning env exit exitCode execArgv execPath getegid geteuid getgid ' +
+    'getuid hrtime kill memoryUsage nextTick off on once pid platform ppid release stderr stdin stdout ' +
+    'title umask uptime version versions cpuUsage resourceUsage emit removeListener removeAllListeners ' +
+    'listenerCount listeners send features getActiveResourcesInfo hasUncaughtExceptionCaptureCallback ' +
+    'setUncaughtExceptionCaptureCallback connected disconnect channel allowedNodeEnvironmentFlags ' +
+    'constrainedMemory availableMemory sourceMapsEnabled setSourceMapsEnabled debugPort'
+  ).split(' '),
+);
+const INTERNALS = /^(?:dlopen|mainModule|getBuiltinModule|_load|_linkedBinding)$/;
+const COMPARISON = new Set([
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+]);
 
-// A text with none of these cannot reach a listing API, an fs module or code built from text.
-const RELEVANT =
-  /\\u|readdir|opendir|glob|scandir|\bfs\b|fs\/|\brequire\b|\bimport\s*\(|createRequire|getBuiltinModule|_load|\beval\b|\bFunction\b|\bprocess\b|\bvm\b|klaw|fdir|readdirp/;
+// `jest.spyOn(globalThis, 'fetch')`, `Object.defineProperty(window, 'name', ...)`: the global object or
+// `process` handed over WITH a literal member name that is not itself a loader, evaluator or internal.
+const SPY_CALLEE =
+  /^(?:jest\.spyOn|vi\.spyOn|Object\.defineProperty|Object\.getOwnPropertyDescriptor)$/;
+const ASSERTION =
+  /^(?:expect|toBe|toEqual|toStrictEqual|equal|strictEqual|notStrictEqual|deepEqual|deepStrictEqual)$/;
 
 function listingCapabilities(file, text) {
-  if (!RELEVANT.test(text)) return [];
-  const kind = /\.[cm]?jsx?$/.test(file)
+  const kindOfFile = /\.[cm]?jsx?$/.test(file)
     ? ts.ScriptKind.JS
     : file.endsWith('.tsx')
       ? ts.ScriptKind.TSX
       : ts.ScriptKind.TS;
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kindOfFile);
   if (source.parseDiagnostics?.length) return [`${file}: does not parse`];
   const found = [];
   const note = (node, what) =>
     found.push(`${file}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${what}`);
-  const strip = (n) => {
-    while (
-      n &&
-      (ts.isParenthesizedExpression(n) ||
-        ts.isAsExpression(n) ||
-        ts.isNonNullExpression(n) ||
-        ts.isAwaitExpression(n) ||
-        ts.isSatisfiesExpression?.(n) ||
-        ts.isTypeAssertionExpression(n))
-    )
-      n = n.expression;
-    return n;
-  };
-  const literal = (n) => (n && ts.isStringLiteralLike(n) ? n.text : undefined);
-  const memberName = (n) =>
-    ts.isPropertyAccessExpression(n)
-      ? n.name.text
-      : ts.isElementAccessExpression(n)
-        ? literal(n.argumentExpression)
-        : undefined;
-  // names that call require(): `require`, anything built by createRequire(...), and aliases of either
-  const requirers = new Set(['require']);
-  const factories = new Set(['createRequire']);
   const all = [];
   const collect = (n) => {
     all.push(n);
     ts.forEachChild(n, collect);
   };
   collect(source);
-  const factoryCall = (n) =>
-    n &&
-    ts.isCallExpression(n) &&
-    ((ts.isIdentifier(n.expression) && factories.has(n.expression.text)) ||
-      memberName(strip(n.expression)) === 'createRequire');
-  for (let size = -1; size !== requirers.size + factories.size;) {
-    size = requirers.size + factories.size;
-    for (const n of all) {
-      if (ts.isImportSpecifier(n) && (n.propertyName ?? n.name).text === 'createRequire')
-        factories.add(n.name.text);
-      else if (
-        ts.isBindingElement(n) &&
-        ts.isIdentifier(n.name) &&
-        (n.propertyName ?? n.name).text === 'createRequire'
-      )
-        factories.add(n.name.text);
-      const bound = ts.isVariableDeclaration(n)
-        ? [n.name, n.initializer]
-        : ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken
-          ? [n.left, n.right]
-          : [];
-      const init = strip(bound[1]);
-      if (!init || !bound[0] || !ts.isIdentifier(bound[0])) continue;
-      if (factoryCall(init) || (ts.isIdentifier(init) && requirers.has(init.text)))
-        requirers.add(bound[0].text);
-      else if (
-        (ts.isIdentifier(init) && factories.has(init.text)) ||
-        memberName(init) === 'createRequire'
-      )
-        factories.add(bound[0].text);
-    }
-  }
-  const memo = new Map();
-  const moduleOf = (n) => {
-    n = strip(n);
-    if (!n || !ts.isCallExpression(n)) return undefined;
-    if (memo.has(n)) return memo.get(n);
-    const r = moduleOfCall(n);
-    memo.set(n, r);
-    return r;
-  };
-  const moduleOfCall = (n) => {
-    if (!n || !ts.isCallExpression(n)) return undefined;
-    const c = n.expression;
-    const isRequire =
-      (ts.isIdentifier(c) && requirers.has(c.text)) ||
-      factoryCall(strip(c)) ||
-      c.kind === ts.SyntaxKind.ImportKeyword ||
-      /^(?:require|getBuiltinModule|_load)$/.test(memberName(strip(c)) ?? '');
-    if (!isRequire) return undefined;
-    const specifier = literal(n.arguments[0]);
-    if (specifier !== undefined) return specifier;
-    // `createRequire(url)(resolve(...))` was invisible before: a path built here names a repository file
-    return factoryCall(strip(c)) && builtFilePath(n.arguments[0]) ? '<file path>' : null; // null: cannot be resolved
-  };
 
-  // fs handles: bindings that hold a whole fs module
-  const handles = new Set();
-  const holds = (n, strict = false) => {
-    n = strip(n);
-    if (!n) return false;
-    if (ts.isIdentifier(n)) return handles.has(n.text);
-    const m = moduleOf(n);
-    if (m !== undefined) return m === null ? !strict : FS_MODULE.test(m); // unresolved: may be fs
-    if (ts.isPropertyAccessExpression(n))
-      return ['promises', 'default'].includes(n.name.text) && holds(n.expression, strict);
-    if (ts.isElementAccessExpression(n))
-      return (
-        holds(n.expression, strict) &&
-        (!literal(n.argumentExpression) ||
-          ['promises', 'default'].includes(literal(n.argumentExpression)))
-      );
-    if (ts.isConditionalExpression(n))
-      return holds(n.whenTrue, strict) || holds(n.whenFalse, strict);
-    if (ts.isBinaryExpression(n))
-      return [
-        ts.SyntaxKind.BarBarToken,
-        ts.SyntaxKind.QuestionQuestionToken,
-        ts.SyntaxKind.AmpersandAmpersandToken,
-        ts.SyntaxKind.CommaToken,
-      ].includes(n.operatorToken.kind)
-        ? holds(n.left, strict) || holds(n.right, strict)
-        : false;
-    return false;
+  const wrapper = (n) =>
+    ts.isParenthesizedExpression(n) ||
+    ts.isAsExpression(n) ||
+    ts.isNonNullExpression(n) ||
+    ts.isAwaitExpression(n) ||
+    ts.isSatisfiesExpression?.(n) ||
+    ts.isTypeAssertionExpression(n);
+  const unwrap = (n) => {
+    while (n && wrapper(n)) n = n.expression;
+    return n;
   };
-  // values of a module the guard cannot resolve: nothing may be called on them (`require(name).sync(p)`)
-  const unknowns = new Set();
-  // A specifier BUILT as a file path (`resolve(...)`, or `join(dir, ...)` with a base) names a file
-  // of this repository, never a built-in or a package.
-  const builtFilePath = (arg) => {
-    arg = strip(arg);
-    if (!arg || !ts.isCallExpression(arg)) return false;
-    const callee = ts.isIdentifier(arg.expression)
-      ? arg.expression.text
-      : memberName(arg.expression);
+  /** The outermost wrapper around `n`: the node whose parent decides how `n` is used. */
+  const outer = (n) => {
+    let u = n;
+    while (u.parent && wrapper(u.parent) && unwrap(u.parent) === n) u = u.parent;
+    return u;
+  };
+  const literal = (n) => (n && ts.isStringLiteralLike(n) ? n.text : undefined);
+  const isMember = (n) => ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n);
+  const memberName = (n) =>
+    ts.isPropertyAccessExpression(n)
+      ? n.name.text
+      : ts.isElementAccessExpression(n)
+        ? literal(n.argumentExpression)
+        : undefined;
+  const bare = (specifier) => specifier.replace(/^node:/, '');
+  const moduleKind = (specifier) =>
+    FS_MODULE.test(bare(specifier)) ? 'fs' : bare(specifier) === 'module' ? 'module' : undefined;
+  // a binding name is not a use; a shorthand property `{ fs }` is one
+  const slot = (n) => {
+    const p = n.parent;
     return (
-      callee === 'resolve' ||
-      (callee === 'join' &&
-        arg.arguments.length > 1 &&
-        !(literal(arg.arguments[0]) !== undefined && !literal(arg.arguments[0]).includes('/')))
+      p &&
+      !ts.isShorthandPropertyAssignment(p) &&
+      !(ts.isExportSpecifier(p) && !p.parent.parent.moduleSpecifier) && // `export { fs }` exports the binding
+      (p.name === n ||
+        p.propertyName === n ||
+        ts.isQualifiedName(p) ||
+        ts.isTypeReferenceNode(p) ||
+        ts.isExpressionWithTypeArguments(p) ||
+        ts.isLabeledStatement(p) ||
+        ts.isBreakOrContinueStatement(p))
     );
   };
-  const unresolved = (n) => {
-    n = strip(n);
-    if (!n) return false;
-    if (ts.isCallExpression(n)) return moduleOf(n) === null && !builtFilePath(n.arguments[0]);
-    if (ts.isIdentifier(n)) return unknowns.has(n.text);
-    if (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n))
-      return unresolved(n.expression);
-    return false;
+  // `import process from 'node:process'` is the global `process` under another declaration
+  const processImport = (n) => {
+    if (!ts.isImportClause(n) && !ts.isNamespaceImport(n)) return false;
+    let decl = n;
+    while (decl && !ts.isImportDeclaration(decl)) decl = decl.parent;
+    return decl !== undefined && bare(decl.moduleSpecifier.text ?? '') === 'process';
   };
-  const names = (pattern) =>
-    ts.isIdentifier(pattern)
-      ? [pattern.text]
-      : pattern.elements.flatMap((el) => (ts.isOmittedExpression(el) ? [] : names(el.name)));
-  for (let size = -1; size !== unknowns.size;) {
-    size = unknowns.size;
-    for (const n of all) {
-      const pair = ts.isVariableDeclaration(n)
-        ? [n.name, n.initializer]
-        : ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken
-          ? [n.left, n.right]
-          : [];
-      if (
-        pair[1] &&
-        unresolved(pair[1]) &&
-        (ts.isIdentifier(pair[0]) || ts.isBindingPattern(pair[0]))
-      )
-        for (const name of names(pair[0])) unknowns.add(name);
-    }
-  }
+  const declared = new Set();
+  for (const n of all)
+    if (
+      (ts.isVariableDeclaration(n) ||
+        ts.isBindingElement(n) ||
+        ts.isParameter(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isClassDeclaration(n) ||
+        ts.isImportClause(n) ||
+        ts.isImportSpecifier(n) ||
+        ts.isNamespaceImport(n) ||
+        ts.isImportEqualsDeclaration(n)) &&
+      n.name &&
+      ts.isIdentifier(n.name) &&
+      !processImport(n)
+    )
+      declared.add(n.name.text);
+
+  // ---- provenance: bindings that PROVABLY hold an fs module / node:module / a require function ----
+  const handles = new Map(); // binding name -> 'fs' | 'module'
+  const requirers = new Set(['require']);
+  const factories = new Set(); // createRequire and its (imported or destructured) bindings
+  const factoryCall = (n) => {
+    n = unwrap(n);
+    return (
+      n &&
+      ts.isCallExpression(n) &&
+      ts.isIdentifier(unwrap(n.expression)) &&
+      factories.has(unwrap(n.expression).text)
+    );
+  };
+  const loaderCall = (n) =>
+    ts.isCallExpression(n) &&
+    (n.expression.kind === ts.SyntaxKind.ImportKeyword ||
+      (ts.isIdentifier(unwrap(n.expression)) && requirers.has(unwrap(n.expression).text)) ||
+      factoryCall(n.expression));
+  /** 'fs' | 'module' when `n` provably is such a module; undefined when it is not (or not provable). */
+  const kind = (n) => {
+    n = unwrap(n);
+    if (!n) return undefined;
+    if (ts.isIdentifier(n)) return handles.get(n.text);
+    if (ts.isCallExpression(n))
+      return loaderCall(n) && n.arguments.length >= 1 && literal(n.arguments[0]) !== undefined
+        ? moduleKind(literal(n.arguments[0]))
+        : undefined;
+    if (isMember(n))
+      return kind(n.expression) === 'fs' && FS_CHAIN.has(memberName(n)) ? 'fs' : undefined;
+    return undefined;
+  };
   let grew = true;
-  const take = (name) => {
-    if (ts.isIdentifier(name) && !handles.has(name.text)) {
-      handles.add(name.text);
+  const bind = (target, k) => {
+    if (ts.isIdentifier(target) && handles.get(target.text) !== k) {
+      handles.set(target.text, k);
       grew = true;
     }
   };
-  const destructure = (pattern) => {
-    for (const el of pattern.elements) {
-      if (ts.isOmittedExpression(el)) continue;
-      if (el.dotDotDotToken) take(el.name);
-      else if (ts.isObjectBindingPattern(pattern)) {
-        const key = el.propertyName ?? el.name;
-        if (ts.isComputedPropertyName(key) && !literal(key.expression))
-          note(el, 'computed key read from an fs module');
-        else if (['promises', 'default'].includes(key.text ?? literal(key.expression)))
-          take(el.name);
-      }
+  const addFactory = (target) => {
+    if (ts.isIdentifier(target) && !factories.has(target.text)) {
+      factories.add(target.text);
+      grew = true;
     }
   };
-  const binders = all.filter(
-    (n) =>
-      ts.isImportDeclaration(n) ||
-      ts.isImportEqualsDeclaration(n) ||
-      (ts.isVariableDeclaration(n) && n.initializer) ||
-      (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken),
-  );
+  /** `const { a, promises: { b } } = <module>`: literal keys only, no rest, no computed key. */
+  const destructure = (pattern, k) => {
+    if (!ts.isObjectBindingPattern(pattern))
+      return note(pattern, 'array destructuring of a loaded module');
+    for (const el of pattern.elements) {
+      const key = el.propertyName ?? el.name;
+      const name = ts.isComputedPropertyName(key) ? literal(key.expression) : key.text;
+      if (el.dotDotDotToken) note(el, 'rest binding of a loaded module');
+      else if (name === undefined) note(el, 'computed key read from a loaded module');
+      else if (k === 'fs' && FS_CHAIN.has(name)) {
+        if (ts.isIdentifier(el.name)) bind(el.name, 'fs');
+        else destructure(el.name, 'fs');
+      } else if (k === 'fs' && SAFE_FS.has(name)) {
+        if (!ts.isIdentifier(el.name)) note(el, `member ${name} destructured further`);
+      } else if (k === 'module' && name === 'createRequire') addFactory(el.name);
+      else if (!(k === 'module' && SAFE_MODULE.has(name)))
+        note(el, `member ${name} of a loaded module is not in the proven set`);
+    }
+  };
+  const flow = (target, value) => {
+    const k = kind(value);
+    if (k) return ts.isIdentifier(target) ? bind(target, k) : destructure(target, k);
+    if (factoryCall(value) && ts.isIdentifier(target) && !requirers.has(target.text)) {
+      requirers.add(target.text);
+      grew = true;
+    }
+  };
   while (grew) {
     grew = false;
-    for (const n of binders) {
-      if (ts.isImportDeclaration(n) && n.importClause && FS_MODULE.test(n.moduleSpecifier.text)) {
+    for (const n of all) {
+      if (ts.isImportDeclaration(n) && n.importClause && !n.importClause.isTypeOnly) {
+        const k = moduleKind(n.moduleSpecifier.text ?? '');
         const { name, namedBindings } = n.importClause;
-        if (name) take(name);
-        if (namedBindings && ts.isNamespaceImport(namedBindings)) take(namedBindings.name);
-        if (namedBindings && ts.isNamedImports(namedBindings))
+        if (
+          bare(n.moduleSpecifier.text ?? '') === 'process' &&
+          namedBindings &&
+          ts.isNamedImports(namedBindings)
+        )
           for (const s of namedBindings.elements)
-            if (['promises', 'default'].includes((s.propertyName ?? s.name).text)) take(s.name);
-      } else if (
-        ts.isImportEqualsDeclaration(n) &&
-        ts.isExternalModuleReference(n.moduleReference) &&
-        FS_MODULE.test(literal(n.moduleReference.expression) ?? '')
-      )
-        take(n.name);
-      else if (ts.isVariableDeclaration(n) && n.initializer && holds(n.initializer)) {
-        if (ts.isObjectBindingPattern(n.name)) destructure(n.name);
-        else take(n.name);
-      } else if (
+            if (!PROCESS_OK.has((s.propertyName ?? s.name).text))
+              note(
+                s,
+                `import of process.${(s.propertyName ?? s.name).text} is not in the proven set`,
+              );
+        if (!k) continue;
+        if (k === 'module' && (name || (namedBindings && ts.isNamespaceImport(namedBindings))))
+          note(n, 'imports node:module as a whole');
+        else if (name) bind(name, k);
+        if (namedBindings && ts.isNamespaceImport(namedBindings) && k === 'fs')
+          bind(namedBindings.name, k);
+        if (namedBindings && ts.isNamedImports(namedBindings))
+          for (const s of namedBindings.elements) {
+            const member = (s.propertyName ?? s.name).text;
+            if (k === 'fs' && FS_CHAIN.has(member)) bind(s.name, 'fs');
+            else if (k === 'module' && member === 'createRequire') addFactory(s.name);
+            else if (!(k === 'fs' ? SAFE_FS : SAFE_MODULE).has(member))
+              note(s, `import of ${member} is not in the proven set`);
+          }
+      } else if (ts.isImportEqualsDeclaration(n)) {
+        const ref = n.moduleReference;
+        const k = ts.isExternalModuleReference(ref)
+          ? literal(ref.expression) !== undefined && moduleKind(literal(ref.expression))
+          : ts.isIdentifier(ref) && handles.get(ref.text);
+        if (k) bind(n.name, k);
+      } else if (ts.isVariableDeclaration(n) && n.initializer) flow(n.name, n.initializer);
+      else if (
         ts.isBinaryExpression(n) &&
         n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        holds(n.right)
+        ts.isIdentifier(n.left)
       )
-        take(n.left);
+        flow(n.left, n.right);
     }
   }
 
+  // ---- every node: it is either outside the capability, or one of the proven shapes ----
+  const callee = (u) => u.parent && ts.isCallExpression(u.parent) && u.parent.expression === u;
+  /** `u` is the target of a spy / property definition naming a member that is safe for `owner`. */
+  const spied = (u, owner) => {
+    const p = u.parent;
+    const key =
+      p && ts.isCallExpression(p) && p.arguments[0] === u ? literal(p.arguments[1]) : undefined;
+    return (
+      key !== undefined &&
+      SPY_CALLEE.test(p.expression.getText().replace(/\s+/g, '')) &&
+      !INTERNALS.test(key) &&
+      (owner === 'process' ? PROCESS_OK.has(key) : !GLOBAL_ROOTS.has(key))
+    );
+  };
   for (const n of all) {
     if (n.kind === ts.SyntaxKind.EndOfFileToken) continue;
-    // 1. the NAME of a listing API, however it is imported, aliased or reached
-    if ((ts.isIdentifier(n) || ts.isPrivateIdentifier(n)) && LISTERS.has(n.text.replace(/^#/, '')))
-      note(n, `names the directory-listing API ${n.text}`);
-    else if (ts.isStringLiteralLike(n) && LISTERS.has(n.text) && !ts.isImportDeclaration(n.parent))
-      note(n, `names the directory-listing API '${n.text}'`);
-    // 2. modules
-    const m = ts.isCallExpression(n) ? moduleOf(n) : undefined;
-    if (m !== undefined && m !== null && (LISTING_PACKAGE.test(m) || REFLECTIVE_MODULE.test(m)))
-      note(n, `loads ${m}`);
-    if (ts.isCallExpression(n) && unresolved(n.expression))
-      note(n, 'calls into a module the guard cannot resolve');
-    if (m !== undefined && (m === null || FS_MODULE.test(m))) {
-      let use = n;
-      while (
-        ts.isParenthesizedExpression(use.parent) ||
-        ts.isAsExpression(use.parent) ||
-        ts.isNonNullExpression(use.parent) ||
-        ts.isAwaitExpression(use.parent)
+    // 1. the NAME of a listing API, however it is imported, aliased, keyed or reached
+    const spelled =
+      (ts.isIdentifier(n) || ts.isPrivateIdentifier(n) || ts.isStringLiteralLike(n)) &&
+      n.text.replace(/^#/, '');
+    if (
+      spelled &&
+      LISTERS.has(spelled.toLowerCase()) &&
+      !(ts.isStringLiteralLike(n) && ts.isImportDeclaration(n.parent))
+    )
+      note(n, `names the directory-listing API ${spelled}`);
+    if (spelled && INTERNALS.test(spelled) && !ts.isStringLiteralLike(n))
+      note(n, `names a Node internal (${spelled})`); // `process['getBuiltinModule']` is a computed process member
+    // 2. acquisition: only a literal specifier is proven; the module it names decides the rest
+    if (loaderCall(n)) {
+      const spec = literal(n.arguments[0]);
+      if (
+        spec === undefined ||
+        (n.arguments.length !== 1 && n.expression.kind !== ts.SyntaxKind.ImportKeyword)
       )
-        use = use.parent;
-      const p = use.parent;
-      const safe =
+        note(n, 'a dynamic require/import: the module it loads is unproven');
+      else if (
+        LISTING_PACKAGE.test(bare(spec)) ||
+        REFLECTIVE_MODULE.test(bare(spec)) ||
+        bare(spec) === 'process' // only a static `import process from` is followed (it is the global)
+      )
+        note(n, `loads ${spec}`);
+    }
+    if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier) {
+      const spec = bare(n.moduleSpecifier.text ?? '');
+      if (LISTING_PACKAGE.test(spec) || REFLECTIVE_MODULE.test(spec)) note(n, `imports ${spec}`);
+      const clause = ts.isExportDeclaration(n) ? n.exportClause : undefined;
+      if (ts.isExportDeclaration(n) && !n.isTypeOnly && moduleKind(spec)) {
+        if (!clause || ts.isNamespaceExport(clause)) note(n, `re-exports ${spec} whole`);
+        else
+          for (const e of clause.elements)
+            if (
+              !(moduleKind(spec) === 'fs' ? SAFE_FS : SAFE_MODULE).has(
+                (e.propertyName ?? e.name).text,
+              )
+            )
+              note(e, `re-exports ${(e.propertyName ?? e.name).text} of ${spec}`);
+      }
+    }
+    if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) {
+      const spec = literal(n.moduleReference.expression);
+      if (spec === undefined) note(n, 'a dynamic import-equals: the module it loads is unproven');
+      else if (LISTING_PACKAGE.test(bare(spec)) || REFLECTIVE_MODULE.test(bare(spec)))
+        note(n, `imports ${spec}`);
+    }
+    // 3. a module or a handle that is used: only the proven contexts
+    const isExpr = !wrapper(n) && !slot(n) && !ts.isTypeNode(n);
+    if (isExpr && kind(n)) {
+      const u = outer(n);
+      const p = u.parent;
+      const k = kind(n);
+      const m = isMember(p) && p.expression === u ? memberName(p) : undefined;
+      const chain = k === 'fs' && FS_CHAIN.has(m); // judged at the link itself
+      const ok =
         ts.isExpressionStatement(p) ||
-        (ts.isPropertyAccessExpression(p) && p.expression === use && p.name.text !== 'then') ||
-        (ts.isElementAccessExpression(p) &&
-          p.expression === use &&
-          literal(p.argumentExpression)) ||
+        ts.isTypeOfExpression(p) ||
+        ts.isTypeQueryNode(p) ||
+        chain ||
+        (k === 'fs' && SAFE_FS.has(m)) ||
         (ts.isVariableDeclaration(p) &&
-          p.initializer === use &&
-          !ts.isObjectBindingPattern(p.name)) ||
-        (ts.isVariableDeclaration(p) &&
-          p.initializer === use &&
-          ts.isObjectBindingPattern(p.name)) ||
+          p.initializer === u &&
+          (ts.isIdentifier(p.name) || ts.isObjectBindingPattern(p.name))) ||
         (ts.isBinaryExpression(p) &&
           p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-          p.right === use);
-      if (!safe) note(n, 'a loaded module is passed on where the guard cannot follow it');
+          p.right === u &&
+          ts.isIdentifier(p.left)) ||
+        ts.isImportEqualsDeclaration(p);
+      if (!ok)
+        note(
+          n,
+          isMember(p) && p.expression === u
+            ? m === undefined
+              ? `computed member of a loaded ${k} module`
+              : `member ${m} of a loaded ${k} module is not in the proven set`
+            : `a loaded ${k} module is passed on or used where the guard cannot follow it`,
+        );
     }
-    if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) {
-      const spec = n.moduleSpecifier?.text;
-      if (spec && (LISTING_PACKAGE.test(spec) || REFLECTIVE_MODULE.test(spec)))
-        note(n, `imports ${spec}`);
-      const clause = ts.isExportDeclaration(n) ? n.exportClause : undefined;
-      if (
-        ts.isExportDeclaration(n) &&
-        FS_MODULE.test(spec ?? '') &&
-        (!clause ||
-          ts.isNamespaceExport(clause) ||
-          clause.elements.some((e) =>
-            ['promises', 'default'].includes((e.propertyName ?? e.name).text),
-          ))
-      )
-        note(n, `re-exports ${spec} whole`);
-      if (
-        spec &&
-        /^(?:node:)?module$/.test(spec) &&
-        !(
-          ts.isImportDeclaration(n) &&
-          n.importClause?.namedBindings &&
-          ts.isNamedImports(n.importClause.namedBindings) &&
-          !n.importClause.name &&
-          n.importClause.namedBindings.elements.every((e) =>
-            ['createRequire', 'builtinModules', 'isBuiltin', 'syncBuiltinESMExports'].includes(
-              (e.propertyName ?? e.name).text,
-            ),
-          )
-        )
-      )
-        note(n, 'imports node:module as a whole');
+    // loaders: require / created require / createRequire only called with a literal
+    if (ts.isIdentifier(n) && !slot(n) && (requirers.has(n.text) || factories.has(n.text))) {
+      const u = outer(n);
+      const m = isMember(u.parent) && u.parent.expression === u ? memberName(u.parent) : undefined;
+      const isRequire = requirers.has(n.text);
+      if (!(
+        callee(u) ||
+        (isRequire && (m === 'resolve' || m === 'main')) ||
+        ts.isTypeOfExpression(u.parent) ||
+        ts.isTypeQueryNode(u.parent) ||
+        ts.isImportSpecifier(u.parent)
+      ))
+        note(n, `module loader ${n.text} used in a way the guard cannot follow`);
+      if (!isRequire && callee(u)) {
+        const call = outer(u.parent);
+        const q = call.parent;
+        if (!(
+          (ts.isVariableDeclaration(q) && q.initializer === call && ts.isIdentifier(q.name)) ||
+          callee(call) ||
+          (isMember(q) && q.expression === call && memberName(q) === 'resolve')
+        ))
+          note(n, 'createRequire result used where the guard cannot follow it');
+      }
     }
-    // 3. code from text, process internals
-    if (ts.isIdentifier(n) && (n.text === 'eval' || n.text === 'Function')) {
+    if (
+      ts.isVariableDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === 'require' &&
+      !(n.initializer && factoryCall(n.initializer))
+    )
+      note(n, 'a binding named require that is not createRequire(...)');
+    if (
+      (ts.isParameter(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isClassDeclaration(n) ||
+        ts.isBindingElement(n) ||
+        ts.isImportClause(n) ||
+        ts.isImportSpecifier(n) ||
+        ts.isNamespaceImport(n)) &&
+      n.name &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === 'require'
+    )
+      note(n, 'a parameter, function, class or import named require');
+    // 4. globals: process, module, the global object, code from text
+    if (isExpr && ts.isIdentifier(n) && (n.text === 'eval' || n.text === 'Function')) {
       const p = n.parent;
       const harmless =
         ts.isTypeReferenceNode(p) ||
@@ -672,106 +814,69 @@ function listingCapabilities(file, text) {
         (ts.isBinaryExpression(p) &&
           p.right === n &&
           p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) ||
-        p.name === n ||
+        (isMember(p) && p.name === n) ||
         (ts.isCallExpression(p) && /^(?:any|toBeInstanceOf)$/.test(memberName(p.expression) ?? ''));
       if (!harmless) note(n, `builds code from text, or aliases it (${n.text})`);
     }
-    const global = /^(?:globalThis|global|window|self)$/;
-    if (
-      memberName(n) !== undefined &&
-      /^(?:eval|Function)$/.test(memberName(n)) &&
-      global.test(n.expression.getText())
-    )
-      note(n, 'builds code from text through the global object');
-    // process, module and the global object: a member chosen at run time may be a module loader
-    const symbolKey = (k) =>
-      ts.isCallExpression(k) && /^Symbol(?:\.for)?$/.test(k.expression.getText()); // never a name
-    if (
-      ts.isElementAccessExpression(n) &&
-      !literal(n.argumentExpression) &&
-      !symbolKey(n.argumentExpression)
-    ) {
-      const base = strip(n.expression).getText();
-      if (
-        /^(?:process|module|globalThis|global|globalThis\.process|global\.process|module\.constructor|Module|require)$/.test(
-          base,
-        )
-      )
-        note(n, `computed member of ${base}`);
-    }
-    if (/^(?:getBuiltinModule|_load)$/.test(memberName(n) ?? '')) {
-      const p = n.parent;
-      if (!(ts.isCallExpression(p) && p.expression === n))
-        note(n, `${memberName(n)} reached without being called`);
-    }
-    if (
-      ts.isBindingElement(n) &&
-      /^(?:getBuiltinModule|_load)$/.test((n.propertyName ?? n.name).text ?? '')
-    )
-      note(n, `${(n.propertyName ?? n.name).text} taken out of its owner`);
-    // 3b. a module loader (require, createRequire and their aliases) that is not simply called
-    if (ts.isIdentifier(n) && (requirers.has(n.text) || factories.has(n.text))) {
-      const p = n.parent;
-      const plain = (name) => !/^(?:call|apply|bind)$/.test(name);
-      const ok =
-        (ts.isCallExpression(p) && p.expression === n) ||
-        ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isBindingElement(p)) &&
-          p.name === n) ||
-        p.name === n ||
-        ts.isImportSpecifier(p) ||
+    if (isExpr && ts.isIdentifier(n) && GLOBAL_OBJECT.test(n.text) && !declared.has(n.text)) {
+      const u = outer(n);
+      const p = u.parent;
+      const m = isMember(p) && p.expression === u ? memberName(p) : undefined;
+      if (m !== undefined && GLOBAL_ROOTS.has(m)) {
+        // `globalThis.process` is `process`: judged below as a root reference
+      } else if (!(
+        m !== undefined ||
         ts.isTypeOfExpression(p) ||
         ts.isTypeQueryNode(p) ||
-        (ts.isVariableDeclaration(p) && p.initializer === n && ts.isIdentifier(p.name)) ||
-        (ts.isBinaryExpression(p) &&
-          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-          ts.isIdentifier(p.left) &&
-          (p.left === n || p.right === n)) ||
-        (ts.isPropertyAccessExpression(p) && (p.name === n || plain(p.name.text))) ||
-        (ts.isElementAccessExpression(p) &&
-          p.expression === n &&
-          plain(literal(p.argumentExpression) ?? 'call')) ||
-        (ts.isPropertyAssignment(p) && p.name === n);
-      if (!ok) note(n, `module loader ${n.text} used in a way the guard cannot follow`);
+        spied(u, 'global')
+      ))
+        note(n, `the global object ${n.text} used where the guard cannot follow it`);
     }
-    if (
-      ts.isPropertyAccessExpression(n) &&
-      /^(?:binding|dlopen|mainModule)$/.test(n.name.text) &&
-      /^(?:process|globalThis\.process|global\.process)$/.test(n.expression.getText())
+    const root =
+      ts.isIdentifier(n) && GLOBAL_ROOTS.has(n.text) && !declared.has(n.text) && !slot(n)
+        ? n.text
+        : isMember(n) &&
+            ts.isIdentifier(unwrap(n.expression)) &&
+            GLOBAL_OBJECT.test(unwrap(n.expression).text) &&
+            !declared.has(unwrap(n.expression).text) &&
+            GLOBAL_ROOTS.has(memberName(n) ?? '')
+          ? memberName(n)
+          : undefined;
+    if (root === 'require' && isMember(n))
+      note(n, 'a module loader reached through the global object');
+    if (root && root !== 'require' && !(root === 'eval' || root === 'Function')) {
+      const u = outer(n);
+      const p = u.parent;
+      const m = isMember(p) && p.expression === u ? memberName(p) : undefined;
+      const ok =
+        ts.isTypeOfExpression(p) ||
+        ts.isTypeQueryNode(p) ||
+        (root === 'process' && (PROCESS_OK.has(m) || spied(u, 'process'))) ||
+        (root === 'process' && ts.isBinaryExpression(p) && COMPARISON.has(p.operatorToken.kind)) ||
+        (root === 'module' &&
+          (m === 'exports' || (ts.isBinaryExpression(p) && COMPARISON.has(p.operatorToken.kind))));
+      if (!ok) note(n, `${root} used where the guard cannot follow it${m ? ` (${m})` : ''}`);
+    } else if (
+      isMember(n) &&
+      ts.isIdentifier(unwrap(n.expression)) &&
+      GLOBAL_OBJECT.test(unwrap(n.expression).text) &&
+      /^(?:eval|Function)$/.test(memberName(n) ?? '')
     )
-      note(n, 'reaches Node internals through process');
-    // 4. an fs handle the guard cannot follow
-    if (
-      (ts.isIdentifier(n) && handles.has(n.text)) ||
-      ((ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) && holds(n, true))
-    ) {
-      const p = n.parent;
-      const declared =
-        (ts.isImportClause(p) ||
-          ts.isNamespaceImport(p) ||
-          ts.isImportSpecifier(p) ||
-          ts.isVariableDeclaration(p) ||
-          ts.isBindingElement(p) ||
-          ts.isParameter(p) ||
-          ts.isImportEqualsDeclaration(p)) &&
-        p.name === n;
-      const member =
-        (ts.isPropertyAccessExpression(p) && p.expression === n) ||
-        (ts.isElementAccessExpression(p) && p.expression === n && literal(p.argumentExpression)) ||
-        ts.isTypeQueryNode(p);
-      const aliased =
-        (ts.isVariableDeclaration(p) && p.initializer === n && ts.isIdentifier(p.name)) ||
+      note(n, 'builds code from text through the global object');
+    // `.constructor` reached the Function constructor of any function: read its name, nothing else
+    if (isMember(n) && memberName(n) === 'constructor') {
+      const u = outer(n);
+      const p = u.parent;
+      if (!(
+        (isMember(p) && p.expression === u && memberName(p) === 'name') ||
         (ts.isBinaryExpression(p) &&
-          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-          p.right === n &&
-          ts.isIdentifier(p.left));
-      const named =
-        (ts.isPropertyAccessExpression(p) && p.name === n) ||
-        (ts.isPropertyAssignment(p) && p.name === n) ||
-        (ts.isBinaryExpression(p) && p.left === n) ||
-        ts.isQualifiedName(p) ||
-        ts.isTypeReferenceNode(p);
-      if (!declared && !member && !aliased && !named)
-        note(n, `fs handle ${n.getText()} used in a way the guard cannot follow`);
+          (COMPARISON.has(p.operatorToken.kind) ||
+            p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword)) ||
+        (ts.isCallExpression(p) &&
+          p.arguments.includes(u) &&
+          ASSERTION.test(memberName(p.expression) ?? p.expression.getText()))
+      ))
+        note(n, '.constructor used where it may reach the Function constructor');
     }
   }
   return [...new Set(found)];
@@ -869,6 +974,79 @@ const REFUSED = {
   'Function passed on': "Reflect.construct(Function, ['return process']);",
   'unicode-escaped loader': "\\u0072equire('\\u0066s')[k](d);",
   'unicode-escaped lister': 'const f = (d) => \\u0072eaddirSync(d);',
+  // FU-126: a built path may name fs, so it is unproven (the files that do it are allow-listed rows)
+  'a repository file loaded by a built path':
+    "const c = require(resolve(root, 'dist/index.js')); c.build(1);",
+  // FU-126: refused before as well, kept as controls
+  'rest binding named like a safe member':
+    "import fs from 'node:fs'; const { ...stat } = fs; stat['read' + 'dir'](d);",
+  'process module imported, binding read':
+    "import process from 'node:process'; process.binding('fs');",
+  'loader reached through the global object':
+    "globalThis.require('node:fs')['read' + 'dirSync'](d);",
+  'path builder returns fs, computed member':
+    "const resolve = () => 'node:fs'; require(resolve())['read' + 'dirSync'](dir);",
+  'join builder with a base':
+    "const join = (a, b) => b; const fs = require(join(root, 'fs')); fs['read' + 'dirSync'](d);",
+  'nested destructuring, computed key':
+    "import fs from 'node:fs'; const { promises: { ['read' + 'dir']: list } } = fs; list(d);",
+  'nested rest binding':
+    "import fs from 'node:fs'; const { promises: { ...p } } = fs; p['read' + 'dir'](d);",
+  'rest of promises':
+    "import fs from 'node:fs'; const { ...all } = fs.promises; all['read' + 'dir'](d);",
+  'process read through the global object, aliased':
+    "const g = globalThis; g.process.getBuiltinModule('fs')['read' + 'dirSync'](d);",
+  'glob dist import': "import { globSync } from 'glob/dist/esm/index.js'; globSync(p);",
+  'import-equals of glob': "import glob = require('glob'); glob.sync(p);",
+  'import-equals fs alias, computed member':
+    "import fs = require('node:fs'); fs['read' + 'dirSync'](d);",
+  'import-equals alias of a namespace':
+    "import fs = require('fs'); import f = fs; f['read' + 'dirSync'](d);",
+};
+/**
+ * FU-126 (PR #772 r2 F1): shapes the earlier detector let through (`[]`) on all eight supported file
+ * extensions (.js .jsx .mjs .cjs .ts .tsx .mts .cts; the TypeScript-only ones on the four TS ones).
+ * Each reaches a directory reader, a loader or an evaluator by a route the old detector did not name:
+ * an unproven path builder, an fs module stored on an object, process or the global object aliased
+ * or reached by a computed/destructured member, `.constructor` chains, `data:` and worker code, a
+ * listing package by sub-path, and TypeScript import-equals loaders. The closed detector refuses all.
+ */
+const ESCAPED_BEFORE = {
+  'path builder returns fs, computed promises member':
+    "const resolve = () => 'node:fs'; require(resolve()).promises['read' + 'dir'](dir);",
+  'fs stored on an object':
+    "const holder = {}; holder.fs = require('node:fs'); holder.fs['read' + 'dirSync'](d);",
+  'fs stored on this':
+    "class C { constructor() { this.fs = require('node:fs'); } list(d) { return this.fs['read' + 'dirSync'](d); } }",
+  'fs stored in an array element':
+    "const held = []; held[0] = require('node:fs'); held[0]['read' + 'dirSync'](d);",
+  'process aliased, computed binding':
+    "const p = process; p['bind' + 'ing']('fs')['read' + 'dir'](d);",
+  'process internals through a parenthesised process': "(process).binding('fs');",
+  'binding destructured from process': "const { binding } = process; binding('fs');",
+  'process passed to a helper': 'use(process);',
+  'global object aliased, eval member': 'const g = globalThis; g.eval(\'require("fs")\');',
+  'global object aliased, computed eval': "const g = globalThis; g['ev' + 'al']('x');",
+  'eval fetched from an aliased global, called through a comma':
+    "const g = global; (0, g.eval)('x');",
+  'Function through constructor': "(() => {}).constructor('return process')();",
+  'Function through a chain of constructors': "[].constructor.constructor('return process')();",
+  'data: URL import': 'import(\'data:text/javascript,import fs from "node:fs"; fs.x\');',
+  'worker evaluates a string':
+    "import { Worker } from 'node:worker_threads'; new Worker('x', { eval: true });",
+  'node-dir sub-path import': "import paths from 'node-dir/lib/paths'; paths.files(d);",
+  'node-dir required by sub-path': "require('node-dir/lib/paths').files(d);",
+  'walkdir package': "import walkdir from 'walkdir'; walkdir.sync(d);",
+  'Deno readDir': 'for await (const e of Deno.readDir(d)) e;',
+  'Bun Glob': "new Bun.Glob('**').scanSync(d);",
+  'import-equals of node-dir': "import dir = require('node-dir'); dir.files(d);",
+  'import-equals of a computed module': 'import m = require(name); m.sync(p);',
+};
+// Found while closing the class (the process module is the global `process` under another name).
+const ESCAPED_LATER = {
+  'node:process required, binding read':
+    "const p = require('node:process'); p.binding('fs')['read' + 'dir'](d);",
+  'process module imported by name': "import { binding } from 'node:process'; binding('fs');",
 };
 const ACCEPTED = {
   'reads files': "import { readFileSync } from 'node:fs'; readFileSync(p, 'utf8');",
@@ -881,12 +1059,19 @@ const ACCEPTED = {
   'a literal path': "const page = require('./page');",
   "fs['promises'] members by name":
     "import fs from 'node:fs'; await fs['promises'].readFile(p); fs.default.statSync(p);",
-  'require read, not passed': "const r = require; r('./x'); require.resolve('y'); typeof require;",
+  'require read, not passed':
+    "require('./x'); require.resolve('y'); typeof require; require.main === module;",
   'createRequire for a literal':
     "import { createRequire } from 'node:module'; createRequire(u)('./x');",
   'named re-export of file reads': "export { readFileSync } from 'node:fs';",
-  'a repository file loaded by path':
-    "const c = require(resolve(root, 'dist/index.js')); c.build(1);",
+  'safe members, destructured and imported':
+    "import fs, { promises, readFileSync } from 'node:fs'; import { writeFile } from 'node:fs/promises'; const { statSync, promises: { readFile } } = fs; promises.stat(p); fs.default.existsSync(p);",
+  'spies on the global object by a literal name':
+    "jest.spyOn(globalThis, 'fetch'); Object.defineProperty(window, 'matchMedia', {}); jest.spyOn(process, 'exit'); globalThis.fetch(u); typeof window;",
+  'process by its safe members and the process module':
+    "import process from 'node:process'; import { argv } from 'node:process'; process.env.X; process.exitCode = 1; module.exports = {}; if (require.main === module) process.exit(0);",
+  'constructor read for its name':
+    'expect(e.constructor).toBe(E); e.constructor.name; x.constructor === Y;',
   'matchers and process members':
     "expect(f).toBeInstanceOf(Function); x instanceof Function; process.env[k]; g[Symbol.for('k')];",
 };
@@ -898,11 +1083,26 @@ function stale(found, allowed) {
   return [...allowed].filter((file) => !found[file]);
 }
 
+const EXTENSIONS = ['js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'mts', 'cts'];
+/** The names of the cases `table` that `verdict` gets wrong, in every supported file extension. */
+const wrong = (table, verdict) =>
+  Object.entries(table).flatMap(([name, code]) =>
+    EXTENSIONS.filter((ext) => !verdict(listingCapabilities(`x.${ext}`, code))).map(
+      (ext) => `${name} (.${ext})`,
+    ),
+  );
+
 test('the detector refuses every way to reach a directory listing and accepts plain file reads', () => {
-  for (const [name, code] of Object.entries(REFUSED))
-    assert.notEqual(listingCapabilities('x.mjs', code).length, 0, `not refused: ${name}`);
-  for (const [name, code] of Object.entries(ACCEPTED))
-    assert.deepEqual(listingCapabilities('x.mjs', code), [], `refused: ${name}`);
+  assert.deepEqual(
+    wrong({ ...REFUSED, ...ESCAPED_BEFORE, ...ESCAPED_LATER }, (found) => found.length > 0),
+    [],
+    'not refused',
+  );
+  assert.deepEqual(
+    wrong(ACCEPTED, (found) => found.length === 0),
+    [],
+    'refused',
+  );
   assert.notEqual(
     listingCapabilities('x.ts', 'const x: number = readdirSync(d).length;').length,
     0,
@@ -910,8 +1110,8 @@ test('the detector refuses every way to reach a directory listing and accepts pl
 });
 
 /**
- * Files that use a directory-listing API (or hold an fs module the guard cannot follow) and predate
- * the inventory. Each only shrinks: moving a file onto `authoredFiles` removes its line, and a file
+ * Files that use a directory-listing API, hold an fs module the guard cannot follow, or (FU-126) acquire
+ * a module, `process` or the global object in a way it cannot prove, and predate the inventory. Each only shrinks: moving a file onto `authoredFiles` removes its line, and a file
  * anywhere else fails the scan below. Generated output exists only under `services/<name>/src/generated`,
  * so a lister is out of reach of the race only when it lists a tree that cannot contain it
  * (NO_GENERATED_TREE). The ten walkers that pruned `generated` by name were migrated onto
@@ -1022,10 +1222,52 @@ const OTHER_CAPABILITY = [
   'services/fleet-service/test/ownership-generation-rollback.int-spec.ts',
   'tests/e2e/src/expect.test.ts',
 ];
+// FU-126: loads a repository module (a workspace package's `dist/index.js`, a config, a fixture) by a path
+// BUILT at run time. A non-literal specifier is unproven (`require(resolve())` may name fs: PR #772 r2 F1),
+// so the file is listed instead of trusted. Each only shrinks; a literal `require('./x')` needs no row.
+
+const LOADS_BY_BUILT_PATH = [
+  'apps/web/src/app/demo-mode-pages.spec.ts',
+  'apps/web/src/app/organization-switch.spec.ts',
+  'apps/web/src/token-roles-screens.spec.ts',
+  'packages/observability/src/__tests__/telemetry-boundary.fixture.ts',
+  'scripts/check-db-runtime-privileges-boundary.pg.test.mjs',
+  'scripts/check-kafka-topic-limits.mjs',
+  'scripts/create-topics.broker.test.mjs',
+  'scripts/dead-letter-escape.broker.test.mjs',
+  'scripts/kafka-acl-generate.mjs',
+  'scripts/kafka-topic-limits-lib.test.mjs',
+  'scripts/outbox-b2-backfill.mjs',
+  'scripts/outbox-b2-backfill.pg.test.mjs',
+  'scripts/outbox-b2-prisma-port.mjs',
+  'scripts/outbox-b3-protocol.pg.test.mjs',
+  'scripts/replay-dlq-lib.test.mjs',
+  'scripts/replay-dlq.mjs',
+  'scripts/runtime-preflight.e2e.mjs',
+  'scripts/verify-test-independence.mjs',
+  'services/economic-service/test/settlement-acting-organization-rollback.int-spec.ts',
+];
+// FU-126: hands `process` / the global object on (dependency injection, a registry on `process`, an
+// `Object.assign(globalThis, ...)` test setup), reads an internal on purpose (`_getActiveHandles`), names an
+// escape as test data (a table of code snippets), or starts worker threads (`new Worker(code)` can eval).
+
+const PASSES_GLOBALS_ON = [
+  'apps/web/src/test/build-controller.mjs', // also loads the supervisor by a built URL
+  'apps/web/src/test/setup.ts',
+  'packages/config/src/command-failure.js',
+  'packages/nest-common/src/lifecycle/graceful-shutdown.ts',
+  'packages/testing/src/disclosure-guard.ts',
+  'scripts/raw-http-boundary-rule.test.mjs',
+  'scripts/test-stall-watchdog-worker.mjs',
+  'scripts/test-stall-watchdog.mjs',
+  'services/document-service/test/outbox-durable-claim.int-spec.ts',
+];
 const LISTING_ALLOWED = new Set([
   ...NO_GENERATED_TREE,
   ...COVERS_GENERATED_ON_PURPOSE,
   ...OTHER_CAPABILITY,
+  ...LOADS_BY_BUILT_PATH,
+  ...PASSES_GLOBALS_ON,
 ]);
 
 const trackedSources = () =>
@@ -1057,7 +1299,11 @@ test('a directory-listing capability outside the inventory is refused unless the
   );
   assert.equal(
     LISTING_ALLOWED.size,
-    NO_GENERATED_TREE.length + 3 + OTHER_CAPABILITY.length,
+    NO_GENERATED_TREE.length +
+      COVERS_GENERATED_ON_PURPOSE.length +
+      OTHER_CAPABILITY.length +
+      LOADS_BY_BUILT_PATH.length +
+      PASSES_GLOBALS_ON.length,
     'a file is listed twice',
   );
   // The walker #741 delegates to (scripts/testing-dev-only-source.mjs) is seen like any other.
