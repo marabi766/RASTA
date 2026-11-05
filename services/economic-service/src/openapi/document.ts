@@ -1,11 +1,15 @@
+import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
 import type { z } from 'zod';
 import {
+  applyOperationSecurity,
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
+  routeAccessByOperation,
   toJsonSchema as sharedToJsonSchema,
   type JsonSchema,
+  type ServiceRouteUsers,
 } from '@rasta/nest-common';
 import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
@@ -274,7 +278,8 @@ const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
 };
 
 /**
- * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4),
+ * The same statuses on the routes that refuse every user (`users-refused` in
+ * `SERVICE_ROUTES`, ADR-061 § 4),
  * which answer one named service and no user at all.
  */
 const INTERNAL_STATUS_TEXT: Record<number, string> = {
@@ -283,22 +288,34 @@ const INTERNAL_STATUS_TEXT: Record<number, string> = {
 };
 
 /**
- * The internal routes' credential: a service's internal token in
- * `X-Internal-Token` and nothing else. `AuthGuard` judges a request that also
- * carries `Authorization` on that bearer token, as a user — so the internal
- * routes cannot be described by the bearer scheme.
+ * Every `@AllowService` route (FU-075) and whether a user token is still
+ * admitted there. Which token a route takes is read from the guard's own
+ * metadata (`applyOperationSecurity`, @rasta/nest-common); this table states
+ * only what no decorator does — `users-refused` is enforced in the service
+ * (`statement-obligation.ts`) — and must match the decorators exactly.
  */
-export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/wallets/me': 'users-accepted',
+  'GET /v1/transactions': 'users-accepted',
+  'GET /v1/transactions/{id}': 'users-accepted',
+  'POST /v1/transactions': 'users-accepted',
+  'POST /v1/transactions/{id}/authorise-settlement': 'users-accepted',
+  'POST /v1/transactions/{id}/dispute': 'users-accepted',
+  'POST /v1/transactions/{id}/resolve-dispute': 'users-accepted',
+  'POST /v1/transactions/{id}/refund': 'users-accepted',
+  'POST /v1/transactions/{id}/cancel': 'users-accepted',
+  'POST /v1/settlements': 'users-accepted',
+  'GET /v1/settlements': 'users-accepted',
+  'GET /v1/internal/obligations/by-source/STATEMENT/{statementId}': 'users-refused',
+};
 
-const INTERNAL_TOKEN_SECURITY_SCHEME = {
-  type: 'apiKey',
-  in: 'header',
-  name: 'X-Internal-Token',
-  description:
-    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
-} as const;
-
-const isInternalPath = (path: string): boolean => path.startsWith('/v1/internal/');
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 /**
  * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
@@ -352,19 +369,15 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   })) {
     document.components.schemas[name] = schema as never;
   }
-  document.components.securitySchemes ??= {};
-  document.components.securitySchemes[INTERNAL_TOKEN_SCHEME] = INTERNAL_TOKEN_SECURITY_SCHEME;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
-      const internal = isInternalPath(path);
-
-      // Only the internal token reaches an internal route; a bearer token there
-      // is a user, and refused.
-      if (internal) operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
+      // A route only a service may call has its own 403/404 text; its security
+      // is `publishOperationSecurity`'s, from the guard's metadata.
+      const internal = SERVICE_ROUTES[key] === 'users-refused';
 
       const body = REQUEST_BODIES[key];
       if (body) {
@@ -474,7 +487,6 @@ function toQueryParameters(schema: JsonSchema): Record<string, unknown>[] {
 }
 
 interface MutableOperation {
-  security?: Record<string, string[]>[];
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;
