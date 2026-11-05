@@ -83,12 +83,19 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  *     target — one resolver, each in terms of the other). A name; a variable holds EVERY
  *     value written to it (`let g; g = globalThis`); the right side of a declaration or
  *     assignment, so a CHAIN (`({ [k]: C } = g = globalThis)`) is worth its right-most value;
- *     a sequence, a conditional, a logical expression, a type assertion; a spread copy; a
+ *     a sequence, a conditional, a logical expression, a logical assignment (`g ||= x` is worth
+ *     `x` or what `g` already held), a type assertion; a spread copy; a
  *     member of a literal object or array (`box.g[k]`, `list[0][k]`) or of the global
  *     (`globalThis.global`); a default (`function f({ [k]: C } = globalThis)`); a `for…of`
  *     head over a literal array; a nested pattern over a literal object or array; an object
  *     pattern over a literal ARRAY by index (`({ 0: { [k]: C } } = [globalThis])`); a REST
- *     element, which takes the rest of the array (`([...[{ [k]: C }]] = [globalThis])`).
+ *     element, which takes the rest of the array (`([...[{ [k]: C }]] = [globalThis])`); a
+ *     member a literal object INHERITS from `__proto__: v`; a class's static field (its own or
+ *     its superclass's); a TypeScript namespace's export; a member of the `timers` module that
+ *     is the module again (`t.default`, `t.promises`, `import { default as t }`); a window
+ *     reached from the global (`window.parent`, `.top`, `.opener`, `frames[0]`). A member the
+ *     resolver cannot place (`globalThis.host`, `t.scheduler`, a static getter or block) is not
+ *     provable, never "something else" (FU-001 r1 F1).
  *     The answer is a set of kinds: the global object, the `timers` module, provably
  *     something else (a literal, a function, a platform name such as `process`), not
  *     provable (a parameter, a call, an import, `this`, `await`), or EXHAUSTED.
@@ -108,10 +115,12 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  *     targets), a `for…in`/`for…of` target, `delete g[k]`.
  *   - **What is not a name** (`keyKind`). Only a key PROVABLY numeric, bigint or
  *     symbol: numeric/bigint literals, unary `+ - ~` and arithmetic/bitwise of provable
- *     numerics, `NaN`/`Infinity`, `Number(…)`/`BigInt(…)`, `Math.<fn>(…)`,
- *     `Number.parseInt/parseFloat(…)`, `Math.PI` / `Number.MAX_SAFE_INTEGER`-style
- *     constants — these identifiers only when they resolve to the unshadowed global —
- *     `Symbol(…)`, `Symbol.for(…)`, `Symbol.<x>`, a constant alias of any of these, a
+ *     numerics, `NaN`/`Infinity`, `Number(…)`/`BigInt(…)`, a numeric `Math.<fn>(…)` (the
+ *     specification's function members only — not `Math.toString()` or
+ *     `Math.constructor(…)`), `Number.parseInt/parseFloat(…)`, `Math.PI` /
+ *     `Number.MAX_SAFE_INTEGER`-style constants — these identifiers only when they resolve
+ *     to the unshadowed global — `Symbol(…)`, `Symbol.for(…)`, a well-known
+ *     `Symbol.<x>` (not `Symbol.name`), a constant alias of any of these, a
  *     conditional whose branches both are. Everything else (`x - 1`, `-x`, `String(1)`, a
  *     shadowed `Number`) could name a global and is refused.
  * - **Allowed:** `AbortSignal.timeout(…)` (no timer to clear; the deadline
@@ -147,8 +156,8 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  *   through `Reflect.get`, a member added to a literal container after it was written
  *   (`box.g = globalThis`, `list.push(globalThis)`, `Object.assign(box, …)`). (A computed key in a destructuring PATTERN over such a value is
  *   refused instead; see C — except through such an added member.) The resolver follows variables of the module only, treats an
- *   undeclared name other than `globalThis`, `window`, `self`, `global`, `frames` as a
- *   platform name (`process`), and does not model getters or proxies.
+ *   undeclared name other than `globalThis`, `window`, `self`, `global`, `frames`, `parent`,
+ *   `top`, `opener` as a platform name (`process`), and does not model getters or proxies.
  *
  * The forms that are plausibly accidental are closed: any value that resolves to the
  * global object (an alias, a reassigned variable, a chain of assignments, a literal
@@ -208,8 +217,21 @@ export const TIMER_ABORT_MODULES = Object.freeze({
 
 const TIMER_NAMES = new Set(['setTimeout']);
 const ABORT_CONTROLLER = 'AbortController';
-/** Names of the global object: a timer or controller reached by member. */
-const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'global', 'frames']);
+/**
+ * Names that hold the global object (or another window, which carries its own timer and
+ * controller): a timer or controller reached by member. Both as an undeclared name and as a
+ * member of the global object — `window.parent`, `top`, `opener` are windows (FU-001 r1 F1).
+ */
+const GLOBAL_OBJECTS = new Set([
+  'globalThis',
+  'window',
+  'self',
+  'global',
+  'frames',
+  'parent',
+  'top',
+  'opener',
+]);
 /** Wrappers that say the same value again: type assertions, non-null, optional chains. */
 const TYPE_WRAPPERS = new Set([
   'TSAsExpression',
@@ -219,8 +241,42 @@ const TYPE_WRAPPERS = new Set([
   'ChainExpression',
 ]);
 
+/**
+ * Members of the global object that the platform defines and that are provably not a window
+ * (`globalThis.process`, like the bare name `process`, is a platform name). Any other member
+ * of the global object is not provably something else — `globalThis.host` may hold anything —
+ * so it is unknown, never 'other' (FU-001 r1 F1).
+ */
+const PLATFORM_MEMBERS = new Set([
+  'Array',
+  'Buffer',
+  'JSON',
+  'Math',
+  'Number',
+  'Object',
+  'Promise',
+  'String',
+  'Symbol',
+  'URL',
+  'console',
+  'process',
+]);
 /** `timers` and `timers/promises`, with or without the `node:` prefix. */
 const TIMERS_MODULE = /^(?:node:)?timers(?:\/promises)?$/;
+/**
+ * Members of a `timers` module that are a `timers` module again: `default` (the module
+ * itself, through ESM interop) and `timers.promises` (FU-001 r1 F1). Any other member is
+ * provably not a host only when it is one of {@link TIMER_FUNCTIONS}; else it is unknown.
+ */
+const TIMERS_SELF = new Set(['default', 'promises']);
+const TIMER_FUNCTIONS = new Set([
+  'setTimeout',
+  'clearTimeout',
+  'setInterval',
+  'clearInterval',
+  'setImmediate',
+  'clearImmediate',
+]);
 
 const FOLD_DEPTH = 8;
 
@@ -237,6 +293,75 @@ const NUMBER_CONSTANTS = new Set([
   'NaN',
   'NEGATIVE_INFINITY',
   'POSITIVE_INFINITY',
+]);
+/**
+ * `Math.<f>(…)` calls that return a number whatever they are given: the function members
+ * of the specification's `Math` (ES2025, plus `f16round` / `sumPrecise`), and nothing else.
+ * `Math` is an ordinary object, so `Math.toString()`, `Math.valueOf()`,
+ * `Math.constructor('AbortController')` and `Math.hasOwnProperty(x)` are calls too — a
+ * string, an object, a boolean — and an unknown name proves nothing (FU-001).
+ */
+const MATH_FUNCTIONS = new Set([
+  'abs',
+  'acos',
+  'acosh',
+  'asin',
+  'asinh',
+  'atan',
+  'atan2',
+  'atanh',
+  'cbrt',
+  'ceil',
+  'clz32',
+  'cos',
+  'cosh',
+  'exp',
+  'expm1',
+  'f16round',
+  'floor',
+  'fround',
+  'hypot',
+  'imul',
+  'log',
+  'log10',
+  'log1p',
+  'log2',
+  'max',
+  'min',
+  'pow',
+  'random',
+  'round',
+  'sign',
+  'sin',
+  'sinh',
+  'sqrt',
+  'sumPrecise',
+  'tan',
+  'tanh',
+  'trunc',
+]);
+/**
+ * The well-known symbols: the members of the global `Symbol` that are symbols. Any other
+ * member is not one (`Symbol.name` is a string, `Symbol.for` a function, `Symbol.prototype`
+ * an object) and is not proof (FU-001, the sibling of {@link MATH_FUNCTIONS}).
+ */
+const WELL_KNOWN_SYMBOLS = new Set([
+  'asyncDispose',
+  'asyncIterator',
+  'dispose',
+  'hasInstance',
+  'isConcatSpreadable',
+  'iterator',
+  'match',
+  'matchAll',
+  'metadata',
+  'replace',
+  'search',
+  'species',
+  'split',
+  'toPrimitive',
+  'toStringTag',
+  'unscopables',
 ]);
 /** `Number.<f>(…)` calls that return a number whatever they are given. */
 const NUMBER_PARSERS = new Set(['parseFloat', 'parseInt']);
@@ -378,7 +503,7 @@ export default {
           if (callee.type === 'MemberExpression' && !callee.computed) {
             const method = callee.property.name;
             const owner = unwrapped(callee.object);
-            if (isUnshadowedGlobal(owner, 'Math')) return 'numeric';
+            if (isUnshadowedGlobal(owner, 'Math') && MATH_FUNCTIONS.has(method)) return 'numeric';
             if (isUnshadowedGlobal(owner, 'Number') && NUMBER_PARSERS.has(method)) {
               return 'numeric';
             }
@@ -395,8 +520,10 @@ export default {
           return undefined;
         }
         case 'MemberExpression': {
-          if (isUnshadowedGlobal(at.object, 'Symbol')) return 'symbol';
           const member = at.computed ? undefined : at.property.name;
+          if (isUnshadowedGlobal(at.object, 'Symbol') && WELL_KNOWN_SYMBOLS.has(member)) {
+            return 'symbol';
+          }
           if (isUnshadowedGlobal(at.object, 'Math') && MATH_CONSTANTS.has(member)) return 'numeric';
           if (isUnshadowedGlobal(at.object, 'Number') && NUMBER_CONSTANTS.has(member)) {
             return 'numeric';
@@ -490,11 +617,14 @@ export default {
         case 'Variable':
           return []; // its values are its writes
         case 'FunctionName':
-        case 'ClassName':
         case 'TSEnumName':
-        case 'TSModuleName':
         case 'Type':
           return only('other');
+        // A class (its static fields) and a namespace (its exports) are containers whose
+        // members can still be selected (FU-001 r1 F1).
+        case 'ClassName':
+        case 'TSModuleName':
+          return [{ c: def.node, offset: 0 }];
         case 'ImportBinding': {
           const { node } = def;
           if (node.type === 'TSImportEqualsDeclaration') {
@@ -506,13 +636,20 @@ export default {
                   : 'unknown',
               );
             }
-            // `import g = globalThis` / `import t = timersAlias`; a qualified name
-            // (`import t = ns.member`) is a member, not a host this rule can name.
-            return reference?.type === 'Identifier'
-              ? valuesOf(reference, run, depth + 1)
-              : only('unknown');
+            // `import g = globalThis` / `import t = timersAlias` / `import t = ns.default`:
+            // a name or a qualified member, resolved like a member access.
+            return valuesOf(reference, run, depth + 1);
           }
-          if (node.type === 'ImportSpecifier') return only('unknown');
+          if (node.type === 'ImportSpecifier') {
+            // `import { default as t }` / `import { promises as t }` from a timers module is
+            // that module's member, selected like `t.default` (FU-001 r1 F1).
+            const source =
+              def.parent?.type === 'ImportDeclaration' ? def.parent.source?.value : undefined;
+            if (typeof source !== 'string' || !TIMERS_MODULE.test(source)) return only('unknown');
+            const imported =
+              node.imported.type === 'Identifier' ? node.imported.name : node.imported.value;
+            return memberOf(only('timers'), imported, run, depth + 1);
+          }
           // Default / namespace specifier: the declaration holds the module.
           const source =
             def.parent?.type === 'ImportDeclaration' ? def.parent.source?.value : undefined;
@@ -525,13 +662,48 @@ export default {
       }
     };
 
+    /**
+     * The first name of every dotted namespace (`namespace A.B { … }`): the scope manager
+     * declares no variable for it, so without this it would read as a platform name. It is
+     * not modelled: unknown (FU-001 r1 F1).
+     */
+    let dottedNamespaceRoots;
+    const isDottedNamespaceRoot = (name) => {
+      if (!dottedNamespaceRoots) {
+        dottedNamespaceRoots = new Set();
+        const keys = sourceCode.visitorKeys;
+        const walk = (node) => {
+          if (node.type === 'TSModuleDeclaration' && node.id.type === 'TSQualifiedName') {
+            let left = node.id;
+            while (left.type === 'TSQualifiedName') left = left.left;
+            dottedNamespaceRoots.add(left.name);
+          }
+          for (const key of keys[node.type] ?? []) {
+            const child = node[key];
+            for (const each of Array.isArray(child) ? child : [child]) {
+              if (each && typeof each.type === 'string') walk(each);
+            }
+          }
+        };
+        walk(sourceCode.ast);
+      }
+      return dottedNamespaceRoots.has(name);
+    };
+
     /** What a name holds: its definitions, plus the value of EVERY write to it. */
     const identifierValues = (identifier, run, depth) => {
       const variable = variableOf(identifier);
       if (!variable || variable.defs.length === 0) {
         // A name the module does not declare: a global object by name, else a platform name.
+        if (isDottedNamespaceRoot(identifier.name)) return only('unknown');
         return only(GLOBAL_OBJECTS.has(identifier.name) ? 'global' : 'other');
       }
+      return variableValues(variable, run, depth);
+    };
+
+    /** What a declared variable holds: its definitions, plus the value of EVERY write to it. */
+    const variableValues = (variable, run, depth) => {
+      if (spent(run, depth)) return only('exhausted');
       if (run.active.has(variable)) return []; // a cycle adds nothing new
       run.active.add(variable);
       try {
@@ -569,28 +741,123 @@ export default {
         if (item.c?.type === 'ArrayExpression') {
           return arrayElements(item.c, item.offset, undefined, run, depth + 1);
         }
-        if (item.c) {
-          // A literal object is not iterable — unless it brings its own iterator.
-          return item.c.properties.some((member) => isSpread(member) || member.computed)
+        if (item.c?.type === 'ObjectExpression') {
+          // A literal object is not iterable — unless it brings (or inherits) its own iterator.
+          return item.c.properties.some(
+            (member) => isSpread(member) || member.computed || isPrototypeSetter(member),
+          )
             ? only('unknown')
             : [];
         }
+        if (item.c && isClass(item.c)) {
+          // A class is iterable only by a static iterator (a computed member) or one a static
+          // block or its superclass gives it.
+          return item.c.superClass ||
+            item.c.body.body.some(
+              (member) => member.type === 'StaticBlock' || (member.static && member.computed),
+            )
+            ? only('unknown')
+            : [];
+        }
+        if (item.c) return []; // a namespace object: its exports are not an iterator
         return item.k === 'global' || item.k === 'timers' ? [] : [item];
       });
+
+    const isClass = (node) => node.type === 'ClassDeclaration' || node.type === 'ClassExpression';
+
+    /** `__proto__: v` in an object literal (not computed, not shorthand, not a method) sets its prototype. */
+    const isPrototypeSetter = (member) =>
+      member.type === 'Property' &&
+      member.kind === 'init' &&
+      !member.computed &&
+      !member.shorthand &&
+      !member.method &&
+      keyName(member.key, false) === '__proto__';
+
+    /**
+     * The static member `name` (undefined: any) of a class: a static field's initializer, a
+     * static method (a function), a static getter (not modelled: unknown), what the
+     * superclass holds under that name; a static block may write any static (unknown).
+     */
+    const staticMemberOf = (cls, name, run, depth) => {
+      const items = cls.superClass
+        ? memberOf(valuesOf(cls.superClass, run, depth + 1), name, run, depth + 1)
+        : [];
+      for (const member of cls.body.body) {
+        if (member.type === 'StaticBlock') {
+          items.push(...only('unknown'));
+          continue;
+        }
+        // An index signature has no key and holds nothing; a private name is not selectable.
+        if (!member.static || !member.key || member.key.type === 'PrivateIdentifier') continue;
+        const own = keyName(member.key, member.computed);
+        if (name !== undefined && own !== undefined && own !== name) continue;
+        if (member.type === 'PropertyDefinition' || member.type === 'AccessorProperty') {
+          // `declare static g: T` is written elsewhere: not provable.
+          if (member.value) items.push(...valuesOf(member.value, run, depth + 1));
+          else if (member.declare) items.push(...only('unknown'));
+        } else if (member.type === 'MethodDefinition' && member.kind === 'method') {
+          items.push(...only('other'));
+        } else {
+          items.push(...only('unknown'));
+        }
+      }
+      return items;
+    };
+
+    /**
+     * The export `name` (undefined: any) of a TypeScript namespace: the variable each
+     * exported declaration declares, followed like any variable. A dotted namespace or one
+     * without a block, and `export { … }`, are not modelled: unknown.
+     */
+    const namespaceMemberOf = (namespace, name, run, depth) => {
+      if (namespace.id.type !== 'Identifier' || namespace.body?.type !== 'TSModuleBlock') {
+        return only('unknown');
+      }
+      const items = [];
+      for (const statement of namespace.body.body) {
+        if (statement.type !== 'ExportNamedDeclaration') continue;
+        if (!statement.declaration) {
+          items.push(...only('unknown'));
+          continue;
+        }
+        for (const variable of sourceCode.scopeManager.getDeclaredVariables(
+          statement.declaration,
+        )) {
+          if (name === undefined || variable.name === name) {
+            items.push(...variableValues(variable, run, depth + 1));
+          }
+        }
+      }
+      return items;
+    };
 
     /** The member named `name` (undefined: any member) of each item. */
     const memberOf = (items, name, run, depth) =>
       items.flatMap((item) => {
+        if (spent(run, depth)) return only('exhausted');
         if (item.c?.type === 'ObjectExpression') {
           return item.c.properties.flatMap((member) => {
             if (isSpread(member)) {
               return memberOf(valuesOf(member.argument, run, depth + 1), name, run, depth + 1);
+            }
+            if (isPrototypeSetter(member)) {
+              // `{ __proto__: host }`: every other name is inherited from `host` (FU-001 r1 F1).
+              const proto = valuesOf(member.value, run, depth + 1);
+              const inherited = memberOf(proto, name, run, depth + 1);
+              return name === undefined || name === '__proto__'
+                ? [...proto, ...inherited]
+                : inherited;
             }
             const own = keyName(member.key, member.computed);
             return name === undefined || own === undefined || own === name
               ? valuesOf(member.value, run, depth + 1)
               : [];
           });
+        }
+        if (item.c && isClass(item.c)) return staticMemberOf(item.c, name, run, depth + 1);
+        if (item.c?.type === 'TSModuleDeclaration') {
+          return namespaceMemberOf(item.c, name, run, depth + 1);
         }
         if (item.c) {
           // A literal array: an index names an element; `length`, `map`, … name none.
@@ -602,11 +869,19 @@ export default {
         }
         switch (item.k) {
           case 'global':
-            return only(
-              name === undefined ? 'unknown' : GLOBAL_OBJECTS.has(name) ? 'global' : 'other',
-            );
+            // A window (`globalThis.window`, `window.parent`, `frames[0]`), or any member by a
+            // name nobody can read, is the global object (or carries its own); any other member
+            // (`globalThis.host`) is not provably something else — unknown, never 'other' —
+            // unless it is a platform name ({@link PLATFORM_MEMBERS}).
+            if (name === undefined || GLOBAL_OBJECTS.has(name) || ARRAY_INDEX.test(name)) {
+              return only('global');
+            }
+            return only(PLATFORM_MEMBERS.has(name) ? 'other' : 'unknown');
           case 'timers':
-            return only(name === undefined ? 'unknown' : 'other');
+            // `t.default`, `t.promises`: the timers module again; a timer function is a
+            // function; anything else is not provable (FU-001 r1 F1).
+            if (name !== undefined && TIMERS_SELF.has(name)) return only('timers');
+            return only(name !== undefined && TIMER_FUNCTIONS.has(name) ? 'other' : 'unknown');
           default:
             return [item]; // a member of something provably other / unknown is that again
         }
@@ -636,8 +911,11 @@ export default {
       const next = (child) => valuesOf(child, run, depth + 1);
       switch (at.type) {
         case 'AssignmentExpression':
-          // `a = b = globalThis`: an assignment is worth its right side.
-          if (at.operator === '=' || LOGICAL_ASSIGNMENTS.has(at.operator)) return next(at.right);
+          // `a = b = globalThis`: a plain assignment is worth its right side.
+          if (at.operator === '=') return next(at.right);
+          // `g ||= x`, `g &&= x`, `g ??= x`: worth the right side OR the value the target
+          // already held (it is kept when it short-circuits) — both, fail closed (FU-001).
+          if (LOGICAL_ASSIGNMENTS.has(at.operator)) return [...next(at.left), ...next(at.right)];
           return only('other'); // arithmetic compound assignment
         case 'SequenceExpression':
           return next(at.expressions.at(-1));
@@ -648,13 +926,24 @@ export default {
         case 'Identifier':
           return identifierValues(at, run, depth);
         case 'ObjectExpression': {
-          // A spread copy carries what it copies.
+          // A spread copy carries what it copies; a `__proto__: host` inherits what it is
+          // (`{ __proto__: globalThis }.AbortController` is the controller — FU-001 r1 F1).
           const copied = at.properties
-            .filter(isSpread)
-            .flatMap((member) => next(member.argument))
+            .flatMap((member) =>
+              isSpread(member)
+                ? next(member.argument)
+                : isPrototypeSetter(member)
+                  ? next(member.value)
+                  : [],
+            )
             .filter((item) => item.k !== undefined && item.k !== 'other');
           return [{ c: at, offset: 0 }, ...copied];
         }
+        case 'ClassExpression':
+          return [{ c: at, offset: 0 }];
+        case 'TSQualifiedName':
+          // `import t = timers.default`: the member `default` of `timers`.
+          return memberOf(next(at.left), at.right.name, run, depth + 1);
         case 'ArrayExpression':
           return [{ c: at, offset: 0 }];
         case 'MemberExpression':
@@ -663,7 +952,6 @@ export default {
         case 'TemplateLiteral':
         case 'FunctionExpression':
         case 'ArrowFunctionExpression':
-        case 'ClassExpression':
         case 'UnaryExpression':
         case 'BinaryExpression':
         case 'UpdateExpression':
@@ -881,7 +1169,7 @@ export default {
       // TypeScript import-equals alias of the member itself, named like a member access.
       TSImportEqualsDeclaration(node) {
         const reference = node.moduleReference;
-        if (reference?.type !== 'TSQualifiedName' || reference.left.type !== 'Identifier') return;
+        if (reference?.type !== 'TSQualifiedName') return;
         const name = reference.right.name;
         if (TIMER_NAMES.has(name) && isTimerHost(reference.left)) note(timers, node, name);
         if (name === ABORT_CONTROLLER && isGlobalObject(reference.left)) {

@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { errorEnvelopeProblems } from '@rasta/nest-common';
+import { organizationIdSchema } from '@rasta/contracts';
+import { searchSuppliersQuerySchema } from '../supplier/dto';
 import { enrichOpenApiDocument } from './document';
 
 /**
@@ -189,7 +191,72 @@ describe('query parameters', () => {
       (parameter: { name: string }) => parameter.name,
     );
 
-    expect(names.sort()).toEqual(['capability', 'cursor', 'limit', 'qualifiedFor', 'status']);
+    expect(names.sort()).toEqual([
+      'capability',
+      'cursor',
+      'limit',
+      'organizationId',
+      'qualifiedFor',
+      'status',
+    ]);
+  });
+
+  it('publishes organizationId as an optional bounded list of organization ids (FU-019)', () => {
+    const document = enrichOpenApiDocument(withPaths({ '/v1/suppliers': { get: {} } }));
+    const parameter = (
+      op(document, '/v1/suppliers', 'get').parameters as {
+        name: string;
+        required: boolean;
+        schema: { type: string; minItems: number; maxItems: number };
+      }[]
+    ).find((p) => p.name === 'organizationId');
+
+    expect(parameter?.required).toBe(false);
+    expect(parameter?.schema).toMatchObject({ type: 'array', minItems: 1, maxItems: 200 });
+  });
+
+  it('publishes the item pattern the runtime enforces, so both refuse the same ids (PR 699 F2)', () => {
+    const document = enrichOpenApiDocument(withPaths({ '/v1/suppliers': { get: {} } }));
+    const schema = (
+      op(document, '/v1/suppliers', 'get').parameters as {
+        name: string;
+        schema: { anyOf?: { type: string; items?: { type: string; pattern?: string } }[] };
+      }[]
+    ).find((p) => p.name === 'organizationId')?.schema;
+    // Every branch the converter publishes — the single string and the array —
+    // carries the pattern; a bare `{"type":"string"}` anywhere is the bug.
+    const strings: { pattern?: string }[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (typeof node !== 'object' || node === null) return;
+      if ((node as { type?: string }).type === 'string') strings.push(node);
+      Object.values(node).forEach(walk);
+    };
+    walk(schema);
+    expect(strings.length).toBeGreaterThan(0);
+    const patterns = strings.map((node) => node.pattern);
+    expect(patterns.every((pattern) => pattern !== undefined)).toBe(true);
+
+    const published = new RegExp(patterns[0] as string);
+    const runtime = (id: string) =>
+      searchSuppliersQuerySchema.safeParse({ organizationId: id }).success;
+    for (const bad of [
+      'bad',
+      '',
+      'ORG_1',
+      'org-lower',
+      'ORG_01JBQ0000000000000000000AI',
+      'X'.repeat(60),
+    ]) {
+      expect([bad, runtime(bad)]).toEqual([bad, false]);
+      expect([bad, published.test(bad)]).toEqual([bad, false]);
+      expect([bad, organizationIdSchema.safeParse(bad).success]).toEqual([bad, false]);
+    }
+    for (const good of ['ORG_01JBQ0000000000000000000AA', 'ORG-UNION-YAZD', 'ORG-BATCH-7']) {
+      expect([good, runtime(good)]).toEqual([good, true]);
+      expect([good, published.test(good)]).toEqual([good, true]);
+      expect([good, organizationIdSchema.safeParse(good).success]).toEqual([good, true]);
+    }
   });
 
   it('marks the capability required on ListQualifiedFor', () => {

@@ -102,6 +102,18 @@ describe('overrides', () => {
     ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
   });
 
+  it('has no deduction writer by default, nor any approver or four-eyes setting (CON-003-1, D-115)', () => {
+    const env = load();
+    expect(env.CONTRACT_DEDUCTION_WRITER_ROLES).toEqual([]);
+    expect(Object.keys(env).filter((key) => /DEDUCTION/.test(key))).toEqual([
+      'CONTRACT_DEDUCTION_WRITER_ROLES',
+    ]);
+    expect(
+      load({ CONTRACT_DEDUCTION_WRITER_ROLES: 'ORGANIZATION_ADMIN' })
+        .CONTRACT_DEDUCTION_WRITER_ROLES,
+    ).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
   it('accepts an empty cancel list (nobody) and four eyes switched off', () => {
     const env = load({ CONTRACT_CANCEL_ROLES: '', CONTRACT_POLICY_FOUR_EYES: 'false' });
     expect(env.CONTRACT_CANCEL_ROLES).toEqual([]);
@@ -115,6 +127,12 @@ describe('overrides', () => {
     ['an organization timeout under 100 ms', { CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '10' }],
     ['SYSTEM_ADMIN among the amenders', { CONTRACT_AMENDMENT_ROLES: 'SYSTEM_ADMIN' }],
     ['AUDITOR among the milestone planners', { CONTRACT_MILESTONE_ROLES: 'AUDITOR' }],
+    ['a contractor among the deduction writers', { CONTRACT_DEDUCTION_WRITER_ROLES: 'CONTRACTOR' }],
+    [
+      'SYSTEM_ADMIN among the deduction writers',
+      { CONTRACT_DEDUCTION_WRITER_ROLES: 'SYSTEM_ADMIN' },
+    ],
+    ['AUDITOR among the deduction writers', { CONTRACT_DEDUCTION_WRITER_ROLES: 'AUDITOR' }],
     ['no amendment reason', { CONTRACT_AMENDMENT_REASON_CODES: '' }],
     ['an amendment reason that is not a code', { CONTRACT_AMENDMENT_REASON_CODES: 'lower case' }],
     ['an amendment reason twice', { CONTRACT_AMENDMENT_REASON_CODES: 'OTHER,OTHER' }],
