@@ -1,10 +1,15 @@
+import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
 import {
+  applyOperationSecurity,
+  INTERNAL_TOKEN_SCHEME,
   isOptionalField,
   objectShapeOf,
   publishedApiErrorSchema,
+  routeAccessByOperation,
   toJsonSchema,
+  type ServiceRouteUsers,
 } from '@rasta/nest-common';
 import {
   approveQualificationSchema,
@@ -124,24 +129,42 @@ const ERROR_DESCRIPTIONS: Record<number, string> = {
   500: 'Unexpected server error',
 };
 
+/**
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`access.ts`, `assertCallerIsConstructionService` and
+ * `assertCallerMayReadStandingOf`) — and must match the decorators exactly.
+ */
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/suppliers/standing-snapshot': 'users-refused',
+  'GET /v1/suppliers/standing-snapshot/{organizationId}': 'users-refused',
+};
+
+/**
+ * The published `security` of every operation, from the guard's metadata on `app`. The scheme's
+ * text is this service's own: its service tokens are signed for no tenant, not for one.
+ */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+  const scheme = document.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME] as {
+    description?: string;
+  };
+  scheme.description =
+    'A signed internal service token minted for supplier-service and for no tenant: by ' +
+    'construction-service for the standing snapshot routes, or by procurement-service for ' +
+    'the single-organization one, sent without an `Authorization` header. Those routes ' +
+    'accept it and nothing else.';
+  return document;
+}
+
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
-  // The standing routes are not bearer-authenticated: construction-service reaches them
-  // with a signed internal service token (ADR-020/035), signed for no tenant. Publishing
-  // them under the bearer scheme would describe a door that does not exist and hide the
-  // one that does.
-  document.components.securitySchemes ??= {};
-  document.components.securitySchemes.internalToken = {
-    type: 'apiKey',
-    in: 'header',
-    name: 'x-internal-token',
-    description:
-      'A signed internal service token minted for supplier-service and for no tenant: by ' +
-      'construction-service for the standing snapshot routes, or by procurement-service for ' +
-      'the single-organization one. Those routes accept it and nothing else.',
-  } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -149,19 +172,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
-      // Every operation requires a bearer token, stated on the operation
-      // rather than only in `components.securitySchemes`.
-      //
-      // `DocumentBuilder.addBearerAuth()` *declares* the scheme; it does not
-      // apply it. Without this the published contract describes a service whose
-      // endpoints are open, while the guard refuses every one of them with 401
-      // — and "closed by default" is a property of the contract a client reads
-      // as much as of the code that enforces it. A generated client would omit
-      // the header and a reviewer would have no way to see the endpoint was
-      // ever meant to be protected.
-      operation.security ??= path.startsWith('/v1/suppliers/standing-snapshot')
-        ? [{ internalToken: [] }]
-        : [{ bearer: [] }];
+      // Every operation's `security` is `publishOperationSecurity`'s, from the
+      // guard's metadata (FU-075), never from the path: "closed by default" is a
+      // property of the contract a client reads as much as of the code.
 
       const body = REQUEST_BODIES[key];
       if (body) {
@@ -205,7 +218,6 @@ interface MutableOperation {
   parameters?: unknown[];
   responses?: Record<string, unknown>;
   description?: string;
-  security?: Record<string, string[]>[];
 }
 
 function isOperation(value: unknown): value is MutableOperation {

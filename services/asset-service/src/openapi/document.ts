@@ -1,12 +1,7 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
-import {
-  publishApiErrors,
-  publishZodRouteInputs,
-  healthProbeErrorSchema,
-  type PublishedSchema,
-} from '@rasta/nest-common';
+import { publishApiErrors, healthProbeErrorSchema, type PublishedSchema } from '@rasta/nest-common';
 import { AssetController } from '../asset/asset.controller';
 import { AssetInternalController, TransferRecordService } from '../asset/transfer-record';
 import { AssetSnapshotService } from '../asset/asset-snapshot';
@@ -21,7 +16,7 @@ import { KafkaEventPublisher } from '../outbox/kafka.publisher';
 
 /** What the routes themselves declare, before the shared error envelope is published. */
 export function assetRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
-  const document = SwaggerModule.createDocument(
+  return SwaggerModule.createDocument(
     app,
     new DocumentBuilder()
       .setTitle('Rasta — Asset Service')
@@ -34,7 +29,6 @@ export function assetRouteDocument(app: INestApplication, version = '0.1.0'): Op
       .addBearerAuth()
       .build(),
   );
-  return publishZodRouteInputs(app, document);
 }
 
 /** D-121: the one registry of probe routes whose 503 is a health body, not the envelope. */

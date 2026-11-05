@@ -80,10 +80,24 @@ describe('asset-service publishes every Zod-validated body and query', () => {
     await app.close();
   });
 
-  it('publishes each route input from its schema, with no exception', () => {
-    const inputs = zodRouteInputs(app);
+  // Query strings are published by #711's `ValidatedQuery` (`parametersOf`), held to their
+  // validators by document.spec.ts; the converter is not applied to this service (PM, #710 sync).
+  it('publishes each route body from its schema, with no exception', () => {
+    const inputs = zodRouteInputs(app).filter((input) => input.kind === 'body');
     expect(inputs.length).toBeGreaterThan(0);
     expect(zodRouteInputProblems(document, inputs)).toEqual([]);
+  });
+
+  it('publishes `q` without the bounds its validator applies only after `.trim()` (FU-120)', () => {
+    // `z.string().trim().min(1).max(100)`: the bounds hold for the trimmed text, not the raw
+    // query a JSON Schema validator checks, so publishing them would refuse what the runtime
+    // accepts. Fails if the converter (which still publishes them) writes asset queries again.
+    const q = document.paths['/v1/assets']?.get?.parameters?.find(
+      (p) => 'in' in p && p.in === 'query' && p.name === 'q',
+    ) as { schema?: Record<string, unknown> } | undefined;
+    expect(q?.schema).toEqual({ type: 'string' });
+    expect(q?.schema).not.toHaveProperty('minLength');
+    expect(q?.schema).not.toHaveProperty('maxLength');
   });
 
   it('publishes every prefixed and seed identifier pattern discovered from the routes', () => {

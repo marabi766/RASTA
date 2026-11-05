@@ -170,8 +170,15 @@ function convert(def: any): JsonSchema {
     case 'optional':
       return toJsonSchema(def.innerType);
 
-    case 'nullable':
-      return { ...toJsonSchema(def.innerType), nullable: true };
+    // OpenAPI 3.0's `nullable` qualifies a `type` and means nothing without one ("nullable"
+    // cannot be used without "type", AJV). An inner schema that says nothing already admits
+    // `null`, so it is published as it is rather than as the non-schema `{"nullable":true}`.
+    case 'nullable': {
+      const inner = toJsonSchema(def.innerType);
+      return inner.type === undefined && Object.keys(inner).every((key) => key === 'description')
+        ? inner
+        : { ...inner, nullable: true };
+    }
 
     // `.prefault()` is zod 3's `.default()` (the value is parsed like any
     // input); either way the value written is the one published.
@@ -184,16 +191,82 @@ function convert(def: any): JsonSchema {
     // so the schema the input is checked against is published; the cross-field
     // rules `.refine()` carries — "at least one of hours or kilometres",
     // "periodEnd after periodStart" — are checks, left out the same way, and
-    // stay in the endpoint description where a human will read it. A pipe
-    // between two schemas (`.pipe()`) was never described, and stays so.
+    // stay in the endpoint description where a human will read it.
     case 'pipe':
       if (defOf(def.out).type === 'transform') return toJsonSchema(def.in);
       if (defOf(def.in).type === 'transform') return toJsonSchema(def.out);
-      return {};
+      return pipeBetweenSchemas(def.in, def.out);
 
     default:
       return {};
   }
+}
+
+/** The keywords a later schema in a pipe narrows: the tighter bound of the two is the one that holds. */
+const LOWER_BOUNDS = ['minLength', 'minimum', 'minItems'] as const;
+const UPPER_BOUNDS = ['maxLength', 'maximum', 'maxItems'] as const;
+
+/**
+ * `.pipe()` between two schemas. A value is accepted only when it passes both, so the input
+ * schema's type and constraints are published — never `{}` (FU-078 r1 F2: under `.nullable()` that
+ * published `{"nullable":true}`, which is not a schema).
+ *
+ * The later schema's constraints are added only when the value reaching it IS the raw input: the
+ * input changes nothing on the way (no transform, no overwrite such as `.trim()`, no coercion) and
+ * the two agree on the type; the tighter bound of a pair wins. A JSON Schema validator checks the
+ * raw request text, so a bound the later schema applies to canonicalised text describes a different
+ * string: `identifierText()` NFKC-folds and strips tatweel before `z.string().max(64)`, and merging
+ * that bound published "67 characters is too long" for a value runtime accepts (FU-078 r2 F2).
+ * Anything the converter cannot prove value-preserving is treated as changing it (fail closed):
+ * the input schema alone is published, and a rule on the changed value belongs in a description.
+ *
+ * When the input says nothing (`z.unknown().pipe(…)`) and changes nothing, the later schema is
+ * what is published. When the two disagree on the type, the input schema alone is published: it
+ * is what the client sends.
+ */
+function pipeBetweenSchemas(inSchema: z.ZodType, outSchema: z.ZodType): JsonSchema {
+  const input = toJsonSchema(inSchema);
+  if (changesValue(inSchema)) return input;
+  const output = toJsonSchema(outSchema);
+  if (Object.keys(input).every((key) => key === 'description')) return { ...output, ...input };
+  if (input.type === undefined || input.type !== output.type) return input;
+  const merged: JsonSchema = { ...output, ...input };
+  for (const key of LOWER_BOUNDS) {
+    if (typeof input[key] === 'number' && typeof output[key] === 'number') {
+      merged[key] = Math.max(input[key] as number, output[key] as number);
+    }
+  }
+  for (const key of UPPER_BOUNDS) {
+    if (typeof input[key] === 'number' && typeof output[key] === 'number') {
+      merged[key] = Math.min(input[key] as number, output[key] as number);
+    }
+  }
+  return merged;
+}
+
+/** Types whose parse returns the raw input itself, unless a check on them overwrites it. */
+const VALUE_PRESERVING_TYPES = new Set([
+  'string',
+  'number',
+  'boolean',
+  'bigint',
+  'enum',
+  'literal',
+  'unknown',
+  'any',
+]);
+
+/**
+ * Whether parsing `schema` may hand on a value other than its raw input: a transform, an
+ * overwrite check (`.trim()`, `.toLowerCase()`, `.normalize()`), a coercion — or any type not known
+ * to preserve the value (objects strip keys, defaults substitute), which fails closed.
+ */
+function changesValue(schema: z.ZodType): boolean {
+  const def = defOf(schema);
+  if (def.type === 'pipe') return changesValue(def.in) || changesValue(def.out);
+  if (def.type === 'optional' || def.type === 'nullable') return changesValue(def.innerType);
+  if (!VALUE_PRESERVING_TYPES.has(def.type as string) || def.coerce === true) return true;
+  return checkDefs(def).some(({ def: check }) => check.check === 'overwrite');
 }
 
 function objectSchema(def: any): JsonSchema {

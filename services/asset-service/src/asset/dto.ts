@@ -70,9 +70,30 @@ export const operationalStatusSchema = z.enum(OPERATIONAL_STATUSES);
  * A value that takes part in a uniqueness check: asset tag, serial number,
  * policy number. Canonicalised before the length check and before storage, so
  * lookups and the unique index see one spelling (audit L3-10).
+ *
+ * Bounded twice, because canonicalisation changes the length. The raw text as
+ * sent — before trimming — is `min`..`max` code points: that is the bound the
+ * OpenAPI document publishes, so a client validating the request text and the
+ * service agree on it (FU-078 r2 F2: tatweel padding shrank 67 characters to 3
+ * and passed, while the document refused it). The canonical form must then
+ * also be `min`..`max`: NFKC can expand a character (U+FDFA becomes 18), and
+ * removing tatweel or whitespace can shorten it below `min`. That second rule
+ * is on a value the client never sends, so JSON Schema cannot state it; the
+ * description does.
  */
 const identifierText = (min: number, max: number) =>
-  plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
+  z
+    .string()
+    .min(min)
+    .max(max)
+    .pipe(plainText())
+    .transform(canonicalIdentifier)
+    .pipe(z.string().min(min).max(max))
+    .describe(
+      `${min}–${max} characters (code points) as sent, and again after canonicalisation ` +
+        '(NFKC, Arabic ي/ك as Persian ی/ک, Persian and Arabic digits as 0–9, tatweel removed, ' +
+        'whitespace runs as one space, trimmed); a value outside either is VALIDATION_FAILED.',
+    );
 
 /**
  * How many top-level attributes `specifications` may carry. A spec sheet names
@@ -159,6 +180,24 @@ export type CreateAssetDto = z.infer<typeof createAssetSchema>;
  */
 export const expectedVersion = z.number().int().min(1);
 
+/*
+ * What the published document says about these fields comes from here, through
+ * the shared converter (`toJsonSchema`, @rasta/nest-common): the controller
+ * publishes each command body as the converter output of the schema it
+ * validates with, so there is no second, hand-typed description to drift
+ * (FU-078). A `.describe()` changes the document only, never what parses.
+ */
+
+/** ISO 8601 instant in UTC only: `isoDateTime()` refuses a numeric offset. */
+const utcInstant = () =>
+  z
+    .string()
+    .check(isoDateTime())
+    .describe(
+      'ISO 8601 instant in UTC, ending in `Z` (`2026-11-04T06:30:00Z`). A numeric offset ' +
+        '(`+03:30`) or no zone at all is refused with 400 VALIDATION_FAILED.',
+    );
+
 export const updateAssetSchema = z
   .object({
     name: displayText(2, 200).optional(),
@@ -172,7 +211,10 @@ export const updateAssetSchema = z
   .strict()
   .refine((value) => Object.keys(value).some((key) => key !== 'expectedVersion'), {
     message: 'At least one field must be provided',
-  });
+  })
+  .describe(
+    'At least one field besides `expectedVersion` must be present. `null` clears an optional field.',
+  );
 
 export type UpdateAssetDto = z.infer<typeof updateAssetSchema>;
 
@@ -196,7 +238,7 @@ export type ListAssetsQuery = z.infer<typeof listAssetsQuerySchema>;
 
 export const activateAssetSchema = z
   .object({
-    commissionedAt: z.string().check(isoDateTime()).optional(),
+    commissionedAt: utcInstant().optional(),
     expectedVersion,
   })
   .strict();
@@ -218,12 +260,36 @@ export type ChangeStatusDto = z.infer<typeof changeStatusSchema>;
 export const decommissionSchema = z
   .object({
     reason: plainText().min(10).max(1000),
-    decommissionedAt: z.string().check(isoDateTime()).optional(),
+    decommissionedAt: utcInstant().optional(),
     expectedVersion,
   })
   .strict();
 
 export type DecommissionDto = z.infer<typeof decommissionSchema>;
+
+/*
+ * Field descriptions for the published bodies, attached through zod's registry
+ * (what `.describe()` writes) rather than inline: apps/web's contract specs pin
+ * these fields' source text (`expectedVersion` shorthand, `plainText().min().max()`).
+ * Documentation only — nothing here changes what parses.
+ */
+const PLAIN_TEXT_DESCRIPTION =
+  'Trimmed. Any text without a Unicode bidirectional control character (`\\p{Bidi_Control}`); ' +
+  'one is refused with 400 VALIDATION_FAILED.';
+z.globalRegistry.add(expectedVersion, {
+  description:
+    'The `version` of the asset the edit or command was made against, as a read returned it. ' +
+    'Required: a stale version is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written — ' +
+    'which is also what a command sent a second time answers, because the first one ' +
+    'moved the version.',
+});
+for (const field of [
+  updateAssetSchema.shape.model,
+  changeStatusSchema.shape.reason,
+  decommissionSchema.shape.reason,
+]) {
+  z.globalRegistry.add(field, { description: PLAIN_TEXT_DESCRIPTION });
+}
 
 export const transferAssetSchema = z
   .object({

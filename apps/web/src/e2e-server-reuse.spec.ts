@@ -162,6 +162,20 @@ const open = (port: number, host: string) =>
     probe.listen(port, host, () => probe.close(() => resolve(true)));
   });
 
+/**
+ * The launcher SIGKILLs its server and exits; the kernel frees the port only once that process is
+ * gone, which the launcher's exit does not wait for. So "taken down" is a bounded wait, never one
+ * probe (FU-098: a single probe right after the exit found the port still held).
+ */
+async function freed(port: number, host: string, ms = 10_000): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (!(await open(port, host))) {
+    if (Date.now() > end) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
 jest.setTimeout(30_000);
 
 describe('own-server.mjs (the suite’s only way to start a server locally)', () => {
@@ -173,7 +187,7 @@ describe('own-server.mjs (the suite’s only way to start a server locally)', ()
     expect(run.exit()).toBeUndefined();
     run.child.kill('SIGTERM');
     await until('the launcher to exit', () => run.exit() !== undefined);
-    expect(await open(port, '127.0.0.1')).toBe(true); // the server went down with the launcher
+    expect(await freed(port, '127.0.0.1')).toBe(true); // the server went down with the launcher
   });
 
   it('does not say ready while its server has not bound the port yet', async () => {
@@ -205,7 +219,7 @@ describe('own-server.mjs (the suite’s only way to start a server locally)', ()
       expect(run.stdout()).not.toContain(OWNED_MARKER);
       expect(run.stderr()).toContain(`port ${port} is held by a server this run did not start`);
       expect(run.stderr()).toContain(`pid ${process.pid}`);
-      expect(await open(port, '127.0.0.1')).toBe(true); // our server was taken down too
+      expect(await freed(port, '127.0.0.1')).toBe(true); // our server was taken down too
     },
   );
 
@@ -253,7 +267,7 @@ describe('own-server.mjs (the suite’s only way to start a server locally)', ()
     await until('the launcher to refuse', () => run.exit() !== undefined);
     expect(run.exit()).toBe(1);
     expect(run.stderr()).toContain(`port ${port} is held by a server this run did not start`);
-    expect(await open(port, '127.0.0.1')).toBe(true);
+    expect(await freed(port, '127.0.0.1')).toBe(true);
   });
 
   // Fail closed: what cannot be listed is not proof of a free port or of ownership.

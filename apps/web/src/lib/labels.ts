@@ -206,6 +206,8 @@ const TRANSACTION_STATUSES: Readonly<Record<string, string>> = {
   PENDING_SETTLEMENT: 'در انتظار تسویه',
   DISPUTED: 'معترض‌شده',
   SETTLED: 'تسویه‌شده',
+  PARTIALLY_REVERSED: 'برگشت‌خورده جزئی',
+  REVERSED: 'برگشت‌خورده',
   REFUNDED: 'بازگشت‌داده‌شده',
   CANCELLED: 'لغوشده',
   FAILED: 'ناموفق',
