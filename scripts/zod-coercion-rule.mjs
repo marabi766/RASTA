@@ -200,7 +200,8 @@ export default {
         def = binding?.defs[0];
       if (binding?.references.some((ref) => ref.isWrite() && !ref.init)) return undefined;
       let path = file,
-        name = raw.name;
+        name = raw.name,
+        spelling = file.split('/').pop();
       if (def?.type === 'ImportBinding') {
         const from = def.parent.source.value;
         path = from.startsWith('@/')
@@ -209,8 +210,12 @@ export default {
             ? relative(ROOT, resolve(dirname(context.filename), from))
             : from;
         name = def.node.imported?.name;
+        spelling = from.split('/').pop();
       }
-      return verifiedCallbackHelper(ROOT, path.replace(/\.[cm]?[jt]sx?$/, ''), name);
+      return verifiedCallbackHelper(ROOT, path.replace(/\.[cm]?[jt]sx?$/, ''), name, {
+        spelling,
+        definition: def?.type,
+      });
     };
     const imported = (def) =>
       def?.type === 'ImportBinding' &&
@@ -675,6 +680,9 @@ export default {
             )
           )
             return stringInput(unwrap(schema.callee)?.object, seen, kind);
+          // A reviewed string-schema factory (`plainText()`): output is a string, no arguments.
+          if (reviewedHelper(schema.callee) === 'string-schema')
+            return kind === 'string' && !schema.arguments.length;
           const optionSlot =
             callbackSignature(api).guardOptions ??
             (api?.raw && api.name === 'array' ? 1 : optionsIndex(api));
@@ -816,7 +824,7 @@ export default {
           const reviewed = reviewedHelper(callee);
           if (reviewed)
             return (
-              ['money-limit', 'currency'].includes(reviewed) ||
+              ['money-limit', 'currency', 'string-schema'].includes(reviewed) ||
               (reviewed === 'money-message'
                 ? reviewedHelper(args[1]) !== 'currency'
                 : reviewed !== 'predicate' && !stringValue(args[0], callee, new Set(), parameters))
