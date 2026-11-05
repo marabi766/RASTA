@@ -1476,6 +1476,7 @@ model Settlement {
   // (`trg_settlement_creation_proven`, migration 20261105120000_settlement_creation_proof).
   // `journalId` has a foreign key there; what it found on older rows is
   // `settlement_creation_quarantine`, not modelled: filled there, frozen, read by triggers.
+  // So is `transaction_hold_reconciliation`, there too: read by `down.sql` and by people.
   /// `STL_<ULID>`.
   id String @id
 

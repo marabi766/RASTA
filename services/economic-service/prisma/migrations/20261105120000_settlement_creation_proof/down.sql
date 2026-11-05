@@ -1,9 +1,13 @@
 -- Reverse of `migration.sql` (20261105120000_settlement_creation_proof).
 --
 -- Drops the proofs, the two foreign keys, the transaction's and the hold's guards, the guard on
--- a reversal and the quarantine, and gives the three older hold predicates back. Refuses nothing: no row is touched, and the quarantine holds nothing
--- that is not still on the rows themselves, which the next up finds again.
+-- a reversal and the quarantine, and gives the three older hold predicates back. Refuses nothing: the quarantine holds nothing
+-- that is not still on the rows themselves, which the next up finds again. The one row it touches: a
+-- transaction up put back in PENDING_SETTLEMENT and nothing has moved since returns to HELD, where the older reads stand it.
 -- Rows written after this runs are not proven by anything until it is applied again.
+-- Refuses in one case: two live holds now share a wallet and reference, which the older index
+-- cannot hold (a unique violation, nothing changed). Roll the release back first: this one's
+-- `TransactionRepository.lockForUpdate` asks `transaction_holds`, which goes here.
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
@@ -80,6 +84,24 @@ BEGIN
   RETURN NEW;
 END; $$ LANGUAGE plpgsql;
 
+UPDATE "transaction" t
+   SET "status" = 'HELD', "updated_at" = CURRENT_TIMESTAMP
+  FROM "transaction_hold_reconciliation" c
+ WHERE c."transaction_id" = t."id"
+   AND c."outcome" = 'RESTORED_TO_PENDING_SETTLEMENT'
+   AND t."status" = 'PENDING_SETTLEMENT'
+   AND t."settlement_authorised_at" IS NULL
+   AND t."dispute_id" IS NOT DISTINCT FROM c."dispute_id";
+
+DROP INDEX "uq_wallet_hold_active_reference";
+CREATE UNIQUE INDEX "uq_wallet_hold_active_reference"
+  ON "wallet_hold" ("wallet_id", "reference")
+  WHERE "status" = 'ACTIVE';
+
+DROP TABLE "transaction_hold_reconciliation";
+DROP FUNCTION reject_transaction_hold_reconciliation_change();
+DROP TRIGGER "trg_transaction_id_unclaimed" ON "transaction";
+DROP FUNCTION enforce_transaction_id_unclaimed();
 DROP TRIGGER "trg_wallet_owner_fixed" ON "wallet";
 DROP FUNCTION reject_wallet_owner_change();
 DROP TRIGGER "trg_wallet_hold_reference_bound" ON "wallet_hold";

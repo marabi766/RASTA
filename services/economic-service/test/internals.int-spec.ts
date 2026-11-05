@@ -428,6 +428,7 @@ describe('economic internals', () => {
             return wiring.wallets.refundHold(tx, {
               wallet: locked!,
               holdId: id,
+              referenceType: 'TRANSACTION',
               transactionId,
               note: 'released by the internals suite',
               resolvedBy: 'internals-itest',

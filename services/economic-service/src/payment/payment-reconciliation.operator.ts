@@ -337,14 +337,19 @@ export class PaymentReconciliationOperator {
           'Only a reconciliation the reconciler escalated to a person may be resolved by one',
         );
       }
-      const hold = await this.walletRepository.findActiveHold(tx, wallet.id, intent.id);
+      const hold = await this.walletRepository.findActiveHold(tx, {
+        walletId: wallet.id,
+        organizationId: wallet.organizationId,
+        reference: intent.id,
+        referenceType: REFUND_HOLD_REFERENCE_TYPE,
+      });
       refuseUnlessEffect(
         decideReconciliation({
           kind: task.kind,
           intentStatus: intent.status,
           marker: intent.failureReason,
           walletStatus: wallet.status,
-          refundHoldActive: hold?.referenceType === REFUND_HOLD_REFERENCE_TYPE,
+          refundHoldActive: hold !== null,
           answer: answerOf(input.providerOutcome),
         }),
       );

@@ -56,20 +56,51 @@
 --
 -- ## Whose hold counts
 --
--- `wallet_hold.reference` is free text, unique only per wallet, so a hold of another
--- organization, or for another purpose, could name this transaction's id and veto its
--- settlement. `transaction_holds` is the one answer to "the holds of this transaction":
+-- `wallet_hold.reference` is free text, so a hold of another organization, or for another
+-- purpose, could name this transaction's id and veto its settlement. Nor can it take the live
+-- slot of the hold it names: `uq_wallet_hold_active_reference` is per wallet, owner, reference
+-- and purpose, so it refuses a second hold of one obligation and no other. `transaction_holds` is the one answer to "the holds of this transaction":
 -- purpose TRANSACTION, the payer's, on the payer's wallet. Every predicate here asks it:
 -- the proof, the settlement authority of a transaction and of a release, and where a
--- resolved dispute returns to. `trg_wallet_hold_reference_bound` keeps the rows true for
+-- resolved dispute returns to; so does the service (`TransactionRepository.lockForUpdate`,
+-- `WalletRepository.findActiveHold`). `trg_wallet_hold_reference_bound` keeps the rows true for
 -- it: a new hold is on a wallet of its own organization; for a transaction, it names one of
 -- its own organization; for anything else, it names no transaction. Whose it is and what it
 -- is for never change, a wallet never changes hands, and a hold is never deleted, or a hold
--- could step out of that answer.
+-- could step out of that answer. `trg_transaction_id_unclaimed` is the other insertion order:
+-- a transaction takes no id a hold already names. The two share one advisory lock per id, so
+-- neither can miss the other in flight: all writers of both tables are READ COMMITTED.
 -- A row from before this breaks none of it silently: no such hold counts, and the
 -- migration says how many there are. What it cannot tell apart: a hold written by hand in
 -- the payer's own name, on the payer's own wallet. That is the payer's hold: refused
 -- settlements, no money moved.
+--
+-- ## What older reads decided from another's hold
+--
+-- 20261103121000's backfill, and resolutions since, counted any hold naming a transaction,
+-- so a transaction can stand where a hold not its own put it. `transaction_hold_reconciliation`
+-- lists each row with no hold of its own, in any status (with one, that hold explains the
+-- decision), that has the backfill's record, or that such a hold names and that is HELD or has
+-- had a dispute resolved. Frozen as the others are:
+--
+--   - RESTORED_TO_PENDING_SETTLEMENT: put back, here, with no money moved. The backfill's own
+--     RETURNED_TO_HELD record proves it stood in PENDING_SETTLEMENT; another organization's hold
+--     is why it moved; it is still HELD, unauthorised, under the same dispute. A resolved
+--     dispute with nothing held is where the rule places it (`resolvedStatus`).
+--   - RETURNED_TO_HELD_UNPROVEN: that record, but the row has moved since, or no other
+--     organization's hold is left to explain it (one in its own name on another's wallet may
+--     be escrow gone wrong, not a stranger's). Not touched: nothing proves it safe.
+--   - HELD_UNPROVEN: HELD with no record: a resolution may have put it there, or anything
+--     else. Not touched. Authorising or refunding it still works, and neither finds a hold to
+--     move; until then the order saga reads HELD as escrowed, and it is not.
+--   - DISPUTE_RESOLVED_UNPROVEN: a resolution may have sent it to HELD, and it has moved on, to
+--     a refund perhaps. Not touched: what happened since is not undone by a migration.
+--   - AUTHORISED_UNRECORDED_UNPROVEN: the backfill recorded an authorisation from a hold not
+--     its own. Reported: that record is frozen and still counts, but with nothing held it opens
+--     nothing a settlement without it could not reach, and the service places a transaction's
+--     hold only as it creates the transaction. A hold written by hand could be released on it.
+--
+-- Everything but the first needs a person: a WARNING says how many, and the table lists them.
 --
 -- ## The foreign keys
 --
@@ -267,6 +298,68 @@ $$ LANGUAGE sql STABLE;
 -- creates (service-privilege-split.bash). SECURITY INVOKER, as is everything here.
 GRANT EXECUTE ON FUNCTION transaction_holds(TEXT, TEXT) TO rasta_economic;
 
+CREATE TABLE "transaction_hold_reconciliation" (
+    "transaction_id" TEXT NOT NULL,
+    "outcome" TEXT NOT NULL,
+    -- The dispute the row held when found: `down.sql` puts back only a row none has touched since.
+    "dispute_id" TEXT,
+    "found_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "transaction_hold_reconciliation_pkey" PRIMARY KEY ("transaction_id"),
+    CONSTRAINT "transaction_hold_reconciliation_transaction_id_fkey" FOREIGN KEY ("transaction_id")
+        REFERENCES "transaction"("id") ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CONSTRAINT "ck_transaction_hold_reconciliation_outcome"
+        CHECK ("outcome" IN ('RESTORED_TO_PENDING_SETTLEMENT', 'RETURNED_TO_HELD_UNPROVEN',
+                             'HELD_UNPROVEN', 'DISPUTE_RESOLVED_UNPROVEN',
+                             'AUTHORISED_UNRECORDED_UNPROVEN'))
+);
+
+-- Driven by the two small sets, not a scan of every transaction. A row of the second has a hold
+-- of purpose TRANSACTION naming it, which with none of its own is not its own.
+INSERT INTO "transaction_hold_reconciliation" ("transaction_id", "outcome", "dispute_id")
+SELECT t."id",
+       CASE
+         WHEN r."outcome" = 'AUTHORISED_UNRECORDED' THEN 'AUTHORISED_UNRECORDED_UNPROVEN'
+         WHEN r."outcome" IS NULL AND t."status" = 'HELD' THEN 'HELD_UNPROVEN'
+         WHEN r."outcome" IS NULL THEN 'DISPUTE_RESOLVED_UNPROVEN'
+         WHEN t."status" = 'HELD'
+              AND t."settlement_authorised_at" IS NULL
+              AND t."dispute_id" IS NOT DISTINCT FROM r."dispute_id"
+              AND EXISTS (SELECT 1 FROM "wallet_hold" h
+                           WHERE h."reference" = t."id" AND h."reference_type" = 'TRANSACTION'
+                             AND h."organization_id" <> t."organization_id")
+           THEN 'RESTORED_TO_PENDING_SETTLEMENT'
+         ELSE 'RETURNED_TO_HELD_UNPROVEN'
+       END,
+       t."dispute_id"
+  FROM "transaction" t
+  LEFT JOIN "settlement_authority_reconciliation" r ON r."transaction_id" = t."id"
+ WHERE t."id" IN (SELECT "transaction_id" FROM "settlement_authority_reconciliation"
+                  UNION
+                  SELECT "reference" FROM "wallet_hold" WHERE "reference_type" = 'TRANSACTION')
+   AND NOT EXISTS (SELECT 1 FROM transaction_holds(t."id", t."organization_id"))
+   AND (r."transaction_id" IS NOT NULL OR t."status" = 'HELD' OR t."dispute_resolved_at" IS NOT NULL);
+
+UPDATE "transaction" t
+   SET "status" = 'PENDING_SETTLEMENT', "updated_at" = CURRENT_TIMESTAMP
+  FROM "transaction_hold_reconciliation" c
+ WHERE c."transaction_id" = t."id"
+   AND c."outcome" = 'RESTORED_TO_PENDING_SETTLEMENT';
+
+CREATE OR REPLACE FUNCTION reject_transaction_hold_reconciliation_change() RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'transaction_hold_reconciliation is fixed by its migration: never written again'
+    USING ERRCODE = 'restrict_violation';
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_transaction_hold_reconciliation_frozen"
+  BEFORE INSERT OR UPDATE OR DELETE ON "transaction_hold_reconciliation"
+  FOR EACH ROW EXECUTE FUNCTION reject_transaction_hold_reconciliation_change();
+
+CREATE TRIGGER "trg_transaction_hold_reconciliation_no_truncate"
+  BEFORE TRUNCATE ON "transaction_hold_reconciliation"
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_transaction_hold_reconciliation_change();
+
 -- By the rows, not by a quarantine reason: a row keeps only the first it fails.
 DO $validate_settlement_creation_proof$
 DECLARE
@@ -296,7 +389,13 @@ BEGIN
       OR (h."reference_type" <> 'TRANSACTION' AND t."id" IS NOT NULL);
   IF found > 0 THEN
     RAISE WARNING 'wallet_hold: % row(s) are not bound to their tenant and purpose; no settlement counts them, and they are left as they are', found
-      USING HINT = 'TransactionRepository.lockForUpdate and WalletRepository.findActiveHold do not ask transaction_holds: read these rows before settling what they name.';
+      USING HINT = 'No settlement, refund or replay takes them for its own; each needs the owner to decide.';
+  END IF;
+  SELECT count(*) INTO found FROM "transaction_hold_reconciliation"
+   WHERE "outcome" <> 'RESTORED_TO_PENDING_SETTLEMENT';
+  IF found > 0 THEN
+    RAISE WARNING 'transaction: % row(s) stand on a decision read from a hold not their own and could not be put back; they are left as they are', found
+      USING HINT = 'List them with: SELECT * FROM transaction_hold_reconciliation WHERE outcome <> ''RESTORED_TO_PENDING_SETTLEMENT''; each needs the owner to decide.';
   END IF;
 END
 $validate_settlement_creation_proof$;
@@ -493,9 +592,13 @@ BEGIN
       RAISE EXCEPTION 'A hold for a transaction names a transaction of its own organization'
         USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
     END IF;
-  ELSIF EXISTS (SELECT 1 FROM "transaction" t WHERE t."id" = NEW."reference") THEN
-    RAISE EXCEPTION 'A hold for anything else names no transaction'
-      USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
+  ELSE
+    -- Then the read: taken from here, a transaction inserted first has committed, or waits.
+    PERFORM pg_advisory_xact_lock(20261105, hashtext(NEW."reference"));
+    IF EXISTS (SELECT 1 FROM "transaction" t WHERE t."id" = NEW."reference") THEN
+      RAISE EXCEPTION 'A hold for anything else names no transaction'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_wallet_hold_reference_bound';
+    END IF;
   END IF;
   RETURN NEW;
 END; $$ LANGUAGE plpgsql;
@@ -503,6 +606,29 @@ END; $$ LANGUAGE plpgsql;
 CREATE TRIGGER "trg_wallet_hold_reference_bound"
   BEFORE INSERT OR UPDATE OR DELETE ON "wallet_hold"
   FOR EACH ROW EXECUTE FUNCTION enforce_wallet_hold_reference();
+
+-- One live hold per obligation, not per reference: a hold for something else, or of someone
+-- else, on this wallet takes no slot from the hold this obligation is owed.
+DROP INDEX "uq_wallet_hold_active_reference";
+CREATE UNIQUE INDEX "uq_wallet_hold_active_reference"
+  ON "wallet_hold" ("wallet_id", "organization_id", "reference", "reference_type")
+  WHERE "status" = 'ACTIVE';
+
+-- The other insertion order. No hold is written before its transaction: one for a transaction
+-- must name it already, and one for anything else must never. Fresh ids, so no contention.
+CREATE OR REPLACE FUNCTION enforce_transaction_id_unclaimed() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(20261105, hashtext(NEW."id"));
+  IF EXISTS (SELECT 1 FROM "wallet_hold" h WHERE h."reference" = NEW."id") THEN
+    RAISE EXCEPTION 'A transaction takes no id a hold has already named'
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'trg_transaction_id_unclaimed';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "trg_transaction_id_unclaimed"
+  BEFORE INSERT ON "transaction"
+  FOR EACH ROW EXECUTE FUNCTION enforce_transaction_id_unclaimed();
 
 -- `transaction_holds` asks whose wallet a hold is on: moving one would step its holds out.
 CREATE OR REPLACE FUNCTION reject_wallet_owner_change() RETURNS TRIGGER AS $$

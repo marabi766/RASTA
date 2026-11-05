@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { Prisma, PrismaClient } from '../src/generated/prisma';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import type { HoldPurpose } from '../src/wallet/wallet.repository';
 import {
   asActor,
   cleanup,
@@ -135,12 +136,24 @@ describe('the proof of a settlement at its creation (real database, runtime role
 
   /** An authorised transaction, through the service: ready to settle, nothing else true yet. */
   async function pending(
-    options: { to?: string; holdFunds?: boolean; line?: boolean; authorised?: boolean } = {},
+    options: {
+      to?: string;
+      holdFunds?: boolean;
+      line?: boolean;
+      authorised?: boolean;
+      type?: 'MARKETPLACE_ORDER' | 'LOGISTICS';
+    } = {},
   ) {
-    const { to = chargedPayee, holdFunds = false, line = true, authorised = true } = options;
+    const {
+      to = chargedPayee,
+      holdFunds = false,
+      line = true,
+      authorised = true,
+      type = 'MARKETPLACE_ORDER',
+    } = options;
     const transaction = await asActor({ organizationId: payer }, () =>
       wiring.transactions.create({
-        transactionType: 'MARKETPLACE_ORDER',
+        transactionType: type,
         ...(line ? { businessLine: 'PARTS' as const } : {}),
         counterpartyOrganizationId: to,
         grossAmountMinor: GROSS.toString(),
@@ -1148,6 +1161,118 @@ describe('the proof of a settlement at its creation (real database, runtime role
       });
     });
 
+    /** Both orders: the guard on the hold's insert, its reciprocal on the transaction's. */
+    describe('no transaction takes an id a hold already names', () => {
+      const CLAIMED = /takes no id a hold has already named/;
+
+      const insertTransaction = (client: Pick<Tx, '$executeRawUnsafe'>, id: string) =>
+        client.$executeRawUnsafe(
+          `INSERT INTO "transaction" (id, organization_id, counterparty_organization_id, transaction_type,
+             gross_amount_minor, occurred_at, correlation_id, updated_at, created_by)
+           VALUES ($1, $2, $3, 'LOGISTICS', 1000, now(), 'itest', now(), 'itest')`,
+          id,
+          payer,
+          chargedPayee,
+        );
+
+      // The reviewer's probe: an OTHER hold naming an absent id, then the transaction under it.
+      it('a hold for anything else, written first by the runtime role', async () => {
+        const id = `TXN_${ulid()}`;
+        await written(id, { reference_type: 'OTHER' });
+        await expect(insertTransaction(runtime, id)).rejects.toThrow(CLAIMED);
+      });
+
+      it.each([
+        ['another organization’s, for a transaction', () => ({ of: stranger })],
+        ['its own, for a transaction', () => ({})],
+      ] as const)('a row from before the guard: %s', async (_label, row) => {
+        const id = `TXN_${ulid()}`;
+        await planted(id, row());
+        await expect(insertTransaction(runtime, id)).rejects.toThrow(CLAIMED);
+      });
+
+      it('an id no hold names is taken as ever', async () => {
+        await expect(insertTransaction(runtime, `TXN_${ulid()}`)).resolves.toBe(1);
+      });
+
+      /** `first` stays open while `second` starts: returns whether it waited, and how it ended. */
+      const race = async (
+        first: (tx: Tx) => Promise<unknown>,
+        second: (client: PrismaClient) => Promise<unknown>,
+        end: 'COMMIT' | 'ROLLBACK',
+      ) => {
+        let begun!: () => void;
+        let finish!: () => void;
+        const started = new Promise<void>((resolve) => (begun = resolve));
+        const finishing = new Promise<void>((resolve) => (finish = resolve));
+        const firstDone = runtime
+          .$transaction(
+            async (tx) => {
+              await first(tx);
+              begun();
+              await finishing;
+              if (end === 'ROLLBACK') throw new Error('rolled back by the suite');
+            },
+            { timeout: 30_000 },
+          )
+          .catch((error: Error) => {
+            if (!error.message.includes('rolled back by the suite')) throw error;
+          });
+        await started;
+        let waited = true;
+        const secondDone = second(runtime).then(
+          () => {
+            waited = false;
+            return null;
+          },
+          (error: Error) => {
+            waited = false;
+            return error;
+          },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 750));
+        const stillWaiting = waited;
+        finish();
+        await firstDone;
+        return { stillWaiting, outcome: await secondDone };
+      };
+
+      const holdFor = (id: string) => async (client: Pick<Tx, '$executeRawUnsafe'>) =>
+        insertRow(client, 'wallet_hold', await holdRow(id, { reference_type: 'OTHER' }));
+
+      it('in flight, the hold first: the transaction waits, and is refused', async () => {
+        const id = `TXN_${ulid()}`;
+        const { stillWaiting, outcome } = await race(
+          holdFor(id),
+          (client) => insertTransaction(client, id),
+          'COMMIT',
+        );
+        expect(stillWaiting).toBe(true);
+        expect(outcome?.message).toMatch(CLAIMED);
+      });
+
+      it('in flight, the transaction first: the hold waits, and is refused', async () => {
+        const id = `TXN_${ulid()}`;
+        const { stillWaiting, outcome } = await race(
+          (tx) => insertTransaction(tx, id),
+          holdFor(id),
+          'COMMIT',
+        );
+        expect(stillWaiting).toBe(true);
+        expect(outcome?.message).toMatch(HOLD_PURPOSE);
+      });
+
+      it('in flight and rolled back: nobody is refused for what never happened', async () => {
+        const id = `TXN_${ulid()}`;
+        const { outcome } = await race(
+          holdFor(id),
+          (client) => insertTransaction(client, id),
+          'ROLLBACK',
+        );
+        expect(outcome).toBeNull();
+      });
+    });
+
     describe('a hold cannot step out of the answer', () => {
       it.each([
         ['what it names', `reference = 'ELSEWHERE'`],
@@ -1211,31 +1336,331 @@ describe('the proof of a settlement at its creation (real database, runtime role
         expect(await rowsOf(transactionId)).toMatchObject({ settlements: 1n, status: 'SETTLED' });
       });
 
-      it('the payer’s own for anything else: settle() takes it for the escrow, and the proof refuses', async () => {
-        // Escrow that really is there, another transaction's, so the debit itself goes through.
-        await pending({ holdFunds: true });
-        const transactionId = await pending();
-        await planted(transactionId, { reference_type: 'OTHER' });
-        await expect(settleForReal(transactionId)).rejects.toThrow(HOLD);
-        expect(await rowsOf(transactionId)).toMatchObject({
-          settlements: 0n,
-          status: 'PENDING_SETTLEMENT',
-        });
-      });
+      const NOT_THIS_OBLIGATIONS = [
+        ...FOREIGN,
+        ['its own, for anything else', () => ({ reference_type: 'OTHER' })],
+        [
+          'another organization’s, on the payer’s wallet',
+          async () => ({ of: stranger, wallet_id: await walletOf(payer) }),
+        ],
+      ] as const;
 
-      // Not this migration's to close: `TransactionRepository.lockForUpdate` reads `fundsHeld` by
-      // reference and purpose only. It fails closed, no new row can reach it, and it wants src/.
-      it('another organization’s for this transaction, unauthorised: the service’s own read still refuses', async () => {
-        const transactionId = await pending({ authorised: false });
+      /** PENDING_SETTLEMENT with nothing recorded, as a resolved dispute leaves it. */
+      const unauthorisedPending = async (options: Parameters<typeof pending>[0] = {}) => {
+        const transactionId = await pending({ ...options, authorised: false });
         await runtime.$executeRawUnsafe(
           `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = $1`,
           transactionId,
         );
-        await planted(transactionId, { of: stranger });
-        await expect(settleForReal(transactionId)).rejects.toMatchObject({
-          code: 'INVALID_STATE_TRANSITION',
+        return transactionId;
+      };
+
+      const holdsOf = (transactionId: string) =>
+        owner.$queryRawUnsafe<{ id: string; status: string }[]>(
+          `SELECT id, status::text AS status FROM wallet_hold WHERE reference = $1`,
+          transactionId,
+        );
+
+      const journalsOf = async (transactionId: string) => {
+        const rows = await owner.$queryRawUnsafe<{ type: string }[]>(
+          `SELECT journal_type::text AS type FROM journal WHERE transaction_id = $1`,
+          transactionId,
+        );
+        return rows.map((row) => row.type);
+      };
+
+      const balancesOf = async (organizationId: string) => {
+        const [wallet] = await owner.$queryRawUnsafe<{ available: bigint; pending: bigint }[]>(
+          `SELECT available_balance_minor AS available, pending_balance_minor AS pending
+             FROM wallet WHERE organization_id = $1 AND currency = 'IRR'`,
+          organizationId,
+        );
+        return wallet!;
+      };
+
+      const refundByPayee = (transactionId: string) =>
+        asActor({ organizationId: chargedPayee }, () =>
+          wiring.transactions.refund(transactionId, 'itest'),
+        );
+
+      const placeHoldFor = (
+        reference: string,
+        referenceType: HoldPurpose,
+        transactionId = reference,
+      ) =>
+        asActor({ organizationId: payer }, () =>
+          wiring.prisma.transaction(async (tx) => {
+            const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
+            return wiring.wallets.placeHold(tx, {
+              wallet: locked!,
+              amountMinor: GROSS,
+              reference,
+              referenceType,
+              transactionId,
+              placedBy: 'itest',
+            });
+          }),
+        );
+
+      let walletId: string;
+      beforeAll(async () => {
+        walletId = await walletOf(payer);
+      });
+
+      describe.each(NOT_THIS_OBLIGATIONS)('%s, ACTIVE', (_label, row) => {
+        // The reviewer's probe: `repository.fundsHeld=1, transaction_holds=0`.
+        it('is not funds held, as `transaction_holds` says', async () => {
+          const transactionId = await unauthorisedPending();
+          await planted(transactionId, await row());
+          const locked = await wiring.prisma.transaction((tx) =>
+            wiring.transactionRepository.lockForUpdate(tx, transactionId),
+          );
+          expect(locked).toMatchObject({ fundsHeld: false, settlementAuthorised: false });
         });
-        expect(await rowsOf(transactionId)).toMatchObject({ settlements: 0n });
+
+        // `assertSettlementReady=INVALID_STATE_TRANSITION`: a valid settlement was vetoed.
+        it('vetoes no settlement, and is left as it is', async () => {
+          const transactionId = await unauthorisedPending();
+          const hold = await planted(transactionId, await row());
+          const before = await balancesOf(payer);
+          await settleForReal(transactionId);
+          expect(await rowsOf(transactionId)).toMatchObject({ settlements: 1n, status: 'SETTLED' });
+          expect(await holdsOf(transactionId)).toEqual([{ id: hold, status: 'ACTIVE' }]);
+          expect((await balancesOf(payer)).available).toBe(before.available - GROSS);
+          expect((await balancesOf(payer)).pending).toBe(before.pending);
+        });
+
+        // `resolveDispute target=HELD`, which the database then refused.
+        it('sends no resolved dispute back to HELD', async () => {
+          // Not an order's: those are disputed only by the order saga.
+          const transactionId = await unauthorisedPending({ type: 'LOGISTICS', line: false });
+          await planted(transactionId, await row());
+          const disputed = await asActor({ organizationId: payer }, () =>
+            wiring.transactions.dispute(transactionId, { reason: 'itest' }),
+          );
+          const resolved = await asActor({ organizationId: payer }, () =>
+            wiring.transactions.resolveDispute(transactionId, {
+              resolution: 'itest',
+              disputeId: disputed.disputeId!,
+            }),
+          );
+          expect(resolved.status).toBe('PENDING_SETTLEMENT');
+        });
+
+        // `refund selected OTHER hold: FUNDS_REFUNDED, ESCROW -> WALLET, 100`.
+        it('builds no refund journal, and moves nothing of its owner’s', async () => {
+          const transactionId = await unauthorisedPending();
+          const hold = await planted(transactionId, await row());
+          const before = await balancesOf(payer);
+          const refunded = await refundByPayee(transactionId);
+          expect(refunded.status).toBe('REFUNDED');
+          expect(await journalsOf(transactionId)).toEqual([]);
+          expect(await holdsOf(transactionId)).toEqual([{ id: hold, status: 'ACTIVE' }]);
+          expect(await balancesOf(payer)).toEqual(before);
+        });
+      });
+
+      describe.each([
+        ['another organization’s', () => ({ of: stranger })],
+        ['its own for anything else', () => ({ reference_type: 'OTHER' })],
+      ] as const)('the real hold, beside %s', (_label, row) => {
+        it('only the real one is settled', async () => {
+          const transactionId = await pending({ holdFunds: true });
+          const beside = await planted(transactionId, row());
+          await settleForReal(transactionId);
+          const holds = await holdsOf(transactionId);
+          expect(holds).toHaveLength(2);
+          expect(holds.find((hold) => hold.id === beside)?.status).toBe('ACTIVE');
+          expect(holds.find((hold) => hold.id !== beside)?.status).toBe('RELEASED');
+        });
+
+        it('only the real one is refunded', async () => {
+          const transactionId = await pending({ holdFunds: true, authorised: false });
+          const beside = await planted(transactionId, row());
+          const before = await balancesOf(payer);
+          await refundByPayee(transactionId);
+          const holds = await holdsOf(transactionId);
+          expect(holds.find((hold) => hold.id === beside)?.status).toBe('ACTIVE');
+          expect(holds.find((hold) => hold.id !== beside)?.status).toBe('REFUNDED');
+          expect((await balancesOf(payer)).available).toBe(before.available + GROSS);
+        });
+      });
+
+      it('its own, on another wallet of the payer: refused, no escrow stranded', async () => {
+        const other = await asActor({ organizationId: payer }, () =>
+          wiring.wallets.getOrOpen('USD'),
+        );
+        const transactionId = await unauthorisedPending();
+        const hold = await planted(transactionId, { wallet_id: other.id, currency: 'USD' });
+        await expect(refundByPayee(transactionId)).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+          message: expect.stringMatching(/not on this transaction’s wallet/),
+        });
+        expect(await rowsOf(transactionId)).toMatchObject({ status: 'PENDING_SETTLEMENT' });
+        expect(await holdsOf(transactionId)).toEqual([{ id: hold, status: 'ACTIVE' }]);
+      });
+
+      describe('the reader of one obligation’s hold', () => {
+        const read = (key: {
+          walletId: string;
+          organizationId: string;
+          reference: string;
+          referenceType: HoldPurpose;
+        }) => wiring.prisma.transaction((tx) => wiring.walletRepository.findActiveHold(tx, key));
+
+        // The reviewer's probe: `findActiveHold for transaction T selected: OTHER`.
+        it('does not select a hold for anything else', async () => {
+          const reference = `TXN_${ulid()}`;
+          await planted(reference, { reference_type: 'OTHER' });
+          await expect(
+            read({ walletId, organizationId: payer, reference, referenceType: 'TRANSACTION' }),
+          ).resolves.toBeNull();
+        });
+
+        it('does not take a transaction’s hold for a payment refund’s', async () => {
+          const reference = `PIN_${ulid()}`;
+          await planted(reference, {});
+          await expect(
+            read({ walletId, organizationId: payer, reference, referenceType: 'PAYMENT_REFUND' }),
+          ).resolves.toBeNull();
+        });
+
+        it.each([
+          ['another organization’s, on this wallet', 'TRANSACTION'],
+          ['another organization’s, on this wallet, for a payment refund', 'PAYMENT_REFUND'],
+        ] as const)('does not select a hold %s', async (_label, referenceType) => {
+          const reference = `REF_${ulid()}`;
+          await planted(reference, {
+            of: stranger,
+            wallet_id: walletId,
+            reference_type: referenceType,
+          });
+          await expect(
+            read({ walletId, organizationId: payer, reference, referenceType }),
+          ).resolves.toBeNull();
+        });
+
+        it('does not select one claiming the organization on another’s wallet', async () => {
+          const reference = `REF_${ulid()}`;
+          await planted(reference, { of: stranger, organization_id: payer });
+          await expect(
+            read({
+              walletId: await walletOf(stranger),
+              organizationId: payer,
+              reference,
+              referenceType: 'TRANSACTION',
+            }),
+          ).resolves.toBeNull();
+        });
+
+        it('selects the obligation’s own', async () => {
+          const reference = `REF_${ulid()}`;
+          const own = await planted(reference, { reference_type: 'PAYMENT_REFUND' });
+          await expect(
+            read({ walletId, organizationId: payer, reference, referenceType: 'PAYMENT_REFUND' }),
+          ).resolves.toMatchObject({ id: own });
+        });
+      });
+
+      describe('a hold placed beside one that is not this obligation’s', () => {
+        const liveHolds = (reference: string) =>
+          owner.$queryRawUnsafe<{ id: string; purpose: string }[]>(
+            `SELECT id, reference_type AS purpose FROM wallet_hold
+              WHERE reference = $1 AND status = 'ACTIVE'`,
+            reference,
+          );
+
+        // The reviewer's probe: `{"replayed":true,"holdId":"H","actualPurpose":"OTHER"}`.
+        it.each([
+          ['its own, for anything else', { reference_type: 'OTHER' }],
+          ['its own, for a payment refund', { reference_type: 'PAYMENT_REFUND' }],
+          ['another organization’s, for a transaction', { of: stranger }],
+        ] as const)(
+          'a transaction’s over %s: placed, no replay, neither vetoed',
+          async (_l, row) => {
+            const transactionId = await pending();
+            const other = await planted(transactionId, { ...row, wallet_id: walletId });
+            const before = await balancesOf(payer);
+            const placed = await placeHoldFor(transactionId, 'TRANSACTION');
+            expect(placed.replayed).toBe(false);
+            expect(placed.holdId).not.toBe(other);
+            expect((await liveHolds(transactionId)).map((hold) => hold.id).sort()).toEqual(
+              [other, placed.holdId].sort(),
+            );
+            expect((await balancesOf(payer)).available).toBe(before.available - GROSS);
+          },
+        );
+
+        it.each([
+          ['its own, for a transaction', {}],
+          [
+            'another organization’s, for a payment refund',
+            { of: stranger, reference_type: 'PAYMENT_REFUND' },
+          ],
+        ] as const)('a payment refund’s over %s: placed, no replay', async (_l, row) => {
+          const reference = `PIN_${ulid()}`;
+          const transactionId = await pending();
+          const other = await planted(reference, { ...row, wallet_id: walletId });
+          const placed = await placeHoldFor(reference, 'PAYMENT_REFUND', transactionId);
+          expect(placed.replayed).toBe(false);
+          expect(placed.holdId).not.toBe(other);
+        });
+
+        it('its own, for the same purpose and amount, is still a replay', async () => {
+          const reference = `REF_${ulid()}`;
+          const own = await planted(reference, { reference_type: 'PAYMENT_REFUND' });
+          await expect(placeHoldFor(reference, 'PAYMENT_REFUND')).resolves.toMatchObject({
+            holdId: own,
+            replayed: true,
+          });
+        });
+
+        it('one obligation still has one live hold', async () => {
+          const reference = `REF_${ulid()}`;
+          await planted(reference, { reference_type: 'PAYMENT_REFUND' });
+          await expect(planted(reference, { reference_type: 'PAYMENT_REFUND' })).rejects.toThrow(
+            /23505/,
+          );
+        });
+      });
+
+      describe('a refund told a hold that is not what it refunds', () => {
+        const refundOf = (holdId: string, referenceType: HoldPurpose) =>
+          asActor({ organizationId: payer }, () =>
+            wiring.prisma.transaction(async (tx) => {
+              const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
+              return wiring.wallets.refundHold(tx, {
+                wallet: locked!,
+                holdId,
+                referenceType,
+                transactionId: `TXN_${ulid()}`,
+                note: 'itest',
+                resolvedBy: 'itest',
+              });
+            }),
+          );
+
+        it.each([
+          ['of another purpose', () => ({ reference_type: 'OTHER' })],
+          [
+            'of another organization, on this wallet',
+            () => ({ of: stranger, wallet_id: walletId }),
+          ],
+          ['on another wallet', () => ({ of: stranger })],
+          [
+            'claiming this organization, on another wallet',
+            () => ({ of: stranger, organization_id: payer }),
+          ],
+        ] as const)('%s: refused, and nothing is built', async (_label, row) => {
+          const reference = `REF_${ulid()}`;
+          const hold = await planted(reference, row());
+          const before = await balancesOf(payer);
+          await expect(refundOf(hold, 'TRANSACTION')).rejects.toMatchObject({
+            code: 'INTERNAL_ERROR',
+          });
+          expect(await holdsOf(reference)).toEqual([{ id: hold, status: 'ACTIVE' }]);
+          expect(await balancesOf(payer)).toEqual(before);
+        });
       });
 
       it.each(UNBOUND)('%s, ACTIVE, is no hold left active', async (_label, row) => {

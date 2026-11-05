@@ -1856,6 +1856,159 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
   },
 ];
 
+const HOLD_DECISION_DOWNS = [
+  SETTLEMENT_CREATION_PROOF,
+  SETTLEMENT_REVERSAL,
+  '20261103121000_transaction_settlement_authority',
+];
+/** A hold of `organization`, on `walletId`, naming a probe transaction. */
+const HOLD_DECISION_HOLD = (suffix, organization, walletId, type = 'TRANSACTION') => `
+INSERT INTO "wallet_hold" ("id", "organization_id", "wallet_id", "amount_minor", "currency", "reference",
+  "reference_type", "placed_at", "placed_by")
+VALUES ('HLD_MIGCHECK_HD_${suffix}_${organization === 'ORG-MIGCHECK' ? 'OWN' : 'FOREIGN'}', '${organization}',
+  '${walletId}', 1000, 'IRR', 'TXN_MIGCHECK_HD_${suffix}', '${type}', now(), 'USR-MIGCHECK');`;
+const HOLD_DECISION_FOREIGN = (suffix) =>
+  HOLD_DECISION_HOLD(suffix, 'ORG-MIGCHECK-PAYEE', 'WLT_MIGCHECK_HD_PAYEE');
+const HOLD_DECISION_FOUND = (expected) => `DO $$
+DECLARE
+  found TEXT;
+BEGIN
+  SELECT string_agg(replace(c.transaction_id, 'TXN_MIGCHECK_HD_', '') || ':' || c.outcome || ':' || t.status,
+                    ' ' ORDER BY c.transaction_id COLLATE "C")
+    INTO found
+    FROM "transaction_hold_reconciliation" c JOIN "transaction" t ON t.id = c.transaction_id
+   WHERE c.transaction_id LIKE 'TXN_MIGCHECK_HD_%';
+  IF found IS DISTINCT FROM '${expected}' THEN
+    RAISE EXCEPTION 'the reconciliation holds: %', found;
+  END IF;
+  IF (SELECT string_agg(status::text, ' ' ORDER BY id COLLATE "C") FROM "transaction"
+       WHERE id IN ('TXN_MIGCHECK_HD_OWN', 'TXN_MIGCHECK_HD_PURPOSE')) IS DISTINCT FROM 'HELD PENDING_SETTLEMENT' THEN
+    RAISE EXCEPTION 'a row whose decision was not another''s hold moved';
+  END IF;
+END $$;`;
+
+/**
+ * What 20261103121000's own backfill decides from another organization's hold, run for
+ * real on rows from before it (#762 r2, F2): the one row provably put there is put back;
+ * the rest are left where they are and listed; a row with a hold of its own, or with only
+ * a hold for something else, is no such decision.
+ */
+const HOLD_DECISION_STEPS = [
+  {
+    label: 'hold decisions: down past the backfill',
+    runDownScript: HOLD_DECISION_DOWNS,
+  },
+  {
+    label: 'hold decisions: rows the backfill will judge, and one a resolution left in HELD',
+    sql: [
+      `INSERT INTO "ledger_account" ("id", "organization_id", "account_type", "account_code", "purpose", "currency", "created_by")
+       VALUES ('ACC_MIGCHECK_HD_PAYER', 'ORG-MIGCHECK', 'LIABILITY', 'MIGCHECK-HD-PAYER', 'WALLET', 'IRR', 'USR-MIGCHECK'),
+              ('ACC_MIGCHECK_HD_PAYEE', 'ORG-MIGCHECK-PAYEE', 'LIABILITY', 'MIGCHECK-HD-PAYEE', 'WALLET', 'IRR', 'USR-MIGCHECK');
+       INSERT INTO "wallet" ("id", "organization_id", "currency", "ledger_account_id", "updated_at")
+       VALUES ('WLT_MIGCHECK_HD_PAYER', 'ORG-MIGCHECK', 'IRR', 'ACC_MIGCHECK_HD_PAYER', now()),
+              ('WLT_MIGCHECK_HD_PAYEE', 'ORG-MIGCHECK-PAYEE', 'IRR', 'ACC_MIGCHECK_HD_PAYEE', now());`,
+      ...['RESTORED', 'OWN', 'PURPOSE', 'MOVED', 'GONE', 'TERMINAL', 'AUTHED', 'CLAIMED'].flatMap(
+        (suffix) => [
+          TRANSACTION_MIGCHECK(`TXN_MIGCHECK_HD_${suffix}`),
+          DISPUTE_MIGCHECK(
+            `TXN_MIGCHECK_HD_${suffix}`,
+            'resolved by a release that asked nothing',
+            '2026-10-01T10:00:00Z',
+            '2026-10-02T10:00:00Z',
+          ),
+        ],
+      ),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_AUTHORISED'),
+      `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = 'TXN_MIGCHECK_HD_AUTHORISED';`,
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_HELD'),
+      `UPDATE "transaction" SET status = 'HELD' WHERE id = 'TXN_MIGCHECK_HD_HELD';`,
+      ...['RESTORED', 'OWN', 'MOVED', 'GONE', 'TERMINAL', 'AUTHED', 'AUTHORISED', 'HELD'].map(
+        HOLD_DECISION_FOREIGN,
+      ),
+      HOLD_DECISION_HOLD('CLAIMED', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYEE'),
+      HOLD_DECISION_HOLD('OWN', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYER'),
+      HOLD_DECISION_HOLD('PURPOSE', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYER', 'OTHER'),
+    ].join('\n'),
+  },
+  { label: 'hold decisions: up, the real backfill first', reapply: true },
+  {
+    label: 'hold decisions: every row where it was proven to belong, or listed',
+    sql: HOLD_DECISION_FOUND(
+      'AUTHED:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'AUTHORISED:AUTHORISED_UNRECORDED_UNPROVEN:PENDING_SETTLEMENT ' +
+        'CLAIMED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'GONE:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'HELD:HELD_UNPROVEN:HELD ' +
+        'MOVED:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'RESTORED:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'TERMINAL:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT',
+    ),
+  },
+  {
+    label: 'hold decisions: the list is frozen',
+    sql: `DELETE FROM "transaction_hold_reconciliation" WHERE transaction_id LIKE 'TXN_MIGCHECK_HD_%';`,
+    mustFail: 'fixed by its migration',
+  },
+  {
+    label: 'hold decisions: a later move is not undone by the rollback',
+    sql: `UPDATE "transaction" SET settlement_authorised_at = now() WHERE id = 'TXN_MIGCHECK_HD_RESTORED';`,
+  },
+  { label: 'hold decisions: down', runDownScript: [SETTLEMENT_CREATION_PROOF] },
+  {
+    label: 'hold decisions: down puts back only what up moved and nothing moved since',
+    sql: `DO $$
+          BEGIN
+            IF (SELECT string_agg(status::text, ' ' ORDER BY id COLLATE "C") FROM "transaction"
+                 WHERE id IN ('TXN_MIGCHECK_HD_AUTHED', 'TXN_MIGCHECK_HD_GONE', 'TXN_MIGCHECK_HD_MOVED',
+                              'TXN_MIGCHECK_HD_RESTORED', 'TXN_MIGCHECK_HD_TERMINAL'))
+               IS DISTINCT FROM 'HELD HELD HELD PENDING_SETTLEMENT HELD' THEN
+              RAISE EXCEPTION 'the rollback did not put them back as it should';
+            END IF;
+          END $$;`,
+  },
+  {
+    label:
+      'hold decisions: disputed again, foreign hold gone, refunded, authorised, and one with no record',
+    sql: `${TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_RESOLVED')}
+          ${DISPUTE_MIGCHECK('TXN_MIGCHECK_HD_RESOLVED', 'resolved since the backfill', '2026-10-03T10:00:00Z', '2026-10-04T10:00:00Z')}
+          UPDATE "transaction" SET status = 'REFUNDED' WHERE id = 'TXN_MIGCHECK_HD_RESOLVED';
+          ${HOLD_DECISION_FOREIGN('RESOLVED')}
+          UPDATE "transaction" SET status = 'REFUNDED' WHERE id = 'TXN_MIGCHECK_HD_TERMINAL';
+          UPDATE "transaction" SET settlement_authorised_at = now() WHERE id = 'TXN_MIGCHECK_HD_AUTHED';
+          ${RSD_DISPUTE('TXN_MIGCHECK_HD_MOVED', 'disputed again', '2026-10-05T10:00:00Z')}
+          ${RSD_MOVE('TXN_MIGCHECK_HD_MOVED', `status = 'HELD', dispute_resolved_at = '2026-10-06T10:00:00Z', dispute_resolved_by = 'USR-MIGCHECK-PLATFORM'`)}
+          DELETE FROM "wallet_hold" WHERE id = 'HLD_MIGCHECK_HD_GONE_FOREIGN';`,
+  },
+  { label: 'hold decisions: up over them', reapply: true },
+  {
+    label: 'hold decisions: none of those moved since is proven now: each stands, listed',
+    sql: HOLD_DECISION_FOUND(
+      'AUTHED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'AUTHORISED:AUTHORISED_UNRECORDED_UNPROVEN:PENDING_SETTLEMENT ' +
+        'CLAIMED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'GONE:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'HELD:HELD_UNPROVEN:HELD ' +
+        'MOVED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'RESOLVED:DISPUTE_RESOLVED_UNPROVEN:REFUNDED ' +
+        'RESTORED:RETURNED_TO_HELD_UNPROVEN:PENDING_SETTLEMENT ' +
+        'TERMINAL:RETURNED_TO_HELD_UNPROVEN:REFUNDED',
+    ),
+  },
+  {
+    label: 'hold decisions: down past the backfill, before the probe rows go',
+    runDownScript: HOLD_DECISION_DOWNS,
+  },
+  {
+    label: 'hold decisions: the probe rows are removed',
+    sql: `DELETE FROM "wallet_hold" WHERE id LIKE 'HLD_MIGCHECK_HD_%';
+          DELETE FROM "wallet" WHERE id LIKE 'WLT_MIGCHECK_HD_%';
+          DELETE FROM "ledger_account" WHERE id LIKE 'ACC_MIGCHECK_HD_%';
+          DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_HD_%';
+          DELETE FROM "transaction" WHERE id LIKE 'TXN_MIGCHECK_HD_%';`,
+  },
+  { label: 'hold decisions: up with them gone', reapply: true },
+];
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label:
@@ -2018,6 +2171,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
     ...TRANSACTION_RESOLVED_DISPUTE_STEPS,
     ...SETTLEMENT_REVERSAL_STEPS,
     ...SETTLEMENT_CREATION_PROOF_STEPS,
+    ...HOLD_DECISION_STEPS,
   ],
 };
 
@@ -2505,6 +2659,8 @@ export const EXPECTED = {
       'settlement_reversal',
       // What 20261105120000 found on rows from before it could prove them (FU-097).
       'settlement_creation_quarantine',
+      // What 20261105120000 found standing on a decision read from another's hold (#762 r2, F2).
+      'transaction_hold_reconciliation',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2564,6 +2720,9 @@ export const EXPECTED = {
       'trg_wallet_hold_no_truncate',
       'trg_wallet_hold_reference_bound',
       'trg_wallet_owner_fixed',
+      'trg_transaction_id_unclaimed',
+      'trg_transaction_hold_reconciliation_frozen',
+      'trg_transaction_hold_reconciliation_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2616,6 +2775,8 @@ export const EXPECTED = {
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',
+      'enforce_transaction_id_unclaimed',
+      'reject_transaction_hold_reconciliation_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -2651,6 +2812,8 @@ export const EXPECTED = {
       'settlement_reversal_journal_id_fkey',
       'ck_settlement_creation_quarantine_source',
       'ck_settlement_creation_quarantine_reason',
+      'ck_transaction_hold_reconciliation_outcome',
+      'transaction_hold_reconciliation_transaction_id_fkey',
       'settlement_journal_id_fkey',
       'commission_journal_id_fkey',
       'ck_commission_pricing_cutover_single',
