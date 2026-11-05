@@ -778,7 +778,14 @@
   },
   {
     "file": "services/contract-service/src/statement/statement.repository.ts",
-    "line": 335,
+    "line": 264,
+    "hash": "f4d8da92b556dd97ac3a2233092f1a6bce298b44a34b2811583b1871d35efb5a",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/contract-service/src/statement/statement.repository.ts",
+    "line": 347,
     "hash": "5cd42f1cbeb0db4b36fd39829879f58136067089a8d83e97b33728c44739a9a5",
     "occurrence": 0,
     "decision": "has bound organization predicate"
