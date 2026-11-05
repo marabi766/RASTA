@@ -653,6 +653,116 @@ describe('adversarial review: what the first version let through', () => {
   });
 });
 
+describe('one person cannot monopolize recovery, under any of its identities (#758 r1 R1)', () => {
+  const TENDER_DEADLINE_MS = 60_000;
+  type Identity = [organizationId: string | undefined, person: string | undefined];
+  type Play = 'cancel at once' | 'cancel at second 59' | 'fail at the deadline';
+
+  /**
+   * After a genuine outage, the attacker tries every identity it has, first, at
+   * every instant the slot frees; the victim gets the slot only when none of them
+   * can take it. Returns how many probes the attacker held before that.
+   */
+  function race(identities: Identity[], play: Play) {
+    const b = breakers();
+    for (const org of ['ORG_X', 'ORG_Y', 'ORG_Z']) b.fail(org);
+    expect(b.state()).toBe('OPEN');
+    b.advance(COOLDOWN_MS);
+    for (let holds = 0; holds < 30; holds += 1) {
+      let taken: CircuitPermit | undefined;
+      for (const [org, person] of identities) {
+        try {
+          taken = b.circuits.admit('identity', org, person);
+          break;
+        } catch {
+          // Excluded: the next identity tries.
+        }
+      }
+      if (!taken) {
+        const victim = b.circuits.admit('identity', 'ORG_VICTIM', 'P_VICTIM');
+        return { holds, victim };
+      }
+      b.circuits.dispatched(taken, TENDER_DEADLINE_MS);
+      if (play === 'cancel at once') {
+        b.circuits.settle(taken, 'abandoned');
+        b.advance(TENDER_DEADLINE_MS);
+      } else if (play === 'cancel at second 59') {
+        b.advance(TENDER_DEADLINE_MS - 1_000);
+        b.circuits.settle(taken, 'abandoned');
+        b.advance(1_000);
+      } else {
+        b.advance(TENDER_DEADLINE_MS);
+        b.circuits.settle(taken, 'failure');
+      }
+    }
+    return { holds: 30, victim: undefined };
+  }
+
+  it.each<[string, Identity[], Play, number]>([
+    [
+      'three memberships, cancelling at once',
+      [
+        ['ORG_A', 'P_ATTACKER'],
+        ['ORG_B', 'P_ATTACKER'],
+        ['ORG_C', 'P_ATTACKER'],
+      ],
+      'cancel at once',
+      1,
+    ],
+    [
+      'two memberships, cancelling at second 59',
+      [
+        ['ORG_A', 'P_ATTACKER'],
+        ['ORG_B', 'P_ATTACKER'],
+      ],
+      'cancel at second 59',
+      1,
+    ],
+    [
+      'two memberships, failing at the deadline',
+      [
+        ['ORG_A', 'P_ATTACKER'],
+        ['ORG_B', 'P_ATTACKER'],
+      ],
+      'fail at the deadline',
+      1,
+    ],
+    [
+      'a membership and anonymous, cancelling at second 59',
+      [
+        ['ORG_A', 'P_ATTACKER'],
+        [undefined, undefined],
+      ],
+      'cancel at second 59',
+      2,
+    ],
+    [
+      'no organization, anonymous and a membership, failing at the deadline',
+      [
+        [undefined, 'P_ATTACKER'],
+        [undefined, undefined],
+        ['ORG_A', 'P_ATTACKER'],
+      ],
+      'fail at the deadline',
+      2,
+    ],
+    [
+      'one organization, three of the people it provisioned, cancelling at once',
+      [
+        ['ORG_A', 'P_ONE'],
+        ['ORG_A', 'P_TWO'],
+        ['ORG_A', 'P_THREE'],
+      ],
+      'cancel at once',
+      1,
+    ],
+  ])('%s: another caller gets the slot', (_label, identities, play, maxHolds) => {
+    const { holds, victim } = race(identities, play);
+    expect(victim?.probe).toBe(true);
+    expect(holds).toBeLessThanOrEqual(maxHolds);
+  });
+});
+
 describe('memory is bounded, whatever the ids', () => {
   beforeAll(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation());
   afterAll(() => jest.restoreAllMocks());
@@ -686,6 +796,22 @@ describe('memory is bounded, whatever the ids', () => {
     for (let i = 0; i < 50_000; i += 1) b.fail(`ORG_FLOOD_${i}`);
     expect(tracked(b).size).toBe(MAX_TRACKED_CALLERS);
     expect(b.state()).toBe('CLOSED');
+  });
+
+  it('recovery exclusions stay within the cap, however many failed probes', () => {
+    const b = breakers();
+    for (const org of ['ORG_X', 'ORG_Y', 'ORG_Z']) b.fail(org);
+    b.advance(COOLDOWN_MS);
+    // One failed probe per cooldown: never K at once, so it never re-opens.
+    for (let i = 0; i < MAX_TRACKED_CALLERS; i += 1) {
+      b.fail(`ORG_PROBE_${i}`);
+      b.advance(COOLDOWN_MS);
+    }
+    const excluded = (
+      b.circuits as unknown as { circuits: Map<string, { excluded: Map<string, number> }> }
+    ).circuits.get('identity')!.excluded;
+    expect(excluded.size).toBe(MAX_TRACKED_CALLERS);
+    expect(b.state()).toBe('HALF_OPEN');
   });
 
   it('a success, or being admitted, remembers nothing', () => {

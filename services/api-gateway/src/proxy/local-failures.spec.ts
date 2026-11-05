@@ -94,6 +94,8 @@ function caller(user: string, organizationId: string, roles: string[]): RequestC
     requestId: `req-local-${user}`,
     organizationId,
     userId: user,
+    // One person per user: the breaker tells people apart by subject (#758 r1 R1).
+    subject: `SUB_${user}`,
     roles,
     organizationIds: [],
     authType: 'USER',

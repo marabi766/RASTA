@@ -18,9 +18,10 @@ import { circuitShedRefusalsTotal, circuitStateGauge } from './circuit.metrics';
  *              HALF_OPEN and is its probe.
  *   HALF_OPEN  exactly ONE request — the probe — is in flight. Every other
  *              request is refused fast, `Retry-After` = 1 s. The probe's
- *              success closes the circuit; its failure or timeout sheds its
- *              caller, and opens the circuit again for a fresh cooldown once
- *              `organizationsToOpen` distinct organizations (and people) have
+ *              success closes the circuit; its failure or timeout excludes its
+ *              caller from the next probe, and opens the circuit again for a
+ *              fresh cooldown once `organizationsToOpen` distinct organizations
+ *              (and people) have
  *              failed a probe (see "Who failed"); a probe that proves nothing
  *              before it was sent (`release`) frees the slot for the next
  *              request and leaves the circuit exactly as it was. A probe whose
@@ -71,15 +72,20 @@ import { circuitShedRefusalsTotal, circuitStateGauge } from './circuit.metrics';
  *    bucket. These shed only themselves and are never an organization toward
  *    opening.
  *  - **Re-opening takes as many.** What opened the circuit is spent when it opens.
- *    Whoever's probe failed is shed for a cooldown, so another caller probes next,
+ *    Whoever's probe failed is excluded from the next one, so another caller probes,
  *    and the circuit re-opens only once enough organizations have failed one: else
  *    a single organization could keep it open by racing for the slot each time.
- *    A probe abandoned holds the slot until its deadline and sheds its caller for
- *    that hold again plus a cooldown, so that two identities of one attacker,
- *    taking turns, still leave a cooldown free for everyone else. A failed or
- *    abandoned probe of any caller without an organization bars every such caller
- *    from probing for as long: they could be one person under many names.
- *    Re-opening takes K probes, one at a time.
+ *    A probe abandoned holds the slot until its deadline.
+ *  - **Recovery exclusions are per person too (#758 r1 R1).** A probe that fails
+ *    or is abandoned excludes, from taking the next probe, its organization, the
+ *    person behind it (under every membership, and without one), and — if it had
+ *    no organization — every caller without one: they could be one person under
+ *    many names. The exclusion runs from the moment the slot frees for the
+ *    probe's whole granted deadline plus a cooldown, never for what was left of
+ *    it when the caller left: so whichever two classes of identity one person
+ *    alternates (a membership, and no organization), each turn is followed by a
+ *    cooldown in which only someone else can probe. Re-opening takes K probes,
+ *    one at a time.
  *
  * Only callers with a failure or a shed are remembered, at most
  * `MAX_TRACKED_CALLERS` per service, least recently touched forgotten first.
@@ -153,6 +159,9 @@ function callerOf(organizationId: string | undefined, person: string | undefined
 const isOrganization = (caller: Caller): caller is string =>
   typeof caller === 'string' && caller.startsWith('org:');
 
+/** The recovery exclusion every caller without an organization shares. */
+const ORGLESS = 'orgless';
+
 /** How the breaker shows on the gateway's readiness endpoint. */
 export interface CircuitStateView {
   failures: number;
@@ -188,8 +197,12 @@ interface Circuit {
   probe: Permit | null;
   /** `failureSeq` when `failures` was last cleared: what came before is no evidence now. */
   clearedSeq: number;
-  /** Callers without an organization may not take the probe before this time. */
-  orglessProbeUntil: number;
+  /**
+   * Who may not take the probe before when: `org:<id>`, `person:<id>`, and
+   * {@link ORGLESS} for every caller without an organization. Bounded like
+   * `callers`; cleared when the circuit closes.
+   */
+  excluded: Map<string, number>;
   /** Callers with a standing failure or a shed, least recently touched first. */
   callers: Map<Caller, CallerFailures>;
 }
@@ -212,6 +225,8 @@ interface Permit extends CircuitPermit {
   readonly caller: Caller;
   readonly person: string | undefined;
   settled: boolean;
+  /** The deadline it was granted when it was sent, in milliseconds. */
+  deadlineMs?: number;
   /** Its upstream deadline on this breaker's clock; set when it is sent. */
   deadlineAt?: number;
   /** An abandoned probe: the slot stays its own until this time. */
@@ -256,9 +271,9 @@ export class CircuitBreakers {
         throw refusal(service, 'circuit-open', circuitRetryAfterSeconds(remainingMs), remainingMs);
       }
     }
-    // Callers without an organization share one probe limit: one person can be
-    // anonymous and several organization-less identities at once.
-    const barredForMs = isOrganization(caller) ? 0 : circuit.orglessProbeUntil - this.options.now();
+    // Excluded from recovery as an organization, as a person under any of its
+    // identities, or as one more caller without an organization.
+    const barredForMs = this.excludedUntil(circuit, caller, person) - this.options.now();
     if (barredForMs > 0) {
       throw refusal(
         service,
@@ -302,6 +317,7 @@ export class CircuitBreakers {
    * caller leaving is `abandoned`, not `release`.
    */
   dispatched(permit: CircuitPermit, deadlineMs: number): void {
+    (permit as Permit).deadlineMs = deadlineMs;
     (permit as Permit).deadlineAt = this.options.now() + deadlineMs;
   }
 
@@ -325,11 +341,8 @@ export class CircuitBreakers {
         // full cooldown, rather than none.
         const now = this.options.now();
         own.heldUntil = own.deadlineAt ?? now + this.options.resetAfterMs;
-        // The hold again, then a cooldown: while another identity of the same
-        // caller holds the slot as long, this one is still shed when it frees.
-        const shedUntil = own.heldUntil + (own.heldUntil - now) + this.options.resetAfterMs;
-        this.remember(circuit, own.caller, { shedUntil });
-        this.barOrgless(circuit, own.caller, shedUntil);
+        const until = this.exclusionEnd(own, own.heldUntil, this.options.resetAfterMs);
+        this.exclude(circuit, own, until);
         return;
       }
       circuit.probe = null;
@@ -338,6 +351,7 @@ export class CircuitBreakers {
         this.transition(own.service, circuit, 'CLOSED');
       } else if (outcome === 'failure') {
         this.addFailure(own, circuit);
+        this.exclude(circuit, own, this.exclusionEnd(own, this.options.now(), 0));
         if (this.enoughOrganizationsFailing(circuit)) this.open(own.service, circuit);
       }
       return;
@@ -408,7 +422,7 @@ export class CircuitBreakers {
       openedAt: null,
       probe: null,
       clearedSeq: 0,
-      orglessProbeUntil: 0,
+      excluded: new Map(),
       callers: new Map(),
     };
     this.circuits.set(service, circuit);
@@ -416,13 +430,13 @@ export class CircuitBreakers {
     return circuit;
   }
 
-  private addFailure({ service, caller, person, probe }: Permit, circuit: Circuit): void {
+  private addFailure({ service, caller, person }: Permit, circuit: Circuit): void {
     circuit.failures += 1;
     circuit.failureSeq += 1;
 
     const now = this.options.now();
     const failures = (circuit.callers.get(caller)?.failures ?? 0) + 1;
-    const shed = probe || failures >= this.options.failureThreshold;
+    const shed = failures >= this.options.failureThreshold;
     this.remember(circuit, caller, {
       failures,
       lastSeq: circuit.failureSeq,
@@ -430,7 +444,6 @@ export class CircuitBreakers {
       person,
       ...(shed ? { shedUntil: now + this.options.resetAfterMs } : {}),
     });
-    if (probe) this.barOrgless(circuit, caller, now + this.options.resetAfterMs);
     if (shed) {
       // Never the tenant's id: logs are not where tenants are named.
       const who = isOrganization(caller) ? 'an organization' : 'a caller without an organization';
@@ -438,11 +451,37 @@ export class CircuitBreakers {
     }
   }
 
-  /** A failed or abandoned probe without an organization bars every such caller from probing. */
-  private barOrgless(circuit: Circuit, caller: Caller, until: number): void {
-    if (!isOrganization(caller)) {
-      circuit.orglessProbeUntil = Math.max(circuit.orglessProbeUntil, until);
+  /**
+   * When a probe that failed or was abandoned stops excluding its caller: from
+   * the moment the slot frees, its whole granted deadline plus a cooldown. Never
+   * what was left of the deadline. `unsent` stands in for a deadline it never got.
+   */
+  private exclusionEnd(probe: Permit, freedAt: number, unsent: number): number {
+    const granted = probe.deadlineMs ?? unsent;
+    return freedAt + granted + this.options.resetAfterMs;
+  }
+
+  /** Who may not take the probe until `until`: the organization, the person, and every caller without an organization if it had none. */
+  private exclude(circuit: Circuit, { caller, person }: Permit, until: number): void {
+    const keys: string[] = [];
+    if (isOrganization(caller)) keys.push(caller);
+    else keys.push(ORGLESS);
+    if (person !== undefined) keys.push(`person:${person}`);
+    for (const key of keys) {
+      // Never excluded now: whoever took the probe was not.
+      circuit.excluded.delete(key);
+      circuit.excluded.set(key, until);
+      if (circuit.excluded.size > MAX_TRACKED_CALLERS) {
+        circuit.excluded.delete(circuit.excluded.keys().next().value as string);
+      }
     }
+  }
+
+  /** Until when this caller may not take the probe; 0 if it may. */
+  private excludedUntil(circuit: Circuit, caller: Caller, person: string | undefined): number {
+    const own = isOrganization(caller) ? caller : ORGLESS;
+    const asPerson = person === undefined ? 0 : (circuit.excluded.get(`person:${person}`) ?? 0);
+    return Math.max(circuit.excluded.get(own) ?? 0, asPerson);
   }
 
   /** Updates a caller, making it the most recently touched; the least recently touched goes past the cap. */
@@ -499,7 +538,7 @@ export class CircuitBreakers {
       circuit.openedAt = null;
       // The service answered: nothing from before is evidence against it now.
       circuit.callers.clear();
-      circuit.orglessProbeUntil = 0;
+      circuit.excluded.clear();
       this.logger.log(`Circuit for ${service} closed`);
     }
     circuitStateGauge.set({ service }, STATE_VALUE[state]);

@@ -103,6 +103,8 @@ function context(user: string, organizationId: string, roles: string[]): Request
     requestId: `req-circuit-${user}`,
     organizationId,
     userId: user,
+    // One person per user: the breaker tells people apart by subject (#758 r1 R1).
+    subject: `SUB_${user}`,
     roles,
     organizationIds: [],
     authType: 'USER',
@@ -346,7 +348,10 @@ describe('HALF_OPEN admits exactly one probe', () => {
     expect(upstream.exchanges).toHaveLength(2); // refused inside the new cooldown
 
     await sleep(PAST_COOLDOWN_MS);
-    expect((await gateway.send(USERS).answer).status).toBe(200);
+    // The caller whose probe failed waits its deadline plus a cooldown (#758 r1
+    // R1); anyone else probes once the fresh cooldown is over.
+    expect(await gateway.send(USERS).answer).toMatchObject({ status: 503 });
+    expect((await gateway.send(USERS, { caller: 'B' }).answer).status).toBe(200);
     expect(gateway.proxy.circuitStates().identity?.state).toBe('CLOSED');
   });
 
