@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TestWorkflowEnvironment, MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
-import { Context } from '@temporalio/activity';
+import { ApplicationFailure, Context } from '@temporalio/activity';
 import { temporalStep, type OrderActivities, type SagaOrderView } from './activities';
 import {
   orderSaga,
@@ -10,6 +10,7 @@ import {
   SAGA_HISTORY_BYTES,
   SAGA_HISTORY_EVENTS,
   type OrderSagaInput,
+  type SagaResume,
   type SagaStatus,
 } from './workflows';
 
@@ -67,7 +68,8 @@ describe('history rollover on real Temporal', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   };
-  // The saga waits with nothing in flight: its last commands are its timers.
+  // The saga waits with nothing in flight: its last commands are its timers,
+  // or a task with no command at all, which is what answering a query leaves.
   // Skip time only from here, and land a signal between two rechecks, not on
   // one. The test server refuses a task that cancels a timer fired while the
   // task ran, and the saga then sits waiting for a retry.
@@ -75,7 +77,13 @@ describe('history rollover on real Temporal', () => {
     const handle = env.client.workflow.getHandle(workflowId);
     for (let i = 0; i < 300; i++) {
       const last = (await handle.fetchHistory()).events?.at(-1);
-      if (last?.timerStartedEventAttributes || last?.timerCanceledEventAttributes) return;
+      if (
+        last?.timerStartedEventAttributes ||
+        last?.timerCanceledEventAttributes ||
+        last?.workflowTaskCompletedEventAttributes
+      ) {
+        return;
+      }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error(`${workflowId} did not come to rest`);
@@ -421,6 +429,129 @@ describe('history rollover on real Temporal', () => {
         expect(disputes).toEqual(['DSP_OLD', 'DSP_NEW']);
       } finally {
         await env.client.workflow.getHandle(taskQueue).terminate();
+      }
+    });
+  });
+
+  it('rolls over inside the release wait: the next run keeps its dispute, rounds and deadlines (FU-080)', async () => {
+    const state: SagaOrderView = {
+      status: 'FUNDS_HELD',
+      economicTransactionId: 'TXN_RELEASE',
+      cancellationReason: null,
+      dispute: null,
+    };
+    const sent: unknown[][] = [];
+    const rounds: number[] = [];
+    let recovered = false;
+    const activities = {
+      readOrder: async (_id: string, mirrored?: string) => ({
+        ...state,
+        ...(mirrored ? { mirroredDispute: { id: mirrored, resolution: 'decided' } } : {}),
+      }),
+      resolveObligationDispute: async (...args: unknown[]) => {
+        sent.push(args);
+        if (!recovered) throw ApplicationFailure.nonRetryable('refused', 'BUSINESS_RULE_VIOLATION');
+      },
+      noteReleaseUnconfirmed: async (_id: string, round: number) => {
+        rounds.push(round);
+      },
+    } satisfies Partial<OrderActivities>;
+    const taskQueue = `rollover-release-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities,
+    });
+    /** What this run was started with. */
+    const resumeOf = async (runId?: string): Promise<SagaResume | undefined> => {
+      const history = await env.client.workflow.getHandle(taskQueue, runId).fetchHistory();
+      const start = history.events?.[0]?.workflowExecutionStartedEventAttributes;
+      const payload = start?.input?.payloads?.[0];
+      const input = JSON.parse(Buffer.from(payload?.data as Uint8Array).toString());
+      return (input as OrderSagaInput).resume;
+    };
+    await worker.runUntil(async () => {
+      const dueAt = (await env.currentTimeMs()) + 30 * 24 * 60 * 60 * 1000;
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'DISPUTED',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              mirroredDispute: 'DSP_RELEASE',
+              mirroredEconomicDispute: 'ECON_RELEASE',
+              waitingIn: 'DISPUTED',
+              reminderDue: [['FUNDS_HELD', dueAt]],
+              activitySequence: 5,
+            },
+          },
+        ],
+      });
+      const latest = env.client.workflow.getHandle(taskQueue);
+      try {
+        const first = (await handle.describe()).runId;
+        await env.sleep('8 hours');
+        const second = (await latest.describe()).runId;
+        expect(second).not.toBe(first);
+        expect(rounds.length).toBeGreaterThanOrEqual(4);
+        // The count goes on across the rollover, so the backoff does not start again.
+        expect(rounds).toEqual(rounds.map((_, i) => i + 1));
+        expect(await resumeOf(second)).toMatchObject({
+          mirroredDispute: 'DSP_RELEASE',
+          mirroredEconomicDispute: 'ECON_RELEASE',
+          waitingIn: 'FUNDS_HELD',
+          reminderDue: [['FUNDS_HELD', dueAt]],
+          releaseRounds: expect.any(Number),
+        });
+        expect(new Set(sent.map((args) => JSON.stringify(args)))).toEqual(
+          new Set([
+            JSON.stringify([
+              INPUT.orderId,
+              'TXN_RELEASE',
+              'DSP_RELEASE',
+              'decided',
+              'ECON_RELEASE',
+            ]),
+          ]),
+        );
+        expect((await latest.query<SagaStatus>('status')).phase).toBe('RELEASE_UNCONFIRMED');
+
+        recovered = true;
+        await atRest(taskQueue);
+        await latest.signal('retryDisputeRelease');
+        for (let i = 0; i < 100; i++) {
+          if ((await latest.query<SagaStatus>('status')).phase === 'AWAITING_CONFIRMATION') break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect((await latest.query<SagaStatus>('status')).phase).toBe('AWAITING_CONFIRMATION');
+
+        // Confirmed: the next ordinary rollover no longer claims a release wait.
+        await atRest(taskQueue);
+        await env.sleep('12 hours');
+        const third = (await latest.describe()).runId;
+        expect(third).not.toBe(second);
+        const resumed = await resumeOf(third);
+        expect(resumed).toBeDefined();
+        expect(resumed).not.toHaveProperty('releaseRounds');
+        expect(resumed).not.toHaveProperty('mirroredDispute');
+        for (const runId of [first, second, third]) {
+          await Worker.runReplayHistory(
+            { workflowsPath: require.resolve('./workflows') },
+            await env.client.workflow.getHandle(taskQueue, runId).fetchHistory(),
+            taskQueue,
+          );
+        }
+      } finally {
+        await latest.terminate();
       }
     });
   });
