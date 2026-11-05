@@ -743,6 +743,7 @@ const PATCHES = {
   'dispute-release-durable-wait-v1': 3,
   'economic-call-durable-wait-v1': 4,
   'economic-sibling-call-durable-wait-v1': 5,
+  'economic-hold-call-durable-wait-v1': 6,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -1203,6 +1204,7 @@ const RESUME_FIELDS = {
   releaseRounds: 3,
   unconfirmedCall: 4,
   siblingCall: 5,
+  holdCall: 6,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1371,6 +1373,12 @@ test('a continuation rolled over in the wait of a filing or refund needs protoco
   );
   assert.match(run(rolled, targetOf(4)).stderr, /requires saga protocol 5; incompatible/);
   assert.equal(run(rolled, targetOf(5)).status, 0);
+});
+
+test('a continuation rolled over in the wait of the hold needs protocol 6', () => {
+  const rolled = withHistory(history({ resume: { activitySequence: 1, holdCall: { rounds: 2 } } }));
+  assert.match(run(rolled, targetOf(5)).stderr, /requires saga protocol 6; incompatible/);
+  assert.equal(run(rolled, targetOf(6)).status, 0);
 });
 
 test('a continuation rolled over in the release wait needs protocol 3', () => {

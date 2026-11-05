@@ -111,6 +111,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     buyerOrganizationId: 'ORG',
     correlationId: 'COR',
     receiptConfirmed: true,
+    totalAmountMinor: '1000',
   };
   afterEach(() => {
     order.receiptConfirmed = true;
@@ -128,6 +129,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
       } as unknown as OrderService,
       economic: {
+        createObligation: failing,
         authoriseSettlement: failing,
         refund: failing,
         settle: failing,
@@ -368,6 +370,37 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       expect(await failure(call(activities))).toMatchObject({
         type: 'RECONCILIATION_READ_FAILED',
       });
+    });
+  });
+
+  describe('createObligation behind the wait (FU-117)', () => {
+    const noTransaction = () => null;
+    const refuses = (code: string) => () => {
+      throw refuse(code);
+    };
+
+    it('the send’s own listed refusal on its first attempt is proof', async () => {
+      const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction, () => 1);
+      const caught = await failure(activities.createObligation('ORD'));
+      expect(caught.type).toBe('INSUFFICIENT_BALANCE');
+      expect(caught.details).toEqual([REFUSED_ON_FIRST_ATTEMPT]);
+    });
+
+    it.each([
+      ['a later attempt', 'INSUFFICIENT_BALANCE', 2],
+      ['an unlisted code', 'IDEMPOTENCY_KEY_REUSED', 1],
+      ['a key in flight', 'CONFLICT', 1],
+      ['a source already taken', 'ALREADY_EXISTS', 1],
+    ] as const)('%s is no proof', async (_name, code, attempt) => {
+      const { activities } = over(refuses(code), noTransaction, () => attempt);
+      const caught = await failure(activities.createObligation('ORD'));
+      expect(caught.type).toBe(code);
+      expect(caught.details ?? []).toEqual([]);
+    });
+
+    it('no attempt known: no proof', async () => {
+      const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction);
+      expect((await failure(activities.createObligation('ORD'))).details ?? []).toEqual([]);
     });
   });
 });

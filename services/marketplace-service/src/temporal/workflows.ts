@@ -94,8 +94,9 @@ export { PROVEN_REFUSALS };
  * that proves the call changed nothing (`PROVEN_REFUSALS`) takes the path it
  * always took; anything else — a 5xx, a timeout, a lost response, a code nobody
  * listed — says nothing about the money, so the saga stays and asks again under
- * the same key. `siblingCall` does the same for the dispute filing and the refund
- * (FU-117). The hold still records FAILED on an empty lookup, as it always did.
+ * the same key. `siblingCall` does the same for the dispute filing, the refund and
+ * the hold (FU-117). An empty lookup does not end a hold in doubt: a request on its
+ * way can commit after it, so only an answer or an obligation found does (`placeHold`).
  *
  * A code speaks for one attempt, never for the attempts before it. So the proof
  * is the activity's own refusal on the first attempt this run scheduled, which it
@@ -160,7 +161,7 @@ export interface OrderSagaInput {
 }
 
 /**
- * The dispute filing or the refund in its wait (FU-117), with what the
+ * The dispute filing, the refund or the hold in its wait (FU-117), with what the
  * next run cannot read back: a refund's lookup would find the obligation REFUNDED
  * and stop, and the order may have left the dispute being filed.
  */
@@ -200,8 +201,14 @@ export interface SagaResume {
   releaseRounds?: number;
   /** The authorisation in its wait, when rolled over there or since (FU-103). */
   unconfirmedCall?: UnconfirmedCall;
-  /** The other call in its wait, when rolled over there (FU-117). */
+  /** The filing or the refund in its wait, when rolled over there (FU-117). */
   siblingCall?: UnconfirmedSibling;
+  /**
+   * The hold in its wait, when rolled over there (FU-117). Not `siblingCall`: a
+   * protocol-5 worker reads that one and would refuse a resumed run at PENDING, and
+   * this field is what tells the drain gate so before the first workflow task.
+   */
+  holdCall?: { rounds: number };
 }
 
 /**
@@ -288,8 +295,16 @@ export const ECONOMIC_WAIT_PATCH = 'economic-call-durable-wait-v1';
  */
 export const SIBLING_WAIT_PATCH = 'economic-sibling-call-durable-wait-v1';
 
+/**
+ * The same, for the hold (FU-117). Not the marker above: a protocol-5 build ends
+ * this history with `FAILED` where it waited, so the drain gate has to refuse that
+ * build for a saga carrying this, while a saga carrying the marker above is its own.
+ */
+export const HOLD_WAIT_PATCH = 'economic-hold-call-durable-wait-v1';
+
 /** What the status query shows while each call waits. */
 const UNCONFIRMED_PHASE: Record<UnconfirmedOperation, string> = {
+  createObligation: 'HOLD_UNCONFIRMED',
   authoriseSettlement: 'AUTHORISATION_UNCONFIRMED',
   disputeObligation: 'DISPUTE_UNCONFIRMED',
   compensate: 'COMPENSATION_UNCONFIRMED',
@@ -297,6 +312,7 @@ const UNCONFIRMED_PHASE: Record<UnconfirmedOperation, string> = {
 
 /** The order status each call waits at, for the rollover to name. */
 const UNCONFIRMED_AT: Record<UnconfirmedOperation, OrderStatus> = {
+  createObligation: 'PENDING',
   authoriseSettlement: 'RECEIPT_CONFIRMED',
   disputeObligation: 'DISPUTED',
   compensate: 'CANCELLING',
@@ -456,7 +472,12 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   let mirroredEconomicDispute: string | undefined = input.resume?.mirroredEconomicDispute;
   let releaseRounds = input.resume?.releaseRounds ?? 0;
   let unconfirmed: UnconfirmedCall | undefined = input.resume?.unconfirmedCall;
-  let sibling: UnconfirmedSibling | undefined = input.resume?.siblingCall;
+  let sibling: UnconfirmedSibling | undefined =
+    input.resume?.siblingCall ??
+    (input.resume?.holdCall && {
+      operation: 'createObligation',
+      rounds: input.resume.holdCall.rounds,
+    });
 
   /** What a rollover hands to the next run. */
   const resumeFrom = (waitingIn: OrderStatus, nextReminderAt?: number): SagaResume => ({
@@ -469,7 +490,11 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     activitySequence,
     ...(releaseRounds > 0 ? { releaseRounds } : {}),
     ...(unconfirmed ? { unconfirmedCall: unconfirmed } : {}),
-    ...(sibling ? { siblingCall: sibling } : {}),
+    ...(sibling?.operation === 'createObligation'
+      ? { holdCall: { rounds: sibling.rounds } }
+      : sibling
+        ? { siblingCall: sibling }
+        : {}),
   });
 
   /** The order now, with the mirrored dispute's resolution when there is one. */
@@ -598,7 +623,8 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         return answer;
       } catch (error) {
         if (!wait.canWait(error)) {
-          status.phase = phase;
+          // Unless the call named why the saga stops (`findOwnObligation`).
+          if (status.phase === wait.phase) status.phase = phase;
           throw error;
         }
         failure = failureOf(error);
@@ -662,7 +688,11 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     try {
       answer = await call(inDoubt());
     } catch (error) {
-      if (!canWait(error) || !patched(SIBLING_WAIT_PATCH)) throw error;
+      const adopted = (): boolean =>
+        carried.operation === 'createObligation'
+          ? patched(HOLD_WAIT_PATCH)
+          : patched(SIBLING_WAIT_PATCH);
+      if (!canWait(error) || !adopted()) throw error;
       const pending: UnconfirmedSibling = sibling ?? { ...carried, rounds: 0 };
       sibling = pending;
       answer = await waitForConfirmation(
@@ -886,16 +916,40 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * the saga asks before concluding anything. This is the difference between
    * an order recorded `FAILED` with its buyer's money held and nothing to
    * release it, and an order that carries on.
+   *
+   * An empty lookup is that answer only if the call was refused for certain
+   * (`outcomeUnknown`): a request still on its way can commit after the lookup
+   * (FU-117). Otherwise the saga sends again under the same key, whatever the order
+   * has become, until a request is answered or the obligation is found. An answered
+   * key fences the late request off, as it replays that answer instead of holding
+   * again; if the buyer has cancelled meanwhile `markFundsHeld` yields and the saga
+   * refunds.
    */
   async function placeHold(): Promise<
     { held: true; transactionId: string } | { held: false; reason: string }
   > {
+    let unanswered: unknown;
+    const place = async (inDoubt: boolean): Promise<string> => {
+      try {
+        return (await createObligation(orderId)).transactionId;
+      } catch (error) {
+        // In doubt, a lookup that cannot answer counts as a round, or an outage would
+        // show nothing. A proven refusal asks until answered and keeps its proof:
+        // the wait would take that proof away.
+        const found = await findOwnObligation(
+          outcomeUnknown(error, inDoubt) ? askEconomic : findObligation,
+        );
+        if (found) return found;
+        unanswered = error;
+        throw error;
+      }
+    };
     try {
-      const held = await createObligation(orderId);
-      return { held: true, transactionId: held.transactionId };
+      const { answer } = await siblingCall({ operation: 'createObligation' }, place);
+      return { held: true, transactionId: answer };
     } catch (error) {
-      const found = await findOwnObligation();
-      if (found) return { held: true, transactionId: found };
+      // A lookup that failed, or an obligation not adopted, is not the hold's refusal.
+      if (error !== unanswered) throw error;
       return { held: false, reason: describe(error) };
     }
   }
@@ -916,8 +970,8 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * or not proven held — so a person decides from that, not from a
    * FUNDS_HELD the order would otherwise have recorded.
    */
-  async function findOwnObligation(): Promise<string | null> {
-    const found = await findObligation(orderId);
+  async function findOwnObligation(find: typeof findObligation): Promise<string | null> {
+    const found = await find(orderId);
     if (found && 'notHeld' in found) {
       status.phase = 'OBLIGATION_NOT_HELD';
       throw ApplicationFailure.nonRetryable(
@@ -1064,14 +1118,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   }
 
   let order = await read();
-  if (input.resume && order.status === 'PENDING') {
+  // Whatever the order has become: the wait is what fences a late request off.
+  const holdInDoubt = sibling?.operation === 'createObligation';
+  if (input.resume && order.status === 'PENDING' && !holdInDoubt) {
     throw ApplicationFailure.nonRetryable(
       'A resumed saga cannot repeat initial hold placement',
       'SAGA_INCONSISTENT',
     );
   }
 
-  if (order.status === 'PENDING') {
+  if (order.status === 'PENDING' || holdInDoubt) {
     status.phase = 'CREATING_OBLIGATION';
     const hold = await placeHold();
 
@@ -1186,7 +1242,8 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         // Refunded unconfirmed and rolled over, the lookup would find it REFUNDED
         // and stop: the next run keeps the transaction it was refunding.
         const carried = sibling?.operation === 'compensate' ? sibling.transactionId : undefined;
-        const transactionId = order.economicTransactionId ?? carried ?? (await findOwnObligation());
+        const transactionId =
+          order.economicTransactionId ?? carried ?? (await findOwnObligation(findObligation));
         // Nothing moves a CANCELLING order but this saga (`ORDER_TRANSITIONS`), so
         // the refund does not stop being wanted, and `markCancelled` follows its answer.
         if (transactionId) {

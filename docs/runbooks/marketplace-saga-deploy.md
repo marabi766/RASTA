@@ -223,9 +223,9 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**. A marker the gate does not list blocks every target until the gate learns
+**5**, `economic-hold-call-durable-wait-v1` **6**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
-(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5; any unlisted field blocks; so does an
+(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `holdCall`: 6; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
 history requires.
 
@@ -281,10 +281,9 @@ protocol-2 target passes the gate and then ends that saga as before this wait.
 
 `RastaMarketplaceSagaEconomicCallUnconfirmed` is the same wait for another economic
 call, labelled `operation`, with the same limit: it counts rounds, so it clears
-with workers stopped. Those calls are `authoriseSettlement` (phase
-`AUTHORISATION_UNCONFIRMED`), `disputeObligation` (`DISPUTE_UNCONFIRMED`) and
-`compensate` (`COMPENSATION_UNCONFIRMED`). `createObligation` is not: exhausted with
-an empty lookup it still records `FAILED`. economic-service gave no answer proving the
+with workers stopped. Those calls are `createObligation` (phase `HOLD_UNCONFIRMED`),
+`authoriseSettlement` (`AUTHORISATION_UNCONFIRMED`), `disputeObligation`
+(`DISPUTE_UNCONFIRMED`) and `compensate` (`COMPENSATION_UNCONFIRMED`). economic-service gave no answer proving the
 call changed nothing, so it may have committed; the call is repeated under the same key,
 doubling from one minute to one hour, and nothing settles meanwhile. After restoring
 economic-service, try now with the same signal, which keeps its name:
@@ -313,6 +312,20 @@ refusal does not end it. A filing is sent until answered even once the order has
 that dispute, because filed unseen it would leave the obligation `DISPUTED` with nothing
 to release it; once answered, the saga mirrors the decision before anything else.
 
+The hold (FU-117) has no transaction to read, so its only answers are a request
+answered or the order's obligation found, asked after every failed send. An empty lookup
+ends nothing unless the send was refused on its first attempt: a request still on its way
+can commit after the lookup, and `FAILED` would leave those funds held with nothing to
+release them. Under this wait the order stays `PENDING`, or `CANCELLING` if the buyer
+cancels. The saga goes on sending even then, because only an answered key fences a late
+request off; if the send is then answered, the saga refunds it. An obligation found that
+is not `HELD` or not on the order's terms stops the saga as it always did
+(`OBLIGATION_NOT_HELD`, `OBLIGATION_TERMS_MISMATCH`). A refusal that persists in this
+wait, an empty wallet say, keeps the saga here: **do not terminate or cancel it** to clear
+the alert, since a hold that lands later would have nothing to release it. Check the
+obligation at economic-service and escalate. There is no operator path to `FAILED`
+from this wait yet. With economic-service down, a lookup that cannot answer counts as a round.
+
 A wait that will not clear shows why in the log line's code: fix the route or
 configuration and signal. For a real refusal at `HELD` (a persistent
 `IDEMPOTENCY_KEY_REUSED`, say) read the transaction at economic-service and reconcile
@@ -327,13 +340,19 @@ Once a dispute is raised or decided the authorisation stops being sent, but the 
 in this phase until economic-service answers a read of the obligation; only then
 does it file the dispute or refund. One rollback edge, as for the release: a call
 whose last attempt failed just as workers stopped has no marker yet, so a target one protocol
-below it (3 for an authorisation, 4 for a filing or refund) passes the gate and ends
+below it (3 for an authorisation, 4 for a filing or refund, 5 for the hold) passes the gate and ends
 that saga as before this wait.
 
 Protocol 5 is forward-only like the others, with its own marker: a protocol-4 history
 carrying `economic-call-durable-wait-v1` from an authorisation may have ended at a
 filing or refund, and replays that end. A protocol-4 saga still running when this build
 deploys takes the new wait at its next such call.
+
+Protocol 6 is the hold's, with its own marker and its own resume field (`holdCall`), so that
+the gate refuses a protocol-5 target for a saga in that wait: that build has no such wait,
+ends the same history in `FAILED`, and refuses a resumed run at `PENDING`. A saga
+protocol 5 started takes the wait if its hold is still unanswered when this build deploys; a
+history in which protocol 5 already recorded `FAILED` replays that end.
 
 ## Continued-as-new visibility gap (FU-046)
 

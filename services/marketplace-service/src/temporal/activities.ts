@@ -171,6 +171,7 @@ export interface DisputedObligation {
 
 /** The economic calls that wait for confirmation beside the release (FU-103, FU-117). */
 export const UNCONFIRMED_OPERATIONS = [
+  'createObligation',
   'authoriseSettlement',
   'disputeObligation',
   'compensate',
@@ -376,10 +377,18 @@ export function createActivities(deps: ActivityDependencies) {
           return { transactionId: order.economicTransactionId };
         }
 
-        const transaction = await deps.economic.createObligation({
-          ...obligationTermsOf(order),
-          correlationId: order.correlationId,
-        });
+        const transaction = await deps.economic
+          .createObligation({
+            ...obligationTermsOf(order),
+            correlationId: order.correlationId,
+          })
+          .catch((refusal: unknown) => {
+            // Only the send's own refusal on its first attempt is proof (`placeHold`).
+            // Not ALREADY_EXISTS: that says an obligation is there, the opposite of
+            // nothing having moved.
+            const taken = isRastaError(refusal) && refusal.code === 'ALREADY_EXISTS';
+            throw currentAttempt() === 1 && !taken ? provenIfListed(refusal) : refusal;
+          });
         return { transactionId: transaction.id };
       });
       await asSystemFor(orderId, async (order) => {

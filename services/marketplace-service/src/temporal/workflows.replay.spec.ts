@@ -77,10 +77,13 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     // filing: the reason these sites have a marker of their own. With it, the wait.
     'pre-fu117-compensate-exhausted',
     'pre-fu117-dispute-exhausted',
+    // Protocol 5 (`38d0ca5d`) failed the order on an empty lookup, with no marker.
+    'pre-fu117-hold-empty',
     'fu103-wait-then-refund-exhausted',
     'fu103-wait-then-dispute-exhausted',
     'fu117-compensate-wait',
     'fu117-dispute-wait',
+    'fu117-hold-wait',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(
