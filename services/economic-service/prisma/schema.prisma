@@ -1526,6 +1526,13 @@ model IdempotencyKey {
   /// response.
   requestHash String @map("request_hash")
 
+  /// SHA-256 of the body in canonical form (`canonicalBodyPipe`), when the
+  /// release that wrote the record knew it. `requestHash` stays the hash the
+  /// previous release computes — the body as sent — so a retry reaching it
+  /// during a rolling update or a rollback still replays (Codex PR-747 r2,
+  /// F3). Null on records written before it existed.
+  canonicalHash String? @map("canonical_hash")
+
   /// SHA-256 of the actor who reserved the key. The same key from another
   /// actor is `409 IDEMPOTENCY_KEY_REUSED`, never a replay. Null on records
   /// written before it existed (docs/23 D-054).

@@ -11,6 +11,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  resolveOpenDispute,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
@@ -280,14 +281,17 @@ describe('order lifecycle (real database)', () => {
 
     // And an operator can still resolve it, which is what that edge is for.
     await asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
-      wiring.orders.resolveDispute(order.id, {
+      resolveOpenDispute(wiring, order.id, {
         outcome: 'SETTLE',
         resolution: 'the supplier provided evidence of correct delivery',
         responsibility: 'BUYER',
       }),
     );
+    // D-083: raised before receipt, so SETTLE resumes the order where the
+    // dispute found it — the buyer has still not confirmed receipt.
     const resolved = await asBuyer(() => wiring.orders.get(order.id));
-    expect(resolved.status).toBe('RECEIPT_CONFIRMED');
+    expect(resolved.status).toBe('AWAITING_RECEIPT_CONFIRMATION');
+    expect(resolved.receiptConfirmedAt).toBeNull();
 
     // ADR-052 § 1-b: the resolve endpoint publishes nothing today. Selected by
     // this order's own id, never by "the last row" — a shared outbox table can
@@ -320,7 +324,7 @@ describe('order lifecycle (real database)', () => {
 
     await expect(
       asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
-        wiring.orders.resolveDispute(order.id, {
+        resolveOpenDispute(wiring, order.id, {
           outcome: 'SETTLE',
           resolution: 'a resolution with a responsibility nobody defined',
           // @ts-expect-error — exactly the out-of-enum value this test refuses
@@ -344,7 +348,7 @@ describe('order lifecycle (real database)', () => {
     );
 
     await asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
-      wiring.orders.resolveDispute(order.id, {
+      resolveOpenDispute(wiring, order.id, {
         outcome: 'REFUND',
         resolution: 'the supplier never shipped the goods',
         responsibility: 'SUPPLIER',
@@ -378,13 +382,16 @@ describe('order lifecycle (real database)', () => {
 
     await expect(
       asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
-        wiring.orders.resolveDispute(order.id, {
+        resolveOpenDispute(wiring, order.id, {
           outcome: 'REFUND',
           resolution: 'resolving something that was never disputed',
           responsibility: 'SUPPLIER',
         }),
       ),
-    ).rejects.toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: [expect.objectContaining({ code: 'DISPUTE_DECISION_STALE' })],
+    });
   });
 
   it('allows one open dispute per order and no more', async () => {
@@ -396,14 +403,16 @@ describe('order lifecycle (real database)', () => {
       wiring.orders.raiseDispute(order.id, { reason: 'the goods never arrived at all' }),
     );
 
-    // Refused by the state machine — and by the partial unique index if a
-    // future path ever got past it.
+    // Refused by the state machine — and by the database if a future path
+    // ever got past it.
     await expect(
       asBuyer(() =>
         wiring.orders.raiseDispute(order.id, { reason: 'a second complaint about the same order' }),
       ),
     ).rejects.toThrow();
 
+    // Inserted directly on the DISPUTED order: no dispute is raised from
+    // DISPUTED, so the origin CHECK refuses it (D-083) before the index does.
     await expect(
       runUnscoped('the suite attempts a second open dispute directly', () =>
         prisma.client.$executeRawUnsafe(
@@ -414,7 +423,25 @@ describe('order lifecycle (real database)', () => {
           order.id,
         ),
       ),
-    ).rejects.toThrow(/Key \(order_id\)=.* already exists/);
+    ).rejects.toThrow(/ck_order_dispute_raised_from/);
+
+    // And on an order whose status a dispute may be raised from, a second
+    // open one — two writers that both inserted before either moved the
+    // order — is refused by the partial unique index.
+    const other = await placeOrder(offerId, 1);
+    await asSaga(() => wiring.orders.markFundsHeld(other.id, `TXN_${ulid()}`, sagaStep()));
+    const insertOpen = () =>
+      runUnscoped('the suite inserts an open dispute directly', () =>
+        prisma.client.$executeRawUnsafe(
+          `INSERT INTO order_dispute (id, organization_id, order_id, reason, status, raised_at, raised_by)
+           VALUES ($1, $2, $3, 'a second open dispute', 'OPEN', now(), 'USR-ITEST')`,
+          `DSP_${ulid()}`,
+          org.buyer,
+          other.id,
+        ),
+      );
+    await insertOpen();
+    await expect(insertOpen()).rejects.toThrow(/Key \(order_id\)=.* already exists/);
   });
 
   it('cancels an order the saga never funded', async () => {
