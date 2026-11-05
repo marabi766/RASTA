@@ -172,7 +172,8 @@ function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>)
 
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
-  // At zero from the start: `increase()` cannot see a series' first increment.
+  // At zero from the start: `increase()` cannot see a series' first increment,
+  // and an operator reads the rounds with it.
   releasesUnconfirmedTotal.inc({ service: SERVICE_NAME }, 0);
 
   /**
@@ -220,6 +221,20 @@ export function createActivities(deps: ActivityDependencies) {
   }
 
   const currentStep = deps.currentStep ?? temporalStep;
+
+  /** The record the release alert reads (FU-104), under the order's own tenant. */
+  const releaseRecord = (
+    write: 'openSagaCall' | 'confirmSagaCall',
+    orderId: string,
+    disputeId: string,
+  ): Promise<void> =>
+    asSystemFor(orderId, (order) =>
+      deps.orders[write](
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        'resolveObligationDispute',
+        disputeId,
+      ),
+    );
 
   /**
    * An economic-service call, made at most once per scheduled activity
@@ -534,9 +549,11 @@ export function createActivities(deps: ActivityDependencies) {
       economicDisputeId?: string | null,
     ): Promise<ObligationDisputeTaken> {
       const step = currentStep();
-      return asSystemFor(orderId, () =>
+      const taken = await asSystemFor(orderId, () =>
         deps.orders.markObligationDisputed(orderId, reason, step, economicDisputeId ?? null),
       );
+      if (taken.disputeId) await releaseRecord('openSagaCall', orderId, taken.disputeId);
+      return taken;
     },
 
     async markSettlementFailed(orderId: string): Promise<OrderStatus> {
@@ -599,6 +616,8 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       reason: string,
     ): Promise<string | null> {
+      // Before the call: a call that fails may still have committed.
+      await releaseRecord('openSagaCall', orderId, disputeId);
       return economicStep(
         orderId,
         'disputeObligation',
@@ -634,6 +653,12 @@ export function createActivities(deps: ActivityDependencies) {
      * raised since the dispute decided here was taken, after that one was
      * resolved there (Codex on #318 round 2, N1). The refusal stands: the saga
      * waits with the funds held and the alert on, for an operator (FU-080).
+     *
+     * Confirmed on every way this answers, including a retry answered from the
+     * step's record. The record, opened when economic-service was told of the
+     * dispute and again here for a dispute told before it existed, keeps the
+     * alert on once the dispute is decided, whether or not a saga is left to
+     * make this call (FU-104).
      */
     async resolveObligationDispute(
       orderId: string,
@@ -642,6 +667,7 @@ export function createActivities(deps: ActivityDependencies) {
       resolution: string,
       economicDisputeId?: string,
     ): Promise<void> {
+      await releaseRecord('openSagaCall', orderId, disputeId);
       await economicStep(
         orderId,
         'resolveObligationDispute',
@@ -683,6 +709,7 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
+      await releaseRecord('confirmSagaCall', orderId, disputeId);
     },
 
     /**

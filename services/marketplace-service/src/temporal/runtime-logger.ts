@@ -83,11 +83,17 @@ export class TemporalRuntimeLogger implements TemporalLogger {
  * status or a poll error at WARN, written by its console exporter straight to
  * stderr, unscrubbed and uncapped (Codex on #296, r2 F1). `logging.forward`
  * sends those records through `logger` as well, under Core's default filter.
+ *
+ * No `shutdownSignals`: by default the SDK stops every worker on four signals,
+ * two of which (SIGQUIT, SIGUSR2) the service's shutdown does not handle, leaving
+ * a live API with no worker. Now SIGTERM and SIGINT stop it through the service's
+ * shutdown, and those two end the process by Node's default action (FU-104).
  */
 export function temporalRuntimeOptions(base: Logger): RuntimeOptions {
   return {
     logger: new TemporalRuntimeLogger(base),
     telemetryOptions: { logging: { forward: {} } },
+    shutdownSignals: [],
   };
 }
 

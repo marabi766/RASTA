@@ -7,7 +7,7 @@ import {
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { Inject } from '@nestjs/common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
-import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import { fatalShutdown, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import { ENV } from '../tokens';
 import type { MarketplaceEnv } from '../config/env';
 import { OrderService } from '../order/order.service';
@@ -32,6 +32,17 @@ import { installTemporalRuntimeLogger } from './runtime-logger';
  * server gets an API that works and a saga that plainly is not running,
  * instead of requests that hang.
  *
+ * ## Enabled means required (FU-104)
+ *
+ * With Temporal enabled, a process without a polling worker does not stay up:
+ * it fails to start, and exits non-zero if the worker ends by itself, the way a
+ * terminal consumer crash does. Not merely unready, because nothing in the
+ * process would ever try again, and the restart is the retry. The price: a
+ * replica starting during a Temporal outage stays down until Temporal is back,
+ * and an answer Core does not retry (revoked credentials, a removed namespace)
+ * stops every replica within about a minute. Core retries an unavailable server,
+ * so an outage alone does not stop replicas already running.
+ *
  * ## Workflow bundling
  *
  * `workflowsPath` points at the source module. Temporal bundles it into an
@@ -47,6 +58,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
   private connection?: NativeConnection;
   private running?: Promise<void>;
   private stopping?: Promise<void>;
+  private stopRequested = false;
 
   constructor(
     @Inject(ENV) private readonly env: MarketplaceEnv,
@@ -84,22 +96,42 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
 
       // Not awaited: `run()` resolves only on shutdown, and awaiting it here
       // would block Nest's bootstrap forever.
-      this.running = this.worker.run().catch((error: unknown) => {
-        // Also what the SDK raises when the force time passes first.
+      this.running = this.worker.run().then(
+        () => this.ended(),
+        (error: unknown) => this.ended(error),
+      );
+      this.logger.log('Order saga worker polling (MARKETPLACE_TEMPORAL_TASK_QUEUE)');
+    } catch (error) {
+      // By class and code only: bootstrap's own handler logs what this throws,
+      // and the failure's text may quote the address.
+      const failure = foreignFailure(error);
+      this.logger.error({ failure }, 'Could not start the order saga worker');
+      throw new Error(
+        `TEMPORAL_ADDRESS: the order saga worker did not start (${failure.type}, code ${failure.code ?? 'unknown'})`,
+      );
+    }
+  }
+
+  /**
+   * `run()` is over. Asked to by `stop()`, that is the shutdown. Otherwise,
+   * however it ended, sagas here have stopped moving while the API looks healthy.
+   */
+  private ended(error?: unknown): void {
+    if (this.stopRequested) {
+      // Also what the SDK raises when the force time passes first.
+      if (error !== undefined) {
         this.logger.warn(
           { failure: foreignFailure(error) },
           'The order saga worker ended with an error',
         );
-      });
-      this.logger.log('Order saga worker polling (MARKETPLACE_TEMPORAL_TASK_QUEUE)');
-    } catch (error) {
-      // A missing Temporal server must not take the API down: existing orders
-      // are still readable and the failure is loud in the log.
-      this.logger.error(
-        { failure: foreignFailure(error) },
-        'Could not start the order saga worker',
-      );
+      }
+      return;
     }
+    this.logger.error(
+      { failure: foreignFailure(error) },
+      'The order saga worker stopped by itself; exiting so that it is restarted',
+    );
+    fatalShutdown.request();
   }
 
   /**
@@ -129,6 +161,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
    * does not return.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopRequested = true;
     this.stopping ??= this.halt(
       options.deadlineAt ?? Date.now() + outboxShutdownBudgetMs(this.env),
     );

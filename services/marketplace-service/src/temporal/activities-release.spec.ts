@@ -29,3 +29,95 @@ it('counts each round from a series that starts at zero, and logs the order', as
     error.mockRestore();
   }
 });
+
+/**
+ * The record the alert reads (FU-104): on before the call, off only once it is
+ * confirmed. The order of the calls is the point, so one log records them all.
+ */
+describe('resolveObligationDispute on record', () => {
+  function build(options: {
+    resolveDispute: () => Promise<unknown>;
+    recorded?: boolean;
+    taken?: string;
+  }) {
+    const log: string[] = [];
+    const orders = {
+      markObligationDisputed: async () => ({ disputeId: options.taken }),
+      describe: async () => ({
+        id: 'ORD_R',
+        buyerOrganizationId: 'ORG_B',
+        correlationId: 'COR',
+      }),
+      onceForSaga: async (_o: unknown, _s: unknown, _a: unknown, call: () => Promise<unknown>) =>
+        options.recorded ? (log.push('answered from the record'), undefined) : call(),
+      openSagaCall: async (...args: unknown[]) => void log.push(`open ${JSON.stringify(args)}`),
+      confirmSagaCall: async (...args: unknown[]) =>
+        void log.push(`confirm ${JSON.stringify(args)}`),
+    };
+    const economic = {
+      resolveDispute: async () => {
+        log.push('call');
+        return options.resolveDispute();
+      },
+      readObligation: async () => null,
+      dispute: async () => {
+        log.push('tell');
+        return { disputeId: 'ECO' };
+      },
+    };
+    const activities = createActivities({
+      orders: orders as unknown as OrderService,
+      economic: economic as unknown as EconomicClient,
+      currentStep: () => ({ key: 'k', scheduledAt: new Date() }),
+    });
+    const release = () => activities.resolveObligationDispute('ORD_R', 'TX', 'DSP', 'SETTLE');
+    return { log, release, activities };
+  }
+  const args = JSON.stringify([
+    { id: 'ORD_R', organizationId: 'ORG_B' },
+    'resolveObligationDispute',
+    'DSP',
+  ]);
+
+  it('opens before the call and confirms after it, under the buying tenant', async () => {
+    const { log, release } = build({ resolveDispute: async () => ({}) });
+
+    await release();
+
+    expect(log).toEqual([`open ${args}`, 'call', `confirm ${args}`]);
+  });
+
+  it('confirms a retry answered from the step record', async () => {
+    const { log, release } = build({ resolveDispute: async () => ({}), recorded: true });
+
+    await release();
+
+    expect(log).toEqual([`open ${args}`, 'answered from the record', `confirm ${args}`]);
+  });
+
+  it('opens when economic-service is told of the dispute, before the telling', async () => {
+    const { log, activities } = build({ resolveDispute: async () => ({}) });
+
+    await activities.disputeObligation('ORD_R', 'TX', 'DSP', 'it does not fit');
+
+    expect(log).toEqual([`open ${args}`, 'tell']);
+  });
+
+  it('opens for the dispute the order takes from economic-service, only if it takes one', async () => {
+    const taking = build({ resolveDispute: async () => ({}), taken: 'DSP' });
+    await taking.activities.markObligationDisputed('ORD_R', 'it does not fit', 'ECO');
+    expect(taking.log).toEqual([`open ${args}`]);
+
+    const none = build({ resolveDispute: async () => ({}) });
+    await none.activities.markObligationDisputed('ORD_R', 'it does not fit', 'ECO');
+    expect(none.log).toEqual([]);
+  });
+
+  it('stays open when the call fails', async () => {
+    const { log, release } = build({ resolveDispute: () => Promise.reject(new Error('down')) });
+
+    await expect(release()).rejects.toThrow();
+
+    expect(log).toEqual([`open ${args}`, 'call']);
+  });
+});

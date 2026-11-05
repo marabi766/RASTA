@@ -242,11 +242,8 @@ above; a history change during inspection requires another drain/check.
 
 ## Unconfirmed dispute release (FU-080)
 
-`RastaMarketplaceSagaDisputeReleaseUnconfirmed` fires from the first round of
-`rasta_marketplace_saga_release_unconfirmed_total` until two hours after the last.
-It counts rounds, not stuck sagas, and rounds need a running worker: with workers
-stopped or failed it clears while the funds are still held. A resolved alert is
-not a confirmed release; the saga's status query is. A decided dispute's
+`RastaMarketplaceSagaDisputeReleaseUnconfirmed` از وضعیت پایدار خوانده می‌شود، نه از نرخ شمارنده؛ بخش بعد را ببین.
+A decided dispute's
 resolution has not been confirmed by economic-service: the obligation stays
 DISPUTED and its funds held. The saga does not end. It waits in phase
 `RELEASE_UNCONFIRMED` (`workflow query --name status`) and calls again with the
@@ -275,6 +272,71 @@ gate, but its call in flight is a pending activity: with workers stopped it stay
 pending, so follow the gate's pending-activity case above. One rollback edge: a
 release whose last attempt failed just as workers stopped has no marker yet, so a
 protocol-2 target passes the gate and then ends that saga as before this wait.
+
+## هشدارهای پایش Saga (FU-104)
+
+آزادسازی تأییدنشده نباید بی‌صدا بماند. دو چیز جدا سنجیده می‌شود، هر دو از فرایند API و بی‌نیاز به Worker، و هر ۱۵ ثانیه:
+ردیف‌های جدول `saga_unconfirmed_call`، و Poller هایی که خود Temporal روی Queue می‌بیند.
+
+| هشدار                                           | چه زمانی                                                               | معنا                                                                                                          |
+| ----------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `RastaMarketplaceSagaDisputeReleaseUnconfirmed` | `rasta_marketplace_saga_unconfirmed_calls` بزرگ‌تر از صفر              | اختلافی بیش از ۵ دقیقه پیش تصمیم گرفته شده و economic-service آزادسازی‌اش را تأیید نکرده است؛ وجه در Hold است |
+| `RastaMarketplaceSagaUnconfirmedCallsUnread`    | زمان آخرین خواندن جدول بیش از ۲ دقیقه کهنه یا سری غایب، به مدت ۲ دقیقه | شمار خوانده نمی‌شود، پس خاموش بودن هشدار بالا چیزی را ثابت نمی‌کند: پایگاه داده یا خود سرویس را بررسی کن      |
+| `RastaMarketplaceSagaWorkerNotPolling`          | زمان آخرین Poll بیش از ۳ دقیقه کهنه یا سری غایب، به مدت ۲ دقیقه        | هیچ Worker ـی Queue را Poll نمی‌کند، یا هیچ نمونه‌ای نمی‌تواند از Temporal بپرسد؛ Saga ها جلو نمی‌روند        |
+
+### آزادسازی تأییدنشده
+
+ردیف از لحظه‌ای که economic-service ممکن است اختلاف را نگه دارد نوشته می‌شود و فقط با تأیید آزادسازی بسته می‌شود. هشدار از
+تصمیم اختلاف می‌شمارد، پس Worker یا Saga ـی لازم ندارد: Saga ـی که پیش‌تر بسته شده یا Workflow Task ـی که مدام شکست می‌خورد
+هشدار را خاموش نگه نمی‌دارد.
+
+توقف Worker فرایند را هم می‌بندد، پس ممکن است هیچ نمونه‌ای جدول را نخواند. در این حالت هشدارِ روشن همان‌طور می‌ماند و
+`RastaMarketplaceSagaUnconfirmedCallsUnread` هم روشن می‌شود؛ هشدار فقط وقتی پاک می‌شود که خواندنی تازه شمار را صفر ببیند. اگر پیش از
+خاموش شدن سرویس روشن نبوده، فقط Unread روشن است. مرجع نهایی همچنان پرس‌وجوی وضعیت Saga است.
+سفارش‌ها را این‌گونه فهرست کن:
+
+```sql
+SELECT organization_id, order_id, subject AS dispute_id, opened_at
+FROM saga_unconfirmed_call WHERE confirmed_at IS NULL ORDER BY opened_at;
+```
+
+ردیف را برای خاموش کردن هشدار دستی نبند. ردیف بسته‌شده دیگر باز نمی‌شود، پس Saga ـی که هنوز منتظر است بی‌هشدار می‌ماند. تنها
+استثنا تصمیم ثبت‌شدهٔ تطبیق است، یعنی همان مسیری که پایان دادن به Saga را مجاز می‌کند (بخش پیش): نخست Saga پایان یابد، سپس
+تصمیم در Change Record ثبت شود و فقط همان ردیف بسته شود. همین مسیر برای ردیفی است که پس از Rollback باز مانده: کد قدیمی
+آزادسازی را تأیید می‌کند ولی ردیف را نمی‌بندد؛ اگر آزادسازی در economic-service ثابت است، این را ثبت کن و ردیف را ببند.
+
+```sql
+UPDATE saga_unconfirmed_call SET confirmed_at = now()
+WHERE organization_id = '<org>' AND order_id = '<order>'
+  AND operation = 'resolveObligationDispute' AND subject = '<dispute>' AND confirmed_at IS NULL;
+```
+
+این Migration پرکردن گذشته ندارد. اختلافی که پیش از این نسخه به economic-service گفته شده، از نخستین تماس آزادسازی در جدول
+دیده می‌شود: Saga ـی که در انتظار است حداکثر یک ساعت بعد (`retryDisputeRelease` زودترش می‌کند)، و Saga ـی که پیش‌تر بسته شده اصلاً
+نه؛ چنین اختلافی را این هشدار نمی‌بیند. `down.sql` این Migration
+رکورد آزادسازی‌های باز را از بین می‌برد: پیش از اجرایش همین فهرست را ثبت کن.
+
+### Worker
+
+- **شکست در آغاز:** با `MARKETPLACE_TEMPORAL_ENABLED=true` نمونه‌ای که Worker ـش بالا نیاید با کد ۱ خارج می‌شود و `listen` نمی‌کند.
+  پس نمونه‌ای که هنگام قطعی Temporal بالا می‌آید تا بازگشت Temporal از دسترس بیرون است. قطعی سرور نمونه‌های در حال اجرا را نمی‌بندد،
+  چون Core دوباره تلاش می‌کند؛ ولی پاسخی که Core تکرارش نمی‌کند (اعتبارنامهٔ باطل، Namespace حذف‌شده) همهٔ نمونه‌ها را حدود یک دقیقه بعد می‌بندد.
+- **توقف بعدی:** اگر `run()` بی‌درخواست `stop()` پایان یابد، نمونه از مسیر عادی Shutdown با کد ۱ خارج می‌شود. Restart را
+  Supervisor انجام می‌دهد؛ تکرارش `RastaConsumerServiceRestartLoop` را روشن می‌کند. برای بررسی، پیام
+  `The order saga worker stopped by itself` در Log نمونه است.
+- **بررسی دستی:** `temporal task-queue describe "${C[@]}" --task-queue "$MARKETPLACE_TEMPORAL_TASK_QUEUE"`. Temporal Worker
+  متوقف‌شده را تا حدود پنج دقیقه با `lastAccessTime` ثابت فهرست می‌کند، پس معیار زمان است، نه حضور در فهرست.
+- **استقرار:** میان گام ۲ و ۴ توالی بالا `RastaMarketplaceSagaWorkerNotPolling` و `RastaMarketplaceSagaUnconfirmedCallsUnread` طبق انتظار روشن می‌شوند،
+  و هشدار آزادسازی اگر روشن است روشن می‌ماند. آن‌ها را در Change Record ثبت کن، و `MARKETPLACE_TEMPORAL_ENABLED=false`
+  را راه خاموش کردنش نکن: این تنظیم سری را حذف می‌کند و هشدار روشن می‌ماند.
+
+### آنچه این پایش ثابت نمی‌کند
+
+- Poll کردن پیشرفت نیست: Worker ـی که Workflow Task ـش مدام شکست می‌خورد (مثلاً ناسازگاری Replay) Poll می‌کند و هشدار Worker روشن
+  نمی‌شود. هشدار آزادسازی پس از تصمیم اختلاف می‌بیندش، ولی پیش از آن هیچ هشداری نیست.
+- زمان Poll با ساعت Temporal است و Prometheus با ساعت خودش می‌سنجد؛ ساعتی که چند دقیقه جلوتر باشد کشف را به همان اندازه دیر می‌کند.
+- `saga_unconfirmed_call` فعلاً فقط `resolveObligationDispute` را ثبت می‌کند. آستانهٔ ۳ دقیقه روی سرور Compose
+  (`temporalio/auto-setup:1.26.2`) سنجیده شده است؛ پس از استقرار با تنظیمات واقعی دوباره بسنج.
 
 ## Continued-as-new visibility gap (FU-046)
 

@@ -2408,6 +2408,13 @@
     "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database"
   },
   {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 99,
+    "hash": "4303599198990e65a5c74aca0ecd07f57e7496197a7c3976c858e209a9167a6c",
+    "occurrence": 0,
+    "decision": "platform-wide: unconfirmed saga release count by operation name only; no tenant labels, identifiers or amounts leave the database"
+  },
+  {
     "file": "services/notification-service/src/notification/notification.repository.ts",
     "line": 159,
     "hash": "fb249fe3dac5b48761658d7b5fd36538feab40572abb5c8babba21f5db3b29c1",

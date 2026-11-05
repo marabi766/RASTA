@@ -3,6 +3,11 @@ import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { foreignFailure } from './foreign-failure';
+import {
+  sagaUnconfirmedCalls,
+  sagaUnconfirmedCallsReadAt,
+  sagaWorkerLastPoll,
+} from '../observability/metrics';
 import type { SagaStartStore } from './saga-start.store';
 import { OrderSagaClient } from './saga.client';
 import { installTemporalRuntimeLogger } from './runtime-logger';
@@ -70,6 +75,7 @@ function stubTemporal(
     signal?: () => Promise<unknown>;
     describe?: () => Promise<unknown>;
     retention?: number;
+    describeTaskQueue?: (request: { taskQueueType: number }) => Promise<unknown>;
   } = {},
 ) {
   const start = jest.fn(overrides.start ?? (async () => undefined));
@@ -90,6 +96,7 @@ function stubTemporal(
       describeNamespace: async () => ({
         config: { workflowExecutionRetentionTtl: { seconds: overrides.retention ?? 86400 } },
       }),
+      describeTaskQueue: overrides.describeTaskQueue,
     },
     connection: {
       withDeadline: (_deadline: number, fn: () => unknown) => fn(),
@@ -521,4 +528,141 @@ test('Temporal close failures expose fixed diagnostics only', async () => {
   expect(failure).toBeInstanceOf(Error);
   expect(String(failure)).toContain('TEMPORAL_ADDRESS: Temporal close failed');
   expect(inspect(failure, { showHidden: true, depth: 10 })).not.toMatch(/sentinel|JZ97/i);
+});
+
+/** FU-104: what the alerts read. Anything short of an answer leaves the timestamp to go stale. */
+describe('sample', () => {
+  const polls = (seconds: unknown[]) => ({
+    pollers: seconds.map((value) => ({ lastAccessTime: { seconds: value } })),
+  });
+  const lastPoll = async () => (await sagaWorkerLastPoll.get()).values[0]?.value;
+  const stateStore = (read: () => Promise<{ operation: string; count: number }[]>) =>
+    ({ unconfirmedCalls: jest.fn(read) }) as unknown as SagaStartStore;
+  const quiet = stateStore(async () => []);
+
+  beforeEach(() => {
+    sagaWorkerLastPoll.reset();
+    sagaUnconfirmedCalls.reset();
+    sagaUnconfirmedCallsReadAt.reset();
+  });
+
+  it('proves the worker by the older of its last workflow and activity polls', async () => {
+    const asked: unknown[] = [];
+    stubTemporal({
+      describeTaskQueue: async (request) => {
+        asked.push(request);
+        return request.taskQueueType === 1 ? polls([100, 300]) : polls([200]);
+      },
+    });
+
+    await new OrderSagaClient(env(), quiet).sample();
+
+    expect(await lastPoll()).toBe(200);
+    expect(asked).toEqual(
+      [1, 2].map((taskQueueType) => ({
+        namespace: 'rasta',
+        taskQueue: { name: 'marketplace-orders' },
+        taskQueueType,
+      })),
+    );
+  });
+
+  it.each<[string, (request: { taskQueueType: number }) => Promise<unknown>]>([
+    ['no pollers', async () => polls([])],
+    ['a null list', async () => ({ pollers: null })],
+    [
+      'pollers of one task type only',
+      async (r) => (r.taskQueueType === 1 ? polls([9]) : polls([])),
+    ],
+    ['a poller without a time', async () => ({ pollers: [{}] })],
+    ['a failed read', async () => Promise.reject(new Error('unavailable'))],
+  ])('proves nothing from %s', async (_name, describeTaskQueue) => {
+    stubTemporal({ describeTaskQueue });
+
+    await new OrderSagaClient(env(), quiet).sample();
+
+    expect(await lastPoll()).toBeUndefined();
+  });
+
+  it('proves nothing with Temporal disabled, and still reads the state', async () => {
+    const reading = stateStore(async () => []);
+
+    await new OrderSagaClient(env({ MARKETPLACE_TEMPORAL_ENABLED: false }), reading).sample();
+
+    expect(connect).not.toHaveBeenCalled();
+    expect(await lastPoll()).toBeUndefined();
+    expect((await sagaUnconfirmedCallsReadAt.get()).values).toHaveLength(1);
+  });
+
+  it('exports the count by operation, and zero when there is none', async () => {
+    stubTemporal({ describeTaskQueue: async () => polls([1]) });
+    const values = async () =>
+      (await sagaUnconfirmedCalls.get()).values.map((v) => [v.labels.operation, v.value]);
+
+    await new OrderSagaClient(
+      env(),
+      stateStore(async () => [
+        { operation: 'resolveObligationDispute', count: 2 },
+        { operation: 'another', count: 1 },
+      ]),
+    ).sample();
+    expect(await values()).toEqual([
+      ['resolveObligationDispute', 2],
+      ['another', 1],
+    ]);
+
+    await new OrderSagaClient(env(), quiet).sample();
+    expect(await values()).toEqual([['resolveObligationDispute', 0]]);
+  });
+
+  it('on a failed read keeps the last count and does not move the timestamp', async () => {
+    stubTemporal({ describeTaskQueue: async () => polls([1]) });
+    const client = new OrderSagaClient(
+      env(),
+      stateStore(async () => [{ operation: 'resolveObligationDispute', count: 2 }]),
+    );
+    await client.sample();
+    sagaUnconfirmedCallsReadAt.set({ service: 'marketplace-service' }, 7);
+
+    const failing = new OrderSagaClient(
+      env(),
+      stateStore(async () => Promise.reject(new Error('down'))),
+    );
+    await failing.sample();
+
+    expect((await sagaUnconfirmedCalls.get()).values[0]?.value).toBe(2);
+    expect((await sagaUnconfirmedCallsReadAt.get()).values[0]?.value).toBe(7);
+  });
+
+  it('one half failing does not stop the other', async () => {
+    stubTemporal({ describeTaskQueue: async () => polls([50]) });
+
+    await new OrderSagaClient(
+      env(),
+      stateStore(async () => Promise.reject(new Error('down'))),
+    ).sample();
+
+    expect(await lastPoll()).toBe(50);
+  });
+
+  it('samples on its own timer from startPolling, and stops with the client', async () => {
+    const timers = jest.useFakeTimers();
+    try {
+      const reading = stateStore(async () => []);
+      const client = new OrderSagaClient(env({ MARKETPLACE_TEMPORAL_ENABLED: false }), reading);
+      Object.assign(reading, {
+        claim: jest.fn(async () => []),
+        backlog: jest.fn(async () => ({ count: 0, age: 0 })),
+      });
+      client.startPolling();
+      await timers.advanceTimersByTimeAsync(31_000);
+      expect(reading.unconfirmedCalls).toHaveBeenCalledTimes(3);
+
+      await client.stop();
+      await timers.advanceTimersByTimeAsync(31_000);
+      expect(reading.unconfirmedCalls).toHaveBeenCalledTimes(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

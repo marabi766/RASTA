@@ -2,6 +2,7 @@ import { ApplicationFailure } from '@temporalio/activity';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
+import { SagaStartStore } from '../src/temporal/saga-start.store';
 import { EconomicClient, OBLIGATION_LOOKUP_PAGES } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import {
@@ -10,6 +11,7 @@ import {
   key,
   newPrisma,
   publishOffer,
+  resolveOpenDispute,
   sagaStep,
   settledResult,
   tenants,
@@ -487,6 +489,57 @@ describe('order saga activities (real database)', () => {
       // Keyed by the dispute, so a second dispute on this order is its own call.
       expect(calls[2].input.disputeId).toBe(dispute!.id);
       expect(calls[3].input.disputeId).toBe(dispute!.id);
+    });
+
+    it('holds a told dispute on record, counted once decided, until the release is confirmed (FU-104)', async () => {
+      const { orderId } = await placeOrder();
+      const { economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+      const store = new SagaStartStore(prisma);
+      const count = async (graceSeconds = 0) =>
+        (await store.unconfirmedCalls(graceSeconds)).find(
+          (row) => row.operation === 'resolveObligationDispute',
+        )?.count ?? 0;
+      const before = await count();
+
+      const held = await acts.createObligation(orderId);
+      await acts.markFundsHeld(orderId, held.transactionId);
+      await asActor(
+        { organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-ACT-SUP' },
+        () => wiring.orders.confirm(orderId),
+      );
+      await asActor(
+        { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
+        () => wiring.orders.raiseDispute(orderId, { reason: 'the part does not fit' }),
+      );
+      const { dispute } = await acts.readOrder(orderId);
+      await acts.disputeObligation(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'the part does not fit',
+      );
+      // Nothing to release while it is open.
+      expect(await count()).toBe(before);
+      // Older than the decision to come, so that the grace below tells them apart.
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+      await asActor(
+        { organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-ACT-OPS' },
+        () =>
+          resolveOpenDispute(wiring, orderId, {
+            outcome: 'REFUND',
+            resolution: 'the part does not fit',
+            responsibility: 'SUPPLIER',
+          }),
+      );
+      // No saga has called: the decision alone is what puts it on the alert.
+      expect(await count()).toBe(before + 1);
+      // Grace runs from the decision, not from the record.
+      expect(await count(1)).toBe(before);
+
+      await acts.resolveObligationDispute(orderId, held.transactionId, dispute!.id, 'REFUND');
+      expect(await count()).toBe(before);
     });
 
     it('records a settlement that will not complete, without moving money', async () => {

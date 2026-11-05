@@ -160,12 +160,45 @@ export const settlementsExhaustedTotal = new Counter({
 
 /**
  * Rounds of a dispute release economic-service has not confirmed (FU-080): the
- * obligation stays DISPUTED and the funds held until it does. A stuck saga adds
- * at least one an hour, so this stays rising for as long as it is stuck.
+ * obligation stays DISPUTED and the funds held until it does. Rounds need a
+ * worker, so no alert reads this; `sagaUnconfirmedCalls` is the state (FU-104).
  */
 export const releasesUnconfirmedTotal = new Counter({
   name: 'rasta_marketplace_saga_release_unconfirmed_total',
   help: 'Rounds of a saga dispute release that economic-service has not confirmed',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * Decided disputes whose release economic-service has not confirmed for longer
+ * than a call can take, from `saga_unconfirmed_call`, by operation: a closed set
+ * of activity names. Sampled by the API process, so no worker or saga is needed
+ * (FU-104).
+ */
+export const sagaUnconfirmedCalls = new Gauge({
+  name: 'rasta_marketplace_saga_unconfirmed_calls',
+  help: 'Saga economic calls due and still not confirmed, past the time a call can take',
+  labelNames: ['service', 'operation'] as const,
+  registers: [registry],
+});
+
+/** When that count was last read: a count that stopped being read says nothing. */
+export const sagaUnconfirmedCallsReadAt = new Gauge({
+  name: 'rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds',
+  help: 'When the count of unconfirmed saga calls was last read from the database',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * The older of Temporal's last workflow poll and last activity poll on the saga's
+ * task queue, by Temporal's own clock. Moves only on that proof, so anything
+ * that prevents the proof reads as a worker that is not polling (FU-104).
+ */
+export const sagaWorkerLastPoll = new Gauge({
+  name: 'rasta_marketplace_saga_worker_last_poll_timestamp_seconds',
+  help: 'When Temporal last saw a worker poll both task types of the order saga queue',
   labelNames: ['service'] as const,
   registers: [registry],
 });

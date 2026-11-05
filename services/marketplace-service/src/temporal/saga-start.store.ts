@@ -6,6 +6,8 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 export const START_BATCH_SIZE = 4;
 export const START_LEASE_SECONDS = 30;
 export const START_RETRY_SECONDS = 30;
+/** From the decision, past any one activity: three attempts of 30 seconds, and their backoff. */
+export const UNCONFIRMED_CALL_GRACE_SECONDS = 300;
 
 export interface StartClaim {
   id: string;
@@ -83,5 +85,28 @@ export class SagaStartStore {
     `,
     );
     return { count: Number(row.count), age: Math.max(0, row.age) };
+  }
+
+  /**
+   * Counts only, as `backlog`. By the database clock, across tenants: platform
+   * plumbing. A dispute still open has nothing to release yet. A row naming no
+   * dispute of its order counts: what cannot be read as waiting is not cleared.
+   */
+  async unconfirmedCalls(
+    graceSeconds = UNCONFIRMED_CALL_GRACE_SECONDS,
+  ): Promise<{ operation: string; count: number }[]> {
+    const rows = await this.bounded(
+      (tx) => tx.$queryRaw<{ operation: string; count: bigint }[]>`
+      SELECT c.operation, count(*) AS count
+      FROM saga_unconfirmed_call c
+      LEFT JOIN order_dispute d ON d.id = c.subject
+        AND d.organization_id = c.organization_id AND d.order_id = c.order_id
+      WHERE c.confirmed_at IS NULL AND (d.id IS NULL OR d.status <> 'OPEN')
+        AND COALESCE(d.resolved_at AT TIME ZONE 'UTC', c.opened_at)
+          <= clock_timestamp() - ${graceSeconds} * interval '1 second'
+      GROUP BY c.operation
+    `,
+    );
+    return rows.map((row) => ({ operation: row.operation, count: Number(row.count) }));
   }
 }

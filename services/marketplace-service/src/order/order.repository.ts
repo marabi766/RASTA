@@ -265,6 +265,45 @@ export class OrderRepository {
   }
 
   /**
+   * A saga call to economic-service is about to be made (FU-104). Once per
+   * subject: a late attempt cannot reopen what a later one confirmed.
+   */
+  async openSagaCall(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+  ): Promise<void> {
+    await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
+      client.sagaUnconfirmedCall.createMany({
+        data: [{ organizationId: order.organizationId, orderId: order.id, operation, subject }],
+        skipDuplicates: true,
+      }),
+    );
+  }
+
+  /** economic-service has confirmed that call (FU-104). */
+  async confirmSagaCall(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+  ): Promise<void> {
+    await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
+      client.sagaUnconfirmedCall.updateMany({
+        where: {
+          organizationId: order.organizationId,
+          orderId: order.id,
+          operation,
+          subject,
+          confirmedAt: null,
+        },
+        data: { confirmedAt: new Date() },
+      }),
+    );
+  }
+
+  /**
    * Whether the order's history holds a row a saga step wrote since `since`
    * (D-053): evidence of a step that took effect before its record could
    * exist — its first attempt ran on a worker older than `saga_step`.

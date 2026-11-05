@@ -2320,6 +2320,8 @@ export const EXPECTED = {
       'order_status_history',
       // 20261015120000_saga_step (D-053): replay records of saga activities.
       'saga_step',
+      // 20261105130000_saga_unconfirmed_call (FU-104): the state the release alert reads.
+      'saga_unconfirmed_call',
       // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
       'return_request',
       'return_line',
@@ -2365,6 +2367,7 @@ export const EXPECTED = {
       'ck_return_dispatch_release_actors',
       'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
+      'ck_saga_unconfirmed_call_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',

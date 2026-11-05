@@ -12,13 +12,51 @@ groups:
           runbook: docs/runbooks/marketplace-saga-deploy.md
   - name: rasta-marketplace-saga-release
     rules:
-      # A saga on a running worker adds a round at least hourly, so two hours
-      # never misses one. Rounds need a worker: this clears if none is running.
+      # State, not rounds (FU-104): the count of saga_unconfirmed_call, read by the
+      # API process, needs no worker. A worker failure takes that process with it,
+      # so once firing this holds for as long as nobody can read the count: only
+      # a read that finds it zero clears it.
       - alert: RastaMarketplaceSagaDisputeReleaseUnconfirmed
-        expr: sum(increase(rasta_marketplace_saga_release_unconfirmed_total[2h])) > 0
+        expr: >-
+          max(rasta_marketplace_saga_unconfirmed_calls{operation="resolveObligationDispute"}) > 0
+          or (
+            max(ALERTS{alertname="RastaMarketplaceSagaDisputeReleaseUnconfirmed",alertstate="firing"})
+            and on ()
+            (
+              time() - max(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds) > 120
+              or absent(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds)
+            )
+          )
         labels:
           severity: critical
         annotations:
           summary: A decided dispute's release is unconfirmed
-          description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. The saga keeps trying; the log names the order.
+          description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. This stays on until a read of the database finds it confirmed, with or without a worker; the runbook lists the orders.
+          runbook: docs/runbooks/marketplace-saga-deploy.md
+      # A count nobody can read is not a zero. Also the service being down.
+      - alert: RastaMarketplaceSagaUnconfirmedCallsUnread
+        expr: >-
+          time() - max(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds) > 120
+          or absent(rasta_marketplace_saga_unconfirmed_calls_read_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Unconfirmed saga calls cannot be counted
+          description: No marketplace-service instance has read saga_unconfirmed_call for minutes, so a release alert that is off cannot be trusted, and one that is on holds. Funds may be held unseen.
+          runbook: docs/runbooks/marketplace-saga-deploy.md
+      # Temporal's own record of the worker polling both task types. It lists a
+      # stopped worker for about five minutes with the time frozen, and advances
+      # the time about once a minute for a live one, so three minutes is not a
+      # slow poll. Absent also covers a service that is down or has Temporal off.
+      - alert: RastaMarketplaceSagaWorkerNotPolling
+        expr: >-
+          time() - max(rasta_marketplace_saga_worker_last_poll_timestamp_seconds) > 180
+          or absent(rasta_marketplace_saga_worker_last_poll_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No worker is polling the order saga queue
+          description: Temporal has seen no worker poll the order saga task queue for minutes, or no instance can ask it. Sagas are not moving, so no money call is being made or retried.
           runbook: docs/runbooks/marketplace-saga-deploy.md

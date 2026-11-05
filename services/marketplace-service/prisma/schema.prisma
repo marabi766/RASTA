@@ -290,6 +290,7 @@ model Order {
   disputes     OrderDispute[]
   review       Review?
   sagaSteps    SagaStep[]
+  sagaUnconfirmedCalls SagaUnconfirmedCall[]
 
   @@unique([organizationId, idempotencyKey], map: "uq_order_org_idempotency_key")
   @@unique([organizationId, id], map: "uq_order_tenant_id")
@@ -423,6 +424,31 @@ model SagaStep {
   @@id([organizationId, orderId, stepKey], map: "saga_step_pkey")
   @@index([orderId], map: "ix_saga_step_order")
   @@map("saga_step")
+}
+
+/// A saga call to economic-service owed from the moment economic-service may hold
+/// a dispute until the release is confirmed (FU-104): the state an alert reads,
+/// so that it stays on whether or not any worker or saga is running. A row is
+/// never deleted; `confirmedAt` is its end.
+model SagaUnconfirmedCall {
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_saga_unconfirmed_call_tenant", onUpdate: Restrict, onDelete: Cascade)
+
+  /// The activity making the call.
+  operation String
+
+  /// What the call is about: for a dispute release, the order's dispute.
+  subject String
+
+  openedAt    DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
+  confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(3)
+
+  /// Also a partial index over `opened_at` of the open rows,
+  /// `ix_saga_unconfirmed_call_open`, which Prisma cannot express.
+  @@id([organizationId, orderId, operation, subject], map: "saga_unconfirmed_call_pkey")
+  @@map("saga_unconfirmed_call")
 }
 
 model OrderDispute {

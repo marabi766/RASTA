@@ -833,7 +833,9 @@ for (const path of ['client', 'worker']) {
           assert.equal(await new OrderSagaClient(env, {}).deliver('order'), false);
         } else {
           const { OrderSagaWorker } = require('./services/marketplace-service/dist/temporal/worker');
-          await new OrderSagaWorker(env, {}, {}).onApplicationBootstrap();
+          await assert.rejects(new OrderSagaWorker(env, {}, {}).onApplicationBootstrap(), {
+            message: /^TEMPORAL_ADDRESS: the order saga worker did not start /,
+          });
         }
         assert.equal(connects, 0);
         assert.throws(() => installTemporalRuntimeLogger(env), /TEMPORAL_ADDRESS: SDK tracing refused/);
@@ -1049,7 +1051,9 @@ for (const path of ['client', 'worker']) {
         } else {
           const { OrderSagaWorker } = require('./services/marketplace-service/dist/temporal/worker');
           const worker = new OrderSagaWorker(env, {}, {});
-          await worker.onApplicationBootstrap();
+          await assert.rejects(worker.onApplicationBootstrap(), {
+            message: /^TEMPORAL_ADDRESS: the order saga worker did not start /,
+          });
           await worker.onModuleDestroy();
         }
         assert.equal(installed, 1);
