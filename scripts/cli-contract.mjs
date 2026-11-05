@@ -88,6 +88,9 @@ export const CLI_CONTRACT = Object.freeze({
   // A Git revision is resolved to a verified commit id; raw input is never echoed.
   'scripts/prepush-parity.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
   'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
+  // FU-093: matches `pnpm install --frozen-lockfile` and `pnpm --filter <workspace> <script>` in CI
+  // steps and root scripts to derive the projected package.json; does not read process.argv.
+  'scripts/prepush-parity-lib.mjs': { other: ['--filter', '--frozen-lockfile'] },
   'scripts/prepush-scope-lib.mjs': {
     other: [
       '--cached',
