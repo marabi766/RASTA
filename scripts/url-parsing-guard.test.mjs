@@ -803,6 +803,11 @@ test('FU-045 r2 aliases carry a potential global through every value flow', () =
     'const { w = W } = key; return w.eval(code);',
     'const a = W.W; return a.eval(code);',
     'const a = [1, W]; return a[key].eval(code);',
+    'const p = { w: W }; const o = { ...p }; return o.w.eval(code);',
+    'const a = [...[W]]; return a[0].eval(code);',
+    'let a; [a] = [W]; return a.eval(code);',
+    'let a; ({ w: a } = { w: W }); return a.eval(code);',
+    'let a; [, [a = key]] = [1, [W]]; return a.eval(code);',
     'const [x, a] = [1, W]; return a.eval(code);',
   ];
   for (const name of GLOBAL_NAMES)

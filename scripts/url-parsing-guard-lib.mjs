@@ -366,22 +366,25 @@ function parserBindings(sourceFile) {
     return value;
   };
   // Every value a literal could hand out under `name` (null: any name or
-  // index). Computed keys and out-of-order spreads widen, never narrow.
+  // index). Computed keys and spreads (whose own members are read) widen,
+  // never narrow.
   const literalMember = (object, name) => {
     const values = [];
+    const spreadOf = (owner, from, key) => values.push(members(stored(owner, from), key));
     if (ts.isArrayLiteralExpression(object)) {
       const index = name === null ? null : /^(0|[1-9]\d*)$/.test(name) ? Number(name) : -1;
       let spread = false;
       object.elements.forEach((element, position) => {
         spread ||= ts.isSpreadElement(element);
-        if (index === -1 || (index !== null && position !== index && !spread)) return;
-        if (!ts.isSpreadElement(element) && !ts.isOmittedExpression(element))
-          values.push(stored(element, element));
+        if (ts.isSpreadElement(element)) spreadOf(element, element.expression, null);
+        else if (index === -1 || (index !== null && position !== index && !spread)) return;
+        else if (!ts.isOmittedExpression(element)) values.push(stored(element, element));
       });
     } else if (ts.isObjectLiteralExpression(object)) {
       for (const property of object.properties) {
         const key = property.name;
         const computed = key !== undefined && ts.isComputedPropertyName(key);
+        if (ts.isSpreadAssignment(property)) spreadOf(property, property.expression, name);
         if (ts.isSpreadAssignment(property) || (name !== null && !computed && key?.text !== name))
           continue;
         if (ts.isPropertyAssignment(property)) values.push(stored(property, property.initializer));
@@ -430,7 +433,31 @@ function parserBindings(sourceFile) {
   const assignments = () => {
     if (assigned) return assigned;
     assigned = { symbols: new Map(), names: new Map() };
-    const add = (map, key, node) => map.set(key, [...(map.get(key) ?? []), node]);
+    const add = (map, key, node, any = false) =>
+      map.set(key, [...(map.get(key) ?? []), { node, any }]);
+    // A destructuring target (`[a, { b }] = list`): each name it assigns may
+    // take any member of the right-hand side.
+    const targets = (node, from) => {
+      const target = unwrap(node);
+      if (ts.isIdentifier(target)) {
+        const symbol = valueSymbol(target);
+        if (symbol) add(assigned.symbols, symbol, from, true);
+      } else if (
+        ts.isBinaryExpression(target) &&
+        target.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      ) {
+        targets(target.left, from);
+      } else if (ts.isArrayLiteralExpression(target)) {
+        for (const element of target.elements)
+          targets(ts.isSpreadElement(element) ? element.expression : element, from);
+      } else if (ts.isObjectLiteralExpression(target)) {
+        for (const property of target.properties) {
+          if (ts.isShorthandPropertyAssignment(property)) targets(property.name, from);
+          else if (ts.isPropertyAssignment(property)) targets(property.initializer, from);
+          else if (ts.isSpreadAssignment(property)) targets(property.expression, from);
+        }
+      }
+    };
     const visit = (node) => {
       const operator = ts.isBinaryExpression(node) ? node.operatorToken.kind : null;
       if (
@@ -444,7 +471,9 @@ function parserBindings(sourceFile) {
       ) {
         const left = unwrap(node.left);
         const symbol = ts.isIdentifier(left) ? valueSymbol(left) : undefined;
-        if (symbol) add(assigned.symbols, symbol, node);
+        if (ts.isArrayLiteralExpression(left) || ts.isObjectLiteralExpression(left))
+          targets(left, node);
+        else if (symbol) add(assigned.symbols, symbol, node);
         else if (isMemberAccess(left) && memberName(left) !== null)
           add(assigned.names, memberName(left), node);
       }
@@ -453,8 +482,20 @@ function parserBindings(sourceFile) {
     visit(sourceFile);
     return assigned;
   };
-  const written = (nodes) =>
-    strings(nodes.flatMap((node) => stored(node, node.right).filter((kind) => kind !== UNKNOWN)));
+  const written = (entries) =>
+    strings(
+      entries.flatMap(({ node, any }) => {
+        const value = stored(node, node.right);
+        if (!any) return value.filter((kind) => kind !== UNKNOWN);
+        // A pattern may reach any element, however deeply nested.
+        const reached = [];
+        for (let layer = value, depth = 0; layer.length > 0 && depth < 8; depth += 1) {
+          layer = members(layer, null).filter((kind) => kind !== UNKNOWN);
+          reached.push(...layer);
+        }
+        return reached;
+      }),
+    );
   const declarationReference = (declaration) => {
     if (ts.isVariableDeclaration(declaration)) {
       const value = initialValue(declaration);
