@@ -625,8 +625,11 @@ class Program {
    */
   invoked(file: string, call: ts.CallExpression, depth = 0): Invocation {
     const fn = bare(call.expression);
+    // Commas return a value, not a method reference carrying its receiver.
+    let reference: ts.Expression = call.expression;
+    while (wraps(reference)) reference = reference.expression;
     const receiver =
-      memberName(fn) !== null ? { file, node: (fn as Access).expression } : undefined;
+      memberName(reference) !== null ? { file, node: (reference as Access).expression } : undefined;
     const args = call.arguments.some(ts.isSpreadElement)
       ? null
       : call.arguments.map((node) => ({ file, node }));

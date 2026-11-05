@@ -1144,6 +1144,21 @@ describe('the guard fails where it must', () => {
         ).replace('failed: () => null,\n          });', 'failed: () => null,\n          }));');
         expect(rules(form)).toEqual(expect.arrayContaining(['store', 'transport']));
       });
+      it.each(['call', 'apply', 'bind'])(
+        'F3 keeps comma-detached .%s receivers detached',
+        (adapter) => {
+          const form = COMPLIANT.replace(
+            'return submitThroughSlot({',
+            `return (0, submitThroughSlot.${adapter})(null, ${adapter === 'apply' ? '[' : ''}{`,
+          )
+            .replace('remember: () => saveThing()', 'remember: (saveThing(), () => saveThing())')
+            .replace(
+              'failed: () => null,\n          });',
+              `failed: () => null,\n          }${adapter === 'apply' ? ']' : ''});`,
+            );
+          expect(rules(form)).toEqual(expect.arrayContaining(['callback', 'boundary', 'store']));
+        },
+      );
       it.each(['ts', 'tsx'])('F3 discovers comma-wrapped default factories in .%s', (ext) => {
         const extra = {
           [`lib/factory.${ext}`]:
