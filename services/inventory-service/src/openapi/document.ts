@@ -4,12 +4,15 @@ import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swag
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
 import {
+  applyOperationSecurity,
   isOptionalField,
   objectShapeOf,
   publishedApiErrorSchema,
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
+  routeAccessByOperation,
   toJsonSchema,
+  type ServiceRouteUsers,
 } from '@rasta/nest-common';
 import { WarehouseController } from '../warehouse/warehouse.controller';
 import { WarehouseService } from '../warehouse/warehouse.service';
@@ -138,21 +141,23 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
 };
 
 /**
- * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
- * else — `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as a
- * user (marketplace-service's and contract-service's documents say the same).
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`dispatch-fence.ts`) — and must match the decorators exactly.
  */
-export const INTERNAL_TOKEN_SCHEME = 'internalToken';
-
-export const INTERNAL_TOKEN_API_KEY = {
-  type: 'apiKey' as const,
-  in: 'header',
-  name: 'X-Internal-Token',
-  description:
-    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/return-requests/{id}/return-shipment': 'users-refused',
+  'POST /v1/internal/return-requests/{id}/dispatch-withdrawal': 'users-refused',
 };
 
-const isInternal = (path: string): boolean => path.startsWith('/v1/internal/');
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 /** The internal routes' bodies: no Idempotency-Key — each is idempotent by itself. */
 const INTERNAL_REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
@@ -316,10 +321,9 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
       .setDescription(DESCRIPTION)
       .setVersion(INVENTORY_VERSION)
       .addBearerAuth()
-      .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
       .build(),
   );
-  return enrichOpenApiDocument(document);
+  return publishOperationSecurity(enrichOpenApiDocument(document), app);
 }
 
 /**
@@ -365,14 +369,13 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
-      if (isInternal(path)) {
+      // A route only a service may call has its own body, success and errors; every
+      // operation's `security` is `publishOperationSecurity`'s, from the guard's metadata
+      // (FU-075), never from the path.
+      if (SERVICE_ROUTES[key] === 'users-refused') {
         enrichInternalOperation(key, operation);
         continue;
       }
-
-      // `addBearerAuth()` declares the scheme; it does not apply it. Without this the contract
-      // would describe endpoints anybody can call.
-      operation.security ??= [{ bearer: [] }];
 
       const query = QUERY_SCHEMAS[key];
       const body = REQUEST_BODIES[key];
@@ -458,11 +461,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 }
 
 /**
- * An internal route (ADR-061 § 4): the internal token's scheme, never the bearer one; its body,
- * with no Idempotency-Key; its one success; and only the errors it can give.
+ * An internal route (ADR-061 § 4): its body, with no Idempotency-Key; its one success; and only
+ * the errors it can give.
  */
 function enrichInternalOperation(key: string, operation: MutableOperation): void {
-  operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
   const body = INTERNAL_REQUEST_BODIES[key];
   if (body) {
     operation.requestBody = {
@@ -512,7 +514,6 @@ interface MutableOperation {
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;
-  security?: Record<string, string[]>[];
 }
 
 function isHeader(parameter: unknown, name: string): boolean {

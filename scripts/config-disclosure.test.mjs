@@ -296,9 +296,7 @@ for (const [script, args, text] of ECHOES) {
   test(`${script} ${args.map((arg) => (/sentinel|JZ97/.test(arg) ? '<sentinel>' : arg)).join(' ')}: refused without echoing it`, () => {
     assertRefusedWith(
       cli(script, args, cleanEnv({}), 60_000),
-      script.startsWith('outbox-b2-')
-        ? 'command failed (code unknown); diagnostics withheld'
-        : text,
+      script.startsWith('outbox-b2-') ? 'command refused (code usage); diagnostics withheld' : text,
       script,
     );
   });

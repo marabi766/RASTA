@@ -7,6 +7,7 @@ import {
   referenceId,
   seedIdSchema,
 } from '@rasta/contracts';
+import { uniqueText } from '@rasta/nest-common';
 
 /**
  * Request and response shapes.
@@ -68,14 +69,22 @@ export type PlatformRole = z.infer<typeof roleSchema>;
 // Users
 // ---------------------------------------------------------------------------
 
+/**
+ * A login name in its one form (FU-084): folded like every uniqueness-compared text (Arabic and
+ * Persian digits to Latin, presentation forms, blanks) and case-folded, so `Ali` is `ali`, then held
+ * to lowercase ASCII. `ck_user_login_printable_ascii` and `ux_user_username_login_key` say the same.
+ */
+const canonicalUsername = uniqueText({ caseFold: true }).pipe(
+  z
+    .string()
+    .min(3)
+    .max(64)
+    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/, 'Username must be lowercase alphanumeric'),
+);
+
 export const createUserSchema = z
   .object({
-    username: z
-      .string()
-      .trim()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/, 'Username must be lowercase alphanumeric'),
+    username: canonicalUsername,
     email: z.string().trim().toLowerCase().email().max(255),
     firstName: personName,
     lastName: personName,
@@ -169,12 +178,7 @@ export type SwitchOrganizationDto = z.infer<typeof switchOrganizationSchema>;
 // Registration
 // ---------------------------------------------------------------------------
 
-const registrationUsername = z
-  .string()
-  .trim()
-  .min(3)
-  .max(64)
-  .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/);
+const registrationUsername = canonicalUsername;
 
 export const submitRegistrationSchema = z
   .object({
