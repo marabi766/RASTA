@@ -540,6 +540,8 @@ const transactionStatus = z.enum([
   'PENDING_SETTLEMENT',
   'DISPUTED',
   'SETTLED',
+  'PARTIALLY_REVERSED',
+  'REVERSED',
   'REFUNDED',
   'CANCELLED',
   'FAILED',

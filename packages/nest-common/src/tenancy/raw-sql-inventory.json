@@ -1491,6 +1491,20 @@
     "decision": "platform-wide: membership administration or expiry operates on a previously locked membership; user-wide projector and expiry scanner intentionally span tenants"
   },
   {
+    "file": "services/identity-service/src/identity/identity.repository.ts",
+    "line": 557,
+    "hash": "cf60cf5ffc5bf4d6b675e7741ef3d11c44a1d8c19b35be09ddb6609ea91f753d",
+    "occurrence": 0,
+    "decision": "platform-wide: usernames and emails are unique across the whole platform (ux_user_username_login_key, ux_user_email_login_key, FU-084); answers only whether a holder exists, before a write already authorized for its target"
+  },
+  {
+    "file": "services/identity-service/src/identity/identity.repository.ts",
+    "line": 571,
+    "hash": "1b2d33f032a295176f0064e19b1cb87568802e77931e85178daa0bf7ea8546cf",
+    "occurrence": 0,
+    "decision": "platform-wide: a username's login key is unique across the platform (ux_user_username_login_key, FU-084); returns only the holder's id, which the caller uses to filter its own tenant-scoped read"
+  },
+  {
     "file": "services/identity-service/src/identity/membership-expiry.scanner.spec.ts",
     "line": 599,
     "hash": "afe11fc097b377b1f1aa21ade7d3d1840f9360cada616c671144ef3d989da528",
@@ -2332,31 +2346,31 @@
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 45,
+    "line": 62,
     "hash": "923df21729a9cbd916343e75e90434f52e6ac06d83655a14a2221552b47dcce4",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 65,
+    "line": 82,
     "hash": "bd1fdbe4826fde84599880f0fbbdeb0c724aba407464e5066af52509a241532e",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 83,
+    "line": 100,
     "hash": "da1e65d7bec3a22e06d597e227d05819450fbff894df858758eacd0c7790ac96",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 118,
-    "hash": "8e1ebb76430110c25b9e6ad323180edc8d1900c176721dcd37af282602941b98",
+    "line": 135,
+    "hash": "9444a272eb21edaddb32a8f2e1a63caf4aae24e2e737f8c2812f9deeae8b29d0",
     "occurrence": 0,
-    "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks"
+    "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks; it also reads whether the buyer's receipt is recorded on that same row, which decides where an operator's SETTLE may return the order (D-083)"
   },
   {
     "file": "services/marketplace-service/src/prisma/prisma.service.ts",
@@ -2500,8 +2514,15 @@
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 145,
-    "hash": "617c20175b27dc0da91e2f30b1dcbf667be334084ae7c159c7699d2045c2d581",
+    "line": 130,
+    "hash": "8a1e49d27272963b31ca321f3d3929e1d9982d9df17e107dd7bc091a9c7a982d",
+    "occurrence": 0,
+    "decision": "platform-wide: external codes are unique across the whole registry (ux_organization_external_code_key, FU-084); returns only the holder's id, and the caller is a write already authorized for its target"
+  },
+  {
+    "file": "services/organization-service/src/organization/organization.repository.ts",
+    "line": 166,
+    "hash": "13827a0dd05391c2ec39fd4a3192adb8aa090772e42f4e57611dce58095354f2",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },

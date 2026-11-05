@@ -73,6 +73,7 @@ const ORDER: Order = {
   cancellationReason: null,
   failureReason: null,
   createdAt: '2026-09-19T08:00:00.000Z',
+  openDisputeId: null,
   availableActions: [],
 };
 
@@ -216,6 +217,18 @@ describe('the command forms', () => {
     expect(formatOrderAmount('1250', 'USD')).toBe('۱۲۵۰ USD');
   });
 
+  it('posts the dispute the page showed with the decision (D-083)', () => {
+    const { container } = renderDetail({
+      ...ORDER,
+      status: 'DISPUTED',
+      openDisputeId: 'DSP_01JC0000000000000000000000',
+      availableActions: ['RESOLVE_DISPUTE'],
+    });
+    expect(container.querySelector('input[type="hidden"][name="disputeId"]')).toHaveValue(
+      'DSP_01JC0000000000000000000000',
+    );
+  });
+
   it('pre-selects no responsibility when resolving a dispute (ADR-052 rule 14)', () => {
     renderDetail({ ...ORDER, status: 'DISPUTED', availableActions: ['RESOLVE_DISPUTE'] });
     const group = screen.getByRole('group', { name: 'مسئول' });
@@ -261,6 +274,7 @@ describe('the command forms', () => {
         responsibility: '',
         rating: '',
         comment: '',
+        disputeId: '',
         acknowledge: '',
       },
       fieldErrors: {},
