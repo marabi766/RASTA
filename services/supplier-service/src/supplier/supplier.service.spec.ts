@@ -325,6 +325,31 @@ describe('the directory', () => {
     expect(second.hasMore).toBe(false);
     expect(second.nextCursor).toBeNull();
   });
+
+  it('narrows to the asked organizations, still with the directory projection only', async () => {
+    const h = seeded();
+
+    const page = await asRole(OTHER_ORG, ['PROCUREMENT_USER'], () =>
+      h.service.search({ organizationId: ['ORG-SECOND', 'ORG-NO-PROFILE'], limit: 25 }),
+    );
+
+    // An organization with no profile is absent, never invented.
+    expect(page.items.map((item) => item.id)).toEqual(['SUP_2']);
+    expect(page.hasMore).toBe(false);
+    expect(JSON.stringify(page.items)).not.toContain('DOC_PRIVATE');
+  });
+
+  it('applies the same role gate when narrowed', async () => {
+    const h = seeded();
+
+    expect(
+      await codeOf(() =>
+        asRole(OTHER_ORG, ['DRIVER'], () =>
+          h.service.search({ organizationId: [SUPPLIER_ORG], limit: 25 }),
+        ),
+      ),
+    ).toBe('FORBIDDEN');
+  });
 });
 
 describe('ListQualifiedFor', () => {

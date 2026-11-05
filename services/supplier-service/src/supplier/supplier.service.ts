@@ -161,6 +161,7 @@ export class SupplierService {
       ...(query.capability ? { capability: query.capability } : {}),
       ...(query.qualifiedFor ? { qualifiedFor: query.qualifiedFor } : {}),
       ...(query.status ? { status: query.status } : {}),
+      ...(query.organizationId ? { organizationIds: query.organizationId } : {}),
       ...(query.cursor ? { cursor: query.cursor } : {}),
       limit: query.limit,
     });
