@@ -447,6 +447,66 @@ export async function cleanup(
   const client = prisma.client;
 
   await runUnscoped('integration cleanup spans the tenants the suite created', async () => {
+    // This run's rules, whoever they are scoped to (see the rule delete below).
+    const author = `${ITEST_ACTOR}-%`;
+    // First of all: each names its journal by a foreign key (FU-097), so both go
+    // before the journals below. In `settle()`'s own order, so no deadlock with one.
+    // A settlement is append-only at the database (RLG-002-1), so this run's own
+    // go with the guard lifted in one owner transaction, which restores it on every
+    // exit path. By transaction as well as by organization: the payee's run clears it too.
+    const settlementOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await settlementOwner.$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE commission DISABLE TRIGGER trg_commission_append_only',
+        );
+        // By transaction as well as by organization: a commission is filed
+        // under the payee, which may be another run's counterparty. And by
+        // rule: the rule delete below reaches this run's rules by author, and
+        // a charge still naming one would block it (`rule_id` is RESTRICT, so
+        // a rule that priced a charge is never silently unlinked from it).
+        await tx.$executeRawUnsafe(
+          `DELETE FROM commission
+            WHERE organization_id LIKE ANY($1::text[])
+               OR transaction_id IN (
+                    SELECT id FROM "transaction"
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR counterparty_organization_id LIKE ANY($1::text[]))
+               OR rule_id IN (
+                    SELECT id FROM commission_rule
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR created_by LIKE $2)`,
+          orgs,
+          author,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE commission ENABLE TRIGGER trg_commission_append_only',
+        );
+
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE settlement DISABLE TRIGGER trg_settlement_append_only',
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM settlement
+            WHERE organization_id LIKE ANY($1::text[])
+               OR transaction_id IN (
+                    SELECT id FROM "transaction"
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR counterparty_organization_id LIKE ANY($1::text[]))`,
+          orgs,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE settlement ENABLE TRIGGER trg_settlement_append_only',
+        );
+      });
+    } finally {
+      await settlementOwner.$disconnect();
+    }
+
     // The journals this run owns, resolved **before** anything is deleted.
     //
     // Two sources, because a journal and its legs need not name the same
@@ -461,12 +521,20 @@ export async function cleanup(
     // concurrent run's ledger history, removed by a suite that never wrote
     // it — and `journal` is the one table in this platform whose contents are
     // supposed to be impossible to lose.
+    //
+    // This run's own settlements and commissions are gone by now, so one still
+    // naming a journal is another run's, claimed through the platform's revenue leg
+    // (F-07, still open): its foreign key (FU-097) keeps that journal out of this.
     const ownedJournals = await client.$queryRawUnsafe<{ id: string }[]>(
-      `SELECT id FROM journal
-        WHERE organization_id LIKE ANY($1::text[])
-       UNION
-       SELECT DISTINCT journal_id AS id FROM ledger_entry
-        WHERE organization_id LIKE ANY($1::text[])`,
+      `SELECT owned.id FROM (
+         SELECT id FROM journal
+          WHERE organization_id LIKE ANY($1::text[])
+         UNION
+         SELECT DISTINCT journal_id AS id FROM ledger_entry
+          WHERE organization_id LIKE ANY($1::text[])
+       ) owned
+       WHERE NOT EXISTS (SELECT 1 FROM settlement s WHERE s.journal_id = owned.id)
+         AND NOT EXISTS (SELECT 1 FROM commission c WHERE c.journal_id = owned.id)`,
       orgs,
     );
     const journalIds = ownedJournals.map((row) => row.id);
@@ -576,40 +644,11 @@ export async function cleanup(
       orgs,
     );
 
-    // A settlement is append-only at the database (RLG-002-1), so this run's own
-    // go with the guard lifted in one owner transaction, which restores it on every
-    // exit path. By transaction as well as by organization: the payee's run clears it too.
-    const settlementOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
-    try {
-      await settlementOwner.$transaction(async (tx) => {
-        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE settlement DISABLE TRIGGER trg_settlement_append_only',
-        );
-        await tx.$executeRawUnsafe(
-          `DELETE FROM settlement
-            WHERE organization_id LIKE ANY($1::text[])
-               OR transaction_id IN (
-                    SELECT id FROM "transaction"
-                     WHERE organization_id LIKE ANY($1::text[])
-                        OR counterparty_organization_id LIKE ANY($1::text[]))`,
-          orgs,
-        );
-        // ISOLATION-ALLOW-UNBOUNDED: as above.
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE settlement ENABLE TRIGGER trg_settlement_append_only',
-        );
-      });
-    } finally {
-      await settlementOwner.$disconnect();
-    }
     // The operator path's history is append-only at the database (ADR-064 B3),
     // and so is a posted commission (ADR-045 § 3). Lifted for this run's own
     // organizations only, inside one transaction that restores the triggers
     // on every exit path — and by the **owner** connection, never the runtime
     // one, which cannot lift a trigger (D-045).
-    // This run's rules, whoever they are scoped to (see the rule delete below).
-    const author = `${ITEST_ACTOR}-%`;
     const historyOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
     try {
       await historyOwner.$transaction(async (tx) => {
@@ -626,34 +665,6 @@ export async function cleanup(
         // ISOLATION-ALLOW-UNBOUNDED: as above.
         await tx.$executeRawUnsafe(
           'ALTER TABLE reward_rule_status_history ENABLE TRIGGER trg_reward_rule_status_append_only',
-        );
-
-        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE commission DISABLE TRIGGER trg_commission_append_only',
-        );
-        // By transaction as well as by organization: a commission is filed
-        // under the payee, which may be another run's counterparty. And by
-        // rule: the rule delete below reaches this run's rules by author, and
-        // a charge still naming one would block it (`rule_id` is RESTRICT, so
-        // a rule that priced a charge is never silently unlinked from it).
-        await tx.$executeRawUnsafe(
-          `DELETE FROM commission
-            WHERE organization_id LIKE ANY($1::text[])
-               OR transaction_id IN (
-                    SELECT id FROM "transaction"
-                     WHERE organization_id LIKE ANY($1::text[])
-                        OR counterparty_organization_id LIKE ANY($1::text[]))
-               OR rule_id IN (
-                    SELECT id FROM commission_rule
-                     WHERE organization_id LIKE ANY($1::text[])
-                        OR created_by LIKE $2)`,
-          orgs,
-          author,
-        );
-        // ISOLATION-ALLOW-UNBOUNDED: as above.
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE commission ENABLE TRIGGER trg_commission_append_only',
         );
 
         // And an obligation names the rule it was priced with (docs/23
@@ -739,9 +750,14 @@ export async function cleanup(
       `DELETE FROM wallet WHERE organization_id LIKE ANY($1::text[])`,
       orgs,
     );
+    // The platform's accounts go only once empty: other runs' legs may still be on them.
     await client.$executeRawUnsafe(
-      `DELETE FROM ledger_account WHERE organization_id LIKE ANY($1::text[])`,
+      `DELETE FROM ledger_account
+        WHERE organization_id LIKE ANY($1::text[])
+          AND (organization_id NOT LIKE $2
+               OR NOT EXISTS (SELECT 1 FROM ledger_entry e WHERE e.account_id = ledger_account.id))`,
       orgs,
+      `${PLATFORM_ORGANIZATION_ID}%`,
     );
     // Bound by organization, or by this run's author.
     //

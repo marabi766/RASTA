@@ -665,6 +665,8 @@ export const ASSET_DATA_ROLLBACK = {
 };
 
 const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
+// Sits on top of the chain, and refuses a bare probe row: the steps writing one take it down first.
+const SETTLEMENT_CREATION_PROOF = '20261105120000_settlement_creation_proof';
 
 /** A transaction as the schema before business lines holds it (or after, with a line). */
 const TRANSACTION_MIGCHECK = (id, line = null) => `
@@ -687,6 +689,19 @@ VALUES ('${id}', 'ORG-MIGCHECK-PAYEE', '${transactionId}', ${ruleId ? `'${ruleId
  */
 const COMMISSION_TRIGGER_HERE = `SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
    WHERE t.tgname = 'trg_commission_append_only' AND c.relnamespace = current_schema()::regnamespace`;
+
+/** `sql`, a probe commission row, with the proof of a settlement's creation (FU-097) out of its way. */
+const WITHOUT_COMMISSION_PROOF = (sql) => {
+  const toggle = (action) => `DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+              WHERE t.tgname = 'trg_commission_creation_proven'
+                AND c.relnamespace = current_schema()::regnamespace) THEN
+    EXECUTE 'ALTER TABLE "commission" ${action} TRIGGER "trg_commission_creation_proven"';
+  END IF;
+END $$;`;
+  return `${toggle('DISABLE')}\n${sql}\n${toggle('ENABLE')}`;
+};
 
 /** Removes every commission probe row; the owner lifts the append-only trigger for them only. */
 const COMMISSION_MIGCHECK_CLEANUP = `
@@ -717,7 +732,7 @@ DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TX
 const COMMISSION_BUSINESS_LINES_STEPS = [
   {
     label: 'commission: down to the schema before business lines (empty)',
-    runDownScript: [COMMISSION_BUSINESS_LINES],
+    runDownScript: [SETTLEMENT_CREATION_PROOF, COMMISSION_BUSINESS_LINES],
   },
   {
     label: 'commission: a priced and an unpriced charge, as the old engine wrote them',
@@ -840,13 +855,15 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
        VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100, now(), 'ACTIVE',
          'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
       TRANSACTION_MIGCHECK('TXN_MIGCHECK_LINE', 'PARTS'),
-      COMMISSION_MIGCHECK(
-        'CMS_MIGCHECK_LINE',
-        'TXN_MIGCHECK_LINE',
-        'CMR_MIGCHECK_LINE',
-        100,
-        10,
-        `'PARTS', 'RULE_APPLIED'`,
+      WITHOUT_COMMISSION_PROOF(
+        COMMISSION_MIGCHECK(
+          'CMS_MIGCHECK_LINE',
+          'TXN_MIGCHECK_LINE',
+          'CMR_MIGCHECK_LINE',
+          100,
+          10,
+          `'PARTS', 'RULE_APPLIED'`,
+        ),
       ),
     ].join('\n'),
   },
@@ -901,7 +918,9 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
     label: 'commission: a charge with no rule behind it, which nothing can classify',
     sql: [
       TRANSACTION_MIGCHECK('TXN_MIGCHECK_ORPHAN'),
-      COMMISSION_MIGCHECK('CMS_MIGCHECK_ORPHAN', 'TXN_MIGCHECK_ORPHAN', null, 100, 10),
+      WITHOUT_COMMISSION_PROOF(
+        COMMISSION_MIGCHECK('CMS_MIGCHECK_ORPHAN', 'TXN_MIGCHECK_ORPHAN', null, 100, 10),
+      ),
     ].join('\n'),
   },
   {
@@ -1084,6 +1103,8 @@ const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_disput
  * whole-chain check of the newest one would find the chain changed.
  */
 const RESOLVED_DISPUTE_DOWNS = [
+  // These probes move a transaction to SETTLED with no settlement behind it.
+  SETTLEMENT_CREATION_PROOF,
   '20261103121000_transaction_settlement_authority',
   '20261103120000_transaction_dispute_resolution_by_authority',
   TRANSACTION_RESOLVED_DISPUTE,
@@ -1526,6 +1547,10 @@ const SETTLEMENT_REVERSAL = '20261104120000_settlement_reversal';
  */
 const SETTLEMENT_REVERSAL_STEPS = [
   {
+    label: 'settlement reversal: the proof of creation goes first, these probes are bare rows',
+    runDownScript: [SETTLEMENT_CREATION_PROOF],
+  },
+  {
     label: 'settlement reversal: a settled transaction, its settlement, and one open case',
     sql: `INSERT INTO "transaction" ("id", "organization_id", "counterparty_organization_id", "transaction_type",
             "status", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "occurred_at",
@@ -1579,11 +1604,239 @@ const SETTLEMENT_REVERSAL_STEPS = [
     mustFail: 'append-only',
   },
   {
+    label: 'settlement reversal: the proof of creation goes again, before the probe rows do',
+    runDownScript: [SETTLEMENT_CREATION_PROOF],
+  },
+  {
     label: 'settlement reversal: the probe rows are removed before the chain reversal',
     sql: `ALTER TABLE "settlement" DISABLE TRIGGER "trg_settlement_append_only";
           DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';
           ALTER TABLE "settlement" ENABLE TRIGGER "trg_settlement_append_only";
           DELETE FROM "transaction" WHERE id = 'TXN_MIGCHECK_SRV';`,
+  },
+];
+
+/**
+ * One hand-written settlement: transaction, commission, journal and legs, written
+ * with the proof of creation off, as a row from before it would be. Every field that
+ * is not told agrees, so each probe disagrees by exactly what it was told.
+ */
+const CREATION_PROOF_ROW = (suffix, options = {}) => {
+  const {
+    status = 'SETTLED',
+    payee = 'ORG-MIGCHECK-PAYEE',
+    settlementGross = 1000,
+    legGross = 1000,
+    journalId = `JRN_MIGCHECK_${suffix}`,
+    commissionJournal = `'JRN_MIGCHECK_${suffix}'`,
+    commission = true,
+    settlement = true,
+  } = options;
+  return `
+INSERT INTO "transaction" ("id", "organization_id", "counterparty_organization_id", "transaction_type",
+  "status", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "occurred_at",
+  "settled_at", "correlation_id", "updated_at", "created_by")
+VALUES ('TXN_MIGCHECK_${suffix}', 'ORG-MIGCHECK', 'ORG-MIGCHECK-PAYEE', 'LOGISTICS', '${status}', 1000, 0, 1000,
+  now(), ${status === 'SETTLED' ? 'now()' : 'NULL'}, 'COR-MIGCHECK', now(), 'USR-MIGCHECK');
+INSERT INTO "journal" ("id", "organization_id", "transaction_id", "journal_type", "description", "posted_at",
+  "posted_by", "correlation_id")
+VALUES ('JRN_MIGCHECK_${suffix}', 'ORG-MIGCHECK', 'TXN_MIGCHECK_${suffix}', 'SETTLEMENT', 'probe', now(),
+  'USR-MIGCHECK', 'COR-MIGCHECK');
+INSERT INTO "ledger_entry" ("id", "journal_id", "account_id", "organization_id", "direction", "amount_minor",
+  "currency", "posted_at")
+VALUES ('ENT_MIGCHECK_${suffix}_D', 'JRN_MIGCHECK_${suffix}', 'ACC_MIGCHECK_PAYER', 'ORG-MIGCHECK', 'DEBIT',
+        ${legGross}, 'IRR', now()),
+       ('ENT_MIGCHECK_${suffix}_C', 'JRN_MIGCHECK_${suffix}', 'ACC_MIGCHECK_PAYEE', 'ORG-MIGCHECK-PAYEE', 'CREDIT',
+        ${legGross}, 'IRR', now());
+${
+  commission
+    ? `INSERT INTO "commission" ("id", "organization_id", "transaction_id", "outcome", "rate_basis_points",
+  "gross_amount_minor", "amount_minor", "currency", "journal_id", "applied_at")
+VALUES ('CMS_MIGCHECK_${suffix}', 'ORG-MIGCHECK-PAYEE', 'TXN_MIGCHECK_${suffix}', 'NO_ACTIVE_RULE', 0,
+  1000, 0, 'IRR', ${commissionJournal}, now());`
+    : ''
+}
+${
+  settlement
+    ? `INSERT INTO "settlement" ("id", "organization_id", "transaction_id", "journal_id", "payer_organization_id",
+  "payee_organization_id", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "currency",
+  "settled_at", "settled_by")
+VALUES ('STL_MIGCHECK_${suffix}', 'ORG-MIGCHECK', 'TXN_MIGCHECK_${suffix}', '${journalId}', 'ORG-MIGCHECK',
+  '${payee}', ${settlementGross}, 0, ${settlementGross}, 'IRR', now(), 'USR-MIGCHECK');`
+    : ''
+}`;
+};
+
+const CREATION_PROOF_FORGED = [
+  'UNCHARGED',
+  'RESERVED_GONE',
+  'NOJOURNAL',
+  'UNSETTLED',
+  'FIGURES',
+  'PARTY',
+  'LEGS',
+  'RESERVED',
+  'NOJ_COMMISSION',
+];
+
+/** Removes probe rows by suffix; the owner lifts each guard in this one transaction only. */
+const CREATION_PROOF_REMOVE = (suffixes) => {
+  const ids = (prefix) => suffixes.map((suffix) => `'${prefix}_MIGCHECK_${suffix}'`).join(', ');
+  return `
+ALTER TABLE "settlement" DISABLE TRIGGER "trg_settlement_append_only";
+ALTER TABLE "commission" DISABLE TRIGGER "trg_commission_append_only";
+ALTER TABLE "ledger_entry" DISABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" DISABLE TRIGGER "trg_journal_immutable";
+DELETE FROM "settlement" WHERE "id" IN (${ids('STL')});
+DELETE FROM "commission" WHERE "id" IN (${ids('CMS')});
+DELETE FROM "ledger_entry" WHERE "journal_id" IN (${ids('JRN')});
+DELETE FROM "journal" WHERE "id" IN (${ids('JRN')});
+DELETE FROM "transaction" WHERE "id" IN (${ids('TXN')});
+ALTER TABLE "settlement" ENABLE TRIGGER "trg_settlement_append_only";
+ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only";
+ALTER TABLE "ledger_entry" ENABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" ENABLE TRIGGER "trg_journal_immutable";`;
+};
+
+const CREATION_PROOF_FKS_VALIDATED = (validated) => `DO $$
+BEGIN
+  IF (SELECT count(*) FROM pg_constraint
+       WHERE conname IN ('settlement_journal_id_fkey', 'commission_journal_id_fkey')
+         AND connamespace = current_schema()::regnamespace AND convalidated = ${validated}) <> 2 THEN
+    RAISE EXCEPTION 'expected both journal foreign keys with convalidated = ${validated}';
+  END IF;
+END $$;`;
+
+/**
+ * `20261105120000_settlement_creation_proof` over rows it would now refuse, which CI's
+ * empty database never holds (FU-097): applied over them it changes none, records
+ * each with its reason, keeps them out of a reversal and leaves only the foreign key
+ * they break unvalidated; with them gone, up again validates both.
+ */
+const SETTLEMENT_CREATION_PROOF_STEPS = [
+  {
+    label: 'creation proof: rows from before it, one borne out and each kind of the unprovable',
+    sql: [
+      `INSERT INTO "ledger_account" ("id", "organization_id", "account_type", "account_code", "purpose", "currency", "created_by")
+       VALUES ('ACC_MIGCHECK_PAYER', 'ORG-MIGCHECK', 'LIABILITY', 'MIGCHECK-PAYER', 'WALLET', 'IRR', 'USR-MIGCHECK'),
+              ('ACC_MIGCHECK_PAYEE', 'ORG-MIGCHECK-PAYEE', 'LIABILITY', 'MIGCHECK-PAYEE', 'WALLET', 'IRR', 'USR-MIGCHECK');`,
+      CREATION_PROOF_ROW('BORNE'),
+      CREATION_PROOF_ROW('NOJOURNAL', { journalId: 'JRN_MIGCHECK_GONE' }),
+      CREATION_PROOF_ROW('UNSETTLED', { status: 'CREATED' }),
+      CREATION_PROOF_ROW('FIGURES', { settlementGross: 2000 }),
+      CREATION_PROOF_ROW('PARTY', { payee: 'ORG-MIGCHECK-ELSEWHERE' }),
+      CREATION_PROOF_ROW('LEGS', { legGross: 500 }),
+      CREATION_PROOF_ROW('RESERVED', { status: 'CREATED', settlement: false }),
+      CREATION_PROOF_ROW('NOJ_COMMISSION', { commissionJournal: 'NULL' }),
+      CREATION_PROOF_ROW('UNCHARGED', { commission: false }),
+      CREATION_PROOF_ROW('RESERVED_GONE', {
+        status: 'CREATED',
+        settlement: false,
+        commissionJournal: `'JRN_MIGCHECK_NEVER_POSTED'`,
+      }),
+    ].join('\n'),
+  },
+  { label: 'creation proof: up over them: the deploy goes through', reapply: true },
+  {
+    label: 'creation proof: each is found, with its reason, and the borne-out row is not',
+    sql: `DO $$
+          DECLARE
+            found TEXT;
+          BEGIN
+            SELECT string_agg(source_table || ':' || row_id || ':' || reason, ' '
+                              ORDER BY source_table, row_id COLLATE "C")
+              INTO found FROM "settlement_creation_quarantine";
+            IF found IS DISTINCT FROM
+               'commission:CMS_MIGCHECK_FIGURES:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_NOJOURNAL:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_NOJ_COMMISSION:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_PARTY:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_RESERVED:SETTLEMENT_MISSING '
+               || 'commission:CMS_MIGCHECK_RESERVED_GONE:SETTLEMENT_MISSING '
+               || 'settlement:STL_MIGCHECK_FIGURES:TRANSACTION_DISAGREES '
+               || 'settlement:STL_MIGCHECK_LEGS:LEGS_DISAGREE '
+               || 'settlement:STL_MIGCHECK_NOJOURNAL:JOURNAL_MISSING '
+               || 'settlement:STL_MIGCHECK_PARTY:TRANSACTION_DISAGREES '
+               || 'settlement:STL_MIGCHECK_UNCHARGED:COMMISSION_MISSING '
+               || 'settlement:STL_MIGCHECK_UNSETTLED:TRANSACTION_NOT_SETTLED' THEN
+              RAISE EXCEPTION 'the quarantine holds: %', found;
+            END IF;
+            IF (SELECT count(*) FROM "settlement" WHERE "id" LIKE 'STL_MIGCHECK_%') <> 8 THEN
+              RAISE EXCEPTION 'the migration changed the rows it judged';
+            END IF;
+          END $$;
+          ${CREATION_PROOF_FKS_VALIDATED(false)}`,
+  },
+  {
+    label: 'creation proof: a foreign key left unvalidated still refuses a new row',
+    sql: `INSERT INTO "settlement" ("id", "organization_id", "transaction_id", "journal_id", "payer_organization_id",
+            "payee_organization_id", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "currency",
+            "settled_at", "settled_by")
+          VALUES ('STL_MIGCHECK_NEW', 'ORG-MIGCHECK', 'TXN_MIGCHECK_RESERVED', 'JRN_MIGCHECK_NEVER', 'ORG-MIGCHECK',
+            'ORG-MIGCHECK-PAYEE', 1000, 0, 1000, 'IRR', now(), 'USR-MIGCHECK');`,
+    mustFail: 'settlement_journal_id_fkey',
+  },
+  {
+    label: 'creation proof: a new row with a real journal is refused at commit',
+    sql: `INSERT INTO "settlement" ("id", "organization_id", "transaction_id", "journal_id", "payer_organization_id",
+            "payee_organization_id", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "currency",
+            "settled_at", "settled_by")
+          VALUES ('STL_MIGCHECK_NEW', 'ORG-MIGCHECK', 'TXN_MIGCHECK_RESERVED', 'JRN_MIGCHECK_RESERVED', 'ORG-MIGCHECK',
+            'ORG-MIGCHECK-PAYEE', 1000, 0, 1000, 'IRR', now(), 'USR-MIGCHECK');`,
+    mustFail: 'written together, by one transaction',
+  },
+  {
+    label: 'creation proof: a quarantined row backs no reversal',
+    sql: `INSERT INTO "settlement_reversal" ("id", "organization_id", "transaction_id", "settlement_id",
+            "source_type", "source_reference")
+          VALUES ('SRV_01MIGCHECK0000000000000001', 'ORG-MIGCHECK', 'TXN_MIGCHECK_FIGURES', 'STL_MIGCHECK_FIGURES',
+            'MANUAL', 'MIGCHECK-2');`,
+    mustFail: 'could not be proven',
+  },
+  {
+    label: 'creation proof: the borne-out row still opens a case, which is then removed',
+    sql: `INSERT INTO "settlement_reversal" ("id", "organization_id", "transaction_id", "settlement_id",
+            "source_type", "source_reference")
+          VALUES ('SRV_01MIGCHECK0000000000000002', 'ORG-MIGCHECK', 'TXN_MIGCHECK_BORNE', 'STL_MIGCHECK_BORNE',
+            'MANUAL', 'MIGCHECK-3');
+          ALTER TABLE "settlement_reversal" DISABLE TRIGGER "trg_settlement_reversal_no_delete";
+          DELETE FROM "settlement_reversal" WHERE id = 'SRV_01MIGCHECK0000000000000002';
+          ALTER TABLE "settlement_reversal" ENABLE TRIGGER "trg_settlement_reversal_no_delete";`,
+  },
+  {
+    label: 'creation proof: the quarantine is frozen',
+    sql: `DELETE FROM "settlement_creation_quarantine";`,
+    mustFail: 'fixed by its migration',
+  },
+  {
+    label: 'creation proof: down over them refuses nothing, and leaves every row',
+    runDownScript: [SETTLEMENT_CREATION_PROOF],
+  },
+  {
+    label: 'creation proof: the rows are all there, and an owner clears the unprovable',
+    sql: `DO $$
+          BEGIN
+            IF (SELECT count(*) FROM "settlement" WHERE "id" LIKE 'STL_MIGCHECK_%') <> 8 THEN
+              RAISE EXCEPTION 'the rollback changed the rows';
+            END IF;
+          END $$;
+          ${CREATION_PROOF_REMOVE(CREATION_PROOF_FORGED)}`,
+  },
+  { label: 'creation proof: up with them gone', reapply: true },
+  {
+    label: 'creation proof: no quarantine, both foreign keys validated over the borne-out row',
+    sql: `DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM "settlement_creation_quarantine") THEN
+              RAISE EXCEPTION 'the quarantine holds a row that is borne out';
+            END IF;
+          END $$;
+          ${CREATION_PROOF_FKS_VALIDATED(true)}`,
+  },
+  {
+    label: 'creation proof: the last probe rows are removed before the chain reversal',
+    sql: `${CREATION_PROOF_REMOVE(['BORNE'])}
+          DELETE FROM "ledger_account" WHERE "id" IN ('ACC_MIGCHECK_PAYER', 'ACC_MIGCHECK_PAYEE');`,
   },
 ];
 
@@ -1748,6 +2001,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
     ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
     ...TRANSACTION_RESOLVED_DISPUTE_STEPS,
     ...SETTLEMENT_REVERSAL_STEPS,
+    ...SETTLEMENT_CREATION_PROOF_STEPS,
   ],
 };
 
@@ -2233,6 +2487,8 @@ export const EXPECTED = {
       'settlement_authority_reconciliation',
       // A correction case on a settlement (RLG-002-1, docs/24 Q-76).
       'settlement_reversal',
+      // What 20261105120000 found on rows from before it could prove them (FU-097).
+      'settlement_creation_quarantine',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2278,6 +2534,16 @@ export const EXPECTED = {
       'trg_settlement_append_only',
       'trg_settlement_no_truncate',
       'trg_ledger_account_identity_fixed',
+      // A settlement proves it happened when it is written (FU-097).
+      'trg_settlement_creation_quarantine_frozen',
+      'trg_settlement_creation_quarantine_no_truncate',
+      'trg_settlement_reversal_not_quarantined',
+      'trg_settlement_creation_proven',
+      'trg_commission_creation_proven',
+      'trg_commission_no_truncate',
+      'trg_transaction_settled_proven',
+      'trg_transaction_terms_fixed',
+      'trg_transaction_status_edges',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2320,6 +2586,12 @@ export const EXPECTED = {
       'reject_settlement_reversal_journal_undo',
       'reject_settlement_mutation',
       'reject_ledger_account_identity_change',
+      'assert_settlement_creation_proven',
+      'reject_settlement_creation_quarantine_change',
+      'reject_settlement_reversal_of_quarantined',
+      'reject_commission_truncate',
+      'reject_transaction_terms_change',
+      'enforce_transaction_settlement_edges',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -2353,6 +2625,10 @@ export const EXPECTED = {
       'settlement_reversal_transaction_id_fkey',
       'settlement_reversal_settlement_id_fkey',
       'settlement_reversal_journal_id_fkey',
+      'ck_settlement_creation_quarantine_source',
+      'ck_settlement_creation_quarantine_reason',
+      'settlement_journal_id_fkey',
+      'commission_journal_id_fkey',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',

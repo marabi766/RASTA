@@ -1069,7 +1069,9 @@ model Commission {
   amountMinor      BigInt @map("amount_minor")
   currency         String
 
-  /// The journal leg that recognised the revenue.
+  /// The journal leg that recognised the revenue: its settlement's journal, by a
+  /// foreign key and at commit (`trg_commission_creation_proven`). Proven with the
+  /// settlement, migration `20261105120000_settlement_creation_proof`.
   journalId String? @map("journal_id")
 
   appliedAt DateTime @map("applied_at")
@@ -1470,6 +1472,10 @@ model SettlementReversal {
 /// its journal is not expressible, and a journal cannot back two settlements.
 model Settlement {
   // Append-only: no row is ever updated or deleted (`trg_settlement_append_only`).
+  // Proven when written, at commit, with its commission, journal and transaction
+  // (`trg_settlement_creation_proven`, migration 20261105120000_settlement_creation_proof).
+  // `journalId` has a foreign key there; what it found on older rows is
+  // `settlement_creation_quarantine`, not modelled: filled there, frozen, read by triggers.
   /// `STL_<ULID>`.
   id String @id
 
