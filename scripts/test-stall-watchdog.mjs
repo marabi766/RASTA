@@ -1,5 +1,5 @@
 /**
- * Preload for `node --test --import ./scripts/test-stall-watchdog.mjs`: no test
+ * Preload for `node --test --require ./scripts/test-stall-watchdog.mjs`: no test
  * may run longer than a wall-clock budget, and a test that does is NAMED.
  *
  * Why not `--test-timeout` alone. On Node 22 that flag is enforced on the test
@@ -16,6 +16,20 @@
  * and kills the process, so the file fails in about a minute instead of at the
  * job limit.
  *
+ * The same preload also guards the `node --test` RUNNER (the parent process),
+ * whose own event loop can stop for good: on Node 22 a child's v8-serialized
+ * report that arrives split right after a 0xFF byte is reordered by the parent's
+ * parser, the frame after it is read at a false header with a huge length, and
+ * once the file ends `#drainRawBuffer` loops forever on it (nodejs/node#62693,
+ * fixed upstream by nodejs/node#62704, not in Node 22.23). The child has exited,
+ * so the test watchdog is gone; the runner prints nothing more, ignores
+ * --test-timeout (its timer never runs) and SIGTERM, and holds the CI step to
+ * its limit (FU-118: runs 42043438996 and 42035896072). Here the main thread
+ * stamps a heartbeat from a timer and the same out-of-thread watchdog kills the
+ * runner, naming the cause, when the heartbeat stops for one budget. This needs
+ * `--require`: on Node 22 the runner loads --require preloads but not --import
+ * ones (those reach only the test files). Node 22.12+ requires this ES module.
+ *
  * Budget: RASTA_TEST_STALL_MS, default 60 s. Anything that is not a positive
  * integer is ignored and the default applies, never "disabled".
  */
@@ -31,13 +45,35 @@ export function stallBudget(raw) {
 }
 
 /**
- * Node hands its `--import` list to every worker thread, the watchdog's own
+ * Node hands its preload list to every worker thread, the watchdog's own
  * included: without the main-thread test each watchdog worker would start a
  * watchdog of its own, whose hooks never fire, and kill the process after one
  * budget. NODE_TEST_CONTEXT is set by the runner in the process that runs a
  * test file, so a plain `node` that preloads this file is left alone.
  */
 export const runsTestFile = isMainThread && process.env.NODE_TEST_CONTEXT !== undefined;
+/** The `node --test` runner itself: the parent that spawns the test files. */
+export const runsTestRunner =
+  isMainThread &&
+  process.env.NODE_TEST_CONTEXT === undefined &&
+  process.execArgv.includes('--test');
+
+function startWatchdog(buffer, runner) {
+  new Worker(new URL('./test-stall-watchdog-worker.mjs', import.meta.url), {
+    workerData: { buffer, budget: stallBudget(process.env.RASTA_TEST_STALL_MS), runner },
+  }).unref();
+}
+
+if (runsTestRunner) {
+  const buffer = new SharedArrayBuffer(16 + NAME_BYTES);
+  const state = new Float64Array(buffer, 0, 2);
+  const beat = () => {
+    state[0] = monotonicMs();
+  };
+  beat();
+  setInterval(beat, 250).unref();
+  startWatchdog(buffer, true);
+}
 
 if (runsTestFile) {
   const buffer = new SharedArrayBuffer(16 + NAME_BYTES);
@@ -52,9 +88,7 @@ if (runsTestFile) {
     state[0] = monotonicMs();
   };
   record(false, '(start of file)');
-  new Worker(new URL('./test-stall-watchdog-worker.mjs', import.meta.url), {
-    workerData: { buffer, budget: stallBudget(process.env.RASTA_TEST_STALL_MS) },
-  }).unref();
+  startWatchdog(buffer, false);
   beforeEach((t) => record(true, t.name));
   afterEach((t) => record(false, t.name));
 }
