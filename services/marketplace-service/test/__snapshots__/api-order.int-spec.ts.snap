@@ -41,8 +41,7 @@ exports[`order API POST /v1/orders/:id/reviews publishes the registered review O
             "additionalProperties": false,
             "properties": {
               "comment": {
-                "maxLength": 2000,
-                "pattern": "^[^\\p{Bidi_Control}]*$",
+                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                 "type": "string",
               },
               "qualityRating": {
