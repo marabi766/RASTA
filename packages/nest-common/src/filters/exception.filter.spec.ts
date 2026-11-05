@@ -318,6 +318,13 @@ describe('AllExceptionsFilter, body-parser refusals', () => {
       'UNSUPPORTED_MEDIA_TYPE',
       'The request body is in a content encoding this service does not accept',
     ],
+    [413, 'parameters.too.many', 'PAYLOAD_TOO_LARGE', 'The request body has too many parameters'],
+    [
+      400,
+      'querystring.parse.rangeError',
+      'MALFORMED_REQUEST',
+      'The request body is nested too deeply',
+    ],
   ])('%s %s: fixed text, never body-parser’s', (status, type, code, message) => {
     const {
       status: sent,
@@ -333,6 +340,38 @@ describe('AllExceptionsFilter, body-parser refusals', () => {
   it('only the allowlisted types, and only at their own status', () => {
     expect(run(bodyParserError(400, 'request.aborted', 'aborted')).status).toBe(500);
     expect(run(bodyParserError(500, 'entity.too.large', 'odd')).status).toBe(500);
+  });
+
+  /** What body-parser makes of a decompression stream's error: zlib's, with status 400. */
+  const undecodable = (code: string, status = 400) =>
+    Object.assign(new Error(`bad bytes ${SENTINEL}`), {
+      code,
+      status,
+      statusCode: status,
+      expose: true,
+    });
+
+  it.each([
+    'Z_DATA_ERROR',
+    'Z_BUF_ERROR',
+    'ERR__ERROR_FORMAT_PADDING_2',
+    'ZSTD_error_prefix_unknown',
+  ])('%s, a body that does not decompress: the caller’s 400, fixed text', (code) => {
+    const { status, body, lines } = run(undecodable(code));
+    expect(status).toBe(400);
+    expect(body).toMatchObject({
+      code: 'MALFORMED_REQUEST',
+      message: 'The request body could not be decompressed',
+    });
+    expect(lines[0]?.level).toBe('debug');
+    expect(JSON.stringify([body, lines])).not.toContain('SENTINEL');
+  });
+
+  it('only with zlib’s code, and only at body-parser’s status: anything else stays a 500', () => {
+    expect(run(undecodable('ECONNRESET')).status).toBe(500);
+    expect(run(undecodable('Z_DATA_ERROR', 500)).status).toBe(500);
+    // A service's own use of zlib failing is the server's fault.
+    expect(run(Object.assign(new Error('zlib'), { code: 'Z_DATA_ERROR' })).status).toBe(500);
   });
 });
 

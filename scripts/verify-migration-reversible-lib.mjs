@@ -3278,6 +3278,9 @@ export const EXPECTED = {
       'rfq',
       'rfq_criterion',
       'rfq_invitation',
+      // COM-007 PR 8: a supplier's sealed quotation and the RFQ's receipt chain.
+      'quotation',
+      'quotation_receipt',
     ],
     types: [],
     triggers: [
@@ -3299,6 +3302,13 @@ export const EXPECTED = {
       'tg_rfq_invitation_guard',
       'tg_rfq_invitation_no_truncate',
       'tg_rfq_invitation_count_check',
+      // COM-007 PR 8: a quotation only before its RFQ's deadline on the database clock, sealed bytes
+      // only with a new revision, each revision receipted; the chain append-only and continuous.
+      'tg_quotation_guard',
+      'tg_quotation_no_truncate',
+      'tg_quotation_receipt_check',
+      'tg_quotation_receipt_guard',
+      'tg_quotation_receipt_no_truncate',
     ],
     functions: [
       'demand_aggregation_guard',
@@ -3308,6 +3318,9 @@ export const EXPECTED = {
       'rfq_guard',
       'rfq_child_guard',
       'rfq_issue_check',
+      'quotation_guard',
+      'quotation_receipt_guard',
+      'quotation_receipt_check',
     ],
     indexes: [
       'ux_demand_aggregation_org_id',
@@ -3325,6 +3338,11 @@ export const EXPECTED = {
       'ux_rfq_org_id_aggregation',
       'ix_rfq_close_due',
       'ix_rfq_invitation_supplier',
+      // COM-007 PR 8: one quotation per invited supplier and RFQ; no fork in a chain.
+      'ux_quotation_rfq_supplier',
+      'ux_quotation_receipt_receipt',
+      'ux_quotation_receipt_previous',
+      'ux_quotation_receipt_revision',
     ],
     constraints: [
       'fk_demand_request_aggregation',
@@ -3336,6 +3354,14 @@ export const EXPECTED = {
       'ck_rfq_cancelled',
       'ck_rfq_invitation_not_buyer',
       'ck_rfq_criterion_values',
+      // COM-007 PR 8: only an invited supplier quotes; a receipt names its quotation.
+      'fk_quotation_invitation',
+      'fk_quotation_receipt_quotation',
+      'ck_quotation_status',
+      'ck_quotation_revision',
+      'ck_quotation_seal',
+      'ck_quotation_withdrawn',
+      'ck_quotation_receipt_shape',
       // COM-007 PR 2: demands still to follow an ended window, the sweeper's claim, a cancellation.
       'ck_demand_aggregation_follow',
       'ck_demand_aggregation_sweep_claim',

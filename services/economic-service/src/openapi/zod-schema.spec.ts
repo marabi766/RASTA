@@ -67,7 +67,14 @@ describe('toJsonSchema', () => {
     // than a re-spelling of it.
     expect(properties.amountMinor).toEqual({ type: 'string', pattern: '^\\d{1,30}$' });
     expect(properties.note).toEqual({ type: 'string', minLength: 3, maxLength: 10 });
-    expect(properties.when).toEqual({ type: 'string', format: 'date-time' });
+    // `isoDateTime()` also publishes the zone it accepts (FU-035).
+    expect(properties.when).toEqual({
+      type: 'string',
+      format: 'date-time',
+      pattern: 'Z$',
+      description:
+        'ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.',
+    });
     expect(properties.email).toEqual({ type: 'string', format: 'email' });
     expect(properties.link).toEqual({ type: 'string', format: 'uri' });
   });
