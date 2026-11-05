@@ -345,6 +345,14 @@ export {
 export type { JsonSchema } from './openapi/zod-schema';
 export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
 export { publishApiErrors, healthProbeErrorSchema } from './openapi/error-document';
+export {
+  applyOperationSecurity,
+  documentationModuleFor,
+  routeAccessByOperation,
+  BEARER_SCHEME,
+  INTERNAL_TOKEN_SCHEME,
+} from './openapi/operation-security';
+export type { RouteAccess, ServiceRouteUsers } from './openapi/operation-security';
 // Conformance checks of a published document against the real error bodies; for tests.
 export {
   errorEnvelopeProblems,
