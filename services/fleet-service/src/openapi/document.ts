@@ -1,6 +1,13 @@
+import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
-import { toJsonSchema, type JsonSchema } from '@rasta/nest-common';
+import {
+  applyOperationSecurity,
+  routeAccessByOperation,
+  toJsonSchema,
+  type JsonSchema,
+  type ServiceRouteUsers,
+} from '@rasta/nest-common';
 import {
   availabilityQuerySchema,
   changeDriverStatusSchema,
@@ -110,6 +117,28 @@ const STATUS_TEXT: Record<number, string> = {
   503: 'A service this operation depends on gave no usable answer (UPSTREAM_UNAVAILABLE); retry',
   504: 'A service this operation depends on did not answer in time (UPSTREAM_TIMEOUT); retry',
 };
+
+/**
+ * Every `@AllowService` route (FU-075) and whether a user token is still
+ * admitted there. Which token a route takes is read from the guard's own
+ * metadata (`applyOperationSecurity`, @rasta/nest-common); this table states
+ * only what no decorator does — `users-refused` is enforced in the service
+ * (`source-fact.ts`, `asset-work-state.ts`, `transfer-clearance.ts`) — and must match the decorators exactly.
+ */
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/usage-records/{id}': 'users-refused',
+  'GET /v1/internal/assets/{assetId}/assignment-state': 'users-refused',
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': 'users-refused',
+  'DELETE /v1/internal/assets/{assetId}/transfer-clearance/{fenceId}': 'users-refused',
+};
+
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
