@@ -112,6 +112,10 @@ Projection به Keycloak روی آن عمل نمی‌کند — تغییر سا�
 | `ORGANIZATION_POLICY_CHANGED`  | audit                                              | `organizationId`, `policyKey`, `value`                                                                            |
 | `ORGANIZATION_CONTACT_CHANGED` | audit                                              | `organizationId`, `contactId`, `change`, `kind`, `isPrimary`, `demotedContactIds[]` — **بدون** تلفن، ایمیل یا نام |
 
+**برنامه‌ریزی‌شده (ADR-072، هنوز تولید نمی‌شود):** `ORGANIZATION_UNION_MEMBERSHIP_STARTED` و `ORGANIZATION_UNION_MEMBERSHIP_ENDED`
+روی همین Topic — کلید Partition سازمان عضو، مستأجر لفافه اتحادیه؛ مصرف: audit (Projection ـِ `UnionMembership/{membershipId}`، PR 1b، پیش از نخستین رویداد مستقر می‌شود) · construction و contract (فقط
+`..._ENDED`، محرک بازپرسی سیاست، Q-83). Payload در ADR-072 § ۳؛ ردیف‌ها در PR ـِ `organization-service` به این جدول می‌آیند.
+
 ## Asset — `rasta.asset.v1`
 
 | رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                                                             |
@@ -550,7 +554,7 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 > | رویداد          | Payload                                                                                                                                                                                                      |
 > | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 > | `RFQ_ISSUED`    | شناسه‌ها و `rfqVersion` (۱)، `productId`, `totalQuantity`, `procurementNature`, `quotationClosingAt`, `invitedSupplierOrganizationIds[]`, `criteriaCount`, `criteriaDigest`, `keyId`, `issuedBy`, `issuedAt` |
-> | `RFQ_CLOSED`    | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `quotationClosingAt`, `trigger` (`SWEEPER` \| `MANUAL`), `closedBy`, `closedAt`, `quotationCount` (ADR-070 § ۹؛ تا PR 8 صفر)                       |
+> | `RFQ_CLOSED`    | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `quotationClosingAt`, `trigger` (`SWEEPER` \| `MANUAL`), `closedBy`, `closedAt`, `quotationCount` (ADR-070 § ۹؛ از PR 8 شمار پیشنهادهای ایستاده)   |
 > | `RFQ_CANCELLED` | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `previousStatus`, `reasonCode` (فهرست بستهٔ `PROCUREMENT_RFQ_CANCELLATION_CODES`، پیش‌فرض `BUYER_REQUEST`), `cancelledBy`, `cancelledAt`           |
 >
 > **COM-007 PR 7 (2026-11-02) — مصرف در `audit-service` (برآمد RFQ-Evidence، گروه `audit-service.rfq-evidence`، موضوع `rasta.procurement.v1`).**
@@ -566,6 +570,17 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 > و `QUOTATION_ACCESSED` زنجیره را نمی‌افزایند (ردیف ممیزی همان Projector هستند). سرِ زنجیره را فقط
 > `GET /v1/internal/rfq-evidence/{rfqId}/chain` (`@AllowService('procurement-service')`، با توکن امضاشده برای سازمان خریدار؛ جستجو با
 > سازمان و RFQ) می‌دهد.
+>
+> **COM-007 PR 8 (2026-11-03) — تولید `QUOTATION_*`.** قرارداد میان‌سرویسی در `@rasta/contracts`
+> (`packages/contracts/src/events/procurement-quotation.ts`، `.strict()` سمت تولیدکننده)؛ Aggregate همان `Rfq` و کلید پارتیشن `rfqId`. نام و نوع
+> میدان‌ها دقیقاً همان Schema مصرف‌کنندهٔ PR 7 است و آزمونی در `rfq-evidence.spec.ts` Fixture مصرف‌کننده را با Schema تولیدکننده می‌سنجد.
+> `QUOTATION_RECEIPT_GENESIS_LABEL` همان `rasta.quotation.receipt.genesis.v1` است. هیچ‌کدام قیمت، پاسخ، یادداشت یا رمزنوشته ندارد.
+>
+> | رویداد                | Payload                                                                                                                                                                                         |
+> | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | `QUOTATION_SUBMITTED` | `rfqId`, `quotationId`, `organizationId` (خریدار)، `supplierOrganizationId`, `revision` (۱)، `receivedAt`, `contentCommitment`, `ciphertextSha256`, `previousReceipt`, `receipt`, `submittedBy` |
+> | `QUOTATION_REVISED`   | همان، با `revision` ≥ ۲                                                                                                                                                                         |
+> | `QUOTATION_WITHDRAWN` | `rfqId`, `quotationId`, `organizationId`, `supplierOrganizationId`, `revision`, `withdrawnBy`, `withdrawnAt` — زنجیره را نمی‌افزاید و رسید ندارد                                                |
 
 ## Supplier — `rasta.supplier.v1`
 

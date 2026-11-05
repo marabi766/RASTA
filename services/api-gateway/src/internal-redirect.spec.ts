@@ -50,14 +50,16 @@ describe('gateway RELAY rejects authenticated redirects', () => {
                 state: 'OPEN',
               });
               await expect(
-                gateway.forward({
-                  service: 'identity',
-                  method,
-                  path: '/v1/users',
-                  query: '',
-                  headers: {},
-                  body: undefined,
-                }),
+                runWithContext(createSystemContext({ correlationId: 'COR_2' }), () =>
+                  gateway.forward({
+                    service: 'identity',
+                    method,
+                    path: '/v1/users',
+                    query: '',
+                    headers: {},
+                    body: undefined,
+                  }),
+                ),
               ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
               expect(probe.sent).toHaveLength(1);
             }

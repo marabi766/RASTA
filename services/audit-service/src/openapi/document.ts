@@ -2,10 +2,13 @@ import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
 import {
+  applyOperationSecurity,
   isOptionalField,
   objectShapeOf,
   publishedApiErrorSchema,
+  routeAccessByOperation,
   toJsonSchema,
+  type ServiceRouteUsers,
 } from '@rasta/nest-common';
 import {
   auditEventDetailQuerySchema,
@@ -124,6 +127,27 @@ const DESCRIPTION =
   "only by identity-service's service token, proves a correction target exists and " +
   'names its scope; it returns no evidence.';
 
+/**
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`audit.lookup.ts`, `tender-evidence.service.ts`,
+ * `rfq-evidence.service.ts`) — and must match the decorators exactly.
+ */
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/audit-events/{id}': 'users-refused',
+  'GET /v1/internal/tender-evidence/{tenderId}/chain': 'users-refused',
+  'GET /v1/internal/rfq-evidence/{rfqId}/chain': 'users-refused',
+};
+
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
+
 /** Builds the finished document for a booted application. */
 export function buildAuditOpenApiDocument(
   app: INestApplication,
@@ -139,29 +163,13 @@ export function buildAuditOpenApiDocument(
       .build(),
   );
 
-  return enrichOpenApiDocument(document);
+  return publishOperationSecurity(enrichOpenApiDocument(document), app);
 }
 
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
-  // The internal correction-target lookup is not bearer-authenticated: it is
-  // reached with a signed service token (ADR-020/035) and by exactly one
-  // service. Publishing it under the bearer scheme would describe a door that
-  // does not exist and hide the one that does.
-  document.components.securitySchemes ??= {};
-  document.components.securitySchemes.internalToken = {
-    type: 'apiKey',
-    in: 'header',
-    name: 'x-internal-token',
-    description:
-      'A signed internal service token. The correction-target lookup accepts one ' +
-      'minted for audit-service by identity-service, the tender-evidence chain read ' +
-      'one minted by construction-service for the tender owner’s organization, and the ' +
-      'rfq-evidence chain read one minted by procurement-service for the buyer’s ' +
-      'organization; nothing else.',
-  } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -169,15 +177,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
-      // Stated on the operation, not only in `components.securitySchemes`.
-      // `DocumentBuilder.addBearerAuth()` *declares* the scheme; it does not
-      // apply it, and without this the published contract would describe a
-      // service whose endpoints are open while the guard answers 401 to every
-      // one of them. On an audit API that is not a documentation nicety: a
-      // reviewer reading the contract must be able to see the store is closed.
-      operation.security ??= path.startsWith('/v1/internal/')
-        ? [{ internalToken: [] }]
-        : [{ bearer: [] }];
+      // Every operation's `security` is `publishOperationSecurity`'s, from the
+      // guard's metadata (FU-075), never from the path: a reviewer reading the
+      // contract must be able to see the store is closed, and which door is which.
 
       const query = QUERY_SCHEMAS[key];
       if (query) {
@@ -213,7 +215,6 @@ interface MutableOperation {
   parameters?: unknown[];
   responses?: Record<string, unknown>;
   description?: string;
-  security?: Record<string, string[]>[];
 }
 
 function isOperation(value: unknown): value is MutableOperation {

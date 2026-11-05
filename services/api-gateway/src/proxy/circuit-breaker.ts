@@ -47,9 +47,12 @@ import { circuitStateGauge } from './circuit.metrics';
  * response body is complete: 2xx–4xx `success` (a 4xx is the service
  * answering, not the service failing), 5xx / malformed / truncated / upstream
  * timeout / network error `failure`, client cancellation and gateway-local
- * faults before the request was sent (token issuance) `release`, client
- * cancellation after it was sent `abandoned` — unless a 5xx status line had
- * already arrived, which is a `failure` (fail closed). An expected per-request
+ * faults before the request was sent (token issuance, a transport refusal)
+ * `release`, client cancellation after it was sent `abandoned` — unless a 5xx
+ * status line had already arrived, which is a `failure` (fail closed). A transport
+ * error that proves nothing either way is `abandoned` too: this breaker is shared
+ * by every tenant, so what one caller can provoke must not count. A request the
+ * gateway refuses outright never gets a permit. An expected per-request
  * refusal exempted from counting (#381's identity refusals) is a `release` too,
  * once its body is complete: it frees the probe slot without changing the
  * failure state.
