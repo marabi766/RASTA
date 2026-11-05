@@ -7,6 +7,7 @@ import { EventPublisher } from '../src/events/publisher';
 import { IdempotencyStore } from '../src/shared/idempotency';
 import { OrderRepository, type SagaStep } from '../src/order/order.repository';
 import { OrderService } from '../src/order/order.service';
+import type { ResolveDisputeDto } from '../src/order/dto';
 import { ReturnRepository } from '../src/returns/return.repository';
 import { ReturnService } from '../src/returns/return.service';
 import type { ReturnGoodsOwner } from '../src/returns/return-goods';
@@ -107,6 +108,40 @@ export function testEnv(): MarketplaceEnv {
     INTERNAL_TOKEN_SECRET:
       process.env.INTERNAL_TOKEN_SECRET ?? 'integration_suite_unused_secret_32_chars',
   });
+}
+
+/**
+ * The dispute an order holds now — what an operator's decision names
+ * (`ResolveDisputeDto.disputeId`, D-083) — or, when it holds none, an
+ * identifier of the right shape that names no dispute, so a decision on an
+ * undisputed order reaches the refusal it is meant to meet.
+ */
+export async function openDisputeId(prisma: PrismaService, orderId: string): Promise<string> {
+  const open = await runUnscoped('the suite reads the dispute an order holds', () =>
+    prisma.client.orderDispute.findFirst({
+      where: { orderId, status: 'OPEN' },
+      orderBy: { raisedAt: 'desc' },
+      select: { id: true },
+    }),
+  );
+  return open?.id ?? NO_DISPUTE;
+}
+
+/** A dispute identifier of the right shape that no dispute has. */
+export const NO_DISPUTE = 'DSP_00000000000000000000000000';
+
+/**
+ * `OrderService.resolveDispute`, naming the order's open dispute as the
+ * operator's form does. Call it inside the operator's context.
+ */
+export async function resolveOpenDispute(
+  wiring: Pick<Wiring, 'prisma' | 'orders'>,
+  orderId: string,
+  dto: Omit<ResolveDisputeDto, 'disputeId'>,
+  record?: Parameters<OrderService['resolveDispute']>[2],
+) {
+  const disputeId = await openDisputeId(wiring.prisma, orderId);
+  return wiring.orders.resolveDispute(orderId, { ...dto, disputeId }, record);
 }
 
 export interface Wiring {

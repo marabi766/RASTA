@@ -451,6 +451,17 @@ model OrderDispute {
   /// `resolution` (ADR-052 §§ 1-b, 4 rule 13/14). Null until resolved.
   responsibility ResponsibilityAttribution? @map("responsibility")
 
+  /// The status the order had when this dispute was raised — where an
+  /// operator's SETTLE resumes it (D-083). Assigned by the database from the
+  /// order's row as the dispute is inserted (`trg_order_dispute_origin`); a
+  /// write can neither set nor change it. NULL only on a dispute raised before
+  /// migration 20261103130000 whose history did not say it with certainty: such
+  /// a dispute is refused SETTLE, never resumed to a guess.
+  raisedFromStatus OrderStatus? @map("raised_from_status")
+
+  /// Also UNIQUE (order_id) WHERE status = 'OPEN' — `uq_dispute_one_open_per_order`,
+  /// a partial index Prisma cannot express (migration 20260829185748): one open
+  /// dispute per order, so a reader asks for it by status, never by time.
   @@index([orderId], map: "ix_dispute_order")
   @@index([organizationId, status], map: "ix_dispute_org_status")
   @@map("order_dispute")
