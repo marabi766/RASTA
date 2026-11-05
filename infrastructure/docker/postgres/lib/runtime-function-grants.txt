@@ -1,7 +1,12 @@
 # Required SECURITY INVOKER helpers; one source for the splitter and checker.
 # service|regprocedure signature, types schema-qualified (SQL identifier
 # spelling)|the migration that creates the function and grants its EXECUTE
+identity|public.user_login_key(text)|20261104120000_canonical_login_keys
+organization|public.organization_text_is_canonical(text)|20261104120000_canonical_external_code
+organization|public.organization_text_key(text)|20261104120000_canonical_external_code
 economic|public.commission_rule_scope_key(text,public."BusinessLine",public."TransactionType")|20261016120000_commission_business_lines
 economic|public.commission_rule_scope_change(text,public."BusinessLine",public."TransactionType")|20261016120000_commission_business_lines
 economic|public.commission_pricing_scope_lock(text,public."BusinessLine",public."TransactionType")|20261016120000_commission_business_lines
 procurement|public.demand_aggregation_digest_range(text,text,text,text,integer)|20261017120000_aggregation_window_sweep
+contract|public.deduction_rule_name_is_canonical(text)|20261104100000_deduction_rule_changes
+contract|public.deduction_rule_name_key(text)|20261104100000_deduction_rule_changes

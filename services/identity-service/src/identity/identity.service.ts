@@ -1253,6 +1253,13 @@ export class IdentityService {
     if (context.authType !== 'USER' || (!everywhere && !context.organizationId)) {
       return { items: [], nextCursor: null, hasMore: false };
     }
+    // The exact username by its login key, as `ux_user_username_login_key`
+    // compares it (FU-084 r2): a legacy `Ali` is the `ali` the query folded to.
+    // No holder, no request: `in: []` matches nothing, and the page is read
+    // the same way whether the name is held or not.
+    const applicant = query.username
+      ? await this.repository.findUserIdByUsername(query.username)
+      : undefined;
     const rows = await runUnscoped(
       'the review queue spans the organizations the reviewer may provision into',
       () =>
@@ -1260,7 +1267,9 @@ export class IdentityService {
           where: {
             ...(everywhere ? {} : { requestedOrganizationId: context.organizationId }),
             ...(query.status ? { status: query.status } : {}),
-            ...(query.username ? { user: { is: { username: query.username } } } : {}),
+            ...(applicant !== undefined
+              ? { userId: { in: applicant === null ? [] : [applicant] } }
+              : {}),
             ...(query.cursor ? { id: { gt: query.cursor } } : {}),
           },
           include: { user: true },

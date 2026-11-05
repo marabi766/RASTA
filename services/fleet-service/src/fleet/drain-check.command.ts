@@ -1,3 +1,5 @@
+import { markRefusal } from '@rasta/config';
+
 /**
  * The fleet half of the drain fence that guards a change of
  * `INSURANCE_COVERAGES_FOLLOWING_VEHICLE` (docs/runbooks/insurance-reprojection.md,
@@ -61,7 +63,12 @@ export interface LagReport {
 }
 
 /** The check could not be made (exit 2), as opposed to made and failed (exit 1). */
-export class DrainCheckError extends Error {}
+export class DrainCheckError extends Error {
+  constructor(message: string) {
+    super(message);
+    markRefusal(this, 'lag-unreadable');
+  }
+}
 
 export async function checkConsumerGroupDrained(
   admin: LagAdmin,

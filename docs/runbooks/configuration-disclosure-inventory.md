@@ -6,7 +6,9 @@ both outbox B2 rejection/cleanup paths, and the Temporal deployment gate's child
 stderr/JSON/stack and returned text. It uses `commandFailure` in `@rasta/config`:
 a fresh closed message and the same registered-code sanitizer as #546. Unknown
 errors, subclasses, names, getters, causes and string coercion do not bypass it.
-Refusals no longer repeat even locally constructed error messages. Reports of
+Refusals no longer repeat even locally constructed error messages. Since FU-023 a refusal the repository raises itself reports its own closed
+code (`command refused (code <code>)`); the code table is in
+`docs/runbooks/outbox-b2-backfill.md` § refusal codes. Reports of
 prior committed batches remain; a refusal never asserts that nothing changed.
 
 **The disclosure class remains open.** The size rule requires a stacked follow-up
