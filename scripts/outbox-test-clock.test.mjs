@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import test from 'node:test';
 import ts from 'typescript';
 import {
@@ -99,27 +100,6 @@ function clockHazards(source, file = '') {
   return errors;
 }
 
-const SKIPPED_DIRECTORIES = new Set([
-  'node_modules',
-  'dist',
-  '.next',
-  '.turbo',
-  'coverage',
-  'playwright-report',
-  'test-results',
-  // Git-ignored Prisma output, rewritten by `db:generate` while checks run: listed
-  // then gone (ENOENT, FU-090). It holds no test code, so it is never descended into.
-  'generated',
-]);
-
-function sourceFiles(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    if (SKIPPED_DIRECTORIES.has(entry.name)) return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? sourceFiles(path) : [path];
-  });
-}
-
 /**
  * Test code wherever it lives: every TypeScript file under a `test/` or `e2e/`
  * directory (helpers included) and every spec beside the source, in services,
@@ -128,7 +108,7 @@ function sourceFiles(dir) {
 function testCodeFiles(repository) {
   return ['services', 'packages', 'apps', 'tests']
     .filter((top) => readdirSync(repository).includes(top))
-    .flatMap((top) => sourceFiles(join(repository, top)))
+    .flatMap((top) => authoredFiles(join(repository, top)))
     .map((path) => relative(repository, path))
     .filter(
       (path) =>

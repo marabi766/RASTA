@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import {
   EXCLUSIVE_PHASE,
   stripJsonComments,
@@ -28,18 +29,10 @@ import {
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export function listFiles(base, dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    // `generated` is git-ignored Prisma output, regenerated while other tasks run (FU-090).
-    if (
-      entry.name === 'node_modules' ||
-      entry.name === 'dist' ||
-      entry.name === 'generated' ||
-      entry.name.startsWith('.')
-    )
-      return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? listFiles(base, path) : [relative(base, path).replace(/\\/g, '/')];
-  });
+  // Hidden entries are not tests; generated output is never opened (FU-102).
+  return authoredFiles(dir, { skip: (name) => name.startsWith('.') }).map((path) =>
+    relative(base, path).replace(/\\/g, '/'),
+  );
 }
 
 /**

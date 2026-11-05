@@ -205,13 +205,13 @@ const ALLOWED = Object.freeze([
     file: 'scripts/check-test-phases.mjs',
     call: 'createRequire(import.meta.url)',
     reason: 'loads only repository Jest configuration to verify test phase registration',
-    line: 59,
+    line: 52,
   },
   {
     file: 'scripts/check-test-phases.mjs',
     call: 'createRequire(import.meta.url)',
     reason: 'loads only repository Jest configuration to verify test phase registration',
-    line: 84,
+    line: 77,
   },
   {
     file: 'scripts/disclosure-jest-launches.mjs',

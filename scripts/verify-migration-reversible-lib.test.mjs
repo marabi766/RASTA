@@ -10,9 +10,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { parse as parseYaml } from 'yaml';
 
 import {
@@ -1357,23 +1358,9 @@ function runnableSources(root = ROOT) {
       roots.push(join(root, 'services', service, part));
     }
   }
-  const files = [];
-  const walk = (dir) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (['node_modules', 'dist', 'generated'].includes(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (/\.(?:[cm]?js|ts)$/.test(entry.name)) files.push(path);
-    }
-  };
-  roots.forEach(walk);
-  return files;
+  return roots
+    .flatMap((dir) => authoredFiles(dir, { optional: true }))
+    .filter((path) => /\.(?:[cm]?js|ts)$/.test(basename(path)));
 }
 
 /**
@@ -1384,17 +1371,9 @@ const URL_FLAG_REFUSAL_TESTS = new Set(['scripts/outbox-b2-vacuum.pg.test.mjs'])
 
 /** Every shell script the repository runs, outside node_modules. */
 function shellScripts() {
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (['node_modules', 'dist', 'generated'].includes(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (/\.(?:sh|bash)$/.test(entry.name)) files.push(path);
-    }
-  };
-  ['infrastructure', 'scripts'].forEach((root) => walk(join(ROOT, root)));
-  return files;
+  return ['infrastructure', 'scripts']
+    .flatMap((root) => authoredFiles(join(ROOT, root)))
+    .filter((path) => /\.(?:sh|bash)$/.test(basename(path)));
 }
 
 const PG_CLIENT =
