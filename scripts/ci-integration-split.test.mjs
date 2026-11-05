@@ -19,6 +19,9 @@ import { parse as parseYaml } from 'yaml';
 import {
   AGGREGATE_JOB,
   ALLOWED_CONDITIONS,
+  QUALITY_GATE_JOB,
+  QUALITY_JOBS,
+  qualitySplitProblems,
   JOB_FLOOR_MINUTES,
   JOB_SETUP_MINUTES,
   INTEGRATION_PARTITIONS,
@@ -455,12 +458,211 @@ test('the committed workflow passes', () => {
   assert.deepEqual(checkIntegrationSplitText(TEXT), []);
 });
 
+test('FU-111: every split job waits for the type check only, not for the whole quality family', () => {
+  assert.equal(QUALITY_GATE_JOB, 'quality-types');
+  const workflow = real();
+  for (const id of splitJobs(workflow)) {
+    assert.deepEqual(workflow.jobs[id].needs, QUALITY_GATE_JOB, id);
+    const without = real();
+    without.jobs[id].needs = 'quality-lint';
+    fails(without, new RegExp(`^${id} must need ${QUALITY_GATE_JOB}$`));
+  }
+  // The aggregate quality check, not these jobs, demands lint, unit tests, guards and build.
+  assert.deepEqual([workflow.jobs.quality.needs].flat().sort(), [
+    'quality-build',
+    'quality-guards',
+    'quality-lint',
+    'quality-types',
+    'quality-unit',
+  ]);
+});
+
+// FU-111: the required "Lint, types and unit tests" check aggregates the quality-* jobs.
+const qualityFails = (workflow, pattern) => {
+  const problems = qualitySplitProblems(workflow);
+  assert.ok(
+    problems.some((problem) => pattern.test(problem)),
+    `expected a problem matching ${pattern}, got: ${JSON.stringify(problems)}`,
+  );
+  // And the whole guard sees it, as CI runs it.
+  fails(workflow, pattern);
+};
+
+// The status checks main's branch protection requires (read on 2026-11-05 from
+// repos/marabi766/RASTA/branches/main/protection/required_status_checks), and the one
+// the merge train requires on its pull request. A job rename or split must keep each
+// name on exactly one job: a required check nobody reports blocks every merge, and one
+// reported by two jobs can be satisfied by the wrong one.
+const REQUIRED_CHECK_NAMES = [
+  'Lint, types and unit tests',
+  'Integration and security tests',
+  'End-to-end (economic critical path)',
+  'Portal in a browser',
+  'Security scans',
+  'Images to build and scan',
+  'ClamAV image scan and signature freshness',
+  'Prometheus config and alert rules',
+  'Migration reversibility and database guards',
+  'Images built and scanned',
+];
+// The jobs that wait for the type-check gate, pinned by name: each builds and runs its own
+// copy of what it tests and needs nothing of the quality jobs but a tree that type-checks.
+test('FU-111: exactly these jobs wait for the type-check gate, and none for another quality job', () => {
+  const workflow = real();
+  const gated = Object.entries(workflow.jobs)
+    .filter(([id, job]) => id !== 'quality' && [job.needs ?? []].flat().includes('quality-types'))
+    .map(([id]) => id)
+    .sort();
+  assert.deepEqual(gated, [
+    'broker-authorisation',
+    'e2e',
+    'integration-backup-drill',
+    'integration-construction',
+    'integration-contract',
+    'integration-coverage',
+    'integration-coverage-critical',
+    'integration-economic',
+    'integration-security',
+    'integration-suites',
+    'migration-guards',
+    'migration-reversibility-chain',
+    'web-browser',
+  ]);
+  // The aggregate is waited for by the images verdict only.
+  assert.deepEqual(
+    Object.entries(workflow.jobs)
+      .filter(([, job]) => [job.needs ?? []].flat().includes('quality'))
+      .map(([id]) => id),
+    ['images'],
+  );
+  for (const id of ['e2e', 'web-browser', 'migration-guards', 'broker-authorisation']) {
+    const mutant = real();
+    mutant.jobs[id].needs = 'quality-lint';
+    fails(mutant, new RegExp(`^${id} waits for quality-lint`));
+    mutant.jobs[id].needs = 'quality';
+    fails(mutant, new RegExp(`^${id} waits for quality;`));
+  }
+});
+
+test('FU-111: every required check name is still reported by exactly one job', () => {
+  const names = Object.values(real().jobs).map((job) => job.name);
+  for (const required of REQUIRED_CHECK_NAMES) {
+    assert.equal(names.filter((name) => name === required).length, 1, required);
+  }
+});
+
+test('FU-111: the real quality split passes, with the names it pins', () => {
+  const workflow = real();
+  assert.deepEqual(qualitySplitProblems(workflow), []);
+  assert.equal(workflow.jobs.quality.name, 'Lint, types and unit tests');
+  assert.deepEqual(
+    Object.keys(workflow.jobs).filter((id) => id.startsWith('quality-')),
+    [...QUALITY_JOBS],
+  );
+  // The job names are the check names: only the aggregate may be called "Lint, types and unit tests".
+  assert.deepEqual(
+    Object.entries(workflow.jobs)
+      .filter(([, job]) => job.name === 'Lint, types and unit tests')
+      .map(([id]) => id),
+    ['quality'],
+  );
+});
+
+for (const [what, edit, pattern] of [
+  [
+    'an aggregate that stops needing one quality job',
+    (w) => (w.jobs.quality.needs = w.jobs.quality.needs.filter((id) => id !== 'quality-lint')),
+    /"quality" does not need quality-lint/,
+  ],
+  [
+    'an aggregate that needs a job that is no quality job',
+    (w) => w.jobs.quality.needs.push('security'),
+    /"quality" needs security, not a quality job/,
+  ],
+  [
+    'a quality job nobody needs',
+    (w) => (w.jobs['quality-extra'] = { ...structuredClone(w.jobs['quality-lint']) }),
+    /the quality jobs are .*quality-extra|does not need quality-extra/,
+  ],
+  [
+    'a quality job removed',
+    (w) => {
+      delete w.jobs['quality-build'];
+    },
+    /the quality jobs are/,
+  ],
+  [
+    'a renamed aggregate',
+    (w) => (w.jobs.quality.name = 'Quality'),
+    /must be named "Lint, types and unit tests"/,
+  ],
+  ['an aggregate without always()', (w) => delete w.jobs.quality.if, /must run if: always\(\)/],
+  [
+    'an aggregate with success()',
+    (w) => (w.jobs.quality.if = '${{ success() }}'),
+    /must run if: always\(\)/,
+  ],
+  [
+    'an aggregate that forgives',
+    (w) => (w.jobs.quality['continue-on-error'] = true),
+    /sets continue-on-error/,
+  ],
+  [
+    'a verdict that passes on anything',
+    (w) => (w.jobs.quality.steps[0].run = 'echo ok'),
+    /must fail unless every needed job's result is "success"/,
+  ],
+  [
+    'a verdict that ignores skipped',
+    (w) =>
+      (w.jobs.quality.steps[0].run = w.jobs.quality.steps[0].run.replace(
+        '!== "success"',
+        '=== "failure"',
+      )),
+    /it passes when/,
+  ],
+  [
+    'a job that can be skipped',
+    (w) => (w.jobs['quality-unit'].if = "github.event_name == 'push'"),
+    /quality-unit has a job-level if/,
+  ],
+  [
+    'a job that is forgiven',
+    (w) => (w.jobs['quality-lint']['continue-on-error'] = true),
+    /quality-lint sets continue-on-error/,
+  ],
+  [
+    'a step that is skipped',
+    (w) => (w.jobs['quality-guards'].steps[8].if = 'false'),
+    /quality-guards: .* has if: false/,
+  ],
+  [
+    'a step that is forgiven',
+    (w) => (w.jobs['quality-build'].steps.at(-1)['continue-on-error'] = true),
+    /quality-build: .* sets continue-on-error/,
+  ],
+  [
+    'a gate that no longer type-checks',
+    (w) =>
+      (w.jobs['quality-types'].steps = w.jobs['quality-types'].steps.filter(
+        (step) => step.run !== 'pnpm run typecheck',
+      )),
+    /quality-types must run pnpm run typecheck exactly once/,
+  ],
+]) {
+  test(`FU-111: ${what} is refused`, () => {
+    const workflow = real();
+    edit(workflow);
+    qualityFails(workflow, pattern);
+  });
+}
+
 test('the parser sees the split it is meant to check', () => {
   const workflow = real();
   assert.ok(splitJobs(workflow).length >= 2);
   assert.equal(workflow.jobs[AGGREGATE_JOB].name, 'Integration and security tests');
   for (const name of SPLIT_STEPS) assert.ok(jobRunning(workflow, name), name);
-  assert.ok(workflow.jobs.containers.needs.includes(AGGREGATE_JOB));
+  assert.ok(workflow.jobs.images.needs.includes(AGGREGATE_JOB));
   // Only the connection report may carry a condition, and never a step of the inventory.
   assert.deepEqual(
     ALLOWED_CONDITIONS.map((entry) => [entry.job, entry.step, entry.if]),
@@ -697,7 +899,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'migration-reversibility-chain': 17,
       'migration-guards': 18,
       'trivy-db': 21,
-      quality: 64,
+      'quality-unit': 25,
     },
   );
   for (const [id, job] of jobs) {
@@ -884,7 +1086,7 @@ test('a step named like an inherited property is an ordinary step, not a crash',
 });
 
 test('a job whose measured runtime needed its limit may not go back below it', () => {
-  assert.deepEqual(JOB_FLOOR_MINUTES, { quality: 56, 'web-browser': 37 });
+  assert.deepEqual(JOB_FLOOR_MINUTES, { 'web-browser': 37 });
   for (const [id, floor] of Object.entries(JOB_FLOOR_MINUTES)) {
     const back = real();
     back.jobs[id]['timeout-minutes'] = floor - 1;
@@ -893,7 +1095,7 @@ test('a job whose measured runtime needed its limit may not go back below it', (
     delete missing.jobs[id]['timeout-minutes'];
     fails(missing, new RegExp(`^${id} has no timeout-minutes`));
     const raised = real();
-    // A raised limit must still hold the job's step limits plus its setup (quality: 10 + 54).
+    // A raised limit must still hold the job's step limits plus its setup (quality-unit: 10 + 15).
     const budget = limitedSteps(raised.jobs[id]).length
       ? stepSum(raised.jobs[id]) + JOB_SETUP_MINUTES[id]
       : 0;

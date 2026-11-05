@@ -71,6 +71,7 @@ const KNOWN_KEYWORDS = new Set([
   'enum',
   'description',
   'format',
+  'pattern',
 ]);
 
 /** What `Date#toISOString` writes, the only date-time the platform envelope carries. */
@@ -114,6 +115,14 @@ export function validate(
         errors.push(`${at}: not an ISO 8601 date-time`);
       } else if (schema.format !== undefined && schema.format !== 'date-time') {
         errors.push(`${at}: the validator does not know format ${String(schema.format)}`);
+      }
+      // A date-time's published zone (FU-035) and any `.regex()` the schema publishes.
+      if (
+        typeof value === 'string' &&
+        typeof schema.pattern === 'string' &&
+        !new RegExp(schema.pattern, 'u').test(value)
+      ) {
+        errors.push(`${at}: does not match ${schema.pattern}`);
       }
       break;
     case 'array':

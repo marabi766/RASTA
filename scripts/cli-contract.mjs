@@ -55,6 +55,13 @@ const PRETTIER = ['--parser', '--stdin-filepath'];
 export const CLI_CONTRACT = Object.freeze({
   // --- apps -----------------------------------------------------------------
   'apps/web/e2e/contract-fixture.ts': { other: ['-X', '-f', '-q', '-v'] },
+  // The launcher that starts each Playwright server and proves it is the port's only holder
+  // (TASK 325): one port argument, checked as an integer in range. `ss` and `ps` options name
+  // the listening sockets and the process tree.
+  'apps/web/e2e/own-server.mjs': {
+    positionals: ['integer'],
+    other: ['-A', '-H', '-ltnp', '-o', '-p'],
+  },
   // The build's preload puts itself into every child's NODE_OPTIONS / execArgv (`--require`);
   // it reads no command line.
   'apps/web/scripts/capture-next-config.cjs': { other: ['--require'] },
@@ -79,6 +86,7 @@ export const CLI_CONTRACT = Object.freeze({
 
   // --- scripts ----------------------------------------------------------------
   // A Git revision is resolved to a verified commit id; raw input is never echoed.
+  'scripts/prepush-parity.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
   'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
   'scripts/prepush-scope-lib.mjs': {
     other: [
@@ -359,15 +367,12 @@ export const CLI_CONTRACT = Object.freeze({
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
   'scripts/ci-node-test-timeouts-lib.mjs': {
     other: [
-      '--dir',
       '--enable-source-maps',
       '--filter',
       '--import',
       '--no-warnings',
       '--test',
       '--test-timeout',
-      '-C',
-      '-F',
     ],
   },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
@@ -427,7 +432,9 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
+  // It reads argv only to refuse any argument at all (#673 r1 F2).
   'scripts/marketplace-saga-drain-check.mjs': {
+    positionals: [],
     other: [
       '--no-json-shorthand-payloads',
       '--address',

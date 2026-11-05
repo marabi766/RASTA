@@ -1,10 +1,13 @@
-import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure, markRefusal } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 import { loadAssetEnv, SERVICE_NAME } from '../config/env';
 import { PrismaService } from '../prisma/prisma.service';
 import { checkOutboxDrained } from './drain-check.command';
+
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
 
 /**
  * `pnpm --filter @rasta/asset-service insurance:drain-check`
@@ -19,7 +22,7 @@ import { checkOutboxDrained } from './drain-check.command';
  * `insurance:drain-check`: this principal may not describe fleet's group.
  */
 async function main(): Promise<number> {
-  if (process.argv.length > 2) throw new Error('insurance:drain-check takes no arguments');
+  if (process.argv.length > 2) throw usage('insurance:drain-check takes no arguments');
 
   assertNoMigratorCredentials(process.env);
   const env = loadAssetEnv();

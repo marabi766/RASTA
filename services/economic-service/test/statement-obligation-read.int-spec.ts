@@ -3,11 +3,16 @@ import request from 'supertest';
 import { ulid } from 'ulid';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { EventEnvelope } from '@rasta/contracts';
-import { EventConsumer, InternalTokenService, runUnscoped } from '@rasta/nest-common';
+import {
+  EventConsumer,
+  INTERNAL_TOKEN_SCHEME,
+  InternalTokenService,
+  runUnscoped,
+} from '@rasta/nest-common';
 import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { SourceFactsClient } from '../src/provenance/source-facts.client';
 import { TransactionRepository } from '../src/transaction/transaction.repository';
-import { enrichOpenApiDocument, INTERNAL_TOKEN_SCHEME } from '../src/openapi/document';
+import { enrichOpenApiDocument, publishOperationSecurity } from '../src/openapi/document';
 import {
   admin,
   apiTenant,
@@ -452,11 +457,14 @@ describe('GET /v1/internal/obligations/by-source/STATEMENT/{statementId} (ADR-06
   });
 
   it('is published with the internal token as its only scheme, and the statuses it answers', () => {
-    const document = enrichOpenApiDocument(
-      SwaggerModule.createDocument(
-        harness.app,
-        new DocumentBuilder().setTitle('t').setVersion('0.0.0').addBearerAuth().build(),
+    const document = publishOperationSecurity(
+      enrichOpenApiDocument(
+        SwaggerModule.createDocument(
+          harness.app,
+          new DocumentBuilder().setTitle('t').setVersion('0.0.0').addBearerAuth().build(),
+        ),
       ),
+      harness.app,
     );
     const operation = document.paths?.['/v1/internal/obligations/by-source/STATEMENT/{statementId}']
       ?.get as unknown as { security: unknown; responses: Record<string, unknown> };

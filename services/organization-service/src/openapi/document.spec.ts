@@ -8,6 +8,7 @@ import {
   errorEnvelopeProblems,
   httpErrorBodyProblems,
   PROBE_TRACEPARENT,
+  routeErrorProblems,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import request from 'supertest';
@@ -15,6 +16,8 @@ import { AppModule } from '../app.module';
 import {
   DocumentationModule,
   buildDocumentationApp,
+  organizationRouteDocument,
+  ORGANIZATION_PROBE_EXCEPTIONS,
   buildOrganizationOpenApiDocument,
   buildScopedOpenApiDocument,
   formatDocument,
@@ -51,6 +54,21 @@ describe('organization-service published errors (D-121)', () => {
     await app.close();
   });
 
+  it('holds the routes the app really serves, and their real error answers, against the document (FU-031)', async () => {
+    const send = async (method: string, url: string) => {
+      const verb = method.toLowerCase() as 'get' | 'post' | 'put' | 'patch' | 'delete';
+      const response = await request(app.getHttpServer())[verb](url);
+      return { status: response.status, body: response.body as unknown };
+    };
+    expect(
+      await routeErrorProblems(app, document, {
+        declared: organizationRouteDocument(app),
+        probeExceptions: ORGANIZATION_PROBE_EXCEPTIONS,
+        send,
+      }),
+    ).toEqual([]);
+  });
+
   it('documents every runtime controller (including excluded controllers)', () => {
     expect(Reflect.getMetadata('controllers', DocumentationModule)).toEqual(
       Reflect.getMetadata('controllers', AppModule),
@@ -68,20 +86,25 @@ describe('organization-service published errors (D-121)', () => {
     const response = await request(app.getHttpServer()).get('/health/startup').expect(503);
     startupBodies.push(response.body);
     expect(
-      probeExceptionProblems(document, 'organization-service', [
-        {
-          service: 'organization-service',
-          path: '/health/ready',
-          status: 503,
-          bodies: readyBodies,
-        },
-        {
-          service: 'organization-service',
-          path: '/health/startup',
-          status: 503,
-          bodies: startupBodies,
-        },
-      ]),
+      probeExceptionProblems(
+        document,
+        'organization-service',
+        [
+          {
+            service: 'organization-service',
+            path: '/health/ready',
+            status: 503,
+            bodies: readyBodies,
+          },
+          {
+            service: 'organization-service',
+            path: '/health/startup',
+            status: 503,
+            bodies: startupBodies,
+          },
+        ],
+        { declared: organizationRouteDocument(app) },
+      ),
     ).toEqual([]);
   });
 

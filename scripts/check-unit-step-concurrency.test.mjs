@@ -32,8 +32,10 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const realWorkflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
 const realScripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
 const realDoc = parse(realWorkflow);
+const contracts = JSON.parse(readFileSync(join(root, 'packages/contracts/package.json'), 'utf8'));
+const realPackages = { [contracts.name]: contracts.scripts };
 const [exception] = UNBOUNDED_EXCEPTIONS;
-const unitStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === 'Unit tests');
+const unitStep = (doc) => doc.jobs['quality-unit'].steps.find((step) => step.name === 'Unit tests');
 const securityStep = (doc) =>
   doc.jobs[exception.job].steps.find((step) => step.name === exception.step);
 const problemsAfter = (edit, scripts = realScripts) => {
@@ -46,7 +48,7 @@ const refused = (problems, pattern) =>
     problems.some((problem) => pattern.test(problem)),
     JSON.stringify(problems),
   );
-const extraRun = (run, job = 'quality') =>
+const extraRun = (run, job = 'quality-unit') =>
   problemsAfter((doc) => doc.jobs[job].steps.push({ name: 'Another command', run }));
 
 test('real workflow passes as YAML and as parsed text', () => {
@@ -64,19 +66,61 @@ test('real workflow passes as YAML and as parsed text', () => {
 const timeoutProblemsAfter = (edit, scripts = realScripts) => {
   const doc = structuredClone(realDoc);
   const copy = structuredClone(scripts);
-  edit(doc, copy);
-  return nodeTestTimeoutProblems(doc, copy);
+  const packages = structuredClone(realPackages);
+  edit(doc, copy, packages);
+  return nodeTestTimeoutProblems(doc, copy, packages);
 };
-const boundedStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === UNIT_STEP.step);
+const boundedStep = (doc) =>
+  doc.jobs['quality-unit'].steps.find((step) => step.name === UNIT_STEP.step);
+// Every quality-* job (FU-111 split the one quality job into five), not the aggregate.
+const qualityJobIds = Object.keys(realDoc.jobs).filter((id) => id.startsWith('quality-'));
 const qualityNodeTestScripts = [
   ...new Set(
-    realDoc.jobs.quality.steps.flatMap((step) =>
-      typeof step.run === 'string' ? [...reachableScripts(step.run, realScripts)] : [],
+    qualityJobIds.flatMap((id) =>
+      realDoc.jobs[id].steps.flatMap((step) =>
+        typeof step.run === 'string' ? [...reachableScripts(step.run, realScripts)] : [],
+      ),
     ),
   ),
 ].filter((name) => nodeTestSegments(realScripts[name]).length > 0);
+test('FU-111: every quality-* job is read for node --test, and a later one too', () => {
+  assert.deepEqual(qualityJobIds, [
+    'quality-guards',
+    'quality-lint',
+    'quality-types',
+    'quality-unit',
+    'quality-build',
+  ]);
+  for (const id of qualityJobIds) {
+    refused(
+      timeoutProblemsAfter((doc) =>
+        doc.jobs[id].steps.push({ name: 'Unbounded', run: 'node --test scripts/x.test.mjs' }),
+      ),
+      /Unbounded|--test-timeout/,
+    );
+  }
+  refused(
+    timeoutProblemsAfter((doc) => {
+      doc.jobs['quality-later'] = {
+        'runs-on': 'ubuntu-latest',
+        steps: [{ name: 'Later', run: 'node --test scripts/x.test.mjs' }],
+      };
+    }),
+    /Later|--test-timeout/,
+  );
+  refused(
+    timeoutProblemsAfter(
+      (doc) => (doc.jobs['quality-lint'].defaults = { run: { shell: 'python {0}' } }),
+    ),
+    /job quality-lint sets defaults\.run/,
+  );
+  refused(
+    timeoutProblemsAfter((doc) => delete doc.jobs['quality-unit']),
+    /job quality-unit has no readable steps/,
+  );
+});
 test('task 310: the real quality job bounds every node --test', () => {
-  assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts), []);
+  assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts, realPackages), []);
   // The class is found, not listed: the step that hung and the slowest others.
   for (const name of [UNIT_STEP.script, 'test:backup-restore-drill-lib', 'test:ci-trivy-db'])
     assert.ok(qualityNodeTestScripts.includes(name), name);
@@ -119,7 +163,7 @@ test('task 310: a new node --test is found directly and through script chains', 
   ]) {
     const problems = timeoutProblemsAfter((doc, all) => {
       Object.assign(all, scripts);
-      doc.jobs.quality.steps.push({ name: 'Brand new step', run });
+      doc.jobs['quality-unit'].steps.push({ name: 'Brand new step', run });
     });
     refused(
       problems,
@@ -129,7 +173,7 @@ test('task 310: a new node --test is found directly and through script chains', 
   // A bounded one passes; so does a step in another job.
   assert.deepEqual(
     timeoutProblemsAfter((doc) => {
-      doc.jobs.quality.steps.push({
+      doc.jobs['quality-unit'].steps.push({
         name: 'Fine',
         run: 'node --test --test-timeout=300000 scripts/x.test.mjs',
       });
@@ -202,10 +246,10 @@ for (const [label, run] of Object.entries(ineffectiveForms)) {
       const problems = timeoutProblemsAfter((doc, all) => {
         all['test:bounded'] = `node --test ${B} scripts/bounded.test.mjs`;
         all.exec = `node --test ${B} scripts/exec.test.mjs`; // shadowed by the pnpm built-in
-        if (where === 'step') doc.jobs.quality.steps.push({ name: 'Escape', run });
+        if (where === 'step') doc.jobs['quality-unit'].steps.push({ name: 'Escape', run });
         else {
           all['test:escape'] = run;
-          doc.jobs.quality.steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+          doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
         }
       });
       assert.notDeepEqual(problems, [], run);
@@ -217,22 +261,21 @@ test('task 312: the commands the quality job really uses are still accepted', ()
     `node --test ${B} scripts/x.test.mjs scripts/y.test.mjs`,
     `node '--test' "--test-timeout=300000" 'scripts/x.test.mjs'`,
     `node --no-warnings --test ${B} --test-concurrency=1 x`,
-    `node --env-file-if-exists=.env --test ${B} --import ./a.mjs x`,
-    `FOO=1 BAR="$(node scripts/print.mjs)" node --test ${B} x`,
+    `node --test ${B} --import ${UNIT_STEP.watchdog} x`,
+    `base=1 SERVICE_ENV_WITHHELD_BASE="$(node scripts/print.mjs)" node --test ${B} x`,
     `node --test ${B} x # a comment mentioning --test-timeout=0 and a stray ' quote`,
     `pnpm run test:bounded # && node --test unbounded.test.mjs`,
     `node --test \\\n  ${B} \\\n  x`,
     `pnpm --filter @rasta/contracts build && node --test ${B} x`,
     `pnpm --filter @rasta/contracts run build\nnode scripts/check.mjs --test`,
-    `base="$(node scripts/print.mjs)"\nSCOPE="$base" pnpm run test:bounded`,
+    `base="$(node scripts/print.mjs)"\nSERVICE_ENV_WITHHELD_BASE="$base" pnpm run test:bounded`,
     'node scripts/check.mjs --test-timeout=0 && echo done',
     'prettier --check "**/*.{ts,json}" && eslint scripts && turbo run lint --concurrency=3',
     'pnpm install --frozen-lockfile',
-    'if true; then pnpm run test:bounded; fi',
   ]) {
     const problems = timeoutProblemsAfter((doc, all) => {
       all['test:bounded'] = `node --test ${B} scripts/bounded.test.mjs`;
-      doc.jobs.quality.steps.push({ name: 'Fine', run });
+      doc.jobs['quality-unit'].steps.push({ name: 'Fine', run });
     });
     assert.deepEqual(problems, [], run);
   }
@@ -241,15 +284,287 @@ test('task 312: a step that changes the shell or directory is not readable as ro
   for (const extra of [{ shell: 'python {0}' }, { 'working-directory': 'services/x' }])
     refused(
       timeoutProblemsAfter((doc) =>
-        doc.jobs.quality.steps.push({ name: 'Odd', run: 'pnpm run test:progress', ...extra }),
+        doc.jobs['quality-unit'].steps.push({
+          name: 'Odd',
+          run: 'pnpm run test:progress',
+          ...extra,
+        }),
       ),
       /"Odd" sets shell or working-directory/,
     );
   refused(
     timeoutProblemsAfter((doc) => {
-      doc.jobs.quality.defaults = { run: { 'working-directory': 'x' } };
+      doc.jobs['quality-unit'].defaults = { run: { 'working-directory': 'x' } };
     }),
     /sets defaults\.run/,
+  );
+});
+// Task 322 (#606 r2 F1): ONE conservative scanner reads every command, and it REFUSES
+// what it does not fully understand instead of skipping it. Each construct below hides a
+// harmless `true`, so only its refusal can catch it (the reviewer's unbudgeted
+// `node --test x` variants are in the second table). Every reason is asserted by name.
+const REFUSALS = {
+  'a parameter expansion with a default word': [
+    '${UNSET:-$(true)}',
+    /parameter expansion with an operator/,
+  ],
+  'a parameter expansion with an alternative': [
+    '${UNSET:+$(true)}',
+    /parameter expansion with an operator/,
+  ],
+  'a parameter expansion that assigns': ['${UNSET:=word}', /parameter expansion with an operator/],
+  'a parameter expansion that substitutes': [
+    '${UNSET//a/$(true)}',
+    /parameter expansion with an operator/,
+  ],
+  'an array subscript': ['${ARR[$(true)]}', /parameter expansion with an operator/],
+  'an indirect expansion': ['${!NAME}', /parameter expansion with an operator/],
+  'a length expansion': ['${#NAME}', /parameter expansion with an operator/],
+  'a quoted word in an expansion': ['${UNSET:-"a b"}', /parameter expansion with an operator/],
+  'a workflow expression': ['${{ github.ref }}', /parameter expansion with an operator/],
+  'a backslash-escaped parenthesis': [
+    String.raw`$(echo \) true)`,
+    /backslash inside a command substitution/,
+  ],
+  'an escaped quote in a substitution': [
+    String.raw`$(echo \" true)`,
+    /backslash inside a command substitution/,
+  ],
+  'a backslash in a backtick substitution': [
+    '`echo \\` true`',
+    /backslash inside a command substitution/,
+  ],
+  'an escaped quote in a quoted string in a substitution': [
+    '$(echo "a\\"b" true)',
+    /backslash inside a command substitution/,
+  ],
+  'a stray backslash in a quoted string in a substitution': [
+    '$(echo "a\\)" true)',
+    /backslash inside a command substitution/,
+  ],
+  'a commented parenthesis': ['$(true # )\ntrue)', /comment inside a command substitution/],
+  'a comment in a backtick substitution': ['`true # x`', /comment inside a command substitution/],
+  'an arithmetic expansion': ['$((1 + 2))', /arithmetic expansion/],
+  'a bracket arithmetic expansion': ['$[1 + 2]', /arithmetic expansion/],
+  'ANSI-C quoting': ["$'a\\'b'", /ANSI-C or locale quoting/],
+  'locale quoting': ['$"a"', /ANSI-C or locale quoting/],
+  'a here-document': ['<<EOF\nx\nEOF\n', /here-document/],
+  'a here-string': ['<<< word', /here-document/],
+  'a closing parenthesis without an opening one': [') true', /unbalanced closing parenthesis/],
+  'an unterminated substitution': ['$(true', /unterminated command substitution/],
+  'an unterminated backtick substitution': ['`true', /unterminated command substitution/],
+  'substitutions nested too deeply': [
+    '$(true $(true $(true $(true $(true)))))',
+    /nested too deeply/,
+  ],
+};
+const POSITIONS = {
+  'an inert argument': (x) => `true ${x}`,
+  'an assignment': (x) => `FOO=${x} true`,
+  'a node file argument': (x) => `node --test ${B} ${x}`,
+  'a pnpm-free echo': (x) => `echo ${x}`,
+  'a double-quoted word': (x) => `echo "${x}"`,
+};
+for (const [label, [construct, reason]] of Object.entries(REFUSALS)) {
+  for (const [position, place] of Object.entries(POSITIONS)) {
+    // Quotes, here-documents and closers change meaning inside "..." or after `=`.
+    if (position === 'a double-quoted word' && /^(?:ANSI|locale|a here|a closing)/.test(label))
+      continue;
+    const run = place(construct);
+    for (const where of ['step', 'script'])
+      test(`task 322: ${label} as ${position} is refused (${where})`, () => {
+        const problems = timeoutProblemsAfter((doc, all) => {
+          if (where === 'step') doc.jobs['quality-unit'].steps.push({ name: 'Escape', run });
+          else {
+            all['test:escape'] = run;
+            doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+          }
+        });
+        refused(problems, reason);
+      });
+  }
+}
+// The reviewer's executable reproductions: bash runs `node --test x` in each, with no budget.
+for (const [label, run] of Object.entries({
+  'a default word with a substitution': 'echo "${UNSET:-$(node --test x)}"',
+  'an escaped parenthesis': String.raw`echo "$(echo \); node --test x)"`,
+  'a commented parenthesis': 'echo "$(true # )\nnode --test x)"',
+  'a quoted parenthesis': 'echo "$(echo ")"; node --test x)"',
+  'a case pattern parenthesis': 'echo "$(case x in a) node --test x;; esac)"',
+  'a backtick body behind an escape': 'echo "`echo \\`; node --test x`"',
+  'an operator in an assignment': 'FOO=${UNSET:-$(node --test x)} true',
+  'a subscript in a node file argument': `node --test ${B} \${ARR[$(node --test y)]}`,
+}))
+  for (const where of ['step', 'script'])
+    test(`task 322: reviewer reproduction ${label} is refused (${where})`, () => {
+      const problems = timeoutProblemsAfter((doc, all) => {
+        if (where === 'step') doc.jobs['quality-unit'].steps.push({ name: 'Escape', run });
+        else {
+          all['test:escape'] = run;
+          doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+        }
+      });
+      assert.notDeepEqual(problems, [], run);
+    });
+test('task 322: expansions and substitutions that are fully understood are still accepted', () => {
+  for (const run of [
+    'echo "${HOME}" ${1} "${@}" "${#}" $HOME "$(node scripts/print.mjs)"',
+    'echo "$(echo ")")" && echo "$(echo \'(\')"',
+    'echo "$(echo "$(true)")" `true`',
+    'echo \'${X:-$(node --test x)}\' "\\${X:-y}"',
+    `base="$(true)" SERVICE_ENV_WITHHELD_BASE=\${HOME} node --test ${B} x`,
+  ]) {
+    const problems = timeoutProblemsAfter((doc) =>
+      doc.jobs['quality-unit'].steps.push({ name: 'Fine', run }),
+    );
+    assert.deepEqual(problems, [], run);
+  }
+});
+// The effective context: workflow defaults.run, job defaults.run, the step, and the
+// environment the shell reads, each resolved and checked on its own.
+const CONTEXT_EDITS = {
+  'workflow python shell': [
+    (doc) => (doc.defaults = { run: { shell: 'python {0}' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow bash with options': [
+    (doc) => (doc.defaults = { run: { shell: 'bash -x {0}' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow working directory': [
+    (doc) => (doc.defaults = { run: { 'working-directory': 'tests/e2e' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow bash in another directory': [
+    (doc) => (doc.defaults = { run: { shell: 'bash', 'working-directory': '.' } }),
+    /the workflow sets defaults\.run/,
+  ],
+  'workflow run as text': [
+    (doc) => (doc.defaults = { run: 'bash' }),
+    /the workflow sets defaults\.run to something/,
+  ],
+  'workflow run as a list': [
+    (doc) => (doc.defaults = { run: [] }),
+    /the workflow sets defaults\.run to something/,
+  ],
+  'workflow defaults as text': [
+    (doc) => (doc.defaults = 'run'),
+    /the workflow has defaults that cannot be read/,
+  ],
+  'workflow defaults empty': [
+    (doc) => (doc.defaults = null),
+    /the workflow has defaults that cannot be read/,
+  ],
+  'job python shell': [
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: { shell: 'python {0}' } }),
+    /job quality-unit sets defaults\.run/,
+  ],
+  'job working directory': [
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: { 'working-directory': 'x' } }),
+    /job quality-unit sets defaults\.run/,
+  ],
+  'job run as text': [
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: 'bash' }),
+    /job quality-unit sets defaults\.run to something/,
+  ],
+  'job defaults as a list': [
+    (doc) => (doc.jobs['quality-unit'].defaults = []),
+    /job quality-unit has defaults that cannot be read/,
+  ],
+  'step python shell': [
+    (doc) => (boundedStep(doc).shell = 'python {0}'),
+    /step "Unit-step concurrency is bounded" sets shell or working-directory/,
+  ],
+  'step bash with options': [
+    (doc) => (boundedStep(doc).shell = 'bash -e {0}'),
+    /sets shell or working-directory/,
+  ],
+  'step shell as a list': [
+    (doc) => (boundedStep(doc).shell = ['bash']),
+    /sets shell or working-directory/,
+  ],
+  'step working directory': [
+    (doc) => (boundedStep(doc)['working-directory'] = '.'),
+    /sets shell or working-directory/,
+  ],
+  'workflow BASH_ENV': [(doc) => (doc.env.BASH_ENV = './x.sh'), /the workflow sets BASH_ENV/],
+  'workflow NODE_OPTIONS': [
+    (doc) => (doc.env.NODE_OPTIONS = '--x'),
+    /the workflow sets NODE_OPTIONS/,
+  ],
+  'job PATH': [
+    (doc) => (doc.jobs['quality-unit'].env = { PATH: '/x' }),
+    /job quality-unit sets PATH/,
+  ],
+  'step BASH_FUNC': [
+    (doc) => (boundedStep(doc).env = { 'BASH_FUNC_node%%': '() { :; }' }),
+    /sets BASH_FUNC_node%%/,
+  ],
+  'workflow env as an expression': [
+    (doc) => (doc.env = '${{ fromJSON(inputs.env) }}'),
+    /the workflow has an env that cannot be read/,
+  ],
+  'step env as a list': [
+    (doc) => (boundedStep(doc).env = ['PATH=/x']),
+    /has an env that cannot be read/,
+  ],
+};
+for (const uses of ['./.github/actions/x', './', 'docker://alpine'])
+  CONTEXT_EDITS[`step uses ${uses}`] = [
+    (doc) => doc.jobs['quality-unit'].steps.push({ name: 'Local', uses }),
+    /step "Local" uses .* which cannot be read/,
+  ];
+CONTEXT_EDITS['a step that is not a map'] = [
+  (doc) => doc.jobs['quality-unit'].steps.push(null),
+  /step "undefined" cannot be read/,
+];
+for (const name of [
+  'BASH_ENV',
+  'ENV',
+  'SHELLOPTS',
+  'BASHOPTS',
+  'PATH',
+  'IFS',
+  'CDPATH',
+  'NODE_OPTIONS',
+])
+  CONTEXT_EDITS[`job ${name} (shell-read variable)`] = [
+    (doc) => (doc.jobs['quality-unit'].env = { [name]: 'x' }),
+    new RegExp(`job quality-unit sets ${name}`),
+  ];
+for (const [label, [edit, reason]] of Object.entries(CONTEXT_EDITS))
+  test(`task 322: ${label} is refused`, () => refused(timeoutProblemsAfter(edit), reason));
+test('task 322: a plain bash or sh at any level, and ordinary env names, are accepted', () => {
+  for (const edit of [
+    (doc) => (doc.defaults = { run: { shell: 'bash' } }),
+    (doc) => (doc.jobs['quality-unit'].defaults = { run: { shell: 'sh' } }),
+    (doc) => (boundedStep(doc).shell = 'bash'),
+    (doc) => (boundedStep(doc).env = { TEMPORAL_TEST_SERVER_DIR: 'x', NODE_VERSION: '22' }),
+  ])
+    assert.deepEqual(timeoutProblemsAfter(edit), []);
+});
+test('task 322: the step must run the unit-step script, and the script must be readable', () => {
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc).run = `echo pnpm run ${UNIT_STEP.script}`)),
+    /must run test:unit-step-concurrency/,
+  );
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc).run = `pnpm run ${UNIT_STEP.script} ${B}`)),
+    /must run test:unit-step-concurrency/,
+  );
+  refused(
+    timeoutProblemsAfter(
+      (doc) => (boundedStep(doc).run = `pnpm run ${UNIT_STEP.script} && true \${X:-a}`),
+    ),
+    /must run test:unit-step-concurrency/,
+  );
+  // Appended after the real command, behind a refused construct: the watchdog check alone
+  // (not the generic one) names it.
+  refused(
+    timeoutProblemsAfter((_doc, all) => {
+      all[UNIT_STEP.script] = `${realScripts[UNIT_STEP.script]} && echo "\${UNSET:-$(true)}"`;
+    }),
+    /must preload/,
   );
 });
 // The watchdog preload is an argument of the one node --test command, before its files.
@@ -276,6 +591,205 @@ test('task 312: a step that changes the shell or directory is not readable as ro
       );
     });
 }
+// Task 4003 (#669 r1): the grammar is closed. Each harmful input first does its harm under the
+// real bash, node or pnpm, then the guard refuses it, so no case is vacuous.
+const inTemp = (use) => {
+  const dir = mkdtempSync(join(tmpdir(), 'guard-4003-'));
+  try {
+    return use(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+const bashStderr = (run, shims = ['node', 'pnpm']) =>
+  inTemp((dir) => {
+    for (const name of shims)
+      writeFileSync(join(dir, name), `#!/bin/sh\necho "RAN ${name} $*" >&2\n`, { mode: 0o755 });
+    const env = { PATH: `${dir}:${process.env.PATH}` };
+    return spawnSync('bash', ['-c', run], { encoding: 'utf8', env }).stderr;
+  });
+const pnpmStdout = (scripts, argv, extra = {}) =>
+  inTemp((cwd) => {
+    const { packageManager } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    const manifest = { name: 'rasta', packageManager, scripts };
+    writeFileSync(join(cwd, 'package.json'), JSON.stringify(manifest));
+    writeFileSync(join(cwd, 'pnpm-workspace.yaml'), 'packages: []\n');
+    // The repository's own pnpm, never a download (a Corepack shim would fetch the latest).
+    const env = { ...extra, PATH: process.env.PATH, HOME: process.env.HOME };
+    env.COREPACK_ENABLE_NETWORK = '0';
+    return spawnSync('pnpm', argv, { cwd, encoding: 'utf8', env }).stdout;
+  });
+const refusedAtBoth = (run, reason, edit = () => {}) => {
+  for (const where of ['step', 'script']) {
+    const problems = timeoutProblemsAfter((doc, all, packages) => {
+      edit(all, packages);
+      if (where === 'script') all['test:escape'] = run;
+      const command = where === 'step' ? run : 'pnpm run test:escape';
+      doc.jobs['quality-unit'].steps.push({ name: 'Escape', run: command });
+    });
+    refused(problems, reason);
+  }
+};
+const UNBUDGETED = /RAN node --test \/dev\/null/;
+const PRELOAD = '--import data:text/javascript,console.error(String.fromCharCode(82,65,78))';
+test('task 4003: F1 a carriage return or other unreadable character is refused', () => {
+  assert.match(bashStderr('echo \r#; node --test /dev/null'), UNBUDGETED);
+  for (const run of ['echo \r#; true', 'true\r\n', 'echo "\r"', 'echo a #', 'echo \f#'])
+    refusedAtBoth(run, /a carriage return, control/);
+});
+test('task 4003: F2 arithmetic evaluation is refused wherever it can start', () => {
+  const inner = "'arr[$(node --test /dev/null)]'";
+  for (const [run, reason] of [
+    [`a=${inner}; ((x=a+1))`, /an assignment to a /],
+    [`base=${inner}; ((base))`, /a subshell or an arithmetic command/],
+    [`base=${inner}; if ((base)); then true; fi`, /a subshell or an arithmetic command/],
+    [`base=${inner}; echo "$(( base ))"`, /arithmetic expansion/],
+    [`base=${inner}; let base`, /the command let/],
+    [`base=${inner}; [[ base -eq 1 ]]`, /computed command word/],
+    [`RANDOM=${inner}`, /an assignment to RANDOM /],
+    [`SRANDOM=${inner}`, /an assignment to SRANDOM /],
+    [`OPTIND=${inner}`, /an assignment to OPTIND /],
+  ]) {
+    assert.match(bashStderr(run), UNBUDGETED, run);
+    refusedAtBoth(run, reason);
+  }
+});
+test('task 4003: F3 inline assignments, env files and shell overrides meet one policy', () => {
+  for (const [run, reason] of [
+    [`NODE_OPTIONS='${PRELOAD}' node /dev/null`, /an assignment to NODE_OPTIONS /],
+    [`node '${PRELOAD.replace(' ', "' '")}' /dev/null`, /a node --import that is not the watchdog/],
+  ]) {
+    assert.match(bashStderr(run, []), /RAN/);
+    refusedAtBoth(run, reason);
+  }
+  for (const option of ['--env-file', '--env-file-if-exists']) {
+    const ran = inTemp((dir) => {
+      writeFileSync(join(dir, 'x.env'), `NODE_OPTIONS=${PRELOAD}\n`);
+      return bashStderr(`node ${option}=${join(dir, 'x.env')} /dev/null`, []);
+    });
+    assert.match(ran, /RAN/);
+    refusedAtBoth(`node ${option}=x.env /dev/null`, /an unlisted node option --env-file/);
+  }
+  const script = { x: 'echo HERE' };
+  assert.match(pnpmStdout(script, ['run', 'x']), /^HERE$/m);
+  const override = { PNPM_CONFIG_SCRIPT_SHELL: '/bin/true' };
+  assert.doesNotMatch(pnpmStdout(script, ['run', 'x'], override), /^HERE$/m);
+  const spellings = ['NPM', 'PNPM'].flatMap((tool) => [
+    `${tool}_CONFIG_SCRIPT_SHELL`,
+    `${tool.toLowerCase()}_config_script_shell`,
+  ]);
+  for (const name of spellings) {
+    refusedAtBoth(`${name}=/bin/true pnpm run test:progress`, new RegExp(`assignment to ${name} `));
+    for (const level of [(doc) => doc, (doc) => doc.jobs['quality-unit'], boundedStep])
+      refused(
+        timeoutProblemsAfter((doc) => (level(doc).env = { [name]: '/bin/true' })),
+        new RegExp(`sets ${name}, which may change`),
+      );
+  }
+  // A shell override in a pnpm config file of the repository is the same source.
+  for (const file of ['.npmrc', 'pnpm-workspace.yaml'])
+    assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /script-?shell|shell-?emulator/i);
+});
+test('task 4003: F4 a required command must really run, at both boundaries', () => {
+  const required = `pnpm run ${UNIT_STEP.script}`;
+  const never = [
+    (x) => `true || ${x}`,
+    (x) => `if ! true; then ${x}; fi`,
+    (x) => `while ! true; do ${x}; done`,
+  ];
+  for (const wrap of never) assert.doesNotMatch(bashStderr(wrap(required)), /RAN pnpm/);
+  const other = [(x) => `echo "$(${x})"`, (x) => `echo x && ${x}`, (x) => `base=1 ${x}`];
+  const mustRun = /must run test:unit-step-concurrency unconditionally/;
+  for (const wrap of [...never, ...other]) {
+    refused(
+      timeoutProblemsAfter((doc) => (boundedStep(doc).run = wrap(required))),
+      mustRun,
+    );
+    const script = wrap(realScripts[UNIT_STEP.script]);
+    refused(
+      timeoutProblemsAfter((_doc, all) => (all[UNIT_STEP.script] = script)),
+      /must preload/,
+    );
+  }
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc).if = 'false')),
+    mustRun,
+  );
+  refused(
+    timeoutProblemsAfter((doc) => (boundedStep(doc)['continue-on-error'] = true)),
+    mustRun,
+  );
+});
+test('task 4003: F5 a pnpm target is resolved and read, never exempted by script name', () => {
+  const selectors = ['--dir .', '-C .', '--filter rasta', '-F rasta'];
+  const bad = (all) => (all.build = all.lint = all.typecheck = 'node --test /dev/null');
+  for (const selector of selectors) {
+    const argv = [...selector.split(' '), 'run', 'build'];
+    assert.match(pnpmStdout({ build: 'echo HERE' }, argv), /^HERE$/m);
+    for (const name of ['build', 'lint', 'typecheck'])
+      for (const run of [`pnpm ${selector} run ${name}`, `pnpm ${selector} ${name}`])
+        refusedAtBoth(run, /a pnpm form that is not|a package that was not read/, bad);
+  }
+  const contract = '@rasta/contracts';
+  const inContract = (name, text) => (_all, packages) => (packages[contract][name] = text);
+  for (const [run, reason, edit] of [
+    [
+      `pnpm --filter ${contract} build`,
+      /without exactly one/,
+      inContract('build', 'node --test x'),
+    ],
+    [`pnpm --filter ${contract} build`, /prebuild: the command sh/, inContract('prebuild', 'sh x')],
+    [`pnpm --filter ${contract} run test:unit`, /test:unit: the command jest/],
+    [`pnpm --filter ${contract} run missing`, /an unknown script missing/],
+    [`pnpm --filter ${contract} lint`, /a pnpm form that is not/],
+    [`pnpm --filter ${contract}... build`, /a package that was not read/],
+    ['pnpm --filter constructor build', /a package that was not read/],
+  ])
+    refusedAtBoth(run, reason, edit);
+  // Omitting the table of read packages opens nothing.
+  refused(nodeTestTimeoutProblems(realDoc, realScripts), /a package that was not read/);
+});
+test('task 4003: what pnpm runs on its own around a script is read too', () => {
+  const scripts = { prex: 'echo A', x: 'echo B', postx: 'echo C', postinstall: 'echo D' };
+  const output = pnpmStdout(scripts, ['run', 'x']);
+  for (const line of ['A', 'B', 'C']) assert.match(output, new RegExp(`^${line}$`, 'm'));
+  assert.match(pnpmStdout(scripts, ['install', '--offline']), /\bD$/m);
+  for (const name of ['pretest:progress', 'posttest:progress', 'preinstall', 'postinstall'])
+    refusedAtBoth(
+      'pnpm run test:progress',
+      new RegExp(`script ${name} runs node --test without`),
+      (all) => {
+        all[name] = 'node --test /dev/null';
+      },
+    );
+  refusedAtBoth(
+    'pnpm install --frozen-lockfile',
+    /script prepare runs node --test without/,
+    (all) => {
+      all.prepare = 'node --test /dev/null';
+    },
+  );
+});
+test('task 4003: other forms outside the grammar are refused', () => {
+  const split = 'echo "$\\\n(node --test /dev/null)"';
+  assert.match(bashStderr(split), UNBUDGETED);
+  for (const [run, reason] of [
+    [split, /a line continuation inside a word/],
+    ['echo $\\\n(true)', /a line continuation inside a word/],
+    ['echo $\\\n{X:-$(true)}', /a line continuation inside a word/],
+    ['true\\', /a backslash at the end/],
+    ['true | true', /a pipeline/],
+    ['true || true', /a pipeline/],
+    ['true & true', /a pipeline/],
+    ['if true; then true; fi', /the command if/],
+    ['! true', /the command !/],
+    ['(true)', /a subshell/],
+    ['f() { true; }', /a subshell/],
+    ['pnpm install --ignore-scripts', /a pnpm form/],
+    ['pnpm build', /a pnpm form/],
+  ])
+    refusedAtBoth(run, reason);
+});
 test('task 310: cycles terminate, inherited names are not scripts, other commands are free', () => {
   assert.equal(runsNodeTest('pnpm run a', { a: 'pnpm run b', b: 'pnpm run a' }), false);
   assert.equal(runsNodeTest('pnpm constructor', {}), false);
@@ -283,16 +797,21 @@ test('task 310: cycles terminate, inherited names are not scripts, other command
   assert.equal(runsNodeTest('echo "node-test" && pnpm run build', { build: 'tsc' }), false);
   assert.equal(runsNodeTest('pnpm run a', { a: 'node --test x' }), true);
   assert.deepEqual(
-    timeoutProblemsAfter((doc) => doc.jobs.quality.steps.push({ name: 'Plain', run: 'echo done' })),
+    timeoutProblemsAfter((doc) =>
+      doc.jobs['quality-unit'].steps.push({ name: 'Plain', run: 'echo done' }),
+    ),
     [],
   );
 });
 test('task 310: an unreadable run or job is refused, not assumed free of node --test', () => {
   refused(
-    timeoutProblemsAfter((doc) => doc.jobs.quality.steps.push({ name: 'Odd', run: ['a'] })),
+    timeoutProblemsAfter((doc) => doc.jobs['quality-unit'].steps.push({ name: 'Odd', run: ['a'] })),
     /"Odd": run is not text/,
   );
-  refused(nodeTestTimeoutProblems({ jobs: { quality: {} } }, realScripts), /no readable steps/);
+  refused(
+    nodeTestTimeoutProblems({ jobs: { 'quality-unit': {} } }, realScripts),
+    /no readable steps/,
+  );
 });
 test('task 310: an exemption that no longer applies is refused', () => {
   refused(
@@ -344,7 +863,7 @@ test('task 310: the unit-step step keeps its step limit, file budget and watchdo
     );
   refused(
     timeoutProblemsAfter((doc) => {
-      doc.jobs.quality.steps = doc.jobs.quality.steps.filter(
+      doc.jobs['quality-unit'].steps = doc.jobs['quality-unit'].steps.filter(
         (step) => step.name !== UNIT_STEP.step,
       );
     }),
@@ -384,7 +903,9 @@ for (const [name, edit, pattern] of [
   [
     'missing',
     (doc) => {
-      doc.jobs.quality.steps = doc.jobs.quality.steps.filter((step) => step.name !== 'Unit tests');
+      doc.jobs['quality-unit'].steps = doc.jobs['quality-unit'].steps.filter(
+        (step) => step.name !== 'Unit tests',
+      );
     },
     /found 0/,
   ],
@@ -399,21 +920,23 @@ for (const [name, edit, pattern] of [
     'moved job',
     (doc) => {
       doc.jobs.security.steps.push(unitStep(doc));
-      doc.jobs.quality.steps = doc.jobs.quality.steps.filter((step) => step.name !== 'Unit tests');
+      doc.jobs['quality-unit'].steps = doc.jobs['quality-unit'].steps.filter(
+        (step) => step.name !== 'Unit tests',
+      );
     },
     /found 0/,
   ],
   [
     'duplicate',
     (doc) => {
-      doc.jobs.quality.steps.push({ ...unitStep(doc) });
+      doc.jobs['quality-unit'].steps.push({ ...unitStep(doc) });
     },
     /found 2/,
   ],
   [
     'duplicate with different run',
     (doc) => {
-      doc.jobs.quality.steps.push({ name: 'Unit tests', run: 'echo test' });
+      doc.jobs['quality-unit'].steps.push({ name: 'Unit tests', run: 'echo test' });
     },
     /found 2/,
   ],
@@ -447,7 +970,7 @@ for (const level of ['step', 'job']) {
       test(`${level} ${key}: ${value} is refused`, () => {
         refused(
           problemsAfter((doc) => {
-            (level === 'step' ? unitStep(doc) : doc.jobs.quality)[key] = value;
+            (level === 'step' ? unitStep(doc) : doc.jobs['quality-unit'])[key] = value;
           }),
           new RegExp(`${level} must not set ${key}`),
         );
@@ -480,7 +1003,7 @@ for (const command of [
   test(`literal unbounded invocation refused: ${command}`, () =>
     refused(extraRun(command), /literal unbounded unit invocation/));
 }
-for (const job of ['quality', 'security', 'integration-security']) {
+for (const job of ['quality', 'quality-lint', 'quality-unit', 'security', 'integration-security']) {
   test(`all jobs scanned: ${job}`, () =>
     refused(extraRun('echo start\npnpm test', job), /literal unbounded/));
 }
@@ -535,7 +1058,7 @@ for (const [name, edit] of [
   [
     'changed job',
     (doc) => {
-      doc.jobs.quality.steps.push(securityStep(doc));
+      doc.jobs['quality-unit'].steps.push(securityStep(doc));
       doc.jobs[exception.job].steps = doc.jobs[exception.job].steps.filter(
         (step) => step.name !== exception.step,
       );
@@ -616,7 +1139,7 @@ function cliFixture(t) {
 }
 test('CLI follows arbitrary local uses recursively, both metadata extensions, and handles cycles', (t) => {
   const fixture = cliFixture(t);
-  fixture.doc.jobs.quality.steps.push({ uses: './ci/outer' });
+  fixture.doc.jobs['quality-unit'].steps.push({ uses: './ci/outer' });
   fixture.workflow();
   fixture.write(
     'ci/outer/action.yml',
@@ -642,7 +1165,7 @@ test('CLI follows arbitrary local uses recursively, both metadata extensions, an
 for (const metadata of ['missing', 'malformed', 'unreadable']) {
   test(`CLI refuses ${metadata} referenced action metadata`, (t) => {
     const fixture = cliFixture(t);
-    fixture.doc.jobs.quality.steps.push({ uses: './ci/broken' });
+    fixture.doc.jobs['quality-unit'].steps.push({ uses: './ci/broken' });
     fixture.workflow();
     if (metadata === 'malformed') fixture.write('ci/broken/action.yml', 'runs: [');
     // A directory at the metadata path is unreadable as a file even as root.
@@ -674,7 +1197,7 @@ test('CLI scans conventional action metadata even before a workflow references i
 
 test('CLI normalizes CR-only workflow and composite metadata before discovery', (t) => {
   const fixture = cliFixture(t);
-  fixture.doc.jobs.quality.steps.push({ uses: './ci/outer' });
+  fixture.doc.jobs['quality-unit'].steps.push({ uses: './ci/outer' });
   fixture.write('.github/workflows/ci.yml', stringify(fixture.doc).replaceAll('\n', '\r'));
   fixture.write(
     'ci/outer/action.yml',
@@ -849,7 +1372,7 @@ for (const option of ['-e', '--eval', '-p', '--print']) {
 // without reparsing unrelated production steps thousands of times.
 const grammarWorkflow = stringify({
   jobs: {
-    quality: { steps: [unitStep(realDoc)] },
+    'quality-unit': { steps: [unitStep(realDoc)] },
     [exception.job]: { steps: [securityStep(realDoc)] },
   },
 });
@@ -1235,7 +1758,7 @@ for (const [file, document] of scannedLocations) {
 for (const site of ['source', '.']) {
   test(`r6 B repo source recursively scanned via CLI: ${site}`, (t) => {
     const fixture = cliFixture(t);
-    fixture.doc.jobs.quality.steps.push({ run: `${site} ./ci/one.sh` });
+    fixture.doc.jobs['quality-unit'].steps.push({ run: `${site} ./ci/one.sh` });
     fixture.workflow();
     fixture.write('ci/one.sh', '# test:unit\n. ./ci/two.sh');
     fixture.write('ci/two.sh', 'pnpm run test:unit');
@@ -1253,7 +1776,7 @@ for (const site of ['source', '.']) {
 }
 test('r6 B unreadable repo source refuses via CLI', (t) => {
   const fixture = cliFixture(t);
-  fixture.doc.jobs.quality.steps.push({ run: 'source ./ci/directory' });
+  fixture.doc.jobs['quality-unit'].steps.push({ run: 'source ./ci/directory' });
   fixture.workflow();
   fixture.write('ci/directory/child', '');
   const result = fixture.run();
@@ -1382,7 +1905,7 @@ test('r6 B repo source path boundaries via CLI', (t) => {
   symlinkSync(join(fixture.directory, 'ci/local.sh'), join(fixture.directory, 'ci/inside-link.sh'));
   symlinkSync(join(outside, 'external.sh'), join(fixture.directory, 'ci/outside-link.sh'));
   const step = { run: 'source ./ci/inside-link.sh' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   fixture.workflow();
   let result = fixture.run();
   assert.equal(result.status, 1, result.stderr);
@@ -1531,7 +2054,7 @@ test('r7 repo source and shell scripts use real filesystem via CLI', (t) => {
   const fixture = cliFixture(t);
   fixture.write('ci/unit.sh', 'pnpm run test:unit');
   const step = { run: '' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   for (const run of [
     'source ./ci/unit.sh "$x"',
     '. ./ci/unit.sh "$x"',
@@ -1678,7 +2201,7 @@ for (const [file, document] of scannedLocations) {
 test('r7 script precheck real infra, unit scripts, and recursive paths via CLI', (t) => {
   const fixture = cliFixture(t);
   const step = { run: '' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   fixture.write('ci/infra.sh', r7InfraText);
   for (const path of [
     'infrastructure/docker/postgres/00-init-databases.sh',
@@ -1883,7 +2406,7 @@ test('r8 CLI propagates unreadable repo script and interpreter-input refusals th
   mkdirSync(join(fixture.directory, 'ci/unreadable.sh'), { recursive: true });
   fixture.write('ci/array.sh', 'values=(one two)\npnpm run test:unit');
   const step = { run: '' };
-  fixture.doc.jobs.quality.steps.push(step);
+  fixture.doc.jobs['quality-unit'].steps.push(step);
   for (const payload of [
     'source ./ci/unreadable.sh $args',
     'source ./ci/array.sh $args',
@@ -1954,7 +2477,7 @@ test('r9 CLI refuses known prefixes directly and through all five repository ent
     const path = `./ci/options-${index}.sh`;
     fixture.write(path, `# test:unit\n${run}`);
     for (const entry of [run, ...r8Entries.map((site) => `${site} ${path}`)])
-      fixture.doc.jobs.quality.steps.push({ name: 'r9 prefix', run: entry });
+      fixture.doc.jobs['quality-unit'].steps.push({ name: 'r9 prefix', run: entry });
   }
   fixture.workflow();
   const result = fixture.run();
