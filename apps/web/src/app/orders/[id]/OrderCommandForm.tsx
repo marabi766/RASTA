@@ -49,11 +49,17 @@ export function OrderCommandForm({
   command,
   csrfToken,
   submissionId,
+  disputeId = null,
 }: {
   orderId: string;
   command: OrderCommand;
   csrfToken: string;
   submissionId: string;
+  /**
+   * For `RESOLVE_DISPUTE`: the dispute the order held when this page was
+   * drawn. Posted as is; the service refuses it once another is open.
+   */
+  disputeId?: string | null;
 }) {
   const [state, action, pending] = useActionState(
     submitOrderCommand.bind(null, orderId),
@@ -76,6 +82,9 @@ export function OrderCommandForm({
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
       <input type="hidden" name={COMMAND_FIELD} value={command} />
+      {command === 'RESOLVE_DISPUTE' ? (
+        <input type="hidden" name="disputeId" value={disputeId ?? ''} />
+      ) : null}
 
       <h3 id={headingId} className="text-base font-medium">
         {COMMAND_LABELS[command]}
@@ -187,6 +196,11 @@ function CommandFields({
     case 'RESOLVE_DISPUTE':
       return (
         <>
+          {errors.disputeId ? (
+            <p role="alert" className="text-sm text-danger">
+              {errors.disputeId}
+            </p>
+          ) : null}
           <Choice
             name="outcome"
             legend="نتیجه"

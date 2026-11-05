@@ -16,6 +16,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  resolveOpenDispute,
 } from './helpers';
 
 /**
@@ -497,7 +498,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
     await expect(saga.run(5, 1, (a) => a.markSettling(orderId))).resolves.toBe('DISPUTED');
     await asOperator(() =>
-      wiring.orders.resolveDispute(orderId, {
+      resolveOpenDispute(wiring, orderId, {
         outcome: 'REFUND',
         resolution: 'the supplier accepted the goods back',
         responsibility: 'SUPPLIER',
@@ -819,7 +820,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       // An operator decides for the supplier; the saga mirrors it back, and
       // settles in a new attempt of its own.
       await asOperator(() =>
-        wiring.orders.resolveDispute(orderId, {
+        resolveOpenDispute(wiring, orderId, {
           outcome: 'SETTLE',
           resolution: 'the supplier showed a signed delivery note',
           responsibility: 'BUYER',
@@ -890,7 +891,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
       // Decided before the saga's next read: it never sees the order DISPUTED.
       await asOperator(() =>
-        wiring.orders.resolveDispute(orderId, {
+        resolveOpenDispute(wiring, orderId, {
           outcome: 'SETTLE',
           resolution: 'the supplier showed a signed delivery note',
           responsibility: 'BUYER',
@@ -948,7 +949,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       const { orderId, saga } = await receiptConfirmed(econ.economic);
       const taken = await saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION));
       await asOperator(() =>
-        wiring.orders.resolveDispute(orderId, {
+        resolveOpenDispute(wiring, orderId, {
           outcome: 'SETTLE',
           resolution: 'the supplier showed a signed delivery note',
           responsibility: 'BUYER',
@@ -1003,7 +1004,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         wiring.orders.raiseDispute(orderId, { reason: 'the buyer disputes it here as well' }),
       );
       await asOperator(() =>
-        wiring.orders.resolveDispute(orderId, {
+        resolveOpenDispute(wiring, orderId, {
           outcome: 'REFUND',
           resolution: 'the supplier took the goods back',
           responsibility: 'SUPPLIER',
@@ -1075,7 +1076,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
     async function decide(orderId: string): Promise<void> {
       await asOperator(() =>
-        wiring.orders.resolveDispute(orderId, {
+        resolveOpenDispute(wiring, orderId, {
           outcome: 'SETTLE',
           resolution: DECIDED,
           responsibility: 'BUYER',
@@ -1265,7 +1266,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       await expect(saga.run(5, 1, (a) => a.markSettling(orderId))).resolves.toBe('DISPUTED');
       await forgetRecords(orderId);
       await asOperator(() =>
-        wiring.orders.resolveDispute(orderId, {
+        resolveOpenDispute(wiring, orderId, {
           outcome: 'REFUND',
           resolution: 'the supplier could not show a delivery',
           responsibility: 'SUPPLIER',
