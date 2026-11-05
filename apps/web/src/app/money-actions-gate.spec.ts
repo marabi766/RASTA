@@ -152,6 +152,8 @@ const resolveDispute = (outcome: 'SETTLE' | 'REFUND'): GatedAction => ({
   draw: () =>
     drawnForm({
       command: 'RESOLVE_DISPUTE',
+      // The dispute the page showed (D-083).
+      disputeId: 'DSP_01JC0000000000000000000000',
       outcome,
       resolution: 'کالا تحویل نشده بود و فروشنده پاسخ نداد.',
       responsibility: 'SUPPLIER',

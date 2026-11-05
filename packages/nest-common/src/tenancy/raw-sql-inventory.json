@@ -2339,31 +2339,31 @@
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 45,
+    "line": 62,
     "hash": "923df21729a9cbd916343e75e90434f52e6ac06d83655a14a2221552b47dcce4",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 65,
+    "line": 82,
     "hash": "bd1fdbe4826fde84599880f0fbbdeb0c724aba407464e5066af52509a241532e",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 83,
+    "line": 100,
     "hash": "da1e65d7bec3a22e06d597e227d05819450fbff894df858758eacd0c7790ac96",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 118,
-    "hash": "8e1ebb76430110c25b9e6ad323180edc8d1900c176721dcd37af282602941b98",
+    "line": 135,
+    "hash": "9444a272eb21edaddb32a8f2e1a63caf4aae24e2e737f8c2812f9deeae8b29d0",
     "occurrence": 0,
-    "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks"
+    "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks; it also reads whether the buyer's receipt is recorded on that same row, which decides where an operator's SETTLE may return the order (D-083)"
   },
   {
     "file": "services/marketplace-service/src/prisma/prisma.service.ts",

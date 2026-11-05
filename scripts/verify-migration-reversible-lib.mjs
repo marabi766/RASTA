@@ -2460,8 +2460,11 @@ export const EXPECTED = {
       'tg_return_status_history_no_truncate',
       'tg_return_dispatch_release_guard',
       'tg_return_dispatch_release_no_truncate',
+      // 20261103130000_order_dispute_origin (D-083): where a dispute found its order.
+      'trg_order_dispute_origin',
     ],
     functions: [
+      'assign_order_dispute_origin',
       'return_request_guard',
       'return_request_history_check',
       'return_line_guard',
@@ -2496,6 +2499,10 @@ export const EXPECTED = {
       // rather than one the init migration already carried.
       'ck_order_cancelled_has_cause',
       'ck_dispute_resolved_has_responsibility',
+      // 20261103130000_order_dispute_origin (D-083): the dispute's origin, and no
+      // RECEIPT_CONFIRMED without the buyer's recorded receipt.
+      'ck_order_dispute_raised_from',
+      'ck_order_receipt_confirmed_has_evidence',
     ],
     // Added by 20260929120100_order_idempotency_key_unique (review of #141):
     // one Idempotency-Key places at most one order per organization, even
