@@ -169,7 +169,7 @@ export const JEST_LAUNCHERS = {
       'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
     sha256: {
       'scripts/exchange-deadline-rule.test.mjs':
-        '723acb43475ede39c864af5e0c8c2850e2527e284ddcdd1d6169365607741b70',
+        '1b3a35b144a1d10fcfec2b1a496e134d8f30c744c13d27845aa7bbc89676763c',
     },
   },
   'scripts/testing-dev-only.test.mjs': {
