@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { legacyDatetimeRegex } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { InventoryAccess, type Acting } from '../access/access';
 import type { InventoryEnv } from '../config/env';
@@ -22,6 +23,9 @@ import { ExpiryBacklog, ReservationExpiry, type ExpiryBatch } from './expiry';
 import { ReservationRepository, type ReservationRow } from './reservation.repository';
 import { canMove, isDue } from './reservation.state-machine';
 import { toReservationView } from './views';
+
+/** The instant syntax the reserve DTO accepts; the guard re-checks it (FU-035). */
+const EXPIRY_SYNTAX = legacyDatetimeRegex({ offset: true });
 
 /**
  * Reservations (ADR-056 § 3): `ReserveStock`, `ReleaseReservation` and `IssueStock`.
@@ -216,13 +220,16 @@ export class ReservationService {
   /**
    * `expiresAt`, if given, lies strictly after the post-lock decision instant and at most
    * INVENTORY_RESERVATION_MAX_TTL_SECONDS after it — the database's clock, the one expiry is
-   * judged by.
+   * judged by. The syntax is the DTO's own (`isoDateTime({ offset: true })`): `Date` alone parses
+   * offsets beyond ±14:00 (`-15:00`), so a caller past the DTO would get an instant the published
+   * contract refuses (FU-035).
    */
   private expiryOf(expiresAt: string | undefined, at: Date): Date | null {
     if (expiresAt === undefined) return null;
     const instant = new Date(expiresAt);
     const latest = at.getTime() + this.env.INVENTORY_RESERVATION_MAX_TTL_SECONDS * 1000;
     if (
+      !EXPIRY_SYNTAX.test(expiresAt) ||
       !Number.isFinite(instant.getTime()) ||
       instant.getTime() <= at.getTime() ||
       instant.getTime() > latest

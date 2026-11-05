@@ -452,6 +452,8 @@ describe('the tender-evidence projection', () => {
         { tenantId: BIDDER },
         { tenantId: undefined },
         { aggregateId: id('TND-OTHER') },
+        // Only the service that owns tenders may extend a tender's chain.
+        { producer: 'procurement-service' },
       ]) {
         const wrong = receipt('BID_SUBMITTED', tenderId, genesis, {}, envelopeOverrides);
         await expect(consumer.handle(wrong.event, DELIVERY)).rejects.toMatchObject({
@@ -461,7 +463,7 @@ describe('the tender-evidence projection', () => {
 
       expect((await chainOf(tenderId)).links).toEqual([]);
       expect(await heldFor(tenderId)).toBe(0);
-      expect(await failures('tender_evidence_mismatch')).toBe(before + 3);
+      expect(await failures('tender_evidence_mismatch')).toBe(before + 4);
     });
 
     it('refuses a receipt for a tender whose chain belongs to another organization', async () => {
@@ -671,7 +673,12 @@ describe('the tender-evidence projection', () => {
         outcome: 'REFUSED',
         accessedAt: new Date().toISOString(),
       };
-      for (const overrides of [{ tenantId: BIDDER }, { aggregateId: id('TND-OTHER') }]) {
+      for (const overrides of [
+        { tenantId: BIDDER },
+        { aggregateId: id('TND-OTHER') },
+        // Only the service that owns tenders may record a read of a bid.
+        { producer: 'procurement-service' },
+      ]) {
         await expect(
           consumer.handle(envelope('BID_ACCESSED', tenderId, payload, overrides), DELIVERY),
         ).rejects.toMatchObject({ name: 'TenderEvidenceIdentityError' });
