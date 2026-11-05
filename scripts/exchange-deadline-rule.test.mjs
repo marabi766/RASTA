@@ -5,7 +5,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -15,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative as relativePath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Linter } from 'eslint';
+import { workspaceDirectories } from './workspace-roots-lib.mjs';
 import tseslint from 'typescript-eslint';
 import exchangeDeadline, {
   ABORT_OWNERS,
@@ -631,11 +631,7 @@ for (const [workspace, filename] of [
 
 test('every workspace that lints source loads the rule (a new workspace cannot opt out silently)', async () => {
   const { ESLint } = await import('eslint');
-  const workspaces = ['services', 'packages', 'apps', 'tests'].flatMap((group) =>
-    readdirSync(`${root}${group}`, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => `${group}/${entry.name}`),
-  );
+  const workspaces = workspaceDirectories(root);
   let checked = 0;
   for (const workspace of workspaces) {
     let config;
