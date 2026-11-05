@@ -60,6 +60,13 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   ['settlement', 'trg_settlement_append_only'],
   ['settlement', 'trg_settlement_no_truncate'],
   ['ledger_account', 'trg_ledger_account_identity_fixed'],
+  // A settlement proves it happened when it is written (FU-097).
+  ['settlement', 'trg_settlement_creation_proven'],
+  ['commission', 'trg_commission_creation_proven'],
+  ['commission', 'trg_commission_no_truncate'],
+  ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_frozen'],
+  ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_no_truncate'],
+  ['settlement_reversal', 'trg_settlement_reversal_not_quarantined'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
