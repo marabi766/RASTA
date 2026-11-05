@@ -186,21 +186,23 @@ export function isDeclared(file: string, declared: readonly string[]): boolean {
 }
 
 /** Repository-relative files a pattern matches today, skipping `node_modules` and build output. */
-export function filesMatching(pattern: string): string[] {
+export function filesMatching(pattern: string, root: string = REPO_ROOT): string[] {
   const regex = globToRegExp(pattern);
   const parts = pattern.split('/');
   const firstWild = parts.findIndex((part) => /[*?]/.test(part));
   const fixed = firstWild === -1 ? parts : parts.slice(0, firstWild);
   const found: string[] = [];
   const walk = (relative: string): void => {
-    const full = path.join(REPO_ROOT, relative);
+    const full = path.join(root, relative);
     if (!fs.existsSync(full)) return;
     if (!fs.statSync(full).isDirectory()) {
       if (regex.test(relative)) found.push(relative);
       return;
     }
     for (const entry of fs.readdirSync(full)) {
-      if (entry === 'node_modules' || entry === 'dist') continue;
+      // `generated` is git-ignored Prisma output that another task regenerates mid-walk
+      // (ENOENT on a vanished file, FU-090); a turbo input must match authored files.
+      if (entry === 'node_modules' || entry === 'dist' || entry === 'generated') continue;
       walk(`${relative}/${entry}`);
     }
   };
