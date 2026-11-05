@@ -80,6 +80,13 @@ const PARSE_METHODS = new Set(['parse', 'canParse']);
 /** Objects a computed access on could yield `URL` (`globalThis[name]`). */
 const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'global']);
 const DYNAMIC_CAPABILITIES = new Set(['unsafe', 'createRequire', 'getBuiltinModule']);
+/**
+ * A LOCAL named like a global object (`window`, `self`, `global`, `globalThis`)
+ * whose value cannot be resolved: it may be the global object. Unlike the
+ * global itself it may be passed around (`run(window)`), but every member it
+ * hands out is read as the global's, through aliases too (FU-045 r2).
+ */
+const POTENTIAL_GLOBAL = 'potentialGlobal';
 const isDynamic = (kinds) => kinds.some((kind) => DYNAMIC_CAPABILITIES.has(kind));
 
 const isImportMetaUrl = (node) =>
@@ -350,33 +357,49 @@ function parserBindings(sourceFile) {
     if (['util', 'node:util'].includes(name)) return 'util';
     return UNKNOWN;
   };
+  // The value an AST node stores, once per cycle.
+  const stored = (owner, expression) => {
+    if (active.has(owner)) return [UNKNOWN];
+    active.add(owner);
+    const value = reference(expression);
+    active.delete(owner);
+    return value;
+  };
+  // Every value a literal could hand out under `name` (null: any name or
+  // index). Computed keys and out-of-order spreads widen, never narrow.
+  const literalMember = (object, name) => {
+    const values = [];
+    if (ts.isArrayLiteralExpression(object)) {
+      const index = name === null ? null : /^(0|[1-9]\d*)$/.test(name) ? Number(name) : -1;
+      let spread = false;
+      object.elements.forEach((element, position) => {
+        spread ||= ts.isSpreadElement(element);
+        if (index === -1 || (index !== null && position !== index && !spread)) return;
+        if (!ts.isSpreadElement(element) && !ts.isOmittedExpression(element))
+          values.push(stored(element, element));
+      });
+    } else if (ts.isObjectLiteralExpression(object)) {
+      for (const property of object.properties) {
+        const key = property.name;
+        const computed = key !== undefined && ts.isComputedPropertyName(key);
+        if (ts.isSpreadAssignment(property) || (name !== null && !computed && key?.text !== name))
+          continue;
+        if (ts.isPropertyAssignment(property)) values.push(stored(property, property.initializer));
+        else if (ts.isShorthandPropertyAssignment(property))
+          values.push(stored(property, property.name));
+      }
+    }
+    return join(...values);
+  };
   const member = (object, name) => {
     if (name === 'URL') return ['class'];
-    if (object && typeof object === 'object') {
-      // Resolve literal members, but never infer absence across spreads/getters.
-      let value = [UNKNOWN];
-      if (ts.isObjectLiteralExpression(object)) {
-        for (const property of object.properties) {
-          const key = property.name;
-          if (ts.isSpreadAssignment(property) || (key && ts.isComputedPropertyName(key))) {
-            value = [UNKNOWN];
-          } else if (key?.text === name) {
-            if (active.has(property)) value = [UNKNOWN];
-            else {
-              active.add(property);
-              value = ts.isPropertyAssignment(property)
-                ? reference(property.initializer)
-                : [UNKNOWN];
-              active.delete(property);
-            }
-          }
-        }
-      }
-      return value;
-    }
+    if (object && typeof object === 'object') return literalMember(object, name);
     if (object === UNKNOWN) return [UNKNOWN];
-    if (object === 'global') {
-      if (GLOBAL_OBJECTS.has(name)) return ['global'];
+    // A potential global (a LOCAL named like one that cannot be resolved)
+    // keeps that kind through every member read: only its capabilities are
+    // refused, a bare use is not (FU-045 r2).
+    if (object === 'global' || object === POTENTIAL_GLOBAL) {
+      if (GLOBAL_OBJECTS.has(name)) return [object];
       if (['eval', 'Function'].includes(name)) return ['unsafe'];
       if (name === 'process') return ['process'];
     }
@@ -391,11 +414,56 @@ function parserBindings(sourceFile) {
     return [UNKNOWN];
   };
   const members = (objects, name) => join(...objects.map((object) => member(object, name)));
+  // What a variable is initialised with: its initializer, or the elements of
+  // the list a `for (const x of list)` takes it from.
+  const initialValue = (declaration) => {
+    if (declaration.initializer) return reference(declaration.initializer);
+    const list = declaration.parent;
+    return ts.isForOfStatement(list.parent) && list.parent.initializer === list
+      ? members(reference(list.parent.expression), null)
+      : [UNKNOWN];
+  };
+  // Every value assigned to a name after its declaration (`a = window`,
+  // `a ||= window`), and to a property name anywhere in the file
+  // (`o.w = window`): an over-approximation, so an alias carries every kind.
+  let assigned;
+  const assignments = () => {
+    if (assigned) return assigned;
+    assigned = { symbols: new Map(), names: new Map() };
+    const add = (map, key, node) => map.set(key, [...(map.get(key) ?? []), node]);
+    const visit = (node) => {
+      const operator = ts.isBinaryExpression(node) ? node.operatorToken.kind : null;
+      if (
+        operator !== null &&
+        [
+          ts.SyntaxKind.EqualsToken,
+          ts.SyntaxKind.BarBarEqualsToken,
+          ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+          ts.SyntaxKind.QuestionQuestionEqualsToken,
+        ].includes(operator)
+      ) {
+        const left = unwrap(node.left);
+        const symbol = ts.isIdentifier(left) ? valueSymbol(left) : undefined;
+        if (symbol) add(assigned.symbols, symbol, node);
+        else if (isMemberAccess(left) && memberName(left) !== null)
+          add(assigned.names, memberName(left), node);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return assigned;
+  };
+  const written = (nodes) =>
+    strings(nodes.flatMap((node) => stored(node, node.right).filter((kind) => kind !== UNKNOWN)));
   const declarationReference = (declaration) => {
     if (ts.isVariableDeclaration(declaration)) {
-      const value = declaration.initializer ? reference(declaration.initializer) : [UNKNOWN];
+      const value = initialValue(declaration);
       return declaration.parent.flags & ts.NodeFlags.Const ? value : strings(value);
     }
+    if (ts.isParameter(declaration))
+      return declaration.initializer && ts.isIdentifier(declaration.name)
+        ? strings(reference(declaration.initializer))
+        : [UNKNOWN];
     if (ts.isBindingElement(declaration)) {
       const pattern = declaration.parent;
       const owner = pattern.parent;
@@ -403,20 +471,26 @@ function parserBindings(sourceFile) {
         ? [UNKNOWN]
         : ts.isBindingElement(owner)
           ? declarationReference(owner)
-          : owner.initializer
-            ? receiver(owner.initializer)
-            : [UNKNOWN];
+          : initialValue(owner);
       if (ts.isVariableDeclaration(owner) && !(owner.parent.flags & ts.NodeFlags.Const))
         from = strings(from);
       const key = declaration.propertyName ?? declaration.name;
-      const name = ts.isComputedPropertyName(key)
-        ? isStringLike(unwrap(key.expression))
-          ? unwrap(key.expression).text
-          : null
-        : ts.isIdentifier(key) || isStringLike(key)
-          ? key.text
-          : null;
-      return members(from, name);
+      const name = ts.isArrayBindingPattern(pattern)
+        ? declaration.dotDotDotToken
+          ? null
+          : String(pattern.elements.indexOf(declaration))
+        : ts.isComputedPropertyName(key)
+          ? isStringLike(unwrap(key.expression))
+            ? unwrap(key.expression).text
+            : null
+          : ts.isIdentifier(key) || isStringLike(key)
+            ? key.text
+            : null;
+      // A default (`{ w = window } = x`) is one more value of the element.
+      return join(
+        members(from, name),
+        declaration.initializer ? reference(declaration.initializer) : [],
+      );
     }
     if (ts.isImportSpecifier(declaration)) {
       const from = moduleKind(declaration.parent.parent.parent.moduleSpecifier.text);
@@ -441,35 +515,54 @@ function parserBindings(sourceFile) {
   // closed) rather than ignored.
   const globalNamed = (name, local) => {
     if (name === 'URL') return 'class';
-    if (GLOBAL_OBJECTS.has(name) && !local) return 'global';
+    if (GLOBAL_OBJECTS.has(name)) return local ? POTENTIAL_GLOBAL : 'global';
     if (['eval', 'Function'].includes(name)) return 'unsafe';
     if (name === 'process') return 'process';
     return UNKNOWN;
-  };
-  // A receiver whose members are read. A local `window`/`self`/`global`/
-  // `globalThis` that cannot be resolved is taken for the global object, so
-  // `window.eval`, `const { Function: F } = self` are refused; passing such a
-  // local around (`run(window)`, a common variable name) is not an escape.
-  const receiver = (node) => {
-    const kinds = reference(node);
-    const inner = unwrap(node);
-    return kinds[0] === UNKNOWN && ts.isIdentifier(inner) && GLOBAL_OBJECTS.has(inner.text)
-      ? ['global']
-      : kinds;
   };
   const resolve = (inner) => {
     if (ts.isIdentifier(inner)) {
       const symbol = valueSymbol(inner);
       const declarations = runtimeDeclarations(inner);
       if (declarations.length === 0) return [globalNamed(inner.text, false)];
-      if (active.has(symbol)) return [UNKNOWN];
+      // A cycle, or a local that resolves to nothing known: still the global
+      // of that name, as far as capabilities go (never erased by the floor).
+      if (active.has(symbol)) return [globalNamed(inner.text, true)];
       active.add(symbol);
-      const result = join(...declarations.map(declarationReference));
+      const result = join(
+        ...declarations.map(declarationReference),
+        written(assignments().symbols.get(symbol) ?? []),
+      );
       active.delete(symbol);
       return result[0] === UNKNOWN ? [globalNamed(inner.text, true)] : result;
     }
     if (ts.isAwaitExpression(inner)) return reference(inner.expression);
-    if (isMemberAccess(inner)) return members(receiver(inner.expression), memberName(inner));
+    if (ts.isConditionalExpression(inner))
+      return join(reference(inner.whenTrue), reference(inner.whenFalse));
+    if (ts.isBinaryExpression(inner)) {
+      const operator = inner.operatorToken.kind;
+      if (operator === ts.SyntaxKind.CommaToken || operator === ts.SyntaxKind.EqualsToken)
+        return reference(inner.right);
+      if (
+        [
+          ts.SyntaxKind.BarBarToken,
+          ts.SyntaxKind.AmpersandAmpersandToken,
+          ts.SyntaxKind.QuestionQuestionToken,
+          ts.SyntaxKind.BarBarEqualsToken,
+          ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+          ts.SyntaxKind.QuestionQuestionEqualsToken,
+        ].includes(operator)
+      )
+        return join(reference(inner.left), reference(inner.right));
+    }
+    if (isMemberAccess(inner)) {
+      const name = memberName(inner);
+      const object = reference(inner.expression);
+      return join(
+        members(object, name),
+        name === null ? [] : written(assignments().names.get(name) ?? []),
+      );
+    }
     if (isUrlModuleLoad(inner)) return ['module'];
     const found = [];
     if (ts.isCallExpression(inner)) {
@@ -773,11 +866,13 @@ export function rawUrlParses(text, file) {
     ) {
       site(node, 'escape');
     }
-    // A computed access on a parser, or on a global object, the parser cannot read.
+    // A computed access on a parser, or on a global object (also a potential
+    // one, through any alias), the parser cannot read.
     if (ts.isElementAccessExpression(node) && memberName(node) === null && !isInType(node)) {
       const object = unwrap(node.expression);
       if (
         parserKinds(object, bindings).length > 0 ||
+        bindings.reference(object).includes(POTENTIAL_GLOBAL) ||
         (ts.isIdentifier(object) && GLOBAL_OBJECTS.has(object.text))
       ) {
         site(node, 'escape');
