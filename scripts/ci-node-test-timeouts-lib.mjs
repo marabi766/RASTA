@@ -150,6 +150,11 @@ function pnpmCommand(args, scripts, packages, found) {
   if (!literal(args)) return found.problems.push(`a computed pnpm argument (${text})`);
   const values = args.map((entry) => entry.value);
   for (const name of INSTALL_SCRIPTS) if (Object.hasOwn(scripts, name)) found.follows.add(name);
+  // FU-092: install runs the lifecycle hooks of EVERY workspace project, not only the root's
+  // (a package's `postinstall` that runs `node --test` hangs the install step the same way).
+  for (const [pkg, own] of Object.entries(packages))
+    for (const name of INSTALL_SCRIPTS)
+      if (Object.hasOwn(own, name)) packageScript(found, pkg, name, own[name]);
   // FU-077 R4: argv boundaries are kept: `pnpm "install --frozen-lockfile"` is ONE word, which
   // pnpm runs as a script of that name, not as an install.
   if (values.length === 2 && values[0] === 'install' && values[1] === '--frozen-lockfile') return;
@@ -328,6 +333,9 @@ function contextProblems(doc, job, id) {
     }
     problems.push(...envProblems(name, owner?.env));
   }
+  // FU-092: a job container changes the shell, the tools and the files every step sees.
+  if (job.container !== undefined)
+    problems.push(`job ${id} runs in a container, so its commands cannot be read`);
   for (const step of job.steps) {
     const name = `step "${step?.name}"`;
     if (!isMap(step)) {
@@ -353,6 +361,44 @@ function envProblems(name, env) {
   return Object.keys(env)
     .filter((key) => !KNOWN_ENV.has(key))
     .map((key) => `${name} sets ${key}, which may change what its commands mean`);
+}
+
+/**
+ * FU-092: pnpm settings that change what an install or a script run does (`script-shell`,
+ * `shell-emulator`, `node-options`, `ignore-scripts`, a `.pnpmfile.cjs` hook ...) are read
+ * from the places pnpm reads them: `.npmrc`, `pnpm-workspace.yaml` (parsed), the root
+ * manifest's `pnpm` field and the presence of a `.pnpmfile.cjs`. A setting outside the
+ * reviewed inert lists refuses; so does a file that cannot be read. Returns the problems.
+ */
+const INERT_NPMRC = new Set(
+  'public-hoist-pattern[] strict-peer-dependencies auto-install-peers min-release-age'.split(' '),
+);
+const INERT_WORKSPACE = new Set(
+  'packages catalog catalogs allowBuilds overrides blockExoticSubdeps minimumReleaseAge minimumReleaseAgeStrict minimumReleaseAgeExclude trustPolicy trustPolicyExclude patchedDependencies'.split(
+    ' ',
+  ),
+);
+export function pnpmSettingsProblems({ npmrc, workspace, manifestPnpm, pnpmfile } = {}) {
+  const problems = [];
+  if (typeof npmrc !== 'string') problems.push('.npmrc was not read');
+  else
+    for (const line of npmrc.split('\n').map((text) => text.trim())) {
+      if (line === '' || /^[#;]/.test(line)) continue;
+      const key = /^([^=\s]+)\s*=/.exec(line)?.[1];
+      if (key === undefined) problems.push(`.npmrc has a line that is not key=value: ${line}`);
+      else if (!INERT_NPMRC.has(key))
+        problems.push(`.npmrc sets ${key}, which may change how pnpm runs scripts`);
+    }
+  if (!isMap(workspace)) problems.push('pnpm-workspace.yaml was not read');
+  else
+    for (const key of Object.keys(workspace))
+      if (!INERT_WORKSPACE.has(key))
+        problems.push(`pnpm-workspace.yaml sets ${key}, which may change how pnpm runs scripts`);
+  if (manifestPnpm !== undefined)
+    problems.push('the root package.json has a pnpm field, which this check does not read');
+  if (pnpmfile !== false)
+    problems.push('a .pnpmfile.cjs may run code at install (or was not looked for)');
+  return problems;
 }
 
 // FU-077 r2 F1: the turbo task graph, read from every configuration with every edge kept.
@@ -477,6 +523,11 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}, workspace =
   const { turbo } = workspace;
   for (const reason of workspace.problems ?? [])
     problems.push(`the turbo task graph cannot be read: ${reason}`);
+  // FU-092: omitting the pnpm settings never opens the check (pnpmSettingsProblems output).
+  if (!Array.isArray(workspace.settings)) problems.push('the pnpm settings were not read');
+  else
+    for (const reason of workspace.settings)
+      problems.push(`the pnpm settings cannot be read: ${reason}`);
   const ids = Object.keys(isMap(doc?.jobs) ? doc.jobs : {}).filter((id) =>
     id.startsWith(QUALITY_JOB_PREFIX),
   );

