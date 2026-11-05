@@ -46,6 +46,8 @@ const ANSWERS: Record<string, [number, string]> = {
 let server: Server;
 let urls: ServiceUrls;
 let ready: boolean;
+/** How readiness answers when it is not ready: a 503, a 304, or never. */
+let notReadyAs: 'status 503' | 'status 304' | 'no answer in time';
 let checks: number;
 let forwarded: string[];
 let clock: number;
@@ -55,8 +57,10 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     if (req.url === READINESS_PATH) {
       checks += 1;
-      res.writeHead(ready ? 200 : 503, { 'content-type': 'application/json' });
-      return res.end('{}');
+      if (!ready && notReadyAs === 'no answer in time') return undefined;
+      const status = ready ? 200 : notReadyAs === 'status 304' ? 304 : 503;
+      res.writeHead(status, { 'content-type': 'application/json' });
+      return res.end(status === 304 ? undefined : '{}');
     }
     forwarded.push(req.url ?? '');
     const [status, body] = ANSWERS[req.url ?? ''] ?? [404, envelope('NOT_FOUND')];
@@ -75,6 +79,7 @@ afterAll(async () => {
 });
 beforeEach(() => {
   ready = false;
+  notReadyAs = 'status 503';
   checks = 0;
   forwarded = [];
   clock = 1_000;
@@ -196,14 +201,18 @@ describe('colluding organizations against a ready service, over HTTP (FU-113)', 
     },
   );
 
-  it('a service the check finds not ready opens on the same failures', async () => {
-    const callers = ['ORG_C0', 'ORG_C1', 'ORG_C2'];
-    for (let round = 0; round < 2; round += 1) {
-      for (const org of callers) await call(org, '/v1/users/poison');
-    }
-    expect(state()).toBe('OPEN');
-    expect(await call('ORG_VICTIM', '/v1/users/me')).toBe('UPSTREAM_UNAVAILABLE');
-  });
+  it.each(['status 503', 'status 304', 'no answer in time'] as const)(
+    'a service whose readiness answers with %s is not ready: it opens on the same failures',
+    async (how) => {
+      notReadyAs = how;
+      const callers = ['ORG_C0', 'ORG_C1', 'ORG_C2'];
+      for (let round = 0; round < 2; round += 1) {
+        for (const org of callers) await call(org, '/v1/users/poison');
+      }
+      expect(state()).toBe('OPEN');
+      expect(await call('ORG_VICTIM', '/v1/users/me')).toBe('UPSTREAM_UNAVAILABLE');
+    },
+  );
 
   it('after an outage, a colluder’s failed probe hands recovery to the check, which closes it', async () => {
     await outage();

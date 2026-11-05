@@ -107,10 +107,16 @@ import { circuitShedRefusalsTotal, circuitStateGauge } from './circuit.metrics';
  *    re-opening still needs it not ready). While the check runs, every request
  *    is refused as while a probe is in flight.
  *  - Anything but a complete 2xx in time is "not ready": fail closed, toward a
- *    failing service opening; a caller cannot reach the check to make it fail.
+ *    failing service opening. No caller's input reaches the check.
  *
- * So while the service is ready, colluding callers can neither open the
- * circuit nor keep it from closing for longer than one probe of their own.
+ * So while the service's readiness answers 2xx — under whatever load callers
+ * put on it — colluding callers can neither open the circuit nor keep it from
+ * closing for longer than one probe of their own. Limits: readiness is not the
+ * API (a service whose readiness checks only its database can fail every route
+ * and stay CLOSED, its organizations shedding themselves; one with a stopped
+ * consumer is not ready and falls back to the counts above); load heavy
+ * enough to make readiness miss its deadline opens it, as it would have
+ * opened before; and a probe's 2xx still closes a service that is not ready.
  *
  * Only callers with a failure or a shed are remembered, at most
  * `MAX_TRACKED_CALLERS` per service, least recently touched forgotten first.
