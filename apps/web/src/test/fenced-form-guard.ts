@@ -176,6 +176,14 @@ const wraps = (node: ts.Node): node is Wrapper =>
   ts.isExpressionWithTypeArguments(node) ||
   ts.isPartiallyEmittedExpression(node);
 
+/** Unwrap syntax only: discarded comma operands still have effects. */
+function unwrap(node: ts.Expression): ts.Expression;
+function unwrap(node: ts.Node): ts.Node;
+function unwrap(node: ts.Node): ts.Node {
+  while (wraps(node)) node = node.expression;
+  return node;
+}
+
 /**
  * Value/name normalizer (FU-037): wrappers and comma tails cannot hide an identity.
  * Exact-return checks and method receivers must preserve comma expressions.
@@ -184,8 +192,8 @@ function bare(node: ts.Expression): ts.Expression;
 function bare(node: ts.Node): ts.Node;
 function bare(node: ts.Node): ts.Node {
   for (;;) {
-    if (wraps(node)) node = node.expression;
-    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.CommaToken)
+    node = unwrap(node);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.CommaToken)
       node = node.right;
     else return node;
   }
@@ -492,16 +500,16 @@ class Program {
   }
 
   /** Every module `module` re-exports, itself included, followed through barrels (cycle-safe). */
-  reexported(module: string, seen = new Set<string>()): Set<string> {
+  reexported(module: string, stores: ReadonlySet<string>, seen = new Set<string>()): Set<string> {
     if (seen.has(module) || !this.sources.has(module)) return seen;
     seen.add(module);
     const parsed = this.module(module);
-    for (const star of parsed.stars) this.reexported(star, seen);
+    for (const star of parsed.stars) this.reexported(star, stores, seen);
     for (const [name, entry] of parsed.exports) {
-      const sym = this.provenance(this.exported(module, name));
-      if (sym !== null) this.reexported(sym.module, seen);
+      const sym = this.provenance(this.exported(module, name), stores);
+      if (sym !== null) this.reexported(sym.module, stores, seen);
       // Preserve the fail-closed dependency even when a FROM name is missing.
-      if (entry.kind === 'FROM') this.reexported(entry.module, seen);
+      if (entry.kind === 'FROM') this.reexported(entry.module, stores, seen);
     }
     return seen;
   }
@@ -523,12 +531,16 @@ class Program {
       if (made.sym?.unresolved) return made.sym;
       if (!isIntrinsic(made.sym, 'bind')) return null;
       const receiver = made.receiver && bare(made.receiver.node);
-      // A literal function target is known, even though it has no exported identity (FU-106).
-      const target =
+      // Literals retain their module; every other unnameable receiver must refuse (FU-106).
+      const target: Sym =
         receiver && (ts.isArrowFunction(receiver) || ts.isFunctionExpression(receiver))
           ? { module: made.receiver!.file, name: '<inline>' }
           : made.receiver
-            ? this.resolve(made.receiver.file, made.receiver.node, depth + 1)
+            ? (this.resolve(made.receiver.file, made.receiver.node, depth + 1) ?? {
+                module: made.receiver.file,
+                name: '<inline>',
+                unresolved: true,
+              })
             : { module: file, name: 'bind', unresolved: true as const };
       const bound = { target, receiver: made.args?.[0], args: made.args && made.args.slice(1) };
       return { module: INTRINSIC, name: 'bound', bound };
@@ -631,8 +643,7 @@ class Program {
   invoked(file: string, call: ts.CallExpression, depth = 0): Invocation {
     const fn = bare(call.expression);
     // Commas return a value, not a method reference carrying its receiver.
-    let reference: ts.Expression = call.expression;
-    while (wraps(reference)) reference = reference.expression;
+    const reference = unwrap(call.expression);
     const receiver =
       memberName(reference) !== null ? { file, node: (reference as Access).expression } : undefined;
     const args = call.arguments.some(ts.isSpreadElement)
@@ -651,6 +662,7 @@ class Program {
     if (depth > 64) return refused as Invocation;
     if (sym?.bound) {
       const { target, receiver: bound, args: first } = sym.bound;
+      if (target === null) return refused as Invocation;
       return this.invoke(target, bound, first && args ? [...first, ...args] : null, depth + 1);
     }
     if (sym === null || sym.unresolved || sym.module !== INTRINSIC) return { sym, receiver, args };
@@ -670,10 +682,11 @@ class Program {
   }
 
   /** Bound identity follows the same adapter semantics as invocation, without discarding arguments. */
-  provenance(sym: Sym | null): Sym | null {
-    return sym?.bound
+  provenance(sym: Sym | null, stores: ReadonlySet<string>): Sym | null {
+    const target = sym?.bound
       ? (this.invoke(sym, undefined, [], 0).sym ?? { ...sym, unresolved: true })
       : sym;
+    return anonymousStore(target, stores) ? { ...target, unresolved: true } : target;
   }
 
   /** Whether `sym` is defined in a `'use server'` module, or in an `…actions` module. */
@@ -693,6 +706,29 @@ function isFunction(node: ts.Node): node is ts.FunctionLikeDeclaration {
     ts.isFunctionDeclaration(node) ||
     ts.isMethodDeclaration(node)
   );
+}
+
+/** Includes suspension without an AwaitExpression (`for await`, `await using`). */
+function isAwaitPoint(node: ts.Node): boolean {
+  return (
+    ts.isAwaitExpression(node) ||
+    (ts.isForOfStatement(node) && node.awaitModifier !== undefined) ||
+    (ts.isVariableDeclarationList(node) &&
+      (node.flags & ts.NodeFlags.AwaitUsing) === ts.NodeFlags.AwaitUsing)
+  );
+}
+
+/** Eager operands in return, callee/namespace base or options must not be discarded. */
+function hasComma(node: ts.Node): boolean {
+  node = unwrap(node);
+  if (isFunction(node)) return false;
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.CommaToken)
+    return true;
+  return ts.forEachChild(node, hasComma) === true;
+}
+
+function anonymousStore(sym: Sym | null, stores: ReadonlySet<string>): sym is Sym {
+  return sym !== null && sym.name === '<inline>' && stores.has(sym.module);
 }
 
 function calls(source: ts.SourceFile): ts.CallExpression[] {
@@ -789,7 +825,10 @@ export function fencedModules(sources: Sources): Set<string> {
 function refersToStore(file: string, { program, stores }: Discovery): boolean {
   const parsed = program.module(file);
   for (const [name, imported] of parsed.imports) {
-    const sym = program.provenance(program.resolve(file, ts.factory.createIdentifier(name)));
+    const sym = program.provenance(
+      program.resolve(file, ts.factory.createIdentifier(name)),
+      stores,
+    );
     if (sym !== null && stores.has(sym.module)) return true;
     // A namespace exposes all its exports; an unresolved name keeps its whole provenance gated.
     const open =
@@ -799,7 +838,7 @@ function refersToStore(file: string, { program, stores }: Discovery): boolean {
           ? [sym.module]
           : [];
     for (const module of open) {
-      if ([...program.reexported(module)].some((m) => stores.has(m))) return true;
+      if ([...program.reexported(module, stores)].some((m) => stores.has(m))) return true;
     }
   }
   return false;
@@ -853,15 +892,15 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
         ? `${detail} (line ${source.getLineAndCharacterOfPosition(node.getStart()).line + 1})`
         : detail,
     });
-  const resolve = (node: ts.Node) => program.provenance(program.resolve(file, node));
+  const resolve = (node: ts.Node) => program.provenance(program.resolve(file, node), stores);
   const isBoundaryCall = (node: ts.Node | undefined): boolean => {
     // A comma returns the tail's value but also evaluates discarded operands.
-    let call = node;
-    while (call && wraps(call)) call = call.expression;
+    const call = node && unwrap(node);
+    if (!call || !ts.isCallExpression(call) || hasComma(call)) return false;
+    const invoked = program.invoked(file, call);
+    const options = invoked.args?.[0];
     return (
-      call !== undefined &&
-      ts.isCallExpression(call) &&
-      is(program.invoked(file, call).sym, BOUNDARY_MODULE, 'submitThroughSlot')
+      is(invoked.sym, BOUNDARY_MODULE, 'submitThroughSlot') && (!options || !hasComma(options.node))
     );
   };
 
@@ -871,8 +910,11 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
     calls(source).flatMap((call) => {
       const invoked = program.invoked(file, call);
       const options = invoked.args?.[0];
-      return is(invoked.sym, BOUNDARY_MODULE, 'submitThroughSlot') && options?.file === file
-        ? [bare(options.node)]
+      return is(invoked.sym, BOUNDARY_MODULE, 'submitThroughSlot') &&
+        options?.file === file &&
+        !hasComma(call) &&
+        !hasComma(options.node)
+        ? [unwrap(options.node)]
         : [];
     }),
   );
@@ -946,7 +988,7 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
     const visit = (node: ts.Node) => {
       if (node !== fn && isFunction(node)) return;
       if (ts.isReturnStatement(node)) returns.push(node);
-      if (ts.isAwaitExpression(node)) awaits.push(node);
+      if (isAwaitPoint(node)) awaits.push(node);
       ts.forEachChild(node, visit);
     };
     ts.forEachChild(fn, visit);
@@ -993,15 +1035,18 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
         flag('transport', node, `${node.expression.getText()}(...) outside the boundary's send`);
       }
       // 4. A store's writes only inside the boundary; no slot made here.
-      if (callee !== null && factories.has(key(callee))) {
-        flag('store', node, `${node.expression.getText()}(...): a slot made in the form`);
+      if (callee !== null && (factories.has(key(callee)) || anonymousStore(callee, stores))) {
+        flag(
+          'store',
+          node,
+          `${node.expression.getText()}(...): a slot made in the form, or an unproven store target`,
+        );
       }
       // A store's writer, also as a member (`D.saveThing` of a default-exported object).
       const writer =
         callee !== null &&
         stores.has(callee.module) &&
-        // An anonymous bound target retains its module, but cannot prove it is a read.
-        (callee.name === '<inline>' || /^(save|answer|settle)/.test(callee.member ?? callee.name));
+        /^(save|answer|settle)/.test(callee.member ?? callee.name);
       const slotWrite =
         callee !== null &&
         stores.has(callee.module) &&
@@ -1031,14 +1076,14 @@ export function fencedFormViolations(sources: Sources): Violation[] {
   const out: Violation[] = [];
   const forms = formsOf(discovery);
   for (const file of forms) out.push(...checkForm(file, discovery));
-  const { program } = discovery;
+  const { program, stores } = discovery;
   for (const file of program.files()) {
     if (file === GATE_MODULE) continue;
     const { source } = program.module(file);
     // Resolve every JSX tag through the same graph used by form discovery.
     walk(source, (node) => {
       if (!ts.isJsxOpeningElement(node) && !ts.isJsxSelfClosingElement(node)) return;
-      const tag = program.provenance(program.resolve(file, node.tagName));
+      const tag = program.provenance(program.resolve(file, node.tagName), stores);
       if (is(tag, GATE_MODULE, 'QuarantineGate')) {
         out.push({ file, rule: 'drawn', detail: 'draws QuarantineGate outside UnresolvedForm' });
       } else if (tag?.unresolved && !forms.includes(file)) {
