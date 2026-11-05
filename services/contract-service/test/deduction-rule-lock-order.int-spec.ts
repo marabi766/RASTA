@@ -179,30 +179,72 @@ describe('one lock per rule: a proposal and a decision never wait on each other 
     expect(await stateOf(second.org, second.rule.id)).toEqual({ retired: false, pending: 1 });
   });
 
-  it('a CREATE has no rule to lock: two of one name wait on the pending index, one way only', async () => {
-    const org = newOrganizationId();
-    organizations.push(org);
-    const name = `Rule ${ulid()}`;
-    const proposeCreate = (tx: ExtendedPrismaClient) =>
-      rules.proposeCreate(tx, {
-        organizationId: org,
-        name,
-        rateBp: 500,
-        base: 'GROSS',
-        proposer: RULE_PROPOSER,
-        at: new Date(),
+  it.each([
+    ['one name', (id: string) => [`Rule ${id}`, `Rule ${id}`]],
+    ['one key, by case and a space (FU-083)', (id: string) => [`Rule ${id}`, `rule${id}`]],
+  ])(
+    'a CREATE has no rule to lock: two of %s wait on the pending index, one way only',
+    async (_how, names) => {
+      const org = newOrganizationId();
+      organizations.push(org);
+      const [name, sameKey] = names(ulid());
+      const proposeCreate = (tx: ExtendedPrismaClient, typed: string) =>
+        rules.proposeCreate(tx, {
+          organizationId: org,
+          name: typed,
+          rateBp: 500,
+          base: 'GROSS',
+          proposer: RULE_PROPOSER,
+          at: new Date(),
+        });
+      let other: { outcome: Promise<PromiseSettledResult<unknown>[]> } | undefined;
+      await session(async (tx) => {
+        const change = await proposeCreate(tx, name!);
+        other = await startBlockedOn(await backend(tx), async (b) => {
+          const second = await proposeCreate(b, sameKey!);
+          return rules.approve(b, act(second, RULE_APPROVER));
+        });
+        return rules.approve(tx, act(change, RULE_APPROVER));
       });
-    let other: { outcome: Promise<PromiseSettledResult<unknown>[]> } | undefined;
-    await session(async (tx) => {
-      const change = await proposeCreate(tx);
-      other = await startBlockedOn(await backend(tx), async (b) => {
-        const second = await proposeCreate(b);
-        return rules.approve(b, act(second, RULE_APPROVER));
-      });
-      return rules.approve(tx, act(change, RULE_APPROVER));
-    });
-    expect((await other!.outcome).map(code)).toEqual(['ALREADY_EXISTS']);
-  });
+      expect((await other!.outcome).map(code)).toEqual(['ALREADY_EXISTS']);
+    },
+  );
+
+  // A move has locked its change and waits for the rule, and the holder of the rule then meets the
+  // pending index on that same change. A pending change is a unique violation at once, not a wait:
+  // no circle, and the move finishes. A proposal's trigger holds the rule only inside its INSERT, so
+  // the SELECT stands for that moment.
+  type Pending = Awaited<ReturnType<typeof propose>>;
+  const moves: [string, (tx: ExtendedPrismaClient, c: Pending) => Promise<unknown>, boolean][] = [
+    ['withdrawal', (tx, c) => rules.withdraw(tx, act(c, RULE_PROPOSER)), false],
+    [
+      'rejection',
+      (tx, c) => rules.reject(tx, { ...act(c, RULE_APPROVER), reason: 'not yet' }),
+      false,
+    ],
+    ['approval', (tx, c) => rules.approve(tx, act(c, RULE_APPROVER)), true],
+  ];
+  it.each(moves)(
+    'a holder of the rule meets the pending index while a %s waits for that rule: a conflict, not a circle, and the move finishes',
+    async (_how, move, retired) => {
+      const { org, rule } = await inForce();
+      const pending = await session((tx) => propose(tx, org, rule.id));
+      let moved: { outcome: Promise<PromiseSettledResult<unknown>[]> } | undefined;
+      await expect(
+        session(async (tx) => {
+          await tx.$queryRawUnsafe(
+            'SELECT 1 FROM deduction_rule WHERE organization_id = $1 AND id = $2 FOR NO KEY UPDATE',
+            org,
+            rule.id,
+          );
+          moved = await startBlockedOn(await backend(tx), (b) => move(b, pending));
+          return propose(tx, org, rule.id);
+        }),
+      ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+      expect((await moved!.outcome).map(code)).toEqual(['PASSED']);
+      expect(await stateOf(org, rule.id)).toEqual({ retired, pending: 0 });
+    },
+  );
 
   it('the lock is not a key lock: a statement naming the rule is not held up by a proposal or a move', async () => {
     const { org, rule } = await inForce();
