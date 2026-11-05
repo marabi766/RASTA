@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import ts from 'typescript';
 import { parse as parseYaml } from 'yaml';
+import { CALLBACK_HELPER_SOURCES } from './zod-callback-helpers.mjs';
 
 /**
  * Nothing that guards the lint rules may fall out of CI unnoticed.
@@ -301,6 +302,21 @@ export const ALLOWED_BUILTINS = new Set([
  */
 export const BUILTIN_READERS = new Map([
   [
+    'scripts/zod-callback-helpers.mjs',
+    {
+      why: 'resolves callback helper imports with the TypeScript config graph, refuses ambiguous siblings, and verifies source hashes',
+      builtins: { fs: ['readFileSync', 'lstatSync'], crypto: ['createHash'] },
+      buildsPrograms: true,
+      exports: ['verifiedCallbackHelper'],
+      reads: [
+        {
+          surface: 'callback-helper-sources',
+          why: 'the finite source paths exported from the private hash manifest',
+        },
+      ],
+    },
+  ],
+  [
     'scripts/internal-token-parser.mjs',
     {
       why:
@@ -394,7 +410,12 @@ export const BUILTIN_READERS = new Map([
   ],
 ]);
 
-const READ_SURFACES = new Set(['linted-files', 'workspace-manifest', 'location-only']);
+const READ_SURFACES = new Set([
+  'linted-files',
+  'workspace-manifest',
+  'location-only',
+  'callback-helper-sources',
+]);
 const own = (object, key) =>
   object !== null && typeof object === 'object' && Object.hasOwn(object, key)
     ? object[key]
@@ -1160,6 +1181,16 @@ const readSurface = (surface, workspace, state) => {
       ]),
     );
     return { files, problems: [] };
+  }
+  if (surface === 'callback-helper-sources') {
+    return {
+      files: new Map(
+        CALLBACK_HELPER_SOURCES.map((path) => [path, 'a reviewed callback helper source']),
+      ),
+      problems: CALLBACK_HELPER_SOURCES.filter((path) => !state.tracked.has(path)).map(
+        (path) => `Missing callback helper source: ${path}`,
+      ),
+    };
   }
   if (surface === 'workspace-manifest') {
     const manifest = dir === '.' ? 'package.json' : `${dir}/package.json`;
@@ -2793,6 +2824,7 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
       'scripts/internal-token-parser.mjs',
       'scripts/internal-token-source-rule.mjs',
       'scripts/testing-dev-only.mjs',
+      'scripts/zod-callback-helpers.mjs',
     ],
     'a built-in exception was added or removed: update this list in the same reviewed change',
   );
@@ -2806,6 +2838,13 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
       reads.map((read) => read.surface),
     ]),
     [
+      [
+        'scripts/zod-callback-helpers.mjs',
+        { fs: ['readFileSync', 'lstatSync'], crypto: ['createHash'] },
+        true,
+        ['verifiedCallbackHelper'],
+        ['callback-helper-sources'],
+      ],
       [
         'scripts/internal-token-parser.mjs',
         { fs: ['existsSync', 'readFileSync'] },
@@ -3398,10 +3437,33 @@ test('mutant: the real parser entry cannot stop saying it builds programs, nor i
     found.workspaces.every((w) => w.builders.get(parser)?.includes('`buildsPrograms: true`')),
   );
   assert.equal(programBuildProblems(found, cached).length, 1);
-  // the entry and the names both gone: nothing flags it (what the table pin test exists for)
+  // With its entry and names gone the parser is no longer flagged; other compiler readers remain.
   const gone = discover({
     ...hidden,
     exceptions: new Map([...BUILTIN_READERS, [parser, entry]]),
   });
-  assert.deepEqual(programBuildProblems(gone, cached), []);
+  assert.ok(programBuildProblems(gone, cached).every((p) => !p.includes(parser)));
+});
+
+// The registry reads across workspace boundaries; a cache may not forget one source.
+test('callback helper source inputs refuse any missing reviewed source', async () => {
+  const found = discover(realState());
+  const hashed = await mutatedSnapshot(() => {});
+  assert.deepEqual(exceptionReadProblems(found, hashed), []);
+  for (const path of CALLBACK_HELPER_SOURCES) {
+    const tasks = new Map(
+      [...hashed.tasks].map(([key, task]) => [
+        key,
+        { ...task, files: new Set([...task.files].filter((file) => file !== path)) },
+      ]),
+    );
+    const global = new Set([...hashed.global].filter((file) => file !== path));
+    const problems = exceptionReadProblems(found, { ...hashed, tasks, global });
+    assert.ok(
+      problems.some(
+        (problem) => problem.includes('scripts/zod-callback-helpers.mjs') && problem.includes(path),
+      ),
+      path,
+    );
+  }
 });
