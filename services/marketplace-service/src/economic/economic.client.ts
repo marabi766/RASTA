@@ -2,7 +2,7 @@ import { Context, CancelledFailure } from '@temporalio/activity';
 import { foreignFailure } from '../temporal/foreign-failure';
 import { InternalHttpClient, exchangeWithDeadline } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { InternalTokenService, RastaError } from '@rasta/nest-common';
+import { BoundedBodyCollector, InternalTokenService, RastaError } from '@rasta/nest-common';
 import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
@@ -40,8 +40,6 @@ import { economicCallDuration, economicCallsTotal } from '../observability/metri
 
 /** Transport ceiling, including error envelopes and paged obligation lookups. */
 export const ECONOMIC_RESPONSE_MAX_BYTES = 1024 * 1024;
-/** First owned read buffer; doubled as the body grows, never past the ceiling. */
-const ECONOMIC_RESPONSE_MIN_BUFFER_BYTES = 256;
 
 async function readEconomicJson(response: Response, deadlineAt: number): Promise<unknown> {
   const length = response.headers.get('content-length');
@@ -54,11 +52,9 @@ async function readEconomicJson(response: Response, deadlineAt: number): Promise
   }
   const reader = response.body.getReader();
   // Memory follows the bytes actually received, never the ceiling and never
-  // the number of chunks (FU-044): each chunk is copied into one owned buffer
-  // that grows geometrically up to the ceiling and is then dropped, so a body
-  // delivered one byte at a time costs no more than one delivered whole.
-  let owned: Buffer | undefined;
-  let size = 0;
+  // the number of chunks (FU-044): the shared collector copies each chunk into
+  // one owned buffer that grows geometrically up to the ceiling.
+  const body = new BoundedBodyCollector(ECONOMIC_RESPONSE_MAX_BYTES);
   try {
     for (;;) {
       // Always-ready microtasks can delay the abort timer's event-loop slot.
@@ -66,24 +62,9 @@ async function readEconomicJson(response: Response, deadlineAt: number): Promise
       const { done, value } = await reader.read();
       if (done) break;
       // Refused before the chunk that would cross the ceiling is copied.
-      if (value.byteLength > ECONOMIC_RESPONSE_MAX_BYTES - size)
-        throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-      const needed = size + value.byteLength;
-      if (!owned || needed > owned.byteLength) {
-        const grown = Math.min(
-          ECONOMIC_RESPONSE_MAX_BYTES,
-          Math.max(needed, ECONOMIC_RESPONSE_MIN_BUFFER_BYTES, (owned?.byteLength ?? 0) * 2),
-        );
-        const next = Buffer.alloc(grown);
-        if (owned) owned.copy(next, 0, 0, size);
-        owned = next;
-      }
-      owned.set(value, size);
-      size = needed;
+      if (!body.append(value)) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
     }
-    const text = owned
-      ? new TextDecoder('utf-8', { fatal: true }).decode(owned.subarray(0, size))
-      : '';
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(body.toBuffer());
     if (!text && response.status !== 204) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
     return text ? (JSON.parse(text) as unknown) : undefined;
   } finally {

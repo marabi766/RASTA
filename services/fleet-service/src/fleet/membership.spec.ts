@@ -348,3 +348,29 @@ describe('notAMember', () => {
     ]);
   });
 });
+
+describe('LiveMembershipClient decoding and deadline (PR #722 r2 F2/F3)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('reads a BOM-prefixed answer as Fetch does', async () => {
+    handler = (_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(answer()))]),
+      );
+    };
+    await expect(client().isLiveMember(ORG, USER)).resolves.toBe(true);
+  });
+
+  it('takes no answer whose parsing crossed the deadline', async () => {
+    handler = json(answer());
+    let now = 1_000;
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const parse = JSON.parse.bind(JSON);
+    jest.spyOn(JSON, 'parse').mockImplementation(((text: string) => {
+      now += 60_000;
+      return parse(text) as unknown;
+    }) as typeof JSON.parse);
+    await expectUnavailable(client().isLiveMember(ORG, USER));
+  });
+});

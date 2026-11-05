@@ -257,3 +257,21 @@ describe('AuditLookupClient', () => {
     expect(headers).not.toHaveProperty('traceparent');
   });
 });
+
+describe('AuditLookupClient decoding (PR #722 r2 F3)', () => {
+  it('reads a BOM-prefixed answer as Fetch does', async () => {
+    const body = { id: ID, organizationId: 'ORG-DEH-0001', occurredAt: AT.toISOString() };
+    const { client } = clientWith(
+      async () =>
+        new Response(
+          new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(JSON.stringify(body))]),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    await expect(inContext(() => client.findTarget(ID, AT))).resolves.toEqual({
+      id: ID,
+      organizationId: 'ORG-DEH-0001',
+      occurredAt: AT,
+    });
+  });
+});

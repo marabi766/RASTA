@@ -217,3 +217,39 @@ describe('ProxyService — the body it forwards', () => {
     expect(await forwardAndCaptureBody('DELETE', {})).toBeUndefined();
   });
 });
+
+describe('ProxyService — decoding as Fetch does (PR #722 r2 F3)', () => {
+  it('relays a BOM-prefixed JSON answer parsed, as `.json()` would read it', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('{"a":1}')]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof globalThis.fetch;
+    try {
+      const relayed = await runWithContext(
+        {
+          correlationId: 'COR_BOM',
+          requestId: 'REQ_BOM',
+          startedAt: Date.now(),
+          roles: ['ORGANIZATION_ADMIN'],
+          authType: 'USER',
+          userId: 'USR_1',
+          organizationIds: [],
+        },
+        () =>
+          proxy().forward({
+            service: 'identity',
+            method: 'GET',
+            path: '/v1/users/USR_1',
+            query: '',
+            headers: { authorization: 'Bearer caller-token' },
+            body: undefined,
+          }),
+      );
+      expect(relayed).toMatchObject({ status: 200, body: { a: 1 } });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

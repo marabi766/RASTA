@@ -7,6 +7,7 @@ import {
   RedirectRefusedError,
   exchangeWithDeadline,
   getContext,
+  readBoundedText,
   httpStatusToCode,
   requestPath,
   type InternalTokenService,
@@ -27,6 +28,13 @@ import {
   type CircuitPermit,
   type CircuitStateView,
 } from './circuit-breaker';
+
+/**
+ * Byte ceiling of a proxied answer, decoded (PR #722 r1 F1). The largest
+ * internal answer a client route returns is far below it; past it the
+ * exchange fails as `UPSTREAM_UNAVAILABLE` rather than buffering the peer.
+ */
+const MAX_PROXIED_BODY_BYTES = 8 * 1024 * 1024;
 
 export { circuitRetryAfterSeconds } from './circuit-breaker';
 
@@ -321,7 +329,9 @@ export class ProxyService {
           status = response.status;
           // Nothing is decided on the status line: a 200 whose body then stalls or
           // is cut off is a failure, and a 5xx is judged once its body is in.
-          const text = await response.text();
+          // Bounded, decoded bytes included (PR #722 r1 F1): past the ceiling
+          // the read rejects and the service is counted as failed.
+          const text = await readBoundedText(response, MAX_PROXIED_BODY_BYTES);
 
           if (response.status >= 500) {
             // A 5xx counts toward the circuit, once. (#381's expected identity

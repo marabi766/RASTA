@@ -1,10 +1,10 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { Inject, Injectable } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
-import { ORGANIZATION_SERVICE, readCapped } from './organization-directory';
+import { ORGANIZATION_SERVICE } from './organization-directory';
 import {
   procurementThresholdsSchema,
   type ThresholdPolicy,
@@ -56,7 +56,7 @@ export class ProcurementThresholdPolicy {
           await response.body?.cancel().catch(() => undefined);
           throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
         }
-        const text = await readCapped(response, MAX_POLICY_RESPONSE_BYTES);
+        const text = await readCappedText(response, MAX_POLICY_RESPONSE_BYTES);
         const parsed = responseSchema.safeParse(text === null ? null : JSON.parse(text));
         if (!parsed.success || parsed.data.organizationId !== organizationId) {
           throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);

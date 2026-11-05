@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type KeyLike } fro
 import { z } from 'zod';
 import { legacyParse } from '@rasta/contracts';
 
+import { BodyDeadlineError, readBoundedJson } from './bounded-body';
 import { CredentialRedirectRefusedError, credentialFetch } from './credential-fetch';
 
 /**
@@ -144,6 +145,9 @@ export class OidcError extends Error {
  */
 const TOKEN_ENDPOINT_TIMEOUT_MS = 10_000;
 
+/** Byte ceiling of a token endpoint answer, decoded (PR #722 r1 F1). */
+const MAX_TOKEN_BODY_BYTES = 256 * 1024;
+
 async function postForm(
   endpoint: string,
   body: Record<string, string>,
@@ -155,6 +159,9 @@ async function postForm(
   // attached to the response, so a provider that sends headers and then
   // stalls mid-body is cut off by the same timer.
   const signal = AbortSignal.timeout(timeoutMs);
+  // Checked between body chunks too: the timer cannot fire while an
+  // always-ready body keeps the microtask queue busy (PR #722 r1 F2).
+  const deadlineAt = performance.now() + timeoutMs;
 
   let response: Response;
   try {
@@ -196,7 +203,7 @@ async function postForm(
     // a refused grant from everything else. The message carries the status
     // and that code, nothing more: Keycloak's error bodies are also where a
     // token can end up echoed back.
-    if (response.status === 400 && (await errorCodeOf(response)) === 'invalid_grant') {
+    if (response.status === 400 && (await errorCodeOf(response, deadlineAt)) === 'invalid_grant') {
       throw new OidcError(
         'INVALID_GRANT',
         'the identity provider refused the grant (invalid_grant)',
@@ -210,11 +217,11 @@ async function postForm(
 
   let payload: unknown;
   try {
-    payload = await response.json();
-  } catch {
+    payload = await readBoundedJson(response, MAX_TOKEN_BODY_BYTES, deadlineAt);
+  } catch (error) {
     // A body cut off by the deadline is a provider that stopped answering,
     // not one that answered with something other than JSON.
-    if (signal.aborted) {
+    if (signal.aborted || error instanceof BodyDeadlineError) {
       throw new OidcError(
         'TOKEN_REQUEST_FAILED',
         `the identity provider did not finish answering within ${timeoutMs} ms`,
@@ -234,9 +241,9 @@ async function postForm(
 }
 
 /** The RFC 6749 § 5.2 `error` code of an error response, or null. Never throws. */
-async function errorCodeOf(response: Response): Promise<string | null> {
+async function errorCodeOf(response: Response, deadlineAt: number): Promise<string | null> {
   try {
-    const body: unknown = await response.json();
+    const body: unknown = await readBoundedJson(response, MAX_TOKEN_BODY_BYTES, deadlineAt);
     const code = (body as { error?: unknown } | null)?.error;
     return typeof code === 'string' ? code : null;
   } catch {

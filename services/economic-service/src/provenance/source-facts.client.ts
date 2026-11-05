@@ -3,11 +3,15 @@ import { z } from 'zod';
 import { digitsToBigInt, isoDateTime, MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import {
   RastaError,
+  readBoundedJson,
   tryGetContext,
   upstreamExchange,
   type InternalTokenService,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
+
+/** Byte ceiling of the peer's answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 1024 * 1024;
 
 /**
  * Asks a fact's owning service what it actually recorded (ADR-061 § 4).
@@ -253,12 +257,13 @@ export class SourceFactsClient implements SourceFacts {
         if (response.status === 404) {
           // Absence only when the owner's own handler said so, about this kind
           // of record. Unavailable otherwise: retried, never taken as "no".
-          if (isRecordNotFound(await response.json(), resourceType)) return null;
+          if (isRecordNotFound(await readBoundedJson(response, MAX_ANSWER_BYTES), resourceType))
+            return null;
           throw RastaError.upstreamUnavailable(service);
         }
         if (response.status !== 200) throw RastaError.upstreamUnavailable(service);
 
-        const parsed = schema.safeParse(await response.json());
+        const parsed = schema.safeParse(await readBoundedJson(response, MAX_ANSWER_BYTES));
         if (!parsed.success) throw RastaError.upstreamUnavailable(service);
 
         // An answer about another record is not an answer. The organization is

@@ -131,12 +131,41 @@ test.each([{ name: 'PreconditionFailed' }, { $metadata: { httpStatusCode: 412 } 
 test('prefix collection sanitizes a delayed body failure', async () => {
   send.mockResolvedValue({
     Body: {
-      transformToByteArray: async () => {
-        throw foreign();
-      },
+      transformToWebStream: () =>
+        new ReadableStream({
+          pull() {
+            throw foreign();
+          },
+        }),
     },
   } as never);
   safe(await new S3ObjectStorage(options).readPrefix('x', 10).catch((e: unknown) => e));
+});
+
+test('a prefix read keeps at most the asked bytes when storage ignores the range (PR #722 r1 F1)', async () => {
+  let pulls = 0;
+  let cancelled = false;
+  send.mockResolvedValue({
+    Body: {
+      transformToWebStream: () =>
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              pulls += 1;
+              controller.enqueue(new Uint8Array(4).fill(pulls));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+    },
+  } as never);
+  const prefix = await new S3ObjectStorage(options).readPrefix('x', 10);
+  expect([...prefix]).toEqual([1, 1, 1, 1, 2, 2, 2, 2, 3, 3]);
+  expect(pulls).toBe(3);
+  expect(cancelled).toBe(true);
 });
 
 async function collect(stream: Readable): Promise<Buffer> {

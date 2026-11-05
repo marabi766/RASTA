@@ -393,4 +393,15 @@ describe('SourceFactsClient', () => {
       'http://maintenance.internal:3105/v1/internal/maintenance-requests/..%2F..%2Fv1%2Fwallets',
     );
   });
+
+  it('reads a BOM-prefixed answer as Fetch does (PR #722 r2 F3)', async () => {
+    const { facts } = client(
+      () =>
+        new Response(
+          new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(JSON.stringify(approval))]),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    await expect(facts.maintenanceRequest('ORG-A', 'MNT_1')).resolves.toEqual(approval);
+  });
 });
