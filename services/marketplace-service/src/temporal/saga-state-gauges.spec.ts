@@ -4,7 +4,8 @@ import { OrderSagaClient } from './saga.client';
 import type { MarketplaceEnv } from '../config/env';
 import {
   DISPUTE_ORIGINS,
-  DISPUTE_RELEASE_STATUSES,
+  ORDER_TRANSITIONS,
+  RELEASE_WATCHED_STATUSES,
   SAGA_CUSTODY,
   SAGA_CUSTODY_STATUSES,
   TERMINAL_STATUSES,
@@ -135,13 +136,26 @@ describe('saga custody (#770 r2 F3)', () => {
     );
   });
 
-  it('watches every status a SETTLE can resume to for an unreleased dispute', () => {
-    // A dispute origin is where SETTLE returns the order (D-083): outside the
-    // saga's custody, only the release says the obligation left DISPUTED.
-    for (const origin of DISPUTE_ORIGINS) {
-      const watched = SAGA_CUSTODY[origin] === 'SAGA' || DISPUTE_RELEASE_STATUSES.includes(origin);
-      expect({ origin, watched }).toEqual({ origin, watched: true });
+  it('watches for an unreleased dispute wherever a decided dispute can leave the order', () => {
+    // SETTLE resumes a dispute origin (D-083), REFUND goes to CANCELLING, and a
+    // party may move a resumed order on before the saga releases it: every
+    // status reachable from DISPUTED, and onward, until the order is terminal.
+    const reachable = new Set<string>();
+    const queue = [...ORDER_TRANSITIONS.DISPUTED];
+    while (queue.length > 0) {
+      const status = queue.shift()!;
+      if (reachable.has(status)) continue;
+      reachable.add(status);
+      queue.push(...ORDER_TRANSITIONS[status]);
     }
-    expect(DISPUTE_RELEASE_STATUSES).not.toContain('DISPUTED');
+    for (const status of reachable) {
+      const watched =
+        SAGA_CUSTODY[status] === 'TERMINAL' ||
+        status === 'DISPUTED' ||
+        RELEASE_WATCHED_STATUSES.includes(status as never);
+      expect({ status, watched }).toEqual({ status, watched: true });
+    }
+    for (const origin of DISPUTE_ORIGINS) expect(RELEASE_WATCHED_STATUSES).toContain(origin);
+    expect(RELEASE_WATCHED_STATUSES).not.toContain('DISPUTED');
   });
 });

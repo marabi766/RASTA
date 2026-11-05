@@ -123,7 +123,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
       this.logger.log('Order saga worker polling (MARKETPLACE_TEMPORAL_TASK_QUEUE)');
       if (!this.ended) {
         void this.probeLiveness();
-        this.probeTimer = setInterval(() => void this.probeLiveness(), LIVENESS_PROBE_INTERVAL_MS);
+        this.probeTimer = setInterval(() => this.everyInterval(), LIVENESS_PROBE_INTERVAL_MS);
         this.probeTimer.unref();
       }
     } catch (error) {
@@ -155,6 +155,15 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
       this.probing = undefined;
     });
     return this.probing;
+  }
+
+  /**
+   * A look still unanswered a whole interval later (its RPC deadline is a
+   * third of that) is unknown: down until it answers, never its last value.
+   */
+  private everyInterval(): void {
+    if (this.probing) sagaWorkerUp.set({ service: SERVICE_NAME }, 0);
+    void this.probeLiveness();
   }
 
   private async look(): Promise<boolean> {

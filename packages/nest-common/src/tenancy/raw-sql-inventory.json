@@ -2416,15 +2416,15 @@
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 80,
-    "hash": "367ddc1e04369ec30fa59919457805f81c3c9474de5ce970a1e9da8394f28091",
+    "line": 82,
+    "hash": "4eb9d3a086aa2dab8360f8bb6268ddd6adf21c90400cb12656154b854479ed96",
     "occurrence": 0,
-    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database"
+    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database; ages in UTC whatever the session zone"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 108,
-    "hash": "c3ff7e241ee7bcc06c5ac33c29912eb0fdd38ac55a87e9aa614ad31dab0b3ac3",
+    "line": 114,
+    "hash": "6d265114a917fda15a4391b9277ff02a804412fa59c3cecd213b0850c5ef9fe4",
     "occurrence": 0,
     "decision": "platform-wide: saga unresolved-financial-step gauge exposes per-reason count and oldest age only (#770 r2 F3); no tenant labels, identifiers or amounts leave the database"
   },

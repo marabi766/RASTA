@@ -2,7 +2,7 @@ import { SAGA_START_DB_MAX_WAIT_MS, SAGA_START_DB_TIMEOUT_MS } from '../config/o
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import { DISPUTE_RELEASE_STATUSES, SAGA_CUSTODY_STATUSES } from '../order/state-machine';
+import { RELEASE_WATCHED_STATUSES, SAGA_CUSTODY_STATUSES } from '../order/state-machine';
 
 export const START_BATCH_SIZE = 4;
 export const START_LEASE_SECONDS = 30;
@@ -76,10 +76,12 @@ export class SagaStartStore {
 
   async backlog(): Promise<{ count: number; age: number }> {
     // Counts only, no tenant labels, identifiers or amounts leave the DB.
+    // created_at is UTC wall time without a zone: now is taken in UTC too, so
+    // the session's TimeZone cannot shift the age.
     const [row] = await this.bounded(
       (tx) => tx.$queryRaw<{ count: bigint; age: number }[]>`
       SELECT count(*) AS count,
-        COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - min(created_at)), 0)::float AS age
+        COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC') - min(created_at)), 0)::float AS age
       FROM "order" WHERE saga_start_delivered_at IS NULL AND status IN ('PENDING', 'CANCELLING')
     `,
     );
@@ -91,46 +93,53 @@ export class SagaStartStore {
    * oldest wait (#770 r2 F3). State, not attempts: an order counts until it
    * moves on, whether the saga retries, has stopped, or has no worker.
    *
-   * - A `SAGA_CUSTODY` status, waiting since it last left a party's hands (a
-   *   transition from a party or terminal status; else since creation), so a
-   *   settlement attempt bouncing RECEIPT_CONFIRMED ↔ SETTLING does not reset it.
-   * - `DISPUTE_RELEASE`: a party wait (D-083) whose last dispute mirror
-   *   (`disputeObligation` / `markObligationDisputed` step) is newer than its
-   *   last `resolveObligationDispute` step — economic-service still holds the
-   *   obligation DISPUTED. Waiting since the order left DISPUTED.
+   * - `DISPUTE_RELEASE`, first: any live order outside DISPUTED whose last
+   *   dispute mirror (`disputeObligation` / `markObligationDisputed` step) is
+   *   newer than its last `resolveObligationDispute` step — economic-service
+   *   still holds the obligation DISPUTED (D-083). Whatever a party does next
+   *   (confirms receipt, cancels), it stays this, aged from when the order
+   *   left DISPUTED, so a party's move neither clears nor re-ages it.
+   * - Otherwise a `SAGA_CUSTODY` status, aged from when the order last left a
+   *   party's hands (a transition from a party or terminal status; else its
+   *   creation), so a settlement bouncing RECEIPT_CONFIRMED ↔ SETTLING does
+   *   not reset it.
    *
-   * Database clock, as `backlog`. Counts and ages only leave the database.
+   * Times without a zone are UTC wall time; now is taken in UTC to match.
+   * Counts and ages only leave the database.
    */
   async unresolved(): Promise<{ reason: string; count: number; age: number }[]> {
     const custody = SAGA_CUSTODY_STATUSES as string[];
-    const release = DISPUTE_RELEASE_STATUSES as string[];
+    const live = RELEASE_WATCHED_STATUSES as string[];
     const rows = await this.bounded(
       (tx) => tx.$queryRaw<{ reason: string; count: bigint; age: number }[]>`
-      WITH owed AS (
-        SELECT
-          CASE WHEN o.status::text = ANY(${custody}::text[]) THEN o.status::text
-            ELSE 'DISPUTE_RELEASE' END AS reason,
-          COALESCE(CASE WHEN o.status::text = ANY(${custody}::text[]) THEN
+      WITH candidate AS (
+        SELECT o.id, o.organization_id, o.status::text AS status, o.created_at,
+          COALESCE((SELECT max(s.applied_at) FROM saga_step s
+              WHERE s.organization_id = o.organization_id AND s.order_id = o.id
+                AND s.activity IN ('disputeObligation', 'markObligationDisputed'))
+            > COALESCE((SELECT max(s.applied_at) FROM saga_step s
+              WHERE s.organization_id = o.organization_id AND s.order_id = o.id
+                AND s.activity = 'resolveObligationDispute'), '-infinity'::timestamptz),
+            false) AS release_owed
+        FROM "order" o
+        WHERE o.status::text = ANY(${live}::text[])
+      ),
+      owed AS (
+        SELECT CASE WHEN c.release_owed THEN 'DISPUTE_RELEASE' ELSE c.status END AS reason,
+          COALESCE(CASE WHEN c.release_owed THEN
             (SELECT max(h.occurred_at) FROM order_status_history h
-              WHERE h.organization_id = o.organization_id AND h.order_id = o.id
-                AND h.kind = 'TRANSITION' AND NOT (h.from_status::text = ANY(${custody}::text[])))
+              WHERE h.organization_id = c.organization_id AND h.order_id = c.id
+                AND h.kind = 'TRANSITION' AND h.from_status = 'DISPUTED')
           ELSE
             (SELECT max(h.occurred_at) FROM order_status_history h
-              WHERE h.organization_id = o.organization_id AND h.order_id = o.id
-                AND h.kind = 'TRANSITION' AND h.from_status = 'DISPUTED')
-          END, o.created_at) AS since
-        FROM "order" o
-        WHERE o.status::text = ANY(${custody}::text[])
-          OR (o.status::text = ANY(${release}::text[])
-            AND (SELECT max(s.applied_at) FROM saga_step s
-                  WHERE s.organization_id = o.organization_id AND s.order_id = o.id
-                    AND s.activity IN ('disputeObligation', 'markObligationDisputed'))
-              > COALESCE((SELECT max(s.applied_at) FROM saga_step s
-                  WHERE s.organization_id = o.organization_id AND s.order_id = o.id
-                    AND s.activity = 'resolveObligationDispute'), '-infinity'::timestamptz))
+              WHERE h.organization_id = c.organization_id AND h.order_id = c.id
+                AND h.kind = 'TRANSITION' AND NOT (h.from_status::text = ANY(${custody}::text[])))
+          END, c.created_at) AS since
+        FROM candidate c
+        WHERE c.release_owed OR c.status = ANY(${custody}::text[])
       )
       SELECT reason, count(*) AS count,
-        GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - min(since)))::float AS age
+        GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC') - min(since)))::float AS age
       FROM owed GROUP BY reason
     `,
     );

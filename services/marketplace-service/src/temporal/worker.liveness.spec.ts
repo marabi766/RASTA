@@ -182,6 +182,21 @@ describe('OrderSagaWorker liveness (FU-104)', () => {
     expect(await up()).toBe(0);
   });
 
+  it('reads 0 when a look is still unanswered a whole interval later', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    const harness = build();
+    await harness.worker.onApplicationBootstrap();
+    await harness.worker.probeLiveness();
+    expect(await up()).toBe(1);
+    harness.describeTaskQueue.mockImplementation(() => new Promise(() => undefined));
+    jest.advanceTimersByTime(LIVENESS_PROBE_INTERVAL_MS);
+    expect(await up()).toBe(1); // the hung look has just started
+    jest.advanceTimersByTime(LIVENESS_PROBE_INTERVAL_MS);
+    expect(await up()).toBe(0);
+    jest.useRealTimers();
+    await harness.worker.stop({ deadlineAt: Date.now() + 50 });
+  });
+
   it('probes on an interval while running', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
     const { worker, describeTaskQueue } = build();

@@ -126,10 +126,12 @@ export const SAGA_CUSTODY_STATUSES = (Object.keys(SAGA_CUSTODY) as OrderStatus[]
 );
 
 /**
- * Where an operator's SETTLE can leave an order whose obligation
- * economic-service still holds DISPUTED until the saga releases it (D-083):
- * every party wait but the dispute itself.
+ * Where an order can be while economic-service still holds its obligation
+ * DISPUTED for a dispute decided here (D-083): every live status but DISPUTED
+ * itself. SETTLE resumes a party wait or RECEIPT_CONFIRMED, REFUND goes to
+ * CANCELLING, and a party may move a resumed order on before the saga
+ * releases it.
  */
-export const DISPUTE_RELEASE_STATUSES = (Object.keys(SAGA_CUSTODY) as OrderStatus[]).filter(
-  (status) => SAGA_CUSTODY[status] === 'PARTY' && status !== 'DISPUTED',
+export const RELEASE_WATCHED_STATUSES = (Object.keys(SAGA_CUSTODY) as OrderStatus[]).filter(
+  (status) => SAGA_CUSTODY[status] !== 'TERMINAL' && status !== 'DISPUTED',
 );

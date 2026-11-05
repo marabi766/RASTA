@@ -41,21 +41,26 @@ groups:
           summary: No order saga worker is polling
           description: No marketplace-service replica reports a saga worker that Temporal lists as polling. Holds, settlements, refunds and dispute releases are not progressing.
           runbook: docs/runbooks/marketplace-saga-liveness.md
-  # #770 r2 F3. State, not a retry rate: the age of the oldest order waiting on
-  # a financial step the saga owes (a saga-custody status, or a dispute decided
-  # here that economic-service still holds). It stays until the order moves on,
-  # whether the saga retries, has stopped, or has no worker. `max` and `absent`
-  # both yield the empty label set, so a reporter that dies does not resolve
-  # the alert and open a new one: it simply keeps firing.
+  # #770 r2 F3. State, not a retry rate: per reason, the age of the oldest
+  # order waiting on a financial step the saga owes (a saga-custody status, or
+  # a dispute decided here that economic-service still holds). It stays until
+  # the order moves on, whether the saga retries, has stopped, or has no
+  # worker. One instance per reason, and each `absent` names its reason, so a
+  # reporter that dies keeps that instance firing (same label set: no resolve,
+  # no new pending) and a stuck reason does not hide another.
   - name: rasta-marketplace-saga-uncertainty
     rules:
       - alert: RastaMarketplaceSagaFinancialStepUnresolved
-        expr: max(rasta_marketplace_saga_unresolved_age_seconds) > 3600
-          or absent(rasta_marketplace_saga_unresolved_age_seconds)
+        expr: max by (reason) (rasta_marketplace_saga_unresolved_age_seconds) > 3600
+          or absent(rasta_marketplace_saga_unresolved_age_seconds{reason="PENDING"})
+          or absent(rasta_marketplace_saga_unresolved_age_seconds{reason="RECEIPT_CONFIRMED"})
+          or absent(rasta_marketplace_saga_unresolved_age_seconds{reason="SETTLING"})
+          or absent(rasta_marketplace_saga_unresolved_age_seconds{reason="CANCELLING"})
+          or absent(rasta_marketplace_saga_unresolved_age_seconds{reason="DISPUTE_RELEASE"})
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: An order has waited over an hour on an unconfirmed financial step
-          description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. rasta_marketplace_saga_unresolved_orders names the step. It clears only when the order moves on.
+          summary: 'An order has waited over an hour on an unconfirmed financial step ({{ $labels.reason }})'
+          description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
           runbook: docs/runbooks/marketplace-saga-liveness.md

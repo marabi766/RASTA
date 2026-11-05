@@ -1,4 +1,5 @@
 import { runUnscoped } from '@rasta/nest-common';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
 import { SagaStartStore } from '../src/temporal/saga-start.store';
@@ -49,9 +50,16 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   const asOperator = <T>(fn: () => Promise<T>) =>
     asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-F3-OPS' }, fn);
 
+  // A session whose TimeZone is not UTC: times without a zone are UTC wall
+  // time, so an age must not move with the session's zone.
+  const tehranUrl = new URL(process.env.DATABASE_URL_MARKETPLACE ?? process.env.DATABASE_URL ?? '');
+  tehranUrl.searchParams.set('options', '-c TimeZone=Asia/Tehran');
+  const tehran = new PrismaService(tehranUrl.toString());
+  const tehranStore = new SagaStartStore(tehran);
+
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await prisma.onModuleDestroy();
+    await Promise.all([prisma.onModuleDestroy(), tehran.onModuleDestroy()]);
   });
 
   async function place(): Promise<string> {
@@ -90,9 +98,9 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
     });
   }
 
-  async function read(): Promise<Record<string, { count: number; days: number }>> {
+  async function read(from = store): Promise<Record<string, { count: number; days: number }>> {
     return Object.fromEntries(
-      (await store.unresolved()).map(({ reason, count, age: seconds }) => [
+      (await from.unresolved()).map(({ reason, count, age: seconds }) => [
         reason,
         { count, days: seconds / 86_400 },
       ]),
@@ -185,5 +193,54 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       }),
     );
     expect((await read()).DISPUTE_RELEASE!.count).toBe(before.DISPUTE_RELEASE!.count);
+  });
+  it('measures the same age whatever the session time zone (UTC wall time)', async () => {
+    const orderId = await place();
+    await age(orderId, 4000);
+    for (const from of [store, tehranStore]) {
+      const { days } = (await read(from)).PENDING!;
+      expect(days).toBeGreaterThan(3999.99);
+      expect(days).toBeLessThan(4000.01);
+    }
+    const [backlogUtc, backlogTehran] = await Promise.all([store.backlog(), tehranStore.backlog()]);
+    expect(Math.abs(backlogUtc.age - backlogTehran.age)).toBeLessThan(60);
+    await acts.markFundsHeld(orderId, `TXN_${ulid()}`);
+  });
+
+  it('keeps an owed release counted, and its age, when a party moves the order on (review F1)', async () => {
+    const before = await read();
+    const { orderId, transactionId } = await held();
+    await asBuyer(() =>
+      wiring.orders.raiseDispute(orderId, { reason: 'goods are not as ordered' }),
+    );
+    const disputeId = await openDisputeId(prisma, orderId);
+    await acts.disputeObligation(orderId, transactionId, disputeId, 'goods are not as ordered');
+    await asOperator(() =>
+      resolveOpenDispute(wiring, orderId, {
+        outcome: 'SETTLE',
+        resolution: 'supplier showed delivery',
+        responsibility: 'BUYER',
+      }),
+    );
+    await age(orderId, 5000);
+    // The release failed and the saga ended; the parties carry on regardless.
+    await asSupplier(() => wiring.orders.confirm(orderId));
+    await asSupplier(() => wiring.orders.fulfill(orderId, { trackingReference: 'TRK-F3' }));
+    await asBuyer(() => wiring.orders.confirmReceipt(orderId, {}));
+    const after = await read();
+    expect(after.DISPUTE_RELEASE!.count).toBe(before.DISPUTE_RELEASE!.count + 1);
+    expect(after.DISPUTE_RELEASE!.days).toBeGreaterThan(4999.9);
+    expect(after.RECEIPT_CONFIRMED!.count).toBe(before.RECEIPT_CONFIRMED!.count);
+
+    await acts.resolveObligationDispute(
+      orderId,
+      transactionId,
+      disputeId,
+      'supplier showed delivery',
+    );
+    const released = await read();
+    expect(released.DISPUTE_RELEASE!.count).toBe(before.DISPUTE_RELEASE!.count);
+    // Released, it is an ordinary settlement owed now, aged from the receipt.
+    expect(released.RECEIPT_CONFIRMED!.count).toBe(before.RECEIPT_CONFIRMED!.count + 1);
   });
 });

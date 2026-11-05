@@ -17,20 +17,21 @@ the retries stopped, whether or not anything was resolved. Both now come from st
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `rasta_marketplace_saga_worker_up`                      | Per replica. `1` only while the SDK reports the worker `RUNNING` **and** Temporal lists this worker's own identity (`marketplace-saga@<host>/<pid>/<uuid>`) as a poller of both the workflow and the activity task queue. Disabled, never started, ended, stopping, or a probe that failed: `0`. |
 | `rasta_marketplace_saga_unresolved_orders{reason}`      | Orders waiting on a financial step the saga owes, read from the database every 10 s by every replica, whether or not it runs a worker.                                                                                                                                                           |
-| `rasta_marketplace_saga_unresolved_age_seconds{reason}` | How long the oldest of them has waited (database clock); `0` when none.                                                                                                                                                                                                                          |
+| `rasta_marketplace_saga_unresolved_age_seconds{reason}` | How long the oldest of them has waited, in UTC (rows store UTC wall time); `0` when none.                                                                                                                                                                                                        |
 
 `reason` is one of:
 
-| `reason`            | The order is …                                                                                                            | The saga owes …                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `PENDING`           | placed; the hold is not confirmed                                                                                         | the hold (`createObligation`), or `FAILED` |
-| `RECEIPT_CONFIRMED` | confirmed by the buyer, or back after a failed settlement attempt                                                         | authorisation and settlement               |
-| `SETTLING`          | in a settlement attempt                                                                                                   | the settlement's outcome                   |
-| `CANCELLING`        | cancelled, or refunded by a dispute decision                                                                              | the refund (`compensate`)                  |
-| `DISPUTE_RELEASE`   | back in a party wait after an operator's SETTLE (D-083), its dispute mirrored to economic-service and no release recorded | the release (`resolveObligationDispute`)   |
+| `reason`            | The order is …                                                                                                                                                              | The saga owes …                            |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `PENDING`           | placed; the hold is not confirmed                                                                                                                                           | the hold (`createObligation`), or `FAILED` |
+| `RECEIPT_CONFIRMED` | confirmed by the buyer, or back after a failed settlement attempt                                                                                                           | authorisation and settlement               |
+| `SETTLING`          | in a settlement attempt                                                                                                                                                     | the settlement's outcome                   |
+| `CANCELLING`        | cancelled, or refunded by a dispute decision                                                                                                                                | the refund (`compensate`)                  |
+| `DISPUTE_RELEASE`   | anywhere but `DISPUTED` or terminal after an operator's decision (D-083), its dispute mirrored to economic-service and no release recorded — even after a party moved it on | the release (`resolveObligationDispute`)   |
 
 The age counts from when the order last left a party's hands, so a settlement bouncing `RECEIPT_CONFIRMED ↔ SETTLING`
-does not reset it; for `DISPUTE_RELEASE`, from when it left `DISPUTED`. A sample that fails, and a replica that is
+does not reset it; for `DISPUTE_RELEASE`, from when it left `DISPUTED`, whatever a party did since. An owed release
+takes precedence over the status, so a buyer confirming receipt neither clears nor re-ages it. A sample that fails, and a replica that is
 stopping, **withdraw** the series instead of leaving the last value; every alert reads a missing series as unknown and
 fires.
 
@@ -40,12 +41,14 @@ fires.
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `RastaMarketplaceSagaWorkerDown`              | a replica reports `worker_up == 0` for 2 min                                                                     | `run()` failed or ended: 2 min + one scrape. Still `RUNNING` but no longer polling: Temporal drops a poller about 5 min after its last poll (5 min 9 s on the dev server), probed every 15 s, then 2 min — about 7.5 min. |
 | `RastaMarketplaceSagaNoLiveWorker`            | no replica reports `worker_up == 1` — all `0`, or no series at all (every replica down or unscraped) — for 2 min | as above; a replica that is gone stops reporting at its next scrape                                                                                                                                                       |
-| `RastaMarketplaceSagaFinancialStepUnresolved` | the oldest owed step is over 1 h old, **or** no replica reports the gauge, for 5 min                             | 1 h 5 min after the order entered the saga's custody                                                                                                                                                                      |
+| `RastaMarketplaceSagaFinancialStepUnresolved` | per `reason`: the oldest owed step is over 1 h old, **or** no replica reports that reason, for 5 min             | 1 h 5 min after the order entered the saga's custody                                                                                                                                                                      |
 
 `FinancialStepUnresolved` does **not** clear when the retries stop, when the saga workflow ends, or when every worker or
 the whole service dies: it clears only when the order moves on (or the gauge is reported again and shows nothing over
-1 h). The `max(...)` and `absent(...)` arms carry the same empty label set, so a reporter dying keeps the alert firing
-instead of resolving it and opening a new one.
+1 h). One instance per `reason`: `max by (reason)` and each `absent(…{reason="…"})` carry the same label set, so a
+reporter dying keeps that instance firing instead of resolving it and opening a new one, and an order stuck for days
+under one reason does not hide a new one under another (a second order under the **same** reason does not re-notify:
+watch `rasta_marketplace_saga_unresolved_orders{reason}` rise).
 
 ## What the operator does
 
@@ -70,21 +73,30 @@ back, then work through `WorkerDown` above. `FinancialStepUnresolved` follows wi
 
 ### `RastaMarketplaceSagaFinancialStepUnresolved`
 
-1. `rasta_marketplace_saga_unresolved_orders` by `reason` says which step. If the gauge is missing, the service is down
+1. The alert's `reason` label says which step; `rasta_marketplace_saga_unresolved_orders{reason}` how many orders. If the gauge is missing, the service is down
    or its sample is failing (log: `A saga state gauge could not be sampled`): the state is unknown — treat every
    in-flight order as unresolved until it is measured again.
 2. If a liveness alert fires too, fix that first: the sagas resume at the next poll.
-3. Find the orders (read-only, database clock):
+3. Find the orders (read-only). The query is `SagaStartStore.unresolved()` in
+   `services/marketplace-service/src/temporal/saga-start.store.ts`; per order, with the same age definition:
 
    ```sql
-   SELECT id, status, updated_at FROM "order"
-   WHERE status IN ('PENDING', 'RECEIPT_CONFIRMED', 'SETTLING', 'CANCELLING')
-   ORDER BY updated_at LIMIT 50;
+   SELECT o.id, o.status,
+     (SELECT max(s.applied_at) FROM saga_step s WHERE s.order_id = o.id
+        AND s.activity IN ('disputeObligation', 'markObligationDisputed'))
+       > COALESCE((SELECT max(s.applied_at) FROM saga_step s WHERE s.order_id = o.id
+        AND s.activity = 'resolveObligationDispute'), '-infinity') AS release_owed,
+     COALESCE((SELECT max(h.occurred_at) FROM order_status_history h WHERE h.order_id = o.id
+        AND h.kind = 'TRANSITION'
+        AND h.from_status NOT IN ('PENDING', 'RECEIPT_CONFIRMED', 'SETTLING', 'CANCELLING')), o.created_at)
+       AS custody_since_utc
+   FROM "order" o
+   WHERE o.status NOT IN ('DISPUTED', 'COMPLETED', 'CANCELLED', 'FAILED')
+   ORDER BY custody_since_utc LIMIT 50;
    ```
 
-   For `DISPUTE_RELEASE`: orders in `FUNDS_HELD`, `CONFIRMED` or `AWAITING_RECEIPT_CONFIRMATION` whose latest
-   `saga_step` with activity `disputeObligation`/`markObligationDisputed` is newer than their latest
-   `resolveObligationDispute` one.
+   Keep rows with `release_owed` (reason `DISPUTE_RELEASE`, aged from the last transition out of `DISPUTED`) or a
+   custody status.
 
 4. `temporal workflow describe --workflow-id order-<orderId>`:
    - **Running, waiting** (a lost signal: the saga re-reads only every `MARKETPLACE_SAGA_RECHECK_HOURS`): send it any of
@@ -99,7 +111,7 @@ back, then work through `WorkerDown` above. `FinancialStepUnresolved` follows wi
 5. `DISPUTE_RELEASE` whose obligation economic-service already shows released (`HELD`, `PENDING_SETTLEMENT` or
    `SETTLED`, with this dispute's identity), with `Saga step resolveObligationDispute of order … took effect but was not
 recorded` in the log: the release happened and only its record was lost. Escalate to engineering to record it; the
-   alert keeps firing until the record exists, by design.
+   alert keeps firing until the record exists, by design (fail closed; no ad-hoc procedure exists yet).
 
 ## Known limits
 
@@ -107,5 +119,17 @@ recorded` in the log: the release happened and only its record was lost. Escalat
   while the order then returns to a party wait is not a `DISPUTE_RELEASE` (no mirror recorded); it is seen once the
   order next enters the saga's custody (`RECEIPT_CONFIRMED`, `CANCELLING`). A durable economic acknowledgement on the
   dispute would close it (proposed as a follow-up to FU-104).
-- A dispute mirrored by a worker older than D-053 left no `saga_step` and is not counted.
+- `saga_step` recording is best effort (`onceForSaga` logs `took effect but was not recorded`). A lost
+  `disputeObligation` record means a release owed is not counted; a lost `resolveObligationDispute` record keeps one
+  counted after it happened (step 5). A dispute mirrored by a worker older than D-053 left no `saga_step` and is not
+  counted. An intent row written before the call would close both (follow-up).
+- While an order is `DISPUTED` it waits on the operator and is not counted, even if the saga had stopped before (for
+  example a buyer disputing after `SETTLEMENT_EXHAUSTED`). After the decision it is counted again, aged from then.
+- A saga that replayed past its resume point without `DISPUTE_RESUME_PATCH` releases only at its next wake-up as
+  `RECEIPT_CONFIRMED`/`CANCELLING`; until then the order counts as `DISPUTE_RELEASE`. On first deploy, run the step 3
+  query to see what is already counted, so the alert does not fire unexplained.
+- The probe uses `DescribeTaskQueue` without enhanced mode; if Temporal ever lists only one partition's pollers, a live
+  worker can read `0` (a false `WorkerDown`, never a false `1`).
+- The unresolved query scans live orders every 10 s per replica under a 1 s statement timeout; past it the sample is
+  withdrawn and the alert fires as unknown. A partial index on `order(status)` is the follow-up if that happens.
 - Local Prometheus loads these rules; notification routing is a deployment responsibility.

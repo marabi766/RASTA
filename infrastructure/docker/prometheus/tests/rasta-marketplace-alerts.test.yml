@@ -107,17 +107,21 @@ tests:
 
   # #770 r2 F3: a settlement waits on economic-service. The saga retries, then
   # stops retrying (a retry counter would go flat here and its alert clear),
-  # then the worker and the whole service die (nothing reports): the state
-  # alert fires throughout, without a gap, and clears only when the order is
-  # resolved.
+  # then the worker and the whole service die (nothing reports): the SETTLING
+  # instance fires throughout, without a gap, and clears only when the order
+  # is resolved. With nothing reported, every reason is unknown and fires too.
   - interval: 1m
     input_series:
       - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
         values: '0+60x80 stale _x19 0x10'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="PENDING"}'
+        values: '0x80 stale _x19 0x10'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="RECEIPT_CONFIRMED"}'
+        values: '0x80 stale _x19 0x10'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="CANCELLING"}'
+        values: '0x80 stale _x19 0x10'
       - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="DISPUTE_RELEASE"}'
         values: '0x80 stale _x19 0x10'
-      - series: 'rasta_marketplace_saga_economic_retries_illustrative_total{service="marketplace-service"}'
-        values: '0+1x40 40x70'
     alert_rule_test:
       - eval_time: 60m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
@@ -127,41 +131,106 @@ tests:
         exp_alerts: []
       - eval_time: 66m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
-        exp_alerts: &unresolved
+        exp_alerts: &settling
           - exp_labels:
               severity: critical
+              reason: SETTLING
             exp_annotations:
-              summary: An order has waited over an hour on an unconfirmed financial step
-              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. rasta_marketplace_saga_unresolved_orders names the step. It clears only when the order moves on.
+              summary: An order has waited over an hour on an unconfirmed financial step (SETTLING)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
               runbook: docs/runbooks/marketplace-saga-liveness.md
-      # Retries stopped 40 minutes ago; the order is still unresolved.
+      # Retries stopped long ago; the order is still unresolved.
       - eval_time: 80m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
-        exp_alerts: *unresolved
-      # The service is gone: still firing at once, not pending again.
+        exp_alerts: *settling
+      # The service is gone: SETTLING still firing at once, not pending again;
+      # the other reasons are pending (unknown).
       - eval_time: 82m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
-        exp_alerts: *unresolved
+        exp_alerts: *settling
       - eval_time: 100m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
-        exp_alerts: *unresolved
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              reason: SETTLING
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (SETTLING)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+          - exp_labels:
+              severity: critical
+              reason: PENDING
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (PENDING)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+          - exp_labels:
+              severity: critical
+              reason: RECEIPT_CONFIRMED
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (RECEIPT_CONFIRMED)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+          - exp_labels:
+              severity: critical
+              reason: CANCELLING
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (CANCELLING)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+          - exp_labels:
+              severity: critical
+              reason: DISPUTE_RELEASE
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (DISPUTE_RELEASE)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
       # Back, and the order has moved on.
       - eval_time: 101m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
         exp_alerts: []
 
-  # A dispute decided here that economic-service still holds DISPUTED: the
-  # same alert, by the same state.
+  # A dispute decided here that economic-service still holds DISPUTED fires
+  # under its own reason, while another reason is already firing: one stuck
+  # order does not hide the next.
   - interval: 1m
     input_series:
       - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="DISPUTE_RELEASE"}'
         values: '3000+60x20'
       - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '7200+60x20'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="PENDING"}'
+        values: '0x20'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="RECEIPT_CONFIRMED"}'
+        values: '0x20'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="CANCELLING"}'
         values: '0x20'
     alert_rule_test:
       - eval_time: 10m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
-        exp_alerts: []
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              reason: SETTLING
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (SETTLING)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
       - eval_time: 16m
         alertname: RastaMarketplaceSagaFinancialStepUnresolved
-        exp_alerts: *unresolved
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              reason: SETTLING
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (SETTLING)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+          - exp_labels:
+              severity: critical
+              reason: DISPUTE_RELEASE
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step (DISPUTE_RELEASE)
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
