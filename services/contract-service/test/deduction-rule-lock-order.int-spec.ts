@@ -212,8 +212,8 @@ describe('one lock per rule: a proposal and a decision never wait on each other 
 
   // A move has locked its change and waits for the rule, and the holder of the rule then meets the
   // pending index on that same change. A pending change is a unique violation at once, not a wait:
-  // no circle, and the move finishes. A proposal's trigger holds the rule only inside its INSERT, so
-  // the SELECT stands for that moment.
+  // no circle, and the move finishes. A proposal's trigger takes the rule inside its INSERT, before
+  // that INSERT meets the index, so the SELECT stands for that moment.
   type Pending = Awaited<ReturnType<typeof propose>>;
   const moves: [string, (tx: ExtendedPrismaClient, c: Pending) => Promise<unknown>, boolean][] = [
     ['withdrawal', (tx, c) => rules.withdraw(tx, act(c, RULE_PROPOSER)), false],

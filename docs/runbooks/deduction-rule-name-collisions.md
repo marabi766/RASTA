@@ -8,4 +8,13 @@
 SELECT organization_id, held, translate(name, U&'ABCDEFGHIJKLMNOPQRSTUVWXYZ\0020\200C', 'abcdefghijklmnopqrstuvwxyz') AS name_key, array_agg(id ORDER BY id) AS ids, array_agg(name ORDER BY id) AS names FROM (SELECT organization_id, id, name, 'in force' AS held FROM deduction_rule WHERE retired_at IS NULL UNION ALL SELECT organization_id, id, name, 'pending' FROM deduction_rule_change WHERE status = 'PENDING_APPROVAL' AND kind = 'CREATE') AS named GROUP BY 1, 2, 3 HAVING count(*) > 1;
 ```
 
-اگر Migration پیش از این کار اجرا و متوقف شده باشد، هیچ ردیف، تابع یا Indexی تغییر نکرده، اما Prisma با `P3009` هر Deploy بعدی را رد می‌کند. پس از برطرف‌کردن برخوردها، `prisma migrate resolve --rolled-back 20261104210000_deduction_rule_name_fold` و سپس Deploy را اجرا کن.
+اگر این پرس‌وجو روی `rasta_contract` با `relation "deduction_rule_change" does not exist` رد شد، Migration جدول‌های ردیف کسر (`20261104100000`) هنوز اجرا نشده و نامی برای برخورد نیست: Deploy را ادامه بده.
+
+تا وقتی مسیری برای نوشتن در این جدول‌ها باز نشده، برطرف‌کردن برخورد یعنی SQL دستی با همان شرط‌های دونفره‌ی جدول‌ها؛ آن را با مالک داده تصمیم بگیر.
+
+اگر Migration پیش از این کار اجرا و متوقف شده باشد، هیچ ردیف، تابع یا Indexی تغییر نکرده، اما Prisma با `P3009` هر Deploy بعدی را رد می‌کند. پیش از Resolve ثابت کن که تلاش ناموفق برگشته است: خروجی `SELECT pg_get_functiondef('deduction_rule_name_key(text)'::regprocedure);` باید هنوز `replace` را نشان دهد، نه `translate`. پس از برطرف‌کردن برخوردها، به‌عنوان مالک Migration و با Credential از env (`.env.migrator`، نه خط فرمان):
+
+```bash
+pnpm --dir services/contract-service exec node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate resolve --rolled-back 20261104210000_deduction_rule_name_fold
+pnpm --dir services/contract-service db:migrate
+```

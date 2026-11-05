@@ -181,7 +181,7 @@ describe('deduction rule changes', () => {
         'a\u202eb',
         'a\u200fb',
         'x'.repeat(201),
-        // What reads as "Tax" and would hold a second rule: `ux_deduction_rule_name_active` compares bytes.
+        // What reads as "Tax" and would hold a second rule: the key folds A-Z, a space and a half-space only.
         'Tax\u00a0',
         'Tax\t',
         'Tax\n',
