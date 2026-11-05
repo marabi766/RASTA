@@ -170,8 +170,8 @@ export const TELEMETRY_SHUTDOWN_FAILED =
  * (the Prometheus listener, a periodic reader's export timer) is built with
  * that resource deferred, and `activations` starts them only once nothing of
  * the start can throw any more. So a refusal is reported with nothing of
- * this start listening or scheduled, and `releases` shuts down, without
- * flushing, every exporter it was handed or built; until those have settled
+ * this start listening or scheduled, and `releases` shuts down every exporter
+ * it was handed or built — flushing nothing, since nothing was recorded yet; until those have settled
  * they are the restart {@link fence}. What the SDK's own builders make and lose when one of them
  * throws part-way (an exporter `getSpanProcessorsFromEnv` built before the
  * next one refused) holds nothing until its first export, which never comes:
@@ -215,18 +215,20 @@ function own(into: Release[], part: { shutdown(): Promise<unknown> }): void {
 
 /**
  * Owns `part`, handed in by the caller, as {@link own} does — but through a
- * stand-in given to the SDK in its place, so the caller's object is untouched.
+ * plain stand-in given to the SDK in its place, so the caller's object (frozen,
+ * perhaps) is untouched. The SDK calls an exporter's `export`, `shutdown` and,
+ * where it has one, `forceFlush`; nothing else.
  */
-function ownHandedIn<T extends { shutdown(): Promise<unknown> }>(into: Release[], part: T): T {
+function ownHandedIn<T extends SpanExporter | logs.LogRecordExporter>(into: Release[], part: T): T {
   const once = releaseOnce(() => part.shutdown());
   into.push(once);
-  return new Proxy(part, {
-    get(target, key) {
-      if (key === 'shutdown') return once;
-      const value: unknown = Reflect.get(target, key, target);
-      return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
-    },
-  });
+  const standIn: Record<string, unknown> = {
+    export: (...args: unknown[]) => Reflect.apply(part.export, part, args) as unknown,
+    shutdown: once,
+  };
+  const flush = part.forceFlush;
+  if (typeof flush === 'function') standIn.forceFlush = () => Reflect.apply(flush, part, []);
+  return standIn as unknown as T;
 }
 
 function releaseOnce(shutdown: () => unknown): Release {
@@ -299,7 +301,8 @@ function fence(teardown: Promise<boolean>): Promise<void> {
  * unregistered, nothing of it is listening or scheduled, every exporter is
  * being shut down, and no SDK is kept — so a later call builds afresh (and
  * refuses again under the same configuration) rather than returning a
- * half-built one, and finds the Prometheus port free. A call made while one
+ * half-built one, and finds the Prometheus port free, once the refusal's
+ * releases have settled. A call made while one
  * is building, or before a teardown — {@link shutdownTelemetry}'s, or a
  * refused start's releases — has settled, is refused: await
  * `shutdownTelemetry()` first.

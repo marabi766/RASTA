@@ -835,6 +835,24 @@ describe('every part a start was handed or built is released on every path (r2 F
     expect(parts.logRecordExporter.shutdown).toHaveBeenCalledTimes(1);
   });
 
+  it('a frozen handed-in exporter is used untouched: its spans reach it, its shutdown runs once', async () => {
+    setOtelEnv({ OTEL_METRICS_EXPORTER: 'none', OTEL_LOGS_EXPORTER: 'none' });
+    const exported: string[] = [];
+    const shutdown = jest.fn(() => Promise.resolve());
+    const traceExporter = Object.freeze({
+      export: (spans: { name: string }[], done: (result: { code: number }) => void) => {
+        exported.push(...spans.map((span) => span.name));
+        done({ code: 0 });
+      },
+      shutdown,
+    });
+    initTelemetry({ serviceName: 'ownership-spec', traceExporter: traceExporter as never });
+    trace.getTracer('ownership-spec').startSpan('frozen').end();
+    await shutdownTelemetry();
+    expect(exported).toEqual(['frozen']);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
   it('under OTEL_SDK_DISABLED, shutdownTelemetry releases what the SDK never registered', async () => {
     setOtelEnv({ OTEL_SDK_DISABLED: 'true', OTEL_METRICS_EXPORTER: 'console' });
     const metricStops = jest.spyOn(sdkMetricsRuntime.ConsoleMetricExporter.prototype, 'shutdown');
