@@ -918,10 +918,15 @@ describe('the payment reconciler (real database)', () => {
       // Pushed out, so only the healing pass can close it: the claim would close it too.
       await runUnscoped('the suite pushes the task out', () =>
         prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task SET next_attempt_at = $2::timestamp
-            WHERE payment_intent_id = $1`,
+          eligibilityClockSql`UPDATE payment_reconciliation_task
+              SET status = CASE WHEN payment_intent_id = $2 THEN 'ESCALATED'::"PaymentReconciliationStatus"
+                                ELSE status END,
+                  escalated_at = CASE WHEN payment_intent_id = $2 THEN now() ELSE escalated_at END,
+                  next_attempt_at = now() + interval '1 hour'
+            WHERE payment_intent_id IN ($1, $2)`,
           made.intentId,
-          new Date(Date.now() + 3_600_000).toISOString(),
+          // Escalates no one: the reviewed probe above, for its push only.
+          '',
         ),
       );
 
