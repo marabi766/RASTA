@@ -367,15 +367,12 @@ export const CLI_CONTRACT = Object.freeze({
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
   'scripts/ci-node-test-timeouts-lib.mjs': {
     other: [
-      '--dir',
       '--enable-source-maps',
       '--filter',
       '--import',
       '--no-warnings',
       '--test',
       '--test-timeout',
-      '-C',
-      '-F',
     ],
   },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
