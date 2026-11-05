@@ -117,6 +117,10 @@ Listener ندارد، و مسیردهیِ چندهدفهٔ Transport سطح عد
 خاموش‌شدن یک «حصار» است (#749 r2): `shutdownTelemetry`، و نیز آزادسازیِ یک شروعِ ردشده، منتظر تک‌تک اجزا
 می‌ماند (Readerها، Processorها، سپس Exporterها؛ نه `Promise.all`ِ زودشکستِ SDK) و تا همه تمام نشده‌اند
 `initTelemetry` با متن ثابت رد می‌کند؛ پس پس از یک رد، پیش از تلاش دوباره `await shutdownTelemetry()` لازم است.
+حصار پیش از فراخوانیِ هر جزء برپا می‌شود (#749 r3): Exporterی که از درونِ خاموش‌شدنِ خود دوباره `initTelemetry`
+یا `shutdownTelemetry` را فراخوانی کند، شروعِ دوباره را ردشده و خاموش‌شدنِ تودرتو را همان `Promise`ِ در جریان می‌یابد.
+Exporterِ هر Processor جدا از خودِ Processor در مالکیت است و حتی اگر Flushِ پایانیِ Processor شکست بخورد خاموش
+می‌شود و حصار منتظر Exportهای در جریانِ آن می‌ماند؛ Processorی که Exporterش در دسترس نباشد، شروع را رد می‌کند.
 خطای اجزا خوانده نمی‌شود و فقط با متن ثابت گزارش می‌شود. `shutdownTelemetry` Instrumentationها را هم غیرفعال
 می‌کند، اجزای ثبت‌نشده زیر `OTEL_SDK_DISABLED` را هم آزاد می‌کند، و در پایان ثبت سراسری API را برمی‌دارد تا شروع
 بعدی واقعاً به کار رود (`telemetry-ownership.spec.ts`).

@@ -2,6 +2,7 @@ import { createServer as createHttpServer, get, type Server as HttpServer } from
 import { Server as NetServer, createServer, type AddressInfo } from 'node:net';
 import { inspect } from 'node:util';
 import { metrics, trace } from '@opentelemetry/api';
+import { logs as logsApi } from '@opentelemetry/api-logs';
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import {
   NodeSDK,
@@ -885,4 +886,313 @@ describe('every part a start was handed or built is released on every path (r2 F
     await shutdownTelemetry();
     expect(installed.filter((instrumentation) => instrumentation.isEnabled())).toEqual([]);
   });
+});
+
+describe('the fence is published before anything it waits for is called (r3 F1)', () => {
+  const quiet = { OTEL_METRICS_EXPORTER: 'none', OTEL_LOGS_EXPORTER: 'none' };
+
+  it('an exporter calling back in from its shutdown: a restart is refused, the nested shutdown is the pending one, and the next SDK keeps its globals', async () => {
+    setOtelEnv(quiet);
+    const closing = gate();
+    let restart: string | undefined;
+    let nested: Promise<void> | undefined;
+    const logRecordExporter = {
+      export: (_records: unknown, done: (result: { code: number }) => void) => done({ code: 0 }),
+      // Synchronously, from inside the SDK's own shutdown.
+      shutdown: jest.fn(() => {
+        try {
+          initTelemetry({
+            serviceName: 'ownership-spec-inner',
+            traceExporter: new RecordingExporter(),
+          });
+          restart = 'started';
+        } catch (error) {
+          restart = (error as Error).message;
+        }
+        nested = shutdownTelemetry();
+        nested.catch(() => undefined);
+        return closing.opened;
+      }),
+    };
+    initTelemetry({
+      serviceName: 'ownership-spec',
+      traceExporter: new InMemorySpanExporter(),
+      logRecordExporter: logRecordExporter as never,
+    });
+    const stop = shutdownTelemetry();
+    try {
+      await nextMacrotask();
+      expect(logRecordExporter.shutdown).toHaveBeenCalledTimes(1);
+      expect(restart).toBe(TELEMETRY_STILL_STOPPING);
+      expect(nested).toBe(stop);
+      expect(await settledYet(stop)).toBe(false);
+    } finally {
+      closing.open();
+    }
+    await stop;
+    const next = new RecordingExporter();
+    initTelemetry({ serviceName: 'ownership-spec', traceExporter: next });
+    trace.getTracer('ownership-spec').startSpan('after-fence').end();
+    await shutdownTelemetry();
+    expect(next.names).toEqual(['after-fence']);
+  });
+
+  it('a refused start’s release calling back in: the nested shutdown is the pending fence, not a settled one', async () => {
+    const env = {
+      OTEL_METRICS_EXPORTER: 'none',
+      OTEL_TRACES_EXPORTER: 'zipkin',
+      OTEL_EXPORTER_ZIPKIN_ENDPOINT: BAD_URL,
+    };
+    setOtelEnv(env);
+    const release = gate();
+    let nested: Promise<void> | undefined;
+    const logRecordExporter = {
+      export: (_records: unknown, done: (result: { code: number }) => void) => done({ code: 0 }),
+      shutdown: jest.fn(() => {
+        nested = shutdownTelemetry();
+        nested.catch(() => undefined);
+        return release.opened;
+      }),
+    };
+    try {
+      const refusal = refusalOf(() =>
+        initTelemetry({
+          serviceName: 'ownership-spec',
+          logRecordExporter: logRecordExporter as never,
+        }),
+      );
+      expect(refusal?.message).toBe(telemetryRefusal('traces', env));
+      expect(logRecordExporter.shutdown).toHaveBeenCalledTimes(1);
+      expect(nested).toBe(shutdownTelemetry());
+      expect(await settledYet(nested as Promise<void>)).toBe(false);
+    } finally {
+      release.open();
+    }
+    await expect(nested).resolves.toBeUndefined();
+  });
+});
+
+/** A module of the SDK's own dependencies, as `NodeSDK` loads it. */
+function sdkDependency<T>(name: string): T {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require(
+    require.resolve(name, { paths: [require.resolve('@opentelemetry/sdk-node')] }),
+  ) as T;
+}
+
+type ExporterClass = {
+  prototype: { export: unknown; shutdown: unknown; forceFlush?: unknown };
+};
+
+describe('an environment-selected exporter is shut down even when its processor’s final flush failed (r3 F2)', () => {
+  const failure = (): { code: number; error: Error } => ({
+    code: 1,
+    error: new Error(`could not export to ${BAD_URL}`),
+  });
+  const traces = (protocol: string | undefined, exporter = 'otlp') => ({
+    OTEL_METRICS_EXPORTER: 'none',
+    OTEL_LOGS_EXPORTER: 'none',
+    OTEL_TRACES_EXPORTER: exporter,
+    OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: protocol,
+  });
+  const logs = (protocol: string) => ({
+    OTEL_METRICS_EXPORTER: 'none',
+    OTEL_TRACES_EXPORTER: 'none',
+    OTEL_LOGS_EXPORTER: 'otlp',
+    OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: protocol,
+    // Every record exported at once: the flush finds one in flight.
+    OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: '1',
+  });
+  const metricsOtlp = (protocol: string) => ({
+    OTEL_TRACES_EXPORTER: 'none',
+    OTEL_LOGS_EXPORTER: 'none',
+    OTEL_METRICS_EXPORTER: 'otlp',
+    OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: protocol,
+  });
+
+  it.each([
+    [
+      'OTLP http/protobuf traces',
+      traces('http/protobuf'),
+      ['@opentelemetry/exporter-trace-otlp-proto', 'OTLPTraceExporter'],
+      'span',
+    ],
+    [
+      'OTLP http/json traces',
+      traces('http/json'),
+      ['@opentelemetry/exporter-trace-otlp-http', 'OTLPTraceExporter'],
+      'span',
+    ],
+    [
+      'OTLP gRPC traces',
+      traces('grpc'),
+      ['@opentelemetry/exporter-trace-otlp-grpc', 'OTLPTraceExporter'],
+      'span',
+    ],
+    [
+      'Zipkin traces',
+      traces(undefined, 'zipkin'),
+      ['@opentelemetry/exporter-zipkin', 'ZipkinExporter'],
+      'span',
+    ],
+    [
+      'OTLP http/protobuf logs',
+      logs('http/protobuf'),
+      ['@opentelemetry/exporter-logs-otlp-proto', 'OTLPLogExporter'],
+      'record',
+    ],
+    [
+      'OTLP http/json logs',
+      logs('http/json'),
+      ['@opentelemetry/exporter-logs-otlp-http', 'OTLPLogExporter'],
+      'record',
+    ],
+    [
+      'OTLP gRPC logs',
+      logs('grpc'),
+      ['@opentelemetry/exporter-logs-otlp-grpc', 'OTLPLogExporter'],
+      'record',
+    ],
+    [
+      'OTLP http/protobuf metrics',
+      metricsOtlp('http/protobuf'),
+      ['@opentelemetry/exporter-metrics-otlp-proto', 'OTLPMetricExporter'],
+      'metric',
+    ],
+  ] as const)(
+    '%s: the export fails, the exporter’s own shutdown still runs once, and the fence waits for it',
+    async (_name, env, [moduleName, className], signal) => {
+      setOtelEnv(env);
+      const Kind = sdkDependency<Record<string, ExporterClass>>(moduleName)[className];
+      const proto = Kind.prototype as Record<string, (...args: unknown[]) => unknown>;
+      const closing = gate();
+      const exports = jest
+        .spyOn(proto, 'export')
+        .mockImplementation((_items: unknown, done: unknown) => {
+          const report = done as (result: ReturnType<typeof failure>) => void;
+          // A log export reports later, so that the final flush finds it in flight.
+          if (signal === 'record') realSetTimeout(() => report(failure()), 10);
+          else report(failure());
+        });
+      const flushes =
+        signal === 'record'
+          ? jest
+              .spyOn(proto, 'forceFlush')
+              .mockImplementation(() => Promise.reject(new Error(`could not flush to ${BAD_URL}`)))
+          : undefined;
+      const stops = jest.spyOn(proto, 'shutdown').mockImplementation(() => closing.opened);
+      try {
+        captured(() => initTelemetry({ serviceName: 'ownership-spec' }));
+        if (signal === 'span') trace.getTracer('ownership-spec').startSpan('buffered').end();
+        if (signal === 'record') logsApi.getLogger('ownership-spec').emit({ body: 'buffered' });
+        if (signal === 'metric')
+          metrics.getMeter('ownership-spec').createCounter('buffered').add(1);
+        const stop = captured(() => shutdownTelemetry()).result;
+        stop.catch(() => undefined);
+        expect(await settledYet(stop)).toBe(false);
+        expect(exports).toHaveBeenCalled();
+        expect(stops).toHaveBeenCalledTimes(1);
+        expect(refusalOf(() => initTelemetry({ serviceName: 'ownership-spec' }))?.message).toBe(
+          TELEMETRY_STILL_STOPPING,
+        );
+        closing.open();
+        const failed: unknown = await stop.then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        // A periodic reader reports a failed export to diag; it does not reject.
+        if (signal !== 'metric') expect((failed as Error).message).toBe(TELEMETRY_SHUTDOWN_FAILED);
+        expect(everythingOf(failed)).not.toMatch(SENTINEL);
+        expect(stops).toHaveBeenCalledTimes(1);
+      } finally {
+        exports.mockRestore();
+        flushes?.mockRestore();
+        stops.mockRestore();
+      }
+    },
+  );
+
+  it('an export still in flight when the final flush failed holds the fence until it settles', async () => {
+    setOtelEnv({
+      ...traces('http/json'),
+      // The first span is exported as it ends; the next two wait for the final flush.
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: '1',
+    });
+    const sdk = initTelemetry({ serviceName: 'ownership-spec' }) as NodeSDK;
+    // The OTLP exporter's own transport (jest cannot load the one that sends):
+    // the first request is held, every later one is refused.
+    const processors = (
+      sdk as unknown as {
+        _tracerProvider: { _activeSpanProcessor: { _spanProcessors: object[] } };
+      }
+    )._tracerProvider._activeSpanProcessor._spanProcessors;
+    const transport = (
+      processors[1] as { _exporter: { _delegate: { _transport: { send: unknown } } } }
+    )._exporter._delegate._transport;
+    const answer = gate();
+    let sends = 0;
+    transport.send = () => {
+      sends += 1;
+      if (sends === 1) return answer.opened.then(() => ({ status: 'success' }));
+      return Promise.resolve({ status: 'failure', error: new Error(`refused by ${BAD_URL}`) });
+    };
+    const tracer = trace.getTracer('ownership-spec');
+    for (const name of ['in-flight', 'refused-1', 'refused-2']) tracer.startSpan(name).end();
+    const stop = captured(() => shutdownTelemetry()).result;
+    stop.catch(() => undefined);
+    expect(await settledYet(stop)).toBe(false);
+    expect(sends).toBe(3);
+    expect(refusalOf(() => initTelemetry({ serviceName: 'ownership-spec' }))?.message).toBe(
+      TELEMETRY_STILL_STOPPING,
+    );
+    answer.open();
+    const failed: unknown = await stop.catch((error: unknown) => error);
+    expect((failed as Error).message).toBe(TELEMETRY_SHUTDOWN_FAILED);
+    expect(everythingOf(failed)).not.toMatch(SENTINEL);
+  });
+});
+
+describe('an exporter that cannot be owned is not run (r3 F2, fail closed)', () => {
+  it.each([
+    [
+      'span processor',
+      { OTEL_METRICS_EXPORTER: 'none', OTEL_LOGS_EXPORTER: 'none' },
+      'getSpanProcessorsFromEnv',
+      'traces',
+      true,
+    ],
+    [
+      'log record processor',
+      { OTEL_METRICS_EXPORTER: 'none', OTEL_TRACES_EXPORTER: 'none', OTEL_LOGS_EXPORTER: 'otlp' },
+      'getBatchLogRecordProcessorFromEnv',
+      'logs',
+      false,
+    ],
+  ] as const)(
+    'an environment %s with no exporter to own: the start is refused, the processor released whole',
+    async (_kind, env, builder, stage, list) => {
+      setOtelEnv(env);
+      const utils = sdkDependency<Record<string, (...args: unknown[]) => unknown>>(
+        '@opentelemetry/sdk-node/build/src/utils',
+      );
+      const release = jest.fn(() => Promise.resolve());
+      const opaque = {
+        onStart: () => undefined,
+        onEnd: () => undefined,
+        onEmit: () => undefined,
+        forceFlush: () => Promise.resolve(),
+        shutdown: release,
+      };
+      const built = jest.spyOn(utils, builder).mockReturnValue(list ? [opaque] : opaque);
+      try {
+        const refusal = refusalOf(() => initTelemetry({ serviceName: 'ownership-spec' }));
+        expect(built).toHaveBeenCalledTimes(1);
+        expect(refusal?.message).toBe(telemetryRefusal(stage, env));
+        expect(release).toHaveBeenCalledTimes(1);
+        await shutdownTelemetry();
+      } finally {
+        built.mockRestore();
+      }
+    },
+  );
 });

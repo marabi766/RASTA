@@ -182,16 +182,17 @@ interface Construction {
   /** Disabled on refusal and on shutdown: they patch modules as they are built. */
   instrumentations: Instrumentations;
   /**
-   * Released on refusal, without a flush, and last on shutdown: every exporter
-   * handed in or built (the Prometheus reader too), the environment's span
-   * processors, the log record processors. Adopted as each part exists.
+   * Released on refusal, without a flush, and last on shutdown — whether or
+   * not what flushes into them failed: every exporter handed in or built (the
+   * Prometheus reader too), the SDK-built processors' exporters too
+   * ({@link ownProcessor}). Adopted as each part exists.
    */
   readonly releases: Release[];
   /**
    * Released on shutdown only, before `releases`: what flushes into an
-   * exporter — a registered periodic reader, the explicit exporter's batch
-   * processor. On refusal they hold nothing (a reader's timer is deferred) and
-   * a flush would export.
+   * exporter — a registered periodic reader, every span and log record
+   * processor. On refusal they hold nothing (a reader's timer is deferred, no
+   * span or record was taken) and a flush would export.
    */
   readonly pipelines: Release[];
   /** Run at commit, in order: start what holds a resource. */
@@ -200,6 +201,43 @@ interface Construction {
 
 /** One owned part's shutdown, made idempotent by {@link own}: it never throws. */
 type Release = () => Promise<unknown>;
+
+/** Whether `part`'s shutdown is already one of `construction`'s releases or pipelines. */
+function isOwned(construction: Construction, part: { shutdown: unknown }): boolean {
+  const shutdown = part.shutdown as Release;
+  return construction.releases.includes(shutdown) || construction.pipelines.includes(shutdown);
+}
+
+/**
+ * Owns a processor the SDK built around an exporter — the environment's span
+ * processors, the log record processors — and, independently, that exporter
+ * (#749 r3 F2): a batch processor's shutdown awaits its final flush and only
+ * then shuts its exporter down, so a failed export skips the exporter's
+ * shutdown, and with it the wait for the exports still in flight. Here the
+ * processor flushes in `pipelines` and its exporter is shut down in
+ * `releases` whether or not that flush failed; a processor that did shut it
+ * down shares the one call ({@link own}).
+ *
+ * The exporter is the processor's `_exporter` (sdk-trace's and sdk-logs'
+ * batch and simple processors; `telemetry-ownership.spec.ts` fails should it
+ * move). A processor without one is released whole, and `false` is returned:
+ * the start is refused — an exporter that cannot be owned is not run.
+ */
+function ownProcessor(
+  construction: Construction,
+  processor: SpanProcessor | logs.LogRecordProcessor,
+): boolean {
+  if (isOwned(construction, processor)) return true;
+  const exporter = (processor as unknown as { _exporter?: { shutdown(): Promise<unknown> } })
+    ._exporter;
+  if (typeof exporter?.shutdown !== 'function') {
+    own(construction.releases, processor);
+    return false;
+  }
+  own(construction.pipelines, processor);
+  if (!isOwned(construction, exporter)) own(construction.releases, exporter);
+  return true;
+}
 
 /**
  * Owns `part`, built here or by the SDK: its `shutdown` becomes idempotent —
@@ -260,21 +298,35 @@ async function settleAll(tiers: readonly (readonly Release[])[]): Promise<boolea
 }
 
 /**
- * Makes `teardown` the restart fence: `initTelemetry` refuses until it has
- * settled, and {@link shutdownTelemetry} returns it — rejecting with
+ * Runs `teardown` behind the restart fence: `initTelemetry` refuses until it
+ * has settled, and {@link shutdownTelemetry} returns it — rejecting with
  * {@link TELEMETRY_SHUTDOWN_FAILED}, nothing of the parts' errors, when one
- * failed. A refused start's fence has no caller, so its rejection is handled.
+ * failed or `teardown` threw. A refused start's fence has no caller, so its
+ * rejection is handled.
+ *
+ * The fence is published before `teardown` is called (#749 r3 F1): what it
+ * calls — a caller's exporter, synchronously from the SDK's own shutdown —
+ * may call back in, and must find a restart refused and a nested shutdown
+ * answered with this very promise, not a settled one.
  */
-function fence(teardown: Promise<boolean>): Promise<void> {
-  const pending: Promise<void> = teardown
-    .then((clean) => {
-      if (!clean) throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
-    })
+function fence(teardown: () => Promise<boolean>): Promise<void> {
+  let run!: (work: Promise<boolean>) => void;
+  const outcome = new Promise<boolean>((resolve) => (run = resolve));
+  const pending: Promise<void> = outcome
+    .then(
+      (clean) => {
+        if (!clean) throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
+      },
+      () => {
+        throw new TelemetryRefusedError(TELEMETRY_SHUTDOWN_FAILED);
+      },
+    )
     .finally(() => {
       if (stopping === pending) stopping = undefined;
     });
   pending.catch(() => undefined);
   stopping = pending;
+  run(invoke(teardown) as Promise<boolean>);
   return pending;
 }
 
@@ -401,7 +453,8 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
     stage = 'sdk';
     registering = true;
     built.start();
-    ownLogRecordProcessors(built, construction);
+    // A log exporter that cannot be owned refuses the start (`ownProcessor`).
+    if (!ownLogRecordProcessors(built, construction)) throw new Error('unowned log exporter');
     reinstallDiagnostics();
   } catch {
     // Nothing of the error is kept: not its message, cause, stack or properties.
@@ -424,22 +477,23 @@ function buildAndStart(config: TelemetryConfig): NodeSDK {
 }
 
 /**
- * Owns the log record processors `start()` gave its logger provider: the
- * caller's, or the ones NodeSDK built from `OTEL_LOGS_EXPORTER` itself
- * (`configureLoggerProviderFromEnv`, which it does not export, keeps them
- * here). `telemetry-ownership.spec.ts` fails should the field move.
+ * Owns the log record processors `start()` gave its logger provider, and each
+ * one's exporter ({@link ownProcessor}): the caller's, or the ones NodeSDK
+ * built from `OTEL_LOGS_EXPORTER` itself (`configureLoggerProviderFromEnv`,
+ * which it does not export, keeps them here). `telemetry-ownership.spec.ts`
+ * fails should the field move. False when an exporter could not be owned.
  */
-function ownLogRecordProcessors(built: NodeSDK, construction: Construction): void {
+function ownLogRecordProcessors(built: NodeSDK, construction: Construction): boolean {
   const config = (
     built as unknown as {
       _loggerProviderConfig?: { logRecordProcessors?: logs.LogRecordProcessor[] };
     }
   )._loggerProviderConfig;
+  let owning = true;
   for (const processor of config?.logRecordProcessors ?? []) {
-    if (!construction.releases.includes(processor.shutdown as Release)) {
-      own(construction.releases, processor);
-    }
+    if (!ownProcessor(construction, processor)) owning = false;
   }
+  return owning;
 }
 
 /** What `diag` is told when a committed reader cannot start; nothing of its error. */
@@ -458,9 +512,12 @@ const READER_NOT_STARTED =
  * `shutdownTelemetry()` waits for them and reports whether one failed.
  */
 function discardPartialStart(construction: Construction, registering: boolean): void {
-  disableAll(construction.instrumentations);
-  if (registering) unregisterGlobals();
-  if (construction.releases.length > 0) fence(settleAll([construction.releases]));
+  // Published first: a release may call back in (r3 F1).
+  fence(() => {
+    disableAll(construction.instrumentations);
+    if (registering) unregisterGlobals();
+    return settleAll([construction.releases]);
+  });
 }
 
 function disableAll(instrumentations: Instrumentations): void {
@@ -577,9 +634,9 @@ function deferInitialization<T extends sdkMetrics.MetricReader>(
  * exporting processor (`OTEL_TRACES_EXPORTER=none`) the pipeline is empty, and
  * NodeSDK then registers no tracer provider, as it did before.
  *
- * Each exporter is released on refusal as soon as it exists: an explicit one
- * itself, the environment's through the processor around it (no span has
- * ended yet, so its shutdown flushes nothing).
+ * Each exporter is released on refusal as soon as it exists, and on shutdown
+ * whether or not its processor's final flush failed: an explicit one itself,
+ * the environment's through {@link ownProcessor}.
  */
 function spanPipeline(
   config: TelemetryConfig,
@@ -602,7 +659,9 @@ function spanPipeline(
     exporting = [batch];
   } else {
     exporting = getSpanProcessorsFromEnv(selfMetrics);
-    for (const processor of exporting) own(construction.releases, processor);
+    // Every one owned before a refusal: an exporter that cannot be is not run.
+    const owning = exporting.map((processor) => ownProcessor(construction, processor));
+    if (owning.includes(false)) throw new Error('unowned span exporter');
   }
   return exporting.length > 0 ? [new RedactingSpanProcessor(), ...exporting] : [];
 }
@@ -637,16 +696,18 @@ export function shutdownTelemetry(): Promise<void> {
   if (!current || !parts) return Promise.resolve();
   sdk = undefined;
   owned = undefined;
-  disableAll(parts.instrumentations);
-  const teardown = settleAll([
-    [() => invoke(() => current.shutdown())],
-    parts.pipelines,
-    parts.releases,
-  ]).then((clean) => {
+  // Published before anything of the SDK is called: it calls the caller's
+  // exporters, which may call back in (r3 F1).
+  return fence(async () => {
+    disableAll(parts.instrumentations);
+    const clean = await settleAll([
+      [() => invoke(() => current.shutdown())],
+      parts.pipelines,
+      parts.releases,
+    ]);
     unregisterGlobals();
     return clean;
   });
-  return fence(teardown);
 }
 
 // ---------------------------------------------------------------------------
