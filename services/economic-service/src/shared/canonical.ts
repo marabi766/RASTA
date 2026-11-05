@@ -9,8 +9,9 @@ import {
 import { validateRequestInput } from '@rasta/nest-common';
 
 /**
- * One spelling per value, before a request body is validated, hashed or
- * executed (pre-review checklist #16; Codex PR-480 r1, R2).
+ * One spelling per value, for the idempotency hash — and, for the reward rule
+ * create only, before it is validated and executed (pre-review checklist #16;
+ * Codex PR-480 r1, R2).
  *
  * The idempotency hash sorts keys but keeps every string as sent, so a retry
  * that says the same thing differently — `"01000"` for `"1000"`,

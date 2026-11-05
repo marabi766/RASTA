@@ -7,9 +7,9 @@ import { isCanonicalBodyPipe } from './canonical';
 
 /**
  * The guard that closes the class (Codex PR-480 r1, R2; task 129): every
- * route that takes an `Idempotency-Key` puts its body in canonical form —
- * amounts, instants, line endings — before it is validated, hashed and
- * executed, so an equivalent retry replays rather than being refused as a key
+ * route that takes an `Idempotency-Key` hashes its body's canonical form too —
+ * amounts, instants, line endings — beside the body validated and executed as
+ * sent, so an equivalent retry replays rather than being refused as a key
  * reused.
  *
  * Read from Nest's own parameter metadata of every controller under `src/`,
