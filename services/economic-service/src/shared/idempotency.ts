@@ -275,8 +275,10 @@ export class IdempotencyStore {
     //
     // The same body: the hash the previous release stored or compares, or —
     // in either column — this one's canonical hash. A record the previous
-    // release wrote has no canonical hash; another spelling of it is refused,
-    // as that release refuses it.
+    // release wrote has no canonical hash: another spelling of it replays only
+    // when the stored body was itself canonical. The previous release refuses
+    // every other spelling; replaying one here is safe — what is replayed is
+    // what was executed — and its unchanged retry replays on both.
     const sameBody =
       existing.requestHash === requestHash ||
       existing.requestHash === canonicalHash ||

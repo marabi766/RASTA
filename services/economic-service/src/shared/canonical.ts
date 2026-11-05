@@ -293,8 +293,8 @@ const AS_SENT = new WeakMap<object, unknown>();
  *
  * **Rollout, both directions** (Codex PR-747 r1 F2, r2 F3). During a rolling
  * update or an automatic rollback (docs/12 § rollout) a retry can reach either
- * release, so nothing here may answer differently from the previous release
- * where that release could also be asked:
+ * release, so its unchanged retry must replay on both, and neither may refuse
+ * what the other accepts:
  *
  *  - **Validation is the previous release's, on the body as sent**, first: a
  *    body it refused is refused with its refusal, and nothing is accepted it
