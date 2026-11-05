@@ -57,7 +57,7 @@
     }
   },
   "pnpmInputs": {
-    "package.json": "233add5c18886cdf272cb6a4464504567cee014e5978c5747b7b69f5af7981ed",
+    "package.json": "30ca22934769f95e9cbf30faf7ae3a8bb1ba6f7b4b54f4b55f7a6dcc86a37e7b",
     "pnpm-workspace.yaml": "684806e1022996c3e17312726df6f87a29f5a4264fef3b53f333927a692609ed",
     ".npmrc": "cc4bfd2fb3d4673444a53190a9b275eba6b6af6156ced60728582829895cf9ef"
   },
