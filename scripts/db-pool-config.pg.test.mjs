@@ -33,6 +33,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -138,12 +139,11 @@ test('3. DATABASE_POOL_TIMEOUT_SECONDS=1: no free connection fails with P2024 af
   assert.ok(unbounded.waitedMs >= 3000, `it waited only ${unbounded.waitedMs} ms`);
 });
 
-/** Every non-test TypeScript file under `dir`. */
+/** Every non-test TypeScript file under `dir` (never the generated clients: FU-102). */
 function sources(dir) {
-  return readdirSync(dir, { recursive: true, encoding: 'utf8' })
-    .filter((file) => file.endsWith('.ts') && !/\.(spec|int-spec|test)\.ts$/.test(file))
-    .filter((file) => !file.split('/').includes('generated'))
-    .map((file) => join(dir, file));
+  return authoredFiles(dir).filter(
+    (file) => file.endsWith('.ts') && !/\.(spec|int-spec|test)\.ts$/.test(file),
+  );
 }
 
 test('4. every service opens its database on loadEnv’s DATABASE_URL, and no other', () => {

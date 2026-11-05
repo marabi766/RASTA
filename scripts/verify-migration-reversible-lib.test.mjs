@@ -10,9 +10,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { parse as parseYaml } from 'yaml';
 
 import {
@@ -1346,32 +1347,20 @@ test('psqlRunner starts psql with no password in its argv', (t) => {
 
 /**
  * Every source file the repository runs, scripts and services alike — never
- * node_modules or build output.
+ * node_modules, build output or git-ignored generated Prisma clients (rewritten
+ * by `db:generate` while checks run: listed then gone, ENOENT, FU-090; the
+ * clients take their urls from the environment and are not our code).
  */
-function runnableSources() {
-  const roots = [join(ROOT, 'scripts')];
-  for (const service of readdirSync(join(ROOT, 'services'))) {
+function runnableSources(root = ROOT) {
+  const roots = [join(root, 'scripts')];
+  for (const service of readdirSync(join(root, 'services'))) {
     for (const part of ['src', 'test', 'prisma', 'scripts']) {
-      roots.push(join(ROOT, 'services', service, part));
+      roots.push(join(root, 'services', service, part));
     }
   }
-  const files = [];
-  const walk = (dir) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (/\.(?:[cm]?js|ts)$/.test(entry.name)) files.push(path);
-    }
-  };
-  roots.forEach(walk);
-  return files;
+  return roots
+    .flatMap((dir) => authoredFiles(dir, { optional: true, base: root }))
+    .filter((path) => /\.(?:[cm]?js|ts)$/.test(basename(path)));
 }
 
 /**
@@ -1382,17 +1371,9 @@ const URL_FLAG_REFUSAL_TESTS = new Set(['scripts/outbox-b2-vacuum.pg.test.mjs'])
 
 /** Every shell script the repository runs, outside node_modules. */
 function shellScripts() {
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (/\.(?:sh|bash)$/.test(entry.name)) files.push(path);
-    }
-  };
-  ['infrastructure', 'scripts'].forEach((root) => walk(join(ROOT, root)));
-  return files;
+  return ['infrastructure', 'scripts']
+    .flatMap((root) => authoredFiles(join(ROOT, root)))
+    .filter((path) => /\.(?:sh|bash)$/.test(basename(path)));
 }
 
 const PG_CLIENT =
@@ -1479,6 +1460,30 @@ test('the shell argv rule catches what it must and passes what it may', () => {
     'psql "postgresql://rasta_economic@localhost:5432/rasta_economic" -c "SELECT 1"',
   ]) {
     assert.equal(pgClientArgvProblem(good), null, good);
+  }
+});
+
+test('runnable-source discovery skips git-ignored generated output (FU-090)', () => {
+  // `db:generate` rewrites src/generated while checks run: a file listed a moment ago can be
+  // gone before it is read (ENOENT). The clients are not our code, so they are never listed.
+  const fixture = mkdtempSync(join(tmpdir(), 'runnable-sources-'));
+  try {
+    for (const file of [
+      'scripts/tool.mjs',
+      'services/svc/src/app.ts',
+      'services/svc/src/generated/prisma/index.js',
+    ]) {
+      mkdirSync(join(fixture, file, '..'), { recursive: true });
+      writeFileSync(join(fixture, file), 'export {};\n');
+    }
+    assert.deepEqual(
+      runnableSources(fixture)
+        .map((file) => file.slice(fixture.length))
+        .sort(),
+      ['/scripts/tool.mjs', '/services/svc/src/app.ts'],
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
   }
 });
 

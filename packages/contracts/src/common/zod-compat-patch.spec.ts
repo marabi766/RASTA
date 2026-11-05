@@ -1,7 +1,15 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import type * as zodModule from 'zod';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (
+    dir: string,
+    options?: { skip?: (name: string) => boolean; optional?: boolean },
+  ) => string[];
+};
 
 import {
   materializeStockZod,
@@ -244,25 +252,9 @@ describe('zod is patched to zod 3’s run order, off by default (Codex PR-444 r2
 
 /** Every text file of the repository outside dependencies, builds and git. */
 function repositoryFiles(): string[] {
-  const SKIP = new Set([
-    'node_modules',
-    'dist',
-    '.next',
-    '.git',
-    '.turbo',
-    'coverage',
-    'generated',
-  ]);
-  const walk = (dir: string): string[] =>
-    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-      if (SKIP.has(entry.name)) return [];
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) return walk(path);
-      return entry.isFile() && /\.(?:[cm]?[jt]sx?|json|ya?ml|patch|sh|md)$/.test(entry.name)
-        ? [relative(ROOT, path)]
-        : [];
-    });
-  return walk(ROOT);
+  return authoredFiles(ROOT)
+    .filter((path) => /\.(?:[cm]?[jt]sx?|json|ya?ml|patch|sh|md)$/.test(basename(path)))
+    .map((path) => relative(ROOT, path));
 }
 
 /** The package's own entry (`zod@4.6.7:` / `zod@4.6.7(patch_hash=…):`), not a resolution. */
@@ -272,27 +264,12 @@ function isPackageEntry(text: string, match: RegExpMatchArray): boolean {
 }
 
 function productionSources(): { file: string; text: string }[] {
-  const walk = (dir: string): string[] => {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return [];
-    }
-    return entries.flatMap((entry) => {
-      const path = join(dir, entry);
-      if (statSync(path).isDirectory()) {
-        return ['node_modules', 'dist', '.next', 'test', '__fixtures__', 'generated'].includes(
-          entry,
-        )
-          ? []
-          : walk(path);
-      }
-      return /\.(ts|tsx)$/.test(entry) && !/\.(spec|test|int-spec)\.|fixture/.test(entry)
-        ? [path]
-        : [];
-    });
-  };
+  const skipped = ['test', '__fixtures__'];
+  const walk = (dir: string): string[] =>
+    authoredFiles(dir, { optional: true, skip: (name) => skipped.includes(name) }).filter(
+      (path) =>
+        /\.(ts|tsx)$/.test(path) && !/\.(spec|test|int-spec)\.|fixture/.test(basename(path)),
+    );
   return WORKSPACES.flatMap((dir) => walk(join(dir, 'src'))).map((path) => ({
     file: relative(ROOT, path),
     text: readFileSync(path, 'utf8'),
