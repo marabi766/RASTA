@@ -981,7 +981,10 @@ test('test-code discovery never descends into git-ignored generated output (FU-0
   const fixture = mkdtempSync(join(tmpdir(), 'outbox-clock-generated-'));
   const unreadable = join(fixture, 'services/sample-service/src/generated/prisma');
   try {
+    // Members come from pnpm-workspace.yaml (FU-028 reader fails closed without it).
+    writeFileSync(join(fixture, 'pnpm-workspace.yaml'), "packages:\n  - 'services/*'\n");
     mkdirSync(unreadable, { recursive: true });
+    writeFileSync(join(fixture, 'services/sample-service/package.json'), '{}');
     mkdirSync(join(fixture, 'services/sample-service/src/test'), { recursive: true });
     writeFileSync(join(fixture, 'services/sample-service/src/test/a.ts'), 'export {};\n');
     chmodSync(unreadable, 0o000);
