@@ -244,6 +244,8 @@ function proxyFor(servicePort: number, options: Partial<ProxyOptions> = {}): Pro
     {
       timeoutMs: 2000,
       failureThreshold: THRESHOLD,
+      // What counts at all, not who may open: circuit-organizations.spec.ts.
+      organizationsToOpen: 1,
       resetAfterMs: COOLDOWN_MS,
       now: () => clock,
       ...options,
@@ -679,7 +681,7 @@ describe('a transport error after the request was marked sent', () => {
     expect(received).toHaveLength(0);
 
     clock += 2001;
-    expect(await send(port)).toMatchObject({ status: 200 });
+    expect(await send(port, { caller: 'B' })).toMatchObject({ status: 200 });
     expect(proxy.circuitStates().identity).toMatchObject({ state: 'CLOSED' });
   });
 

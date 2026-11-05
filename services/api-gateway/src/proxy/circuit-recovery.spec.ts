@@ -177,7 +177,8 @@ async function startGateway(
   const proxy = new ProxyService(
     urls,
     new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
-    options,
+    // These specs are about recovery. Who may open a circuit: circuit-organizations.spec.ts.
+    { organizationsToOpen: 1, ...options },
   );
   const controller = new GatewayController(proxy, limiter, PLATFORM_ENV);
   const filter = new AllExceptionsFilter(quietLogger as never);
@@ -601,7 +602,7 @@ describe('a caller that leaves after the probe was sent cannot buy another probe
     await sendAndLeave(gateway, 1);
     const answers: Answer[] = [];
     for (let i = 1; i < 20; i += 1) {
-      const sent = gateway.send(USERS);
+      const sent = gateway.send(USERS, { caller: 'B' });
       answers.push(await sent.answer);
       sent.abort(); // the same caller pattern; refused before it could leave
     }
@@ -641,15 +642,21 @@ describe('a caller that leaves after the probe was sent cannot buy another probe
 
       upstream.behaviour = ok;
       frozen.advance(DEADLINE_MS - 1);
-      expect(await gateway.send(USERS).answer).toMatchObject({ status: 503, retryAfter: '1' });
+      expect(await gateway.send(USERS, { caller: 'B' }).answer).toMatchObject({
+        status: 503,
+        retryAfter: '1',
+      });
       expect(upstream.exchanges).toHaveLength(2);
 
       frozen.advance(1); // the abandoned probe's deadline has passed
       upstream.behaviour = hold;
-      const next = gateway.send(USERS);
+      // Another organization: the one that abandoned it waits one more cooldown.
+      const next = gateway.send(USERS, { caller: 'B' });
       await until(() => upstream.exchanges.length === 3, 'one new probe');
-      // Still exactly one in flight: the next caller is refused.
-      expect(await gateway.send(USERS).answer).toMatchObject({ status: 503, retryAfter: '1' });
+      // Still exactly one in flight: the next caller is refused. This one
+      // abandoned the last probe, so it is shed for that 4 s hold again plus a
+      // cooldown: 4.2 s, rounded up.
+      expect(await gateway.send(USERS).answer).toMatchObject({ status: 503, retryAfter: '5' });
       expect(upstream.exchanges).toHaveLength(3);
 
       answer(upstream.exchanges[2]!.res, 200, { ok: true });
