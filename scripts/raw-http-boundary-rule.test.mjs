@@ -253,6 +253,58 @@ test('global and imported process allow only known capabilities and discarded li
   }
 });
 
+test('process registry holders are inert through casts and immutable aliases', () => {
+  const holder = `
+    const REGISTRY = Symbol.for('fixture.registry');
+    if (typeof process !== 'object' || process === null) throw new Error();
+    const holder = (process as unknown) as Record<symbol, unknown>;
+    const alias = holder;
+    const existing = alias[REGISTRY];
+    Object.defineProperty(holder, REGISTRY, { value: new WeakMap() });`;
+  assert.deepEqual(check(holder), []);
+  assert.deepEqual(
+    check(readFileSync(`${ROOT}packages/config/src/command-failure.js`, 'utf8')),
+    [],
+  );
+  for (const source of [
+    '',
+    "import process from 'node:process';",
+    "import * as process from 'process';",
+  ]) {
+    assert.deepEqual(check(source + holder), []);
+    for (const use of [
+      'const load = alias.getBuiltinModule; load(name);',
+      'alias.binding(name);',
+      'alias[unknownKey];',
+      'consume(alias);',
+      "const exposed = alias.on('x', callback);",
+      'const exposed = Object.defineProperty(alias, REGISTRY, { value: 1 });',
+      "Object.defineProperty(alias, 'getBuiltinModule', { value: load });",
+      'function fake(Object) { Object.defineProperty(alias, REGISTRY, {}); }',
+    ])
+      assert.ok(
+        check(source + holder + use).some(({ message }) =>
+          /process.*(loader|exposes)/.test(message),
+        ),
+        use,
+      );
+  }
+});
+
+test('process registry keys refuse unproven or shadowed symbols and mutable holders', () => {
+  for (const code of [
+    'const holder = process; const key = unknown; holder[key];',
+    "const holder = process; let key = Symbol.for('k'); holder[key];",
+    "function f(Symbol) { const holder = process; holder[Symbol.for('k')]; }",
+    "function f(key = Symbol.for('k')) { const holder = process; holder[key]; }",
+    'const holder = process; const key = other; const other = key; holder[key];',
+    'let holder = process; holder = other;',
+    'const holder = process; const { getBuiltinModule: load } = holder;',
+    'const holder = process; const alias = holder; export { alias };',
+  ])
+    assert.ok(check(code).length, code);
+});
+
 // Both actual E2E configs must reject the import class in every supported source extension.
 for (const [workspace, base] of [
   ['apps/web', 'e2e/raw-process.spec'],
