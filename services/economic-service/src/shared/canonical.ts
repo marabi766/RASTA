@@ -28,9 +28,11 @@ import { validateRequestInput } from '@rasta/nest-common';
  *     rule's condition puts the operand of each numeric comparison in its
  *     exact decimal form (Codex PR-480 r2, R2).
  *
- * A value is rewritten only when it already passes the field's own pattern
- * and its canonical form does too, so what a schema accepts and refuses is
- * unchanged; anything else is left exactly as sent for validation to answer.
+ * An instant, and a declared form through {@link canonicalWithin}, is
+ * rewritten only when it already passes the field's own pattern and its
+ * canonical form does too; anything else is left exactly as sent for
+ * validation to answer. A whole body whose canonical form its schema refuses
+ * is answered as the previous release answered it ({@link canonicalBodyPipe}).
  * Absent, `null` and zero stay distinct: an absent key is not added, `null`
  * is not a string, `"0"` is already canonical.
  *

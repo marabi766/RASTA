@@ -727,6 +727,16 @@ function refusedForState(error: unknown): boolean {
 }
 
 /**
+ * The same words, whatever their line endings: economic-service keeps text
+ * with LF line endings since it canonicalizes command bodies (task 129) —
+ * as sent before it, and still for a body whose LF form it refuses. This service keeps what the person sent.
+ */
+function sameText(kept: string | null | undefined, sent: string): boolean {
+  const lf = (text: string) => text.replace(/\r\n?/g, '\n');
+  return typeof kept === 'string' && lf(kept) === lf(sent);
+}
+
+/**
  * The words the last resolution left on the transaction.
  *
  * economic-service keeps them in `disputeResolution`, beside the objection
@@ -737,16 +747,6 @@ function refusedForState(error: unknown): boolean {
  * on a transaction resolved since, it is the objection, and a resolution
  * worded like it proves nothing (Codex on #322).
  */
-/**
- * The same words, whatever their line endings: economic-service keeps text
- * with LF line endings since it canonicalizes command bodies (task 129), and
- * kept it as sent before. This service keeps what the person sent.
- */
-function sameText(kept: string | null | undefined, sent: string): boolean {
-  const lf = (text: string) => text.replace(/\r\n?/g, '\n');
-  return typeof kept === 'string' && lf(kept) === lf(sent);
-}
-
 function resolutionOf(transaction: TransactionDetailView): string | null {
   const keptApart = transaction.disputeResolution;
   if (keptApart !== null && keptApart !== undefined) return keptApart;
