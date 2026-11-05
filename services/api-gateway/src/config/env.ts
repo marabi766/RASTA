@@ -25,6 +25,13 @@ export const TENDER_OPEN_DEADLINE_MAX_MS = 180_000;
 export const TENDER_OPEN_DEADLINE_DEFAULT_MS = 60_000;
 
 /**
+ * Distinct organizations a failure run needs to open a circuit every tenant shares (FU-085).
+ * Three, not two: one person may hold memberships in two organizations, and a deployment with
+ * fewer active tenants still sheds each of them on its own.
+ */
+export const DEFAULT_ORGANIZATIONS_TO_OPEN = 3;
+
+/**
  * api-gateway configuration.
  *
  * No database schema here: the gateway owns no data (ADR-009). Redis is used
@@ -72,6 +79,17 @@ export const gatewayEnvSchema = baseEnvSchema
       .prefault(TENDER_OPEN_DEADLINE_DEFAULT_MS),
     GATEWAY_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).prefault(5),
     GATEWAY_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).prefault(30_000),
+    /**
+     * Distinct organizations a failure run needs before the circuit every tenant shares opens.
+     * Never below 2: at 1, one tenant's bad input opens it for all (FU-085). Capped far below
+     * what the breaker remembers (`MAX_TRACKED_CALLERS`), so that it can always be reached.
+     */
+    GATEWAY_CIRCUIT_ORGANIZATIONS_TO_OPEN: z.coerce
+      .number()
+      .int()
+      .min(2)
+      .max(100)
+      .prefault(DEFAULT_ORGANIZATIONS_TO_OPEN),
 
     /**
      * Allow traffic when Redis is unreachable.

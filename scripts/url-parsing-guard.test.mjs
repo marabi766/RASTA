@@ -664,6 +664,194 @@ test('R2-1 unknown local global-object names stay unknown while their URL member
     assert.deepEqual(sites(`function f(${name}){new ${name}.URL(env.X)}`), ['new URL']);
   }
 });
+// FU-045: the name floor only ADDS refusals. A file with a URL alias whose
+// name equals a non-URL capability's must still resolve the real binding.
+const HIDDEN_CAPABILITY = {
+  'a getBuiltinModule behind a URL alias': [
+    "import { URL as p } from 'node:url'; export function f() { const p = require('node:process'); return p.getBuiltinModule('node:vm'); }",
+    "import { URL as getBuiltinModule } from 'node:url'; export function f() { const { getBuiltinModule } = process; return getBuiltinModule('node:vm'); }",
+  ],
+  'globalThis.eval / globalThis.Function behind a URL alias': [
+    "import { URL as g } from 'node:url'; export function f(code) { const g = globalThis; return g.eval(code); }",
+    "import { URL as g } from 'node:url'; export function f(code) { const g = globalThis; return new g.Function(code); }",
+    "import { URL as eval } from 'node:url'; export function f(code) { const { eval } = globalThis; return eval(code); }",
+    "import { URL as v } from 'node:url'; export function f(code) { const v = require('node:vm'); return v.runInThisContext(code); }",
+  ],
+  'a URL mutation behind a URL alias': [
+    "import { URL as u } from 'node:url'; export function f(x) { const u = new URL('http://ok'); u.href = x; }",
+  ],
+};
+test('FU-045 a URL alias of the same name cannot hide a capability from the resolver', () => {
+  for (const [label, sources] of Object.entries(HIDDEN_CAPABILITY))
+    for (const source of sources) {
+      const kinds = sites(source);
+      assert.ok(
+        kinds.includes(label.includes('mutation') ? 'URL mutation' : 'dynamic code/loader'),
+        `${label}: ${source} -> ${kinds}`,
+      );
+    }
+});
+test('FU-045 an UNKNOWN local eval / Function / global-object name is refused, not ignored', () => {
+  for (const source of [
+    'function f(Function) { return new Function(code); }',
+    'function f(Function) { return Function(code); }',
+    'function f(e) { var eval = e; return eval(code); }',
+    'function f(window) { return window.eval(code); }',
+    'function f(self) { return new self.Function(code); }',
+    'function f(global) { return global.process.getBuiltinModule("vm"); }',
+    'function f(globalThis) { const { Function: F } = globalThis; return F(code); }',
+  ])
+    assert.ok(sites(source, 'x.cjs').includes('dynamic code/loader'), source);
+  // Passing such a local around is not an escape (`window` is a common name).
+  for (const name of ['window', 'self', 'global'])
+    assert.deepEqual(sites(`function f(${name}) { return g(${name}, ${name}.length); }`), []);
+});
+test("FU-045 argv and parseArgs readers keep main's syntactic floor beside the resolver", () => {
+  const reads = (text) => commandLineSurface(text, 'x.mjs').readsArgv;
+  for (const source of [
+    "import { URL as process } from 'node:url'; export const a = process.argv;",
+    "import { URL as parseArgs } from 'node:url'; export function f() { const { parseArgs } = require('node:util'); return parseArgs({ options: {} }); }",
+    "import { parseArgs } from 'node:util'; export const f = (parseArgs) => parseArgs({ options: {} });",
+    "export const run = (process) => process.argv; import { parseArgs as p } from 'node:util';",
+  ])
+    assert.equal(reads(source), true, source);
+  assert.equal(
+    reads("import { parseArgs as p } from 'node:util'; export const x = () => p({});"),
+    true,
+  );
+  assert.equal(
+    reads("import { URL as process } from 'node:url'; export const a = process.env;"),
+    false,
+  );
+  assert.deepEqual(
+    commandLineSurface(
+      "import { URL as parseArgs } from 'node:url'; function f() { const { parseArgs } = require('node:util'); parseArgs({ options: { 'api-key': {} } }); }",
+      'x.mjs',
+    ),
+    { readsArgv: true, options: ['--api-key'] },
+  );
+});
+// FU-045 r2 (Codex PR-737 r1 F1): a local named like a global object whose
+// value cannot be resolved keeps that provenance. The URL name floor joins it
+// (never replaces it) and every alias, container, default, assignment and loop
+// variable carries it; only its capabilities are refused, a bare use is not.
+const GLOBAL_NAMES = ['window', 'self', 'global', 'globalThis'];
+const FLOOR_HEADS = [
+  'import { URL as G } from "node:url";',
+  'import * as G from "node:url";',
+  'import G from "node:url";',
+  'const { URL: G } = require("node:url");',
+  'const G = require("node:url").URL;',
+  'import { parse as G } from "node:url";',
+];
+const EXTENSIONS = ['.mjs', '.cjs', '.js', '.jsx', '.ts', '.tsx', '.mts', '.cts'];
+test('FU-045 r2 a URL name floor never erases a local global-object receiver', () => {
+  for (const name of GLOBAL_NAMES)
+    for (const head of FLOOR_HEADS)
+      for (const file of EXTENSIONS) {
+        const body = `export function run(${name}, code) { return ${name}.eval(code); }`;
+        const source = `${head.replaceAll('G', name)} ${body}`;
+        assert.ok(sites(source, `x${file}`).includes('dynamic code/loader'), `${file} ${source}`);
+      }
+  const head = (name) => `import { URL as ${name} } from "node:url";`;
+  for (const name of GLOBAL_NAMES) {
+    for (const body of [
+      `export function run(${name}, code) { return new ${name}.Function(code); }`,
+      `export function run(${name}) { return ${name}.process.getBuiltinModule("node:vm"); }`,
+      `export function run(${name}, code) { const a = ${name}; return a.eval(code); }`,
+    ])
+      assert.ok(sites(`${head(name)} ${body}`).includes('dynamic code/loader'), body);
+    // CLI discovery: the argv read behind a masked receiver is still found.
+    for (const body of [
+      `export function run(${name}) { return ${name}.process.argv; }`,
+      `export function run(${name}) { const a = ${name}; return a.process.argv; }`,
+    ])
+      assert.equal(commandLineSurface(`${head(name)} ${body}`, 'x.mjs').readsArgv, true, body);
+  }
+  assert.deepEqual(
+    commandLineSurface(
+      'import { URL as global } from "node:url"; export function f(global) { return global.process.argv; }',
+      'x.mjs',
+    ),
+    { readsArgv: true, options: [] },
+  );
+});
+test('FU-045 r2 aliases carry a potential global through every value flow', () => {
+  const flows = [
+    'const a = W; return a.eval(code);',
+    'let a = W; return a.eval(code);',
+    'var a = W; return a.eval(code);',
+    'let a; a = W; return a.eval(code);',
+    'let a; a ||= W; return a.eval(code);',
+    'const a = W; const b = a; const c = b; return c.eval(code);',
+    'const o = { w: W }; return o.w.eval(code);',
+    'const o = { W }; return o.W.eval(code);',
+    'const o = { w: W }; return o[key].eval(code);',
+    'const o = { [key]: W }; return o.w.eval(code);',
+    'const o = {}; o.w = W; return o.w.eval(code);',
+    'const { w } = { w: W }; return w.eval(code);',
+    'const { eval: e } = W; return e(code);',
+    'const a = [W]; return a[0].eval(code);',
+    'const a = [W]; return a[key].eval(code);',
+    'const [a] = [W]; return a.eval(code);',
+    'for (const a of [W]) a.eval(code);',
+    'const a = (0, W); return a.eval(code);',
+    'const a = key || W; return a.eval(code);',
+    'const a = key ?? W; return a.eval(code);',
+    'const a = key && W; return a.eval(code);',
+    'const a = key ? W : null; return a.eval(code);',
+    'const { w = W } = key; return w.eval(code);',
+    'const a = W.W; return a.eval(code);',
+    'const a = [1, W]; return a[key].eval(code);',
+    'const p = { w: W }; const o = { ...p }; return o.w.eval(code);',
+    'const a = [...[W]]; return a[0].eval(code);',
+    'let a; [a] = [W]; return a.eval(code);',
+    'let a; ({ w: a } = { w: W }); return a.eval(code);',
+    'let a; [, [a = key]] = [1, [W]]; return a.eval(code);',
+    'const [x, a] = [1, W]; return a.eval(code);',
+  ];
+  for (const name of GLOBAL_NAMES)
+    for (const flow of flows) {
+      const source = `export function run(${name}, code, key) { ${flow.replaceAll('W', name)} }`;
+      assert.ok(sites(source).includes('dynamic code/loader'), source);
+    }
+  for (const name of GLOBAL_NAMES) {
+    const source = `export function run(${name}, code) { const a = ${name}; return a.process.argv; }`;
+    assert.equal(commandLineSurface(source, 'x.mjs').readsArgv, true, source);
+    assert.ok(
+      sites(`export function run(${name}, key) { const a = ${name}; return a[key]; }`).includes(
+        'escape',
+      ),
+    );
+  }
+  assert.ok(
+    sites(
+      'export async function run(window, code) { const a = await window; return a.eval(code); }',
+    ).includes('dynamic code/loader'),
+  );
+  // A self-referencing local still joins its potential-global value with the others.
+  assert.ok(
+    sites(
+      'export function run(window, code, key) { window = key ? require("node:process") : window; return window.eval(code); }',
+    ).includes('dynamic code/loader'),
+  );
+  assert.ok(
+    sites('export function run(code, a = window) { return a.eval(code); }').includes(
+      'dynamic code/loader',
+    ),
+  );
+});
+test('FU-045 r2 a bare use of a potential global stays allowed', () => {
+  for (const source of [
+    'export function f(window) { return g(window, window.length, typeof window); }',
+    'export function f(window) { const a = window; return g(a, a.length); }',
+    'export function f(window, self) { const o = { window, self }; return o.window.location; }',
+    'export function f(window) { return window.location.href; }',
+    'export function f(self) { const a = [self]; return a[0].postMessage(1); }',
+    'export function f(globalThis) { let a; a = globalThis; return a.document; }',
+  ])
+    assert.deepEqual(sites(source), [], source);
+});
 test('R2-1 mutable bindings retain proven native instance capabilities', () => {
   assert.deepEqual(sites("let base=new URL('http://ok'); base.href=env.X"), ['URL mutation']);
 });

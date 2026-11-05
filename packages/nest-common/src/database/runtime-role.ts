@@ -44,7 +44,7 @@
  */
 
 import { clientFailureCode } from './client-failure';
-import { DemoSeedRefusedError } from '@rasta/config';
+import { DemoSeedRefusedError, markRefusal } from '@rasta/config';
 
 /** The one raw-SQL method every generated Prisma client has. */
 export interface RuntimeRoleQueryClient {
@@ -157,6 +157,7 @@ export class RuntimeRoleRefusedError extends Error {
         '(docs/runbooks/db-role-split.md, D-045).',
     );
     this.name = 'RuntimeRoleRefusedError';
+    markRefusal(this, 'runtime-role');
   }
 }
 
@@ -204,6 +205,7 @@ export class RuntimeRoleUnverifiedError extends Error {
       `${runtimeVariable}: the connected role could not be checked (code ${code}); ` +
         "the database client's own error is withheld",
     );
+    markRefusal(this, 'runtime-role-unverified');
   }
 }
 
