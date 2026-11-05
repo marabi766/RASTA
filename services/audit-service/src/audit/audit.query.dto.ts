@@ -47,6 +47,12 @@ import { decodeAuditCursor, InvalidCursorError, type AuditCursor } from './audit
  * that do not exist, and a cursor is only stable under one ordering.
  */
 
+// Input fields have already passed their schemas. Keep the runtime proof next to conversion.
+function validatedDate(value: unknown): Date {
+  if (typeof value === 'string') return new Date(value);
+  throw new TypeError('Expected a validated timestamp');
+}
+
 /** Page size defaults, from ADR-053 § 3 — shared by every audit listing. */
 export const DEFAULT_PAGE_LIMIT = 25;
 export const MAX_PAGE_LIMIT = 200;
@@ -170,8 +176,8 @@ function refineWindow(
   ctx: z.RefinementCtx,
   maxWindowDays: number,
 ): void {
-  const from = new Date(value.from);
-  const to = new Date(value.to);
+  const from = validatedDate(value.from);
+  const to = validatedDate(value.to);
 
   if (to.getTime() < from.getTime()) {
     ctx.addIssue({
@@ -254,8 +260,8 @@ export function buildAuditEventQuerySchema(
       }
     })
     .transform((value): AuditEventQuery => ({
-      from: new Date(value.from),
-      to: new Date(value.to),
+      from: validatedDate(value.from),
+      to: validatedDate(value.to),
       organizationId: value.organizationId,
       actorId: value.actorId,
       actorType: value.actorType,
@@ -278,8 +284,8 @@ export function buildAuditEventDetailQuerySchema(
     .strict()
     .superRefine((value, ctx) => refineWindow(value, ctx, maxWindowDays))
     .transform((value): AuditEventDetailQuery => ({
-      from: new Date(value.from),
-      to: new Date(value.to),
+      from: validatedDate(value.from),
+      to: validatedDate(value.to),
       organizationId: value.organizationId,
     }));
 }
@@ -327,8 +333,8 @@ export function buildAuditVerifyQuerySchema(
       }
     })
     .transform((value): AuditVerifyQuery => ({
-      from: new Date(value.from),
-      to: new Date(value.to),
+      from: validatedDate(value.from),
+      to: validatedDate(value.to),
       scope: value.scope,
       organizationId: value.organizationId,
     }));

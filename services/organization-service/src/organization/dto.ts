@@ -9,6 +9,7 @@ import {
   withMaxKeys,
   withoutBidiControlDeep,
 } from '@rasta/contracts';
+import { uniqueText } from '@rasta/nest-common';
 
 /**
  * Request and response shapes for organizations.
@@ -114,6 +115,16 @@ const freeFormMetadata = withoutBidiControlDeep(
   withMaxKeys(z.record(z.string(), z.unknown()), MAX_METADATA_KEYS),
 );
 
+/**
+ * A registry code in its one form (FU-084): bidi controls refused first, as before, then folded and
+ * held to the canonical alphabet, so two codes a person cannot tell apart are one code. Case is kept.
+ * At most 64: every character of the form is one UTF-16 unit, so this is the code points
+ * `ck_organization_external_code_canonical` counts.
+ */
+const externalCode = plainText()
+  .pipe(uniqueText({ caseFold: false }))
+  .pipe(z.string().min(1).max(64));
+
 export const createOrganizationSchema = z
   .object({
     name: displayName,
@@ -121,7 +132,7 @@ export const createOrganizationSchema = z
     type: organizationTypeSchema,
     /** Omit for a root. Anything else must be an organization the caller may write to. */
     parentId: organizationId.optional(),
-    externalCode: plainText().min(1).max(64).optional(),
+    externalCode: externalCode.optional(),
     /** Type-specific attributes. Kept free-form so a new type needs no migration. */
     metadata: freeFormMetadata.prefault({}),
     location: locationInput.optional(),
@@ -134,7 +145,7 @@ export const updateOrganizationSchema = z
   .object({
     name: displayName.optional(),
     shortName: displayName.nullable().optional(),
-    externalCode: plainText().min(1).max(64).nullable().optional(),
+    externalCode: externalCode.nullable().optional(),
     metadata: freeFormMetadata.optional(),
   })
   .strict()

@@ -381,6 +381,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--noEmit',
       '--no-warnings',
       '--passWithNoTests',
+      '--require',
       '--selectProjects',
       '--test',
       '--test-timeout',
@@ -501,6 +502,8 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: ['script'],
     other: ['--depth', '--no-tags', '--quiet', '--verify'],
   },
+  // `git -C <root> ls-files | check-ignore -q --no-index`: is a vanished generated path ignored?
+  'scripts/testing-dev-only-source.mjs': { other: ['--no-index', '-C', '-q'] },
   'scripts/testing-dev-only.mjs': {
     // `image <ref>` | `tree <dir> <entry>`: each checked against IMAGE_REF or
     // REPO_PATH before any use.
@@ -518,6 +521,9 @@ export const CLI_CONTRACT = Object.freeze({
       '-xf',
     ],
   },
+  // FU-118: the stall watchdog READS process.execArgv for --test to know it runs in the
+  // node --test runner (parent); it has no command line.
+  'scripts/test-stall-watchdog.mjs': { other: ['--test'] },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
     other: [

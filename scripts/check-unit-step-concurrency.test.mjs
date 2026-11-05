@@ -608,7 +608,7 @@ test('task 322: the step must run the unit-step script, and the script must be r
 // The watchdog preload is an argument of the one node --test command, before its files.
 {
   const watchdog = UNIT_STEP.watchdog;
-  const preload = `--import ${watchdog} `;
+  const preload = `${UNIT_STEP.preload} ${watchdog} `;
   for (const [label, edit] of Object.entries({
     'after the files': (text) => text.replace(preload, '').replace(' && ', ` ${preload}&& `),
     'in a comment': (text) => text.replace(preload, '').replace(' && ', ` # ${preload}\n&& `),
@@ -617,7 +617,10 @@ test('task 322: the step must run the unit-step script, and the script must be r
     'next to another preload': (text) => text.replace(preload, `--import ./other.mjs ${preload}`),
     twice: (text) => text.replace(preload, `${preload}${preload}`),
     computed: (text) => text.replace(watchdog, '$WATCHDOG'),
-    'as the --import=<file> form': (text) => text.replace(preload, `--import=${watchdog} `),
+    'as the --require=<file> form': (text) => text.replace(preload, `--require=${watchdog} `),
+    // FU-118: the runner never loads an --import preload, so it would not guard the runner.
+    'as an --import the runner never loads': (text) =>
+      text.replace(preload, `--import ${watchdog} `),
     'with a second node --test command': (text) => `${text} && node --test ${B} y`,
   }))
     test(`task 312: a watchdog preload ${label} is refused`, () => {
@@ -872,12 +875,13 @@ test('task 310: an exemption that no longer applies is refused', () => {
 test('task 310: the unit-step step keeps its step limit, file budget and watchdog', () => {
   const script = realScripts[UNIT_STEP.script];
   assert.match(script, /--test-timeout=540000 /);
-  assert.match(script, /--import \.\/scripts\/test-stall-watchdog\.mjs /);
+  assert.match(script, /--require \.\/scripts\/test-stall-watchdog\.mjs /);
   assert.match(script, /scripts\/test-stall-watchdog\.test\.mjs/);
   assert.equal(boundedStep(realDoc)['timeout-minutes'], UNIT_STEP.maxMinutes);
   for (const [edit, pattern] of [
-    [(text) => text.replace(/--import \S+ /, ''), /must preload/],
-    [(text) => text.replace('--import ./', '--import ../'), /must preload/],
+    [(text) => text.replace(/--require \S+ /, ''), /must preload/],
+    [(text) => text.replace('--require ./', '--require ../'), /must preload/],
+    [(text) => text.replace('--require ./', '--import ./'), /must preload/],
     [
       (text) => text.replace(/ --test-timeout=\d+/, ''),
       /script test:unit-step-concurrency runs node/,
