@@ -371,6 +371,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--filter',
       '--import',
       '--no-warnings',
+      '--require',
       '--test',
       '--test-timeout',
     ],
@@ -506,6 +507,9 @@ export const CLI_CONTRACT = Object.freeze({
       '-xf',
     ],
   },
+  // FU-118: the stall watchdog READS process.execArgv for --test to know it runs in the
+  // node --test runner (parent); it has no command line.
+  'scripts/test-stall-watchdog.mjs': { other: ['--test'] },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
     other: [
