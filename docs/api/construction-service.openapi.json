@@ -3958,6 +3958,7 @@
                       "anyOf": [
                         {
                           "type": "string",
+                          "pattern": "^AST_[0-9A-HJKMNP-TV-Z]{26}$",
                           "description": "AST identifier"
                         },
                         {

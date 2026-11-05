@@ -1928,6 +1928,7 @@
                       "anyOf": [
                         {
                           "type": "string",
+                          "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
                           "description": "ORG identifier"
                         },
                         {
