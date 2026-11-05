@@ -29,7 +29,13 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function listFiles(base, dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name.startsWith('.'))
+    // `generated` is git-ignored Prisma output, regenerated while other tasks run (FU-090).
+    if (
+      entry.name === 'node_modules' ||
+      entry.name === 'dist' ||
+      entry.name === 'generated' ||
+      entry.name.startsWith('.')
+    )
       return [];
     const path = join(dir, entry.name);
     return entry.isDirectory() ? listFiles(base, path) : [relative(base, path).replace(/\\/g, '/')];

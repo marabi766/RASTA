@@ -200,7 +200,9 @@ export function filesMatching(pattern: string): string[] {
       return;
     }
     for (const entry of fs.readdirSync(full)) {
-      if (entry === 'node_modules' || entry === 'dist') continue;
+      // `generated` is git-ignored Prisma output that another task regenerates mid-walk
+      // (ENOENT on a vanished file, FU-090); a turbo input must match authored files.
+      if (entry === 'node_modules' || entry === 'dist' || entry === 'generated') continue;
       walk(`${relative}/${entry}`);
     }
   };

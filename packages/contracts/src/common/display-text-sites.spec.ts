@@ -1,5 +1,6 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 /**
  * The class guard for display text. The Persian comma «،» was refused in five
@@ -17,35 +18,42 @@ const NAME_POLICIES = new Set([
   'services/organization-service/src/organization/dto.ts', // organisation names
 ]);
 
-function sources(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (entry === 'node_modules' || entry === 'dist' || entry === '.next') continue;
-    const path = join(dir, entry);
-    if (statSync(path).isDirectory()) out.push(...sources(path));
-    else if (/\.(ts|tsx|mjs|js)$/.test(entry) && !/\.(spec|test)\./.test(entry)) out.push(path);
-  }
-  return out;
+/**
+ * The sites are the TRACKED source files, from `git ls-files`, not a walk of the
+ * working tree. A walk also visits git-ignored build output (the generated
+ * Prisma clients under `src/generated/`), which another test in the same CI job
+ * regenerates: a file listed by `readdirSync` and gone by `statSync` failed this
+ * suite to run (ENOENT, FU-090). Generated output is not a display-text site.
+ * A tracked file that is missing from disk is NOT skipped: `read` throws on it
+ * and the presence test below names it. If `git` cannot answer, the suite fails.
+ */
+const OUTPUT_SEGMENTS = new Set(['node_modules', 'dist', '.next']);
+
+function isSourceSite(file: string): boolean {
+  const segments = file.split('/');
+  const name = segments[segments.length - 1] ?? '';
+  const inScope =
+    /^services\/[^/]+\/src\//.test(file) ||
+    file.startsWith('apps/web/src/') ||
+    (file.startsWith('packages/') && !file.includes('packages/contracts/src/'));
+  return (
+    inScope &&
+    !segments.some((segment) => OUTPUT_SEGMENTS.has(segment)) &&
+    /\.(ts|tsx|mjs|js)$/.test(name) &&
+    !/\.(spec|test)\./.test(name)
+  );
 }
 
-const SOURCE_FILES = [
-  ...readdirSync(join(ROOT, 'services')).flatMap((service) => {
-    const src = join(ROOT, 'services', service, 'src');
-    return statSync(join(ROOT, 'services', service)).isDirectory() && safeIsDir(src)
-      ? sources(src)
-      : [];
-  }),
-  ...sources(join(ROOT, 'apps/web/src')),
-  ...sources(join(ROOT, 'packages')).filter((path) => !path.includes('/packages/contracts/src/')),
-].map((path) => relative(ROOT, path));
-
-function safeIsDir(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
+function trackedSources(): string[] {
+  const listing = execFileSync(
+    'git',
+    ['ls-files', '-z', '--', 'services', 'apps/web/src', 'packages'],
+    { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+  );
+  return listing.split('\0').filter((file) => file !== '' && isSourceSite(file));
 }
+
+const SOURCE_FILES = trackedSources();
 
 const read = (file: string): string => readFileSync(join(ROOT, file), 'utf8');
 
@@ -54,6 +62,29 @@ describe('display-text allow-lists', () => {
     expect(SOURCE_FILES.length).toBeGreaterThan(300);
     expect(SOURCE_FILES).toContain('services/fleet-service/src/fleet/dto.ts');
     expect(SOURCE_FILES).toContain('apps/web/src/server/asset-commands.ts');
+  });
+
+  it('finds every tracked site on disk and none from generated output', () => {
+    expect(SOURCE_FILES.filter((file) => !existsSync(join(ROOT, file)))).toEqual([]);
+    expect(SOURCE_FILES.filter((file) => file.split('/').includes('generated'))).toEqual([]);
+  });
+
+  it('keeps the site filter to source, not output, tests or the contracts package', () => {
+    for (const site of [
+      'services/a-service/src/x/dto.ts',
+      'apps/web/src/a.tsx',
+      'packages/config/src/a.mjs',
+    ])
+      expect(isSourceSite(site)).toBe(true);
+    for (const other of [
+      'services/a-service/src/x/dto.spec.ts',
+      'services/a-service/test/x.ts',
+      'services/a-service/src/dist/x.ts',
+      'packages/contracts/src/common/text.ts',
+      'apps/web/e2e/a.ts',
+      'services/a-service/src/x/README.md',
+    ])
+      expect(isSourceSite(other)).toBe(false);
   });
 
   it('keeps every \\p{Script=Arabic} allow-list to the two name policies', () => {
