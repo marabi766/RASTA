@@ -11,9 +11,9 @@ import {
  * Contract equality (FU-134): each transaction body that another service fills
  * with its users' text accepts exactly the lengths `TRANSACTION_TEXT_BOUNDS`
  * states — the table marketplace-service validates the same text with when it
- * accepts it. Probed through the real schemas at both edges, so a bound typed
- * here instead of read from the table, or a table entry read for the wrong
- * field, fails.
+ * accepts it. Probed through the real schemas at both edges, so a body whose
+ * bounds differ from its table entry — a literal that drifted, or the wrong
+ * entry read — fails (a literal equal to the entry passes until either moves).
  */
 const BODIES: readonly [string, z.ZodType, string, TextBounds][] = [
   ['refund', refundTransactionSchema, 'reason', TRANSACTION_TEXT_BOUNDS.closingReason],

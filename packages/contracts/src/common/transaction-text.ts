@@ -19,6 +19,10 @@ import { z } from 'zod';
  * Lengths are counted the way zod's `.min()`/`.max()` count them — code
  * points of the trimmed string (zod 4; PostgreSQL's `char_length` agrees) —
  * on both sides, since both validate with the one catalog zod (checklist H-17).
+ *
+ * Each service compiles the table in, so a change rolls out in order: a bound
+ * raised ships to economic-service first, a bound lowered to the forwarding
+ * services first — never a window in which one accepts what the other refuses.
  */
 export interface TextBounds {
   readonly min: number;
