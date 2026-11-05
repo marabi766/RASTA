@@ -169,16 +169,17 @@ describe('the proof of a settlement at its creation (real database, runtime role
 
   const insertJournal = async (tx: Tx, transactionId: string, overrides: Row = {}) => {
     const id = `JRN_${ulid()}`;
+    const now = new Date();
     await insertRow(tx, 'journal', {
       id,
       organization_id: payer,
       transaction_id: transactionId,
       journal_type: 'SETTLEMENT',
       description: 'itest',
-      posted_at: new Date(),
+      posted_at: now,
       posted_by: 'itest',
       correlation_id: 'itest',
-      created_at: new Date(),
+      created_at: now,
       ...overrides,
     });
     return id;
@@ -853,6 +854,7 @@ describe('the proof of a settlement at its creation (real database, runtime role
       ['refunded by this journal, not released', () => ({ status: 'REFUNDED' })],
     ])('a hold %s', async (_label, changes) => {
       const transactionId = await pending();
+      const now = new Date();
       const [wallet] = await owner.$queryRawUnsafe<{ id: string }[]>(
         `SELECT id FROM wallet WHERE organization_id = $1 AND currency = 'IRR'`,
         payer,
@@ -872,9 +874,9 @@ describe('the proof of a settlement at its creation (real database, runtime role
               reference: transactionId,
               reference_type: 'OTHER',
               resolved_journal_id: journalId,
-              placed_at: new Date(),
+              placed_at: now,
               placed_by: 'itest',
-              resolved_at: new Date(),
+              resolved_at: now,
               ...changes(journalId),
             }),
         },
