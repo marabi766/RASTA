@@ -45,7 +45,7 @@ const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 //   scripts  the root scripts the quality-* jobs can run, derived (not listed by hand): every
 //            `pnpm run <name>` in a quality-* step's `run`, every root script those reach the
 //            same way, the pre/post hook of each, and the lifecycle scripts `pnpm install` runs.
-// The pin is one sha256 per entry of the canonical JSON (recursively sorted keys, no
+// The pin is one `sha256:<hex>` per entry of the canonical JSON (recursively sorted keys, no
 // whitespace) of its value, so independent edits touch independent pin lines. A referenced
 // script that is missing, a package manager invocation whose root scripts cannot be named, a
 // malformed package.json, or a whole-file pin (the pre-FU-093 form) refuses.
@@ -91,7 +91,7 @@ function rootScriptsRun(text, where, rootName) {
       refuseInput(`${where} runs a command through an expansion or a shell string`);
     const mentions = segment.match(PACKAGE_MANAGER) ?? [];
     if (mentions.length === 0) continue;
-    const at = words.indexOf('pnpm');
+    const at = words.findIndex((word) => /^pnpm$/.test(word));
     const args = words.slice(at + 1);
     if (mentions.length === 1 && at >= 0) {
       if (args.length === 2 && args[0] === 'install' && args[1] === '--frozen-lockfile') {
@@ -169,7 +169,7 @@ const digestEach = (values) =>
   Object.fromEntries(
     Object.keys(values)
       .sort()
-      .map((key) => [key, sha256(canonicalJson(values[key]))]),
+      .map((key) => [key, `sha256:${sha256(canonicalJson(values[key]))}`]),
   );
 
 export function packageJsonPin(text, runs) {

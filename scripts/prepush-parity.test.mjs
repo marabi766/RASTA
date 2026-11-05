@@ -431,7 +431,8 @@ const repinned = (inputs, wf = workflow) => ({
 const refusesInput = (fn, pattern) =>
   assert.throws(fn, (error) => error instanceof PnpmInputRefusal && pattern.test(error.message));
 const reached = () => Object.keys(manifest.pnpmInputs['package.json'].scripts);
-const pinOf = (value) => createHash('sha256').update(canonicalJson(value)).digest('hex');
+const pinOf = (value) =>
+  `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`;
 
 test('FU-093: the committed pin is the projection of the current repository', () => {
   assert.deepEqual(manifest.pnpmInputs, pnpmInputPins(workflow, pnpmInputs));
@@ -489,21 +490,18 @@ test('FU-093: a changed body of a script the quality jobs reach refuses until re
 });
 
 test('FU-093: packageManager, engines, a pnpm key and any other top-level key refuse', () => {
-  for (const [key, mutate] of [
-    ['packageManager', (pkg) => (pkg.packageManager = 'pnpm@9.0.0')],
-    ['engines', (pkg) => (pkg.engines.node = '>=18')],
-    ['engines', (pkg) => delete pkg.engines],
-    ['pnpm', (pkg) => (pkg.pnpm = { overrides: { yaml: '1.0.0' } })],
-    ['devEngines', (pkg) => (pkg.devEngines = { packageManager: { name: 'npm' } })],
-    ['type', (pkg) => (pkg.type = 'module')],
-    ['devDependencies', (pkg) => (pkg.devDependencies.yaml = '*')],
-    ['futureSetting', (pkg) => (pkg.futureSetting = true)],
+  for (const [refusal, mutate] of [
+    [/fields "packageManager"/, (pkg) => (pkg.packageManager = 'pnpm@9.0.0')],
+    [/fields "engines"/, (pkg) => (pkg.engines.node = '>=18')],
+    [/fields "engines"/, (pkg) => delete pkg.engines],
+    [/fields "pnpm"/, (pkg) => (pkg.pnpm = { overrides: { yaml: '1.0.0' } })],
+    [/fields "devEngines"/, (pkg) => (pkg.devEngines = { packageManager: { name: 'yarn' } })],
+    [/fields "type"/, (pkg) => (pkg.type = 'module')],
+    [/fields "devDependencies"/, (pkg) => (pkg.devDependencies.yaml = '*')],
+    [/fields "futureSetting"/, (pkg) => (pkg.futureSetting = true)],
   ]) {
     const inputs = withPackage(mutate);
-    refusesInput(
-      () => validateParity(workflow, manifest, scriptsOf(inputs), inputs),
-      new RegExp(`fields "${key}"`),
-    );
+    refusesInput(() => validateParity(workflow, manifest, scriptsOf(inputs), inputs), refusal);
   }
 });
 
@@ -539,16 +537,16 @@ test('FU-093: a script the quality jobs run that is missing refuses, and cannot 
   // A new CI step for a new script: the pin must name the script before the step passes.
   const ci = parse(workflow),
     changed = clone(manifest);
-  const step = { name: 'New guard', run: 'pnpm run test:new-guard' };
+  const step = { name: 'New guard', run: 'pnpm run check:new-guard' };
   ci.jobs['quality-guards'].steps.push(step);
   const at = changed.steps.findLastIndex((entry) => entry.job === 'quality-guards') + 1;
   changed.steps.splice(at, 0, { job: 'quality-guards', ci: step, reason: 'New guard.' });
   const inputs = withPackage((pkg) => {
-    pkg.scripts['test:new-guard'] = 'node --test scripts/new-guard.test.mjs';
+    pkg.scripts['check:new-guard'] = 'node --test scripts/new-guard.test.mjs';
   });
   refusesInput(
     () => validateParity(stringify(ci), changed, scriptsOf(inputs), inputs),
-    /scripts "test:new-guard"/,
+    /scripts "check:new-guard"/,
   );
   changed.pnpmInputs = pnpmInputPins(stringify(ci), inputs);
   assert.equal(validateParity(stringify(ci), changed, scriptsOf(inputs), inputs).length, 2);
@@ -592,7 +590,7 @@ test('FU-093: malformed package.json or a projection that cannot be computed ref
   for (const run of [
     'pnpm lint',
     'pnpm run "lint"',
-    'pnpm run test:$NAME',
+    'pnpm run lint:$NAME',
     'pnpm -w run lint',
     'pnpm --filter rasta lint',
     'pnpm --filter ./ lint',
