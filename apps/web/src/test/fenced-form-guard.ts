@@ -43,7 +43,10 @@ import ts from 'typescript';
  * has no own `call`: an object literal's own `call`/`apply`/`bind` member is
  * itself. An adapter whose function or arguments cannot be read (a kept `call`
  * with no receiver, `Reflect.apply(...xs)`, another `Reflect` member) is
- * `unresolved`: refused.
+ * `unresolved`: refused. Bound identities use that same adapter traversal in
+ * import/barrel discovery, completion and JSX checks. Argument-sensitive rules
+ * read effective arguments with their source module, never an ignored receiver.
+ * Commas normalize before alias, function-definition and reducer discovery.
  *
  * ## Discovery is by what the code does, not by a list
  *
@@ -180,15 +183,12 @@ const wraps = (node: ts.Node): node is Wrapper =>
 function bare(node: ts.Expression): ts.Expression;
 function bare(node: ts.Node): ts.Node;
 function bare(node: ts.Node): ts.Node {
-  while (wraps(node)) node = node.expression;
-  return node;
-}
-
-/** The node that holds `node`, past any wrapper around it. */
-function holder(node: ts.Node): ts.Node | undefined {
-  let child = node;
-  while (child.parent && wraps(child.parent)) child = child.parent;
-  return child.parent;
+  for (;;) {
+    if (wraps(node)) node = node.expression;
+    else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.CommaToken)
+      node = node.right;
+    else return node;
+  }
 }
 
 /** `ns.x`, or `ns['x']`: a member named by a literal. */
@@ -498,7 +498,7 @@ class Program {
     const parsed = this.module(module);
     for (const star of parsed.stars) this.reexported(star, seen);
     for (const [name, entry] of parsed.exports) {
-      const sym = this.exported(module, name);
+      const sym = this.provenance(this.exported(module, name));
       if (sym !== null) this.reexported(sym.module, seen);
       // Preserve the fail-closed dependency even when a FROM name is missing.
       if (entry.kind === 'FROM') this.reexported(entry.module, seen);
@@ -512,9 +512,6 @@ class Program {
     if (depth > 64) return { module: file, name: '', unresolved: true };
     const parsed = this.module(file);
     node = bare(node);
-    // `(0, f)` is `f`.
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.CommaToken)
-      return this.resolve(file, node.right, depth + 1);
     const memberOf = memberName(node);
     if (memberOf !== null) {
       const base = this.resolve(file, (node as Access).expression, depth + 1);
@@ -664,6 +661,13 @@ class Program {
     return { sym, receiver, args };
   }
 
+  /** Bound identity follows the same adapter semantics as invocation, without discarding arguments. */
+  provenance(sym: Sym | null): Sym | null {
+    return sym?.bound
+      ? (this.invoke(sym, undefined, [], 0).sym ?? { ...sym, unresolved: true })
+      : sym;
+  }
+
   /** Whether `sym` is defined in a `'use server'` module, or in an `…actions` module. */
   isServerAction(sym: Sym | null): boolean {
     if (sym === null || sym.name === NAMESPACE || !this.sources.has(sym.module)) return false;
@@ -777,7 +781,7 @@ export function fencedModules(sources: Sources): Set<string> {
 function refersToStore(file: string, { program, stores }: Discovery): boolean {
   const parsed = program.module(file);
   for (const [name, imported] of parsed.imports) {
-    const sym = program.resolve(file, ts.factory.createIdentifier(name));
+    const sym = program.provenance(program.resolve(file, ts.factory.createIdentifier(name)));
     if (sym !== null && stores.has(sym.module)) return true;
     // A namespace exposes all its exports; an unresolved name keeps its whole provenance gated.
     const open =
@@ -841,7 +845,7 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
         ? `${detail} (line ${source.getLineAndCharacterOfPosition(node.getStart()).line + 1})`
         : detail,
     });
-  const resolve = (node: ts.Node) => program.resolve(file, node);
+  const resolve = (node: ts.Node) => program.provenance(program.resolve(file, node));
   const isBoundaryCall = (node: ts.Node | undefined): boolean => {
     const call = node && bare(node);
     return (
@@ -851,7 +855,19 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
     );
   };
 
-  /** Whether `node` lies inside the argument of a boundary call — in its `property`, when named. */
+  // Only the effective options argument grants protection, never an adapter receiver.
+  // Bound options need not be ancestors of the eventual invocation.
+  const boundaryOptions = new Set(
+    calls(source).flatMap((call) => {
+      const invoked = program.invoked(file, call);
+      const options = invoked.args?.[0];
+      return is(invoked.sym, BOUNDARY_MODULE, 'submitThroughSlot') && options?.file === file
+        ? [bare(options.node)]
+        : [];
+    }),
+  );
+
+  /** Whether `node` lies inside the effective options — in its `property`, when named. */
   const insideBoundary = (node: ts.Node, property?: string): boolean => {
     let child: ts.Node = node;
     for (let parent = node.parent; parent; child = parent, parent = parent.parent) {
@@ -863,7 +879,7 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       if (
         member !== null &&
         ts.isObjectLiteralExpression(member.parent) &&
-        isBoundaryCall(holder(member.parent))
+        boundaryOptions.has(member.parent)
       ) {
         return property === undefined || member.name.getText() === property;
       }
@@ -895,7 +911,8 @@ function checkForm(file: string, discovery: Discovery): Violation[] {
       ts.isCallExpression(argument) &&
       is(program.invoked(file, argument).sym, REACT, 'useCallback')
     ) {
-      argument = argument.arguments[0] && bare(argument.arguments[0]);
+      const reducer = program.invoked(file, argument).args?.[0];
+      argument = reducer?.file === file ? bare(reducer.node) : undefined;
     }
     return argument && (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument))
       ? argument
@@ -1010,7 +1027,7 @@ export function fencedFormViolations(sources: Sources): Violation[] {
     // Resolve every JSX tag through the same graph used by form discovery.
     walk(source, (node) => {
       if (!ts.isJsxOpeningElement(node) && !ts.isJsxSelfClosingElement(node)) return;
-      const tag = program.resolve(file, node.tagName);
+      const tag = program.provenance(program.resolve(file, node.tagName));
       if (is(tag, GATE_MODULE, 'QuarantineGate')) {
         out.push({ file, rule: 'drawn', detail: 'draws QuarantineGate outside UnresolvedForm' });
       } else if (tag?.unresolved && !forms.includes(file)) {
