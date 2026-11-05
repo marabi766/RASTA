@@ -121,6 +121,7 @@ const PAYLOADS = {
     buyerOrganizationId: BUYER,
     supplierOrganizationId: SUPPLIER,
     outcome: 'SETTLE',
+    orderStatus: 'RECEIPT_CONFIRMED',
     responsibility: 'BUYER',
     resolvedBy: 'USR-OPS',
     resolvedAt: '2026-08-29T00:00:07.500Z',
