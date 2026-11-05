@@ -162,7 +162,10 @@ describe('the roles the portal mirrors', () => {
  */
 const SENT_IDENTITY: Readonly<Record<DisputeCommand, Readonly<Record<string, string>>>> = {
   DISPUTE: {},
-  RESOLVE_DISPUTE: { disputeId: 'disputeId:z.string().trim().min(1).max(64).optional()' },
+  // An identifier: economic-service never rewrites its line endings (task 129).
+  RESOLVE_DISPUTE: {
+    disputeId: 'disputeId:identifier(z.string().trim().min(1).max(64)).optional()',
+  },
 };
 
 /**
