@@ -68,6 +68,29 @@ import { parse as parseYaml } from 'yaml';
 export const AGGREGATE_JOB = 'integration';
 export const AGGREGATE_NAME = 'Integration and security tests';
 export const SPLIT_PREFIX = 'integration-';
+/**
+ * The one quality job every split job waits for (FU-111). The former single
+ * `quality` job is five parallel `quality-*` jobs; a split job builds and runs
+ * its own copy of everything it tests and takes nothing from them, so what it
+ * waits for is only a reason not to start ~20 jobs on a tree that cannot
+ * type-check. Lint, unit tests, the static guards and the build checks are not
+ * waited for: they are demanded by the `quality` aggregate (a required check),
+ * and waiting for them would put their minutes on the critical path again.
+ */
+export const QUALITY_GATE_JOB = 'quality-types';
+/** The required check "Lint, types and unit tests" and the parallel jobs it aggregates (FU-111). */
+export const QUALITY_AGGREGATE = 'quality';
+export const QUALITY_AGGREGATE_NAME = 'Lint, types and unit tests';
+export const QUALITY_PREFIX = 'quality-';
+/** The one job that may wait for the aggregate: the images verdict demands it, beside the tests. */
+export const QUALITY_AGGREGATE_WAITERS = Object.freeze(['images']);
+export const QUALITY_JOBS = Object.freeze([
+  'quality-guards',
+  'quality-lint',
+  'quality-types',
+  'quality-unit',
+  'quality-build',
+]);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 import { planTestRun } from './test-phases-lib.mjs';
@@ -416,9 +439,15 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  * is refused here without an entry, rather than assumed to need no setup.
  * Measured maxima, in seconds: suites 298, security 309, critical 281,
  * coverage 310, backup drill 92, migration chain 135 (per shard), migration
- * guards 253, trivy-db 5. `quality` (2026-11-03): its one limited step is the
- * unit-step concurrency step (74-87 s in green runs); the rest of the worst run
- * (2216 s, 2026-11-02) is 2216 - 87 = 2129 s, so ceil(2129 x 1.5 / 60) = 54.
+ * guards 253, trivy-db 5. `quality-unit` (FU-111): its one limited step is the
+ * unit-step concurrency step (74-87 s in green runs); the rest of the job is
+ * setup, `pnpm install`, `db:generate`, the Temporal cache and the unit
+ * tests: 8 + 16 + 19 + 16 + 9 + 306 = 374 s in run 41985369242 (2026-11-05),
+ * and up to 2216/1608 = 1.38 times that on the slowest measured day (2026-11-02,
+ * whole-job times), so ceil(374 x 1.38 x 1.5 / 60) = 13, plus the turbo
+ * `^build` the job now does for itself (it shared the old job's cache), 2: 15.
+ * Derived from one run's step times, not from 20 runs: re-measure after a week
+ * of runs.
  */
 export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-suites': 8,
@@ -432,19 +461,21 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'migration-reversibility-chain': 4,
   'migration-guards': 7,
   'trivy-db': 1,
-  quality: 54,
+  'quality-unit': 15,
 });
 
 /**
  * The least `timeout-minutes` a job may have where the runtime itself, not
  * the sum of its step limits, set it: the slowest of the last 20 green runs
  * took more than 80 % of the old limit, so the new one is ceil(max x 1.5 / 60).
- * `quality` took up to 1446 s (old limit 25, 96 %) and cancelled train run
- * 40936057488; `web-browser` took up to 1462 s (old limit 30, 81 %).
- * On 2026-11-02 `quality` took up to 2216 s (limit 37, 100 %) and cancelled
- * main run 41496157174 and train run 41512869238, so its floor is 56.
+ * `web-browser` took up to 1462 s (old limit 30, 81 %). The former single
+ * `quality` job had a floor of 56 (it took up to 2216 s on 2026-11-02 and
+ * cancelled healthy runs); FU-111 split it into five jobs of 20/20/15/25/20
+ * minutes whose longest step list is 8-9 minutes, so that floor went with it
+ * (and would now fail the 5-minute aggregate). The new jobs have no measured
+ * history yet: set floors for them once 20 green runs exist.
  */
-export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 56, 'web-browser': 37 });
+export const JOB_FLOOR_MINUTES = Object.freeze({ 'web-browser': 37 });
 
 /** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);
@@ -632,6 +663,7 @@ export function checkIntegrationSplit(workflow) {
     }
   }
   problems.push(...integrationPartitionProblems(effective));
+  problems.push(...qualitySplitProblems(workflow));
   if (stressCount !== 1)
     problems.push(`expected exactly one exclusive stress phase, found ${stressCount}`);
   const jobs = isMapping(workflow?.jobs) ? workflow.jobs : {};
@@ -683,7 +715,8 @@ export function checkIntegrationSplit(workflow) {
       problems.push(`${id} is not a job`);
       continue;
     }
-    if (!listOf(job.needs).includes('quality')) problems.push(`${id} must need quality`);
+    if (!listOf(job.needs).includes(QUALITY_GATE_JOB))
+      problems.push(`${id} must need ${QUALITY_GATE_JOB}`);
     jobLevel(id, job);
     const services = isMapping(job.services) ? job.services : {};
     const steps = Array.isArray(job.steps) ? job.steps.filter(isMapping) : [];
@@ -773,6 +806,99 @@ export function checkIntegrationSplit(workflow) {
   for (const [name, where] of seen) {
     if (where.length === 0) problems.push(`no ${SPLIT_PREFIX}* job runs "${name}"`);
     if (where.length > 1) problems.push(`"${name}" runs in more than one job: ${where.join(', ')}`);
+  }
+  return problems;
+}
+
+/**
+ * FU-111: the required check "Lint, types and unit tests" is an aggregate of
+ * the parallel `quality-*` jobs, and nothing may let it pass without every one
+ * of them having succeeded. Fail closed:
+ *
+ *  - the aggregate keeps its name, needs exactly the `quality-*` jobs found in
+ *    the workflow (so a job added later is needed, not forgotten) and exactly
+ *    QUALITY_JOBS (so adding or dropping one is a reviewed edit here), runs
+ *    `if: always()` and nothing else, and its verdict, run here against every
+ *    result, fails on all but `success`;
+ *  - no quality job, and no step of one, can be skipped or forgiven (`if`,
+ *    `continue-on-error`), which would turn a failed check into a pass;
+ *  - the gate the integration jobs wait for runs the type check.
+ */
+export function qualitySplitProblems(workflow) {
+  const jobs = isMapping(workflow?.jobs) ? workflow.jobs : {};
+  const ids = Object.keys(jobs).filter((id) => id.startsWith(QUALITY_PREFIX));
+  const problems = [];
+  if (JSON.stringify([...ids].sort()) !== JSON.stringify([...QUALITY_JOBS].sort())) {
+    problems.push(
+      `the quality jobs are ${JSON.stringify(ids)}, not ${JSON.stringify(QUALITY_JOBS)}: a job added or removed must be added to QUALITY_JOBS in the same change`,
+    );
+  }
+  const aggregate = jobs[QUALITY_AGGREGATE];
+  if (!isMapping(aggregate)) {
+    problems.push(`no "${QUALITY_AGGREGATE}" job`);
+  } else {
+    if (aggregate.name !== QUALITY_AGGREGATE_NAME) {
+      problems.push(
+        `"${QUALITY_AGGREGATE}" must be named "${QUALITY_AGGREGATE_NAME}" (the required check)`,
+      );
+    }
+    const needs = listOf(aggregate.needs);
+    for (const id of ids) {
+      if (!needs.includes(id)) problems.push(`"${QUALITY_AGGREGATE}" does not need ${id}`);
+    }
+    for (const id of needs) {
+      if (!ids.includes(id)) problems.push(`"${QUALITY_AGGREGATE}" needs ${id}, not a quality job`);
+    }
+    const condition = squash(aggregate.if ?? '').replace(/^\$\{\{\s*(.*?)\s*\}\}$/, '$1');
+    if (condition !== 'always()') {
+      problems.push(
+        `"${QUALITY_AGGREGATE}" must run if: always() and nothing else; a skipped required check counts as passing`,
+      );
+    }
+    if ('continue-on-error' in aggregate && aggregate['continue-on-error'] !== false) {
+      problems.push(`"${QUALITY_AGGREGATE}" sets continue-on-error`);
+    }
+    problems.push(...verdictProblems(aggregate, needs, QUALITY_AGGREGATE));
+  }
+  for (const id of ids) {
+    const job = jobs[id];
+    if (!isMapping(job)) {
+      problems.push(`${id} is not a job`);
+      continue;
+    }
+    if ('if' in job) problems.push(`${id} has a job-level if, which can skip it`);
+    if ('continue-on-error' in job && job['continue-on-error'] !== false) {
+      problems.push(`${id} sets continue-on-error: its failure would not fail the aggregate`);
+    }
+    const steps = Array.isArray(job.steps) ? job.steps.filter(isMapping) : [];
+    if (steps.length === 0) problems.push(`${id} has no steps`);
+    for (const step of steps) {
+      const label = `${id}: "${textOf(step.name ?? step.uses ?? step.run)}"`;
+      if ('if' in step) problems.push(`${label} has if: ${textOf(step.if)}, which can skip it`);
+      if ('continue-on-error' in step && step['continue-on-error'] !== false) {
+        problems.push(`${label} sets continue-on-error: its failure would not fail the job`);
+      }
+    }
+  }
+  // No other job waits for the aggregate or for a quality job but the gate: waiting for
+  // lint, unit tests, the guards or the build would put their minutes on the path again.
+  for (const [id, job] of Object.entries(jobs)) {
+    if (id === QUALITY_AGGREGATE || ids.includes(id) || !isMapping(job)) continue;
+    for (const need of listOf(job.needs)) {
+      if (need === QUALITY_AGGREGATE && QUALITY_AGGREGATE_WAITERS.includes(id)) continue;
+      if ((need === QUALITY_AGGREGATE || ids.includes(need)) && need !== QUALITY_GATE_JOB) {
+        problems.push(
+          `${id} waits for ${need}; the only quality job another job may wait for is ${QUALITY_GATE_JOB}`,
+        );
+      }
+    }
+  }
+  const gate = jobs[QUALITY_GATE_JOB];
+  const gateRuns = (Array.isArray(gate?.steps) ? gate.steps : []).filter(
+    (step) => isMapping(step) && step.run === 'pnpm run typecheck',
+  );
+  if (gateRuns.length !== 1) {
+    problems.push(`${QUALITY_GATE_JOB} must run pnpm run typecheck exactly once, it is the gate`);
   }
   return problems;
 }
@@ -916,8 +1042,8 @@ function unresolvedProblem(value) {
  * every result but `success`. Its only expression is `${{ toJSON(needs) }}`
  * in one env variable, which is what lets it run here at all.
  */
-function verdictProblems(aggregate, needs) {
-  const label = `"${AGGREGATE_JOB}"`;
+function verdictProblems(aggregate, needs, id = AGGREGATE_JOB) {
+  const label = `"${id}"`;
   const steps = Array.isArray(aggregate.steps) ? aggregate.steps : [];
   if (steps.length !== 1 || !isMapping(steps[0])) {
     return [`${label} must have exactly one step, its verdict; it only aggregates`];

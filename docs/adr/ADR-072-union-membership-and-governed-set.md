@@ -1,0 +1,600 @@
+# ADR-072: رابطهٔ «عضو اتحادیه» و دامنهٔ اتحادیه (Governed Set)
+
+- **وضعیت:** **Proposed** — فقط طراحی؛ هیچ کدی در این PR نیست. دور ۲ (2026-11-03): هفت یافته‌ی Codex دور ۱ و افزوده‌های A تا H مدیر پروژه — § ۳ تا § ۶ و Compliance بازنویسی شدند.
+- **تاریخ:** 2026-10-23
+- **تصمیم‌گیرنده:** معماری پلتفرم؛ تصمیم محصول از صاحب محصول (Q-80 گزینهٔ (پ)، Q-61، Q-63 — 2026-10-23)؛ شمارهٔ ADR از
+  مدیر پروژه (#357)؛ زیرپرسش‌ها `Q-144` تا `Q-147`؛ `D-061`
+- **مرتبط:** ADR-005 (مالکیت پایگاه داده)، ADR-011 (چندمستأجری)، ADR-020 و ADR-035 (توکن داخلی امضاشده برای یک سازمان)،
+  ADR-021 (Outbox)، ADR-023 (حکمرانی پیکربندی‌پذیر)، ADR-051 (ترتیب رویداد)، ADR-053 § ۱۰ (دید حسابرسی اتحادیه)، ADR-060
+  (نقش به سازمان گره می‌خورد؛ § ۲، § ۷)، ADR-063 و Q-70 (۷) (سیاست موافقت ساخت‌وساز)، ADR-068 § ۵ (سیاست امضای قرارداد)؛
+  `docs/07` § ۷٫۱۰ (Replica مبنای مجوزدهی نیست)، `docs/09` § ۹٫۳؛ `docs/23` D-038، D-041، D-050، D-054؛ Q-61، Q-63، Q-64،
+  Q-67، Q-80، Q-83، Q-136
+- **Backlog:** هیچ قلمی در `backlog.json` برای این کار نیست؛ این ADR آن را تغییر نمی‌دهد (برآورد در برنامهٔ اجرا).
+- **برنامهٔ اجرا:** [ADR-072 implementation plan](ADR-072-implementation-plan.md)
+
+## Context
+
+### تصمیم صاحب محصول (2026-10-23)
+
+**Q-80، گزینهٔ (پ):** دهیاری‌ها در درخت سازمانی زیر شهرستان می‌مانند و **هم‌زمان زیر نظر اتحادیه‌اند**. پس در
+`organization-service` رابطهٔ جداگانهٔ «عضو اتحادیه» ساخته می‌شود و **دامنهٔ اتحادیه = خودش و زیردرختش + سازمان‌های عضو**.
+جای جغرافیایی (درخت) و عضویت صنفی دو واقعیت جدا می‌مانند.
+
+**Q-61:** `UNION_ADMIN` در دامنهٔ اتحادیه‌اش حساب می‌سازد و درخواست ثبت‌نام را تأیید می‌کند؛ `identity-service` این دامنه را از
+یک Client داخلی **بسته در خطا** می‌خواند. بیرون از آن، فقط `SYSTEM_ADMIN`.
+
+**Q-63 (نهایی):** فقط `SYSTEM_ADMIN` سراسری است؛ `UNION_ADMIN` به سازمانش گره می‌خورد (ADR-060). دامنهٔ اتحادیه بر سازمان‌های
+دیگر از راه همین ADR می‌آید، نه با سراسری‌کردن نقش.
+
+**تصمیم‌های موقت مدیر پروژه** — این ADR آن‌ها را **به همین عنوان** پیاده می‌کند و صاحب محصول می‌تواند خلافشان را بگوید:
+
+1. عضویت را **فقط `SYSTEM_ADMIN`** ثبت و پایان می‌دهد، و هر دو کنش حسابرسی می‌شوند.
+2. هر سازمان در هر لحظه عضو **حداکثر یک** اتحادیه است.
+3. جابه‌جایی و تغییر وضعیت (تعلیق، غیرفعال‌سازی) **هر** سازمانی — از جمله عضو — مثل امروز فقط با `SYSTEM_ADMIN` است.
+
+### آنچه امروز هست — با شواهد
+
+| کجا                                        | امروز                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `organization-service` — دید و نوشتن       | زیردرختی برای همه جز `SYSTEM_ADMIN` (`organization.service.ts:43` `PLATFORM_OPERATOR_ROLES = GLOBAL_ROLES`؛ `:92` تا `:188` `visibleRoot`، `assertCanRead`، `assertCanWrite`، `assertCanWriteLocked`). بیرون از زیردرخت `404` با همان بدنهٔ شناسهٔ ناموجود. `move` و `changeStatus` فقط `SYSTEM_ADMIN` (`:461`، `:574`).     |
+| `organization-service` — پاسخ سرویس        | `GET /v1/organizations/:id` با توکن سرویس ← `{ id, hierarchyVersion }` یا `404`، فقط «همان سازمان امضاشده یا زیر آن» (`organization.controller.ts:87`، `organization.service.ts:224`، `organization.repository.ts:244` `withinVersion`). Allow-list: construction، contract، economic، marketplace.                          |
+| ترتیب در برابر جابه‌جایی                   | `hierarchy_version` (D-050): در تراکنش هر جابه‌جایی، زیر `pg_advisory_xact_lock` سلسله‌مراتب (`organization.repository.ts:324`، `:347`)، به `max + 1` می‌رسد؛ `ORGANIZATION_MOVED` آن را می‌برد.                                                                                                                             |
+| `economic-service`                         | شش فرمان مالی برای سازمان دیگر: `UNION_SUBTREE` از همان پاسخ (Q-136؛ `access.ts:213` `canActFinanciallyFor`، `:263` `reconfirmFinancialAuthority`). **ولی** `hasPlatformScope` (`access.ts:49`، `:77`) به `UNION_ADMIN` دید سراسری تراکنش (`:411`) و کیف پول (`:558`)، تراز آزمایشی و برگشت سند (`:96`) می‌دهد.              |
+| `document-service`                         | `hasPlatformScope` (`access.ts:43`، `:63`) ← خواندن، تغییر و حذف سند هر سازمانی (`:105`، `:120`).                                                                                                                                                                                                                            |
+| `supplier-service`                         | `hasPlatformScope` (`access.ts:75`، `:139`) ← صف بازبینی صلاحیت، سابقهٔ خصوصی، تأیید، رد، تعلیق و بازگشت هر تأمین‌کننده (`:248`، `:294`، `:390`؛ `supplier.controller.ts` `@Roles(...PLATFORM_ROLES)`).                                                                                                                      |
+| `marketplace-service`                      | `hasPlatformScope` (`access.ts:62`، `:81`) ← دیدن هر سفارش (`:109`)، هر درخواست مرجوعی (`returns/return-access.ts:32`)، و ویرایش هر پیشنهاد (`:160`؛ `offer/catalogue.service.ts:357`). حل اختلاف از پیش به زیردرخت محدود است (Q-136؛ `:225` `assertDisputeResolver`).                                                       |
+| `identity-service` (Q-61)                  | `USER_PROVISIONING_CROSS_ORG_ROLES` پیش‌فرض `SYSTEM_ADMIN` (`provisioning-scope.ts:79`)؛ بقیه فقط سازمان فعال خودشان (`:122`). چهار مسیر: `createUser` (`identity.service.ts:249`)، `addMembership` (`:422`)، `approveRegistration` (`:760`)، `rejectRegistration` (`:1017`). **هیچ تماسی با `organization-service` ندارد.** |
+| `audit-service` (ADR-053 § ۱۰)             | زیردرخت از Replica محلی `organization_ref` (`organization-projection.ts`؛ `audit.repository.ts:690` `isWithinProjectedSubtree`؛ `audit.scope.ts:40` `resolveSubtreeTarget`). کهنگی = «ردیف غایب».                                                                                                                            |
+| `construction-service`، `contract-service` | پرسش «درون» از همان پاسخ سرویس (`src/organization/organization-directory.ts`)؛ `ORGANIZATION_MOVED` محرک بازپرسی و تعلیق سیاست (Q-83؛ `src/events/organization-moved.consumer.ts`، `policy-suspension.service.ts`).                                                                                                          |
+| Seed                                       | `ORG-UNION-YAZD` هم‌سطح `ORG-COUNTY-YAZD` زیر `ORG-PROVINCE-YAZD`؛ `ORG-DEH-0001` و `ORG-DEH-0002` زیر شهرستان (`services/organization-service/prisma/seed.ts:67` تا `:107`). پس دامنهٔ اتحادیه امروز فقط خودش است.                                                                                                          |
+
+**شماره‌خط‌های بخش Q-80 در `docs/24`** برای economic (`:75`، `:96`، `:141`، `:171`، `:238`، `:265`) و Gateway (`routes.ts:172`)
+از نوشتن آن بخش جابه‌جا شده‌اند؛ جدول بالا شماره‌های `main` در `ff3e8143` را می‌دهد (`ledger` در Gateway اکنون `routes.ts:207`).
+
+### آنچه اسناد نگفته‌اند و این ADR جعلش نمی‌کند
+
+- آیا **زیردرخت خودِ عضو** هم در دامنهٔ اتحادیه است — **Q-144**.
+- آیا سیاست حکمرانیِ **به‌ارث‌رسیدنیِ** اتحادیه به اعضا می‌رسد — **Q-145**.
+- کارکردهای سراسری پلتفرم که امروز با `hasPlatformScope` به اتحادیه رسیده‌اند ولی دربارهٔ هیچ سازمانِ تحت نظری نیستند (تراز
+  آزمایشی، برگشت سند، صف صلاحیت تأمین‌کنندگان) — **Q-146**.
+- آیا اختیار اتحادیه در `identity-service` از «ساختن و تأیید» به «ادارهٔ عضویت‌های موجود» می‌رسد — **Q-147**.
+
+## Decision
+
+### ۱. تعریف: دامنهٔ اتحادیه
+
+برای سازمان `U`:
+
+```
+G(U) = { U } ∪ subtree(U) ∪ ActiveMembers(U)
+```
+
+- `subtree(U)` همان زیردرخت امروز است (`path <@ U.path`).
+- `ActiveMembers(U)` سازمان‌هایی‌اند که عضویت **فعالِ** آن‌ها در `U` در لحظهٔ پرسش ثبت است — **فقط خودِ همان سازمان‌ها**، نه
+  زیردرختشان (§ ۲ (۶)، Q-144).
+- **ترایایی نیست:** عضوِ عضو، زیردرختِ عضو، و اتحادیهٔ عضو در `G(U)` نمی‌آیند.
+- برای سازمانی که نوعش `UNION` نیست، `ActiveMembers` همیشه تهی است و `G` همان زیردرخت است.
+
+**`G(U)` فقط به `UNION_ADMIN`ـی می‌رسد که برای `U` عمل می‌کند** (`X-Organization-Id = U`، نقش در عضویت `U` — ADR-060 § ۱).
+پایهٔ زیردرختی، مثل امروز، برای هر نقشی است که سرویسِ مالک آن را زیردرختی می‌خواند (مثلاً همهٔ نقش‌ها در `organization-service`)؛
+**پایهٔ عضویت فقط برای `UNION_ADMIN`** — کمینهٔ امتیاز: «زیر نظر اتحادیه» یعنی زیر نظر مدیر اتحادیه، نه هر کاربر سازمان اتحادیه.
+`SYSTEM_ADMIN` همه چیز را دارد، مثل امروز. هیچ نقش دیگری چیزی از این ADR نمی‌گیرد.
+
+### ۲. مدل داده در `organization-service`
+
+یک جدول تازه، مالکش `organization-service` (ADR-005؛ مالک سلسله‌مراتب، A-13):
+
+```sql
+CREATE TABLE union_membership (
+  id                      text PRIMARY KEY,               -- 'UMB_' || ULID (ID_PREFIXES.unionMembership)
+  union_organization_id   text NOT NULL REFERENCES organization(id),
+  member_organization_id  text NOT NULL REFERENCES organization(id),
+  started_at              timestamptz NOT NULL DEFAULT clock_timestamp(),
+  started_by              text NOT NULL,
+  start_reason            text NOT NULL,                  -- کران‌دار، مثل reason جابه‌جایی
+  start_hierarchy_version bigint NOT NULL,
+  ended_at                timestamptz,
+  ended_by                text,
+  end_cause               text,                           -- OPERATOR_ENDED | MEMBER_DEACTIVATED | UNION_DEACTIVATED
+  end_reason              text,
+  end_hierarchy_version   bigint,
+  CONSTRAINT ck_union_membership_not_self CHECK (union_organization_id <> member_organization_id),
+  CONSTRAINT ck_union_membership_end_complete CHECK (
+    (ended_at IS NULL AND ended_by IS NULL AND end_cause IS NULL AND end_hierarchy_version IS NULL)
+    OR (ended_at IS NOT NULL AND ended_by IS NOT NULL AND end_cause IS NOT NULL AND end_hierarchy_version IS NOT NULL)),
+  CONSTRAINT ck_union_membership_end_after_start CHECK (ended_at IS NULL OR ended_at >= started_at)
+);
+-- (۲) یک عضویت فعال به‌ازای هر عضو — قید پایگاه داده، نه فقط بررسی کد
+CREATE UNIQUE INDEX ux_union_membership_active_member
+  ON union_membership (member_organization_id) WHERE ended_at IS NULL;
+CREATE INDEX ix_union_membership_active_union
+  ON union_membership (union_organization_id, member_organization_id) WHERE ended_at IS NULL;
+CREATE INDEX ix_union_membership_member_history ON union_membership (member_organization_id, started_at);
+```
+
+قاعده‌ها:
+
+1. **بی دورهٔ زمان‌بندی‌شده.** عضویت با Commit ثبتش آغاز و با Commit پایانش تمام می‌شود؛ ساعت = ساعت پایگاه داده
+   (`clock_timestamp()`، همان قاعدهٔ D-048 برای ستون تازه: `timestamptz`). `effective_from`/`effective_to` آینده‌دار یا
+   گذشته‌دار ساخته نمی‌شود: اختیاری که در آینده خودبه‌خود روشن یا خاموش شود، کنشی است که هیچ‌کس در آن لحظه انجامش نداده و حسابرسی‌اش
+   نمی‌کند؛ و اختیار گذشته‌دار برای مجوزدهی معنایی ندارد.
+2. **حداکثر یک عضویت فعال به‌ازای هر عضو** (تصمیم موقت (۲)): Partial Unique Index بالا. اتحادیه‌ای که عضو را «تحویل» می‌گیرد،
+   دو کنش جدا و حسابرسی‌شده است: پایان در اتحادیهٔ قبلی، ثبت در تازه. عملیات «انتقال عضویت» ساخته نمی‌شود.
+3. **سابقه هرگز پاک نمی‌شود.** پایان = پر کردن ستون‌های `ended_*`؛ Trigger `trg_union_membership_append_only` هر `DELETE` و
+   هر `UPDATE`ی جز یک‌بار پر کردن `ended_*` ردیف فعال را رد می‌کند (همان شکل حفاظت تمامیت در جدول‌های دیگر؛ اگر نقش زمان اجرای
+   `organization-service` مالک جدول باشد، محدودیت D-045 همین‌جا هم صادق است و PR سرویس آن را می‌سنجد). ثبت دوباره پس از پایان
+   یک ردیف تازه است.
+4. **ناوردایی‌های ثبت** — در سرویس، زیر قفل سلسله‌مراتب و روی ردیف‌های قفل‌شده:
+   - `U` نوع `UNION` دارد (`OrganizationType` پس از ساخت تغییرپذیر نیست — `updateOrganizationSchema` آن را ندارد؛ پس این قاعده
+     پایدار می‌ماند)؛
+   - عضو نوع `UNION` ندارد (اتحادیهٔ اتحادیه ساخته نمی‌شود، تا ترایایی پنهانی پدید نیاید)؛
+   - عضو در لحظهٔ ثبت درون `subtree(U)` نیست (عضویتِ زائد، که پس از جابه‌جایی بعدی بی‌صدا اختیار نگه می‌داشت)؛
+   - هیچ‌کدام `DEACTIVATED` نیست. `SUSPENDED` و `PENDING` پذیرفته می‌شوند — امروز هم پایهٔ زیردرختی وضعیت را نمی‌سنجد
+     (`withinVersion`)، و تعلیق برگشت‌پذیر است.
+5. **پایان خودکار فقط با غیرفعال‌سازی.** `changeStatus` به `DEACTIVATED` (پایانی؛ آبشاری به زیردرخت) در **همان تراکنش** هر
+   عضویت فعالی را که عضوش یا اتحادیه‌اش در زیردرختِ غیرفعال‌شده است با `end_cause = MEMBER_DEACTIVATED | UNION_DEACTIVATED` و
+   `ended_by = SYSTEM` پایان می‌دهد و رویداد پایانش را می‌فرستد. **تعلیق** عضویت را پایان نمی‌دهد. **جابه‌جایی** عضویت را
+   دست نمی‌زند: جغرافیا و عضویت دو واقعیت‌اند (تصمیم Q-80).
+6. **زیردرخت عضو در `G` نیست** (پاسخ پیشنهادی به Q-144). دلیل: عضویت یک واقعیت صریح به‌ازای **یک** سازمان است؛ اگر زیردرخت عضو
+   به ارث برسد، (الف) عضویت یک شهرستان بی‌صدا همهٔ دهیاری‌هایش را — بی هیچ ثبت جداگانه — زیر نظر اتحادیه می‌برد، و (ب) هر
+   جابه‌جایی زیر عضو، دامنهٔ اتحادیه را بی هیچ رویداد عضویتی تغییر می‌دهد. خوانش باریک برگشت‌پذیر است (ثبت عضویت به‌ازای هر
+   سازمان)، خوانش وسیع نیست. اگر صاحب محصول خلافش را بخواهد، فقط پرسش داخلی (§ ۴) و افزایش نسخه (۷) عوض می‌شوند: پایهٔ
+   عضویت به `path <@ member.path` می‌رسد و ثبت/پایان نسخهٔ کل زیردرخت عضو را بالا می‌برد.
+7. **نسخهٔ سلسله‌مراتب، ترتیب‌دهندهٔ عضویت هم هست.** ثبت و پایان، مثل جابه‌جایی، زیر `lockHierarchy` و با
+   `nextHierarchyVersion` انجام می‌شوند و `hierarchy_version` **ردیف عضو** را به همان مقدار می‌رسانند (و در ستون‌های
+   `start_/end_hierarchy_version` ثبت می‌کنند). پس هر پاسخ «درون دامنه» که نسخه‌اش را می‌برد (§ ۴)، در برابر پایانِ عضویت هم
+   با عدد ترتیب‌پذیر است، نه با ساعت — همان D-050، بی شمارندهٔ دوم. معنای ستون از «نسخهٔ نسب» به «نسخهٔ اینکه چه کسی بر این
+   سازمان دامنه دارد» گسترده می‌شود؛ مصرف‌کنندگانی که امروز آن را می‌خوانند فقط «بزرگ‌تر = تازه‌تر» را فرض کرده‌اند، که می‌ماند.
+8. **قفل.** نوشتن‌هایی که امروز زیر `assertCanWriteLocked` قفل سلسله‌مراتب را می‌گیرند، عضویت را هم زیر همان قفل می‌خوانند؛ پس
+   نوشتنی که پیش از Commit پایانِ عضویت بررسی شده، یا پیش از آن Commit شده یا منتظر می‌ماند و رد می‌شود.
+
+### ۳. رویدادها و حسابرسی
+
+دو رویداد تازه روی `rasta.organization.v1` (همان Topic، همان ACL و همان Principal):
+
+| رویداد                                  | Payload                                                                                                                                                                                        |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ORGANIZATION_UNION_MEMBERSHIP_STARTED` | `membershipId`، `unionOrganizationId`، `memberOrganizationId`، `startedAt`، `hierarchyVersion`، `reason`                                                                                       |
+| `ORGANIZATION_UNION_MEMBERSHIP_ENDED`   | `membershipId`، `unionOrganizationId`، `memberOrganizationId`، `startedAt`، `endedAt`، `cause` (`OPERATOR_ENDED` \| `MEMBER_DEACTIVATED` \| `UNION_DEACTIVATED`)، `hierarchyVersion`، `reason` |
+
+- **نام:** پیشوند `ORGANIZATION_` همهٔ رویدادهای این Topic (`events.ts`)؛ `ORG_UNION_MEMBERSHIP_*` در شرح کار نام پیشنهادی بود.
+- **جریان و Partition:** `aggregateType = 'Organization'`، `aggregateId = memberOrganizationId` ← `PARTITION_SCOPE_OF` همان
+  `AGGREGATE` (`routing.ts`)؛ پس ثبت و پایان عضویت یک سازمان در **همان جریانِ** `ORGANIZATION_MOVED` و
+  `ORGANIZATION_STATUS_CHANGED` همان سازمان‌اند و ترتیبشان حفظ است. کلاس DETECT (ADR-051 § D-1)، مثل بقیهٔ این Topic.
+- **مستأجر لفافه = اتحادیه** (`organizationId = unionOrganizationId`). دلیل: رکورد حسابرسی زیر مستأجر لفافه ثبت می‌شود (ADR-053
+  § ۱). اگر مستأجر عضو بود، اتحادیه پس از پایان عضویت دیگر رکورد پایان عضویت خودش را نمی‌دید (عضو از `G` بیرون رفته)؛ زیر مستأجر
+  اتحادیه، سابقه‌ی عضویت‌های اتحادیه همیشه در دید خودش است و `SYSTEM_ADMIN` همه را می‌بیند. `ORGANIZATION_ADMIN` عضو امروز دسترسی
+  حسابرسی ندارد (ADR-053 § ۱۰)، پس چیزی از دست نمی‌دهد.
+- **نگاشت حسابرسی: Projection ـِ اعتبارسنجی‌شده، نه Mapper بی‌تغییر** (یافته‌ی ۶ Codex). Mapper مسیر A امروز `resourceType` و
+  `resourceId` را عیناً از `aggregateType` و `aggregateId` لفافه می‌گیرد (`audit.mapper.ts:278`–`:279`) و Payload را نگه
+  نمی‌دارد؛ پس با کلید جریان بالا رکورد `Organization/{memberId}` می‌شد، نه `UnionMembership/{membershipId}`، و دوره‌های پیاپی
+  عضویت یک سازمان با شناسه‌ی منبع از هم جدا نمی‌شدند. **تصمیم:** کلید Partition همان عضو می‌ماند، و audit یک Projection تازه
+  می‌گیرد (`union-membership-projection.ts`) هم‌شکل سه Projection موجود (`contract-refusal-projection.ts`،
+  `settlement-refusal-projection.ts`، `commission-rule-change-projection.ts`): فقط برای همین دو نام رویداد روی
+  `rasta.organization.v1`، Payload را با Schema ـِ `packages/contracts` می‌سنجد و `resourceType = 'UnionMembership'` و
+  `resourceId = membershipId` می‌نویسد. Payload ناسازگار، `membershipId` بی پیشوند `UMB_`، یا `memberOrganizationId` ناهمسان با
+  `aggregateId` لفافه به DLQ می‌رود — هرگز رکوردی با منبع حدسی. `action` = نام رویداد؛ `actor` از لفافه (کاربر `SYSTEM_ADMIN`، یا
+  `SYSTEM` در پایان خودکار).
+  - **چرا Projection، نه تغییر کلید و نه تغییر قول:** کلید Partition = `membershipId` ترتیب ثبت و پایان را از
+    `ORGANIZATION_MOVED` و `ORGANIZATION_STATUS_CHANGED` همان عضو جدا می‌کرد (ADR-051؛ پایان خودکار با غیرفعال‌سازی باید پس از
+    رویداد وضعیت بیاید)، و قول `Organization/{memberId}` دوره را گم می‌کرد، در حالی که پایان عضویت به شناسه‌ی دوره بسته است
+    (§ ۴). Projection یک فایل کوچک با الگوی موجود است.
+  - **ترتیب استقرار (افزوده‌ی H):** این Projection پیش از نخستین رویدادی که این قول را می‌دهد مستقر می‌شود — PR 1b برنامه‌ی
+    اجرا، پیش از PR 1 ـِ `organization-service`. شماره‌های ADR و D و Q که در `docs/26` برای #362 رزرو شده‌اند، همان می‌مانند.
+- **رد کنش:** درخواست ثبت/پایان از غیر `SYSTEM_ADMIN` در `RolesGuard` و پیش از هر Lookup `403` می‌گیرد، مثل `move`؛ ردِ گارد از
+  همان مسیر حسابرسی ردهای موجود (ADR-053 § ۴) می‌گذرد.
+- **فهرست رویدادها:** دو ردیف در `docs/events/README.md` (§ Organization) در PR ـِ `organization-service`؛ این PR فقط یادداشت
+  «برنامه‌ریزی‌شده» می‌گذارد. مصرف‌کنندهٔ تازه‌ای در `TOPIC_CONSUMERS` لازم نیست: construction و contract از پیش مشترک
+  `rasta.organization.v1`اند (`packages/contracts/src/events/topic-consumers.ts:96`، `:110`).
+
+### ۴. API
+
+**بیرونی** (از پیشوند موجود `organizations` در Gateway، `routes.ts:110`):
+
+| Endpoint                                                                                                  | چه کسی                                                                                         | پاسخ‌ها                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/organizations/{unionId}/members` `{ memberOrganizationId, expectedLatestMembershipId, reason }` | `@Roles('SYSTEM_ADMIN')` و دوباره در سرویس (تصمیم موقت (۱))؛ `403` پیش از خواندن بدنه و Lookup | `201` نمای دوره؛ `404 NOT_FOUND` اتحادیه یا عضو ناموجود؛ `422 BUSINESS_RULE_VIOLATION` با `rule` ∈ {`NOT_A_UNION`، `MEMBER_IS_UNION`، `ALREADY_IN_UNION_SUBTREE`، `ORGANIZATION_DEACTIVATED`}؛ `409 ALREADY_EXISTS` وقتی عضو عضویت فعالی دارد (در همین یا اتحادیه‌ی دیگر)؛ `409 OPTIMISTIC_LOCK_FAILED` وقتی آخرین دوره‌ی عضو (فعال یا پایان‌یافته، زیر قفل سلسله‌مراتب) `expectedLatestMembershipId` نیست (`null` = عضو هرگز دوره‌ای نداشته)                   |
+| `POST /v1/organizations/{unionId}/memberships/{membershipId}/end` `{ reason }`                            | همان                                                                                           | `200` نمای دوره‌ی پایان‌یافته؛ `404 NOT_FOUND` (`UnionMembership`) وقتی این دوره از این اتحادیه نیست؛ `409 INVALID_STATE_TRANSITION` وقتی همین دوره پیش‌تر پایان یافته — هرگز دوره‌ی دیگری از همان جفت را پایان نمی‌دهد                                                                                                                                                                                                                                         |
+| `GET /v1/organizations/{unionId}/members?status=ACTIVE\|ALL&cursor&limit`                                 | هر کسی که `unionId` را می‌خواند                                                                | Cursor با کران قرارداد (`limit` پیش‌فرض ۲۵، بیشینه ۲۰۰؛ ترتیب `started_at DESC, id DESC`). دوره‌ی فعال: فقط اگر خواننده عضوش را می‌خواند. دوره‌ی پایان‌یافته: برای `UNION_ADMIN` ـِ همان `U` و `SYSTEM_ADMIN` فقط نمای دوره (`membershipId`، `memberOrganizationId`، `startedAt`، `endedAt`، `endCause`) — دوره رابطه‌ی خود `U` است، نه داده‌ی عضو، و هیچ داده‌ی دیگری از عضو پیشین نمی‌آید؛ برای بقیه فقط اگر عضو را می‌خوانند. `unionId` بیرون از دید ← `404` |
+| `GET /v1/organizations/{id}/union-membership`                                                             | هر کسی که `id` را می‌خواند                                                                     | دوره‌ی فعال (`{ membershipId, unionOrganizationId, startedAt }`) یا `null`. نام اتحادیه نمی‌آید — همان مرز Q-67 برای نام‌های بیرون از دید                                                                                                                                                                                                                                                                                                                       |
+| `GET /v1/organizations/{id}/union-memberships?cursor&limit`                                               | همان                                                                                           | سابقه، با همان Cursor و کران فهرست اعضا (دیگر «همه‌ی ردیف‌ها» در یک پاسخ نیست)؛ نمای دوره بی نام اتحادیه. خواننده‌ای که `id` را دیگر نمی‌خواند — مثلاً اتحادیه پس از پایان — `404` می‌گیرد و دوره‌های خودش را از فهرست اعضا می‌بیند                                                                                                                                                                                                                             |
+
+**ستون‌های اپراتور** (`start_reason`، `end_reason`، `started_by`، `ended_by`) فقط به `SYSTEM_ADMIN` نشان داده می‌شوند: نوشته‌ی
+اپراتور برای سابقه‌ی پلتفرم است، نه برای اتحادیه یا عضو (افزوده‌ی G).
+
+**هر دو نوشتن به دوره بسته‌اند** (افزوده‌ی C). `organization-service` امروز `Idempotency-Key` را در هیچ نوشتنی پیاده نکرده، و این
+ADR آن را برای دو کنش تازه نمی‌سازد؛ به‌جایش: پایان، شناسه‌ی دوره را در مسیر دارد و فقط همان ردیف را، اگر هنوز فعال است، پایان
+می‌دهد؛ ثبت، `expectedLatestMembershipId` را می‌خواهد و زیر قفل سلسله‌مراتب با آخرین دوره‌ی عضو می‌سنجد. پس بازتلاش دیرکرده‌ی
+پایان، دوره‌ی جانشینی را که پس از آن ثبت شده پایان نمی‌دهد (`409`)، و بازتلاش دیرکرده‌ی ثبت، عضویتی را که اپراتور در این میان پایان
+داده دوباره زنده نمی‌کند (`409`). پاسخ گم‌شده با `GET .../union-memberships` روشن می‌شود. خطاهای `409`/`422` اینجا چیزی نشت
+نمی‌دهند: فقط `SYSTEM_ADMIN` به آن‌ها می‌رسد.
+
+**دید و نوشتن خود سرویس برای `UNION_ADMIN` ـِ `U`** (بقیهٔ نقش‌ها بی‌تغییر):
+
+- **خواندن** (`get`، `list`، `nearby`، `policies`): هر سازمان در `G(U)`. `list` و `nearby` همان فیلتر را در همان Statement
+  می‌گیرند (`path <@ U.path OR id IN (اعضای فعال U)`)؛ هیچ مسیر خواندنی ردیف سازمانی بیرون از `G(U)` برنمی‌گرداند.
+- `children(member)` و `subtree(member)` فقط ردیف‌های درون `G(U)` را برمی‌گردانند — یعنی خودِ عضو، نه فرزندانش (§ ۲ (۶)).
+  `ancestors(member)` زنجیره را از خودِ عضو آغاز می‌کند، مثل قاعدهٔ Q-67 که زنجیره را در بالای دید خواننده می‌بُرد.
+- **نوشتن** (`update`، `addLocation`، `addContact`، `setPolicy`): هر سازمان در `G(U)`، و چک معتبر همچنان زیر قفل سلسله‌مراتب
+  (§ ۲ (۸)). `setPolicy` همچنان فهرست Q-64 (`GOVERNANCE_POLICY_SETTER_ROLES`) را هم می‌خواهد. **ساختن سازمان زیر عضو نه**:
+  والد باید در پایهٔ درختی خواننده باشد، وگرنه سازمانی ساخته می‌شد که سازنده‌اش آن را نمی‌بیند. `move` و `changeStatus` بی‌تغییر
+  فقط `SYSTEM_ADMIN` (تصمیم موقت (۳)).
+- **سیاست مؤثر عضو** همان نمایی است که هر خوانندهٔ مجاز امروز می‌گیرد — شامل مقادیر به‌ارث‌رسیده از اجداد درختیِ عضو (D-038 نشت
+  فرادادهٔ منبع را از پیش ثبت کرده است). سیاست به‌ارث‌رسیدنیِ `U` به عضو **نمی‌رسد**؛ وراثت فقط درختی است (Q-145).
+- **قاعدهٔ نشت مستأجر بی‌تغییر:** هر سازمان بیرون از `G(U)` همان `404` و همان بدنه‌ای را می‌گیرد که شناسهٔ ناموجود.
+
+**درونی** (سرویس به سرویس؛ `/v1/internal/...` پیشوند Gateway ندارد، پس از بیرون دست‌نیافتنی است):
+
+| Endpoint                                                        | پاسخ                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /v1/internal/organizations/{id}/governance`                | `200 { id, hierarchyVersion, basis }` با `basis` ∈ {`SELF`، `SUBTREE`، `MEMBER`} وقتی `id ∈ G(S)`، `S` = سازمانی که توکن داخلی برایش امضا شده (ADR-035)؛ وگرنه `404` با بدنه‌ی `Organization not found` — همان برای ناموجود. یک Statement در Snapshot ـِ فقط‌خواندنی تازه، روی پایگاه داده‌ی اصلی (§ ۵).                          |
+| `POST /v1/internal/organizations/governance` `{ ids: [1..50] }` | `200 { governed: [{ id, hierarchyVersion, basis }] }` — زیرمجموعه‌ی درون `G(S)`، هر شناسه حداکثر یک بار، به هر ترتیب؛ همان Snapshot و همان پایگاه داده. بیش از ۵۰ شناسه، شناسه‌ی تکراری یا بدنه‌ی نامعتبر ← `400`. کران پاسخ ۸ KiB: بدترین حالت ۵۰ ورودی × ۱۱۸ بایت (شناسه‌ی ۵۲ نویسه‌ای `seedIdSchema`، نسخه‌ی ۱۹ رقمی) ≈ ۶ KiB. |
+
+- **Allow-list: بسته تا هر مصرف‌کننده روشن شود** (یافته‌ی ۳). `@AllowService()` بی نام امروز **همه‌ی** سرویس‌ها را راه می‌دهد:
+  گارد نام فراخوان را فقط وقتی `allowed.length > 0` است می‌سنجد (`auth.guard.ts:364`). پس PR 1 دو مسیر درونی را **بی هیچ
+  `@AllowService`** مستقر می‌کند — گارد هر توکن سرویس را با «This endpoint is not callable by another service» رد می‌کند — و خود
+  Handler هم فقط `authType === 'SERVICE'` با `callerService` در ثابت بسته‌ی `GOVERNANCE_CALLERS` را می‌پذیرد (نخست تهی ← رد
+  همه، توکن کاربر هم؛ الگوی `settlement-fact.ts:51`). هر مصرف‌کننده نامش را در PR خودش به هر دو می‌افزاید. **بستن رده:** PR 1a
+  امضای `AllowService` در `nest-common` را «دست‌کم یک نام» می‌کند (نوع `[string, ...string[]]`، و خطا هنگام بارگذاری Module برای
+  فهرست تهی) و گارد فهرست تهی را رد می‌کند، نه Wildcard. دلیل خطای زمان بارگذاری: هفت کاربرد امروز با Spread ـِ یک ثابت است
+  (`STANDING_OF_CALLERS`، `MEMBERSHIP_READ_CALLERS`، `LIVE_MEMBERSHIP_CALLERS`، `POLICY_STANDING_CALLERS`، `SNAPSHOT_CALLERS`،
+  `TRANSFER_RECORD_CALLERS`، `WORK_STATE_CALLERS`)، و تهی شدن هرکدام بی‌صدا Wildcard می‌ساخت.
+- **دو نوع پرسش، دو امضای مستأجر** (یافته‌ی ۴، افزوده‌ی D). توکن سرویس نقش کاربر را حمل نمی‌کند؛ پاسخ همیشه درباره‌ی دامنه‌ی
+  سازمان `S` است که توکن برایش امضا شده، و مصرف‌کننده `S` را فقط از یکی از دو منبع امضاشده یا ذخیره‌شده می‌گیرد — هرگز از سرآیند
+  یا بدنه:
+  1. **واگذاری مستقیم اتحادیه** — درخواست کاربر `UNION_ADMIN` برای سازمانی جز سازمان خودش: `S` = سازمانی که درخواست برایش عمل
+     می‌کند (`getOrganizationId()`، مستأجر امضاشده‌ی درخواست؛ ADR-035، ADR-060 § ۱). **فقط** برای `UNION_ADMIN` پرسیده می‌شود؛
+     نقش‌های دیگر در این نوع پرسش رفتار امروزشان را دارند.
+  2. **اعتبار نویسنده‌ی سیاست** — هر استفاده از سیاستی که `UNION_ADMIN` نوشته: امضای قرارداد (`signing-authority.ts:98`)، گشودن
+     دور موافقت ساخت‌وساز (`approval.service.ts:329`)، ارسال صورت‌وضعیت (`statement.service.ts:475`–`:481`). `S` =
+     `policy.authorOrganizationId` ذخیره‌شده، و پرسش به `policy.authorRole` بسته است، **نه به نقش فراخوان** — کاربر عادی سازمان
+     خودش زیر سیاست اتحادیه هم می‌پرسد. این پرسش امروز هم هست (پاسخ زیردرختی)؛ حذفش برای نقش‌های جز `UNION_ADMIN` ابطال را به
+     تعلیق ناهمگام Q-83 می‌سپرد، پس هیچ PRی آن را حذف نمی‌کند.
+
+  گارد سرآیند `X-Organization-Id` ناهمسان با Claim را رد می‌کند (`auth.guard.ts:376`–`:390`)، و Client هم `organizationId` توکن و
+  هم سرآیند را از همان `S` می‌سازد (`organization-directory.ts:113`–`:118`)؛ هر دو حفظ می‌شوند.
+
+- **پاسخ موجود دست نمی‌خورد:** شاخه‌ی سرویس `GET /v1/organizations/:id` (`confirmWithinCaller`) فقط-زیردرخت می‌ماند تا آخرین
+  مصرف‌کننده‌اش مهاجرت کند، و در PR پاک‌سازی برداشته می‌شود. دلیل: اگر همان پاسخ گسترده می‌شد، construction، contract، economic و
+  marketplace هم‌زمان و بی PR خودشان رفتار عوض می‌کردند — نه آزمون، نه برگشت جدا به‌ازای سرویس.
+
+### ۵. رساندن دامنه به سرویس‌های دیگر: پرسش همزمان، بسته در خطا، بی Cache
+
+**تصمیم: هر سرویس `G` را از `organization-service` همزمان می‌پرسد (§ ۴، درونی)؛ هیچ سرویسی Replicaی از عضویت را مبنای مجوزدهی
+نمی‌کند.**
+
+- **بسته در خطا** — یک Client مشترک، `GovernanceClient` در `nest-common` (PR 1a)، با همان قرارداد Client موجود
+  (`economic-service/src/organization/organization-hierarchy.ts`): `200` با شناسه‌ی همان سازمان، نسخه‌ی معتبر و `basis` شناخته‌شده
+  ← درون؛ `404` با بدنه‌ی خود سرویس ← بیرون؛ هر چیز دیگر (وضعیت دیگر، `404` بی آن بدنه — مثلاً مسیر هنوز مستقرنشده —، بدنه‌ی
+  بزرگ‌تر از ۱ KiB، Timeout که خواندن بدنه را هم می‌پوشاند، خطای شبکه) ← `503 UPSTREAM_UNAVAILABLE` / `504 UPSTREAM_TIMEOUT` و
+  **هیچ چیز نوشته یا خوانده نمی‌شود**. یک تلاش در هر پرسش؛ بازتلاش با فراخواننده است.
+- **پرسش دسته‌ای هم بسته در خطا** (یافته‌ی ۵، افزوده‌ی E). Client شناسه‌ها را یکتا می‌کند و به تکه‌های حداکثر ۵۰ تایی می‌برد؛ همه‌ی
+  تکه‌ها زیر **یک ددلاین کل** فرستاده می‌شوند (همان `*_ORGANIZATION_REQUEST_TIMEOUT_MS`، یک `AbortSignal` برای همه، حداکثر ۵ تکه
+  هم‌زمان). پاسخ هر تکه سنجیده می‌شود: کران ۸ KiB، هر `id` از همان تکه‌ی درخواستی، بی تکرار، با نسخه و `basis` معتبر. هر تکه‌ی
+  شکست‌خورده، کند یا بدشکل ← کل پرسش `503`/`504`، و فراخوان **هیچ** ردیفی برنمی‌گرداند — هرگز نتیجه‌ی جزئی از داده‌ی خصوصی.
+  شناسه‌ای که در پاسخ نیامده فقط وقتی «بیرون» است که پاسخ تکه‌اش کامل و معتبر بوده.
+- **ناتوانی برای هدف ذخیره‌شده = همان `404`** (رده‌ی یافته‌ی ۷). وقتی سازمان هدف از ردیفی می‌آید که شناسه‌اش در مسیر است
+  (تراکنش، کیف پول، سند، تأمین‌کننده، سفارش، مرجوعی، ثبت‌نام)، `503` فقط برای ردیف موجود رخ می‌داد و Oracle وجود می‌ساخت. پس
+  نخستین تصمیم دید آن ردیف در ناتوانی و در حصار منقضی همان `404` ـِ ناموجود را می‌دهد، و Log و متریک علت را نگه می‌دارند (همان
+  قاعده‌ی identity، § ۶). `503`/`504` فقط برای هدفی که فراخوان خودش در بدنه نام برده (`createUser`، `addMembership`، ساختن
+  سیاست)، برای فهرست (کل صفحه)، و برای پرسش دوم فرمانی که هدفش را پیش‌تر دیدنی یافته است.
+- **Timeout:** متغیر هر سرویس (`*_ORGANIZATION_REQUEST_TIMEOUT_MS`): economic، construction، marketplace و contract (تا ۶۰٬۰۰۰) کرانه‌ی
+  موجود خودشان را نگه می‌دارند؛ سرویس تازه ۱۰۰ تا ۳۰٬۰۰۰، پیش‌فرض ۳٬۰۰۰.
+- **پایگاه داده‌ی اصلی، نه Replica:** `organization-service` پرسش `governance` را با Client ـِ متصل به `DATABASE_URL` خودش
+  (Primary) و در Snapshot ـِ فقط‌خواندنی تازه برای هر پرسش (`readSnapshot`) می‌خواند. هیچ Replica ـِ خواندنی — امروز نیست — هرگز به
+  این پرسش سیم‌کشی نمی‌شود: تأخیر Replication ابطال را به همان اندازه عقب می‌انداخت. PR 1 آن را با آزمون سنجاق می‌کند.
+- **بی Cache** — نه مثبت، نه منفی. Cache مثبت با TTL یعنی پایان عضویت تا TTL اثر ندارد؛ Cache منفی ثبت تازه را عقب می‌اندازد.
+  بار ناچیز است: فقط درخواست‌های `UNION_ADMIN` برای سازمان دیگر و استفاده از سیاست نوشته‌ی اتحادیه می‌پرسند، و پاسخ یک
+  پرس‌وجوی نمایه‌دار است. اگر روزی بار Cache بخواهد، فقط **مثبت**، با `TTL ≤ 5 s` که در Boot اجبار می‌شود، و ابطال با `..._ENDED`
+  به‌عنوان بهینه‌سازی — نه به‌عنوان کران. چنین Cacheی ADR تازه یا بازنگری همین بند است.
+
+**کران ابطال (الزام امنیتی؛ بازنویسی دور ۲، یافته‌ی ۲).** فرض کنید پایان عضویت در لحظه‌ی `T` در `organization-service` Commit شده
+است:
+
+1. هر پرسشی که Snapshot آن پس از `T` گرفته شود «بیرون» پاسخ می‌گیرد. پس **هر تصمیمی که پرسشش پس از `T` فرستاده شود رد
+   می‌شود** — در هر هشت سرویس، بی وابستگی به Kafka، Relay، Consumer یا Cache.
+2. **پرسش تعیین‌کننده درون تراکنش اثر.** بررسی پیش از تراکنش به هیچ Timeoutی بسته نیست: Lookup ـِ بعدی می‌تواند پشت قفل یک
+   Migration بماند، `statement_timeout` نشست اختیاری است (`.env.example:135`)، و Gateway فقط Fetch خودش را رها می‌کند
+   (`proxy.service.ts:182`–`:195`)، نه کار پایگاه داده‌ی سرویس پایین‌دست را. پس هر بررسی پیش از تراکنش فقط **رد زودهنگام** است و
+   هیچ اثری بر آن تکیه نمی‌کند. هر نوشتن تحت دامنه پرسش را **دوباره، درون تراکنشی که اثر را Commit می‌کند و پس از گرفتن قفل‌هایی
+   که آن نوشتن را سریال می‌کنند** می‌پرسد — الگوی موجود `reconfirmFinancialAuthority` ـِ economic و `authorizeLive` ـِ identity.
+   نمونه‌های امروزِ «پیش از تراکنش» که PR سرویس خودشان به درون تراکنش می‌برد: identity `identity.service.ts:318`، `:664`، `:1305`،
+   `:1621` (تصمیم درون تراکنش از پیش هست)؛ supplier `qualification.service.ts:175`، `suspension.service.ts:94`، `:160`؛ contract
+   `policy.service.ts:123`، `:237`، `:297` و `statement.service.ts:481`؛ construction `policy.service.ts:127`، `:212`، `:268` و
+   `approval.service.ts:330`. Sweeperهای Q-83 (`policy-reconciliation.sweeper.ts`) فقط محرک تعلیق‌اند و اختیاری نمی‌دهند.
+3. **سه ادعای جدا: تازگی پاسخ، پذیرش برای Commit، پایان Commit (بازنویسی دور ۳، Codex r2 یافته‌ی ۱؛ سازوکار پذیرش: دور ۵).** دور ۲ کران «۹ ثانیه
+   و دیرتر ← Rollback» را وعده داده بود و سازوکارش هیچ‌کدام را نگه نمی‌داشت: `clock_timestamp() - askedAt` سن دیواری است، نه زمان
+   سپری‌شده (ساعت پایگاه داده که ۱۸ ثانیه عقب بپرد، پاسخ ۲۰ ثانیه‌ای را در بودجه‌ی ۶۰ ثانیه‌ای economic ۲ ثانیه‌ای نشان می‌دهد)؛ و
+   `statement_timeout` ـِ `COMMIT` دیر را Rollback نمی‌کند (Flush ـِ WAL قطع‌شدنی نیست، و لغو انتظار Replication همگام Commit
+   محلیِ انجام‌شده را فقط با WARNING گزارش می‌کند). پس این ADR **ضمانت را باریک می‌کند** و فقط آنچه سازوکار نگه می‌دارد می‌گوید:
+   - **داور: ساعت خود پایگاه داده، درون خود `COMMIT` (بازنویسی دور ۵، Codex r4 یافته‌ی ۱).** قرارداد دور ۴ تصمیم را در Node می‌گرفت، و
+     هر خواندن ساعت در برنامه فقط فاصله را جابه‌جا می‌کند: `SIGSTOP` پس از هر دو نمونه و پیش از تصمیم، پذیرش را با مهلت ۵٬۰۱۰ به ۶٬۴۰۵
+     میلی‌ثانیه رساند (اجراشده)، و فرض تداوم دور ۴ آن را کنار نمی‌گذاشت. آن فرض و ادعای «تصمیم Node» **پس گرفته می‌شوند**. گزاره‌ی روی آخرین
+     Statement هم کافی نیست، چون توقف میان آن Statement و `COMMIT` همان فاصله است. پس **گزاره را خود `COMMIT` حمل می‌کند**، با یک Trigger معوق.
+     - **Migration ـِ یکسان در هر هفت پایگاه داده‌ی نویسنده** (economic، document، supplier، marketplace، identity، construction،
+       contract): جدول `governed_admission` (`id`، `asked_db`، `deadline`، `fenced_at`) و `CONSTRAINT TRIGGER trg_governed_admission_deadline` با
+       `AFTER INSERT OR UPDATE`، `DEFERRABLE INITIALLY DEFERRED` و `ENABLE ALWAYS` (الگوی موجود `trg_journal_balanced`،
+       `20260828202043_init_economic/migration.sql:634`). Trigger ردیف خودش را حذف می‌کند و سپس `clock_timestamp() > NEW.deadline` ← `RAISE`
+       با پیام و SQLSTATE ـِ `RG072`. PostgreSQL Trigger معوق را در `COMMIT` و پیش از نوشتن رکورد Commit اجرا می‌کند، پس این خطا Rollback
+       قطعی است، و جدول پس از هر Commit تهی است و داده‌ای نگه نمی‌دارد.
+     - **لنگر.** درون تراکنش اثر، پس از **آخرین** قفل و آخرین انتظار بیرونی، پیش از فرستادن نخستین پرسش **تعیین‌کننده**: `governed_admission_anchor(MAX_AGE)`، یک Statement و یک نمونه؛
+       `asked_db = clock_timestamp()` و `deadline = asked_db + MAX_AGE` از **همان** نمونه. از همین لحظه `COMMIT` مسلح است، چه `fence` برسد چه
+       نرسد. همان Statement از `pg_trigger` می‌سنجد که Trigger هست، معوق است و `tgenabled = 'A'`؛ وگرنه `RG073`. Migration نرسیده یا Trigger
+       خاموش ← لنگر خطا می‌دهد، **پرسش فرستاده نمی‌شود** و نتیجه `EXPIRED` است. نقش زمان اجرا نمی‌تواند Trigger را خاموش یا حذف کند یا
+       `session_replication_role` را عوض کند (D-045، `scripts/check-db-runtime-privileges.mjs`؛ هر هفت سرویس در `PRIVILEGE_SPLIT_SERVICES`اند).
+       پرسش فقط از راه تراکنش Brand‌شده فرستاده می‌شود؛ پرسش تعیین‌کننده‌ی بعدی لنگر را عوض نمی‌کند: کهنه‌ترین پاسخ تعیین‌کننده سنجیده می‌شود. پرسش پیش از آخرین قفل (الگوی امروز economic:
+       `settlement.service.ts:200` پیش از قفل کیف پول `:227` و پرسش دوباره‌ی `:293`؛ `transaction.service.ts:564` و قفل `:575`) فقط رد زودهنگام است و لنگر نمی‌زند، وگرنه انتظار قفلی که بودجه‌ی
+       ۶۰ ثانیه‌ای به آن اجازه می‌دهد رد کاذب می‌ساخت (اجراشده: انتظار ۵٫۵ ثانیه پس از لنگر ← `RG072`؛ لنگر پس از انتظار ← `COMMITTED`). پرسش زودهنگامی که تا `fence` پرسش تعیین‌کننده‌ای نداشته باشد ← `EXPIRED`.
+     - **`fence(tx)`، آخرین Statement.** `governed_admission_fence(anchorId, GRACE)` در یک Statement: (۱) `UPDATE` ردیف، که سنجش را دوباره در صف
+       می‌گذارد و **آخرین** Trigger معوق تراکنش می‌کند — پنج سرویس از هفت Trigger معوق خودشان را دارند، و سنجشی که پیش از آن‌ها بگذرد چیزی
+       را ثابت نمی‌کند (اجراشده: Trigger معوق ۶ ثانیه‌ای ← `RG072`)؛ (۲) ردیف نبود ← `RG073`؛ (۳) `deadline` گذشته ← `RG072`، که فقط رد زودتر است؛
+       (۴) `idle_in_transaction_session_timeout` = `GRACE`، تا قفل‌های فرایند ایستاده آزاد شوند — جزء هیچ ادعایی نیست؛ (۵) برگرداندن
+       `clock_timestamp() - asked_db`. سپس Node: `assessElapsed(..., MAX_AGE)` برابر `OK` و دست‌کم `GRACE` مانده از مهلت تراکنش؛ وگرنه خطا پیش از
+       `COMMIT`. **این گام‌ها فقط رد می‌سازند؛ هیچ‌کدام چیزی را نمی‌پذیرند.** پرسیده و بی `fence` ← `EXPIRED`؛ `fence` هنگام Statement در پرواز ← خطا؛ پس از `fence` هر Statement دیگر ←
+       خطا و Rollback (این مهر Wrapper لازم است: `SET CONSTRAINTS ALL IMMEDIATE` پس از `fence` سنجش را زود اجرا می‌کند و `COMMIT` دیر را بی سنجش می‌گذارد، اجراشده)؛ شکست لنگر یا `fence`، حتی اگر Callback آن را بگیرد، در Wrapper می‌ماند و Callback با `EXPIRED` پایان می‌یابد، چون `COMMIT` ـِ تراکنش خطادیده بی خطا `ROLLBACK` می‌شود و موفق دیده می‌شد؛ هیچ نپرسیده (`SYSTEM_ADMIN`، `REFUND` از راه `PAYEE`) ← بی لنگر، بی سنجش و بی مشاهده. اینکه کدام مسیر باید بپرسد تصمیم
+       اختیار است و با آزمون هر مصرف‌کننده سنجاق می‌شود، نه با ساعت.
+     - **Savepoint و `SET CONSTRAINTS`، بسته در خطا.** `ROLLBACK TO SAVEPOINT` پس از لنگر هم ردیف و هم سنجش صف‌شده را دور می‌ریزد، و
+       `SET CONSTRAINTS ... IMMEDIATE` پیش از `fence` سنجش را زود اجرا و ردیف را حذف می‌کند؛ در هر دو `fence` ردیفی نمی‌یابد ← `RG073` ← `EXPIRED`. تنها
+       Savepoint ـِ هفت سرویس `settlement_priced` ـِ economic است: لنگر `SETTLE` پس از `RELEASE` (`settlement.service.ts:282`) و در پرسش `:293` است، پس بیرون از آن. مسیر رد (`:149`) رکوردی
+       به جریان سازمان دیگر Commit می‌کند که به پاسخ «درون» بسته است، پس پس از `ROLLBACK TO` و پیش از `recordRefusal` پرسش تعیین‌کننده و لنگر و `fence` خودش را دارد (برنامه‌ی اجرا، PR 2).
+     - **ساعت ۱، فقط آشکارساز.** `process.hrtime.bigint()` (`askedMono` پیش از فرستادن لنگر؛ هر خواندن بعدی پس از رسیدن پاسخ Statement) هیچ
+       کرانی نمی‌دهد و فقط رد یا هشدار می‌سازد. تنها کارش دیدن ساعت پایگاه داده‌ی عقب‌پریده است (بند «باقی‌مانده»). **یک گزاره، دو محل:**
+       `assessElapsed({ elapsedDb, elapsedMono }, limit)` در `nest-common` که `fence` و مشاهده‌ی پایان درون `governedTransaction` صدا می‌زنند: نمونه‌ی
+       پایگاه داده نبود یا منفی ← `UNVERIFIED`؛ `elapsedDb > limit` ← `ELAPSED`؛ `elapsedMono > limit` ← `DB_CLOCK_SUSPECT`؛ وگرنه `OK`. هیچ‌یک از هفت
+       سرویس خودش ساعت نمی‌سنجد.
+   - **(الف) تازگی پاسخ.** `asked_db` پیش از فرستادن پرسش نمونه‌برداری می‌شود و Snapshot ـِ پاسخ پس از آن است، پس سنی که از آن سنجیده شود
+     کمتر از سن واقعی پاسخ نیست، مگر ساعت پایگاه داده عقب بپرد.
+   - **(ب) پذیرش برای Commit — تنها کرانی که وعده داده می‌شود.** **ضمانت: هیچ پذیرشی دیرتر از `T + MAX_AGE` به ساعت پایگاه داده مؤثر نمی‌شود.**
+     به دقت: `COMMIT` ـِ تراکنشی که پرسیده فقط وقتی به رکورد Commit می‌رسد که Backend ـِ همان پایگاه داده، درون خود `COMMIT` و پس از همه‌ی Triggerهای
+     معوق دیگر، `clock_timestamp() ≤ asked_db + MAX_AGE` (پیش‌فرض ۵ ثانیه) را دیده باشد. `asked_db` پیش از Snapshot ـِ پاسخ است و پاسخ «درون» یعنی
+     Snapshot پیش از `T`، پس این سنجش دیرتر از `T + MAX_AGE` نیست؛ مقایسه‌ای میان ساعت دو پایگاه داده در کار نیست، فقط یک تفاضل روی یک ساعت و
+     ترتیب واقعی رخدادها. **هر توقف پیش از رسیدن `COMMIT` فقط رد می‌سازد، هرگز پذیرش دیر:** GC، محدودیت CPU، `SIGSTOP`، Suspend ـِ میزبان سرویس،
+     تأخیر شبکه، یا ایستادن خود پایگاه داده پیش از خواندن `COMMIT`. پس این ادعا هیچ فرضی درباره‌ی میزبان سرویس یا فرایند Node ندارد. هر دو نمونه روی یک
+     Backend و یک میزبان‌اند، و Failover میان آن دو خود تراکنش را از بین می‌برد. نتیجه‌ی رد، از لنگر و `fence` یا از خود `COMMIT`، **قطعی** `EXPIRED` است
+     (`503 UPSTREAM_UNAVAILABLE`، یا `404` یکسان برای هدف ذخیره‌شده، § ۴).
+   - **باقی‌مانده‌ها — وعده نیستند، نوشته می‌شوند.**
+     - **ساعت میزبان پایگاه داده.** `clock_timestamp()` ساعت دیواری است: عقب‌پریدن (NTP Step یا دستی)، مکث VM بی تصحیح ساعت یا بازگشت از Checkpoint
+       میان لنگر و `COMMIT` پنجره را به همان اندازه دراز می‌کند؛ جلوپریدن فقط رد امن است؛ نرخ ≤ ۵۰۰ ppm فرض استقرار است. شناسایی با ساعت ۱: پیش از
+       `fence` ← رد (نمونه‌ی Codex r2: ۲۰ ثانیه واقعی، ۲ ثانیه در پایگاه داده)؛ پس از `fence` ← `COMMITTED_LATE` با `DB_CLOCK_SUSPECT` پس از رخداد.
+       **دیده‌نشدنی:** عقب‌پریدن پس از `fence` که ساعت ۱ را زیر `MAX_AGE + GRACE` نگه دارد (دیرکرد کمتر از `GRACE`)؛ عقب‌پریدن هم‌زمان با Suspend ـِ میزبان
+       سرویس؛ مرگ فرایند پیش از مشاهده. برای این‌ها فقط سنجش عددی `hierarchyVersion` در بند ۶ می‌ماند، که می‌گوید پرسش پیش از پایان بوده، نه
+       اینکه Commit چقدر دیر بوده.
+     - **تأخیر پس از گزاره.** میان گزاره و دیدنی شدن Commit: Flush ـِ WAL، انتظار Replication همگام اگر روزی باشد، و ایستادن میزبان پایگاه داده. این
+       فاصله کران ندارد و Rollback هم نمی‌شود؛ بند (پ) آن را می‌سنجد. `statement_timeout` آن را کران‌دار **نمی‌کند**: با ۱ ثانیه، `COMMIT` ـِ
+       منتظر Replication ۴٫۶ ثانیه ماند تا لغو دستی، و لغو هم Rollback نبود (WARNING، ردیف ماند) — هر دو اجراشده.
+     - **پاسخ دیر پس از Commit به‌موقع.** توقف سرویس پس از رسیدن `COMMIT` اثر را دیر نمی‌کند، فقط مشاهده را؛ خطایش فقط به سمت هشدار اضافه است.
+     - **بیرون از این ضمانت:** خواندن‌ها (بند ۴)، و دیرکرد خود پرسش-تا-Commit تا سقف `MAX_AGE` (همان D-050).
+   - **(پ) پایان Commit — کران‌دار نیست؛ با ساعت پایگاه داده طبقه‌بندی می‌شود.** ADR هیچ «Commit دیر ← Rollback»ی برای پس از گزاره وعده نمی‌دهد.
+     نتیجه بر پایه‌ی **مرحله** است: خطا پیش از فرستادن `COMMIT` ← `EXPIRED`/رد، قطعاً بی اثر. پاسخ `COMMIT` با پیام `RG072` ← `EXPIRED`، Rollback ـِ اثبات‌شده. Prisma در این
+     مرحله SQLSTATE را نمی‌دهد (اجراشده روی Prisma 6.19: `PrismaClientUnknownRequestError` بی `code`، فقط متن پیام؛ در `fence`: `P2010` با `meta.code`)، پس
+     Wrapper متن ثابت `ERROR: RG072` را در یک تابع می‌سنجد و آزمون آن را سنجاق می‌کند؛ نشناختن فقط به `COMMIT_UNKNOWN` می‌رسد، نه به پذیرش. هر خطای دیگر
+     پس از فرستادن `COMMIT` (قطع اتصال، `P1017` ـِ Timeout بی‌کاری، `P2028`) ← `COMMIT_UNKNOWN`: هرگز `EXPIRED`، رد (`403`/`404`) یا موفق گزارش نمی‌شود — همان پاسخ
+     امروز برای خطای پایگاه داده (`500`، بی کد تازه؛ Oracle نمی‌سازد، چون فقط پس از پاسخ «درون» رخ می‌دهد) — و فراخوان با بازخوانی یا، در سرویس دارای کلید،
+     بازپخش همان `Idempotency-Key` نتیجه را می‌یابد، **تا وقتی هدف هنوز درون `G` اوست**. پس از پایان عضویت هر دو رد می‌گیرند (`403`/`404`، § ۶) و اثر داشته و نداشته
+     برای او یکسان است؛ این را فقط `SYSTEM_ADMIN` روشن می‌کند. پس از `COMMIT` موفق، **مشاهده‌ی پایان** درون `governedTransaction`: یک Statement بیرون از تراکنش روی همان
+     Client ـِ Primary، `clock_timestamp() - asked_db`، با مهلت خودش `GRACE`، سپس خواندن ساعت ۱ و `assessElapsed(..., MAX_AGE + GRACE)`. **`COMMITTED_LATE` با زمان پایگاه
+     داده تعریف می‌شود:** `elapsedDb > MAX_AGE + GRACE` ← `ELAPSED`؛ ساعت ۱ فقط `DB_CLOCK_SUSPECT` می‌سازد؛ شکست یا مهلت خود مشاهده ← `UNVERIFIED`؛ `OK` ← `COMMITTED`. هر
+     `COMMITTED_LATE` پاسخ موفق است (اثر هست؛ گزارش شکست نادرست است)، با متریک و Log هشدار شامل `hierarchyVersion`، `basis` و `askedAt` (بند ۶) تا با `..._ENDED` سنجیده
+     شود. این نمونه دیرتر از پایان واقعی Commit است، پس `COMMITTED_LATE` یعنی «به‌موقع بودن اثبات نشد»، نه «دیر بودن اثبات شد». (`pg_xact_commit_timestamp` به کار
+     نمی‌رود: `track_commit_timestamp` خاموش است و روشن کردنش Restart می‌خواهد.)
+   - **چرا باریک کردن، نه هماهنگی قوی‌تر.** کرانی بر **دیدنی شدن** اثر نسبت به `T` هماهنگی میان دو پایگاه داده می‌خواهد: Commit
+     دومرحله‌ای (`PREPARE TRANSACTION`، تأیید organization-service، سپس `COMMIT PREPARED`) یا Leaseی که پایان عضویت منتظر پایان
+     Leaseهای باز آن بماند. هر دو همان تراکنش/قفل توزیع‌شده‌ای است که D-050 عمداً نمی‌سازد، بازیابی تراکنش معلق می‌خواهد، و پایان
+     Commit ـِ کند را باز «نامعلوم» می‌گذارد. فاصله‌ی گزاره تا Commit در عمل میلی‌ثانیه است؛ فقط پایانی دیرتر از `MAX_AGE + GRACE` پس از پرسش
+     هشدار می‌گیرد (نه هر Commit ـِ کند)، جز موارد «دیده‌نشدنی» بالا؛ ADR آن را می‌پذیرد و می‌نویسد، نه اینکه کران‌دار بخواند.
+   - **بودجه‌ها (بازنویسی دور ۳، Codex r2 یافته‌ی ۲).** `GOVERNANCE_ANSWER_MAX_AGE_MS` = Timeout پرسش همان سرویس + ۲٬۰۰۰
+     (پیش‌فرض ۵٬۰۰۰)؛ `GOVERNANCE_COMMIT_GRACE_MS` = ۲٬۰۰۰ ثابت؛ **مهلت هر تراکنش نوشتن تحت دامنه** =
+     `max(مهلت امروز همان تراکنش، MAX_AGE + GRACE + 5000)` — ۵٬۰۰۰ برای قفل‌ها و کار پیش از پرسش، همان پیش‌فرض Prisma که این
+     عملیات امروز در آن جا می‌شوند؛ با Timeout پرسش ۳٬۰۰۰: ۱۲٬۰۰۰ (marketplace با ۲٬۰۰۰: ۱۱٬۰۰۰). پس پذیرش در مهلت تراکنش همیشه ممکن است، `GRACE` برای `COMMIT` می‌ماند، و
+     هیچ مهلت امروزی کوتاه نمی‌شود. (قاعده‌ی دور ۲، «Boot اگر `MAX_AGE` ≥ مهلت تراکنش ← رد»، چهار سرویس را با پیش‌فرض ۵ ثانیه‌ی Prisma
+     رد می‌کرد و برداشته شد.) هر نوشتن تحت دامنه فقط با `governedTransaction(...)` ـِ PR 1a باز می‌شود که این مهلت را **صریح** به
+     Prisma می‌دهد (هرگز پیش‌فرض Prisma)، و `fence` فقط روی تراکنشی که آن ساخته وجود دارد (نوع Brand‌شده و خطای زمان اجرا). همان
+     مهلت در `operationBudgets` سرویس می‌آید، پس `loadEnv` ـِ موجود هر `DATABASE_STATEMENT_TIMEOUT_MS` ـِ نه بالاتر از آن را رد می‌کند
+     (#268 r4)، و `env.spec` هر سرویس سنجاق می‌کند که پیکربندی پیش‌فرض بالا می‌آید و مهلت هر نوشتن تحت دامنه
+     ≥ `MAX_AGE + GRACE + 5000` است. جدول هر سرویس: برنامه‌ی اجرا، «بودجه‌ی تراکنش‌های تحت دامنه».
+4. **خواندن‌ها:** پرسش پس از خواندن ردیف‌ها و درست پیش از ساختن پاسخ؛ پیش از فرستادن پاسخ، سن پاسخ پرسش با ساعت Monotonic
+   فرایند (ساعت ۱ ـِ بند ۳، از پیش از فرستادن پرسش) سنجیده می‌شود (همان `MAX_AGE`) و کهنه‌تر ← `503`. خواندن `COMMIT`ی ندارد که گزاره را
+   حمل کند و اثر ماندگاری هم نمی‌گذارد، پس بیرون از ضمانت بند ۳ است: توقف پس از این سنجش پاسخ را دیرتر می‌فرستد و Suspend ـِ میزبان سرویس در ساعت ۱
+   دیده نمی‌شود. این باقی‌مانده‌ی خواندن است و مشاهده‌ی پایان ندارد.
+5. **اثر بیرونی: Keycloak در identity.** ترتیب موجود می‌ماند و پرسش در آن جا می‌گیرد: (الف) پرسش زودهنگام در تراکنش Intent؛
+   (ب) حساب Keycloak **غیرفعال و بی هیچ اعطا** ساخته می‌شود (`identity.service.ts:358`–`:371`)، پس پیش از Commit هیچ اختیاری
+   نمی‌دهد؛ (پ) پرسش تعیین‌کننده درون تراکنش Commit، زیر قفل Intent و **پس از** فراخوانی‌های Adoption ـِ Keycloak (تا پنج فراخوانی ۱۰ ثانیه‌ای، `identity.service.ts:382`، `:1390`)، با لنگر و حصار بند ۳؛ پرسش `authorizeLive` پیش از آن‌ها فقط رد زودهنگام است؛ (ت) اعطا و فعال‌سازی فقط
+   پس از Commit و فقط از حالت Commit‌شده (`projectAfterCommit`، `:458`). اگر (پ) رد شود، از جمله با `RG072` در خود `COMMIT`، تراکنش Rollback می‌شود، کاربر و عضویتی
+   Commit نمی‌شود و حساب غیرفعال و بی‌اعطا می‌ماند. **جبران** همان مسیر امروز تلاش ناموفق است: فقط بازتلاش همان کلید آن حساب را
+   برمی‌دارد (Adoption)، و آن بازتلاش هم دوباره می‌پرسد و رد می‌شود؛ هیچ مسیری برای حسابی بی ردیف Commit‌شده اعطا نمی‌نویسد. اعطای
+   پس از `T` برای کاربری که پیش از `T` Commit شده درست است: اختیار آن کاربر از عضویت خودش در سازمان عضو است، نه از اتحادیه
+   (ناهمسانی آگاهانه‌ی Q-61).
+6. هر فرمانی که اثر ماندگار گذاشته، `hierarchyVersion`، `basis` و `askedAt` پاسخ را ثبت می‌کند؛ نسخه‌ی کمتر از `hierarchyVersion`
+   رویداد `..._ENDED` یعنی پیش از پایان خوانده شده — ترتیب با عدد، نه با ساعت (D-050).
+7. **جدا از این کران:** خود نقش `UNION_ADMIN` در توکن تا ۹۰۵ ثانیه کهنه می‌ماند (ADR-060 § ۷). این ADR آن را تغییر نمی‌دهد؛
+   عضویت سرعت ابطال خودش را دارد و به کهنگی توکن گره نمی‌خورد.
+
+**رصدپذیری:** `rasta_organization_governance_checks_total{caller_service, outcome}` (`SELF`|`SUBTREE`|`MEMBER`|`OUTSIDE`) در
+`organization-service` و `..._governance_client_total{outcome}` (به‌علاوه‌ی `UNAVAILABLE`، `TIMEOUT` و `EXPIRED`) در هر مصرف‌کننده،
+و `..._governed_commit_total{outcome, reason}` (`COMMITTED`|`COMMITTED_LATE`|`COMMIT_UNKNOWN`؛ `reason` فقط برای `COMMITTED_LATE`:
+`ELAPSED`|`DB_CLOCK_SUSPECT`|`UNVERIFIED`، § ۵ (۳) (پ)) — **بی برچسب سازمان** (ADR-017). هشدار روی نرخ `UNAVAILABLE` و `EXPIRED`، و روی
+**هر** `COMMITTED_LATE` یا `COMMIT_UNKNOWN`. `DB_CLOCK_SUSPECT` یعنی ساعت پایگاه داده این اثر را به‌موقع نشان داده و ساعت فرایند نه، پس ساعت پایگاه داده شاید عقب پریده: گرداننده با
+`hierarchyVersion` در برابر `..._ENDED` می‌سنجد که پرسش پیش از پایان بوده یا نه؛ میزان دیرکرد از آن درنمی‌آید.
+
+**اثر بر دسترس‌پذیری (اصلاح دور ۲، یافته‌ی ۴):** از کار افتادن `organization-service` این‌ها را `503` می‌کند (هدف ذخیره‌شده: همان `404` یکسان، § ۴): (الف) کنش‌های
+میان‌سازمانی `UNION_ADMIN` در هشت سرویس؛ (ب) **هر** استفاده از سیاستی که `UNION_ADMIN` نوشته — امضای قرارداد، گشودن دور موافقت و
+ارسال صورت‌وضعیت — حتی برای کاربر عادی در سازمان خودش. (ب) تازه نیست: همین سه مسیر امروز پاسخ زیردرختی را می‌پرسند. کار کاربر در
+سازمان خودش بی سیاست نوشته‌ی اتحادیه تماسی ندارد. وابستگی تازه فقط برای document، supplier، identity و audit است (`D-061`).
+
+### ۶. هر سرویس چه تغییر می‌کند
+
+| سرویس                          | امروز                                                       | پس از ADR-072                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `organization-service`         | زیردرخت                                                     | § ۲ تا § ۴: جدول، API، رویداد، دید و نوشتن در `G(U)`، پرسش درونی تکی و دسته‌ای.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `economic-service` (نخست)      | `hasPlatformScope` ← سراسری                                 | `PLATFORM_ROLES` و `hasPlatformScope` = فقط `SYSTEM_ADMIN`. **«اجازه‌ی تلاش» جدا از دامنه‌ی سراسری** (یافته‌ی ۱): امروز `canActFinanciallyFor` نخست `canCommitOrganization` را صدا می‌زند (`access.ts:218`) که برای سازمان دیگر `hasPlatformScope` را می‌خواهد (`:144`)؛ با باریک‌شدن، اتحادیه پیش از پرسش `:233` `403` می‌گرفت. پس `canActFinanciallyFor` دیگر از `canCommitOrganization` نمی‌گذرد؛ گام نخستش `assertMayAttemptFinancialCommand(books)` است: Auditor رد، نقش مالی لازم، سرویس فقط برای طرفی که توکنش نام می‌برد، و برای سازمان دیگر فقط شخص با `CROSS_ORGANIZATION_CANDIDATE_ROLES` (`SYSTEM_ADMIN`، `UNION_ADMIN`) — گزاره‌ای که فقط به تصمیم راه می‌دهد و هیچ اختیاری نمی‌دهد: `SYSTEM_ADMIN` ← پایه‌ی `SYSTEM_ADMIN`؛ `UNION_ADMIN` ← پرسش `G` ← `UNION_GOVERNED` با `basis` (`SUBTREE`\|`MEMBER`) و نسخه، وگرنه همان `403`. `assertMayRefund` (`:500`) همان شاخه را با همین گزاره می‌گیرد، نه با `hasPlatformScope`؛ قاعده‌ی دریافت‌کننده (`PAYEE`) پیش از آن و بی پرسش می‌ماند. `canCommitOrganization` برای تنها فراخوان دیگرش (`journal-reversal.service.ts:80`) فقط `SYSTEM_ADMIN` را از سازمان دیگر می‌پذیرد. **استثناهای پول بی‌تغییر** (افزوده‌ی A): `refuseStatementWithdrawal` (`transaction.service.ts:742`؛ تعهد صورت‌وضعیت را هیچ‌کس بازپرداخت یا لغو نمی‌کند) و `assertMayDisputeDirectly` (`access.ts:535`–`:543`؛ اعتراض و حل اعتراض تعهد سفارش فقط از Saga ـِ سفارش) در همان جای امروز، برای مسیر اتحادیه هم. **بازپخش** (افزوده‌ی B): هر شش بازپخش از `assertMayReplay` ← `authorizeAct` (`transaction.service.ts:761`–`:793`) یا `authorizeSettlement` (`settlement.controller.ts:136`) می‌گذرند، پس پرسش تازه را دارند: پس از پایان عضویت، پاسخ ذخیره‌شده هم `403` است و اثر دومی نیست؛ بازپخش خواندن است و قاعده‌ی § ۵ (۴) را دارد. پرسش تعیین‌کننده پس از قفل‌ها (`settleWithin` و `refund` با `reconfirmFinancialAuthority`؛ چهار فرمان دیگر زیر قفل ردیف تراکنش) و حصار § ۵ (۳) آخرین Statement است. خواندن تراکنش: طرف‌ها، یا `UNION_ADMIN` وقتی پرداخت‌کننده **یا** دریافت‌کننده در `G` است (`assertTransactionVisible` ناهمگام، یک پرسش دسته‌ای)؛ وگرنه `404`. کیف پول: مالک در `G`؛ وگرنه `404`. **تراز آزمایشی و برگشت سند: فقط `SYSTEM_ADMIN`** (`@Roles` و `assertPlatformScope`) — هر دو سراسری‌اند: برش `G` از دفتر دوطرفه تراز نمی‌شود، و برگشت سند تراز طرفی را عوض می‌کند که ممکن است بیرون از `G` باشد (Q-146). پیشوند `ledger` در Gateway همچنان `UNION_ADMIN` را برای حساب‌ها و اسناد سازمان خودش راه می‌دهد. |
+| `document-service`             | خواندن/تغییر/حذف سند هر سازمان                              | `UNION_ADMIN`: مالک سند در `G`؛ وگرنه همان `404`. تغییر و حذف: پرسش دوباره درون تراکنش پس از قفل ردیف سند، با حصار § ۵ (۳)؛ خواندن طبق § ۵ (۴). Upload intent بی‌تغییر (از پیش بی استثنای پلتفرم).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `supplier-service`             | صف و تصمیم صلاحیت همه‌ی تأمین‌کنندگان                       | تصمیم‌ها (تأیید، رد، تعلیق، بازگشت) و سابقه‌ی خصوصی: `SYSTEM_ADMIN`، یا `UNION_ADMIN` وقتی سازمان تأمین‌کننده در `G` است. **یک `404` برای ناموجود و بیرون از `G`** (یافته‌ی ۷): `RolesGuard` نقش‌های دیگر را مثل امروز پیش از Lookup رد می‌کند؛ پس از Lookup، `decide` (`qualification.service.ts:169`–`:175`)، `suspend` و `reinstate` (`suspension.service.ts:91`–`:94`، `:157`–`:160`) تأمین‌کننده‌ی بیرون از `G` را برای `UNION_ADMIN` با همان `404 Supplier` ـِ شناسه‌ی ناموجود رد می‌کنند — نه `403` «Only a platform operator…». پرسش تعیین‌کننده دوباره درون تراکنش تصمیم، پس از قفل ردیف تأمین‌کننده، با حصار § ۵ (۳). **دو قاعده‌ی افشا بی‌تغییر** (افزوده‌ی F): `assertNotDecidingOwnCase` روی **کل مجموعه‌ی عضویت‌های** توکن (`access.ts:352`–`:378`)، پس از دامنه، برای هر دو نقش؛ و `mayReadReviewerNote` (`:394`) **به‌ازای هر ردیف**: (`SYSTEM_ADMIN`، یا `UNION_ADMIN` با تأمین‌کننده‌ی درون `G`) و عضو سازمان تأمین‌کننده نه — دیگر نه `hasPlatformScope` به‌تنهایی، تا باریک‌شدن نه یادداشت را از اتحادیه‌ی ذی‌حق بگیرد نه به کسی بدهد (`qualification.service.ts:295`–`:301`). **صف بازبینی** (`listForReview`، `supplier.repository.ts:619`–`:637`؛ `limit` تا ۲۰۰، خواندن `limit + 1`): برای `UNION_ADMIN`، سازمان‌های تأمین‌کننده‌ی `limit` ردیف نخست یکتا می‌شوند و با پرسش دسته‌ای (§ ۵؛ حداکثر ۴ تکه‌ی ۵۰ تایی) صافی؛ ردیف Lookahead فقط `hasMore` را تعیین می‌کند — نه برگردانده می‌شود، نه پرسیده. `nextCursor` = شناسه‌ی آخرین ردیف **پیمایش‌شده**، نه آخرین برگردانده، پس صفحه‌ی کاملاً صافی‌شده `items: []` با Cursor ـِ پیش‌رونده و `hasMore` درست می‌دهد — صفحه‌ی تهی «هیچ» نیست. چون تأمین‌کنندگان معمولاً شرکت‌اند و نه عضو، در عمل اتحادیه صف را **از دست می‌دهد** — موقت، به‌نظر صاحب محصول (Q-146).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `marketplace-service`          | دیدن همه‌ی سفارش‌ها، مرجوعی‌ها؛ ویرایش هر پیشنهاد           | سفارش و درخواست مرجوعی برای `UNION_ADMIN` دیدنی است وقتی خریدار **یا** فروشنده در `G` است؛ وگرنه `404` مثل غریبه. **اختلاف سازمان‌های بیرون از `G` دیگر دیدنی نیست** — `SYSTEM_ADMIN` به آن‌ها رسیدگی می‌کند. حل اختلاف بی‌تغییر قاعده: خریدار در `G` (Q-136)، با `basis` تازه، پرسش پس از قفل‌ها (`assertDisputeResolver`، `access.ts:247`) و حصار § ۵ (۳). ویرایش پیشنهاد: مالک، `SYSTEM_ADMIN`، یا `UNION_ADMIN` وقتی مالک در `G` است، با پرسش درون تراکنش ویرایش. `viewerParties.platform` نقش‌محور می‌ماند (فقط پیشنهاد کنش در نمای سفارشی که از پیش دیدنی است؛ فرمان خودش می‌پرسد).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `identity-service` (Q-61)      | فقط سازمان فعال خود؛ `SYSTEM_ADMIN` سراسری                  | `isWithinProvisioningScope` ناهمگام: `SYSTEM_ADMIN` ← بله؛ سازمان فعال خود ← بله؛ `UNION_ADMIN` و هدف در `G(سازمان فعال)` ← بله (`GovernanceClient`)؛ وگرنه نه. چهار مسیر بی‌تغییر ترتیب: پرسش پیش از Lookup فقط رد زودهنگام است؛ تصمیم در `authorizeLive`/`authorizeUnderLock` درون تراکنش Commit، با حصار § ۵ (۳) و ترتیب Keycloak ـِ § ۵ (۵). `createUser` و `addMembership` (شناسه از بدنه): ناتوانی ← `503`، که به داده‌ی ذخیره‌شده بسته نیست؛ `approveRegistration` و `rejectRegistration` همان `404` یکسان — و **ناتوانی در پرسیدن و حصار منقضی هم `404`** (نه `503`)، چون شناسه‌ی سازمان از ردیف ذخیره‌شده می‌آید و `503` فقط برای ثبت‌نام موجود Oracle وجود می‌ساخت؛ Log و متریک علت را نگه می‌دارند. `USER_PROVISIONING_CROSS_ORG_ROLES` در Boot هر نقشی جز `SYSTEM_ADMIN` را رد می‌کند (نقش سراسری فقط یکی است، Q-63). تغییر نقش، ابطال عضویت و فهرست کاربران در سازمان‌های `G`: بی‌تغییر، فقط سازمان خود (Q-147). وابستگی زمان اجرای تازه: `ORGANIZATION_SERVICE_URL`، `IDENTITY_ORGANIZATION_REQUEST_TIMEOUT_MS`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `audit-service` (ADR-053 § ۱۰) | زیردرخت از Replica                                          | `resolveSubtreeTarget`: هدف = سازمان خود ← بی پرسش؛ هدف دیگر ← پرسش همزمان `G`؛ درون ← همان هدف؛ بیرون ← همان `403` امروز با همان بدنه؛ ناتوانی ← `503`. **`organization_ref` دیگر اختیار را گسترش نمی‌دهد** — Replica نمی‌تواند کران ابطال § ۵ را بدهد، و همین تغییر کهنگی «جابه‌جاشده هنوز درون» را هم می‌بندد. Consumer آن برای پاک‌سازی بعدی می‌ماند. ADR-053 § ۳ (هیچ‌کس برای تصمیم، audit را صدا نمی‌زند) دست نمی‌خورد. Projection رویداد عضویت: § ۳ (PR 1b).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `construction-service`         | Q-70 (۷) از پاسخ زیردرختی؛ Q-83 روی `ORGANIZATION_MOVED`    | `OrganizationDirectory` ← `GovernanceClient`؛ `basis`، نسخه و `askedAt` در ردیف سیاست/دور ثبت. **پرسش اعتبار نویسنده‌ی سیاست برای هر فراخوان** (§ ۴، نوع ۲): `confirmGoverningPolicy` (`approval.service.ts:319`–`:330`) امروز بیرون از تراکنش گشودن دور می‌پرسد؛ به درون آن تراکنش، پس از قفل سیاست، با حصار § ۵ (۳) می‌رود. ساختن و تغییر سیاست (`policy.service.ts:127`، `:212`، `:268`): پرسش پیش از تراکنش رد زودهنگام، و دوباره درون تراکنش پس از قفل جایگاه سیاست. Consumer موجود `..._ENDED` را هم مثل `ORGANIZATION_MOVED` فقط **محرک** می‌خواند: بازپرسی، و تعلیق سیاست نوشته‌ی `UNION_ADMIN` برای سازمانی که دیگر در `G` نیست — همان قواعد Q-83: هرگز بازفعال نمی‌شود، ثبت دوباره سیاست را زنده نمی‌کند، دور باز نسخه‌ی خودش را نگه می‌دارد (D-041 همان هزینه را برای این رویداد هم دارد).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `contract-service`             | ADR-068 § ۵ از پاسخ زیردرختی؛ Q-83 روی `ORGANIZATION_MOVED` | همان تغییر construction برای سیاست امضای کارفرما و زنجیره‌های صورت‌وضعیت. امضا (`signing-authority.ts:96`–`:113`) از پیش درون تراکنش می‌پرسد و فقط حصار می‌گیرد؛ ارسال صورت‌وضعیت (`statement.service.ts:475`–`:481`) و ساختن/تغییر سیاست (`policy.service.ts:123`، `:237`، `:297`) پرسش تعیین‌کننده را به درون تراکنش اثر می‌برند. در فهرست Q-80 نیامده بود ولی همان پرسش را می‌پرسد؛ بدون آن، اتحادیه سیاست ساخت‌وساز عضو را می‌نوشت و سیاست امضای قراردادش را نه.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+
+سرویس‌های دیگر (`asset`، `fleet`، `maintenance`، `inventory`، `procurement`، `notification`، `analytics`) امروز به اتحادیه دامنهٔ
+میان‌سازمانی نمی‌دهند و تغییر نمی‌کنند. `analytics-service` نمای حاکمیتی خودش را دارد (ADR-071، Q-141).
+
+### ۷. Seed و آزمون‌هایی که رفتار امروز را سنجاق کرده‌اند
+
+**Seed (`services/organization-service/prisma/seed.ts`):**
+
+- `ORG-DEH-0001` و `ORG-DEH-0002` عضو `ORG-UNION-YAZD` می‌شوند (`started_by = 'SEED'`، دلیل ثابت)، با تابعی هم‌شکل
+  `seedOrganization`: زیر قفل سلسله‌مراتب، با همان ناوردایی‌های § ۲ (۴)، **هم‌توان** (عضویت فعال همان جفت ← هیچ؛ عضویت فعال در
+  اتحادیهٔ دیگر ← خطا، Seed هرگز عضویتی را جابه‌جا نمی‌کند)، و فقط زیر همان نگهبان پایگاه دادهٔ دورریختنی (`seed-guard.ts`).
+- سازمان تازهٔ **`ORG-DEH-0003`** زیر `ORG-COUNTY-YAZD`، **عمداً عضو نه** — «دهیاری‌ای که به اتحادیه نپیوسته» — تا هر آزمون
+  «بیرون از دامنه» هدف واقعی و موجودی داشته باشد. در `tests/e2e/src/env.ts` با نام `ORG.outside`.
+- عضویت‌های تولید را **هیچ Seedی نمی‌سازد**؛ فهرست اعضا واقعیت مالک است و `SYSTEM_ADMIN` پس از استقرار ثبتش می‌کند (برنامهٔ اجرا).
+
+**آزمون‌هایی که باید عوض شوند** — هرکدام در PR سرویس خودش، نه زودتر (پاسخ قدیمی تا آن PR دست نمی‌خورد، § ۴):
+
+| آزمون                                                                                                                                                                      | امروز سنجاق می‌کند                                        | پس از PR سرویس                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `tests/e2e/specs/construction/02-approval-lifecycle.e2e-spec.ts:143`–`:149`                                                                                                | اتحادیه برای `ORG-DEH-0001` سیاست نمی‌نویسد (`403`)       | برای `ORG.a` (عضو) می‌نویسد؛ رد به `ORG.outside` می‌رود                           |
+| `tests/e2e/specs/audit/01-query-authorization.e2e-spec.ts:165`–`:196`                                                                                                      | پرسش اتحادیه دربارهٔ `ORG.a` ← `403`                      | `ORG.a` ← `200` با ردیف‌های همان سازمان؛ `ORG.outside` ← `403`؛ توضیح Replica حذف |
+| `tests/e2e/specs/economic/02-critical-path.e2e-spec.ts:295`                                                                                                                | `UNION_ADMIN` تراز آزمایشی را می‌خواند                    | `systemAdmin` می‌خواند؛ `UNION_ADMIN` ← `403`                                     |
+| `tests/e2e/specs/marketplace/01-order-critical-path.e2e-spec.ts:306`، `:318`                                                                                               | تراز با `UNION_ADMIN`؛ برگشت سند با `UNION_ADMIN` ← `404` | تراز با `systemAdmin`؛ برگشت با `UNION_ADMIN` ← `403` پیش از Lookup               |
+| `tests/e2e/specs/economic/03-authorization.e2e-spec.ts:84`–`:86`                                                                                                           | «مدیر پلتفرم هر تراکنشی را می‌خواند»                      | همان `200` چون طرف‌ها عضوند؛ به‌علاوهٔ تراکنشی با `ORG.outside` ← `404`           |
+| `services/organization-service/src/organization/organization.service.spec.ts:286` و `test/union-admin-scope.int-spec.ts`                                                   | Q-80 فقط-زیردرخت                                          | زیردرخت + عضو؛ عضوِ عضو، فرزند عضو و `ORG.outside` همچنان `404`                   |
+| `services/economic-service/test/union-admin-financial-authority.int-spec.ts`، `src/access/access.spec.ts`                                                                  | `UNION_SUBTREE`، `hasPlatformScope` با `UNION_ADMIN`      | `UNION_GOVERNED`/`basis`؛ دید سراسری اتحادیه رد                                   |
+| `services/marketplace-service/src/access/access.spec.ts`، `services/supplier-service/src/access/access.spec.ts`، Helperهای `services/document-service/test/api-helpers.ts` | دامنهٔ پلتفرمی اتحادیه                                    | `G` یا رد                                                                         |
+| `services/identity-service/src/identity/provisioning-scope.spec.ts`                                                                                                        | `UNION_ADMIN` فقط سازمان خودش                             | به‌علاوهٔ `G`؛ ناتوانی ← `503`/`404` طبق § ۶                                      |
+| `services/audit-service/src/audit/audit.scope.spec.ts`، `test/kafka-projector.int-spec.ts`                                                                                 | Replica اختیار را گسترش می‌دهد                            | پرسش همزمان؛ Replica هیچ گسترشی نمی‌دهد                                           |
+| `services/{construction,contract}-service/test/organization-directory.int-spec.ts`، `contract-service/test/organization-moved.int-spec.ts`                                 | پاسخ زیردرختی؛ فقط `MOVED`                                | پرسش `governance`؛ `..._ENDED` هم محرک                                            |
+| `apps/web/e2e/live-session.ts:41`–`:44`                                                                                                                                    | توضیح «دهیاری‌ها زیر اتحادیه نیستند»                      | توضیح عضویت (بی تغییر رفتار)                                                      |
+
+هر PR پیش از ادغام `UNION_ADMIN` را در `test/` و `src/**/*.spec.ts` سرویس خودش جست‌وجو و هر فرض سنجاق‌شدهٔ «دامنهٔ پلتفرمی» یا
+«فقط زیردرخت» را در توضیح PR فهرست می‌کند (همان قاعدهٔ ADR-060 § «پیاده‌سازی» برای `hasPlatformScope`).
+
+### ۸. ترتیب، استقرار، پرچم و برگشت (خلاصه؛ جزئیات در برنامهٔ اجرا)
+
+- **ترتیب:** نخست پیش‌نیازهای مشترک (PR 1a: `@AllowService` بی Wildcard، `GovernanceClient`، Schema ـِ رویدادها) و Projection
+  حسابرسی (PR 1b)؛ سپس `organization-service` (همه به پرسش درونی‌اش وابسته‌اند)؛ از چهار سرویس دامنه‌ی پلتفرمی **نخست economic**
+  (داده‌ی مالی)، سپس document، supplier و marketplace؛ identity، audit، construction و contract پس از organization-service و
+  موازی؛ در پایان پاک‌سازی (برداشتن پاسخ فقط-زیردرخت و به‌روزکردن `docs/09`، ADR-053 § ۱۰، ADR-060 § ۲).
+- **استقرار:** audit با Projection ـِ PR 1b پیش از organization-service، تا نخستین رویداد عضویت `UnionMembership/{membershipId}`
+  ثبت شود (§ ۳، افزوده‌ی H). organization-service (Migration بالا) پیش از هر مصرف‌کننده. مصرف‌کننده‌ای که زودتر مستقر شود، `404`
+  مسیر را می‌گیرد که بدنه‌ی سرویس ندارد ← `503`: **بسته در خطا**، نه گسترده؛ و تا نامش در Allow-list ـِ organization-service نیامده،
+  `403` ← همان `503`.
+- **بی پرچم ویژگی.** گسترش (در organization، identity، audit، construction، contract) **با داده** روشن می‌شود: تا
+  `SYSTEM_ADMIN` عضویتی ثبت نکند، `G = subtree` و رفتار همان امروز است؛ برگشتش پایان عضویت است — فوری، حسابرسی‌شده، بی استقرار.
+  باریک‌شدن (در economic، document، supplier، marketplace) **عمداً کلید خاموش ندارد**: پرچمی که `hasPlatformScope` سراسری را
+  برگرداند، کلیدِ بازکردنِ همان نقصی است که Q-63 و ADR-060 بستند.
+- **برگشت:** Revert همان PR. برای چهار سرویس باریک‌شونده یعنی بازگشت دامنهٔ سراسری اتحادیه — فقط اضطراری و با حکم مدیر پروژه.
+  `down.sql` ـِ organization-service جدول را برمی‌دارد و مصرف‌کنندگان بسته در خطا `503` می‌گیرند؛ پس پیش از آن مصرف‌کنندگان Revert
+  می‌شوند.
+
+## Alternatives Considered
+
+| گزینه                                                                            | چرا نه                                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| جابه‌جایی دهیاری‌ها زیر اتحادیه در درخت                                          | صاحب محصول رد کرد: جغرافیا و عضویت دو واقعیت‌اند؛ دید استان و شهرستان و وراثت سیاست درختی به هم می‌ریخت.                                                                                                                                                                          |
+| درخت با چند والد (DAG)                                                           | `ltree` یک مسیر دارد؛ هر پرس‌وجوی زیردرخت، قفل جابه‌جایی و نسخهٔ D-050 بازنویسی می‌شد.                                                                                                                                                                                            |
+| عضویت به‌صورت ردیف `organization_policy` یا `metadata`                           | بی قید یکتایی، بی سابقهٔ تغییرناپذیر، بی رویداد جدا؛ و سیاست معنای وراثت دارد که اینجا نادرست است.                                                                                                                                                                                |
+| عضویت در `identity-service`                                                      | مالک «چه کسی بر چه کسی دامنه دارد» سلسله‌مراتب است (A-13)؛ construction، contract، economic و marketplace از پیش همین را از organization-service می‌پرسند.                                                                                                                        |
+| `effective_from`/`effective_to` زمان‌بندی‌شده                                    | اختیار خودکار در آینده یا گذشته؛ § ۲ (۱).                                                                                                                                                                                                                                         |
+| چند اتحادیه به‌ازای هر سازمان                                                    | تصمیم موقت (۲)؛ پاسخ «کدام اتحادیه تصمیم می‌گیرد» را باز می‌گذاشت (Q-83 (الف) همین پرسش را دارد). قید یکتایی با یک Migration برداشتنی است.                                                                                                                                        |
+| گستردن پاسخ موجود `GET /v1/organizations/:id`                                    | چهار سرویس هم‌زمان و بی PR خودشان رفتار عوض می‌کردند؛ § ۴.                                                                                                                                                                                                                        |
+| **Replica رویدادمحور در هر سرویس** (عضویت + درخت از `rasta.organization.v1`)     | ابطال = تأخیر Relay + کارگزار + Consumer، و با گیر کردن Consumer یا DLQ **بی‌کران**؛ پایان عضویت در Replica «ردیف اضافه» است، درست جهتی که ADR-053 § ۱۰ نمی‌پذیرد؛ `docs/07` § ۷٫۱۰ Replica را مبنای مجوزدهی نمی‌داند؛ هشت نسخهٔ Projection سلسله‌مراتب (audit به‌تنهایی ۳۳۱ خط). |
+| Replica با Watermark تازگی (رد وقتی آخرین رویداد کهنه‌تر از کران است)            | رویداد Heartbeat و ماشین‌آلات تازه در هر سرویس؛ کران همچنان کران Watermark است نه صفر؛ پیچیدگی بی سود برای بار ناچیز.                                                                                                                                                             |
+| فهرست `G` در توکن کاربر (Claim)                                                  | کهنگی تا ۹۰۵ ثانیه (ADR-060 § ۷)؛ اندازهٔ توکن با تعداد اعضا رشد می‌کند؛ identity باید دادهٔ organization را بداند.                                                                                                                                                               |
+| Cache مثبت با TTL کوتاه از روز اول                                               | کران ابطال را از «Commit» به «Commit + TTL» می‌برد بی آنکه باری آن را بخواهد؛ § ۵.                                                                                                                                                                                                |
+| پرچم ویژگی برای باریک‌شدن چهار سرویس                                             | § ۸: کلید بازکردن دوبارهٔ نقص Q-63.                                                                                                                                                                                                                                               |
+| ماندن دید سراسری اختلاف‌ها در marketplace (ADR-060 § ۲ آن را «مقصود» خوانده بود) | آن جمله پیش از Q-63 و Q-80 بود؛ دیدنِ اختلافی که اتحادیه حق حلش را ندارد (Q-136) فقط افشای دادهٔ تجاری سازمان بیگانه است.                                                                                                                                                         |
+
+## Consequences
+
+**مثبت.**
+
+- دامنهٔ اتحادیه یک تعریف، یک مالک و یک پاسخ دارد؛ هشت سرویس آن را یکسان می‌پرسند و `basis` آن را ثبت می‌کنند.
+- پایان عضویت در لحظه‌ی Commit برای هر تصمیم تازه اثر دارد، و اثری که پیش از آن پرسیده دیرتر از `T + MAX_AGE` به ساعت پایگاه داده
+  **مؤثر** نمی‌شود: گزاره درون خود `COMMIT` است، پس هیچ توقف سرویس آن را نمی‌شکند؛ باقی‌مانده‌ها ساعت میزبان پایگاه داده و تأخیر پس از گزاره‌اند (§ ۵ (۳))؛ این کران به Kafka، Cache یا عمر توکن بسته نیست.
+- دید سراسری `UNION_ADMIN` در economic، document، supplier و marketplace بسته می‌شود — آخرین بازماندهٔ «نقش پلتفرمی» که Q-63 رد کرد.
+- سابقه‌ی عضویت تغییرناپذیر است و با یک Projection ـِ کوچک در audit، به‌ازای هر دوره، به حسابرسی می‌رسد (§ ۳).
+- `@AllowService` بی نام دیگر Wildcard نیست، در هیچ سرویسی (PR 1a).
+
+**منفی — و هیچ‌کدام کوچک نیست.**
+
+- **وابستگی زمان اجرای تازه** برای document، supplier، identity و audit به `organization-service`؛ از کار افتادنش کنش میان‌سازمانی
+  اتحادیه را در هشت سرویس، و هر استفاده از سیاست نوشته‌ی اتحادیه را برای هر کاربری، `503` می‌کند (هدف ذخیره‌شده: `404` یکسان؛ § ۵، `D-061`).
+- **اتحادیه کارکردهایی را از دست می‌دهد:** تراز آزمایشی، برگشت سند، صف صلاحیت تأمین‌کنندگان، و دیدن سفارش و اختلاف سازمان‌های
+  بیرون از `G`. تا پاسخ Q-146، این‌ها کار `SYSTEM_ADMIN` است.
+- هر خواندن میان‌سازمانی اتحادیه یک فراخوانی HTTP بیشتر دارد (صف supplier تا ۴ تکه‌ی هم‌زمان)؛ صف supplier صفحه‌های کوتاه‌تر و
+  گاه تهی با Cursor ـِ پیش‌رونده می‌گیرد.
+- **پنجره‌ی «پرسش، سپس Commit»** میان دو سرویس بسته نمی‌شود — همان D-050 و D-054. فقط **پذیرش** کران‌دار است، با گزاره‌ی پایگاه داده درون
+  `COMMIT` (پیش‌فرض ۵ ثانیه، § ۵ (۳))؛ **پس از گزاره**، پایان Commit کران ندارد و Rollback هم نمی‌شود — `COMMITTED_LATE` یا
+  `COMMIT_UNKNOWN` سنجیده، هشدار داده و با `hierarchyVersion` ثبت می‌شود، نه بیشتر. عقب‌پریدن ساعت پایگاه داده یا مکث VM آن بی تصحیح ساعت کران را به همان اندازه دراز می‌کند؛
+  بیشترش پس از رخداد هشدار می‌گیرد (`DB_CLOCK_SUSPECT`) و چند حالت هیچ هشداری ندارد (§ ۵ (۳)، «باقی‌مانده‌ها»).
+- **هر هفت پایگاه داده‌ی نویسنده یک Migration تازه می‌گیرد** (جدول، سه تابع، Trigger)، و تراکنشی که می‌پرسد تا سه رفت‌وبرگشت بیشتر دارد (لنگر، `fence`، مشاهده‌ی پایان) و یک ردیف
+  می‌نویسد و حذف می‌کند. اگر پایگاه داده پاسخ ندهد پاسخ موفق تا `GRACE` دیرتر می‌رسد. Migration نرسیده ← هر نوشتن تحت دامنه رد می‌شود، نه باز.
+- پایان عضویت، مثل جابه‌جایی، سیاست‌های اتحادیه برای آن عضو را معلق می‌کند و دوره‌ی بی‌سیاستی می‌سازد (Q-83، D-041).
+- معنای `hierarchy_version` گسترده می‌شود (§ ۲ (۷))؛ نام ستون عوض نمی‌شود.
+
+## Compliance
+
+- **organization-service:** آزمون قید یکتایی در پایگاه داده (دو ثبت هم‌زمان برای یک عضو ← یکی `201`، دیگری `409`)؛ Trigger
+  (حذف و ویرایش ردیف پایان‌یافته رد)؛ ناوردایی‌های § ۲ (۴) هرکدام با `rule`؛ پایان خودکار با غیرفعال‌سازی، و **نه** با تعلیق یا
+  جابه‌جایی؛ افزایش `hierarchy_version` عضو در همان تراکنش و بالاتر از هر نسخه‌ی پیشین؛ رویداد در همان تراکنش (Outbox)؛ `403` پیش
+  از Lookup برای غیر `SYSTEM_ADMIN`؛ هر مسیر خواندن: عضو دیدنی، فرزند عضو، عضو اتحادیه‌ی دیگر و `ORG.outside` همه `404` با بدنه‌ی
+  یکسان شناسه‌ی ناموجود؛ `ORGANIZATION_ADMIN` و دیگر نقش‌های سازمان اتحادیه از پایه‌ی عضویت هیچ نمی‌گیرند؛ پرسش درونی تکی و دسته‌ای
+  با `basis` درست و `404` یکسان؛ دسته‌ای با ۵۱ شناسه یا شناسه‌ی تکراری ← `400`؛ Migration برگشت‌پذیر (`verify-migration-reversible`).
+  **دوره (افزوده‌ی C):** پایان یک دوره، ثبت دوره‌ی جانشین، سپس بازتلاش پایان اول ← `409` و جانشین فعال می‌ماند؛ ثبت با
+  `expectedLatestMembershipId` کهنه ← `409`. **سابقه (G):** فهرست اعضا و `union-memberships` با `limit` پیش‌فرض و ۲۰۰، Cursor تا
+  پایان؛ دوره‌ی پایان‌یافته برای اتحادیه فقط نمای دوره، بی `reason` و بی داده‌ی دیگر عضو؛ `id` بیرون از دید ← `404`. **Allow-list در
+  وضعیت نخستین استقرار (یافته‌ی ۳):** سرویس نامرتبط (مثلاً `fleet-service`) با توکن معتبر امضاشده برای `U` روی هر دو مسیر درونی ←
+  `403`، و توکن کاربر ← `403`. **Primary:** پرسش `governance` از Client ـِ `DATABASE_URL` خوانده می‌شود.
+- **nest-common و contracts (PR 1a):** `@AllowService` بی نام هنگام بارگذاری Module خطا می‌دهد و گارد فهرست تهی را رد می‌کند؛
+  `GovernanceClient`: هر حالت بسته در خطا، یکتاسازی و تکه‌بندی (مثلاً ۲۰۰ شناسه با تکرار ← ۴ تکه، هر شناسه یک بار)، ددلاین کل (یک تکه‌ی
+  کند ← کل `504`)، شناسه‌ی ناخواسته، تکراری یا بدشکل در پاسخ ← `503`، و در هیچ شکستی نتیجه‌ی جزئی. **حصار پذیرش (§ ۵ (۳)) روی PostgreSQL واقعی و نقش زمان اجرا، با `SIGSTOP` واقعی فرایند:**
+  **رد Codex r4:** نمونه‌ها ~۴٬۹۰۰، `SIGSTOP` ۱٬۵۰۰ میان نمونه‌ها و مصرفشان، `assessElapsed` همان `OK` ← `COMMIT` با `RG072`، `EXPIRED`، هیچ ردیف؛ همان توقف درون مهلت ← `COMMITTED`؛
+  توقف بیش از `GRACE` ← نشست بسته، هیچ ردیف، `COMMIT_UNKNOWN`؛ توقف پیش از `fence` ← `RG072` از `fence`؛ توقف پس از فرستادن `COMMIT` ← اثر هست و `COMMITTED_LATE` با `ELAPSED`
+  به زمان پایگاه داده؛ پایگاه داده‌ی ایستاده پیش از خواندن `COMMIT` ← `RG072`، و بیش از `GRACE` ← هیچ ردیف، `COMMIT_UNKNOWN`؛ Trigger معوق کند مصرف‌کننده پیش از سنجش ← `RG072` (ترتیب)؛
+  بی `fence` و دیر ← `RG072` در `COMMIT`؛ Savepoint برگشته و `SET CONSTRAINTS ALL IMMEDIATE` ← `RG073` در `fence`؛ Trigger خاموش یا Migration نرسیده ← `RG073` در لنگر و **پرسش فرستاده
+  نشده**؛ نقش زمان اجرا نمی‌تواند Trigger را خاموش یا حذف کند؛ `SERIALIZABLE`؛ جدول پس از هر Commit تهی. **باقی‌مانده:** انتظار Replication همگام پس از گزاره ← ردیف در انتظار نادیدنی، پس از لغو هست، `COMMITTED_LATE` با
+  `ELAPSED`؛ `statement_timeout` به `COMMIT` نمی‌رسد. **با Prisma واقعی:** رد در `COMMIT` ← `EXPIRED` (نه `COMMIT_UNKNOWN`)، `P1017` و `P2028` ← `COMMIT_UNKNOWN`، Pool پس از آن سالم. **با ساعت تزریق‌شده** (عقب‌پریدن در Container
+  تولیدشدنی نیست): ساعت ۱ بیش از `MAX_AGE` و پایگاه داده کمتر ← رد؛ تفاضل منفی یا نمونه‌ی نبود ← `UNVERIFIED`؛ کمتر از `GRACE` مانده از مهلت تراکنش ← `EXPIRED`؛ در هر رد پیش از `COMMIT`،
+  `COMMIT` فرستاده نشده؛ شکست یا مهلت مشاهده ← `COMMITTED_LATE` با `UNVERIFIED` و پاسخ موفق؛ Statement پس از `fence` ← خطا و Rollback؛ پرسش دوم لنگر را عوض نمی‌کند؛
+  نپرسیده ← بی لنگر، بی سنجش و بی مشاهده؛ `fence` روی تراکنش ساخته‌نشده با `governedTransaction` ← خطا؛ `governedTransaction` مهلت صریح را به Prisma می‌دهد.
+- **audit (PR 1b):** Projection ـِ `UnionMembership/{membershipId}` برای هر دو رویداد، کلید Partition عضو؛ Payload ناسازگار یا
+  `memberOrganizationId` ناهمسان با `aggregateId` ← DLQ؛ دو دوره‌ی یک عضو ← دو منبع جدا.
+- **هر مصرف‌کننده:** آزمون بسته در خطا (۵۰۳، ۵۰۴، `404` بی بدنه‌ی سرویس، بدنه‌ی بزرگ، بدنه‌ی بی‌نسخه یا `basis` ناشناخته)؛ **آزمون
+  ابطال**: ثبت ← اجازه؛ پایان ← درخواست بعدی رد، بی هیچ انتظار؛ **آزمون کران**: پایان عضویت میان پرسش تعیین‌کننده و Commit، و پرسشی
+  که پیش از حصار بیش از `MAX_AGE` معطل شود ← Rollback و هیچ اثری؛ **آزمون گزاره، در هر هفت نویسنده:** Migration روی پایگاه داده‌ی همان سرویس (و `verify-migration-reversible`)، و یک نوشتن واقعی که `COMMIT` آن پس از مهلت برسد ← `RG072`، `EXPIRED`، هیچ ردیف اثر یا Outbox، جدول `governed_admission` تهی؛ **آزمون بودجه**: Boot با پیکربندی پیش‌فرض بالا می‌آید؛ هر
+  نوشتن تحت دامنه مهلت ≥ `MAX_AGE + GRACE + 5000` را صریح به Prisma می‌دهد؛ `DATABASE_STATEMENT_TIMEOUT_MS` نه بالاتر از آن ← Boot
+  رد (برنامه‌ی اجرا، «بودجه‌ی تراکنش‌های تحت دامنه»)؛ آزمون اینکه برای پرسش واگذاری مستقیم، نقش‌های جز `UNION_ADMIN`
+  هرگز نمی‌پرسند؛ آزمون اینکه `SYSTEM_ADMIN` بی‌تغییر است؛ آزمون امضای مستأجر (افزوده‌ی D): پرسش واگذاری با توکن امضاشده برای
+  سازمان فعال، پرسش سیاست با توکن امضاشده برای نویسنده، و سرآیند `X-Organization-Id` ناهمسان ← رد؛ ناتوانی یا حصار منقضی روی هدف ذخیره‌شده ← همان `404` ـِ ناموجود، با بدنه‌ی یکسان.
+- **economic، document، supplier، marketplace:** آزمونی که `UNION_ADMIN` با هدف بیرون از `G` همان پاسخ غریبه را می‌گیرد (`404`
+  یا `403` امروز هر مسیر) — یعنی `hasPlatformScope` دیگر اتحادیه را نمی‌شناسد؛ تراز آزمایشی و برگشت سند ← `403`.
+- **economic (یافته‌ی ۱، افزوده‌های A و B):** آزمون مثبت برای **هر شش فرمان** (`SETTLE`، `AUTHORISE_SETTLEMENT`، `DISPUTE`،
+  `RESOLVE_DISPUTE`، `CANCEL`، `REFUND`) با سازمان عمل‌کننده (`U`) ≠ سازمان دفتر (`M`)، یک بار با `basis = MEMBER` و یک بار
+  `SUBTREE`، و رکورد فرمان با `basis` و نسخه؛ `REFUND` هم از مسیر `PAYEE` (بی پرسش) و هم از مسیر اتحادیه؛ اتحادیه درون `G`
+  همچنان: لغو یا بازپرداخت تعهد صورت‌وضعیت ← رد `refuseStatementWithdrawal`، اعتراض یا حل اعتراض تعهد سفارش ← رد
+  `assertMayDisputeDirectly`؛ **بازپخش هر شش فرمان** پس از پایان عضویت ← همان رد درخواست تازه (`404` اگر هیچ طرف تراکنش دیدنی نیست، وگرنه `403`)، و شمار ردیف‌های دفتر، موجودی
+  کیف پول‌ها و ردیف‌های Outbox بی‌تغییر.
+- **supplier (یافته‌های ۵ و ۷، افزوده‌ی F):** صف با صفحه‌ی پیش‌فرض (۲۵) و بیشینه (۲۰۰، یعنی ۲۰۱ ردیف خوانده) با سازمان‌های یکتا و
+  تکراری؛ پیمایش Cursor از میان صفحه‌های کاملاً صافی‌شده تا پایان، بی ردیف گم یا تکراری؛ ردیف Lookahead نه برگردانده و نه پرسیده؛
+  ناموجود و بیرون از `G` برای `decide`، `suspend` و `reinstate` ← یک `404` با بدنه‌ی یکسان؛ داوری در کار خود با عضویت دوم ←
+  `403`؛ یادداشت بازبین به‌ازای ردیف (`UNION_ADMIN` عضو تأمین‌کننده ← نه؛ درون `G` ← بله؛ بیرون ← ردیف نیست).
+- **identity:** هر چهار مسیر؛ `approve`/`reject` بیرون از `G`، ناموجود، و ناتوانی در پرسش ← یک `404` یکسان؛ Boot با
+  `USER_PROVISIONING_CROSS_ORG_ROLES=UNION_ADMIN` رد؛ پایان عضویت میان پرسش زودهنگام و تراکنش Commit ← Rollback، حساب Keycloak
+  غیرفعال و بی‌اعطا، هیچ اعطایی نوشته نمی‌شود، و بازتلاش همان کلید ← رد.
+- **audit:** Replica خالی یا کهنه هیچ اختیاری نمی‌دهد و نمی‌گیرد؛ پاسخ همزمان تعیین‌کننده است.
+- **construction و contract (یافته‌ی ۴):** کاربر عادی در سازمان خودش زیر سیاست نوشته‌ی اتحادیه — امضا، گشودن دور، ارسال
+  صورت‌وضعیت: پرسش انجام می‌شود؛ پایان عضویت ← رد بی انتظار Consumer؛ `organization-service` در دسترس نیست ← `503`. `..._ENDED`
+  (و تحویل دوباره، و بازپخش از `.retry`) سیاست را فقط پس از بازپرسی معلق می‌کند؛ ثبت دوباره زنده نمی‌کند.
+- **A-01، A-02:** هیچ خواندن جدول یا `import` میان‌سرویسی؛ `check:service-boundaries`.
+
+## پرسش‌های باز که این ADR حل نمی‌کند
+
+- **Q-144** — زیردرخت خودِ عضو در دامنهٔ اتحادیه؟ (تصمیم موقت: نه، § ۲ (۶))
+- **Q-145** — سیاست به‌ارث‌رسیدنیِ اتحادیه به اعضا می‌رسد؟ (تصمیم موقت: نه، وراثت فقط درختی)
+- **Q-146** — کارکردهای سراسری پلتفرم که دربارهٔ سازمانِ تحت نظری نیستند (تراز آزمایشی، برگشت سند، صلاحیت تأمین‌کنندگان، ویرایش
+  پیشنهاد بیگانه) با چه کسی؟ (تصمیم موقت: `SYSTEM_ADMIN`، و برای اتحادیه فقط درون `G`)
+- **Q-147** — اختیار اتحادیه در identity به ادارهٔ عضویت‌های موجود در سازمان‌های `G` می‌رسد؟ (تصمیم موقت: نه)
+- تصمیم‌های موقت مدیر پروژه (۱) تا (۳) در بخش Q-80 ثبت‌اند و پاسخ صاحب محصول به هرکدام فقط یک قاعدهٔ سرویس یا یک قید را عوض
+  می‌کند (§ ۲ (۲)، § ۴).
+- بازبرآورد: هیچ قلم Backlogی برای این کار نیست؛ برآورد برش‌ها در برنامهٔ اجراست — تصمیم مدیر پروژه.
