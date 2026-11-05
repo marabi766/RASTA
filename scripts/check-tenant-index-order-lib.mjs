@@ -491,6 +491,11 @@ export const EXEMPTIONS = {
       reason:
         "the payment reconciler's heal pass reads the intents a refund left unfinished across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial, empty in the normal case",
     },
+    ux_settlement_reversal_source: {
+      index: 'settlement_reversal (source_type, source_reference)',
+      reason:
+        'the invariant that makes a correction case idempotent (RLG-002): one source is one fact across every tenant, and widening the key with organization_id would let a redelivered event open a second case under another organization',
+    },
     ix_payment_reconciliation_open_window: {
       index: 'payment_reconciliation_task (created_at, id)',
       reason:

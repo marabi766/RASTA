@@ -233,6 +233,7 @@ const ECONOMIC_EXEMPT = [
   'transaction_leg_transaction_id_role_key',
   'uq_ledger_account_identity',
   'uq_wallet_hold_active_reference',
+  'ux_settlement_reversal_source',
 ];
 
 test('economic-service: without its exemptions exactly the classified indexes are reported', () => {

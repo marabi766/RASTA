@@ -42,6 +42,14 @@ bodies for tooling compatibility. Each 503 schema explicitly describes that body
 envelope a thrown exception can produce. Liveness failures use the envelope. Conformance tests
 enumerate the six exceptions by service, path and status and validate real HTTP probe bodies.
 
+The publisher supplies the envelope only where a route declares no error body: a typed refusal a
+route declares (`publishedApiErrorSchema.extend({ details: … })`) is published unchanged, and a
+declared error body that is not one resolvable JSON schema stops generation. `routeErrorProblems`
+(FU-031) reads the routes the application really serves — not only the document: every real route
+must be published (the gateway's proxy catch-all is the one listed exclusion), every published
+operation must be served, every declared error body must survive publication, and each route is
+sent one real request whose error answer is validated against that route's published schema.
+
 ## مرور تعاملی
 
 | محیط             | آدرس                           |

@@ -26,6 +26,13 @@ describe('CORRECTION_OF', () => {
       expect(CORRECTION_OF[type]).toContain('docs/24 Q-76');
     }
   });
+
+  it('calls a refund and a settlement reversal final, correctable only by a new forward transaction', () => {
+    for (const type of ['FUNDS_REFUNDED', 'SETTLEMENT_REVERSAL'] as const) {
+      expect(CORRECTION_OF[type]).toContain('final');
+      expect(CORRECTION_OF[type]).toContain('new forward transaction');
+    }
+  });
 });
 
 /**
