@@ -48,6 +48,10 @@ export const UNIT_STEP = {
   script: 'test:unit-step-concurrency',
   maxMinutes: 10,
   watchdog: './scripts/test-stall-watchdog.mjs',
+  // FU-118: --require, not --import. On Node 22 the `node --test` runner (the parent)
+  // executes --require preloads but not --import ones, and the runner itself can hang
+  // (nodejs/node#62693); the watchdog guards it only when the runner loads it too.
+  preload: '--require',
 };
 /** Scripts the guard does not read, each with the reason; a stale entry is refused. */
 export const EXEMPT_SCRIPTS = {
@@ -262,12 +266,12 @@ function nodeCommand(args, found, unconditional) {
     const { value, dynamic } = args[at];
     if (dynamic) return found.problems.push(`a computed node option (${text})`);
     if (value === '--' || !value.startsWith('-') || value === '-') break; // first file argument
-    if (value === '--import') {
+    if (value === '--import' || value === '--require') {
       const next = args[++at];
       // Any other preload is code the guard does not read, even inline (a data: URL).
       if (next?.value !== UNIT_STEP.watchdog || next.dynamic)
-        return found.problems.push(`a node --import that is not the watchdog (${text})`);
-      options.imports.push(next.value);
+        return found.problems.push(`a node ${value} that is not the watchdog (${text})`);
+      options.imports.push(`${value} ${next.value}`);
     } else if (value.startsWith('--test-timeout=')) options.timeouts.push(value.slice(15));
     else if (value === '--test-timeout') options.timeouts.push('');
     else if (value === '--test') options.test = true;
@@ -515,10 +519,10 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
     watched.problems.length > 0 ||
     tests.length !== 1 ||
     !tests[0].unconditional ||
-    tests[0].imports.join('\n') !== UNIT_STEP.watchdog
+    tests[0].imports.join('\n') !== `${UNIT_STEP.preload} ${UNIT_STEP.watchdog}`
   )
     problems.push(
-      `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (--import ${UNIT_STEP.watchdog}) and nothing else, before its files`,
+      `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (${UNIT_STEP.preload} ${UNIT_STEP.watchdog}, which the runner loads too) and nothing else, before its files`,
     );
   return problems;
 }
