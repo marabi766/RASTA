@@ -603,7 +603,7 @@ export function createActivities(deps: ActivityDependencies) {
           // resolution — which the saga sends only after this step — changes
           // them.
           answer: (transaction) =>
-            transaction.status === 'DISPUTED' && transaction.disputeReason === reason
+            transaction.status === 'DISPUTED' && sameText(transaction.disputeReason, reason)
               ? { result: transaction.disputeId ?? null }
               : null,
         },
@@ -662,7 +662,7 @@ export function createActivities(deps: ActivityDependencies) {
               transaction.disputedAt !== null;
             const ours =
               economicDisputeId === undefined
-                ? resolutionOf(transaction) === resolution
+                ? sameText(resolutionOf(transaction), resolution)
                 : transaction.disputeId === economicDisputeId;
             return released && ours ? { result: undefined } : null;
           },
@@ -737,6 +737,16 @@ function refusedForState(error: unknown): boolean {
  * on a transaction resolved since, it is the objection, and a resolution
  * worded like it proves nothing (Codex on #322).
  */
+/**
+ * The same words, whatever their line endings: economic-service keeps text
+ * with LF line endings since it canonicalizes command bodies (task 129), and
+ * kept it as sent before. This service keeps what the person sent.
+ */
+function sameText(kept: string | null | undefined, sent: string): boolean {
+  const lf = (text: string) => text.replace(/\r\n?/g, '\n');
+  return typeof kept === 'string' && lf(kept) === lf(sent);
+}
+
 function resolutionOf(transaction: TransactionDetailView): string | null {
   const keptApart = transaction.disputeResolution;
   if (keptApart !== null && keptApart !== undefined) return keptApart;

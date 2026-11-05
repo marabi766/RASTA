@@ -1,6 +1,12 @@
-import type { PipeTransform } from '@nestjs/common';
+import type { ArgumentMetadata, PipeTransform } from '@nestjs/common';
 import { z } from 'zod';
-import { amountMinorSchema, legacyDatetimeRegex, type IsoDateTimeOptions } from '@rasta/contracts';
+import {
+  amountMinorSchema,
+  legacyDatetimeRegex,
+  legacyParse,
+  type IsoDateTimeOptions,
+} from '@rasta/contracts';
+import { validateRequestInput } from '@rasta/nest-common';
 
 /**
  * One spelling per value, before a request body is validated, hashed or
@@ -29,15 +35,21 @@ import { amountMinorSchema, legacyDatetimeRegex, type IsoDateTimeOptions } from 
  * is not a string, `"0"` is already canonical.
  *
  * Derived from the schema ({@link canonicalFieldsOf}), so a field added to a
- * DTO is normalized by its type, not by remembering a list. Only the reward
- * rule create uses it so far; the other idempotent commands are task 129.
+ * DTO is normalized by its type, not by remembering a list — nested objects
+ * and arrays of them included. Every idempotent command's body goes through
+ * {@link canonicalBodyPipe} (task 129); the reward rule create, which parses
+ * in its handler for its legacy replay, uses {@link canonicalPipe}. A route
+ * that takes an `Idempotency-Key` without either is refused by
+ * `idempotent-routes.spec.ts`.
  */
 
 export type CanonicalKind =
   | { kind: 'amountMinor' }
   | { kind: 'instant'; options: IsoDateTimeOptions }
   | { kind: 'text' }
-  | { kind: 'form'; canonicalize: (value: unknown) => unknown };
+  | { kind: 'form'; canonicalize: (value: unknown) => unknown }
+  | { kind: 'object'; fields: CanonicalFields }
+  | { kind: 'array'; element: CanonicalKind };
 
 export type CanonicalFields = Readonly<Record<string, CanonicalKind>>;
 
@@ -123,6 +135,18 @@ export function withCanonicalForm<T extends z.ZodType>(
   return schema;
 }
 
+/**
+ * A string that names something — a reference, a key, an opaque provider
+ * instruction — rather than saying something: its canonical form is itself.
+ * A line ending inside one is part of the name, so it is never rewritten
+ * (`"A\r\nB"` and `"A\nB"` are two references, and the second would not be
+ * found by a lookup for the first). Without it, a string with no format or
+ * pattern is human text.
+ */
+export function identifier<T extends z.ZodType>(schema: T): T {
+  return withCanonicalForm(schema, (value) => value);
+}
+
 function canonicalValue(value: unknown, field: CanonicalKind): unknown {
   switch (field.kind) {
     case 'amountMinor':
@@ -133,33 +157,44 @@ function canonicalValue(value: unknown, field: CanonicalKind): unknown {
       return canonicalText(value);
     case 'form':
       return field.canonicalize(value);
+    case 'object':
+      return canonicalBody(value, field.fields);
+    case 'array': {
+      if (!Array.isArray(value)) return value;
+      const items = value.map((item: unknown) => canonicalValue(item, field.element));
+      return items.some((item, index) => item !== value[index]) ? items : value;
+    }
   }
 }
 
 /**
- * A copy of `body` with each declared top-level field in its canonical form.
- * A body that is not a plain object is returned as it is, for the schema to
- * refuse. The request's own object is never modified.
+ * `body` with each declared field in its canonical form — a copy when any
+ * field changed, `body` itself when none did. A body that is not a plain
+ * object is returned as it is, for the schema to refuse. The request's own
+ * object is never modified.
  */
 export function canonicalBody(body: unknown, fields: CanonicalFields): unknown {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return body;
-  const copy: Record<string, unknown> = { ...(body as Record<string, unknown>) };
+  const source = body as Record<string, unknown>;
+  let copy: Record<string, unknown> | undefined;
   for (const [name, field] of Object.entries(fields)) {
-    if (Object.prototype.hasOwnProperty.call(copy, name)) {
-      copy[name] = canonicalValue(copy[name], field);
-    }
+    if (!Object.prototype.hasOwnProperty.call(source, name)) continue;
+    const canonical = canonicalValue(source[name], field);
+    if (canonical === source[name]) continue;
+    copy ??= { ...source };
+    copy[name] = canonical;
   }
-  return copy;
+  return copy ?? body;
 }
 
 /**
  * The fields of an object schema that have a canonical form, read from the
  * schema itself: {@link amountMinorSchema} is an amount, a string with an ISO
  * datetime check is an instant (with that check's zone options), a string
- * with no format or pattern is human text, and a schema that declares its own
- * form ({@link withCanonicalForm}) has that form. Optional, nullable and
- * defaulted wrappers are seen through. Nested objects are not walked: a
- * structured value declares its form.
+ * with no format or pattern is human text, a schema that declares its own
+ * form ({@link withCanonicalForm}, {@link identifier}) has that form, and an
+ * object, or an array of them, has its own fields' forms. Optional, nullable
+ * and defaulted wrappers are seen through.
  */
 export function canonicalFieldsOf(schema: z.ZodObject): CanonicalFields {
   const fields: Record<string, CanonicalKind> = {};
@@ -189,14 +224,40 @@ interface CheckDef {
   precision?: number | null;
 }
 
+type Check = { _zod: { def: CheckDef } };
+
+const checksOf = (schema: z.ZodType): Check[] =>
+  (schema._zod.def as { checks?: Check[] }).checks ?? [];
+
+const AMOUNT_CHECKS = checksOf(amountMinorSchema);
+
+/**
+ * {@link amountMinorSchema}, or a refinement of it (`amountMinorSchema.refine(
+ * …positive…)`): zod 4 makes a refinement a new schema that carries the
+ * original's check instances, so identity alone missed the top-up's amount.
+ */
+function isAmountMinor(schema: z.ZodType): boolean {
+  if (schema === amountMinorSchema) return true;
+  if (schema._zod.def.type !== 'string') return false;
+  const checks = checksOf(schema);
+  return AMOUNT_CHECKS.every((check) => checks.includes(check));
+}
+
 function kindOf(schema: z.ZodType): CanonicalKind | null {
   const declared = DECLARED_FORMS.get(schema);
   if (declared) return { kind: 'form', canonicalize: declared };
-  if (schema === amountMinorSchema) return { kind: 'amountMinor' };
-  if (schema._zod.def.type !== 'string') return null;
-  const checks = ((schema._zod.def as { checks?: { _zod: { def: CheckDef } }[] }).checks ?? []).map(
-    (check) => check._zod.def,
-  );
+  if (isAmountMinor(schema)) return { kind: 'amountMinor' };
+  const type = schema._zod.def.type;
+  if (type === 'object') {
+    const fields = canonicalFieldsOf(schema as z.ZodObject);
+    return Object.keys(fields).length > 0 ? { kind: 'object', fields } : null;
+  }
+  if (type === 'array') {
+    const element = kindOf(unwrapped((schema as z.ZodArray<z.ZodType>).element));
+    return element ? { kind: 'array', element } : null;
+  }
+  if (type !== 'string') return null;
+  const checks = checksOf(schema).map((check) => check._zod.def);
   const datetime = checks.find((check) => check.format === 'datetime');
   if (datetime) {
     return {
@@ -216,4 +277,66 @@ function kindOf(schema: z.ZodType): CanonicalKind | null {
 export function canonicalPipe(schema: z.ZodObject): PipeTransform {
   const fields = canonicalFieldsOf(schema);
   return { transform: (value: unknown) => canonicalBody(value, fields) };
+}
+
+const CANONICAL_BODY_PIPES = new WeakSet<object>();
+const AS_SENT = new WeakMap<object, unknown>();
+
+/**
+ * The body pipe of an idempotent command: the body in canonical form, then
+ * validated by `schema` — one pipe, so the two can never be listed apart or
+ * in the wrong order (`@Body(canonicalBodyPipe(schema))`).
+ *
+ * **Rollout.** A key stored before canonicalization holds the hash of the body
+ * as it was sent. When canonicalization changed something, the body exactly
+ * as the previous release would have validated it is kept beside the result
+ * ({@link asSentForm}), and the idempotency store accepts that form's hash
+ * too: the client's unchanged retry of a pre-change key replays its answer
+ * instead of a 409 that could send it to a new key and a second payment.
+ * Safe for any record, old or new: the as-sent body matches a stored hash only
+ * when it is the very request that was stored, or — already canonical — equal
+ * to the canonical body anyway.
+ */
+export function canonicalBodyPipe(schema: z.ZodType): PipeTransform {
+  const fields = canonicalFieldsOf(objectOf(schema));
+  const pipe: PipeTransform = {
+    transform: (value: unknown, _metadata: ArgumentMetadata): unknown => {
+      const canonical = canonicalBody(value, fields);
+      const dto: unknown = validateRequestInput(schema, canonical);
+      if (canonical !== value && dto !== null && typeof dto === 'object') {
+        const asSent = legacyParse(schema, value);
+        if (asSent.success) AS_SENT.set(dto, asSent.data);
+      }
+      return dto;
+    },
+  };
+  CANONICAL_BODY_PIPES.add(pipe);
+  return pipe;
+}
+
+/** Whether `pipe` came from {@link canonicalBodyPipe} — for the route guard. */
+export function isCanonicalBodyPipe(pipe: unknown): boolean {
+  return typeof pipe === 'object' && pipe !== null && CANONICAL_BODY_PIPES.has(pipe);
+}
+
+/**
+ * The body as the release before canonicalization validated it, where that
+ * differs from `body`; otherwise `undefined`.
+ */
+export function asSentForm(body: unknown): unknown {
+  return body !== null && typeof body === 'object' ? AS_SENT.get(body) : undefined;
+}
+
+/** Records `asSent` as `wrapper`'s as-sent form (`targeted`). */
+export function rememberAsSent(wrapper: object, asSent: unknown): void {
+  AS_SENT.set(wrapper, asSent);
+}
+
+/** The object schema whose fields are normalized: `schema`, or what it refines. */
+function objectOf(schema: z.ZodType): z.ZodObject {
+  const inner = unwrapped(schema);
+  if (inner._zod.def.type !== 'object') {
+    throw new Error('canonicalBodyPipe takes an object schema');
+  }
+  return inner as z.ZodObject;
 }

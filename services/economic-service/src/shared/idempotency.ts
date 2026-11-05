@@ -8,6 +8,7 @@ import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+import { asSentForm, rememberAsSent } from './canonical';
 
 export { CLAIM_WAIT_MS };
 
@@ -129,13 +130,19 @@ export class IdempotencyStore {
     body: unknown,
     fingerprintVersion?: string,
   ): Promise<Claim> {
-    const requestHash = fingerprintVersion
-      ? `${fingerprintVersion}:${this.hash(body)}`
-      : this.hash(body);
+    const fingerprint = (value: unknown) =>
+      fingerprintVersion ? `${fingerprintVersion}:${this.hash(value)}` : this.hash(value);
+    const requestHash = fingerprint(body);
+    // A key stored before its route put bodies in canonical form holds the
+    // hash of the body as sent; the client's unchanged retry is that body
+    // (`canonicalBodyPipe`, rollout). Compared, never stored.
+    const asSent = asSentForm(body);
+    const accepted: [string, ...string[]] =
+      asSent === undefined ? [requestHash] : [requestHash, fingerprint(asSent)];
     const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash, actorHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, accepted, actorHash, deadline);
       if (outcome !== RETRY_CLAIM) return outcome;
     }
     // Every attempt found the key vanishing under it: other requests are
@@ -193,10 +200,12 @@ export class IdempotencyStore {
   private async claimOnce(
     endpoint: string,
     key: string,
-    requestHash: string,
+    accepted: readonly [string, ...string[]],
     actorHash: string,
     deadline: number,
   ): Promise<Claim | typeof RETRY_CLAIM> {
+    // Written in the first form only: the canonical one.
+    const [requestHash] = accepted;
     const organizationId = getOrganizationId();
     const now = new Date();
     const expiresAt = new Date(
@@ -249,7 +258,7 @@ export class IdempotencyStore {
     // 1). A record from before actors were bound has none; it is answered only
     // through the replay guard, and only until it expires.
     if (
-      existing.requestHash !== requestHash ||
+      !accepted.includes(existing.requestHash) ||
       (existing.actorHash !== null && existing.actorHash !== actorHash)
     ) {
       throw RastaError.idempotencyKeyReused();
@@ -698,7 +707,12 @@ function claimLost(endpoint: string): RastaError {
  * already hashed — so its stored keys still match after this change.
  */
 export function targeted(id: string, body?: unknown): { id: string; body?: unknown } {
-  return body === undefined ? { id } : { id, body };
+  if (body === undefined) return { id };
+  const wrapper = { id, body };
+  // The as-sent form of the body, wrapped the same way (`canonicalBodyPipe`).
+  const asSent = asSentForm(body);
+  if (asSent !== undefined) rememberAsSent(wrapper, { id, body: asSent });
+  return wrapper;
 }
 
 /**

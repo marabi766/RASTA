@@ -165,10 +165,12 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
     let loseNext = false;
     let disputes = 0;
+    // As economic-service keeps text since task 129: LF line endings.
+    const lf = (text: string) => text.replace(/\r\n?/g, '\n');
     const disputed = (reason: string) => {
       disputes += 1;
       obligation.disputedAt = new Date().toISOString();
-      obligation.disputeReason = reason;
+      obligation.disputeReason = lf(reason);
       obligation.disputeId = `TXD_${disputes}`;
     };
 
@@ -223,7 +225,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           );
         }
         return move('resolveDispute', ['DISPUTED'], 'PENDING_SETTLEMENT', () => {
-          obligation.disputeReason = input.resolution;
+          obligation.disputeReason = lf(input.resolution);
         });
       },
       settle: async () => {
@@ -1073,11 +1075,11 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       return { econ, ...run, answer: answer! };
     }
 
-    async function decide(orderId: string): Promise<void> {
+    async function decide(orderId: string, resolution = DECIDED): Promise<void> {
       await asOperator(() =>
         wiring.orders.resolveDispute(orderId, {
           outcome: 'SETTLE',
-          resolution: DECIDED,
+          resolution,
           responsibility: 'BUYER',
         }),
       );
@@ -1193,6 +1195,39 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         else await expect(step).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
       },
     );
+
+    // economic-service keeps text with LF line endings (task 129); this
+    // service keeps what the person sent. The same words either way.
+    const CRLF_WORDS = 'the supplier showed\r\na signed delivery note';
+
+    it('without an identity, resolved there with the same words in LF: answered', async () => {
+      const { econ, orderId, saga, transactionId, answer } = await disputedAfterAuthorisation();
+      const taken = await saga.run(5, 1, (a) => a.markObligationDisputed(orderId, answer.reason));
+      econ.resolveThere('the supplier showed\na signed delivery note', true);
+      await decide(orderId, CRLF_WORDS);
+
+      await expect(
+        saga.run(6, 1, (a) =>
+          a.resolveObligationDispute(orderId, transactionId, taken.disputeId!, CRLF_WORDS),
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it('a dispute filed in CRLF, kept there in LF, read back after its answer was lost: its own', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga, transactionId } = await receiptConfirmed(econ.economic);
+      await asBuyer(() => wiring.orders.raiseDispute(orderId, { reason: CRLF_WORDS }));
+      const { dispute } = await saga.run(5, 1, (a) => a.readOrder(orderId));
+
+      econ.loseNextAnswer();
+      await expect(
+        saga.run(6, 1, (a) => a.disputeObligation(orderId, transactionId, dispute!.id, CRLF_WORDS)),
+      ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE' });
+      expect(econ.obligation.disputeReason).toBe('the supplier showed\na signed delivery note');
+      await expect(
+        saga.run(6, 2, (a) => a.disputeObligation(orderId, transactionId, dispute!.id, CRLF_WORDS)),
+      ).resolves.toBe('TXD_1');
+    });
 
     it('a dispute the saga files: economic-service’s identity of it, also when read back after its answer was lost', async () => {
       const econ = expiredEconomic();

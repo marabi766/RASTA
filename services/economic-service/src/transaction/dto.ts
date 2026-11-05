@@ -8,6 +8,7 @@ import {
   organizationIdSchema,
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
+import { identifier } from '../shared/canonical';
 import { cursorQueryParameter } from '../shared/cursor';
 import { isEconomicRecordedSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 
@@ -90,8 +91,8 @@ export const createTransactionSchema = z
      * The owning service's identifier space — an order id, a statement id.
      * Reserved types are refused below (`recorded-sources.ts`).
      */
-    sourceType: z.string().trim().min(1).max(64).optional(),
-    sourceReference: z.string().trim().min(1).max(128).optional(),
+    sourceType: identifier(z.string().trim().min(1).max(64)).optional(),
+    sourceReference: identifier(z.string().trim().min(1).max(128)).optional(),
     /**
      * Reserve the funds immediately.
      *
@@ -101,7 +102,7 @@ export const createTransactionSchema = z
      */
     holdFunds: z.boolean().prefault(false),
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */
-    idempotencyKey: z.string().trim().min(8).max(128).optional(),
+    idempotencyKey: identifier(z.string().trim().min(8).max(128)).optional(),
   })
   .strict()
   // No caller — person or service — may record under a source type
@@ -179,7 +180,7 @@ export const resolveDisputeSchema = z
      * `INVALID_STATE_TRANSITION`. Without it, a decision about one dispute
      * could resolve another raised since (docs/23 D-053).
      */
-    disputeId: z.string().trim().min(1).max(64).optional(),
+    disputeId: identifier(z.string().trim().min(1).max(64)).optional(),
   })
   .strict();
 
@@ -198,7 +199,7 @@ export type RefundTransactionDto = z.infer<typeof refundTransactionSchema>;
 
 export const settleTransactionSchema = z
   .object({
-    transactionId: z.string().trim().min(1).max(64),
+    transactionId: identifier(z.string().trim().min(1).max(64)),
   })
   .strict();
 
