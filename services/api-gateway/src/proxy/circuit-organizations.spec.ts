@@ -219,6 +219,8 @@ function breakers(options: { organizationsToOpen?: number; failureThreshold?: nu
     failureThreshold: 3,
     resetAfterMs: COOLDOWN_MS,
     now: () => clock,
+    // These schedules are outages: the gateway's own check finds the service not ready.
+    checkReady: () => false,
     ...options,
   });
   return {
@@ -613,6 +615,7 @@ describe('adversarial review: what the first version let through', () => {
       failureThreshold: 3,
       resetAfterMs: COOLDOWN_MS,
       now: () => 1,
+      checkReady: () => false,
     });
     for (const org of ['ORG_A', 'ORG_B', 'ORG_C', 'ORG_D']) {
       raw.settle(raw.admit('identity', org), 'failure');

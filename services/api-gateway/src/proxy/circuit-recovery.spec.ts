@@ -17,7 +17,7 @@ import {
 import type { GatewayEnv } from '../config/env';
 import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
 import { GatewayController } from './gateway.controller';
-import { ProxyService, type ProxyOptions } from './proxy.service';
+import { ProxyService, READINESS_PATH, type ProxyOptions } from './proxy.service';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
 
 /**
@@ -65,14 +65,28 @@ function answer(res: ServerResponse, status: number, body: unknown): void {
 
 interface Upstream {
   url: string;
+  /** Every exchange but the gateway's own readiness checks. */
   exchanges: Exchange[];
   behaviour: Behaviour;
+  /** What its `GET /health/ready` answers (FU-113): not ready unless a test says so. */
+  ready: boolean;
+  /** The gateway's readiness checks received. */
+  checks: number;
   close: () => Promise<void>;
 }
 
 async function startUpstream(): Promise<Upstream> {
-  const upstream = { exchanges: [] as Exchange[], behaviour: ok } as Upstream;
+  const upstream = {
+    exchanges: [] as Exchange[],
+    behaviour: ok,
+    ready: false,
+    checks: 0,
+  } as Upstream;
   const server: Server = createServer((req, res) => {
+    if (req.url === READINESS_PATH) {
+      upstream.checks += 1;
+      return answer(res, upstream.ready ? 200 : 503, { ready: upstream.ready });
+    }
     const exchange: Exchange = {
       method: req.method ?? '',
       url: req.url ?? '',
@@ -370,16 +384,23 @@ describe('HALF_OPEN admits exactly one probe', () => {
     expect(gateway.proxy.circuitStates().identity).toMatchObject({ state: 'OPEN', failures: 2 });
   });
 
-  it('a probe answered 4xx closes the circuit: the service answered', async () => {
+  it('a probe answered 4xx proves nothing: the gateway’s own check decides (FU-109)', async () => {
     gateway = await startGateway(upstream, {
       timeoutMs: 4000,
       failureThreshold: 1,
       resetAfterMs: COOLDOWN_MS,
     });
     await openThenCool(upstream, gateway);
-    upstream.behaviour = ({ res }) => answer(res, 404, { code: 'NOT_FOUND' });
+    upstream.behaviour = ({ res }) => answer(res, 400, { code: 'VALIDATION_FAILED' });
 
-    expect((await gateway.send(USERS).answer).status).toBe(404);
+    // Not ready: the refusal of one request does not close it, and frees the slot.
+    expect((await gateway.send(USERS).answer).status).toBe(400);
+    expect(upstream.checks).toBe(2);
+    expect(gateway.proxy.circuitStates().identity?.state).toBe('HALF_OPEN');
+    // Ready: the gateway's check, not the 400, closes it.
+    upstream.ready = true;
+    expect((await gateway.send(USERS, { caller: 'B' }).answer).status).toBe(400);
+    expect(upstream.checks).toBe(3);
     expect(gateway.proxy.circuitStates().identity).toEqual({
       failures: 0,
       open: false,
@@ -682,6 +703,8 @@ describe('a caller that leaves after the probe was sent cannot buy another probe
     upstream.behaviour = stall5xxBody;
 
     await sendAndLeave(gateway, 1, 50);
+    // The caller has gone; the gateway's own check still decides, after it.
+    await until(() => gateway!.proxy.circuitStates().identity?.open === true, 're-opening');
     expect(gateway.proxy.circuitStates().identity).toEqual({
       failures: 2,
       open: true,

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { InternalTokenService, createSystemContext, runWithContext } from '@rasta/nest-common';
 import { REDIRECT_CASES, withRedirectProbe } from '@rasta/testing';
-import { ProxyService } from './proxy/proxy.service';
+import { ProxyService, READINESS_PATH } from './proxy/proxy.service';
 
 const tokens = new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300);
 afterEach(() => jest.restoreAllMocks());
@@ -38,9 +38,12 @@ describe('gateway RELAY rejects authenticated redirects', () => {
             );
             if (status === 200) await expect(result).resolves.toBeDefined();
             else await expect(result).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
-            expect(probe.sent).toHaveLength(1);
+            // The gateway's own readiness check (FU-113) is no relayed exchange:
+            // it carries no credential, and it never follows a redirect either.
+            const relayed = probe.sent.filter((request) => request.url !== READINESS_PATH);
+            expect(relayed).toHaveLength(1);
             expect(probe.target).toEqual([]);
-            for (const request of probe.sent) {
+            for (const request of relayed) {
               expect(request.method).toBe(method);
               expect(request.headers['x-internal-token']).toEqual(expect.any(String));
             }
@@ -66,7 +69,9 @@ describe('gateway RELAY rejects authenticated redirects', () => {
                   }),
                 ),
               ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
-              expect(probe.sent).toHaveLength(1);
+              expect(probe.sent.filter((request) => request.url !== READINESS_PATH)).toHaveLength(
+                1,
+              );
             }
           },
         );
