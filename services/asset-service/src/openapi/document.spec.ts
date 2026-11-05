@@ -1,17 +1,11 @@
-import { VersioningType, type INestApplication } from '@nestjs/common';
+import { type INestApplication } from '@nestjs/common';
 import { METHOD_METADATA, ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { ModulesContainer } from '@nestjs/core';
 import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
-import { Test } from '@nestjs/testing';
-import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
-import { AssetController } from '../asset/asset.controller';
-import { AssetService } from '../asset/asset.service';
-import { InsuranceService } from '../insurance/insurance.service';
-import { ClaimService } from '../insurance/claim.service';
-import { IdempotencyStore } from '../asset/idempotency';
+import { type OpenAPIObject } from '@nestjs/swagger';
 import { publishedIsoDateTimeZone, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { toJsonSchema, ZodValidationPipe } from '@rasta/nest-common';
 import { parametersOf } from './query-parameters';
@@ -22,14 +16,14 @@ import {
   changeStatusSchema,
   decommissionSchema,
   updateAssetSchema,
+  listAssetsQuerySchema,
 } from '../asset/dto';
 import { canonicalIdentifier } from '../asset/identifier';
 
 /**
  * The document this service actually serves.
  *
- * Asserted on the output of `SwaggerModule.createDocument` — the same call
- * `main.ts` makes — rather than on the decorator metadata that feeds it. The
+ * Asserted on `buildAssetOpenApiDocument` — the builder `main.ts` serves — rather than on the decorator metadata that feeds it. The
  * defect being fixed here was a published contract that disagreed with the
  * runtime, and only the finished document can show that it no longer does.
  *
@@ -37,27 +31,12 @@ import { canonicalIdentifier } from '../asset/identifier';
  * reads decorators, not behaviour, so this needs no database and no PostGIS.
  */
 async function buildDocument() {
-  const moduleRef = await Test.createTestingModule({
-    controllers: [AssetController],
-    providers: [
-      { provide: AssetService, useValue: {} },
-      { provide: InsuranceService, useValue: {} },
-      { provide: ClaimService, useValue: {} },
-      { provide: IdempotencyStore, useValue: {} },
-    ],
-  }).compile();
-
-  const app = moduleRef.createNestApplication();
-  app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
-  await app.init();
-
-  const document = SwaggerModule.createDocument(
-    app,
-    new DocumentBuilder().setTitle('Rasta — Asset Service').setVersion('test').build(),
-  );
-
-  await app.close();
-  return document;
+  const app = await buildDocumentationApp();
+  try {
+    return buildAssetOpenApiDocument(app);
+  } finally {
+    await app.close();
+  }
 }
 
 describe('the served OpenAPI document', () => {
@@ -159,8 +138,10 @@ describe('the served PATCH /v1/assets/{id} request body', () => {
 
   it('marks a field nullable where the validator accepts null, since null clears it', () => {
     const shape = updateAssetSchema.shape as Record<string, { isNullable(): boolean }>;
+    const ajv = new Ajv({ strict: false });
+    addFormats(ajv);
     for (const [name, field] of Object.entries(shape)) {
-      expect([name, body.properties[name]?.nullable === true]).toEqual([name, field.isNullable()]);
+      if (field.isNullable()) expect(ajv.compile(body.properties[name]!)(null)).toBe(true);
     }
   });
 });
@@ -303,9 +284,14 @@ describe('the character rule in the published request bodies', () => {
     ['update', 'model', updateAssetSchema.shape.model],
     ['status', 'reason', changeStatusSchema.shape.reason],
     ['decommission', 'reason', decommissionSchema.shape.reason],
-  ] as const)('%s.%s publishes the bidi rule the validator enforces', (body, field, schema) => {
+  ] as const)('%s.%s marks its post-trim bidi rule as omitted (FU-120)', (body, field, schema) => {
     expect(regexSources(schema)).toEqual([WITHOUT_BIDI_CONTROL.source]);
-    expect(bodies[body]!.properties[field]?.pattern).toBe(WITHOUT_BIDI_CONTROL.source);
+    expect(schema.safeParse('   ').success).toBe(false);
+    expect(bodies[body]!.properties[field]?.pattern).toBeUndefined();
+    expect(bodies[body]!.properties[field]).toHaveProperty(
+      'description',
+      expect.stringContaining('Constraints after a value-changing step are omitted'),
+    );
   });
 
   it.each([
@@ -608,7 +594,8 @@ describe('every validated input is published from its validator (FU-078)', () =>
       const published = accepts(body);
       expect({ probe, runtime: runtime(body) }).toEqual({
         probe,
-        runtime: published && canonical >= min && canonical <= max,
+        runtime:
+          published && canonical >= min && canonical <= max && !/\p{Bidi_Control}/u.test(raw),
       });
       // The published bounds are the raw ones, enforced as published.
       if ([...raw].length > max) expect(published).toBe(false);
@@ -641,4 +628,22 @@ describe('every validated input is published from its validator (FU-078)', () =>
       ? { expectedVersion: 1, reason: 'retired after inspection' }
       : { expectedVersion: 1 };
   }
+});
+
+describe('raw asset query constraints (FU-120)', () => {
+  it.each([' ' + 'a'.repeat(100) + ' ', '   '])(
+    'documents transformed q honestly: %j',
+    async (q) => {
+      const document = await buildDocument();
+      const parameter = document.paths['/v1/assets']!.get!.parameters!.find(
+        (p) => 'name' in p && p.name === 'q',
+      ) as unknown as { schema: Record<string, unknown> };
+      expect(listAssetsQuerySchema.safeParse({ q }).success).toBe(q.length === 102);
+      expect(parameter.schema).toEqual({
+        type: 'string',
+        description:
+          'Constraints after a value-changing step are omitted; validation applies them to the transformed value.',
+      });
+    },
+  );
 });

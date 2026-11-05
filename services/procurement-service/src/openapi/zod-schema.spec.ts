@@ -179,7 +179,7 @@ describe('the real demand DTOs', () => {
     ['withdrawal', withdrawDemandSchema, { expectedVersion: 1 }],
     ['cancellation', cancelAggregationSchema, { expectedVersion: 1 }],
   ])(
-    'counts a %s reason in characters at both bounds, and publishes 8..500',
+    'counts a %s reason in characters at both bounds, and marks its post-trim bounds as omitted (FU-120)',
     (_l, schema, rest) => {
       const issues = (reason: string) => {
         const parsed = schema.safeParse({ ...rest, reason });
@@ -200,7 +200,10 @@ describe('the real demand DTOs', () => {
       );
       expect(issues('a'.repeat(500))).toEqual([]);
       const properties = toJsonSchema(schema).properties as Record<string, JsonSchema>;
-      expect(properties.reason).toMatchObject({ type: 'string', minLength: 8, maxLength: 500 });
+      expect(properties.reason).toEqual({
+        type: 'string',
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     },
   );
 

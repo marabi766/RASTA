@@ -104,11 +104,18 @@ export function toJsonSchema(schema: z.ZodType): JsonSchema {
   };
 }
 
-/** The bounds a `codePointLength` check on `def` publishes, if any. */
-function codePointBounds(def: any): { minLength: number; maxLength: number } | undefined {
-  let bounds: { minLength: number; maxLength: number } | undefined;
-  for (const { check } of checkDefs(def)) bounds = CODE_POINT_BOUNDS.get(check) ?? bounds;
-  return bounds;
+/** A deliberate omission, not a raw-input constraint. Kept through descriptions/wrappers. */
+const TRANSFORMED_CONSTRAINTS =
+  'Constraints after a value-changing step are omitted; validation applies them to the transformed value.';
+
+function transformedConstraints(input: JsonSchema = {}): JsonSchema {
+  const description = String(input.description ?? '');
+  return {
+    ...input,
+    description: description.includes(TRANSFORMED_CONSTRAINTS)
+      ? description
+      : [description, TRANSFORMED_CONSTRAINTS].filter(Boolean).join(' '),
+  };
 }
 
 function convert(def: any): JsonSchema {
@@ -116,12 +123,8 @@ function convert(def: any): JsonSchema {
     case 'object':
       return objectSchema(def);
 
-    case 'string': {
-      // A refinement is a check on the schema it refines, so a `codePointLength`
-      // bound is found among the string's own checks, and published over them.
-      const bounds = codePointBounds(def);
-      return bounds ? { ...stringSchema(def), ...bounds } : stringSchema(def);
-    }
+    case 'string':
+      return stringSchema(def);
 
     case 'number':
       return numberSchema(def);
@@ -185,13 +188,13 @@ function convert(def: any): JsonSchema {
 
     // `.transform()` and `z.preprocess()` pipe a schema into or out of a
     // function. What a transform returns cannot be expressed in JSON Schema,
-    // so the schema the input is checked against is published; the cross-field
+    // so only the schema checked before the function is published; the cross-field
     // rules `.refine()` carries — "at least one of hours or kilometres",
     // "periodEnd after periodStart" — are checks, left out the same way, and
     // stay in the endpoint description where a human will read it.
     case 'pipe':
       if (defOf(def.out).type === 'transform') return toJsonSchema(def.in);
-      if (defOf(def.in).type === 'transform') return toJsonSchema(def.out);
+      if (defOf(def.in).type === 'transform') return transformedConstraints();
       return pipeBetweenSchemas(def.in, def.out);
 
     default:
@@ -223,10 +226,16 @@ const UPPER_BOUNDS = ['maxLength', 'maximum', 'maxItems'] as const;
  */
 function pipeBetweenSchemas(inSchema: z.ZodType, outSchema: z.ZodType): JsonSchema {
   const input = toJsonSchema(inSchema);
-  if (changesValue(inSchema)) return input;
+  if (changesValue(inSchema)) return transformedConstraints(input);
   const output = toJsonSchema(outSchema);
-  if (Object.keys(input).every((key) => key === 'description')) return { ...output, ...input };
-  if (input.type === undefined || input.type !== output.type) return input;
+  // A description on the input must not hide an omission made inside the output.
+  const keepMarker = (result: JsonSchema): JsonSchema =>
+    String(output.description ?? '').includes(TRANSFORMED_CONSTRAINTS)
+      ? transformedConstraints(result)
+      : result;
+  if (Object.keys(input).every((key) => key === 'description'))
+    return keepMarker({ ...output, ...input });
+  if (input.type === undefined || input.type !== output.type) return keepMarker(input);
   const merged: JsonSchema = { ...output, ...input };
   for (const key of LOWER_BOUNDS) {
     if (typeof input[key] === 'number' && typeof output[key] === 'number') {
@@ -238,7 +247,7 @@ function pipeBetweenSchemas(inSchema: z.ZodType, outSchema: z.ZodType): JsonSche
       merged[key] = Math.min(input[key] as number, output[key] as number);
     }
   }
-  return merged;
+  return keepMarker(merged);
 }
 
 /** Types whose parse returns the raw input itself, unless a check on them overwrites it. */
@@ -258,12 +267,31 @@ const VALUE_PRESERVING_TYPES = new Set([
  * overwrite check (`.trim()`, `.toLowerCase()`, `.normalize()`), a coercion — or any type not known
  * to preserve the value (objects strip keys, defaults substitute), which fails closed.
  */
+// Unknown/custom checks can assign to Zod's payload.value (.check callbacks).
+// Only built-in checks, and our registered code-point refinement, are proven safe.
+const VALUE_PRESERVING_CHECKS = new Set([
+  'min_length',
+  'max_length',
+  'length_equals',
+  'string_format',
+  'greater_than',
+  'less_than',
+  'number_format',
+  'multiple_of',
+]);
+
 function changesValue(schema: z.ZodType): boolean {
   const def = defOf(schema);
+  if (
+    checkDefs(def).some(
+      ({ check, def: definition }) =>
+        !CODE_POINT_BOUNDS.has(check) && !VALUE_PRESERVING_CHECKS.has(definition.check as string),
+    )
+  )
+    return true;
   if (def.type === 'pipe') return changesValue(def.in) || changesValue(def.out);
   if (def.type === 'optional' || def.type === 'nullable') return changesValue(def.innerType);
-  if (!VALUE_PRESERVING_TYPES.has(def.type as string) || def.coerce === true) return true;
-  return checkDefs(def).some(({ def: check }) => check.check === 'overwrite');
+  return !VALUE_PRESERVING_TYPES.has(def.type as string) || def.coerce === true;
 }
 
 function objectSchema(def: any): JsonSchema {
@@ -296,9 +324,20 @@ const STRING_FORMATS: Record<string, string> = {
 };
 
 function stringSchema(def: any): JsonSchema {
+  // Coercion happens before every check, including the string type check.
+  if (def.coerce === true) return transformedConstraints();
   const out: JsonSchema = { type: 'string' };
 
   for (const { check: instance, def: check } of checkDefs(def)) {
+    // Zod executes checks in declaration order. An overwrite is a transform
+    // inside that list (.trim, .toLowerCase, .normalize, .overwrite, ...).
+    // Unknown callbacks may also replace the payload. Later checks are not
+    // proven raw; earlier raw checks stay.
+    if (!CODE_POINT_BOUNDS.has(instance) && !VALUE_PRESERVING_CHECKS.has(check.check as string)) {
+      return transformedConstraints(out);
+    }
+    const bounds = CODE_POINT_BOUNDS.get(instance);
+    if (bounds) Object.assign(out, bounds);
     if (check.check === 'min_length') out.minLength = check.minimum;
     if (check.check === 'max_length') out.maxLength = check.maximum;
     if (check.check !== 'string_format') continue;
@@ -354,8 +393,10 @@ export function objectShapeOf(schema: z.ZodType): Record<string, z.ZodType> | un
     if (def.type === 'pipe') {
       const kind = (side: unknown) => (side as { _zod: { def: { type: string } } })._zod.def.type;
       if (kind(def.out) === 'transform') current = def.in as z.ZodType;
-      else if (kind(def.in) === 'transform') current = def.out as z.ZodType;
-      else return undefined;
+      // A preprocessor may replace the entire object: its fields are not raw parameters.
+      else if (kind(def.in) === 'transform') {
+        throw new Error('Cannot publish query fields after a value-changing preprocessor');
+      } else return undefined;
       continue;
     }
     return undefined;

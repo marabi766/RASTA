@@ -173,13 +173,16 @@ describe('the real supplier DTOs', () => {
     ]);
   });
 
-  it('publishes the rejection reason as required, with its minimum length', () => {
+  it('publishes the rejection reason as required, with an explicit post-trim omission (FU-120)', () => {
     // A decision with no reason is not an audit record, and a client should be
     // able to see the minimum before it sends "x".
     const schema = toJsonSchema(rejectQualificationSchema);
 
     expect(schema.required).toEqual(['reason']);
-    expect((schema.properties as Record<string, { minLength: number }>).reason.minLength).toBe(8);
+    expect((schema.properties as Record<string, unknown>).reason).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 
   it('publishes evidence as identifiers and labels, and nothing fetchable', () => {

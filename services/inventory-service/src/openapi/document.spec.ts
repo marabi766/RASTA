@@ -1,3 +1,4 @@
+import { createWarehouseSchema } from '../warehouse/dto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
@@ -39,6 +40,19 @@ describe('the committed OpenAPI document', () => {
 
   afterAll(async () => {
     await app.close();
+  });
+
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(
+      JSON.stringify(buildInventoryOpenApiDocument(app).paths['/v1/warehouses']!.post!.requestBody),
+    );
+    expect(body.content['application/json'].schema.properties.name).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = createWarehouseSchema.shape.name;
+    expect(field.safeParse(' ' + 'a'.repeat(200) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
   });
 
   const committedPath = join(

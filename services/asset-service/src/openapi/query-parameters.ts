@@ -1,6 +1,7 @@
 import type { ApiQueryOptions } from '@nestjs/swagger';
 import { queryBooleanDefault } from '@rasta/config';
 import { z } from 'zod';
+import { toJsonSchema } from '@rasta/nest-common';
 
 /**
  * A Zod query schema as OpenAPI parameters, published by `ValidatedQuery` (`./validated.ts`) from
@@ -39,7 +40,8 @@ function describe(name: string, field: z.ZodType): ApiQueryOptions {
   const { inner, required, defaultValue } = unwrap(field);
   const def = defOf(inner);
 
-  const schema: Record<string, unknown> = { ...primitive(def) };
+  const schema: Record<string, unknown> =
+    def.type === 'number' ? numeric(def) : toJsonSchema(field);
   if (defaultValue !== undefined) schema.default = defaultValue;
 
   return { name, required, schema };
@@ -48,22 +50,6 @@ function describe(name: string, field: z.ZodType): ApiQueryOptions {
 /** A schema's zod 4 definition (`_zod.def`); every branch re-checks `type`. */
 function defOf(schema: z.ZodType): Record<string, unknown> {
   return (schema as unknown as { _zod: { def: Record<string, unknown> } })._zod.def;
-}
-
-function primitive(def: Record<string, unknown>): Record<string, unknown> {
-  switch (def.type) {
-    case 'boolean':
-      return { type: 'boolean' };
-
-    case 'number':
-      return numeric(def);
-
-    case 'enum':
-      return { type: 'string', enum: Object.values(def.entries as Record<string, string>) };
-
-    default:
-      return { type: 'string' };
-  }
 }
 
 function numeric(def: Record<string, unknown>): Record<string, unknown> {

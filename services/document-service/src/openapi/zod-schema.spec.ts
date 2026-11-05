@@ -161,12 +161,15 @@ describe('the real document DTOs', () => {
     expect(properties).not.toHaveProperty('objectKey');
   });
 
-  it('publishes the deletion reason as required, with its minimum length', () => {
+  it('publishes the deletion reason as required, with an explicit post-trim omission (FU-120)', () => {
     // A tombstone with no reason is not an audit record, and a client should
     // be able to see the minimum before it sends "x".
     const schema = toJsonSchema(deleteDocumentSchema);
     expect(schema.required).toEqual(['reason']);
-    expect((schema.properties as Record<string, { minLength: number }>).reason.minLength).toBe(8);
+    expect((schema.properties as Record<string, unknown>).reason).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 
   it('publishes the listing filters with their defaults', () => {
@@ -175,7 +178,10 @@ describe('the real document DTOs', () => {
       Record<string, unknown>
     >;
 
-    expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
+    expect(properties.limit).toEqual({
+      default: 25,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
 
     // A logical boolean, not the `boolean | string` union the parser accepts.
     // This once asserted only the default, which let the union through: a

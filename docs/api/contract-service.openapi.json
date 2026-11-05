@@ -20,9 +20,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -1108,10 +1106,7 @@
                   },
                   "note": {
                     "type": "string",
-                    "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 1000,
-                    "description": "Optional free text, trimmed, up to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event."
+                    "description": "Optional free text, trimmed, up to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "expectedVersion": {
                     "type": "integer",
@@ -1152,7 +1147,7 @@
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,9}$",
-              "description": "Opaque, server-issued."
+              "description": "Opaque, server-issued. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           },
           {
@@ -1160,9 +1155,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 50
             }
           }
@@ -1693,7 +1686,7 @@
                   "deltaMinor": {
                     "type": "string",
                     "pattern": "^-?\\d{1,30}$",
-                    "description": "The change to the contract price in minor units (rials), a decimal string; never a float. Within a bigint. It must be positive: no document allows a reduction yet, so zero or a negative amount is 422 AMENDMENT_DELTA_NOT_POSITIVE (Q-100)."
+                    "description": "The change to the contract price in minor units (rials), a decimal string; never a float. Within a bigint. It must be positive: no document allows a reduction yet, so zero or a negative amount is 422 AMENDMENT_DELTA_NOT_POSITIVE (Q-100). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "reasonCode": {
                     "type": "string",
@@ -1702,10 +1695,7 @@
                   },
                   "reasonText": {
                     "type": "string",
-                    "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 1000,
-                    "description": "Why, in the proposer’s words: trimmed, 1 to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event."
+                    "description": "Why, in the proposer’s words: trimmed, 1 to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "expectedVersion": {
                     "type": "integer",
@@ -2703,15 +2693,12 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 200,
-                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "plannedDate": {
                     "type": "string",
                     "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "The planned day, YYYY-MM-DD — a date, never an instant."
+                    "description": "The planned day, YYYY-MM-DD — a date, never an instant. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "plannedShareBp": {
                     "type": "integer",
@@ -3153,15 +3140,12 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 200,
-                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "plannedDate": {
                     "type": "string",
                     "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "The planned day, YYYY-MM-DD — a date, never an instant."
+                    "description": "The planned day, YYYY-MM-DD — a date, never an instant. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "plannedShareBp": {
                     "type": "integer",
@@ -3208,7 +3192,7 @@
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,9}$",
-              "description": "Opaque, server-issued."
+              "description": "Opaque, server-issued. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           },
           {
@@ -3216,9 +3200,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 20
             }
           }
@@ -4080,15 +4062,12 @@
                       "properties": {
                         "description": {
                           "type": "string",
-                          "pattern": "^[^\\p{Bidi_Control}]*$",
-                          "minLength": 1,
-                          "maxLength": 500,
-                          "description": "What is claimed: trimmed, 1 to 500 characters, without bidirectional control characters."
+                          "description": "What is claimed: trimmed, 1 to 500 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "amountMinor": {
                           "type": "string",
                           "pattern": "^\\d{1,30}$",
-                          "description": "The amount claimed in minor units (rials), a positive decimal string; never a float."
+                          "description": "The amount claimed in minor units (rials), a positive decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "milestoneId": {
                           "type": "string",
@@ -6054,8 +6033,7 @@
                 "properties": {
                   "organizationId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "workflowKey": {
                     "type": "string",
@@ -6067,13 +6045,11 @@
                   },
                   "label": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "rationale": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "isSample": {
                     "type": "boolean",
@@ -6086,37 +6062,24 @@
                       "properties": {
                         "authorityOrganizationId": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 64
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "authorityRole": {
-                          "type": "string",
-                          "enum": [
-                            "UNION_ADMIN",
-                            "ORGANIZATION_ADMIN",
-                            "FLEET_MANAGER",
-                            "DRIVER",
-                            "OPERATOR",
-                            "PROCUREMENT_USER",
-                            "SUPPLIER",
-                            "WORKSHOP",
-                            "CONTRACTOR"
-                          ]
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "authorityLabel": {
                           "type": "string",
-                          "minLength": 2,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "minAmountMinor": {
                           "type": "string",
                           "pattern": "^\\d{1,30}$",
-                          "description": "A statement gross in minor units (rials), a decimal string; never a float."
+                          "description": "A statement gross in minor units (rials), a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "maxAmountMinor": {
                           "type": "string",
                           "pattern": "^\\d{1,30}$",
-                          "description": "A statement gross in minor units (rials), a decimal string; never a float."
+                          "description": "A statement gross in minor units (rials), a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": ["authorityOrganizationId", "authorityRole", "authorityLabel"],
@@ -6155,9 +6118,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -6442,9 +6403,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -7801,8 +7760,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reason"],

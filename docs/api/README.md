@@ -97,3 +97,14 @@ Zod Schema ──┬──► اعتبارسنجی زمان اجرا (Backend)
 | مدل خطا و کدها             | § ۶٫۷ · `packages/contracts/src/common/errors.ts`              |
 | Idempotency                | § ۶٫۸                                                          |
 | Rate Limiting              | § ۶٫۹                                                          |
+
+FU-120: shared Zod conversion publishes only string constraints checked before a value-changing step.
+For example, `z.string().max(200).trim().min(1)` publishes `maxLength: 200`, with this description:
+“Constraints after a value-changing step are omitted; validation applies them to the transformed value.”
+Post-step lengths, patterns and formats remain enforced by the server. Overwrites (including trim,
+lowercase and normalization), arbitrary transforms, preprocessors and unrecognized checks are barriers.
+The registered `codePointLength` check is known to preserve its input. Opaque preprocessors publish an
+open schema with the marker, including numeric preprocessors; their output type is not a raw-input
+contract. Query-object preprocessors are refused rather than publishing their output fields.
+The marker survives optional/nullable wrappers, descriptions and pipes. This intentionally describes
+less than all validation; it never presents a post-transform check as a raw-input check.

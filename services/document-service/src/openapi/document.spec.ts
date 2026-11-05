@@ -1,3 +1,9 @@
+import { VersioningType } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { documentationModuleFor } from '@rasta/nest-common';
+import { DocumentController } from '../document/document.controller';
+import { finalizeDocumentSchema } from '../document/dto';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { errorEnvelopeProblems } from '@rasta/nest-common';
 import { enrichOpenApiDocument } from './document';
@@ -231,4 +237,29 @@ describe('the published error envelope (audit 10-26 F3)', () => {
     const document = enrichOpenApiDocument(nestDocument(), OPTIONS);
     expect(errorEnvelopeProblems(document)).toEqual([]);
   });
+});
+
+// The regression uses the final document assembled exactly as main.ts serves it.
+it('omits transformed document body constraints in the served document (FU-120)', async () => {
+  const app = await NestFactory.create(documentationModuleFor([DocumentController]), {
+    logger: false,
+  });
+  try {
+    app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+    const document = enrichOpenApiDocument(
+      SwaggerModule.createDocument(app, new DocumentBuilder().setTitle('t').build()),
+      OPTIONS,
+    );
+    const body = JSON.parse(JSON.stringify(document.paths['/v1/documents']!.post!.requestBody));
+    expect(body.content['application/json'].schema.properties.ownerResourceType).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    expect(
+      finalizeDocumentSchema.shape.ownerResourceType.safeParse(' ' + 'a'.repeat(64) + ' ').success,
+    ).toBe(true);
+    expect(finalizeDocumentSchema.shape.ownerResourceType.safeParse('   ').success).toBe(false);
+  } finally {
+    await app.close();
+  }
 });
