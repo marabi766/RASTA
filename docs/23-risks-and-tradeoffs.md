@@ -1736,8 +1736,13 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   رفته، پس میان بررسی و جابه‌جایی کسی Activity آغاز نمی‌کند). هر پاسخ پیش از هر تفسیری با شکل خروجی CLI ـِ سنجاق‌شده
   (`temporalio/auto-setup:1.26.2`) سنجیده می‌شود: شمار فقط `{"count": "<n>"}` یا عدد صحیح نامنفی، و `{}` برای صفر؛ پاسخ
   Queue شیئی با `pollers` (`null` یا فهرست) و `stats`؛ توصیف فقط وقتی پذیرفته است که `workflowId` و `runId` همان ردیف فهرست،
-  نوع `orderSaga` و Queue همان Queue ـِ بررسی‌شده باشد (Codex دور ۳ روی #283). کد ۱ = Poller یا Activity در انتظار یافت شد؛
-  کد ۲ = بررسی ممکن نشد، از جمله هر پاسخ دیگر؛ هر دو متوقف می‌کنند. Activity در انتظار ⇐ نسخهٔ قدیمی دوباره بالا می‌آید تا کار خودش را تمام کند و توالی از نو؛
+  نوع `orderSaga` و Queue همان Queue ـِ بررسی‌شده باشد (Codex دور ۳ روی #283). از #581 هر دو حالت کد خروج ۱ دارند و
+  متوقف می‌کنند؛ خروجی فقط شکل ثابت دارد و جزئیات CLI ـِ Temporal (stderr، JSON، شناسه‌ها، Stack) چاپ نمی‌شود:
+  Poller یا Activity در انتظار ⇐ `marketplace saga drain check: BLOCKED — <n> finding(s):` و برای هر یافته یک سطر ثابت
+  (`workflow has a pending activity; details withheld`)؛ بررسی ممکن نشد، از جمله هر پاسخ دیگر ⇐
+  `marketplace saga drain check: cannot verify — deployment blocked: <دلیل>` که دلیل یا یکی از متن‌های ثابت خود Gate است یا
+  سطر بستهٔ مشترک CLIها (`command failed (code <کد ثبت‌شدهٔ Client یا unknown>); diagnostics withheld; …`؛ کدها و شکل‌ها:
+  [`outbox-b2-backfill` § کدهای امتناع](runbooks/outbox-b2-backfill.md)). موفقیت کد ۰ است. Activity در انتظار ⇐ نسخهٔ قدیمی دوباره بالا می‌آید تا کار خودش را تمام کند و توالی از نو؛
   `terminate`/`reset` برای گذشتن از Gate ممنوع (Q-118). جزئیات و دستورهای دقیق: Runbook
   [`marketplace-saga-deploy`](runbooks/marketplace-saga-deploy.md). مخزن اسکریپت یا Job استقراری برای marketplace-service
   ندارد (`ci.yml` فقط می‌سازد و می‌آزماید)، پس Gate گامی دستی است و هر خط استقراری که ساخته شود باید آن را اجرا کند و با کد
