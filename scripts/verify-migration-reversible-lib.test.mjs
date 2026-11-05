@@ -1359,7 +1359,7 @@ function runnableSources(root = ROOT) {
     }
   }
   return roots
-    .flatMap((dir) => authoredFiles(dir, { optional: true }))
+    .flatMap((dir) => authoredFiles(dir, { optional: true, base: root }))
     .filter((path) => /\.(?:[cm]?js|ts)$/.test(basename(path)));
 }
 

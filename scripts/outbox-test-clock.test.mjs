@@ -108,7 +108,7 @@ function clockHazards(source, file = '') {
 function testCodeFiles(repository) {
   return ['services', 'packages', 'apps', 'tests']
     .filter((top) => readdirSync(repository).includes(top))
-    .flatMap((top) => authoredFiles(join(repository, top)))
+    .flatMap((top) => authoredFiles(join(repository, top), { base: repository }))
     .map((path) => relative(repository, path))
     .filter(
       (path) =>

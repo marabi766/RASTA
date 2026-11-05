@@ -30,7 +30,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export function listFiles(base, dir) {
   // Hidden entries are not tests; generated output is never opened (FU-102).
-  return authoredFiles(dir, { skip: (name) => name.startsWith('.') }).map((path) =>
+  return authoredFiles(dir, { base, skip: (name) => name.startsWith('.') }).map((path) =>
     relative(base, path).replace(/\\/g, '/'),
   );
 }
