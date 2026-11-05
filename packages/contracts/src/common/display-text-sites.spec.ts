@@ -6,15 +6,17 @@ import { join, relative, resolve } from 'node:path';
  * services and two portal modules at once because each kept its own copy of an
  * Arabic-script allow-list; `displayText` / `DISPLAY_TEXT_PATTERN` in
  * `./text.ts` is now the one definition. This spec fails the day anyone writes
- * another `\p{Script=Arabic}` allow-list outside the two narrower, deliberate
- * ones, or re-declares a local `displayText`.
+ * another `\p{Script=Arabic}` policy outside the explicit name/orthography
+ * policies, or re-declares a local `displayText`.
  */
 const ROOT = resolve(__dirname, '../../../..');
 
-/** The deliberately narrower name policies, each with its own tests. */
-const NAME_POLICIES = new Set([
+/** Deliberately narrower policies, each with its own tests. */
+const SCRIPT_POLICIES = new Set([
   'services/identity-service/src/identity/dto.ts', // person names
   'services/organization-service/src/organization/dto.ts', // organisation names
+  // Test tooling refuses Arabic-script points outside the explicit Persian repertoire.
+  'apps/web/src/test/orthography.ts',
 ]);
 
 function sources(dir: string): string[] {
@@ -56,9 +58,9 @@ describe('display-text allow-lists', () => {
     expect(SOURCE_FILES).toContain('apps/web/src/server/asset-commands.ts');
   });
 
-  it('keeps every \\p{Script=Arabic} allow-list to the two name policies', () => {
+  it('keeps every \\p{Script=Arabic} policy to the explicit name/orthography policies', () => {
     const offenders = SOURCE_FILES.filter(
-      (file) => read(file).includes('Script=Arabic') && !NAME_POLICIES.has(file),
+      (file) => read(file).includes('Script=Arabic') && !SCRIPT_POLICIES.has(file),
     );
     expect(offenders).toEqual([]);
   });

@@ -29,6 +29,7 @@
  *
  * A configuration check, not business logic (AGENTS.md A-03).
  */
+import { markRefusal } from './command-failure';
 import { tryReadUrl } from './url-reader';
 
 /**
@@ -192,6 +193,7 @@ export class MigratorCredentialInServiceError extends Error {
         `(docs/runbooks/db-role-split.md, D-045).`,
     );
     this.name = 'MigratorCredentialInServiceError';
+    markRefusal(this, 'owner-credential');
     this.variables = variables;
     this.unregistered = unregistered;
     this.unregisteredUrls = unregisteredUrls;

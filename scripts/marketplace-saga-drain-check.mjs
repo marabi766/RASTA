@@ -47,7 +47,11 @@
  * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
-import { commandFailure, clientFailureCode } from '../packages/config/src/command-failure.js';
+import {
+  commandFailure,
+  clientFailureCode,
+  markRefusal,
+} from '../packages/config/src/command-failure.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -429,6 +433,18 @@ function check() {
 }
 
 try {
+  // Environment only, so any argument is a command line it does not have
+  // (#673 r1 F2): `--namespace x` would otherwise check TEMPORAL_NAMESPACE's
+  // namespace and could report OK for the wrong one. Refused before any
+  // setting is read or any `temporal` call is made.
+  if (process.argv.length !== 2) {
+    throw markRefusal(
+      new Error(
+        'usage: marketplace-saga-drain-check.mjs (no arguments; settings from the environment)',
+      ),
+      'usage',
+    );
+  }
   const { running, blockers } = check();
   if (blockers.length > 0) {
     console.error(`marketplace saga drain check: BLOCKED — ${blockers.length} finding(s):`);
