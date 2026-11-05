@@ -1,3 +1,4 @@
+import { createProjectSchema } from '../project/dto';
 import { errorEnvelopeProblems } from '@rasta/nest-common';
 import { refusal, type RefusalArea } from '../shared/refusal';
 import { readFileSync } from 'node:fs';
@@ -33,6 +34,21 @@ describe('the committed OpenAPI document', () => {
 
   afterAll(async () => {
     await app.close();
+  });
+
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(
+      JSON.stringify(
+        buildConstructionOpenApiDocument(app).paths['/v1/projects']!.post!.requestBody,
+      ),
+    );
+    expect(body.content['application/json'].schema.properties.title).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = createProjectSchema.shape.title;
+    expect(field.safeParse(' ' + 'a'.repeat(200) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
   });
 
   const committedPath = join(
