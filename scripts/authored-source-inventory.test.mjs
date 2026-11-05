@@ -6,18 +6,17 @@
 // never opens it, by ONE policy: the repository's .gitignore. The second half of this file refuses
 // every other use of a directory-listing API.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
-import { authoredFiles, ignoreMatcher } from './authored-source-inventory.cjs';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const INVENTORY = 'scripts/authored-source-inventory.cjs';
-const GITIGNORE = fs.readFileSync(join(root, '.gitignore'), 'utf8');
 const git = (...args) =>
   execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 28 });
 
@@ -55,80 +54,75 @@ function fixture() {
   }
   return dir;
 }
-/** Runs `body` while recording every directory the inventory opens; `fail(path)` may throw instead. */
-function opened(body, fail = () => undefined) {
-  const real = fs.readdirSync;
-  const seen = [];
-  fs.readdirSync = (path, ...rest) => {
-    seen.push(String(path));
-    fail(String(path));
-    return real(path, ...rest);
-  };
-  try {
-    return { result: body(), seen };
-  } finally {
-    fs.readdirSync = real;
-  }
-}
 const rel = (dir) => (path) => relative(dir, path);
+
+const unblocked = process.getuid?.() === 0; // root opens a mode-000 directory, so there nothing is proved
+const lock = (dir, directories, mode) => {
+  for (const d of directories) fs.chmodSync(join(dir, d), mode);
+};
 
 test('lists authored files, sorted, and never opens an ignored directory (every .gitignore pattern shape)', () => {
   const dir = fixture();
   try {
-    const { result, seen } = opened(() => authoredFiles(dir));
+    // An ignored directory nobody may open: the listing succeeds only if it never tries.
+    lock(dir, IGNORED_DIRECTORIES, 0o000);
+    const result = authoredFiles(dir);
     assert.deepEqual(
       result.map(rel(dir)),
       [...AUTHORED].sort(),
       'authored files, ignored ones left out',
     );
-    const hit = seen
-      .map(rel(dir))
-      .filter((path) => IGNORED_DIRECTORIES.some((d) => path === d || path.startsWith(`${d}/`)));
-    assert.deepEqual(hit, [], 'an ignored directory was opened');
-    assert.ok(seen.length >= 6, 'the authored directories were opened');
+    if (!unblocked) {
+      // ...and the same walk over an AUTHORED directory nobody may open is a real fault.
+      fs.chmodSync(join(dir, 'b', 'd'), 0o000);
+      assert.throws(() => authoredFiles(dir), /git ls-files failed/);
+      assert.throws(() => authoredFiles(dir, { optional: true }), /git ls-files failed/);
+      fs.chmodSync(join(dir, 'b', 'd'), 0o755);
+    }
   } finally {
+    lock(dir, IGNORED_DIRECTORIES, 0o755);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('an ignored directory that vanishes between listing and reading cannot fail the inventory', () => {
+test('the order, skip, optional, base, links and a nested repository', () => {
   const dir = fixture();
   try {
-    // The review's race: the parent was listed, the lock directory is gone when it would be opened.
-    const gone = (path) => {
-      if (IGNORED_DIRECTORIES.some((d) => relative(dir, path) === d))
-        throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
-    };
-    assert.equal(opened(() => authoredFiles(dir), gone).result.length, AUTHORED.length);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('skip prunes by name before the directory is opened; an authored fault still throws', () => {
-  const dir = fixture();
-  try {
-    const { result, seen } = opened(() => authoredFiles(dir, { skip: (name) => name === 'd' }));
-    assert.ok(!result.some((path) => path.endsWith('e.mjs')));
-    assert.ok(!seen.includes(join(dir, 'b', 'd')));
+    // A depth-first walk that sorts each directory by name: the directory `a` comes before `a-b`.
+    for (const file of ['o/a.b/x', 'o/a/x', 'o/a-b']) {
+      fs.mkdirSync(dirname(join(dir, file)), { recursive: true });
+      fs.writeFileSync(join(dir, file), 'x');
+    }
+    assert.deepEqual(authoredFiles(join(dir, 'o')).map(rel(join(dir, 'o'))), [
+      'a/x',
+      'a-b',
+      'a.b/x',
+    ]);
+    const skipped = authoredFiles(dir, { skip: (name) => name === 'd' });
+    assert.ok(!skipped.some((path) => path.endsWith('e.mjs')));
+    assert.ok(
+      authoredFiles(dir, { skip: (name) => name === 'c.ts' }).every((p) => !p.endsWith('c.ts')),
+    );
+    // A root whose name holds glob characters (or looks like pathspec magic) is that directory only.
+    for (const odd of ['we[ir]d*', 'weird1', ':(top).env']) {
+      fs.mkdirSync(join(dir, odd), { recursive: true });
+      fs.writeFileSync(join(dir, odd, `${odd.length}.ts`), 'x');
+    }
+    for (const odd of ['we[ir]d*', ':(top).env'])
+      assert.deepEqual(authoredFiles(join(dir, odd), { base: dir }).map(rel(join(dir, odd))), [
+        `${odd.length}.ts`,
+      ]);
+    // only names BELOW the root are skipped: the root itself and what holds it are not
+    assert.equal(
+      authoredFiles(join(dir, 'b'), { base: dir, skip: (name) => name === 'b' }).length,
+      2,
+    );
     assert.throws(() => authoredFiles(join(dir, 'absent')), { code: 'ENOENT' });
     assert.deepEqual(authoredFiles(join(dir, 'absent'), { optional: true }), []);
     assert.throws(() => authoredFiles(join(dir, 'a.ts'), { optional: true }), { code: 'ENOTDIR' });
-    // A listed AUTHORED directory that is gone (or unreadable) when it is opened is a real fault.
-    for (const [code, options] of [['ENOENT'], ['EACCES'], ['ENOENT', { optional: true }]])
-      assert.throws(
-        () =>
-          opened(
-            () => authoredFiles(dir, options),
-            (path) => {
-              if (path === join(dir, 'b', 'd')) throw Object.assign(new Error(code), { code });
-            },
-          ),
-        { code },
-      );
-    // The policy is read on every call: an unreadable .gitignore refuses, it does not ignore nothing.
-    const real = fs.readFileSync;
-    fs.readFileSync = (path, ...rest) => {
+    // The policy is the repository's .gitignore: an unreadable one refuses, it does not ignore nothing.
+    const real = fs.accessSync;
+    fs.accessSync = (path, ...rest) => {
       if (String(path).endsWith('.gitignore'))
         throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
       return real(path, ...rest);
@@ -136,269 +130,199 @@ test('skip prunes by name before the directory is opened; an authored fault stil
     try {
       assert.throws(() => authoredFiles(dir), { code: 'EACCES' });
     } finally {
-      fs.readFileSync = real;
+      fs.accessSync = real;
     }
-    // A linked directory is judged like a directory (a linked node_modules is not opened) and not entered.
+    // A linked directory is not a file and is not entered (a linked node_modules is never opened).
     fs.symlinkSync(join(dir, 'b'), join(dir, 'node_modules'));
     fs.symlinkSync(join(dir, 'b'), join(dir, 'linked'));
     const listed = authoredFiles(dir).map(rel(dir));
-    assert.ok(!listed.includes('node_modules') && listed.includes('linked'));
+    assert.ok(!listed.includes('node_modules') && !listed.includes('linked'));
     assert.ok(!listed.some((path) => path.startsWith('linked/')));
     // A walk that starts below the base still judges paths from it: `src/generated` is ignored
     // although the walk starts in `src` (a root outside the repository names its base).
     fs.mkdirSync(join(dir, 'tree/src/generated/deep'), { recursive: true });
     fs.writeFileSync(join(dir, 'tree/src/app.ts'), 'x');
     fs.writeFileSync(join(dir, 'tree/src/generated/deep/f'), 'x');
-    const below = opened(() => authoredFiles(join(dir, 'tree/src'), { base: join(dir, 'tree') }));
-    assert.deepEqual(below.result.map(rel(dir)), ['tree/src/app.ts']);
-    assert.ok(!below.seen.some((path) => path.includes('generated')));
+    assert.deepEqual(
+      authoredFiles(join(dir, 'tree/src'), { base: join(dir, 'tree') }).map(rel(dir)),
+      ['tree/src/app.ts'],
+    );
     assert.throws(
       () => authoredFiles(join(dir, 'b'), { base: join(dir, 'tree') }),
       /not inside its base/,
     );
     // ...and so is a root that is itself ignored output: nobody asks for the authored files of it.
+    assert.throws(
+      () => authoredFiles(join(dir, 'tree/src/generated'), { base: join(dir, 'tree') }),
+      { code: 'EIGNORED' },
+    );
     assert.throws(() => authoredFiles(join(root, 'services/audit-service/src/generated')), {
       code: 'EIGNORED',
     });
+    // A repository inside the tree is not listed file by file: refused, never guessed.
+    execFileSync('git', ['init', '-q', join(dir, 'tree/inner')]);
+    fs.writeFileSync(join(dir, 'tree/inner/f.ts'), 'x');
+    assert.throws(() => authoredFiles(join(dir, 'tree')), /nested repository/);
+    // A caller's own git environment (a hook runs with GIT_DIR set) does not redirect the listing.
+    const before = authoredFiles(join(root, 'scripts'));
+    const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+    process.env.GIT_DIR = join(dir, 'nowhere');
+    process.env.GIT_WORK_TREE = join(dir, 'nowhere');
+    try {
+      assert.deepEqual(authoredFiles(join(root, 'scripts')), before);
+    } finally {
+      for (const [name, value] of Object.entries(saved))
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a tree with its own repository: tracked files count, a deleted tracked file does not', () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), 'authored-repo-'));
+  try {
+    const run = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+    run('init', '-q');
+    for (const file of ['keep.ts', 'gone.ts', 'src/generated/tracked.ts', 'src/app.ts']) {
+      fs.mkdirSync(dirname(join(dir, file)), { recursive: true });
+      fs.writeFileSync(join(dir, file), 'x');
+    }
+    run('add', '-f', '.');
+    run('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'x');
+    fs.rmSync(join(dir, 'gone.ts'));
+    fs.writeFileSync(join(dir, 'new.ts'), 'x'); // untracked, not ignored
+    fs.mkdirSync(join(dir, 'src/generated/more'), { recursive: true });
+    fs.writeFileSync(join(dir, 'src/generated/more/untracked.ts'), 'x'); // untracked, ignored
+    assert.deepEqual(authoredFiles(dir).map(rel(dir)), [
+      'keep.ts',
+      'new.ts',
+      'src/app.ts',
+      'src/generated/tracked.ts', // tracked: authored, whatever the policy says
+    ]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
 // ---------------------------------------------------------------------------------------------
-// ONE exclusion policy, and it is .gitignore: checked against git itself.
+// ONE exclusion policy, and git itself applies it: no pattern matcher of our own to disagree.
 // ---------------------------------------------------------------------------------------------
+//
+// A hand matcher disagreed with git on UTF-8 names (git reads bytes), newlines in paths, a BOM, a
+// final CR and `!` re-inclusion below `**` (PR #772 r1 F3). The inventory takes git's own answer.
+// Each row is [.gitignore text, a path, is it ignored?]: the answers were read from git itself.
 
-/** What `git check-ignore --no-index` says about `[path, isDirectory]` pairs under this .gitignore. */
-function gitIgnores(gitignore, probes) {
-  const dir = fs.mkdtempSync(join(tmpdir(), 'authored-gitignore-'));
+/** Authored files of a temporary tree with this `.gitignore` and these paths, relative to it. */
+function listing(policy, paths) {
+  const dir = fs.mkdtempSync(join(tmpdir(), 'authored-oracle-'));
+  try {
+    fs.writeFileSync(join(dir, '.gitignore'), policy);
+    for (const path of paths) {
+      fs.mkdirSync(dirname(join(dir, path)), { recursive: true });
+      fs.writeFileSync(join(dir, path), 'x');
+    }
+    return authoredFiles(dir).map(rel(dir)).sort();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+/** What `git ls-files --cached --others --exclude-standard -z` says in a real repository. */
+function oracle(policy, paths) {
+  const dir = fs.mkdtempSync(join(tmpdir(), 'authored-oracle-git-'));
   try {
     execFileSync('git', ['init', '-q', dir]);
-    fs.writeFileSync(join(dir, '.gitignore'), gitignore);
-    // The paths exist, so git knows which are directories (a trailing slash would be read as a name).
-    const made = probes.filter(([path, isDirectory]) => {
-      try {
-        if (isDirectory) fs.mkdirSync(join(dir, path), { recursive: true });
-        else {
-          fs.mkdirSync(dirname(join(dir, path)), { recursive: true });
-          fs.writeFileSync(join(dir, path), 'x');
-        }
-        return true;
-      } catch {
-        return false; // a file probe under a probe that is a file: the directory probes cover it
-      }
-    });
-    const input = made.map(([path]) => `${path}\0`).join('');
-    const out = spawnSync('git', ['-C', dir, 'check-ignore', '--no-index', '--stdin', '-z'], {
-      input,
-      encoding: 'utf8',
-    });
-    assert.ok(out.status === 0 || out.status === 1, out.stderr);
-    const ignored = new Set(out.stdout.split('\0').filter(Boolean));
-    return { made, ignored };
+    fs.writeFileSync(join(dir, '.gitignore'), policy);
+    for (const path of paths) {
+      fs.mkdirSync(dirname(join(dir, path)), { recursive: true });
+      fs.writeFileSync(join(dir, path), 'x');
+    }
+    return execFileSync(
+      'git',
+      [
+        '-C',
+        dir,
+        '-c',
+        'core.excludesFile=/dev/null',
+        'ls-files',
+        '-z',
+        '-co',
+        '--exclude-standard',
+      ],
+      { encoding: 'utf8' },
+    )
+      .split('\0')
+      .filter(Boolean)
+      .sort();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
-function agreeWithGit(gitignore, probes) {
-  const own = ignoreMatcher(gitignore);
-  // git also asks about every parent directory: nothing below an ignored directory can be re-included.
-  const ignored = (path, isDirectory) =>
-    path
-      .split('/')
-      .slice(0, -1)
-      .some((_, i, parts) => own(parts.slice(0, i + 1).join('/'), true)) || own(path, isDirectory);
-  const differ = [];
-  for (const mode of [true, false]) {
-    const { made, ignored: expected } = gitIgnores(
-      gitignore,
-      probes.filter(([, isDirectory]) => isDirectory === mode),
+
+test('the inventory is git itself: the reviewer oracle table (UTF-8, newlines, re-inclusion below **)', () => {
+  const rows = [
+    ['q/??\n', 'q/é', true], // two bytes
+    ['q/?x\n', 'q/éx', false],
+    ['q/[!a]\n', 'q/é', false],
+    ['q/**\n', 'q/a\nb', true], // a newline in a name
+    ['q/**/x\n', 'q/a\nb/x', true],
+    ['q/**\n!q/a/\n', 'q/a/b', true], // re-including the parent does not re-include what `q/**` names
+    ['q/*\n!q/a/\n', 'q/a/b', false], // ...but with `*` the parent decides
+    ['q/*\n', 'q/a/b', true],
+    ['*.log\n!keep.log\n', 'keep.log', false],
+    ['dir/\n', 'dir', false], // a FILE named like a directory pattern is not ignored
+  ];
+  for (const [policy, path, ignored] of rows)
+    assert.equal(
+      listing(policy, [path]).includes(path),
+      !ignored,
+      `${JSON.stringify(policy)} ${JSON.stringify(path)}`,
     );
-    assert.ok(made.length >= probes.length / 2 - 10, 'too many probes could not be created');
-    for (const [path, isDirectory] of made)
-      if (ignored(path, isDirectory) !== expected.has(path))
-        differ.push({
-          path,
-          isDirectory,
-          ours: ignored(path, isDirectory),
-          git: expected.has(path),
-        });
+});
+
+test('the inventory equals git on BOM, CRLF, a final CR, NUL and spacing edges', () => {
+  const policies = [
+    '\uFEFFq/x\n',
+    'q/x\r\n',
+    'q/x\r',
+    'q/x\n\r\n!q/y\r\n',
+    'q/x\0y\nq/z\n',
+    'q/a**/z\n',
+    'q/**a\n',
+    'q/x \n',
+    'q/x\\ \n',
+    '\\#q\n#q\n',
+    'q/é\n',
+    'q/[é]\n',
+    'q/[[:alpha:]]x\n',
+  ];
+  const paths = [
+    'q/x',
+    'q/y',
+    'q/z',
+    'q/é',
+    'q/e',
+    'q/ax',
+    'q/a/b/z',
+    'q/ab/z',
+    'q/aa',
+    '#q',
+    'q/x ',
+  ];
+  for (const policy of policies)
+    assert.deepEqual(listing(policy, paths), oracle(policy, paths), JSON.stringify(policy));
+});
+
+test('a name that is not UTF-8 is refused, never mangled', () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), 'authored-bytes-'));
+  try {
+    fs.writeFileSync(join(dir, 'ok.ts'), 'x');
+    fs.writeFileSync(Buffer.concat([Buffer.from(`${dir}/q`), Buffer.from([0xff])]), 'x');
+    assert.throws(() => authoredFiles(dir), { name: 'TypeError' });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-  assert.deepEqual(differ, []);
-}
-
-test('the matcher agrees with git on every gitignore pattern shape', () => {
-  const lines = [
-    'dirname/',
-    'bare',
-    '*.log',
-    'prefix*',
-    '/anchored',
-    'with/slash',
-    'under/*',
-    '!under/keep',
-    '**/any/',
-    'mid/**/tail',
-    'inside/**',
-    '[lm]class',
-    'one?',
-    '\\#hash',
-    '\\!bang',
-    'ends/*.key',
-    '!ends/ok.key',
-    '*.pem',
-    '!ok.pem',
-    'anch/o?e',
-  ];
-  const names = [
-    'dirname',
-    'bare',
-    'x.log',
-    'prefix',
-    'prefixed',
-    'anchored',
-    'with/slash',
-    'under/a',
-    'under/keep',
-    'any',
-    'p/any',
-    'mid/tail',
-    'mid/a/tail',
-    'mid/a/b/tail',
-    'inside/a',
-    'lclass',
-    'nclass',
-    'oneX',
-    'one',
-    '#hash',
-    '!bang',
-    'ends/a.key',
-    'ends/ok.key',
-    'ends/sub/a.key',
-    'anch/oxe',
-    'anch/o/e',
-    'q.pem',
-    'ok.pem',
-    'sub/anchored',
-    'sub/with/slash',
-    'sub/dirname',
-    'sub/x.log',
-    'sub/under/a',
-  ];
-  const probes = names.flatMap((name) => [
-    [name, true],
-    [name, false],
-    [`deep/${name}`, true],
-    [`deep/${name}`, false],
-  ]);
-  agreeWithGit(lines.join('\n'), probes);
-  assert.throws(() => ignoreMatcher('[[:alpha:]]x'), /unsupported/); // a shape it does not know is refused
-});
-
-test('the matcher agrees with git on classes, star runs and whitespace (PR #751 r2 F3)', () => {
-  const paths = (...names) =>
-    names.flatMap((n) => [
-      [n, true],
-      [n, false],
-      [`d/${n}`, false],
-    ]);
-  const cases = [
-    // [pattern line, probe names]: each was accepted but read differently by the old matcher
-    ['q/[]a]', paths('q/a', 'q/]', 'q/b')],
-    ['q/[!]]', paths('q/a', 'q/]')],
-    ['q/[\\]]', paths('q/]', 'q/a')],
-    ['q/[a\\-c]', paths('q/a', 'q/-', 'q/b', 'q/c')],
-    ['q/[/-0]', paths('q/0', 'q/.', 'q/1')],
-    ['q/[^a-c]x', paths('q/dx', 'q/bx', 'q/x')],
-    ['q/***/tail', paths('q/tail', 'q/a/tail', 'q/a/b/tail')],
-    ['q/****', paths('q/a', 'q/a/b')],
-    ['q[!a]x', paths('q/x', 'qbx', 'qax')],
-    ['q/[a-]', paths('q/a', 'q/-', 'q/b')],
-    ['q/a***', paths('q/abc', 'q/a/b')],
-    ['***/z', paths('z', 'a/z', 'a/b/z')],
-    ['q/end\t', paths('q/end', 'q/end\t')],
-    ['q/sp\\ ', paths('q/sp', 'q/sp ')],
-    ['q/sp   ', paths('q/sp', 'q/sp ')],
-    ['q/in space', paths('q/in space', 'q/in')],
-  ];
-  for (const [line, probes] of cases) agreeWithGit(`${line}\n`, probes);
-  // What it cannot read exactly is refused, never guessed.
-  for (const line of [
-    'q/[a',
-    'q/[a-',
-    'q/[[:alpha:]]',
-    'q/[z-a]',
-    'q/[é]',
-    'q/\\',
-    'a\\/b',
-    'a//b',
-    'a**\\/b',
-    'q/a**/z', // git 2.43 and 2.56 read this differently (CI runs 2.56)
-  ])
-    assert.throws(() => ignoreMatcher(line), /\.gitignore/, line);
-});
-
-test('the real .gitignore: every line, the review cases, and git itself agree', () => {
-  // A probe for every line: its pattern with `*` as nothing and as text, `**` as zero and as two directories.
-  const probes = GITIGNORE.split('\n')
-    .filter((line) => line && !line.startsWith('#'))
-    .flatMap((line) => {
-      const base = line.replace(/^!/, '').replace(/^\//, '').replace(/\/$/, '');
-      const forms = [
-        base.replace(/\*\*\//g, '').replace(/\*/g, ''),
-        base.replace(/\*\*\//g, 'p/q/').replace(/\*/g, 'x'),
-        base.replace(/\/\*\*?$/, '/x'),
-      ];
-      return forms.flatMap((form) => [
-        [form, true],
-        [form, false],
-        [`deep/${form}`, true],
-        [`deep/${form}`, false],
-      ]);
-    });
-  const named = [
-    // the review's cases: build lock + staging, the broker CA, .vscode descendants and its exceptions
-    '.next.build-lock',
-    '.next.build-lock.receipt-1',
-    'apps/web/.next.build-lock',
-    'infrastructure/docker/kafka/.tls',
-    'x/infrastructure/docker/kafka/.tls',
-    'infrastructure/docker/.tls',
-    '.vscode',
-    '.vscode/settings.json',
-    '.vscode/extensions.json',
-    '.vscode/settings.example.json',
-    'services/a/src/generated',
-    'generated',
-    'src/generatedx',
-    'node_modules/.prisma',
-    '.env',
-    '.env.example',
-    '.env.migrator.example',
-    'infrastructure/x/y.example.key',
-    'infrastructure/x/y.key',
-    'a.log',
-    'logs',
-  ].flatMap((path) => [
-    [path, true],
-    [path, false],
-  ]);
-  agreeWithGit(GITIGNORE, [...probes, ...named]);
-  assert.ok(probes.length >= 100, 'no .gitignore patterns found');
-  const ignored = ignoreMatcher(GITIGNORE);
-  for (const path of [
-    '.next.build-lock',
-    '.next.build-lock.receipt-1',
-    'infrastructure/docker/kafka/.tls',
-    'services/a/src/generated',
-  ])
-    assert.ok(ignored(path, true), `${path} must be ignored`);
-  assert.ok(ignored('.vscode/settings.json', false));
-  assert.ok(
-    !ignored('.vscode/extensions.json', false) &&
-      !ignored('.vscode/settings.example.json', false) &&
-      !ignored('.vscode', true),
-  );
 });
 
 test('the inventory of this repository is exactly what git tracks (plus untracked files that are not ignored)', () => {
@@ -989,22 +913,11 @@ test('the detector refuses every way to reach a directory listing and accepts pl
  * Files that use a directory-listing API (or hold an fs module the guard cannot follow) and predate
  * the inventory. Each only shrinks: moving a file onto `authoredFiles` removes its line, and a file
  * anywhere else fails the scan below. Generated output exists only under `services/<name>/src/generated`,
- * so a lister is out of reach of the race when it prunes `generated` BY NAME before it opens
- * anything (PRUNE_BY_NAME), or lists a tree that cannot contain it (NO_GENERATED_TREE). Follow-up
- * (FU-102): migrate them and drop the lists.
+ * so a lister is out of reach of the race only when it lists a tree that cannot contain it
+ * (NO_GENERATED_TREE). The ten walkers that pruned `generated` by name were migrated onto
+ * `authoredFiles` (FU-112 r2): a walker of its own, however it prunes, is not trusted, so there is
+ * no pruning-order check to fool. Follow-up (FU-102): migrate the rest and drop the lists.
  */
-const PRUNE_BY_NAME = [
-  'apps/web/src/test/turbo-inputs-guard.ts',
-  'packages/contracts/src/events/topic-consumers.repo.spec.ts',
-  'packages/nest-common/src/kafka/log-creator.spec.ts',
-  'packages/nest-common/src/tenancy/raw-sql-inventory.spec.ts',
-  'scripts/check-service-boundaries-lib.mjs',
-  'scripts/eligibility-clock-derive.mjs',
-  'scripts/url-parsing-guard-lib.mjs',
-  'services/audit-service/test/authorization.int-spec.ts',
-  'services/construction-service/src/shared/idempotency-forget.spec.ts',
-  'services/identity-service/src/prisma/transaction-boundary.spec.ts',
-];
 const NO_GENERATED_TREE = [
   'apps/web/src/app/select-reset.spec.tsx',
   'apps/web/src/app/suppliers/supplier-persian.spec.tsx',
@@ -1045,6 +958,7 @@ const COVERS_GENERATED_ON_PURPOSE = [
 // replace a reader to test a fault, or load a module chosen at run time. The old recursion-only
 // scan did not see them; none is known to open generated output, and none is reviewed one by one.
 const OTHER_CAPABILITY = [
+  'apps/web/src/test/turbo-inputs-guard.ts', // wraps fs read APIs to record reads; lists nothing itself
   'apps/web/scripts/build-lock.mjs',
   'apps/web/scripts/capture-next-config.cjs',
   'apps/web/scripts/build-run.mjs',
@@ -1109,7 +1023,6 @@ const OTHER_CAPABILITY = [
   'tests/e2e/src/expect.test.ts',
 ];
 const LISTING_ALLOWED = new Set([
-  ...PRUNE_BY_NAME,
   ...NO_GENERATED_TREE,
   ...COVERS_GENERATED_ON_PURPOSE,
   ...OTHER_CAPABILITY,
@@ -1144,7 +1057,7 @@ test('a directory-listing capability outside the inventory is refused unless the
   );
   assert.equal(
     LISTING_ALLOWED.size,
-    10 + NO_GENERATED_TREE.length + 3 + OTHER_CAPABILITY.length,
+    NO_GENERATED_TREE.length + 3 + OTHER_CAPABILITY.length,
     'a file is listed twice',
   );
   // The walker #741 delegates to (scripts/testing-dev-only-source.mjs) is seen like any other.
@@ -1160,6 +1073,16 @@ test('a directory-listing capability outside the inventory is refused unless the
 // The walkers this change converted, and how many listing-API names each still has (a one-level
 // listing beside the inventory call). A reverted conversion brings its raw walker back: more names.
 const CONVERTED = {
+  'apps/web/src/test/turbo-inputs-guard.ts': 0,
+  'packages/contracts/src/events/topic-consumers.repo.spec.ts': 0,
+  'packages/nest-common/src/kafka/log-creator.spec.ts': 0,
+  'packages/nest-common/src/tenancy/raw-sql-inventory.spec.ts': 0,
+  'scripts/check-service-boundaries-lib.mjs': 0,
+  'scripts/eligibility-clock-derive.mjs': 0,
+  'scripts/url-parsing-guard-lib.mjs': 0,
+  'services/audit-service/test/authorization.int-spec.ts': 0,
+  'services/construction-service/src/shared/idempotency-forget.spec.ts': 0,
+  'services/identity-service/src/prisma/transaction-boundary.spec.ts': 0,
   'scripts/disclosure-guard-wiring.test.mjs': 0,
   'scripts/db-pool-config.pg.test.mjs': 2,
   'scripts/service-boot-guard.test.mjs': 2,
@@ -1188,158 +1111,4 @@ test('the rule is still enforced on the walkers this change converted', () => {
       `${file} lists directories itself`,
     );
   }
-});
-
-/**
- * What the pruning guards of a walker DO. Every code mention of the name `generated` (a comparison,
- * a list, a Set) leads to the `if`/`?:` that decides on it; that test is EVALUATED (module constants
- * included) for the name `generated` and for `src`, and the branch it selects must skip the entry
- * for the first and walk it for the second. A guard whose condition is disabled (`&& false`),
- * inverted, renamed, or whose `continue` is gone does not behave like that. A guard that cannot be
- * evaluated (it depends on anything but one entry name and constants) is a failure, not a pass.
- */
-function pruneFailures(file, text) {
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-  const failures = [];
-  const constants = new Map();
-  for (const statement of source.statements)
-    if (ts.isVariableStatement(statement))
-      for (const d of statement.declarationList.declarations)
-        if (ts.isIdentifier(d.name) && d.initializer) constants.set(d.name.text, d);
-  const guards = new Set();
-  const guardOf = (node) => {
-    for (let n = node; n.parent; n = n.parent) {
-      const p = n.parent;
-      if (ts.isIfStatement(p) && p.expression === n) return p;
-      if (ts.isConditionalExpression(p) && p.condition === n) return p;
-      if (ts.isVariableDeclaration(p) && ts.isSourceFile(p.parent.parent.parent)) return p;
-      if (ts.isFunctionLike(p) || ts.isSourceFile(p)) return undefined;
-    }
-    return undefined;
-  };
-  const visit = (node) => {
-    if (ts.isStringLiteralLike(node) && node.text === 'generated') {
-      const p = node.parent;
-      if (
-        ts.isArrayLiteralExpression(p) ||
-        ts.isCaseClause(p) ||
-        (ts.isBinaryExpression(p) && /^[!=]==?$/.test(p.operatorToken.getText()))
-      ) {
-        const guard = guardOf(node);
-        if (guard && ts.isVariableDeclaration(guard)) {
-          // a module constant: every test that reads it is a guard
-          const reads = (n) => {
-            if (ts.isIdentifier(n) && n.text === guard.name.text && n !== guard.name) {
-              const g = guardOf(n);
-              if (g && !ts.isVariableDeclaration(g)) guards.add(g);
-            }
-            ts.forEachChild(n, reads);
-          };
-          reads(source);
-        } else if (guard) guards.add(guard);
-        else failures.push(`${file}: 'generated' at ${node.getStart()} guards nothing`);
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  if (guards.size === 0) failures.push(`${file}: no pruning guard found`);
-  const terminal = (s) =>
-    s &&
-    (ts.isContinueStatement(s) ||
-      (ts.isReturnStatement(s) &&
-        (!s.expression ||
-          (ts.isArrayLiteralExpression(s.expression) && s.expression.elements.length === 0))));
-  const outcome = (branch, hasRest) => {
-    if (branch === undefined || ts.isEmptyStatement(branch)) return hasRest ? 'walk' : 'skip';
-    if (ts.isBlock(branch)) {
-      const last = branch.statements.at(-1);
-      return last === undefined ? (hasRest ? 'walk' : 'skip') : terminal(last) ? 'skip' : 'walk';
-    }
-    if (ts.isArrayLiteralExpression(branch)) return branch.elements.length === 0 ? 'skip' : 'walk';
-    return terminal(branch) ? 'skip' : 'walk';
-  };
-  for (const guard of guards) {
-    const test = ts.isIfStatement(guard) ? guard.expression : guard.condition;
-    const [yes, no] = ts.isIfStatement(guard)
-      ? [guard.thenStatement, guard.elseStatement]
-      : [guard.whenTrue, guard.whenFalse];
-    const siblings = ts.isIfStatement(guard) ? guard.parent.statements : undefined;
-    const hasRest = !!siblings && siblings.indexOf(guard) < siblings.length - 1;
-    const free = new Set();
-    const needed = new Set(); // the constants the test reads, and those they read
-    const collectFree = (n) => {
-      const isName = ts.isPropertyAccessExpression(n.parent) && n.parent.name === n;
-      if (ts.isIdentifier(n) && !isName) {
-        if (/^(?:Set|Map|Array|Object|String|RegExp)$/.test(n.text)) return;
-        if (!constants.has(n.text)) free.add(n.text);
-        else if (!needed.has(n.text)) {
-          needed.add(n.text);
-          collectFree(constants.get(n.text).initializer);
-        }
-      }
-      ts.forEachChild(n, collectFree);
-    };
-    collectFree(test);
-    const where = `${file}:${source.getLineAndCharacterOfPosition(guard.getStart()).line + 1}`;
-    if (free.size !== 1) {
-      failures.push(`${where}: the guard depends on ${[...free].join(', ') || 'nothing'}`);
-      continue;
-    }
-    const [variable] = free;
-    const usesName = /\.name\b/.test(test.getText());
-    const js = ts.transpileModule(
-      `${[...needed].map((name) => constants.get(name).parent.parent.getText()).join('\n')}\nexports.test = (${variable}) => (${test.getText()});`,
-      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
-    ).outputText;
-    let verdicts;
-    try {
-      const exported = {};
-      new Function('exports', 'require', js)(exported, () => ({}));
-      const entry = (name) => (usesName ? { name, isDirectory: () => true } : name);
-      verdicts = ['generated', 'src'].map((name) =>
-        outcome(exported.test(entry(name)) ? yes : no, hasRest),
-      );
-    } catch (error) {
-      failures.push(`${where}: the guard cannot be evaluated (${error.message})`);
-      continue;
-    }
-    if (verdicts.join() !== 'skip,walk')
-      failures.push(`${where}: for 'generated' and 'src' the guard does ${verdicts.join(' and ')}`);
-  }
-  return failures;
-}
-test('the walkers that prune by name really skip generated (and only skip what they name)', () => {
-  for (const file of PRUNE_BY_NAME)
-    assert.deepEqual(pruneFailures(file, fs.readFileSync(join(root, file), 'utf8')), []);
-  const walker = (guard) =>
-    `const SKIP = new Set(['dist', 'generated']);\nfunction w(d) {\n  for (const entry of readdirSync(d)) {\n    ${guard}\n    w(entry);\n  }\n}`;
-  const good = [
-    "if (entry === 'dist' || entry === 'generated') continue;",
-    "if (['generated', 'dist'].includes(entry)) continue;",
-    'if (SKIP.has(entry)) continue;',
-    "if (entry === 'generated') { continue; }",
-    "entry === 'generated' ? [] : w(entry);",
-  ];
-  for (const guard of good) assert.deepEqual(pruneFailures('x.ts', walker(guard)), [], guard);
-  const disabled = [
-    "if ((entry === 'dist' || entry === 'generated') && false) continue;", // condition disabled
-    "if (entry === 'dist' || entry !== 'generated') continue;", // inverted
-    "if (entry === 'dist' || entry === 'generate') continue;", // renamed
-    "if (entry === 'dist' || entry === 'generated') ;", // the continue is gone
-    "if (entry === 'dist' || entry === 'generated') { }",
-    "if (entry === 'dist' || entry === 'generated') log(entry);",
-    "if (['generated'].includes(entry) && false) continue;",
-    "if (['generated', 'dist'].map((x) => x).includes(entry) && entry.length < 0) continue;",
-    'if (SKIP.has(entry) && false) continue;',
-    "if (entry === 'generated' && other) continue;", // depends on something else
-    "if (check(entry) || entry === 'generated') continue;", // depends on a function
-    "const stale = entry === 'generated'; if (stale && false) continue;",
-    "if (entry === 'generated' || entry.length > 0) continue;", // skips everything
-    "if (entry === 'generated' && process.env.NODE_ENV !== 'x') continue;", // depends on the environment
-    "if (entry.foo.bar === 'generated') continue;", // cannot be evaluated
-  ];
-  for (const guard of disabled)
-    assert.notDeepEqual(pruneFailures('x.ts', walker(guard)), [], guard);
-  assert.notDeepEqual(pruneFailures('x.ts', "log('generated'); if (n === 'dist') continue;"), []);
 });

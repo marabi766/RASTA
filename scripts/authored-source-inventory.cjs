@@ -9,201 +9,143 @@
 // listed file or directory that is then missing is a real fault and still throws. CommonJS so Jest
 // specs (`require`) and the `.mjs` checks (`import`) share it.
 //
-// ONE exclusion policy: the repository's own `.gitignore`, read at the time of the call, with git's
-// own rules (wildcards, `**`, anchored path patterns, trailing-slash directory patterns, `!`
-// exceptions, last match wins). A pattern shape this reader does not know throws, never guesses.
-const fs = require('node:fs'); // members read at call time: a test watches which directories are opened
-const { basename, dirname, join, relative, resolve, sep, isAbsolute } = require('node:path');
+// ONE exclusion policy, and git itself applies it: the repository's own `.gitignore` (the root file
+// and any nested one). This file does NOT re-implement git's pattern language (a hand matcher
+// disagreed with git on UTF-8 names, newlines in paths, byte semantics and `!` re-inclusion, PR #772
+// r1). It asks `git ls-files --cached --others --exclude-standard -z`, which reads the working tree
+// but does not open an ignored directory, and takes its NUL-separated BYTES as the paths (a name that
+// is not UTF-8 is refused, never mangled). A tree outside the repository (a test's temporary tree)
+// is judged by the same git against a throwaway empty git directory, with the repository's
+// `.gitignore` as its excludes file. Anything git does not answer cleanly (a failure, a warning on
+// stderr such as an unreadable directory, a nested repository) throws.
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const { tmpdir } = require('node:os');
+const { join, relative, resolve, sep, isAbsolute } = require('node:path');
 
 const REPO_ROOT = resolve(__dirname, '..');
+const DECODER = new TextDecoder('utf-8', { fatal: true });
 
-const hex = (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`;
-
-/**
- * One character class `[...]` of a gitignore glob as a RegExp, read the way git's wildmatch reads it:
- * `!` or `^` negates, a `]` first in the class is a member, `\x` is the character x (also as a range
- * end), `a-c` is a range, and a class never matches `/`. Anything else it does not know throws.
- */
-function characterClass(glob, start) {
-  const unsupported = (why) => {
-    throw new Error(`.gitignore: unsupported ${why} in ${glob}`);
-  };
-  let i = start + 1;
-  const negate = glob[i] === '!' || glob[i] === '^';
-  if (negate) i += 1;
-  const char = () => {
-    let c = glob[i];
-    if (c === '\\') {
-      i += 1;
-      c = glob[i];
-    }
-    if (c === undefined) unsupported('an unclosed character class');
-    if (c.charCodeAt(0) > 0x7e) unsupported('a non-ASCII character in a class'); // git reads bytes
-    return c;
-  };
-  let members = '';
-  for (let first = true; first || glob[i] !== ']'; first = false) {
-    if (glob[i] === '[' && /^\[[:=.]/.test(glob.slice(i))) unsupported('a POSIX character class');
-    const low = char();
-    if (glob[i + 1] === '-' && glob[i + 2] !== undefined && glob[i + 2] !== ']') {
-      i += 2;
-      const high = char();
-      if (high < low) unsupported('a descending range');
-      members += `${hex(low)}-${hex(high)}`;
-    } else members += hex(low);
-    i += 1;
-  }
-  return { end: i, source: `(?!/)[${negate ? '^' : ''}${members}]` };
-}
-
-/** A gitignore glob (no leading `!`, no trailing `/`) as a RegExp source over a `/` path. */
-function globSource(glob) {
-  if (/\\\/|\/\/|\*\*+\\/.test(glob)) throw new Error(`.gitignore: unsupported escape in ${glob}`);
-  let out = '';
-  for (let i = 0; i < glob.length; i += 1) {
-    const c = glob[i];
-    if (c === '\\') {
-      i += 1;
-      if (i >= glob.length) throw new Error('.gitignore: a pattern ends in a backslash');
-      out += glob[i].replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-    } else if (c === '*') {
-      // A run of stars. Two or more that are a whole path component before a `/` are `**/`; at the very
-      // end they are `**` after a `/`; anywhere else they are one `*`. Two or more glued to text before a
-      // `/` (`q/a**/z`) mean different things in different git versions (2.43 crosses directories, 2.56
-      // does not), so that shape is refused, never guessed.
-      let end = i;
-      while (glob[end + 1] === '*') end += 1;
-      const after = glob[end + 1];
-      if (end > i && after === '/' && i > 0 && glob[i - 1] !== '/')
-        throw new Error(
-          `.gitignore: unsupported escape in ${glob} (** glued to text before a slash differs between git versions)`,
-        );
-      if (end > i && after === '/') {
-        out += '(?:.*/)?';
-        end += 1;
-      } else
-        out += end > i && after === undefined && (i === 0 || glob[i - 1] === '/') ? '.+' : '[^/]*';
-      i = end;
-    } else if (c === '?') out += '[^/]';
-    else if (c === '[') {
-      const cls = characterClass(glob, i);
-      out += cls.source;
-      i = cls.end;
-    } else out += c.replace(/[.+^${}()|\]/]/g, '\\$&');
-  }
-  return out;
-}
-
-/** git's own trim: trailing SPACES go (not tabs), unless a backslash quotes them. */
-function trimTrailingSpaces(line) {
-  let lastSpace = -1;
-  for (let i = 0; i < line.length; i += 1) {
-    if (line[i] === ' ') {
-      if (lastSpace < 0) lastSpace = i;
-    } else {
-      if (line[i] === '\\') i += 1;
-      lastSpace = -1;
-    }
-  }
-  return lastSpace < 0 ? line : line.slice(0, lastSpace);
-}
-
-/**
- * `.gitignore` text as `(path, isDirectory) => ignored`. `path` is `/`-separated and relative to
- * the directory that holds the `.gitignore`. The caller never descends into an ignored directory,
- * so a path is judged by its own name and place, last matching pattern wins.
- */
-function ignoreMatcher(text) {
-  const rules = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const line = trimTrailingSpaces(raw);
-    if (line === '' || line.startsWith('#')) continue;
-    const negate = line.startsWith('!');
-    let glob = negate ? line.slice(1) : line;
-    const directoryOnly = glob.endsWith('/');
-    if (directoryOnly) glob = glob.slice(0, -1);
-    const anchored = glob.includes('/');
-    if (glob.startsWith('/')) glob = glob.slice(1);
-    if (glob === '') throw new Error(`.gitignore: empty pattern in ${JSON.stringify(raw)}`);
-    rules.push({
-      negate,
-      directoryOnly,
-      anchored,
-      regex: new RegExp(`^${globSource(glob)}$`),
-    });
-  }
-  return (path, isDirectory) => {
-    const name = path.slice(path.lastIndexOf('/') + 1);
-    let ignored = false;
-    for (const rule of rules) {
-      if (rule.directoryOnly && !isDirectory) continue;
-      if (rule.regex.test(rule.anchored ? path : name)) ignored = !rule.negate;
-    }
-    return ignored;
-  };
-}
-
-// Read on every call: the policy is whatever .gitignore says now, and an unreadable one throws.
-const repositoryMatcher = () =>
-  ignoreMatcher(fs.readFileSync(join(REPO_ROOT, '.gitignore'), 'utf8'));
 const inside = (base, path) => {
   const rel = relative(base, path);
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 };
-const posix = (path) => path.split(sep).join('/');
-const comparator = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
-function isDirectory(entry, path) {
-  if (entry.isDirectory()) return true;
-  if (!entry.isSymbolicLink()) return false;
+/** Runs git with this repository's `.gitignore` as the excludes file and no inherited repository. */
+function git(scope, args, input) {
+  fs.accessSync(join(REPO_ROOT, '.gitignore'), fs.constants.R_OK); // git silently skips a missing excludes file
+  const env = { ...process.env };
+  for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR'])
+    delete env[name];
+  const result = spawnSync(
+    'git',
+    [
+      ...scope,
+      ...(args[0] === 'ls-files' ? ['--literal-pathspecs'] : []), // check-ignore reads a path, no globs
+      '-c',
+      `core.excludesFile=${join(REPO_ROOT, '.gitignore')}`,
+      ...args,
+    ],
+    { env, input, maxBuffer: 1 << 30, stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  if (result.error) throw result.error;
+  const warnings = result.stderr.toString('utf8').trim();
+  if ((result.status !== 0 && !(args[0] === 'check-ignore' && result.status === 1)) || warnings)
+    throw new Error(`git ${args[0]} failed (${result.status}): ${warnings}`);
+  return { status: result.status, out: result.stdout };
+}
+const names = (buffer) => {
+  const parts = [];
+  for (let from = 0; from < buffer.length;) {
+    const end = buffer.indexOf(0, from);
+    if (end < 0) throw new Error('git printed a path without its NUL terminator');
+    parts.push(DECODER.decode(buffer.subarray(from, end)));
+    from = end + 1;
+  }
+  return parts;
+};
+const compareNames = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+/** The order of a depth-first walk that sorts every directory's entries by name. */
+function compareWalk(a, b) {
+  const left = a.split('/');
+  const right = b.split('/');
+  for (let i = 0; i < Math.min(left.length, right.length); i += 1) {
+    const order = compareNames(left[i], right[i]);
+    if (order !== 0) return order;
+  }
+  return left.length - right.length;
+}
+
+/** A work tree with its own `.git` is listed as that repository; any other tree against an empty throwaway git directory. */
+const isRepository = (base) => resolve(base) === REPO_ROOT || fs.existsSync(join(base, '.git'));
+function withGit(base, body) {
+  if (isRepository(base)) return body(['-C', base]);
+  const empty = fs.mkdtempSync(join(tmpdir(), 'authored-inventory-git-'));
   try {
-    return fs.statSync(path).isDirectory(); // a linked `node_modules` is never opened either
-  } catch {
-    return false;
+    const init = spawnSync('git', ['init', '-q', '--bare', empty], { stdio: 'pipe' });
+    if (init.status !== 0) throw new Error(`git init failed: ${init.stderr}`);
+    return body([`--git-dir=${empty}`, `--work-tree=${base}`]);
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
   }
 }
 
 /**
- * Absolute paths of every authored file under `dir`, sorted: not git-ignored (see above) and not
- * `.git`. `skip(name)` prunes further directories (and files) by name before they are opened.
- * `optional` lets a `dir` that does not exist yield [] (a workspace without `src`); anything else
- * that cannot be read throws, and so does a `dir` that is itself ignored output. `base` is the
- * directory the .gitignore paths are relative to (`src/generated` is `<base>/…/src/generated`): the
- * repository root, which is the default for a `dir` inside it; a `dir` elsewhere (a test's temporary
- * tree) is its own base unless the caller names one that holds it.
+ * Absolute paths of every authored file under `dir`, sorted: what git lists as tracked or as
+ * untracked-and-not-ignored (git never lists its own `.git`). `skip(name)` drops a path when any name below `dir`
+ * satisfies it. `optional` lets a `dir` that does not exist yield [] (a workspace without `src`);
+ * anything else that cannot be read throws, and so does a `dir` that is itself ignored output.
+ * `base` is the directory the .gitignore paths are relative to: the repository root, which is the
+ * default for a `dir` inside it; a `dir` elsewhere (a test's temporary tree) is its own base unless
+ * the caller names one that holds it. A symbolic link to a directory is not a file and is not listed.
  */
 function authoredFiles(dir, { skip, optional = false, base: given } = {}) {
   const top = resolve(dir);
   const base = given ? resolve(given) : inside(REPO_ROOT, top) ? REPO_ROOT : top;
   if (!inside(base, top)) throw new Error(`${top} is not inside its base ${base}`);
-  const ignored = repositoryMatcher();
-  const isIgnored = (path, directory) =>
-    basename(path) === '.git' || ignored(posix(relative(base, path)), directory);
-  for (let up = top; up !== base; up = dirname(up)) {
-    if (isIgnored(up, true))
-      throw Object.assign(new Error(`${up} is git-ignored output, not authored source`), {
+  try {
+    if (!fs.statSync(top).isDirectory())
+      throw Object.assign(new Error(`ENOTDIR: ${top}`), { code: 'ENOTDIR' });
+  } catch (error) {
+    if (optional && error?.code === 'ENOENT') return [];
+    throw error;
+  }
+  const spec = relative(base, top) || '.';
+  const listed = withGit(base, (scope) => {
+    if (
+      spec !== '.' &&
+      git(
+        scope,
+        ['check-ignore', '--no-index', '-z', '--stdin'],
+        `${spec.startsWith(':') ? `./${spec}` : spec}\0`,
+      ).status === 0
+    )
+      throw Object.assign(new Error(`${top} is git-ignored output, not authored source`), {
         code: 'EIGNORED',
       });
-  }
-  const walk = (current) => {
-    let entries;
+    const gone = new Set(
+      isRepository(base) ? names(git(scope, ['ls-files', '-z', '--deleted', '--', spec]).out) : [],
+    );
+    return names(
+      git(scope, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', spec]).out,
+    ).filter((path) => !gone.has(path));
+  });
+  const depth = relative(base, top) === '' ? 0 : relative(base, top).split(sep).length;
+  const files = [];
+  for (const path of listed.sort(compareWalk)) {
+    if (path.endsWith('/'))
+      throw new Error(`${join(base, path)} is a nested repository: its files are not listed`);
+    const parts = path.split('/');
+    if (typeof skip === 'function' && parts.slice(depth).some((name) => skip(name))) continue;
+    const full = join(base, ...parts);
     try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch (error) {
-      if (optional && current === top && error?.code === 'ENOENT') return [];
-      throw error;
+      if (fs.lstatSync(full).isSymbolicLink() && fs.statSync(full).isDirectory()) continue;
+    } catch {
+      // gone, or a dangling link: whoever reads it decides (a vanished authored file is a real fault)
     }
-    return entries.sort(comparator).flatMap((entry) => {
-      const path = join(current, entry.name);
-      if (
-        isIgnored(path, isDirectory(entry, path)) ||
-        (typeof skip === 'function' && skip(entry.name))
-      )
-        return [];
-      return entry.isDirectory() ? walk(path) : [path];
-    });
-  };
-  return walk(top);
+    files.push(full);
+  }
+  return files;
 }
 
-module.exports = { authoredFiles, ignoreMatcher };
+module.exports = { authoredFiles };

@@ -249,6 +249,22 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
+  // `git ls-files -co --exclude-standard -z`, `check-ignore --no-index -z --stdin`, `init -q --bare`: the one listing.
+  'scripts/authored-source-inventory.cjs': {
+    other: [
+      '--bare',
+      '--cached',
+      '--deleted',
+      '--exclude-standard',
+      '--no-index',
+      '--others',
+      '--stdin',
+      '-C',
+      '-c',
+      '-q',
+      '-z',
+    ],
+  },
   'scripts/backup-restore-drill-lib.mjs': {
     other: ['--encoding', '--format', '--quote-all-identifiers', '--schema-only', '-service'],
   },
