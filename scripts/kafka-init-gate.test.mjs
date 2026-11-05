@@ -226,7 +226,7 @@ test('package startup/reset preserve preflight before mutations and gate before 
   assert.match(scripts.verify, /pnpm run test:kafka-init-gate/);
   assert.match(scripts.verify, /pnpm run test:broker-default/);
   const workflow = YAML.parse(read('.github/workflows/ci.yml'));
-  const quality = workflow.jobs.quality.steps.map((step) => step.run ?? '').join('\n');
+  const quality = workflow.jobs['quality-guards'].steps.map((step) => step.run ?? '').join('\n');
   assert.match(quality, /pnpm run test:kafka-init-gate/);
   assert.match(quality, /pnpm run test:broker-default/);
   assert.ok(!read('infrastructure/docker/kafka/ci-up.sh').includes('kafka-init-gate'));

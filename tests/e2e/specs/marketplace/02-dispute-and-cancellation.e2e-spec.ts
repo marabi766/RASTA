@@ -154,12 +154,21 @@ test.describe.serial('a dispute stops settlement completely', () => {
 
   test('refuses a party the right to resolve their own dispute', async ({ tenantA }) => {
     const list = await tenantA.get('/v1/orders?role=BUYER&status=DISPUTED&limit=1');
-    const disputed = (list.body as { items: { id: string }[] }).items[0];
+    const disputed = (list.body as { items: { id: string; openDisputeId: string | null }[] })
+      .items[0];
     expect(disputed).toBeDefined();
+    // The decision names the dispute it is about (D-083), as an operator's form
+    // does — so the refusal below is the party rule, not a malformed body.
+    expect(disputed!.openDisputeId).toMatch(/^DSP_/);
 
     const attempt = await tenantA.post(`/v1/orders/${disputed!.id}/disputes/resolve`, {
       idempotencyKey: idempotencyKey('e2e-self-resolve'),
-      body: { outcome: 'SETTLE', resolution: 'من به نفع خودم تصمیم گرفتم' },
+      body: {
+        disputeId: disputed!.openDisputeId,
+        outcome: 'SETTLE',
+        resolution: 'من به نفع خودم تصمیم گرفتم',
+        responsibility: 'SUPPLIER',
+      },
     });
     expect(attempt.status).toBe(403);
   });
