@@ -65,12 +65,7 @@
         "identity": "fixture",
         "binaryChecksum": "@temporalio/worker@1.25.0+6b0741a2645b6497267ee87d4c7f814fbe80867a0095e9045b59190f8acd8f70",
         "sdkMetadata": {
-          "coreUsedFlags": [
-            3,
-            1,
-            2,
-            4
-          ],
+          "coreUsedFlags": [3, 1, 2, 4],
           "sdkName": "temporal-typescript",
           "sdkVersion": "1.25.0"
         },
