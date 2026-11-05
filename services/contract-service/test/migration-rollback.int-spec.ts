@@ -130,6 +130,8 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const RULE_NAME_FOLD = '20261104210000_deduction_rule_name_fold';
+  const RULE_LOCK_ORDER = '20261104200000_deduction_rule_lock_order';
   const RULE_CHANGES = '20261104100000_deduction_rule_changes';
   const SETTLEMENT = '20261017160000_statement_settlement';
   const DECISIONS = '20261016180000_statement_decisions';
@@ -1150,6 +1152,167 @@ describe('each down.sql, run whole with psql --file', () => {
              FROM "statement" s JOIN "contract" c ON c."id" = s."contract_id" WHERE s."id" = 'STM_rb'`,
         ]),
       ).toBe('SETTLED:10:10');
+    });
+  });
+
+  it('deduction_rule_lock_order (FU-060) changes only trigger bodies: down restores them exactly', () => {
+    const schema = scratch(RULE_LOCK_ORDER);
+    const result = psql(schema, ['--file', down(RULE_LOCK_ORDER)]);
+    expect(result.out).toBe('');
+    expect(result.ok).toBe(true);
+    const previous = scratch(RULE_CHANGES);
+    expect(shape(schema)).toBe(shape(previous));
+    expect(functions(schema)).toBe(functions(previous));
+  });
+
+  describe('deduction_rule_name_fold (FU-083)', () => {
+    const proposal = (id: string, name: string) =>
+      `INSERT INTO "deduction_rule_change"
+         ("id", "organization_id", "kind", "name", "rate_bp", "base", "proposed_at", "proposed_by",
+          "proposed_by_issuer", "proposed_by_subject")
+       VALUES ('${id}', 'ORG_E', 'CREATE', '${name}', 500, 'GROSS', now(), 'USR_1', 'iss', 'sub-1');`;
+    const inForce = (id: string, name: string) =>
+      `BEGIN; ${proposal(`DRC_${id}`, name)}
+       UPDATE "deduction_rule_change"
+          SET "status" = 'APPROVED', "decided_at" = now(), "decided_by" = 'USR_2',
+              "decided_by_issuer" = 'iss', "decided_by_subject" = 'sub-2', "version" = 2
+        WHERE "id" = 'DRC_${id}';
+       INSERT INTO "deduction_rule"
+         ("id", "organization_id", "name", "rate_bp", "base", "created_at", "created_by", "approved_change_id")
+       SELECT 'DDR_${id}', 'ORG_E', "name", 500, 'GROSS', "decided_at", 'USR_1', "id"
+         FROM "deduction_rule_change" WHERE "id" = 'DRC_${id}';
+       COMMIT;`;
+    const withdrawn = (id: string) =>
+      `UPDATE "deduction_rule_change"
+          SET "status" = 'WITHDRAWN', "decided_at" = now(), "decided_by" = 'USR_1',
+              "decided_by_issuer" = 'iss', "decided_by_subject" = 'sub-1', "version" = 2
+        WHERE "id" = '${id}';`;
+    const retired = (id: string) =>
+      `BEGIN;
+       INSERT INTO "deduction_rule_change"
+         ("id", "organization_id", "kind", "deduction_rule_id", "reason", "proposed_at", "proposed_by",
+          "proposed_by_issuer", "proposed_by_subject")
+       VALUES ('DRC_r${id}', 'ORG_E', 'RETIRE', 'DDR_${id}', 'old', now(), 'USR_1', 'iss', 'sub-1');
+       UPDATE "deduction_rule_change"
+          SET "status" = 'APPROVED', "decided_at" = now(), "decided_by" = 'USR_2',
+              "decided_by_issuer" = 'iss', "decided_by_subject" = 'sub-2', "version" = 2
+        WHERE "id" = 'DRC_r${id}';
+       UPDATE "deduction_rule" SET "retired_at" = now() WHERE "id" = 'DDR_${id}';
+       COMMIT;`;
+    const rows = (schema: string) =>
+      mustRun(schema, [
+        '-c',
+        `SELECT jsonb_build_array(
+           (SELECT jsonb_agg(to_jsonb(r) ORDER BY r."id") FROM "deduction_rule" r),
+           (SELECT jsonb_agg(to_jsonb(c) ORDER BY c."id") FROM "deduction_rule_change" c))::text`,
+      ]);
+    const up = (schema: string) =>
+      psql(schema, [
+        '--single-transaction',
+        '--file',
+        join(MIGRATIONS, RULE_NAME_FOLD, 'migration.sql'),
+      ]);
+    /** `functions` reads `prosrc`, empty for a RETURN body: the key is compared by its definition. */
+    const indexes = (schema: string) =>
+      mustRun(schema, [
+        '-c',
+        `SELECT jsonb_build_array(pg_get_functiondef('deduction_rule_name_key'::regproc),
+                  (SELECT jsonb_agg(indexdef ORDER BY indexdef) FROM pg_indexes
+                    WHERE schemaname = current_schema() AND indexname LIKE 'ux_deduction_rule%'))::text`,
+      ]);
+    /** The query the operator is told to run, from the page they are told to read. */
+    const collisions = (schema: string) => {
+      const page = readFileSync(
+        join(__dirname, '..', '..', '..', 'docs', 'runbooks', 'deduction-rule-name-collisions.md'),
+        'utf8',
+      );
+      return mustRun(schema, ['-c', /```sql\n([\s\S]*?)```/.exec(page)![1]!]);
+    };
+
+    it.each([
+      [
+        'two rules in force',
+        'ux_deduction_rule_name_active',
+        [inForce('a', 'Tax'), inForce('b', 'TAX')],
+      ],
+      [
+        'two pending CREATEs',
+        'ux_deduction_rule_change_pending_create',
+        [proposal('DRC_a', 'Tax A'), proposal('DRC_b', 'TaxA')],
+      ],
+    ])(
+      '%s of one new key stop it with nothing changed; the runbook query names them first',
+      (_what, index, rows) => {
+        const schema = scratch(RULE_LOCK_ORDER);
+        for (const row of rows) mustRun(schema, ['-c', row]);
+        expect(collisions(schema)).toMatch(/DRC_a|DDR_a/);
+        const [before, guards, held] = [shape(schema), functions(schema), indexes(schema)];
+        const stopped = up(schema);
+        expect(stopped.ok).toBe(false);
+        expect(stopped.out).toContain(index);
+        expect([shape(schema), functions(schema), indexes(schema)]).toEqual([before, guards, held]);
+      },
+    );
+
+    it('a retired rule, or a CREATE waiting behind a rule in force, stops nothing: the query and the migration agree', () => {
+      const schema = scratch(RULE_LOCK_ORDER);
+      mustRun(schema, ['-c', inForce('a', 'Tax')]);
+      mustRun(schema, ['-c', retired('a')]);
+      mustRun(schema, ['-c', inForce('b', 'TAX')]);
+      mustRun(schema, ['-c', proposal('DRC_w', 'tax')]);
+      expect(collisions(schema)).toBe('');
+      const before = rows(schema);
+      const result = up(schema);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      expect(rows(schema)).toBe(before);
+
+      // The rebuilt indexes hold the rows that were already there, not only what comes after.
+      const secondPending = psql(schema, ['-c', proposal('DRC_x', 'T A X')]);
+      expect(secondPending.ok).toBe(false);
+      expect(secondPending.out).toContain('ux_deduction_rule_change_pending_create');
+      mustRun(schema, ['-c', withdrawn('DRC_w')]);
+      const secondInForce = psql(schema, ['-c', inForce('c', 'tAx')]);
+      expect(secondInForce.ok).toBe(false);
+      expect(secondInForce.out).toContain('ux_deduction_rule_name_active');
+    });
+
+    it('over rows that exist, down restores the key and both indexes exactly and keeps every row; a name it lets back in stops up again', () => {
+      const schema = scratch(RULE_NAME_FOLD);
+      mustRun(schema, ['-c', inForce('a', 'Tax')]);
+      mustRun(schema, ['-c', proposal('DRC_w', 'Tax')]);
+      const [applied, kept] = [[functions(schema), indexes(schema)], rows(schema)];
+      const result = psql(schema, ['--file', down(RULE_NAME_FOLD)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      expect(rows(schema)).toBe(kept);
+      const previous = scratch(RULE_LOCK_ORDER);
+      const before = [shape(previous), functions(previous), indexes(previous)].map((one) =>
+        one.replaceAll(previous, ''),
+      );
+      const now = () =>
+        [shape(schema), functions(schema), indexes(schema)].map((one) =>
+          one.replaceAll(schema, ''),
+        );
+      expect(now()).toEqual(before);
+
+      // The old key tells these apart, so each is admitted only if down rebuilt that index; up stops on them.
+      mustRun(schema, ['-c', proposal('DRC_x', 'tax')]);
+      const pendingStop = up(schema);
+      expect(pendingStop.ok).toBe(false);
+      expect(pendingStop.out).toContain('ux_deduction_rule_change_pending_create');
+      expect(now()).toEqual(before);
+      mustRun(schema, ['-c', withdrawn('DRC_x')]);
+      mustRun(schema, ['-c', inForce('b', 'tax')]);
+      const activeStop = up(schema);
+      expect(activeStop.ok).toBe(false);
+      expect(activeStop.out).toContain('ux_deduction_rule_name_active');
+      expect(now()).toEqual(before);
+
+      mustRun(schema, ['-c', retired('b')]);
+      expect(up(schema).ok).toBe(true);
+      expect(functions(schema)).toBe(applied[0]);
+      expect(indexes(schema)).toBe(applied[1]);
     });
   });
 

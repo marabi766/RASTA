@@ -6,8 +6,8 @@
  * `isCanonicalDeductionRuleName` is `deduction_rule_name_is_canonical` of migration
  * 20261104100000, and that function is what the database refuses by. It names what is allowed, so
  * nothing unlisted gets in: `test/deduction-rule-change.int-spec.ts` runs both over every code point.
- * Two names that differ only by a half-space are still one name: the database compares
- * `deduction_rule_name_key`.
+ * Names that differ only by case, a space or a half-space are still one name: see
+ * `deductionRuleNameKey`.
  */
 const LETTERS =
   '\\u0621-\\u063A\\u0641\\u0642\\u0644-\\u0648\\u067E\\u0686\\u0698\\u06A9\\u06AF\\u06CC';
@@ -51,4 +51,16 @@ export function canonicalDeductionRuleName(raw: string): string | null {
     .replace(/[\t\n\v\f\r ]+/g, ' ')
     .replace(/^ | $/g, '');
   return isCanonicalDeductionRuleName(name) ? name : null;
+}
+
+/**
+ * What makes two names one name: `deduction_rule_name_key` of migration 20261104210000, which is what
+ * the database refuses by. The name is stored and shown as typed; this is only ever compared.
+ *
+ * It folds A-Z and nothing else, as the database must (an index cannot follow a collation). That is
+ * Unicode's whole case mapping over the one form, which admits no other cased letter: the spec holds
+ * the two together over every code point.
+ */
+export function deductionRuleNameKey(canonicalName: string): string {
+  return canonicalName.replace(/[ \u200c]/g, '').replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
