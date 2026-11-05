@@ -222,8 +222,11 @@ describe('the gateway’s readiness check', () => {
     w.checks[0]!.resolve(true);
     await decided;
     expect(w.state()).toBe('CLOSED');
+    // The threshold is reached again by two organizations: B's and C's spent
+    // failures do not make them three.
     expect(w.fail('ORG_A')).toBeUndefined();
-    expect(w.fail('ORG_B')).toBeUndefined();
+    expect(w.fail('ORG_A')).toBeUndefined();
+    expect(w.fail('ORG_E')).toBeUndefined();
     expect(w.checks).toHaveLength(1);
     expect(w.fail('ORG_D')).toBeInstanceOf(Promise);
     expect(w.checks).toHaveLength(2);
