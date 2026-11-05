@@ -186,10 +186,7 @@
                 "type": "object",
                 "properties": {
                   "username": {
-                    "type": "string",
-                    "minLength": 3,
-                    "maxLength": 64,
-                    "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+                    "type": "string"
                   },
                   "email": {
                     "type": "string",
@@ -684,10 +681,7 @@
                 "type": "object",
                 "properties": {
                   "username": {
-                    "type": "string",
-                    "minLength": 3,
-                    "maxLength": 64,
-                    "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+                    "type": "string"
                   },
                   "email": {
                     "type": "string",
@@ -812,10 +806,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string",
-              "minLength": 3,
-              "maxLength": 64,
-              "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+              "type": "string"
             }
           }
         ],
