@@ -17,8 +17,151 @@ tests:
               severity: critical
             exp_annotations:
               summary: Order saga starts are waiting
-              description: A start intent has waited over five minutes. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+              description: A start intent has waited over five minutes, or no replica can measure the backlog. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
               runbook: docs/runbooks/marketplace-saga-deploy.md
       - eval_time: 4m
         alertname: RastaMarketplaceSagaStartBacklogAging
         exp_alerts: []
+
+  # The backlog stops being reported (every replica down, or its sample failing
+  # and withdrawn): unknown, so it fires rather than reading as an empty backlog.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_start_backlog_age_seconds{service="marketplace-service",instance="replica-1"}'
+        values: '0 0 stale'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaMarketplaceSagaStartBacklogAging
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaMarketplaceSagaStartBacklogAging
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Order saga starts are waiting
+              description: A start intent has waited over five minutes, or no replica can measure the backlog. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+              runbook: docs/runbooks/marketplace-saga-deploy.md
+
+  # FU-104: one replica's worker fails (run() ended, or Temporal no longer
+  # lists it as a poller) while another still polls. Before, this only logged.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_worker_up{service="marketplace-service",instance="replica-1"}'
+        values: '1 1 1 0 0 0 0 0 1'
+      - series: 'rasta_marketplace_saga_worker_up{service="marketplace-service",instance="replica-2"}'
+        values: '1x8'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RastaMarketplaceSagaWorkerDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaMarketplaceSagaWorkerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: marketplace-service
+              instance: replica-1
+            exp_annotations:
+              summary: A marketplace replica has no polling saga worker (replica-1)
+              description: This replica's order saga worker is not running, or Temporal does not list it as polling the order task queue. Restart the replica; if no replica polls, no saga moves money.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 5m
+        alertname: RastaMarketplaceSagaNoLiveWorker
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RastaMarketplaceSagaWorkerDown
+        exp_alerts: []
+
+  # FU-104: every worker dead. First both report 0 (failed), then both
+  # processes are gone and nothing reports at all: still firing, without a
+  # gap, until a worker polls again.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_worker_up{service="marketplace-service",instance="replica-1"}'
+        values: '1 1 0 0 0 stale _x4 1'
+      - series: 'rasta_marketplace_saga_worker_up{service="marketplace-service",instance="replica-2"}'
+        values: '1 1 0 0 0 stale _x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaMarketplaceSagaNoLiveWorker
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaMarketplaceSagaNoLiveWorker
+        exp_alerts: &no-live-worker
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: No order saga worker is polling
+              description: No marketplace-service replica reports a saga worker that Temporal lists as polling. Holds, settlements, refunds and dispute releases are not progressing.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      - eval_time: 6m
+        alertname: RastaMarketplaceSagaNoLiveWorker
+        exp_alerts: *no-live-worker
+      - eval_time: 9m
+        alertname: RastaMarketplaceSagaNoLiveWorker
+        exp_alerts: *no-live-worker
+      - eval_time: 10m
+        alertname: RastaMarketplaceSagaNoLiveWorker
+        exp_alerts: []
+
+  # #770 r2 F3: a settlement waits on economic-service. The saga retries, then
+  # stops retrying (a retry counter would go flat here and its alert clear),
+  # then the worker and the whole service die (nothing reports): the state
+  # alert fires throughout, without a gap, and clears only when the order is
+  # resolved.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '0+60x80 stale _x19 0x10'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="DISPUTE_RELEASE"}'
+        values: '0x80 stale _x19 0x10'
+      - series: 'rasta_marketplace_saga_economic_retries_illustrative_total{service="marketplace-service"}'
+        values: '0+1x40 40x70'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: []
+      - eval_time: 66m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: &unresolved
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: An order has waited over an hour on an unconfirmed financial step
+              description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. rasta_marketplace_saga_unresolved_orders names the step. It clears only when the order moves on.
+              runbook: docs/runbooks/marketplace-saga-liveness.md
+      # Retries stopped 40 minutes ago; the order is still unresolved.
+      - eval_time: 80m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: *unresolved
+      # The service is gone: still firing at once, not pending again.
+      - eval_time: 82m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: *unresolved
+      - eval_time: 100m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: *unresolved
+      # Back, and the order has moved on.
+      - eval_time: 101m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: []
+
+  # A dispute decided here that economic-service still holds DISPUTED: the
+  # same alert, by the same state.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="DISPUTE_RELEASE"}'
+        values: '3000+60x20'
+      - series: 'rasta_marketplace_saga_unresolved_age_seconds{service="marketplace-service",instance="replica-1",reason="SETTLING"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: RastaMarketplaceSagaFinancialStepUnresolved
+        exp_alerts: *unresolved

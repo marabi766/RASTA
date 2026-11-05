@@ -192,3 +192,37 @@ export const sagaStartDeliveries = new Counter({
   labelNames: ['service', 'outcome'] as const,
   registers: [registry],
 });
+
+/**
+ * 1 while this replica's saga worker runs AND Temporal lists it among the
+ * task queue's pollers; 0 otherwise — disabled, never started, failed,
+ * stopping, or a probe that could not tell (FU-104). Liveness is the server's
+ * view, not the SDK's, so a worker that still says RUNNING but no longer polls
+ * reads 0 once Temporal stops listing it.
+ */
+export const sagaWorkerUp = new Gauge({
+  name: 'rasta_marketplace_saga_worker_up',
+  help: 'Whether this replica has a saga worker that Temporal lists as polling (1) or not (0)',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * Orders whose next financial step belongs to the saga, by why (#770 r2 F3):
+ * a saga-custody status (`SAGA_CUSTODY`), or `DISPUTE_RELEASE` — a dispute
+ * mirrored to economic-service, decided here, and not yet released there.
+ * State read from the database, not a count of attempts: it stays until the
+ * order moves on, whatever the worker does. Every reason is always present.
+ */
+export const sagaUnresolvedOrders = new Gauge({
+  name: 'rasta_marketplace_saga_unresolved_orders',
+  help: 'Orders waiting on a financial step the saga owes, by reason',
+  labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});
+export const sagaUnresolvedAge = new Gauge({
+  name: 'rasta_marketplace_saga_unresolved_age_seconds',
+  help: 'Seconds the oldest such order has waited on the saga, by reason (0 when none)',
+  labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});

@@ -2,6 +2,7 @@ import { SAGA_START_DB_MAX_WAIT_MS, SAGA_START_DB_TIMEOUT_MS } from '../config/o
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { DISPUTE_RELEASE_STATUSES, SAGA_CUSTODY_STATUSES } from '../order/state-machine';
 
 export const START_BATCH_SIZE = 4;
 export const START_LEASE_SECONDS = 30;
@@ -83,5 +84,59 @@ export class SagaStartStore {
     `,
     );
     return { count: Number(row.count), age: Math.max(0, row.age) };
+  }
+
+  /**
+   * Orders waiting on a financial step the saga owes, by reason, with the
+   * oldest wait (#770 r2 F3). State, not attempts: an order counts until it
+   * moves on, whether the saga retries, has stopped, or has no worker.
+   *
+   * - A `SAGA_CUSTODY` status, waiting since it last left a party's hands (a
+   *   transition from a party or terminal status; else since creation), so a
+   *   settlement attempt bouncing RECEIPT_CONFIRMED ↔ SETTLING does not reset it.
+   * - `DISPUTE_RELEASE`: a party wait (D-083) whose last dispute mirror
+   *   (`disputeObligation` / `markObligationDisputed` step) is newer than its
+   *   last `resolveObligationDispute` step — economic-service still holds the
+   *   obligation DISPUTED. Waiting since the order left DISPUTED.
+   *
+   * Database clock, as `backlog`. Counts and ages only leave the database.
+   */
+  async unresolved(): Promise<{ reason: string; count: number; age: number }[]> {
+    const custody = SAGA_CUSTODY_STATUSES as string[];
+    const release = DISPUTE_RELEASE_STATUSES as string[];
+    const rows = await this.bounded(
+      (tx) => tx.$queryRaw<{ reason: string; count: bigint; age: number }[]>`
+      WITH owed AS (
+        SELECT
+          CASE WHEN o.status::text = ANY(${custody}::text[]) THEN o.status::text
+            ELSE 'DISPUTE_RELEASE' END AS reason,
+          COALESCE(CASE WHEN o.status::text = ANY(${custody}::text[]) THEN
+            (SELECT max(h.occurred_at) FROM order_status_history h
+              WHERE h.organization_id = o.organization_id AND h.order_id = o.id
+                AND h.kind = 'TRANSITION' AND NOT (h.from_status::text = ANY(${custody}::text[])))
+          ELSE
+            (SELECT max(h.occurred_at) FROM order_status_history h
+              WHERE h.organization_id = o.organization_id AND h.order_id = o.id
+                AND h.kind = 'TRANSITION' AND h.from_status = 'DISPUTED')
+          END, o.created_at) AS since
+        FROM "order" o
+        WHERE o.status::text = ANY(${custody}::text[])
+          OR (o.status::text = ANY(${release}::text[])
+            AND (SELECT max(s.applied_at) FROM saga_step s
+                  WHERE s.organization_id = o.organization_id AND s.order_id = o.id
+                    AND s.activity IN ('disputeObligation', 'markObligationDisputed'))
+              > COALESCE((SELECT max(s.applied_at) FROM saga_step s
+                  WHERE s.organization_id = o.organization_id AND s.order_id = o.id
+                    AND s.activity = 'resolveObligationDispute'), '-infinity'::timestamptz))
+      )
+      SELECT reason, count(*) AS count,
+        GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - min(since)))::float AS age
+      FROM owed GROUP BY reason
+    `,
+    );
+    return [...custody, 'DISPUTE_RELEASE'].map((reason) => {
+      const row = rows.find((candidate) => candidate.reason === reason);
+      return { reason, count: Number(row?.count ?? 0), age: row?.age ?? 0 };
+    });
   }
 }

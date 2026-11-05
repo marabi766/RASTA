@@ -1,12 +1,61 @@
 groups:
   - name: rasta-marketplace-saga-start
     rules:
+      # `or absent(...)`: a start backlog nobody reports — every replica down,
+      # or its sample failing (the series is withdrawn, never frozen) — is
+      # unknown, and keeps the alert firing instead of clearing it (#770 r2 F3).
       - alert: RastaMarketplaceSagaStartBacklogAging
         expr: max(rasta_marketplace_saga_start_backlog_age_seconds) > 300
+          or absent(rasta_marketplace_saga_start_backlog_age_seconds)
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: Order saga starts are waiting
-          description: A start intent has waited over five minutes. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+          description: A start intent has waited over five minutes, or no replica can measure the backlog. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
           runbook: docs/runbooks/marketplace-saga-deploy.md
+  # FU-104. `rasta_marketplace_saga_worker_up` is 1 only while the SDK says
+  # RUNNING and Temporal lists the worker's own identity as a poller of both
+  # task queues; a failed or ended run() drops it at once, a worker that stops
+  # polling drops it once Temporal stops listing it (about five minutes).
+  - name: rasta-marketplace-saga-liveness
+    rules:
+      - alert: RastaMarketplaceSagaWorkerDown
+        expr: rasta_marketplace_saga_worker_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'A marketplace replica has no polling saga worker ({{ $labels.instance }})'
+          description: This replica's order saga worker is not running, or Temporal does not list it as polling the order task queue. Restart the replica; if no replica polls, no saga moves money.
+          runbook: docs/runbooks/marketplace-saga-liveness.md
+      # No replica at all reports a live worker: every one down, failed,
+      # disabled, or not scraped. `absent` of the comparison, so zero series
+      # and all-zero series read alike.
+      - alert: RastaMarketplaceSagaNoLiveWorker
+        expr: absent(rasta_marketplace_saga_worker_up == 1)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No order saga worker is polling
+          description: No marketplace-service replica reports a saga worker that Temporal lists as polling. Holds, settlements, refunds and dispute releases are not progressing.
+          runbook: docs/runbooks/marketplace-saga-liveness.md
+  # #770 r2 F3. State, not a retry rate: the age of the oldest order waiting on
+  # a financial step the saga owes (a saga-custody status, or a dispute decided
+  # here that economic-service still holds). It stays until the order moves on,
+  # whether the saga retries, has stopped, or has no worker. `max` and `absent`
+  # both yield the empty label set, so a reporter that dies does not resolve
+  # the alert and open a new one: it simply keeps firing.
+  - name: rasta-marketplace-saga-uncertainty
+    rules:
+      - alert: RastaMarketplaceSagaFinancialStepUnresolved
+        expr: max(rasta_marketplace_saga_unresolved_age_seconds) > 3600
+          or absent(rasta_marketplace_saga_unresolved_age_seconds)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: An order has waited over an hour on an unconfirmed financial step
+          description: An order has waited over an hour for the saga to hold, settle, refund or release its funds and the outcome is unconfirmed, or no replica can measure it. rasta_marketplace_saga_unresolved_orders names the step. It clears only when the order moves on.
+          runbook: docs/runbooks/marketplace-saga-liveness.md
