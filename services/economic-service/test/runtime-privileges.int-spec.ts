@@ -56,6 +56,10 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   // So is a levels-and-badges version (COM-012 criterion 2).
   ['recognition_rule', 'trg_recognition_rule_append_only'],
   ['recognition_rule', 'trg_recognition_rule_no_truncate'],
+  // What a settlement reversal is capped by and bound to (RLG-002-1).
+  ['settlement', 'trg_settlement_append_only'],
+  ['settlement', 'trg_settlement_no_truncate'],
+  ['ledger_account', 'trg_ledger_account_identity_fixed'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
