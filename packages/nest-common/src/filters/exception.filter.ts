@@ -305,13 +305,39 @@ const BODY_PARSER_REFUSALS: Readonly<
     code: ERROR_CODES.UNSUPPORTED_MEDIA_TYPE,
     message: 'The request body is in a content encoding this service does not accept',
   },
+  'parameters.too.many': {
+    status: HttpStatus.PAYLOAD_TOO_LARGE,
+    code: ERROR_CODES.PAYLOAD_TOO_LARGE,
+    message: 'The request body has too many parameters',
+  },
+  'querystring.parse.rangeError': {
+    status: HttpStatus.BAD_REQUEST,
+    code: ERROR_CODES.MALFORMED_REQUEST,
+    message: 'The request body is nested too deeply',
+  },
+};
+
+/**
+ * A body in a content encoding that does not decode. zlib's error carries no
+ * `type`; body-parser only gives it status 400. Told by zlib's own codes: gzip
+ * and deflate (`Z_DATA_ERROR`, `Z_BUF_ERROR`), Brotli (`ERR__ERROR_FORMAT_…`),
+ * Zstandard (`ZSTD_error_…`).
+ */
+const DECOMPRESSION_FAILURE = /^(?:Z_[A-Z_]+|ERR__ERROR_[A-Z0-9_]+|ZSTD_error_[a-zA-Z0-9_]+)$/;
+const UNDECODABLE_BODY = {
+  status: HttpStatus.BAD_REQUEST,
+  code: ERROR_CODES.MALFORMED_REQUEST,
+  message: 'The request body could not be decompressed',
 };
 
 function bodyParserRefusal(
   exception: unknown,
 ): { status: number; code: ErrorCode; message: string } | undefined {
   if (!(exception instanceof Error)) return undefined;
-  const { type, status } = exception as { type?: unknown; status?: unknown };
+  const { type, status, code } = exception as { type?: unknown; status?: unknown; code?: unknown };
+  if (type === undefined && status === UNDECODABLE_BODY.status && typeof code === 'string') {
+    return DECOMPRESSION_FAILURE.test(code) ? UNDECODABLE_BODY : undefined;
+  }
   if (
     typeof type !== 'string' ||
     !Object.prototype.hasOwnProperty.call(BODY_PARSER_REFUSALS, type)
