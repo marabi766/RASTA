@@ -1516,6 +1516,77 @@ const RECOGNITION_RULE_STEPS = [
   },
 ];
 
+const SETTLEMENT_REVERSAL = '20261104120000_settlement_reversal';
+
+/**
+ * The rollback of `20261104120000_settlement_reversal` (RLG-002-1). Down refuses
+ * while a case exists, in words and before changing anything: it records a
+ * decision about money. With none, it rebuilds both enums under the rows that
+ * hold them, and up again adds the values back.
+ */
+const SETTLEMENT_REVERSAL_STEPS = [
+  {
+    label: 'settlement reversal: a settled transaction, its settlement, and one open case',
+    sql: `INSERT INTO "transaction" ("id", "organization_id", "counterparty_organization_id", "transaction_type",
+            "status", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "occurred_at",
+            "settled_at", "correlation_id", "updated_at", "created_by")
+          VALUES ('TXN_MIGCHECK_SRV', 'ORG-MIGCHECK', 'ORG-MIGCHECK-PAYEE', 'LOGISTICS', 'SETTLED', 1000, 0, 1000,
+            now(), now(), 'COR-MIGCHECK', now(), 'USR-MIGCHECK');
+          INSERT INTO "settlement" ("id", "organization_id", "transaction_id", "journal_id", "payer_organization_id",
+            "payee_organization_id", "gross_amount_minor", "commission_amount_minor", "net_amount_minor",
+            "currency", "settled_at", "settled_by")
+          VALUES ('STL_MIGCHECK_SRV', 'ORG-MIGCHECK', 'TXN_MIGCHECK_SRV', 'JRN_MIGCHECK_SRV', 'ORG-MIGCHECK',
+            'ORG-MIGCHECK-PAYEE', 1000, 0, 1000, 'IRR', now(), 'USR-MIGCHECK');
+          INSERT INTO "settlement_reversal" ("id", "organization_id", "transaction_id", "settlement_id",
+            "source_type", "source_reference")
+          VALUES ('SRV_01MIGCHECK0000000000000000', 'ORG-MIGCHECK', 'TXN_MIGCHECK_SRV', 'STL_MIGCHECK_SRV',
+            'MANUAL', 'MIGCHECK-1');`,
+  },
+  {
+    label: 'settlement reversal: the rollback refuses while a case exists',
+    runDownScript: [SETTLEMENT_REVERSAL],
+    mustFail: 'a settlement reversal exists',
+  },
+  {
+    label: 'settlement reversal: a case is never deleted',
+    sql: `DELETE FROM "settlement_reversal" WHERE id = 'SRV_01MIGCHECK0000000000000000';`,
+    mustFail: 'never removed',
+  },
+  {
+    label:
+      'settlement reversal: the owner removes the probe case (guard lifted in this script only)',
+    sql: `ALTER TABLE "settlement_reversal" DISABLE TRIGGER "trg_settlement_reversal_no_delete";
+          DELETE FROM "settlement_reversal" WHERE id = 'SRV_01MIGCHECK0000000000000000';
+          ALTER TABLE "settlement_reversal" ENABLE TRIGGER "trg_settlement_reversal_no_delete";`,
+  },
+  {
+    label: 'settlement reversal: with no case, the rollback rebuilds both enums under the rows',
+    runDownScript: [SETTLEMENT_REVERSAL],
+  },
+  {
+    label: 'settlement reversal: the row keeps its status through the rebuild',
+    sql: `DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM "transaction" WHERE id = 'TXN_MIGCHECK_SRV' AND status = 'SETTLED') THEN
+              RAISE EXCEPTION 'the rebuild lost the probe row';
+            END IF;
+          END $$;`,
+  },
+  { label: 'settlement reversal: up again', reapply: true },
+  {
+    label: 'settlement reversal: up again, a settlement is append-only once more',
+    sql: `DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'settlement reversal: the probe rows are removed before the chain reversal',
+    sql: `ALTER TABLE "settlement" DISABLE TRIGGER "trg_settlement_append_only";
+          DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';
+          ALTER TABLE "settlement" ENABLE TRIGGER "trg_settlement_append_only";
+          DELETE FROM "transaction" WHERE id = 'TXN_MIGCHECK_SRV';`,
+  },
+];
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label:
@@ -1676,6 +1747,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
     ...COMMISSION_BUSINESS_LINES_STEPS,
     ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
     ...TRANSACTION_RESOLVED_DISPUTE_STEPS,
+    ...SETTLEMENT_REVERSAL_STEPS,
   ],
 };
 
@@ -2159,6 +2231,8 @@ export const EXPECTED = {
       'transaction_source_quarantine',
       // What 20261103121000 found and did about legacy settlement authority (D-083).
       'settlement_authority_reconciliation',
+      // A correction case on a settlement (RLG-002-1, docs/24 Q-76).
+      'settlement_reversal',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2191,9 +2265,33 @@ export const EXPECTED = {
       'trg_wallet_hold_release_settlement_authority',
       'trg_settlement_authority_reconciliation_frozen',
       'trg_settlement_authority_reconciliation_no_truncate',
+      // The case's transitions and cap; never removed; the transaction and the
+      // journal each follow the money.
+      'trg_settlement_reversal_guard',
+      'trg_settlement_reversal_no_delete',
+      'trg_settlement_reversal_no_truncate',
+      'trg_settlement_reversal_status_moved',
+      'trg_transaction_reversal_status',
+      'trg_journal_settlement_reversal_owned',
+      'trg_journal_settlement_reversal_final',
+      'trg_ledger_entry_settlement_reversal_closed',
+      'trg_settlement_append_only',
+      'trg_settlement_no_truncate',
+      'trg_ledger_account_identity_fixed',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
-    types: ['BusinessLine', 'CommissionOutcome'],
+    types: [
+      'BusinessLine',
+      'CommissionOutcome',
+      'SettlementReversalSource',
+      'SettlementReversalStatus',
+    ],
+    // Added by 20261104120000; its down script rebuilds both types to take them away.
+    enumValues: [
+      ['TransactionStatus', 'PARTIALLY_REVERSED'],
+      ['TransactionStatus', 'REVERSED'],
+      ['JournalType', 'SETTLEMENT_REVERSAL'],
+    ],
     functions: [
       'reject_commission_mutation',
       'commission_rule_effective_dated',
@@ -2213,6 +2311,15 @@ export const EXPECTED = {
       'enforce_transaction_settlement_authority',
       'enforce_hold_release_settlement_authority',
       'reject_settlement_authority_reconciliation_change',
+      'enforce_settlement_reversal_change',
+      'reject_settlement_reversal_removal',
+      'assert_settlement_reversal_status_moved',
+      'enforce_transaction_reversal_status',
+      'assert_settlement_reversal_journal_owned',
+      'reject_settlement_reversal_journal_leg',
+      'reject_settlement_reversal_journal_undo',
+      'reject_settlement_mutation',
+      'reject_ledger_account_identity_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -2234,6 +2341,18 @@ export const EXPECTED = {
       'ck_transaction_order_source',
       'ck_transaction_source_quarantine_decision',
       'ck_settlement_authority_reconciliation_outcome',
+      'ck_settlement_reversal_id',
+      'ck_settlement_reversal_source_reference',
+      'ck_settlement_reversal_amounts',
+      'ck_settlement_reversal_proposal',
+      'ck_settlement_reversal_approval',
+      'ck_settlement_reversal_rejection',
+      'ck_settlement_reversal_text',
+      'ck_settlement_reversal_four_eyes',
+      'ck_transaction_reversed_settled',
+      'settlement_reversal_transaction_id_fkey',
+      'settlement_reversal_settlement_id_fkey',
+      'settlement_reversal_journal_id_fkey',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
@@ -2265,6 +2384,10 @@ export const EXPECTED = {
       'ix_reward_source_evaluation_subject',
       // A quarantined key, per tenant, as the row carried it (#334 r3).
       'ix_transaction_source_quarantine_key',
+      'ux_settlement_reversal_source',
+      'ux_settlement_reversal_journal',
+      'ix_settlement_reversal_org_status',
+      'ix_settlement_reversal_transaction',
     ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
@@ -2923,8 +3046,16 @@ export const EXPECTED = {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      // 20261104100000_deduction_rule_changes (CON-003-1): rule changes under four eyes.
+      'deduction_rule_change',
     ],
-    types: ['ContractStatus', 'ContractSide', 'ApprovalPolicyStatus'],
+    types: [
+      'ContractStatus',
+      'ContractSide',
+      'ApprovalPolicyStatus',
+      'DeductionRuleChangeKind',
+      'DeductionRuleChangeStatus',
+    ],
     triggers: [
       'tg_contract_guard',
       'tg_contract_no_truncate',
@@ -2936,12 +3067,23 @@ export const EXPECTED = {
       'tg_approval_policy_step_insert',
       'tg_approval_policy_step_immutable',
       'tg_approval_policy_step_no_truncate',
+      'tg_deduction_rule_change_insert',
+      'tg_deduction_rule_change_guard',
+      'tg_deduction_rule_change_no_truncate',
+      'tg_deduction_rule_change_effect',
+      'tg_deduction_rule_insert',
     ],
     functions: [
       'contract_guard',
       'contract_signature_guard',
       'approval_policy_guard',
       'approval_policy_step_guard',
+      'deduction_rule_change_insert_guard',
+      'deduction_rule_change_guard',
+      'deduction_rule_change_effect',
+      'deduction_rule_insert_guard',
+      'deduction_rule_name_is_canonical',
+      'deduction_rule_name_key',
     ],
     indexes: [
       'ux_contract_org_tender',
@@ -2955,6 +3097,10 @@ export const EXPECTED = {
       'ux_approval_policy_step_order',
       // `ux_approval_policy_step_authority` is dropped by 20261016120000 (CON-003 PR 5): one step
       // per authority holds for signing policies only, in `approval_policy_step_guard`.
+      'ux_deduction_rule_change_org_id',
+      'ux_deduction_rule_change_pending_create',
+      'ux_deduction_rule_change_pending_retire',
+      'ux_deduction_rule_approved_change',
     ],
     constraints: [
       'ck_contract_cancellation',
@@ -2986,6 +3132,20 @@ export const EXPECTED = {
       'ck_outbox_attempts_nonneg',
       'ck_outbox_next_attempt_requires_failure',
       'ck_outbox_published_is_clean',
+      'deduction_rule_change_rule_fkey',
+      'deduction_rule_approved_change_fkey',
+      'ck_deduction_rule_change_text_not_blank',
+      'ck_deduction_rule_change_kind',
+      'ck_deduction_rule_change_name',
+      'ck_deduction_rule_change_rate',
+      'ck_deduction_rule_change_base',
+      'ck_deduction_rule_change_reason',
+      'ck_deduction_rule_change_decision',
+      'ck_deduction_rule_change_timestamps',
+      'ck_deduction_rule_change_version',
+      'ck_deduction_rule_change_four_eyes',
+      'ck_deduction_rule_change_withdrawn_by_proposer',
+      'ck_deduction_rule_name_canonical',
     ],
   },
   /**

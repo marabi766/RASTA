@@ -1914,22 +1914,19 @@ for (const [job, image, ignores] of SCANS) {
   });
 }
 
-test('containers: every job it already waited for is still required to have succeeded', () => {
+test('containers: waits for the scope and the DB only; every job it used to wait for is demanded by the images gate (FU-111)', () => {
+  // The scans need the image selection and the shared DB, nothing a test makes, so they run
+  // beside the tests. The tests' green is still required: `images` ("Images built and scanned")
+  // lists every one of them in needs and its verdict (imagesGateVerdict) turns red on any that
+  // did not succeed; scripts/container-scope.test.mjs runs that verdict for each.
+  assert.deepEqual(workflow.jobs.containers.needs, ['container-scope', 'trivy-db']);
   const cond = String(workflow.jobs.containers.if);
-  const others = workflow.jobs.containers.needs.filter(
-    (n) => n !== 'trivy-db' && n !== 'container-scope',
-  );
-  assert.deepEqual(others, [
-    'quality',
-    'security',
-    'integration',
-    'migration-reversibility',
-    'e2e',
-  ]);
-  for (const n of [...others, 'container-scope']) {
-    assert.ok(cond.includes(`needs.${n}.result == 'success'`), n);
-  }
+  assert.ok(cond.includes("needs.container-scope.result == 'success'"));
   assert.ok(cond.includes("needs.container-scope.outputs.services != '[]'"));
+  assert.deepEqual(
+    workflow.jobs.images.needs.filter((n) => n !== 'trivy-db' && n !== 'container-scope'),
+    ['containers', 'quality', 'security', 'integration', 'migration-reversibility', 'e2e'],
+  );
 });
 
 test('the Alpine releases the DB must cover are those of every scanned image (addendum B)', () => {

@@ -1,9 +1,14 @@
-import { All, Controller, Inject, Req, Res } from '@nestjs/common';
+import { All, Controller, Inject, MethodNotAllowedException, Req, Res } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Public, RastaError, getContext } from '@rasta/nest-common';
 import { authorizationDenialsTotal, normalizeRoute } from '@rasta/observability';
 import type { Request, Response } from 'express';
-import { ClientCancelledError, ProxyService, type ProxyResponse } from './proxy.service';
+import {
+  ClientCancelledError,
+  FORWARDABLE_METHODS,
+  ProxyService,
+  type ProxyResponse,
+} from './proxy.service';
 import { RateLimiter } from './rate-limiter';
 import { isSafeMethod, rateLimitFor } from './rate-limit-rule';
 import { resolveRoute, type RouteRule } from '../config/routes';
@@ -22,7 +27,9 @@ import { GATEWAY_ENV } from '../tokens';
  *   3. rate limit        before doing real work, so a flood is cheap to refuse
  *   4. idempotency key   before forwarding, so a missing key never charges
  *   5. coarse role check a cheap filter, NOT the authorization decision
- *   6. forward           admitted by the service's circuit breaker; refused
+ *   6. forward           prepared first: a request that cannot be sent is the
+ *                        caller's 4xx, never held against the service. Then
+ *                        admitted by the service's circuit breaker; refused
  *                        here never takes its HALF_OPEN probe slot
  *
  * Step 5 deserves emphasis: the service re-checks authorization independently,
@@ -82,6 +89,9 @@ export class GatewayController {
     } catch (error) {
       // Nobody is left to answer; the socket is already closed.
       if (error instanceof ClientCancelledError) return;
+      if (error instanceof MethodNotAllowedException) {
+        response.setHeader('Allow', FORWARDABLE_METHODS.join(', '));
+      }
       throw error;
     } finally {
       cancellation.dispose();

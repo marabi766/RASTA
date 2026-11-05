@@ -367,15 +367,12 @@ export const CLI_CONTRACT = Object.freeze({
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
   'scripts/ci-node-test-timeouts-lib.mjs': {
     other: [
-      '--dir',
       '--enable-source-maps',
       '--filter',
       '--import',
       '--no-warnings',
       '--test',
       '--test-timeout',
-      '-C',
-      '-F',
     ],
   },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
@@ -435,7 +432,9 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
+  // It reads argv only to refuse any argument at all (#673 r1 F2).
   'scripts/marketplace-saga-drain-check.mjs': {
+    positionals: [],
     other: [
       '--no-json-shorthand-payloads',
       '--address',
