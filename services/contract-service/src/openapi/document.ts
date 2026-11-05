@@ -4,12 +4,16 @@ import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swag
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
 import {
+  applyOperationSecurity,
+  INTERNAL_TOKEN_SCHEME,
   isOptionalField,
   objectShapeOf,
   publishedApiErrorSchema,
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
+  routeAccessByOperation,
   toJsonSchema,
+  type ServiceRouteUsers,
 } from '@rasta/nest-common';
 import { ContractController } from '../contract/contract.controller';
 import { ContractService } from '../contract/contract.service';
@@ -278,8 +282,8 @@ export const POLICY_ERROR_DESCRIPTIONS: Record<number, string> = {
 };
 
 /**
- * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4), which answer one named
- * service and no user at all.
+ * The same statuses on the routes that refuse every user (`users-refused` in `SERVICE_ROUTES`,
+ * ADR-061 § 4), which answer one named service and no user at all.
  */
 export const INTERNAL_ERROR_DESCRIPTIONS: Record<number, string> = {
   401: ERROR_DESCRIPTIONS[401] as string,
@@ -288,12 +292,25 @@ export const INTERNAL_ERROR_DESCRIPTIONS: Record<number, string> = {
   500: 'Unexpected server error.',
 };
 
+export { INTERNAL_TOKEN_SCHEME };
+
 /**
- * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
- * else. `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as
- * a user — so the internal routes cannot be described by the bearer scheme.
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`settlement-fact.ts`) — and must match the decorators exactly.
  */
-export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/statements/{id}': 'users-refused',
+};
+
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 const DESCRIPTION =
   'The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: ' +
@@ -331,19 +348,9 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
       .setDescription(DESCRIPTION)
       .setVersion(CONTRACT_VERSION)
       .addBearerAuth()
-      .addApiKey(
-        {
-          type: 'apiKey',
-          in: 'header',
-          name: 'X-Internal-Token',
-          description:
-            'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
-        },
-        INTERNAL_TOKEN_SCHEME,
-      )
       .build(),
   );
-  return enrichOpenApiDocument(document);
+  return publishOperationSecurity(enrichOpenApiDocument(document), app);
 }
 
 /**
@@ -390,12 +397,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
-      // `addBearerAuth()` declares the scheme; it does not apply it. Without this the
-      // contract would describe endpoints anybody can call. The internal routes answer a
-      // service's internal token only, which is not a bearer token.
-      operation.security ??= path.startsWith('/v1/internal/')
-        ? [{ [INTERNAL_TOKEN_SCHEME]: [] }]
-        : [{ bearer: [] }];
+      // Every operation's `security` is `publishOperationSecurity`'s, from the guard's metadata
+      // (FU-075), never from the path.
 
       const query = QUERY_SCHEMAS[key];
       const body = REQUEST_BODIES[key];
@@ -438,11 +441,12 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         };
       }
 
-      const descriptions = path.startsWith('/v1/internal/')
-        ? INTERNAL_ERROR_DESCRIPTIONS
-        : path.startsWith('/v1/contract-approval-policies')
-          ? POLICY_ERROR_DESCRIPTIONS
-          : ERROR_DESCRIPTIONS;
+      const descriptions =
+        SERVICE_ROUTES[key] === 'users-refused'
+          ? INTERNAL_ERROR_DESCRIPTIONS
+          : path.startsWith('/v1/contract-approval-policies')
+            ? POLICY_ERROR_DESCRIPTIONS
+            : ERROR_DESCRIPTIONS;
       for (const [status, description] of Object.entries(descriptions)) {
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
@@ -509,7 +513,6 @@ interface MutableOperation {
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;
-  security?: Record<string, string[]>[];
 }
 
 function isHeader(parameter: unknown, name: string): boolean {

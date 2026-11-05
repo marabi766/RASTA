@@ -3,6 +3,7 @@ import { ApplicationFailure, Context, CancelledFailure } from '@temporalio/activ
 import {
   createSystemContext,
   isRastaError,
+  RastaError,
   runWithContext,
   type RequestContext,
 } from '@rasta/nest-common';
@@ -427,6 +428,19 @@ export function createActivities(deps: ActivityDependencies) {
         orderId,
         'authoriseSettlement',
         async (order) => {
+          // The buyer's receipt is what authorises settlement; without it on
+          // the row, nothing is asked of economic-service. An order an older
+          // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
+          // otherwise authorise an obligation migration 20261103121000 put
+          // back in HELD (#625 round 2 self-review). Refused for good: the
+          // saga stops with the funds held, for the runbook
+          // (docs/runbooks/marketplace-receipt-evidence.md).
+          if (!order.receiptConfirmed) {
+            throw RastaError.businessRule(
+              'Settlement is authorised only for an order whose receipt the buyer confirmed',
+              { orderId: order.id },
+            );
+          }
           await deps.economic.authoriseSettlement({
             orderId: order.id,
             transactionId,
@@ -603,7 +617,7 @@ export function createActivities(deps: ActivityDependencies) {
           // resolution — which the saga sends only after this step — changes
           // them.
           answer: (transaction) =>
-            transaction.status === 'DISPUTED' && transaction.disputeReason === reason
+            transaction.status === 'DISPUTED' && sameText(transaction.disputeReason, reason)
               ? { result: transaction.disputeId ?? null }
               : null,
         },
@@ -662,7 +676,7 @@ export function createActivities(deps: ActivityDependencies) {
               transaction.disputedAt !== null;
             const ours =
               economicDisputeId === undefined
-                ? resolutionOf(transaction) === resolution
+                ? sameText(resolutionOf(transaction), resolution)
                 : transaction.disputeId === economicDisputeId;
             return released && ours ? { result: undefined } : null;
           },
@@ -724,6 +738,18 @@ function systemContext(organizationId: string | undefined, correlationId: string
  */
 function refusedForState(error: unknown): boolean {
   return isRastaError(error) && error.code === 'INVALID_STATE_TRANSITION';
+}
+
+/**
+ * The same words, whatever their line endings. economic-service keeps the text
+ * as sent; once it keeps it with LF line endings (FU-115), this reader still
+ * finds its own dispute and resolution — which is why this release, reading
+ * both, must be every running worker and the rollback floor before that
+ * writer ships (docs/06 § 6.8). This service keeps what the person sent.
+ */
+function sameText(kept: string | null | undefined, sent: string): boolean {
+  const lf = (text: string) => text.replace(/\r\n?/g, '\n');
+  return typeof kept === 'string' && lf(kept) === lf(sent);
 }
 
 /**

@@ -25,7 +25,8 @@ import { RastaError } from '../errors/rasta-error';
  */
 @Injectable()
 export class ZodValidationPipe<T extends z.ZodType> implements PipeTransform {
-  constructor(private readonly schema: T) {}
+  /** Public so a test can read what a route validates with (FU-078: what is validated is what is published). */
+  constructor(readonly schema: T) {}
 
   transform(value: unknown, _metadata: ArgumentMetadata): z.infer<T> {
     return validateRequestInput(this.schema, value);

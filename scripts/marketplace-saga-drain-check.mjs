@@ -42,11 +42,16 @@
  * an API key: the `temporal` CLI's own TEMPORAL_* variables, inherited.
  * MARKETPLACE_TARGET_PACKAGE_JSON is the package.json extracted from the target
  * image, whose name must be @rasta/marketplace-service. marketplaceSagaProtocol
- * is 0 (legacy) or 1; an absent field means 0. Always run this gate from the
+ * is a protocol this gate knows (`PATCH_PROTOCOL`); an absent field means 0, the
+ * legacy protocol. Always run this gate from the
  * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
-import { commandFailure, clientFailureCode } from '../packages/config/src/command-failure.js';
+import {
+  commandFailure,
+  clientFailureCode,
+  markRefusal,
+} from '../packages/config/src/command-failure.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -165,9 +170,48 @@ function listExecutions(cli, common, query, expected, status = 'RUNNING') {
   return executions;
 }
 
-// Protocol 1 is forward-only: patch commands and continuation state cannot be
-// understood by protocol 0. Read durable history, not eventually indexed memo.
-const ROLLOVER_PATCH = 'order-saga-durable-rollover-v1';
+// Each protocol is forward-only: its patch commands and continuation state cannot
+// be understood by a lower one. Read durable history, not eventually indexed memo.
+// Whatever is not listed here refuses the deployment; the test suite scans the
+// saga's source, so a new `patched()` id fails CI until it is listed.
+const PATCH_PROTOCOL = new Map([
+  ['order-saga-durable-rollover-v1', 1],
+  ['dispute-settle-resumes-order', 2],
+]);
+const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
+// A continued run has no marker until its first workflow task: its `resume` is
+// the only evidence of what wrote it. `reminderDue` came with protocol 2.
+const RESUME_PROTOCOL = new Map([
+  ['status', 1],
+  ['mirroredDispute', 1],
+  ['mirroredEconomicDispute', 1],
+  ['waitingIn', 1],
+  ['nextReminderAt', 1],
+  ['activitySequence', 1],
+  ['reminderDue', 2],
+]);
+// Every field a saga has ever been started with; any other could mean anything.
+const INPUT_FIELDS = new Set([
+  'orderId',
+  'fulfillmentWindowDays',
+  'receiptWindowDays',
+  'reminderIntervalDays',
+  'recheckIntervalHours',
+  'historyEventThreshold',
+  'resume',
+]);
+function resumeProtocol(resume) {
+  if (!isRecord(resume)) throw new Unverifiable('workflow history: invalid start input');
+  let required = 1;
+  for (const field of Object.keys(resume)) {
+    const protocol = RESUME_PROTOCOL.get(field);
+    if (protocol === undefined) {
+      throw new Unverifiable('workflow history: unknown continuation state');
+    }
+    required = Math.max(required, protocol);
+  }
+  return required;
+}
 function jsonPayload(payload) {
   try {
     if (payload?.metadata?.encoding !== 'anNvbi9wbGFpbg==' || typeof payload.data !== 'string') {
@@ -203,8 +247,10 @@ function requiredProtocol(history, historyLength, taskQueue) {
     throw new Unverifiable('workflow history: missing start input');
   }
   const input = jsonPayload(start.input.payloads[0]);
-  if (!isRecord(input)) throw new Unverifiable('workflow history: invalid start input');
-  let required = Object.hasOwn(input, 'resume') ? 1 : 0;
+  if (!isRecord(input) || Object.keys(input).some((field) => !INPUT_FIELDS.has(field))) {
+    throw new Unverifiable('workflow history: invalid start input');
+  }
+  let required = Object.hasOwn(input, 'resume') ? resumeProtocol(input.resume) : 0;
   for (const event of events) {
     if (
       event.eventType !== 'EVENT_TYPE_MARKER_RECORDED' &&
@@ -220,10 +266,11 @@ function requiredProtocol(history, historyLength, taskQueue) {
       throw new Unverifiable('workflow history: unreadable compatibility marker');
     }
     const patch = jsonPayload(marker.details['patch-data'].payloads[0]);
-    if (patch?.id !== ROLLOVER_PATCH || typeof patch.deprecated !== 'boolean') {
+    const protocol = PATCH_PROTOCOL.get(patch?.id);
+    if (protocol === undefined || typeof patch.deprecated !== 'boolean') {
       throw new Unverifiable('workflow history: unknown compatibility marker');
     }
-    required = 1;
+    required = Math.max(required, protocol);
   }
   return required;
 }
@@ -256,7 +303,7 @@ function check() {
   // Pre-protocol releases support only legacy histories; do not rewrite their manifests.
   const targetProtocol =
     target.marketplaceSagaProtocol === undefined ? 0 : target.marketplaceSagaProtocol;
-  if (targetProtocol !== 0 && targetProtocol !== 1) {
+  if (!Number.isInteger(targetProtocol) || targetProtocol < 0 || targetProtocol > LATEST_PROTOCOL) {
     throw new Unverifiable('target build compatibility declaration is unsupported');
   }
   const common = ['--address', address, '--namespace', namespace];
@@ -344,8 +391,9 @@ function check() {
       'json',
       '--no-json-shorthand-payloads',
     ]);
-    if (requiredProtocol(history, info.historyLength, taskQueue) > targetProtocol) {
-      blockers.push('workflow requires saga protocol 1; incompatible target build');
+    const required = requiredProtocol(history, info.historyLength, taskQueue);
+    if (required > targetProtocol) {
+      blockers.push(`workflow requires saga protocol ${required}; incompatible target build`);
     }
     for (let i = 0; i < pending.length; i += 1) {
       blockers.push('workflow has a pending activity; details withheld');
@@ -379,6 +427,18 @@ function check() {
 }
 
 try {
+  // Environment only, so any argument is a command line it does not have
+  // (#673 r1 F2): `--namespace x` would otherwise check TEMPORAL_NAMESPACE's
+  // namespace and could report OK for the wrong one. Refused before any
+  // setting is read or any `temporal` call is made.
+  if (process.argv.length !== 2) {
+    throw markRefusal(
+      new Error(
+        'usage: marketplace-saga-drain-check.mjs (no arguments; settings from the environment)',
+      ),
+      'usage',
+    );
+  }
   const { running, blockers } = check();
   if (blockers.length > 0) {
     console.error(`marketplace saga drain check: BLOCKED — ${blockers.length} finding(s):`);
