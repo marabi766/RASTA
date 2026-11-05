@@ -12,13 +12,35 @@ const load = (root, file) => readFileSync(`${root}/${file}`, 'utf8');
 
 // Pin all workflow context and all quality-job values, not just key names.
 // Repository pnpm inputs are pinned with normalized line endings; new settings require review.
+// FU-111: the one `quality` job is five parallel `quality-*` jobs and an aggregate named
+// `quality`. The manifest pins every one of them and their steps in this order; a quality job
+// the manifest does not list, or one it lists that is gone, refuses (fail closed), so no step
+// of the family can be added, moved or dropped without an explicit entry and reason.
+export const QUALITY_JOBS = [
+  'quality-guards',
+  'quality-lint',
+  'quality-types',
+  'quality-unit',
+  'quality-build',
+  'quality',
+];
 const pnpmFiles = ['package.json', 'pnpm-workspace.yaml', '.npmrc'];
+const isMapping = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 export function validateParity(workflow, manifest, scripts, pnpmInputs) {
   const { jobs, ...context } = parse(workflow);
-  const { steps, ...job } = jobs.quality;
-  if (manifest?.version !== 2) refuse();
+  if (manifest?.version !== 3) refuse();
   if (!isDeepStrictEqual(context, manifest.workflow)) refuse();
-  if (!isDeepStrictEqual(job, manifest.job)) refuse();
+  if (!isMapping(jobs) || !isMapping(manifest.jobs)) refuse();
+  const family = Object.keys(jobs).filter((id) => id === 'quality' || id.startsWith('quality-'));
+  if (!isDeepStrictEqual([...family].sort(), [...QUALITY_JOBS].sort())) refuse();
+  if (!isDeepStrictEqual(Object.keys(manifest.jobs), QUALITY_JOBS)) refuse();
+  const steps = [];
+  for (const id of QUALITY_JOBS) {
+    if (!isMapping(jobs[id]) || !Array.isArray(jobs[id].steps)) refuse();
+    const { steps: jobSteps, ...job } = jobs[id];
+    if (!isDeepStrictEqual(job, manifest.jobs[id])) refuse();
+    steps.push(...jobSteps.map((step) => ({ id, step })));
+  }
   if (!Array.isArray(manifest.steps)) refuse();
   if (steps.length !== manifest.steps.length) refuse();
   const digests = Object.fromEntries(
@@ -29,8 +51,9 @@ export function validateParity(workflow, manifest, scripts, pnpmInputs) {
   );
   if (!isDeepStrictEqual(digests, manifest.pnpmInputs)) refuse();
   const checks = [];
-  for (const [index, step] of steps.entries()) {
+  for (const [index, { id, step }] of steps.entries()) {
     const entry = manifest.steps[index];
+    if (entry?.job !== id) refuse();
     if (!isDeepStrictEqual(step, entry.ci)) refuse();
     if (entry.script !== undefined) {
       if (

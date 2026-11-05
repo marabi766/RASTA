@@ -9,6 +9,7 @@ import {
   controlledEnv,
   executeCheck,
   runParity,
+  QUALITY_JOBS,
   validateParity as validate,
 } from './prepush-parity-lib.mjs';
 
@@ -43,7 +44,7 @@ test('real quality job has complete, explicit coverage and CI executes this guar
 test('fake-step mutant, including alternate pnpm spelling and non-pnpm command, refuses', () => {
   for (const run of ['pnpm run fake:check', 'pnpm fake:check', 'node scripts/new-check.mjs']) {
     const mutant = parse(workflow);
-    mutant.jobs.quality.steps.push({ name: 'Fake step', run });
+    mutant.jobs['quality-guards'].steps.push({ name: 'Fake step', run });
     assert.throws(() => validateParity(stringify(mutant), manifest, scripts));
   }
 });
@@ -54,9 +55,44 @@ test('missing, malformed, renamed and empty CI jobs refuse', () => {
     '{}',
     'jobs: {quality: {steps: []}}',
     workflow.replace('  quality:', '  other:'),
+    workflow.replace('  quality-lint:', '  other:'),
   ]) {
     assert.throws(() => validateParity(text, manifest, scripts));
   }
+});
+
+test('FU-111: every quality job and step is pinned; an added, moved, dropped or renamed one refuses', () => {
+  assert.deepEqual(Object.keys(manifest.jobs), QUALITY_JOBS);
+  // A job nobody listed.
+  const extra = parse(workflow);
+  extra.jobs['quality-extra'] = { 'runs-on': 'ubuntu-latest', steps: [{ run: 'true' }] };
+  assert.throws(() => validateParity(stringify(extra), manifest, scripts));
+  for (const id of QUALITY_JOBS) {
+    // A step dropped, one added, one moved to another job, the job emptied or renamed.
+    const dropped = parse(workflow);
+    dropped.jobs[id].steps.pop();
+    assert.throws(() => validateParity(stringify(dropped), manifest, scripts), `drop ${id}`);
+    const added = parse(workflow);
+    added.jobs[id].steps.push({ name: 'Sneaked', run: 'true' });
+    assert.throws(() => validateParity(stringify(added), manifest, scripts), `add ${id}`);
+    const renamed = parse(workflow);
+    renamed.jobs[`${id}-x`] = renamed.jobs[id];
+    delete renamed.jobs[id];
+    assert.throws(() => validateParity(stringify(renamed), manifest, scripts), `rename ${id}`);
+    const moved = parse(workflow);
+    const [step] = moved.jobs[id].steps.splice(-1, 1);
+    const other = QUALITY_JOBS.find((x) => x !== id && x !== 'quality');
+    moved.jobs[other].steps.push(step);
+    assert.throws(() => validateParity(stringify(moved), manifest, scripts), `move ${id}`);
+  }
+  // An entry that claims the wrong job.
+  const wrongJob = clone(manifest);
+  wrongJob.steps[0].job = 'quality-lint';
+  assert.throws(() => validateParity(workflow, wrongJob, scripts));
+  // The aggregate's verdict is pinned too: a verdict that passes everything refuses.
+  const lax = parse(workflow);
+  lax.jobs.quality.steps[0].run = 'echo ok';
+  assert.throws(() => validateParity(stringify(lax), manifest, scripts));
 });
 
 test('command, environment, shell, condition and failure handling drift refuses, including exclusions', () => {
@@ -70,12 +106,12 @@ test('command, environment, shell, condition and failure handling drift refuses,
   ]) {
     for (const index of [0, 4, 5]) {
       const mutant = parse(workflow);
-      Object.assign(mutant.jobs.quality.steps[index], change);
+      Object.assign(mutant.jobs['quality-guards'].steps[index], change);
       assert.throws(() => validateParity(stringify(mutant), manifest, scripts));
     }
   }
   const mutant = parse(workflow);
-  mutant.jobs.quality.env = { NODE_OPTIONS: '--env-file=.env' };
+  mutant.jobs['quality-guards'].env = { NODE_OPTIONS: '--env-file=.env' };
   assert.throws(() => validateParity(stringify(mutant), manifest, scripts));
 });
 
@@ -89,11 +125,11 @@ test('missing reasons, changed root scripts, duplicate entries and missing guard
   const missing = clone(manifest);
   missing.steps = missing.steps.filter((c) => c.script !== 'test:prepush-parity');
   const mutant = parse(workflow);
-  mutant.jobs.quality.steps = missing.steps.map((c) => c.ci);
+  mutant.jobs['quality-guards'].steps = missing.steps.map((c) => c.ci);
   assert.throws(() => validateParity(stringify(mutant), missing, scripts));
   const duplicated = clone(manifest);
   duplicated.steps.push(clone(duplicated.steps.find((c) => c.script)));
-  mutant.jobs.quality.steps = duplicated.steps.map((c) => c.ci);
+  mutant.jobs['quality-guards'].steps = duplicated.steps.map((c) => c.ci);
   assert.throws(() => validateParity(stringify(mutant), duplicated, scripts));
 });
 
@@ -238,9 +274,11 @@ test('all job values and unknown job keys refuse independently', () => {
     { strategy: {} },
     { futureSetting: true },
   ]) {
-    const changed = parse(workflow);
-    Object.assign(changed.jobs.quality, change);
-    assert.throws(() => validateParity(stringify(changed), manifest, scripts));
+    for (const id of QUALITY_JOBS) {
+      const copy = parse(workflow);
+      Object.assign(copy.jobs[id], change);
+      assert.throws(() => validateParity(stringify(copy), manifest, scripts), id);
+    }
   }
 });
 
@@ -259,7 +297,7 @@ test('every extra executed-step field refuses even with CI and manifest co-drift
         ci = parse(workflow);
       const index = changed.steps.findIndex((entry) => entry.script === script);
       Object.assign(changed.steps[index].ci, change);
-      ci.jobs.quality.steps[index] = changed.steps[index].ci;
+      ci.jobs['quality-guards'].steps[index] = changed.steps[index].ci;
       assert.throws(() => validateParity(stringify(ci), changed, scripts));
     }
   }
@@ -297,7 +335,7 @@ test('executed run and exact script-to-command binding refuse co-drift', () => {
     ci = parse(workflow);
   const index = changed.steps.findIndex((e) => e.script);
   changed.steps[index].ci.run = 'true';
-  ci.jobs.quality.steps[index] = changed.steps[index].ci;
+  ci.jobs['quality-guards'].steps[index] = changed.steps[index].ci;
   assert.throws(() => validateParity(stringify(ci), changed, scripts));
   for (const script of ['test:prepush-scope', 'test:prepush-parity']) {
     for (const prefix of ['pre', 'post']) {

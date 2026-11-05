@@ -576,13 +576,33 @@ export async function cleanup(
       orgs,
     );
 
-    await client.$executeRawUnsafe(
-      `DELETE FROM settlement WHERE transaction_id IN (
-         SELECT id FROM "transaction"
-          WHERE organization_id LIKE ANY($1::text[])
-             OR counterparty_organization_id LIKE ANY($1::text[]))`,
-      orgs,
-    );
+    // A settlement is append-only at the database (RLG-002-1), so this run's own
+    // go with the guard lifted in one owner transaction, which restores it on every
+    // exit path. By transaction as well as by organization: the payee's run clears it too.
+    const settlementOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await settlementOwner.$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE settlement DISABLE TRIGGER trg_settlement_append_only',
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM settlement
+            WHERE organization_id LIKE ANY($1::text[])
+               OR transaction_id IN (
+                    SELECT id FROM "transaction"
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR counterparty_organization_id LIKE ANY($1::text[]))`,
+          orgs,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE settlement ENABLE TRIGGER trg_settlement_append_only',
+        );
+      });
+    } finally {
+      await settlementOwner.$disconnect();
+    }
     // The operator path's history is append-only at the database (ADR-064 B3),
     // and so is a posted commission (ADR-045 § 3). Lifted for this run's own
     // organizations only, inside one transaction that restores the triggers
@@ -696,7 +716,6 @@ export async function cleanup(
     }
 
     for (const table of [
-      'settlement',
       'reward',
       'reward_balance',
       // Children first: each foreign key here is ON DELETE RESTRICT.
