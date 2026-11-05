@@ -263,3 +263,291 @@ for (const [finding, cases] of Object.entries(regressions))
     });
 for (const [index, code] of positives.entries())
   it(`F4 safe syntax ${index + 1}: ${code}`, () => assert.deepEqual(messages(code), []));
+
+const provenanceFailures = [
+  `function factory(){if(true)return Number;return v=>v;} z.preprocess(v=>factory()(v),z.number());`,
+  `const factory=()=>{while(true){return BigInt;}return v=>v;}; z.preprocess(v=>factory()(v),z.bigint());`,
+  `function factory(){if(true)return String;return v=>v;} z.preprocess(v=>factory()(v),z.string());`,
+  `function apply(f,v) { return f(v); } z.preprocess(v=>apply(Number,v),z.number());`,
+  `function get() { return Number; } z.preprocess(v=>get()(v),z.number());`,
+  `const get=()=>Number; const f=get(); z.preprocess(v=>f(v),z.number());`,
+  `const get=()=>Number; const f=get(); z.preprocess((v,n=f(v))=>n,z.number());`,
+  `function f(v,{n=Number(v)}={}) { return n; } z.preprocess(v=>f(v),z.number());`,
+  `import {normalizePersianText} from 'unreviewed'; z.preprocess(v=>normalizePersianText(v),z.string());`,
+  `import {normalizePersianText} from '@/lib/format'; z.preprocess(v=>normalizePersianText(v),z.string());`,
+  `import {parseMoneyInput} from '@/lib/format'; z.preprocess(v=>parseMoneyInput(v),z.bigint());`,
+  `z.preprocess(v=>new Promise(Number),z.number());`,
+  `z.preprocess(v=>setTimeout(Number,1),z.number());`,
+];
+for (const code of provenanceFailures)
+  it(`F3 helper provenance refusal: ${code}`, () =>
+    assert.ok(
+      messages(code).some((m) => m.ruleId === 'boundary/coercion'),
+      code,
+    ));
+for (const code of [
+  `function apply(f,v) { return f(v); } z.preprocess(v=>apply(n=>n,v),z.unknown());`,
+  `function factory(){if(false)throw new Error('unused');return v=>v;} z.preprocess(v=>factory()(v),z.unknown());`,
+  `z.preprocess(v=>new Promise(resolve=>setTimeout(resolve,1)),z.unknown());`,
+  `function f(v) { return v.trim(); } z.preprocess(v=>typeof v==='string'?f(v):v,z.string());`,
+  `import {normalizePersianText} from '@/lib/format'; z.preprocess(v=>typeof v==='string'?normalizePersianText(v):v,z.string());`,
+  `import {parseMoneyInput} from '@/lib/format'; z.preprocess(v=>typeof v==='string'?parseMoneyInput(v):v,z.bigint());`,
+])
+  it(`F3 proven helper call: ${code}`, () => assert.deepEqual(messages(code), []));
+
+import { mkdtempSync, cpSync, appendFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { verifiedCallbackHelper } from './zod-callback-helpers.mjs';
+it('reviewed helper provenance refuses unknown, missing and changed source', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-helper-'));
+  try {
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      undefined,
+    );
+    cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
+      recursive: true,
+    });
+    // The reviewed current formatter delegates fixed messages to this source.
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/form-issues.ts'),
+      join(root, 'apps/web/src/lib/form-issues.ts'),
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      'string',
+    );
+    assert.equal(verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'unknown'), undefined);
+    for (const [module, name] of [
+      ['drivers', 'localDateToIso'],
+      ['usage', 'localDateTimeToIso'],
+    ]) {
+      cpSync(
+        join(ROOT, `apps/web/src/server/${module}.ts`),
+        join(root, `apps/web/src/server/${module}.ts`),
+      );
+      assert.equal(verifiedCallbackHelper(root, `apps/web/src/server/${module}`, name), 'verified');
+    }
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/repair-order-fields.ts'),
+      join(root, 'apps/web/src/lib/repair-order-fields.ts'),
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'),
+      'money-limit',
+    );
+    appendFileSync(join(root, 'apps/web/src/lib/repair-order-fields.ts'), '\n// changed source\n');
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'),
+      undefined,
+    );
+    appendFileSync(join(root, 'apps/web/src/lib/format/digits.ts'), '\n// changed helper\n');
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
+      undefined,
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/server/drivers', 'localDateToIso'),
+      undefined,
+    );
+    assert.equal(
+      verifiedCallbackHelper(root, 'apps/web/src/server/usage', 'localDateTimeToIso'),
+      undefined,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// F3 transform family: every callback entry uses the same fail-closed helper analysis.
+const transformFailures = [
+  `import {formMessage} from 'unknown'; z.string().min(1,formMessage('Required')).transform(Number);`,
+  `import {formMessage} from '@/lib/form-issues'; z.string().min(1,formMessage(unknown)).transform(Number);`,
+  `import {moneyInputMessage} from '@/lib/format'; z.transform(v=>moneyInputMessage(v,unknown));`,
+  `import {IRR} from '@/lib/format'; z.transform(v=>IRR(v));`,
+  `z.core._string(z.ZodTransform,{transform:Number});`,
+  `z.core._int(z.ZodTransform,{transform:(v,ctx,n=Number(v))=>n});`,
+  `const C=z.ZodTransform; z.core._url(C,{transform:Number});`,
+  `import {z as legacy} from 'zod/v3'; z.core._string(legacy.ZodEffects,{schema:legacy.unknown(),effect:{type:'transform',transform:Number}});`,
+  `z.string({checks:[z.overwrite(()=>true)]}).transform(Number);`,
+  `const opts={checks:[z.overwrite(()=>true)]}; z.string(opts).transform(Number);`,
+  `z.array(z.string(),{checks:[z.overwrite(()=>[true])]}).transform(v=>v.map(Number));`,
+  ...['min(0', 'max(1000', 'length(1', 'regex(/.*/'].map(
+    (method) => `z.string().${method},{when:p=>{p.value=true;return false;}}).transform(Number);`,
+  ),
+  `z.string().nonempty({when:p=>{p.value=true;return false;}}).transform(Number);`,
+  `const opts={when:p=>{p.value=true;return false;}}; z.string().regex(/.*/,opts).transform(Number);`,
+  `z.string().regex(/.*/,{...{when:p=>{p.value=true;return false;}}}).transform(Number);`,
+  `z.core._url(getConstructor(),{});`,
+  `z.core._int(getConstructor(),{});`,
+  `let C=z.core.$ZodString; C=unresolved; z.core._string(C,{});`,
+  `z.core._transform(getConstructor(),v=>v);`,
+  `import {C} from 'unknown'; z.core._transform(C,v=>v);`,
+  `function build(C) { return z.core._transform(C,v=>v); }`,
+  `let C=z.core.$ZodTransform; C=unresolved; z.core._transform(C,v=>v);`,
+  `let C=z.ZodTransform; ({C}=getConstructors()); z.core._transform(C,v=>v);`,
+  `import {MAX_AMOUNT_MINOR} from 'unknown'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
+  `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(v=>MAX_AMOUNT_MINOR('1'));`,
+  `import {other} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(other));`,
+  `const def={effect:{type:'transform',transform:v=>v}}; def.effect.transform=Number; new z.ZodEffects(def);`,
+  `const def={effect:{type:'transform',transform:v=>v}}; const effect=def.effect; effect.transform=Number; new z.ZodEffects(def);`,
+  `const def={effect:{type:'transform',transform:v=>v}}; mutate(def.effect); new z.ZodEffects(def);`,
+  `z.array(z.string()).refine(v=>{v[0]=true;return true;}).transform(v=>v.map(Number));`,
+  `const mutate=v=>{v[0]=true;return true;}; z.array(z.string()).refine(mutate).transform(v=>v.map(Number));`,
+  `const C=z.transform(()=>'1').constructor; new C({type:'transform',transform:Number});`,
+  `z.transform(()=>'1').clone({type:'transform',transform:Number});`,
+
+  `new z.ZodTransform({type:'transform', __proto__:{transform:Number}});`,
+  `z.string().check(ctx=>{ctx.value=true;}).transform(Number);`,
+  `z.string().superRefine((v,ctx)=>{ctx.value=true;}).transform(Number);`,
+  `z.string().refine(()=>true,{when:ctx=>{ctx.value=true;return true;}}).transform(Number);`,
+
+  `z.transform(v=>Number.call('validated-this',v));`,
+  `z.transform(v=>Number.apply('validated-this',[v]));`,
+  `const f=Number.call; z.transform(v=>f('validated-this',v));`,
+  `const f=Number.apply; z.transform(v=>f('validated-this',[v]));`,
+  `z.transform(v=>globalThis.String.call('validated-this',v));`,
+  `const f=Boolean.bind(null); z.transform(f);`,
+
+  `const def={type:'transform',transform:v=>v}; const alias=def; alias.transform=Number; new z.ZodTransform(def);`,
+  `const def={type:'transform',transform:v=>v}; Object.assign(def,{transform:Number}); new z.ZodTransform(def);`,
+  `const def={type:'transform',transform:v=>v}; mutate(def); new z.ZodTransform(def);`,
+  `const def={type:'transform',transform:v=>v, mutate(){this.transform=Number;}}; def.mutate(); new z.ZodTransform(def);`,
+
+  ...['Number', 'BigInt', 'String', 'Boolean', 'Date', 'parseInt', 'parseFloat'].flatMap(
+    (convert) => [`z.unknown().transform(${convert});`, `z.transform(${convert});`],
+  ),
+  `const f = async v => Number(v); z.unknown().transform(f);`,
+  `function f(v, n = Number(v)) { return n; } z.unknown().transform(f);`,
+  `const f = (v, {n = Number(v)} = {}) => n; z.unknown().transform(f);`,
+  `const f = (v, n = Number(v)) => n; z.unknown().transform(v => f(v));`,
+  `const f = (v, {n = Number(v)} = {}) => n; z.unknown().transform(v => f(v));`,
+  `function apply(f,v) { return f(v); } z.transform(v => apply(Number,v));`,
+  `function get() { return Number; } z.transform(get());`,
+  `const get = () => Number; z.transform(get());`,
+  `const get = () => Number; const f = get(); z.transform(f);`,
+  `const f = opaque; z.transform(f);`,
+  `import { convert } from 'unknown'; z.unknown().transform(v => convert(v));`,
+  `import { normalizePersianText } from '@/lib/format'; z.transform(normalizePersianText);`,
+  `z.unknown().pipe(z.transform(Number));`,
+  `z.pipe(z.unknown(), z.transform(Number));`,
+  `const {transform: f} = z.unknown(); f(Number);`,
+  `const f = z.unknown().transform; f(Number);`,
+  `let f = z.string().transform; f = v => v; f(Number);`,
+  `z.unknown()[method](Number);`,
+  ...['transform', 'preprocess'].map(
+    (field) =>
+      `new z.ZodEffects({effect: {type: '${field}', ${field}: Number}, schema: z.unknown()});`,
+  ),
+  ...['ZodTransform', 'ZodMiniTransform', 'core.$ZodTransform'].map(
+    (type) => `new z.${type}({type: 'transform', transform: Number});`,
+  ),
+  `z.ZodTransform({type: 'transform', transform: Number});`,
+  `z.ZodTransform.init({}, {type: 'transform', transform: Number});`,
+  `z.ZodTransform.create({type: 'transform', transform: Number});`,
+  `z.core._transform(z.core.$ZodTransform, Number);`,
+  `z.ZodEffects.createWithPreprocess(Number, z.number());`,
+  `z.clone(z.transform(v => v), {type: 'transform', transform: Number});`,
+  `z.transform(v => v).clone({type: 'transform', transform: Number});`,
+  `const def = {type:'transform',transform:Number}; new z.ZodTransform(def);`,
+  `const def = {type:'transform',transform:v=>v}; def.transform=Number; new z.ZodTransform(def);`,
+  `new z.ZodTransform(getDefinition());`,
+  `new z.ZodTransform({...getDefinition()});`,
+  `new z.ZodTransform({get transform() { return Number; }});`,
+  ...['z.overwrite', 'z.unknown().overwrite', 'z.core._overwrite'].map((api) => `${api}(Number);`),
+  `new z.core.$ZodCheckOverwrite({check:'overwrite',tx:Number});`,
+  `z.check(z.overwrite(Number));`,
+  `z.unknown().transform((v, n=Number(v))=>n);`,
+  `z.unknown().overwrite((v, {n=Number(v)}={})=>n);`,
+  `z.array(z.unknown()).transform(v=>v.map(Number));`,
+  `z.array(z.unknown()).transform(v=>v.map(n=>Number(n)));`,
+  `z.string().transform(v=>opaque.trim(v));`,
+  `z.unknown().transform(v=>setTimeout(Number,1));`,
+  `z.unknown().transform(v=>new Promise(Number));`,
+  `z.unknown().transform((v: string)=>Number(v));`,
+  `let s=z.string(); s=z.unknown(); s.transform(Number);`,
+];
+for (const [index, code] of transformFailures.entries())
+  it(`F3 transform refusal ${index + 1}: ${code}`, () =>
+    assert.ok(
+      messages(code).some((m) => m.ruleId === 'boundary/coercion'),
+      code,
+    ));
+for (const code of [
+  `import {formMessage} from '@/lib/form-issues'; z.string().min(1,formMessage('Required')).transform(Number);`,
+  "import {formMessage} from '@/lib/form-issues'; z.string().regex(/.*/,formMessage(`Bound ${1}`)).transform(Number);",
+  `import {moneyInputMessage,IRR} from '@/lib/format'; z.transform(v=>moneyInputMessage(v,IRR));`,
+  `import {formMessage} from '@/lib/form-issues'; z.codec(z.string().min(1,formMessage('Input')),z.string().min(1,formMessage('Output')),{decode:Number,encode:Number});`,
+  `import {MAX_AMOUNT_MINOR} from '@/lib/repair-order-fields'; z.transform(()=>BigInt(MAX_AMOUNT_MINOR));`,
+  `z.string({error:'Required'}).min(1,{message:'Length'}).transform(Number);`,
+  'z.string().min(1, `Known bound ${1}`).transform(Number);',
+  `z.string().meta({when:'data',coerce:true}).transform(Number);`,
+  `z.array(z.string(),{error:'Array'}).transform(v=>v.map(Number));`,
+  `z.string().min(0,undefined).transform(Number);`,
+  `z.string().regex(/.*/).transform(Number);`,
+  `z.string().transform(Number);`,
+  `z.string().transform(v=>Number(v));`,
+  `const f=async v=>Number(v); z.string().transform(f);`,
+  `function f(v) { return Number(v); } z.string().transform(f);`,
+  `const f=v=>Number(v); const alias=f; z.string().transform(alias);`,
+  `const f=v=>v; z.unknown().transform(f);`,
+  `const factory=()=>v=>v; z.unknown().transform(factory());`,
+  `z.string().transform(v=>v.trim().toUpperCase());`,
+  `z.array(z.string()).transform(v=>v.map(Number));`,
+  `z.array(z.number()).transform(v=>v.reverse());`,
+  `z.string().transform(v=>v.split(',').map(n=>n.trim()));`,
+  `z.string().transform(v=>v.replace(/x/g, 'y'));`,
+  `z.unknown().transform(v=>typeof v==='string'?Number(v):v);`,
+  `const helper=v=>Number(v); z.unknown().transform(v=>typeof v==='string'?helper(v):v);`,
+  `import {normalizePersianText} from '@/lib/format'; z.string().transform(normalizePersianText);`,
+  `import {parseMoneyInput} from '@/lib/format'; z.string().transform(parseMoneyInput);`,
+  `z.unknown().transform(v=>new Promise(resolve=>setTimeout(resolve,1)));`,
+  `z.core._transform(z.core.$ZodTransform, v=>v);`,
+  `const C=z.core.$ZodTransform; z.core._transform(C,v=>v);`,
+  `new z.ZodTransform({type:'transform',transform:v=>v});`,
+  `const def={type:'transform',transform:v=>v}; new z.ZodTransform(def);`,
+  `z.unknown().overwrite(v=>v);`,
+  `new z.core.$ZodCheckOverwrite({check:'overwrite',tx:v=>v});`,
+])
+  it(`F3 verified transform: ${code}`, () => assert.deepEqual(messages(code), []));
+
+it('F3 keeps a validated string receiver through a method alias', () =>
+  assert.deepEqual(messages(`const f=z.string().transform; f(Number);`), []));
+
+// F3 codecs validate decode against `in` and encode against `out` independently.
+for (const code of [
+  `z.core._int(z.ZodCodec,{in:z.unknown(),out:z.number(),transform:Number,reverseTransform:v=>v});`,
+  `z.core._string(z.ZodCodec,{in:z.number(),out:z.unknown(),transform:v=>v,reverseTransform:Number});`,
+  `z.codec(z.string({checks:[z.overwrite(()=>true)]}),z.number(),{decode:Number,encode:v=>v});`,
+  `z.codec(z.number(),z.string().min(0,{when:p=>{p.value=true;return false;}}),{decode:v=>v,encode:Number});`,
+  `new z.ZodCodec({type:'pipe',in:z.string({checks:[z.overwrite(()=>true)]}),out:z.number(),transform:Number,reverseTransform:v=>v});`,
+  `z.codec(z.unknown(),z.number(),{decode:Number,encode:v=>v});`,
+  `z.codec(z.number(),z.unknown(),{decode:v=>v,encode:Number});`,
+  `const f=async v=>Number(v); z.codec(z.unknown(),z.number(),{decode:f,encode:v=>v});`,
+  `z.codec(z.unknown(),z.number(),{decode:(v,n=Number(v))=>n,encode:v=>v});`,
+  `z.codec(z.number(),z.unknown(),{decode:v=>v,encode:(v,{n=Number(v)}={})=>n});`,
+  `const helper=(v,n=Number(v))=>n; z.codec(z.unknown(),z.number(),{decode:v=>helper(v),encode:v=>v});`,
+  `z.codec(z.string(),z.number(),getOptions());`,
+  `z.codec(z.string(),z.number(),{...getOptions()});`,
+  `const opts={decode:v=>v,encode:v=>v}; const alias=opts; alias.decode=Number; z.codec(z.unknown(),z.number(),opts);`,
+  `const opts={decode:v=>v,encode:v=>v}; Object.assign(opts,{encode:Number}); z.codec(z.unknown(),z.number(),opts);`,
+  `z.codec(z.unknown(),z.number(),{get decode(){return Number},encode:v=>v});`,
+  `z.codec(z.unknown(),z.number(),{decode:unknownHelper,encode:v=>v});`,
+  `z.unknown().pipe(z.codec(z.unknown(),z.number(),{decode:Number,encode:v=>v}));`,
+  ...['ZodCodec', 'ZodMiniCodec', 'core.$ZodCodec'].flatMap((type) => [
+    `new z.${type}({type:'pipe',in:z.unknown(),out:z.number(),transform:Number,reverseTransform:v=>v});`,
+    `new z.${type}({type:'pipe',in:z.number(),out:z.unknown(),transform:v=>v,reverseTransform:Number});`,
+  ]),
+  `z.ZodCodec.init({}, {type:'pipe',in:z.unknown(),out:z.number(),transform:Number,reverseTransform:v=>v});`,
+  `z.ZodCodec.create({type:'pipe',in:z.unknown(),out:z.number(),transform:v=>v,reverseTransform:Number});`,
+])
+  it(`F3 codec refuses: ${code}`, () => assert.ok(messages(code).length, code));
+for (const code of [
+  `z.codec(z.string(),z.number(),{decode:Number,encode:v=>v});`,
+  `z.codec(z.number(),z.string(),{decode:v=>v,encode:Number});`,
+  `const f=async v=>Number(v); z.codec(z.string(),z.number(),{decode:f,encode:v=>v});`,
+  `new z.ZodCodec({type:'pipe',in:z.string(),out:z.string(),transform:Number,reverseTransform:Number});`,
+  `z.codec(z.unknown(),z.unknown(),{decode:v=>v,encode:v=>v});`,
+])
+  it(`F3 codec preserves: ${code}`, () => assert.deepEqual(messages(code), []));
