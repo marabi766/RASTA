@@ -97,7 +97,9 @@ export class TransferRecordClient implements TransferRecordSource {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const { status, text } = await upstreamExchange(
+    // Parsed inside the exchange, so its deadline check before it returns
+    // covers parsing too (PR #722 r2 F2).
+    const { status, body } = await upstreamExchange(
       ASSET_SERVICE,
       this.options.timeoutMs,
       (signal) =>
@@ -108,11 +110,10 @@ export class TransferRecordClient implements TransferRecordSource {
         ),
       async (response) => ({
         status: response.status,
-        text: await readBoundedText(response, MAX_ANSWER_BYTES),
+        body: parseJson(await readBoundedText(response, MAX_ANSWER_BYTES)),
       }),
     );
 
-    const body = parseJson(text);
     if (status === 200) {
       const parsed = recordedSchema.safeParse(body);
       if (parsed.success && parsed.data.assetId === assetId && parsed.data.transferId === fenceId) {

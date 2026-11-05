@@ -124,9 +124,11 @@ export class LiveMembershipClient implements MembershipSource {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    let text: string | null;
+    // Parsed inside the exchange, so its deadline check before it returns
+    // covers parsing too (PR #722 r2 F2).
+    let answer: { readonly body: unknown } | null;
     try {
-      text = await exchangeWithDeadline(
+      answer = await exchangeWithDeadline(
         this.options.timeoutMs,
         (signal) =>
           sender.send(
@@ -134,18 +136,19 @@ export class LiveMembershipClient implements MembershipSource {
               `${encodeURIComponent(userId)}/live-membership`,
             { method: 'GET', headers, signal },
           ),
-        (response) =>
+        async (response) => {
           // Anything but a plain 200 is refused unread: the boundary cancels the body.
-          response.status === 200 && !response.redirected
-            ? readCappedText(response, MAX_MEMBERSHIP_ANSWER_BYTES)
-            : null,
+          if (response.status !== 200 || response.redirected) return null;
+          const text = await readCappedText(response, MAX_MEMBERSHIP_ANSWER_BYTES);
+          return text === null ? null : { body: parseJson(text) };
+        },
       );
     } catch {
       throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
     }
-    if (text === null) throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
+    if (answer === null) throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
 
-    const parsed = answerSchema.safeParse(parseJson(text));
+    const parsed = answerSchema.safeParse(answer.body);
     if (
       !parsed.success ||
       parsed.data.userId !== userId ||

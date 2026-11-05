@@ -58,7 +58,9 @@ export async function internalGet(
     headers['x-correlation-id'] = context.correlationId;
   }
 
-  const { status, text } = await upstreamExchange(
+  // Parsed inside the exchange, so the exchange's deadline check before it
+  // returns covers parsing too (PR #722 r2 F2).
+  return upstreamExchange(
     options.to,
     options.timeoutMs,
     (signal) =>
@@ -70,10 +72,9 @@ export async function internalGet(
     async (response) => {
       const body = await readCappedText(response, options.maxBodyBytes ?? INTERNAL_GET_MAX_BYTES);
       if (body === null) throw RastaError.upstreamUnavailable(options.to);
-      return { status: response.status, text: body };
+      return { status: response.status, body: parseJson(body) };
     },
   );
-  return { status, body: parseJson(text) };
 }
 
 function parseJson(text: string): unknown {

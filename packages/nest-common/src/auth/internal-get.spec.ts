@@ -120,3 +120,30 @@ describe('internalGet', () => {
     });
   });
 });
+
+describe('internalGet decoding and deadline (PR #722 r2 F2/F3)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('reads a BOM-prefixed JSON answer as Fetch does', async () => {
+    const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"a":1}')]);
+    const opts = options((async () => new Response(bom, { status: 200 })) as typeof fetch);
+    await expect(internalGet(opts, '/x', 'ORG_A')).resolves.toEqual({
+      status: 200,
+      body: { a: 1 },
+    });
+  });
+
+  it('parses inside the exchange: parsing that crosses the deadline is UPSTREAM_TIMEOUT', async () => {
+    let now = 1_000;
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const parse = JSON.parse.bind(JSON);
+    jest.spyOn(JSON, 'parse').mockImplementation(((text: string) => {
+      now += 10_000;
+      return parse(text) as unknown;
+    }) as typeof JSON.parse);
+    const opts = options((async () => new Response('{"a":1}', { status: 200 })) as typeof fetch);
+    await expect(internalGet(opts, '/x', 'ORG_A')).rejects.toMatchObject({
+      code: 'UPSTREAM_TIMEOUT',
+    });
+  });
+});

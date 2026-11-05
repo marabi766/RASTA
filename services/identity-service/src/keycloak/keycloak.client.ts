@@ -368,6 +368,13 @@ export class KeycloakAdminClient {
         signal: this.deadline(cancel),
       }),
     );
+    // An answer heard only after the deadline is the deadline's, as if the
+    // timer had fired: a header-only answer (a create's Location, a status)
+    // is never read, so no body check would catch it (PR #722 r2 F2).
+    if (performance.now() >= deadlineAt) {
+      await response.body?.cancel().catch(() => undefined);
+      throw RastaError.upstreamUnavailable('keycloak', { operation: 'admin', reason: 'deadline' });
+    }
     adminDeadlines.set(response, deadlineAt);
     return response;
   }

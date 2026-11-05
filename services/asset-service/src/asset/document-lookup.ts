@@ -116,7 +116,9 @@ export class DocumentLookupClient implements DocumentLookup {
 
     // The body is read inside the deadline too, and an answer that arrives
     // after it is not taken, even from a transport that ignored the abort.
-    const { status, text } = await upstreamExchange(
+    // Parsed inside the exchange, so its deadline check before it returns
+    // covers parsing too (PR #722 r2 F2).
+    const { status, body } = await upstreamExchange(
       DOCUMENT_SERVICE,
       this.options.timeoutMs,
       (signal) =>
@@ -126,11 +128,10 @@ export class DocumentLookupClient implements DocumentLookup {
         ),
       async (response) => ({
         status: response.status,
-        text: await readBoundedText(response, MAX_ANSWER_BYTES),
+        body: parseJson(await readBoundedText(response, MAX_ANSWER_BYTES)),
       }),
     );
 
-    const body = parseJson(text);
     if (status === 404) {
       // Only the service's own refusal counts: the platform error body. A proxy's
       // 404 proves nothing about this document.

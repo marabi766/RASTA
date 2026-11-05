@@ -84,14 +84,39 @@ export interface CappedReadOptions {
  * always-ready stream would otherwise keep the abort timer from ever running
  * (PR #722 r1 F2).
  */
+function deadlineOf(response: Response, options: CappedReadOptions) {
+  const exchange = exchangeDeadlineOf(response);
+  const at = Math.min(exchange?.at ?? Infinity, options.deadlineAt ?? Infinity);
+  return {
+    at,
+    late: () => new ExchangeDeadlineError(exchange?.timeoutMs ?? 0),
+  };
+}
+
+/**
+ * Rejects with `ExchangeDeadlineError` once the deadline has passed. Called
+ * after decoding and parsing too, before a reader returns: a body collected
+ * just in time whose decoding or parsing crosses the deadline is still a late
+ * answer (PR #722 r2 F2).
+ */
+function assertInTime(response: Response, options: CappedReadOptions): void {
+  const deadline = deadlineOf(response, options);
+  if (performance.now() >= deadline.at) throw deadline.late();
+}
+
+/**
+ * UTF-8 exactly as Fetch's `.text()` / `.json()` decode it: an initial BOM is
+ * removed and invalid sequences become U+FFFD (PR #722 r2 F3).
+ * `Buffer.toString('utf8')` keeps the BOM, which then fails `JSON.parse`.
+ */
+const fetchUtf8 = new TextDecoder('utf-8');
+
 async function collectCapped(
   response: Response,
   limit: number,
   options: CappedReadOptions,
 ): Promise<Buffer | null> {
-  const exchange = exchangeDeadlineOf(response);
-  const deadlineAt = Math.min(exchange?.at ?? Infinity, options.deadlineAt ?? Infinity);
-  const late = () => new ExchangeDeadlineError(exchange?.timeoutMs ?? 0);
+  const { at: deadlineAt, late } = deadlineOf(response, options);
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => undefined);
@@ -117,8 +142,9 @@ async function collectCapped(
 }
 
 /**
- * The body as UTF-8 text, or `null` once it exceeds `limit` bytes; see
- * `collectCapped` for the deadline.
+ * The body as UTF-8 text, decoded as Fetch decodes it, or `null` once it
+ * exceeds `limit` bytes; see `collectCapped` for the deadline, which is
+ * checked again after decoding.
  */
 export async function readCappedText(
   response: Response,
@@ -126,7 +152,10 @@ export async function readCappedText(
   options: CappedReadOptions = {},
 ): Promise<string | null> {
   const bytes = await collectCapped(response, limit, options);
-  return bytes === null ? null : bytes.toString('utf8');
+  if (bytes === null) return null;
+  const text = fetchUtf8.decode(bytes);
+  assertInTime(response, options);
+  return text;
 }
 
 /**
@@ -155,5 +184,7 @@ export async function readBoundedJson(
   limit: number,
   options: CappedReadOptions = {},
 ): Promise<unknown> {
-  return JSON.parse(await readBoundedText(response, limit, options)) as unknown;
+  const parsed = JSON.parse(await readBoundedText(response, limit, options)) as unknown;
+  assertInTime(response, options);
+  return parsed;
 }

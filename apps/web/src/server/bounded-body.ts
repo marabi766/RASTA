@@ -8,7 +8,7 @@
  * it cannot fire while an always-ready body keeps the microtask queue busy.
  * Here the decoded bytes are copied into one owned buffer that grows
  * geometrically up to `limit`, and the monotonic deadline is checked between
- * chunks; past either, the stream is cancelled.
+ * chunks and once more after parsing; past either, the stream is cancelled.
  */
 export class BodyTooLargeError extends Error {
   constructor() {
@@ -65,7 +65,10 @@ export async function readBoundedJson(
       owned.set(value, size);
       size += value.byteLength;
     }
-    if (performance.now() >= deadlineAt) throw new BodyDeadlineError();
   }
-  return JSON.parse(new TextDecoder().decode(owned.subarray(0, size))) as unknown;
+  const parsed = JSON.parse(new TextDecoder().decode(owned.subarray(0, size))) as unknown;
+  // After decoding and parsing too, on every return: a body collected just in
+  // time whose parsing crosses the deadline is still a late answer (PR #722 r2 F2).
+  if (performance.now() >= deadlineAt) throw new BodyDeadlineError();
+  return parsed;
 }

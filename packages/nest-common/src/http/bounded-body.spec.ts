@@ -171,3 +171,70 @@ describe('readBoundedText / readBoundedJson (PR #722 r1 F1/F2)', () => {
     expect(cancelled).toBe(true);
   });
 });
+
+/** `EF BB BF` then `{"a":1}`: what a peer that writes a UTF-8 BOM sends. */
+const BOM_JSON = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"a":1}')]);
+
+describe('Fetch-compatible decoding (PR #722 r2 F3)', () => {
+  it('removes an initial BOM exactly as `.text()` / `.json()` do', async () => {
+    expect(await new Response(BOM_JSON).json()).toEqual({ a: 1 });
+    await expect(readBoundedJson(new Response(BOM_JSON), 1024)).resolves.toEqual({ a: 1 });
+    await expect(readBoundedText(new Response(BOM_JSON), 1024)).resolves.toBe(
+      await new Response(BOM_JSON).text(),
+    );
+    await expect(
+      readCappedText(streamed([BOM_JSON.subarray(0, 2), BOM_JSON.subarray(2)]), 1024),
+    ).resolves.toBe('{"a":1}');
+  });
+
+  it('keeps a BOM that is not initial, and replaces invalid UTF-8, as Fetch does', async () => {
+    const inner = Buffer.concat([
+      Buffer.from('a'),
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from([0xff]),
+    ]);
+    await expect(readBoundedText(new Response(inner), 1024)).resolves.toBe(
+      await new Response(inner).text(),
+    );
+  });
+});
+
+describe('deadline after decoding and parsing (PR #722 r2 F2)', () => {
+  /** A clock that jumps past `deadlineAt` while `JSON.parse` runs. */
+  const parseCrossesDeadline = (deadlineAt: number) => {
+    let now = deadlineAt - 50;
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const parse = JSON.parse.bind(JSON);
+    jest.spyOn(JSON, 'parse').mockImplementation(((text: string) => {
+      now = deadlineAt + 1;
+      return parse(text) as unknown;
+    }) as typeof JSON.parse);
+  };
+
+  it('readBoundedJson rejects a body collected in time whose parsing crosses the deadline', async () => {
+    parseCrossesDeadline(1_000);
+    await expect(
+      readBoundedJson(new Response('{"a":1}'), 1024, { deadlineAt: 1_000 }),
+    ).rejects.toBeInstanceOf(ExchangeDeadlineError);
+  });
+
+  it('readBoundedText rejects when decoding ends past the deadline, an empty body included', async () => {
+    let now = 900;
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const decode = TextDecoder.prototype.decode;
+    jest.spyOn(TextDecoder.prototype, 'decode').mockImplementation(function (
+      this: InstanceType<typeof TextDecoder>,
+      input,
+    ) {
+      now = 1_001;
+      return decode.call(this, input);
+    });
+    await expect(
+      readBoundedText(new Response('x'), 1024, { deadlineAt: 1_000 }),
+    ).rejects.toBeInstanceOf(ExchangeDeadlineError);
+    now = 900;
+    await expect(
+      readBoundedText(new Response(null), 1024, { deadlineAt: 1_000 }),
+    ).rejects.toBeInstanceOf(ExchangeDeadlineError);
+  });
+});

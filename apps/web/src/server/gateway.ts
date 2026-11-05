@@ -298,6 +298,12 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
   // thing that already happened. The caller's schema then parses `undefined`,
   // which is what actually came back.
   if (response.status === 204 || response.headers.get('content-length') === '0') {
+    // Heard after the deadline: as unanswered as a timeout before the headers
+    // (PR #722 r2 F2) — a write it answers is unconfirmed, never applied.
+    if (performance.now() >= deadlineAt) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new GatewayOutcomeUnknownError(503, correlationId, 'TRANSPORT');
+    }
     return { data: undefined as T, correlationId };
   }
 
