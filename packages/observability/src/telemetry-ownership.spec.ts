@@ -972,17 +972,35 @@ describe('the fence is published before anything it waits for is called (r3 F1)'
   });
 });
 
-/** A module of the SDK's own dependencies, as `NodeSDK` loads it. */
-function sdkDependency<T>(name: string): T {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require(
-    require.resolve(name, { paths: [require.resolve('@opentelemetry/sdk-node')] }),
-  ) as T;
+/** The exporter a running SDK built from the environment for `signal`. */
+function builtExporter(sdk: NodeSDK, signal: 'span' | 'record' | 'metric'): object {
+  const internals = sdk as unknown as {
+    _tracerProvider: { _activeSpanProcessor: { _spanProcessors: { _exporter: object }[] } };
+    _loggerProviderConfig: { logRecordProcessors: { _exporter: object }[] };
+    _meterProviderConfig: { readers: { _exporter: object }[] };
+  };
+  if (signal === 'span')
+    return internals._tracerProvider._activeSpanProcessor._spanProcessors[1]!._exporter;
+  if (signal === 'record') return internals._loggerProviderConfig.logRecordProcessors[0]!._exporter;
+  return internals._meterProviderConfig.readers[0]!._exporter;
 }
 
-type ExporterClass = {
-  prototype: { export: unknown; shutdown: unknown; forceFlush?: unknown };
-};
+/**
+ * The class of the exporter the SDK builds from `env` for `signal`, found by a
+ * start that is shut down again: its methods can then be stubbed before the
+ * start under test builds and owns one.
+ */
+async function exporterClass(
+  signal: 'span' | 'record' | 'metric',
+): Promise<Record<string, (...args: unknown[]) => unknown>> {
+  const sdk = captured(() => initTelemetry({ serviceName: 'ownership-spec-probe' })).result;
+  const proto = Object.getPrototypeOf(builtExporter(sdk as NodeSDK, signal)) as Record<
+    string,
+    (...args: unknown[]) => unknown
+  >;
+  await captured(() => shutdownTelemetry()).result;
+  return proto;
+}
 
 describe('an environment-selected exporter is shut down even when its processor’s final flush failed (r3 F2)', () => {
   const failure = (): { code: number; error: Error } => ({
@@ -1061,10 +1079,12 @@ describe('an environment-selected exporter is shut down even when its processor�
     ],
   ] as const)(
     '%s: the export fails, the exporter’s own shutdown still runs once, and the fence waits for it',
-    async (_name, env, [moduleName, className], signal) => {
+    async (_name, env, [, className], signal) => {
       setOtelEnv(env);
-      const Kind = sdkDependency<Record<string, ExporterClass>>(moduleName)[className];
-      const proto = Kind.prototype as Record<string, (...args: unknown[]) => unknown>;
+      // The row's exporter, as the SDK builds it from `env` (which package and
+      // protocol `env` selects is pinned by exporter-selection.spec.ts).
+      const proto = await exporterClass(signal);
+      expect(proto.constructor?.name).toBe(className);
       const closing = gate();
       const exports = jest
         .spyOn(proto, 'export')
@@ -1172,9 +1192,11 @@ describe('an exporter that cannot be owned is not run (r3 F2, fail closed)', () 
     'an environment %s with no exporter to own: the start is refused, the processor released whole',
     async (_kind, env, builder, stage, list) => {
       setOtelEnv(env);
-      const utils = sdkDependency<Record<string, (...args: unknown[]) => unknown>>(
-        '@opentelemetry/sdk-node/build/src/utils',
-      );
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const utils = require('@opentelemetry/sdk-node/build/src/utils') as Record<
+        string,
+        (...args: unknown[]) => unknown
+      >;
       const release = jest.fn(() => Promise.resolve());
       const opaque = {
         onStart: () => undefined,
