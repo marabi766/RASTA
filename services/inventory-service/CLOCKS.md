@@ -25,6 +25,11 @@ clock is read. Issue/release also lock their target reservation before sampling.
 | `receive_return_shipment`, `inspect_return_shipment`, `resolve_return_shipment` | Claim then return-shipment row; transaction time, clamped to locked updatedAt for rows/events                        | No expiry or deadline decision; unchanged                                                                                                         |
 | Expiry batch / sweeper (outside CommandRunner)                                  | Stock item with SKIP LOCKED, then bounded reservation candidates; wall clock after them                              | Yes; same equality and timestamp rules as commands                                                                                                |
 
+The replay fence (`shared/idempotency.ts`, FU-171) is one more deadline decision, on the same clock:
+`clock_timestamp()` read inside the claim's insert transaction, and again after the insert that lost,
+the read of the existing row and the visibility guard, before a stored response leaves. This replica's
+clock only refuses early (nothing read or written) and keeps its existing lease and retention duties.
+
 There is no inventory confirm command. The dispatch-withdrawal fence (outside CommandRunner)
 uses the per-request advisory lock and transaction time for metadata, with no deadline decision.
 The stock updated_at monotonic clamp stays in place.

@@ -31,6 +31,80 @@ export function shellTextProblem(text) {
     : null;
 }
 
+/** A word naming a shell, as a path or a bare name: sh, bash, dash, ksh, zsh, ash, csh, tcsh, fish, rbash. */
+export const SHELL_WORD = /(?:^|\/)(?:r?ba|da|k|z|a|c|tc|fi)?sh$/;
+const SHELL_LONG_OPTIONS = new Set(['--norc', '--noprofile', '--posix', '--login', '--noediting']);
+const computed = (word) => Boolean(word.opaque || word.dynamic || word.value.includes('$'));
+/** A script operand that is standard input under another name: the shell reads a pipe, not a file. */
+const STDIN_FILE = /^(?:\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d+)$/;
+
+/**
+ * FU-092: what ONE shell invocation runs, decided from the words after the shell word and
+ * never assumed: `{ body }` (the -c operand, a word to read as a script), `{ file }` (the
+ * script operand, which the caller must prove it reads), `{ stdin: true }` (the commands come
+ * from standard input: a pipe, a here-string, a here-document or the terminal), or
+ * `{ problem }` (`/dev/stdin` and `/dev/fd/N` operands are standard input, not files). Bash accepts `-` and `+` option clusters alike (`bash +c 'cmd'` runs cmd,
+ * `+sc` too), `-o`/`-O` take a value even inside a cluster (`-eo pipefail -c`), `-` is `--`,
+ * and a computed word may be an option, a body or a file: all of those are refused, never
+ * read as "some other operand". A long option other than the listed inert ones can name a
+ * file the shell runs (--rcfile, --init-file). `name` is the shell word, for the message.
+ */
+export function shellInvocation(args, name = 'the shell') {
+  // csh, tcsh and fish do not share POSIX syntax: reading their text as sh would be a guess.
+  if (/(?:^|\/)(?:c|tc|fi)sh$/.test(name))
+    return { problem: `${name} is a shell whose syntax this check does not read` };
+  let command = false;
+  let stdin = false;
+  let at = 0;
+  for (; at < args.length; at++) {
+    const word = args[at];
+    if (computed(word))
+      return {
+        problem: command
+          ? `${name} -c runs a body this check cannot read`
+          : `${name} has a computed option or operand this check cannot read`,
+      };
+    const { value } = word;
+    if (value === '--' || value === '-') {
+      at++;
+      break;
+    }
+    if (!/^[-+]/.test(value)) break;
+    const cluster = value.startsWith('--') ? null : /^[-+]([A-Za-z]+)$/.exec(value);
+    if (!cluster && !SHELL_LONG_OPTIONS.has(value))
+      return { problem: `${name} option ${value} is not one this check reads` };
+    for (const letter of cluster?.[1] ?? '') {
+      if (letter === 'c') command = true;
+      else if (letter === 's') stdin = true;
+      else if (letter === 'o' || letter === 'O') {
+        at++; // the option name: one word per o/O, also inside a cluster
+        if (!args[at] || computed(args[at]))
+          return { problem: `${name} option ${value} has a name this check cannot read` };
+      }
+    }
+  }
+  const operand = args[at];
+  if (operand && computed(operand))
+    return { problem: `${name} has a computed option or operand this check cannot read` };
+  if (command)
+    return operand
+      ? { body: operand }
+      : { problem: `${name} -c runs a body this check cannot read` };
+  return stdin || !operand || STDIN_FILE.test(operand.value) ? { stdin: true } : { file: operand };
+}
+
+const CONTINUATIONS = /(?:\\\n)+/y;
+/**
+ * True when `text[at]` is `$` and backslash-newline pairs follow it. Bash deletes them before
+ * it reads tokens, so `$\<newline>(cmd)` is a command substitution wherever `$(` is one: a
+ * scanner that does not join them reads data there. Refused, never joined.
+ */
+export function continuedDollar(text, at) {
+  if (text[at] !== '$') return false;
+  CONTINUATIONS.lastIndex = at + 1;
+  return CONTINUATIONS.test(text);
+}
+
 /** `${NAME}`, `${1}`, `${@}`: the only parameter expansions that cannot run or hide a command. */
 const PLAIN_EXPANSION = /^\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?!$-])\}/;
 
