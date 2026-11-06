@@ -394,8 +394,11 @@ describe('enrichOpenApiDocument', () => {
       expect(array).not.toHaveProperty('minItems');
       expect(array).not.toHaveProperty('maxItems');
     }
-    // Only array bounds are held back: a string's bounds are published.
-    expect(JSON.stringify(recognition)).toContain('"maxLength":80');
+    // Recognition names are bounded after trimming, not on the raw text.
+    expect(JSON.stringify(recognition)).toContain(
+      'Constraints after a value-changing step are omitted',
+    );
+    expect(JSON.stringify(recognition)).not.toContain('"maxLength":80');
   });
 
   it('leaves a route it knows nothing about with a success response and no body', () => {

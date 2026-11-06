@@ -89,7 +89,7 @@ const pins = {
   'packages/contracts/src/common/iso-datetime.ts':
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
   'packages/contracts/src/common/text.ts':
-    'ff9708d0c86b5121a653c9e9aef3bf86d34a85ece0a499e219e8d8819ca5d30e',
+    '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
     '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',

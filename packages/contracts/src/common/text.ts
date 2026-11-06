@@ -31,7 +31,7 @@ export const UNSUPPORTED_CHARACTERS = 'Contains unsupported characters';
  * field's own bounds on it: `plainText().min(3).max(500)`.
  */
 export function plainText(): z.ZodString {
-  return z.string().trim().regex(WITHOUT_BIDI_CONTROL, UNSUPPORTED_CHARACTERS);
+  return z.string().regex(WITHOUT_BIDI_CONTROL, UNSUPPORTED_CHARACTERS).trim();
 }
 
 /**
