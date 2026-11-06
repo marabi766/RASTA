@@ -3,7 +3,11 @@ import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { commandKeyHash } from '../shared/command';
 import type { CursorPage } from '../shared/dto';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import { COMMAND_NOTE, READ_NOTE, STOCK_COMMAND_NOTE } from '../shared/notes';
 import {
   adjustStockSchema,
@@ -93,13 +97,13 @@ export class StockController {
   })
   async receive(
     @Body(zodPipe(receiveStockSchema)) dto: ReceiveStockDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<StockChangeView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(RECEIVE_STOCK_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(RECEIVE_STOCK_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<StockChangeView>(
       RECEIVE_STOCK_ENDPOINT,
-      key,
+      request,
       dto,
       201,
       (fence) => this.stock.receive(dto, { fence, keyHash }),
@@ -131,13 +135,13 @@ export class StockController {
   })
   async adjust(
     @Body(zodPipe(adjustStockSchema)) dto: AdjustStockDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<StockChangeView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(ADJUST_STOCK_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(ADJUST_STOCK_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<StockChangeView>(
       ADJUST_STOCK_ENDPOINT,
-      key,
+      request,
       dto,
       201,
       (fence) => this.stock.adjust(dto, { fence, keyHash }),

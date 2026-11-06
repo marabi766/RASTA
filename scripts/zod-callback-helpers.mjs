@@ -102,10 +102,8 @@ const pins = {
     'd470201ab822d732e8c10f0b6db953e4a5daacf94e47ae77afd0b75b64313822',
     // + PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (FU-156): one constant beside the project-create one.
     '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
-    // + reviewed numberInputInnerSchema export; main's published-pattern and text exports retained.
-    '68551ddd4d6f0570e8cfed812e2a95e03a2f26c6d2ef005504cf30935bdc136b',
-    // + FU-152 private pattern registry exports on the synchronized parent barrel.
-    'ff0b1b1547d48ead1da62fcaf3418936ab71eb08db6fbb07c54786f2facbe8b9',
+    // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171), numberInputInnerSchema (FU-160, #831) and the FU-152 private pattern registry exports (#840): exact union.
+    'ea1656bd023da6f0fddd9d24e1842aa628939bd610f77c5a7ad4f793e277c155',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',

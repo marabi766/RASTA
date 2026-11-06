@@ -126,13 +126,20 @@ describe('the committed OpenAPI document', () => {
     }
   });
 
-  it('requires an Idempotency-Key on every command and on nothing else', () => {
+  it('requires an Idempotency-Key on every command, offers its replay deadline (FU-171), and nothing else', () => {
     for (const { key, operation: op } of operations()) {
       const headers = op.parameters.filter((p) => p.in === 'header');
       if (key.startsWith('POST ')) {
         expect([key, headers]).toEqual([
           key,
-          [expect.objectContaining({ name: 'Idempotency-Key', required: true })],
+          [
+            expect.objectContaining({ name: 'Idempotency-Key', required: true }),
+            expect.objectContaining({
+              name: 'Idempotency-Replay-Deadline',
+              required: false,
+              schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
+            }),
+          ],
         ]);
         expect(op.responses['409']?.headers).toHaveProperty('Retry-After');
       } else {
@@ -186,6 +193,19 @@ describe('the committed OpenAPI document', () => {
     ]) {
       expect([key, operation(key).responses['422']]).toEqual([key, undefined]);
     }
+  });
+
+  it('lets a browser send every header a command publishes (PR-844 r1 F2)', () => {
+    const policy = /allowedHeaders:\s*\[([^\]]*)\]/.exec(
+      readFileSync(join(__dirname, '..', 'main.ts'), 'utf8'),
+    )?.[1];
+    const published = new Set(
+      operations().flatMap(({ operation: op }) =>
+        op.parameters.filter((p) => p.in === 'header').map((p) => p.name.toLowerCase()),
+      ),
+    );
+    expect(published).toContain('idempotency-replay-deadline');
+    for (const header of published) expect(policy).toContain(`'${header}'`);
   });
 
   it('publishes the two internal routes for marketplace-service under the X-Internal-Token scheme, with no Idempotency-Key and no 404 (Q-133 (9))', () => {

@@ -105,6 +105,7 @@ export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 
 export {
+  INVENTORY_MAX_REPLAY_WINDOW_SECONDS,
   PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
   PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
 } from './common/replay-window';
