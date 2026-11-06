@@ -94,6 +94,10 @@ const NO_SESSION_REDIRECTS = new Map<string, { args: () => unknown[]; to: string
     actionKey('apps/web/src/app/suppliers/supplier-actions.ts', 'reconcileSupplierWrite'),
     { args: () => [null, new FormData()], to: '/login?returnTo=%2Fsuppliers' },
   ],
+  [
+    actionKey('apps/web/src/app/procurement/demands/demand-actions.ts', 'releaseUnresolvedDemand'),
+    { args: () => [new FormData()], to: '/login?returnTo=%2Fprocurement%2Fdemands' },
+  ],
 ]);
 
 const REDIRECT_CASES = EXPORTS.filter(
