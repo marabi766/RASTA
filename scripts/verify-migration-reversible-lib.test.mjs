@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -24,6 +25,9 @@ import {
   ledgerAssertionScript,
   lexSql,
   libpqInvocation,
+  psqlInvocation,
+  UNUSABLE_PRISMA_OPTIONS,
+  UNUSABLE_PRISMA_SCHEMA,
   libpqUrl,
   NO_TRANSACTION_MARKER,
   downFileMode,
@@ -1344,15 +1348,181 @@ test('psqlRunner starts psql with no password in its argv', (t) => {
   assert.equal(lines.at(-1), `PGPASSWORD=${secret}`);
 });
 
+test('psqlInvocation lands where Prisma would, and keeps what the operator set (FU-128)', () => {
+  const base = 'postgresql://u:p%40ss@db.example:5432/rasta_x';
+  assert.deepEqual(psqlInvocation(`${base}?schema=audit&connection_limit=3&sslmode=require`), {
+    target: 'postgresql://u@db.example:5432/rasta_x?sslmode=require',
+    env: { PGPASSWORD: 'p@ss', PGOPTIONS: '-c search_path=audit' },
+  });
+  // Prisma's own default, not libpq's "$user", public.
+  assert.equal(psqlInvocation(base).env.PGOPTIONS, '-c search_path=public');
+  // libpq lets a URL's options override PGOPTIONS, so no options may stay in the URL.
+  const moved = psqlInvocation(
+    `${base}?schema=audit&options=-c%20statement_timeout%3D5s`,
+    '-c default_transaction_read_only=on',
+  );
+  assert.equal(moved.target, 'postgresql://u@db.example:5432/rasta_x');
+  assert.equal(
+    moved.env.PGOPTIONS,
+    '-c statement_timeout=5s -c default_transaction_read_only=on -c search_path=audit',
+  );
+});
+
+test('psqlInvocation refuses what could override PGOPTIONS, and repeats none of the URL', () => {
+  for (const query of ['service=s3cret', 'options=-c%20a%3D1&options=-c%20b%3D2']) {
+    assert.throws(
+      () => psqlInvocation(`postgresql://u:s3cret@db.example/rasta_x?${query}`),
+      (error) => error.message === UNUSABLE_PRISMA_OPTIONS,
+      query,
+    );
+  }
+});
+
+test('psqlInvocation refuses a schema it cannot name, and repeats none of the URL', () => {
+  for (const query of [
+    'schema=',
+    'schema=Audit',
+    'schema=a%20b',
+    'schema=a%3Bdrop',
+    'schema=a&schema=b',
+  ]) {
+    assert.throws(
+      () => psqlInvocation(`postgresql://u:s3cret@db.example/rasta_x?${query}`),
+      (error) => error.message === UNUSABLE_PRISMA_SCHEMA,
+      query,
+    );
+  }
+});
+
+const PSQL_PRISMA_URL = fileURLToPath(new URL('./psql-prisma-url.mjs', import.meta.url));
+
+test("psql-prisma-url passes the conversion to psql, and psql's exit code back", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'psql-prisma-url-'));
+  const seen = join(dir, 'seen');
+  writeFileSync(
+    join(dir, 'psql'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" > '${seen}'\nprintf 'PGPASSWORD=%s\\nPGOPTIONS=%s\\nstdin=%s\\n' "$PGPASSWORD" "$PGOPTIONS" "$(cat)" >> '${seen}'\nexit 7\n`,
+    { mode: 0o755 },
+  );
+  try {
+    const run = (args, env = {}) =>
+      spawnSync('node', [PSQL_PRISMA_URL, ...args], {
+        encoding: 'utf8',
+        input: 'SELECT 1;',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PGOPTIONS: '', ...env },
+      });
+    const url = 'postgresql://u:s3cret@db.example/rasta_x?schema=audit';
+
+    const ran = run(['DATABASE_URL_X', '-X', '-f', '-'], {
+      DATABASE_URL_X: url,
+      PGOPTIONS: '-c default_transaction_read_only=on',
+    });
+    assert.equal(ran.status, 7, ran.stderr);
+    assert.deepEqual(readFileSync(seen, 'utf8').trim().split('\n'), [
+      'postgresql://u@db.example/rasta_x',
+      '-X',
+      '-f',
+      '-',
+      'PGPASSWORD=s3cret',
+      'PGOPTIONS=-c default_transaction_read_only=on -c search_path=audit',
+      'stdin=SELECT 1;',
+    ]);
+
+    rmSync(seen);
+    // A URL on the command line, a name not set, a schema it cannot name: psql never starts.
+    for (const [args, env] of [
+      [[url], {}],
+      [['DATABASE_URL_UNSET'], {}],
+      [['OTHER_URL'], { OTHER_URL: url }],
+      [[], {}],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: `${url}&schema=other` }],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: 'not a url s3cret' }],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: `${url}&service=s3cret` }],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: url, PGSERVICE: 's3cret' }],
+    ]) {
+      const refused = run(args, env);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stderr.includes('s3cret'), false, refused.stderr);
+      assert.equal(existsSync(seen), false, args.join(' '));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a marketplace runbook hands no Prisma URL straight to psql (FU-128)', () => {
+  for (const name of ['marketplace-receipt-evidence.md', 'marketplace-saga-deploy.md']) {
+    const runbook = readFileSync(join(ROOT, 'docs', 'runbooks', name), 'utf8');
+    assert.doesNotMatch(runbook, /psql\s+-?[^\n]*"\$\{?DATABASE_URL/, name);
+    assert.match(
+      runbook,
+      /node scripts\/psql-prisma-url\.mjs DATABASE_URL_MARKETPLACE_MIGRATOR/,
+      name,
+    );
+  }
+});
+
+test(
+  'psql-prisma-url reaches the named schema, read-only when asked, against PostgreSQL (FU-128)',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const scratch = newScratchDatabase(LIB_PURPOSE, 'prisma_url');
+    createAsOwner(scratch);
+    try {
+      const must = (result) => assert.equal(result.status, 0, result.stderr);
+      must(
+        psqlAt(
+          libDatabaseUrl,
+          `CREATE TABLE public.place (name text); INSERT INTO public.place VALUES ('public');
+           CREATE SCHEMA other; CREATE TABLE other.place (name text); INSERT INTO other.place VALUES ('other');`,
+          scratch.name,
+        ),
+      );
+      const url = new URL(libDatabaseUrl);
+      url.pathname = `/${scratch.name}`;
+      url.search = '?schema=other&connection_limit=3';
+      const prismaUrl = url.toString();
+      const psql = (env, sql) =>
+        spawnSync(
+          'node',
+          [PSQL_PRISMA_URL, 'DATABASE_URL_X', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql],
+          { encoding: 'utf8', env: { ...process.env, DATABASE_URL_X: prismaUrl, ...env } },
+        );
+
+      // What this replaces: psql takes neither the URL nor, cut, the schema.
+      const raw = spawnSync('psql', [prismaUrl, '-X', '-c', 'SELECT 1'], { encoding: 'utf8' });
+      assert.notEqual(raw.status, 0);
+      assert.match(raw.stderr, /invalid URI query parameter: "schema"/);
+
+      const read = psql({ PGOPTIONS: '' }, 'SELECT name FROM place');
+      assert.equal(read.stdout.trim(), 'other', read.stderr);
+
+      const readOnly = psql(
+        { PGOPTIONS: '-c default_transaction_read_only=on' },
+        "INSERT INTO place VALUES ('written')",
+      );
+      assert.notEqual(readOnly.status, 0);
+      assert.match(readOnly.stderr, /read-only transaction/);
+
+      const failed = psql({ PGOPTIONS: '' }, 'SELECT * FROM no_such_table');
+      assert.equal(failed.status, 1, failed.stderr);
+    } finally {
+      assert.equal(dropAsOwner(scratch).ok, true);
+    }
+  },
+);
+
 /**
  * Every source file the repository runs, scripts and services alike — never
- * node_modules or build output.
+ * node_modules, build output or git-ignored generated Prisma clients (rewritten
+ * by `db:generate` while checks run: listed then gone, ENOENT, FU-090; the
+ * clients take their urls from the environment and are not our code).
  */
-function runnableSources() {
-  const roots = [join(ROOT, 'scripts')];
-  for (const service of readdirSync(join(ROOT, 'services'))) {
+function runnableSources(root = ROOT) {
+  const roots = [join(root, 'scripts')];
+  for (const service of readdirSync(join(root, 'services'))) {
     for (const part of ['src', 'test', 'prisma', 'scripts']) {
-      roots.push(join(ROOT, 'services', service, part));
+      roots.push(join(root, 'services', service, part));
     }
   }
   const files = [];
@@ -1364,7 +1534,7 @@ function runnableSources() {
       return;
     }
     for (const entry of entries) {
-      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      if (['node_modules', 'dist', 'generated'].includes(entry.name)) continue;
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path);
       else if (/\.(?:[cm]?js|ts)$/.test(entry.name)) files.push(path);
@@ -1385,7 +1555,7 @@ function shellScripts() {
   const files = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      if (['node_modules', 'dist', 'generated'].includes(entry.name)) continue;
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path);
       else if (/\.(?:sh|bash)$/.test(entry.name)) files.push(path);
@@ -1479,6 +1649,30 @@ test('the shell argv rule catches what it must and passes what it may', () => {
     'psql "postgresql://rasta_economic@localhost:5432/rasta_economic" -c "SELECT 1"',
   ]) {
     assert.equal(pgClientArgvProblem(good), null, good);
+  }
+});
+
+test('runnable-source discovery skips git-ignored generated output (FU-090)', () => {
+  // `db:generate` rewrites src/generated while checks run: a file listed a moment ago can be
+  // gone before it is read (ENOENT). The clients are not our code, so they are never listed.
+  const fixture = mkdtempSync(join(tmpdir(), 'runnable-sources-'));
+  try {
+    for (const file of [
+      'scripts/tool.mjs',
+      'services/svc/src/app.ts',
+      'services/svc/src/generated/prisma/index.js',
+    ]) {
+      mkdirSync(join(fixture, file, '..'), { recursive: true });
+      writeFileSync(join(fixture, file), 'export {};\n');
+    }
+    assert.deepEqual(
+      runnableSources(fixture)
+        .map((file) => file.slice(fixture.length))
+        .sort(),
+      ['/scripts/tool.mjs', '/services/svc/src/app.ts'],
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
   }
 });
 

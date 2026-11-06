@@ -7,6 +7,7 @@ import { RELEASE_WATCHED_STATUSES, SAGA_CUSTODY_STATUSES } from '../order/state-
 export const START_BATCH_SIZE = 4;
 export const START_LEASE_SECONDS = 30;
 export const START_RETRY_SECONDS = 30;
+export const OPEN_UNCONFIRMED_CALLS_LIMIT = 1000;
 
 export interface StartClaim {
   id: string;
@@ -14,6 +15,22 @@ export interface StartClaim {
   first_possible_start_at: Date;
   age_ms: number;
   token: string;
+}
+
+/** One row of `saga_unconfirmed_call` no attempt has confirmed (FU-104). */
+export interface OpenUnconfirmedCall {
+  organizationId: string;
+  orderId: string;
+  operation: string;
+  /** What the call is about: for a dispute release, the order's dispute. */
+  subject: string;
+  /** The opening a confirmation has to name. */
+  generation: number;
+  /**
+   * The first opening. A later attempt leaves it, so that a stuck call's age keeps
+   * growing; it does not say when the attempt now running began.
+   */
+  openedAt: Date;
 }
 
 /** ADR-050 fencing, on the order itself: intent and receipt are never purged.
@@ -147,5 +164,28 @@ export class SagaStartStore {
       const row = rows.find((candidate) => candidate.reason === reason);
       return { reason, count: Number(row?.count ?? 0), age: row?.age ?? 0 };
     });
+  }
+
+  /**
+   * The economic calls no attempt has confirmed (FU-104), oldest first, across
+   * tenants: platform plumbing, never served to a party. As recorded: whether a row
+   * is due, or still a call in flight, is the reader's to decide. `more` says the
+   * list stopped at `limit`, so its length is not a total; a failed read throws, so
+   * no reader can take it for an empty list.
+   */
+  async openUnconfirmedCalls(
+    limit = OPEN_UNCONFIRMED_CALLS_LIMIT,
+  ): Promise<{ calls: OpenUnconfirmedCall[]; more: boolean }> {
+    const rows = await this.bounded(
+      (tx) => tx.$queryRaw<OpenUnconfirmedCall[]>`
+      SELECT organization_id AS "organizationId", order_id AS "orderId", operation, subject,
+        generation, opened_at AS "openedAt"
+      FROM saga_unconfirmed_call
+      WHERE confirmed_at IS NULL
+      ORDER BY opened_at, organization_id, order_id, operation, subject
+      LIMIT ${limit + 1}
+    `,
+    );
+    return { calls: rows.slice(0, limit), more: rows.length > limit };
   }
 }

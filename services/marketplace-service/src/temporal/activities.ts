@@ -22,7 +22,7 @@ import {
   type TransactionDetailView,
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
-import { settlementsExhaustedTotal } from '../observability/metrics';
+import { releasesUnconfirmedTotal, settlementsExhaustedTotal } from '../observability/metrics';
 
 /**
  * Everything the order saga does that touches the world.
@@ -172,6 +172,8 @@ function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>)
 
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
+  // At zero from the start: `increase()` cannot see a series' first increment.
+  releasesUnconfirmedTotal.inc({ service: SERVICE_NAME }, 0);
 
   /**
    * Runs `fn` as the system, acting for the order's buying organization.
@@ -218,6 +220,16 @@ export function createActivities(deps: ActivityDependencies) {
   }
 
   const currentStep = deps.currentStep ?? temporalStep;
+
+  /** The durable record of an unconfirmed release (FU-104), under the order's own tenant. */
+  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
+    asSystemFor(orderId, (order) =>
+      deps.orders.openSagaCall(
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        'resolveObligationDispute',
+        disputeId,
+      ),
+    );
 
   /**
    * An economic-service call, made at most once per scheduled activity
@@ -597,6 +609,8 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       reason: string,
     ): Promise<string | null> {
+      // Before the call: a call that fails may still have committed.
+      await openRelease(orderId, disputeId);
       return economicStep(
         orderId,
         'disputeObligation',
@@ -617,7 +631,7 @@ export function createActivities(deps: ActivityDependencies) {
           // resolution — which the saga sends only after this step — changes
           // them.
           answer: (transaction) =>
-            transaction.status === 'DISPUTED' && transaction.disputeReason === reason
+            transaction.status === 'DISPUTED' && sameText(transaction.disputeReason, reason)
               ? { result: transaction.disputeId ?? null }
               : null,
         },
@@ -630,9 +644,15 @@ export function createActivities(deps: ActivityDependencies) {
      * With `economicDisputeId`, only that dispute: economic-service refuses the
      * resolution, under its row lock, once the transaction holds another — one
      * raised since the dispute decided here was taken, after that one was
-     * resolved there (Codex on #318 round 2, N1). The refusal stands, and the
-     * saga stops with the funds held for an operator, as it did before the
-     * order took economic-service's disputes at all.
+     * resolved there (Codex on #318 round 2, N1). The refusal stands: the saga
+     * waits with the funds held and the alert on, for an operator (FU-080).
+     *
+     * Confirmed on every way this answers, including a retry answered from the
+     * step's record. The record, opened when economic-service was told of the
+     * dispute and again by every attempt here, stays open whether or not a saga
+     * is left to make this call (FU-104). An attempt after an earlier one confirmed
+     * is open until it answers itself, and an earlier attempt's late confirmation
+     * cannot close it.
      */
     async resolveObligationDispute(
       orderId: string,
@@ -641,6 +661,7 @@ export function createActivities(deps: ActivityDependencies) {
       resolution: string,
       economicDisputeId?: string,
     ): Promise<void> {
+      const generation = await openRelease(orderId, disputeId);
       await economicStep(
         orderId,
         'resolveObligationDispute',
@@ -676,11 +697,34 @@ export function createActivities(deps: ActivityDependencies) {
               transaction.disputedAt !== null;
             const ours =
               economicDisputeId === undefined
-                ? resolutionOf(transaction) === resolution
+                ? sameText(resolutionOf(transaction), resolution)
                 : transaction.disputeId === economicDisputeId;
             return released && ours ? { result: undefined } : null;
           },
         },
+      );
+      await asSystemFor(orderId, (order) =>
+        deps.orders.confirmSagaCall(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          'resolveObligationDispute',
+          disputeId,
+          generation,
+        ),
+      );
+    },
+
+    /**
+     * Reports a round of a dispute release economic-service has not confirmed
+     * (FU-080), from an activity because the SDK logger discards a workflow's
+     * words (`TemporalRuntimeLogger`) and only a worker holds the registry.
+     * Touches nothing else, so it cannot fail for the reason the release did.
+     */
+    async noteReleaseUnconfirmed(orderId: string, round: number, failure: string): Promise<void> {
+      releasesUnconfirmedTotal.inc({ service: SERVICE_NAME });
+      logger.error(
+        `The dispute release of order ${orderId} is unconfirmed after round ${round} ` +
+          `(${failure}); its funds stay held and the saga keeps trying ` +
+          '(docs/runbooks/marketplace-saga-deploy.md)',
       );
     },
 
@@ -738,6 +782,18 @@ function systemContext(organizationId: string | undefined, correlationId: string
  */
 function refusedForState(error: unknown): boolean {
   return isRastaError(error) && error.code === 'INVALID_STATE_TRANSITION';
+}
+
+/**
+ * The same words, whatever their line endings. economic-service keeps the text
+ * as sent; once it keeps it with LF line endings (FU-115), this reader still
+ * finds its own dispute and resolution — which is why this release, reading
+ * both, must be every running worker and the rollback floor before that
+ * writer ships (docs/06 § 6.8). This service keeps what the person sent.
+ */
+function sameText(kept: string | null | undefined, sent: string): boolean {
+  const lf = (text: string) => text.replace(/\r\n?/g, '\n');
+  return typeof kept === 'string' && lf(kept) === lf(sent);
 }
 
 /**

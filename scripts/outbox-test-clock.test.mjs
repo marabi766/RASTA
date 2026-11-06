@@ -3,7 +3,15 @@
 // this repository; the rest pin each refusal on small fixtures, so a mutant
 // that disables a refusal branch fails here.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +107,9 @@ const SKIPPED_DIRECTORIES = new Set([
   'coverage',
   'playwright-report',
   'test-results',
+  // Git-ignored Prisma output, rewritten by `db:generate` while checks run: listed
+  // then gone (ENOENT, FU-090). It holds no test code, so it is never descended into.
+  'generated',
 ]);
 
 function sourceFiles(dir) {
@@ -946,6 +957,25 @@ test('the clock rule scans test code beside the source, in packages, the portal 
       new Set(files),
     );
   } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('test-code discovery never descends into git-ignored generated output (FU-090)', () => {
+  // `db:generate` rewrites src/generated while checks run: a directory listed a moment
+  // ago can be gone (ENOENT). A directory that cannot be read stands in for that: the
+  // walk must not open it, wherever it sits, and must still find the authored spec.
+  const fixture = mkdtempSync(join(tmpdir(), 'outbox-clock-generated-'));
+  const unreadable = join(fixture, 'services/sample-service/src/generated/prisma');
+  try {
+    mkdirSync(unreadable, { recursive: true });
+    mkdirSync(join(fixture, 'services/sample-service/src/test'), { recursive: true });
+    writeFileSync(join(fixture, 'services/sample-service/src/test/a.ts'), 'export {};\n');
+    chmodSync(unreadable, 0o000);
+    if (process.getuid?.() === 0) return; // root reads it anyway: nothing to prove
+    assert.deepEqual(testCodeFiles(fixture), ['services/sample-service/src/test/a.ts']);
+  } finally {
+    chmodSync(unreadable, 0o755);
     rmSync(fixture, { recursive: true, force: true });
   }
 });

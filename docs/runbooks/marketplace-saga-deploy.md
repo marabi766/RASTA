@@ -215,7 +215,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 2); an absent field means protocol **0**, the strictest legacy
+support (this build: 3); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue. An incompatible
@@ -225,11 +225,12 @@ checked against describe) also block. Never add protocol 1 to an old build to
 bypass the gate: it must preserve both continuation state and patched commands.
 
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
-`dispute-settle-resumes-order` requires **2**. A marker the gate does not list
-blocks every target until the gate learns it; a continuation's `resume` fields
-prove the same before its first marker (`reminderDue`: 2; any unlisted field
-blocks; so does an unlisted start input field). A target must declare at least
-what any inspected history requires.
+`dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
+**3**. A marker the gate does not list blocks every target until the gate learns
+it; a continuation's `resume` fields prove the same before its first marker
+(`reminderDue`: 2, `releaseRounds`: 3; any unlisted field blocks; so does an
+unlisted start input field). A target must declare at least what any inspected
+history requires.
 
 A build of #625 alone declares 1 although it writes the protocol-2 marker. Once a
 saga holds that marker, the gate refuses that image as a target, rollback or
@@ -242,6 +243,85 @@ Use this gate for **every** deployment, including rollback. Once a running saga
 requires a protocol, restore only a compatible image or ship a forward fix. Never
 reset/terminate a saga to downgrade. Keep the stopped-worker/no-new-start window
 above; a history change during inspection requires another drain/check.
+
+## Unconfirmed dispute release (FU-080)
+
+`RastaMarketplaceSagaDisputeReleaseUnconfirmed` fires from the first round of
+`rasta_marketplace_saga_release_unconfirmed_total` until two hours after the last.
+It counts rounds, not stuck sagas, and rounds need a running worker: with workers
+stopped or failed it clears while the funds are still held. A resolved alert is
+not a confirmed release; the saga's status query is. A decided dispute's
+resolution has not been confirmed by economic-service: the obligation stays
+DISPUTED and its funds held. The saga does not end. It waits in phase
+`RELEASE_UNCONFIRMED` (`workflow query --name status`) and calls again with the
+same idempotency key, doubling from one minute to one hour between rounds, so a
+release that did commit is recognized and never repeated. Nothing is authorised,
+settled or refunded for that order until it is confirmed, even if the buyer has
+confirmed receipt; the saga then reads the order again and carries on.
+
+The log line names the order and the last failure's code and words: read them
+before deciding anything. `rasta_marketplace_economic_calls_total` does not
+separate an outage from a refusal: its `REFUSED` counts every non-2xx answer, a
+5xx or an in-flight conflict included. After restoring economic-service, try now
+instead of waiting for the next round:
+
+```bash
+temporal workflow signal "${C[@]}" --workflow-id order-<orderId> --name retryDisputeRelease
+```
+
+A refusal that names the dispute can persist: economic-service holds a dispute
+other than the one decided here, and the release must not clear it. Deciding that
+dispute there does
+not make this release confirmable: the order then needs a person's reconciliation,
+with the funds still held. Terminating the saga belongs to that recorded decision,
+never to silencing the alert or passing the gate. A waiting saga does not block the
+gate, but its call in flight is a pending activity: with workers stopped it stays
+pending, so follow the gate's pending-activity case above. One rollback edge: a
+release whose last attempt failed just as workers stopped has no marker yet, so a
+protocol-2 target passes the gate and then ends that saga as before this wait.
+
+## رکورد فراخوانی‌های تأییدنشده (FU-104)
+
+`saga_unconfirmed_call` رکورد پایدار فراخوانی‌هایی به economic-service است که نتیجه‌شان تأیید نشده است. ردیف پیش از فراخوانی نوشته می‌شود،
+هر تلاش تازه آن را دوباره باز می‌کند و `generation` را جلو می‌برد، و فقط تأیید همان تلاش آن را می‌بندد؛ پس تأیید دیرهنگام تلاشی قدیمی‌تر چیزی را نمی‌بندد،
+و ردیف با توقف Worker یا پایان Saga از بین نمی‌رود. فعلاً فقط `resolveObligationDispute` ثبت می‌شود، پس ردیف بسته فقط تأیید همان آزادسازی است و ثابت نمی‌کند بازپرداخت یا تسویهٔ پس از آن هم انجام شده است.
+این جدول فقط ثبت می‌کند: هنوز هیچ هشداری آن را نمی‌خواند، پس برای دیدن ردیف‌های باز این پرس‌وجو را اجرا کن (`opened_at` زمان نخستین بازشدن است و با تلاش تازه جلو نمی‌رود):
+
+```sql
+SELECT organization_id, order_id, operation, subject AS dispute_id, generation, opened_at
+FROM saga_unconfirmed_call WHERE confirmed_at IS NULL ORDER BY opened_at;
+```
+
+ردیف باز ثابت نمی‌کند وجه هنوز در Hold است؛ ثابت می‌کند که کسی خلافش را ثابت نکرده است. پس آن را با economic-service تطبیق بده (اختلاف باز هنوز چیزی برای آزادسازی ندارد).
+ردیف را فقط با تصمیم ثبت‌شدهٔ تطبیق ببند، و با همان `generation` که خوانده‌ای، تا تلاشی که پس از خواندن تو آغاز شده بسته نشود. اگر `UPDATE 0` برگشت، دوباره بخوان و دوباره تطبیق بده:
+
+```sql
+UPDATE saga_unconfirmed_call SET confirmed_at = now()
+WHERE organization_id = '<org>' AND order_id = '<order>' AND operation = 'resolveObligationDispute'
+  AND subject = '<dispute>' AND generation = <generation> AND confirmed_at IS NULL;
+```
+
+### پرکردن گذشته
+
+Migration برای **هر** اختلافی که سفارشش `COMPLETED` یا `CANCELLED` نیست ردیف می‌نویسد، چه اختلاف باز باشد چه تصمیم‌گرفته، چه Saga ـش زنده باشد چه بسته. هیچ رسید و هیچ زمانی
+این را تغییر نمی‌دهد: رسید آزادسازی نمی‌گوید پاسخ کدام اختلاف است، زمانش با ساعت دیگری از زمان تصمیم ثبت می‌شود، و ممکن است دیر برسد یا هرگز نوشته نشود. پس آزادسازی‌ای که واقعاً
+انجام شده هم ردیف می‌گیرد: Saga ـی که منتظر است ردیف خود را با تلاش بعدی‌اش می‌بندد (در فاز `RELEASE_UNCONFIRMED`، `retryDisputeRelease` آن را زودتر می‌کند)، و بقیه را با economic-service تطبیق بده، با همان مسیر بالا ببند و ثبت کن.
+
+Migration پیش از توقف نسخهٔ قدیمی اجرا می‌شود (گام ۱) و آن نسخه تا گام ۲ هنوز می‌تواند اختلافی را ثبت کند. پس **در هر تلاش استقرار، میان گام ۲ و ۴ این پرکردن را دوباره اجرا کن**، از جمله پس از Rollback: `db:migrate` دوم کاری نمی‌کند، و اختلافی که نسخهٔ قدیمی در این میان ثبت کرده ردیف نمی‌گیرد؛
+همان عبارت Migration است، تکرارش بی‌خطر است و ردیف موجود را تغییر نمی‌دهد. از ریشهٔ مخزن اجرا کن. کد خروج غیرصفر (از جمله وقتی عبارتی پیدا نشود) استقرار را متوقف می‌کند،
+و سطر `INSERT 0 <n>` در Change Record ثبت می‌شود:
+
+```bash
+set -o pipefail
+sed -n '/^-- BACKFILL BEGIN/,/^-- BACKFILL END/p' \
+  services/marketplace-service/prisma/migrations/20261105130000_saga_unconfirmed_call/migration.sql |
+  node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 -f - |
+  grep -E '^INSERT 0 [0-9]+$'
+```
+
+`scripts/psql-prisma-url.mjs` تنها تبدیل نشانی Prisma به libpq است: `psql` پارامتر `?schema=` را نمی‌پذیرد، و این ابزار آن را به `search_path` تبدیل می‌کند، پس Schema ـی غیر از `public` هم از دست نمی‌رود.
+
+`down.sql` این Migration رکورد فراخوانی‌های باز را از بین می‌برد: پیش از اجرایش همین فهرست را ثبت کن.
 
 ## Continued-as-new visibility gap (FU-046)
 

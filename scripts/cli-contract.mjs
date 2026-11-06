@@ -88,6 +88,10 @@ export const CLI_CONTRACT = Object.freeze({
   // A Git revision is resolved to a verified commit id; raw input is never echoed.
   'scripts/prepush-parity.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
   'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
+  // FU-093: classifies `pnpm install --frozen-lockfile`, `pnpm --filter|--dir <workspace> run
+  // <script>` and `node --test` in CI steps and root scripts to derive the projected package.json;
+  // does not read process.argv.
+  'scripts/prepush-parity-lib.mjs': { other: ['--dir', '--filter', '--frozen-lockfile', '--test'] },
   'scripts/prepush-scope-lib.mjs': {
     other: [
       '--cached',
@@ -371,6 +375,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--filter',
       '--import',
       '--no-warnings',
+      '--require',
       '--test',
       '--test-timeout',
     ],
@@ -464,6 +469,8 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
+  // The name of a DATABASE_URL_* variable, never its value, then what psql is to be told.
+  'scripts/psql-prisma-url.mjs': { positionals: ['identifier', 'forwarded'] },
   'scripts/replay-dlq-lib.mjs': {
     accepts: {
       '--allow-stale': 'identifier',
@@ -489,6 +496,8 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: ['script'],
     other: ['--depth', '--no-tags', '--quiet', '--verify'],
   },
+  // `git -C <root> ls-files | check-ignore -q --no-index`: is a vanished generated path ignored?
+  'scripts/testing-dev-only-source.mjs': { other: ['--no-index', '-C', '-q'] },
   'scripts/testing-dev-only.mjs': {
     // `image <ref>` | `tree <dir> <entry>`: each checked against IMAGE_REF or
     // REPO_PATH before any use.
@@ -506,6 +515,9 @@ export const CLI_CONTRACT = Object.freeze({
       '-xf',
     ],
   },
+  // FU-118: the stall watchdog READS process.execArgv for --test to know it runs in the
+  // node --test runner (parent); it has no command line.
+  'scripts/test-stall-watchdog.mjs': { other: ['--test'] },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
     other: [

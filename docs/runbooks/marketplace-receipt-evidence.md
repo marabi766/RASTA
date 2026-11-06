@@ -33,7 +33,7 @@
 
 ```bash
 PGOPTIONS='-c default_transaction_read_only=on' \
-  psql "$DATABASE_URL_MARKETPLACE_MIGRATOR" -v ON_ERROR_STOP=1 \
+  node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 \
   -f services/marketplace-service/prisma/checks/dispute-settle-evidence.sql
 ```
 

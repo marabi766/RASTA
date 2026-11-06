@@ -177,10 +177,12 @@ function listExecutions(cli, common, query, expected, status = 'RUNNING') {
 const PATCH_PROTOCOL = new Map([
   ['order-saga-durable-rollover-v1', 1],
   ['dispute-settle-resumes-order', 2],
+  ['dispute-release-durable-wait-v1', 3],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is
-// the only evidence of what wrote it. `reminderDue` came with protocol 2.
+// the only evidence of what wrote it: `reminderDue` came with protocol 2, and
+// `releaseRounds` means it rolled over inside the release wait of protocol 3.
 const RESUME_PROTOCOL = new Map([
   ['status', 1],
   ['mirroredDispute', 1],
@@ -189,6 +191,7 @@ const RESUME_PROTOCOL = new Map([
   ['nextReminderAt', 1],
   ['activitySequence', 1],
   ['reminderDue', 2],
+  ['releaseRounds', 3],
 ]);
 // Every field a saga has ever been started with; any other could mean anything.
 const INPUT_FIELDS = new Set([
