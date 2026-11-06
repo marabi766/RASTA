@@ -309,7 +309,7 @@
   },
   {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
-    "line": 237,
+    "line": 239,
     "hash": "1b6e0d58da2ac563b351590150b6090fc4390aa0da3a8ff7701ed151b932f603",
     "occurrence": 0,
     "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
@@ -799,7 +799,7 @@
   },
   {
     "file": "services/document-service/src/scanning/scan.repository.ts",
-    "line": 237,
+    "line": 239,
     "hash": "f6262e06e9077efe9b5f6f51356ba7aebfd97f2b804a49cd61ce94a6cf90ac42",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
@@ -919,13 +919,13 @@
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
     "line": 411,
-    "hash": "8b459764d36e9b3f91f2d213bef61051a94e774227d70e6e4503d857acf5d659",
+    "hash": "58052b662cb00ae83ca355c5b6a5c9011c703afbaf8799dca65dfa96a6c2bf79",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler retires stale tasks across tenants under row locks when their marker and hold are absent"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 477,
+    "line": 478,
     "hash": "07cf8007f828a01ba198cc86431ab4e5d027ca688183558aa90a08b7005bc6c8",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
@@ -1080,9 +1080,9 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "daeb0670a1ea029e63f6c4b8d3d5a63c8b1f598b9bdea4b081bae73bba31e0cc",
+    "hash": "a42868e01ac1f252041c961b16859c1710d1c584871cfc1f0daeaf1a2c2afe30",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (wallet_hold by its reference), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
@@ -2080,7 +2080,7 @@
   },
   {
     "file": "services/inventory-service/src/shipment/shipment.repository.ts",
-    "line": 237,
+    "line": 239,
     "hash": "d339e7177c87984986feb0720c13214dd9a2bb0b15edb45d17d203031ec590bf",
     "occurrence": 0,
     "decision": "platform-wide: shipment is visible to its owner and consignee or buyer; bound visible SQL fragment encodes these party predicates before returning data"

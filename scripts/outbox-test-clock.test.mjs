@@ -3,15 +3,7 @@
 // this repository; the rest pin each refusal on small fixtures, so a mutant
 // that disables a refusal branch fails here.
 import assert from 'node:assert/strict';
-import {
-  chmodSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +22,7 @@ import {
   templateHash,
 } from './eligibility-clock-guard.mjs';
 import { stripComments } from './eligibility-clock-sql.mjs';
+import { workspaceDirectories } from './workspace-roots-lib.mjs';
 
 // #452's clock rule (one reading per object literal), from main: the tests at the end use it.
 /**
@@ -106,9 +99,10 @@ function clockHazards(source, file = '') {
  * packages, the portal and tests/e2e.
  */
 function testCodeFiles(repository) {
-  return ['services', 'packages', 'apps', 'tests']
-    .filter((top) => readdirSync(repository).includes(top))
-    .flatMap((top) => authoredFiles(join(repository, top), { base: repository }))
+  // Members come from pnpm-workspace.yaml (fails closed), not from four hard-coded roots;
+  // each member is read through the authored-source inventory (git's own file list).
+  return workspaceDirectories(repository)
+    .flatMap((directory) => authoredFiles(join(repository, directory), { base: repository }))
     .map((path) => relative(repository, path))
     .filter(
       (path) =>
@@ -156,6 +150,8 @@ function repository(files, run) {
   const dir = mkdtempSync(join(tmpdir(), 'eligibility-guard-'));
   const base = {
     'package.json': '{"name":"fixture-root","scripts":{}}',
+    'pnpm-workspace.yaml':
+      "packages:\n  - 'apps/*'\n  - 'services/*'\n  - 'packages/*'\n  - 'tests/*'\n",
     'services/sample/package.json': '{"name":"@rasta/sample"}',
     'services/sample/prisma/schema.prisma': [
       'model Hold {',
@@ -924,6 +920,16 @@ test('the clock rule scans test code beside the source, in packages, the portal 
       'tests/e2e/specs/sample.e2e-spec.ts',
       'tests/e2e/src/fixture.ts',
     ];
+    // The fixture declares its workspace like the real repository: members are
+    // what pnpm-workspace.yaml names, each with a manifest.
+    writeFileSync(
+      join(fixture, 'pnpm-workspace.yaml'),
+      "packages:\n  - 'apps/*'\n  - 'services/*'\n  - 'packages/*'\n  - 'tests/*'\n",
+    );
+    for (const member of ['services/sample-service', 'packages/sample', 'apps/web', 'tests/e2e']) {
+      mkdirSync(join(fixture, member), { recursive: true });
+      writeFileSync(join(fixture, member, 'package.json'), '{}');
+    }
     for (const file of [...files, 'services/sample-service/src/sample.service.ts']) {
       mkdirSync(join(fixture, file, '..'), { recursive: true });
       writeFileSync(join(fixture, file), twice);
@@ -948,7 +954,10 @@ test('test-code discovery never descends into git-ignored generated output (FU-0
   const fixture = mkdtempSync(join(tmpdir(), 'outbox-clock-generated-'));
   const unreadable = join(fixture, 'services/sample-service/src/generated/prisma');
   try {
+    // Members come from pnpm-workspace.yaml (FU-028 reader fails closed without it).
+    writeFileSync(join(fixture, 'pnpm-workspace.yaml'), "packages:\n  - 'services/*'\n");
     mkdirSync(unreadable, { recursive: true });
+    writeFileSync(join(fixture, 'services/sample-service/package.json'), '{}');
     mkdirSync(join(fixture, 'services/sample-service/src/test'), { recursive: true });
     writeFileSync(join(fixture, 'services/sample-service/src/test/a.ts'), 'export {};\n');
     chmodSync(unreadable, 0o000);
