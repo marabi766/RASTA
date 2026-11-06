@@ -43,8 +43,8 @@ export const PROVEN_REFUSALS: ReadonlySet<string> = new Set([
 export const REFUSED_ON_FIRST_ATTEMPT = 'REFUSED_ON_FIRST_ATTEMPT';
 
 /**
- * In a failure's details: the call is in doubt, and the obligation is in a terminal
- * status, not the call's answer, which no request still in flight can move. Whether
- * it ever took effect no longer matters: the money has nowhere further to go.
+ * In a failure's details, in a history recorded before `ObligationFinal` replaced it:
+ * the call was in doubt, and the obligation terminal. Nothing marks a failure so now;
+ * the workflow still reads it, so that such a history replays its end.
  */
 export const OWNER_STATE_IS_FINAL = 'OWNER_STATE_IS_FINAL';

@@ -22,11 +22,7 @@ import {
   type TransactionDetailView,
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
-import {
-  OWNER_STATE_IS_FINAL,
-  PROVEN_REFUSALS,
-  REFUSED_ON_FIRST_ATTEMPT,
-} from './economic-refusal';
+import { PROVEN_REFUSALS, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
 import {
   economicCallsUnconfirmedTotal,
   releasesUnconfirmedTotal,
@@ -169,23 +165,65 @@ export interface DisputedObligation {
   economicDisputeId?: string | null;
 }
 
-/** The economic calls that wait for confirmation beside the release (FU-103, FU-117). */
+/**
+ * The obligation is in a terminal status that is not the call's own effect, so no
+ * attempt can ever have that effect, and no request still in flight can move it.
+ * An answer, not a refusal: the saga decides from it what the order can do.
+ */
+export interface ObligationFinal {
+  final: true;
+  status: string;
+  funds: ObligationFunds;
+}
+
+/** The economic calls whose outcome the saga can owe beside the release (FU-103, FU-117). */
 export const UNCONFIRMED_OPERATIONS = [
   'createObligation',
+  'readOrder',
   'authoriseSettlement',
+  'settle',
   'disputeObligation',
   'compensate',
 ] as const;
 export type UnconfirmedOperation = (typeof UNCONFIRMED_OPERATIONS)[number];
 
 /** What `authoriseSettlement` answers. Undefined: authorised. */
-export type AuthorisationResult = DisputedObligation | undefined;
+export type AuthorisationResult = DisputedObligation | ObligationFinal | undefined;
 
 /**
  * What `markObligationDisputed` answers: the order's status, and the dispute
  * it filed for the one economic-service holds — null when it filed none.
  */
 export type ObligationDisputeTaken = Awaited<ReturnType<OrderService['markObligationDisputed']>>;
+
+/**
+ * The statuses no late request can move for any call the saga waits on. Each call's
+ * own effect is its answer first. A reversal starts from SETTLED and goes only further.
+ */
+const PAST_ANY_CALL = [
+  'SETTLED',
+  'PARTIALLY_REVERSED',
+  'REVERSED',
+  'REFUNDED',
+  'CANCELLED',
+  'FAILED',
+];
+
+/** `transaction` as an {@link ObligationFinal} step answer when in one of `statuses`, else null. */
+function finalIn(
+  transaction: TransactionDetailView,
+  statuses: readonly string[],
+): { result: ObligationFinal } | null {
+  return statuses.includes(transaction.status)
+    ? {
+        result: {
+          final: true,
+          status: transaction.status,
+          funds: fundsOf(transaction.status),
+        },
+      }
+    : null;
+}
 
 /** The terms the order's obligation is recorded on, from the order row alone. */
 function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>): ObligationTerms {
@@ -276,8 +314,8 @@ export function createActivities(deps: ActivityDependencies) {
    * failure marked as proof is this step's own refusal, by `requires` or the send,
    * on the first attempt of this scheduling. In doubt — a retry, or a round after
    * an unconfirmed attempt — a failed send asks the obligation, because a code
-   * then says nothing of the attempts before it: its effect is the answer,
-   * `isFinal` is the proof, and anything else stays unknown.
+   * then says nothing of the attempts before it: its effect or a terminal status
+   * is the answer (`finalIn`), and anything else stays unknown.
    */
   async function economicStep<T>(
     orderId: string,
@@ -289,8 +327,6 @@ export function createActivities(deps: ActivityDependencies) {
       answer: (transaction: TransactionDetailView) => { result: T } | null;
       confirmed?: {
         inDoubt: boolean;
-        /** A terminal status without this command's effect as the answer, which nothing can move. */
-        isFinal: (transaction: TransactionDetailView) => boolean;
         /**
          * What must hold before asking at all. Its refusal is never reconciled: the
          * obligation's state cannot stand in for a condition of this order's.
@@ -330,20 +366,10 @@ export function createActivities(deps: ActivityDependencies) {
                 throw reconciliationReadFailed(activity, failure);
               });
             const answer = transaction ? applied.answer(transaction) : null;
-            if (!answer) {
-              if (inDoubt && transaction && confirmed?.isFinal(transaction)) {
-                throw ApplicationFailure.create({
-                  message: `The obligation is ${transaction.status}: terminal, and nothing further can move it`,
-                  type: 'OBLIGATION_ALREADY_FINAL',
-                  nonRetryable: true,
-                  details: [OWNER_STATE_IS_FINAL],
-                });
-              }
-              throw unanswered(refusal);
-            }
+            if (!answer) throw unanswered(refusal);
             logger.warn(
               `Saga step ${activity} of order ${order.id} was refused, and the transaction's state ` +
-                `already shows its effect (${transaction?.status}); answering from economic-service's record`,
+                `(${transaction?.status}) answers it; answering from economic-service's record`,
             );
             return answer.result;
           }
@@ -506,7 +532,8 @@ export function createActivities(deps: ActivityDependencies) {
      * disputed since in economic-service. `inDoubt` is the workflow's word that
      * an earlier scheduling of this call went unconfirmed, which this attempt
      * cannot see. Omitted, the workflow still ends nothing on a mark it did not
-     * ask for: it ignores the mark while in doubt (`outcomeUnknown`).
+     * ask for: it ignores the mark while in doubt (`outcomeUnknown`). An
+     * {@link ObligationFinal} when it can never be authorised.
      */
     async authoriseSettlement(
       orderId: string,
@@ -537,12 +564,12 @@ export function createActivities(deps: ActivityDependencies) {
               return { result: undefined };
             }
             const disputed = disputedSinceAuthorised(transaction, orderId);
-            return disputed ? { result: disputed } : null;
+            if (disputed) return { result: disputed };
+            // SETTLED is the effect, above. DISPUTED and HELD can still move.
+            return finalIn(transaction, PAST_ANY_CALL);
           },
           confirmed: {
             inDoubt,
-            // SETTLED is the effect, above. DISPUTED and HELD can still move.
-            isFinal: ({ status }) => ['REFUNDED', 'CANCELLED', 'FAILED'].includes(status),
             // The buyer's receipt is what authorises settlement; without it on
             // the row, nothing is asked of economic-service. An order an older
             // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
@@ -650,15 +677,16 @@ export function createActivities(deps: ActivityDependencies) {
      *
      * The only compensation this saga performs, and only before settlement.
      * After receipt confirmation `docs/08` § 8.4 forbids automatic financial
-     * compensation entirely.
+     * compensation entirely. An {@link ObligationFinal} when another terminal status
+     * means no refund can ever land.
      */
     async compensate(
       orderId: string,
       transactionId: string,
       reason: string,
       inDoubt = false,
-    ): Promise<void> {
-      await economicStep(
+    ): Promise<ObligationFinal | void> {
+      return economicStep<ObligationFinal | void>(
         orderId,
         'compensate',
         async (order) => {
@@ -675,12 +703,10 @@ export function createActivities(deps: ActivityDependencies) {
           // Terminal, and only a refund reaches it: the held money is back
           // with the buyer, which is all compensation is for.
           answer: (transaction) =>
-            transaction.status === 'REFUNDED' ? { result: undefined } : null,
-          // Refunded is the effect, above. No late refund can move these.
-          confirmed: {
-            inDoubt,
-            isFinal: ({ status }) => ['SETTLED', 'CANCELLED', 'FAILED'].includes(status),
-          },
+            transaction.status === 'REFUNDED'
+              ? { result: undefined }
+              : finalIn(transaction, PAST_ANY_CALL),
+          confirmed: { inDoubt },
         },
       );
     },
@@ -696,7 +722,8 @@ export function createActivities(deps: ActivityDependencies) {
      *
      * Answers economic-service's identity of the dispute it filed — what the
      * saga names when it mirrors the decision (Codex on #318 round 2, N1) —
-     * or null from an economic-service older than the identity.
+     * or null from an economic-service older than the identity. An
+     * {@link ObligationFinal} when the obligation can no longer be disputed.
      */
     async disputeObligation(
       orderId: string,
@@ -704,8 +731,8 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       reason: string,
       inDoubt = false,
-    ): Promise<string | null> {
-      return economicStep(
+    ): Promise<string | ObligationFinal | null> {
+      return economicStep<string | ObligationFinal | null>(
         orderId,
         'disputeObligation',
         async (order) => {
@@ -724,17 +751,13 @@ export function createActivities(deps: ActivityDependencies) {
           // Disputed with this dispute's own words. Nothing but the next
           // resolution — which the saga sends only after this step — changes
           // them.
-          answer: (transaction) =>
-            transaction.status === 'DISPUTED' && transaction.disputeReason === reason
-              ? { result: transaction.disputeId ?? null }
-              : null,
           // Disputed by another's words can still move, and so can HELD or
           // PENDING_SETTLEMENT: a late filing can land on those.
-          confirmed: {
-            inDoubt,
-            isFinal: ({ status }) =>
-              ['SETTLED', 'REFUNDED', 'CANCELLED', 'FAILED'].includes(status),
-          },
+          answer: (transaction) =>
+            transaction.status === 'DISPUTED' && sameText(transaction.disputeReason, reason)
+              ? { result: transaction.disputeId ?? null }
+              : finalIn(transaction, PAST_ANY_CALL),
+          confirmed: { inDoubt },
         },
       );
     },
@@ -746,7 +769,9 @@ export function createActivities(deps: ActivityDependencies) {
      * resolution, under its row lock, once the transaction holds another — one
      * raised since the dispute decided here was taken, after that one was
      * resolved there (Codex on #318 round 2, N1). The refusal stands: the saga
-     * waits with the funds held and the alert on, for an operator (FU-080).
+     * waits with the funds held and the alert on, for an operator (FU-080). In a
+     * terminal status there is nothing left to release ({@link ObligationFinal}), and
+     * the saga's next call reads that status and says what follows.
      */
     async resolveObligationDispute(
       orderId: string,
@@ -754,8 +779,8 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       resolution: string,
       economicDisputeId?: string,
-    ): Promise<void> {
-      await economicStep(
+    ): Promise<ObligationFinal | void> {
+      return economicStep<ObligationFinal | void>(
         orderId,
         'resolveObligationDispute',
         async (order) => {
@@ -790,9 +815,9 @@ export function createActivities(deps: ActivityDependencies) {
               transaction.disputedAt !== null;
             const ours =
               economicDisputeId === undefined
-                ? resolutionOf(transaction) === resolution
+                ? sameText(resolutionOf(transaction), resolution)
                 : transaction.disputeId === economicDisputeId;
-            return released && ours ? { result: undefined } : null;
+            return released && ours ? { result: undefined } : finalIn(transaction, PAST_ANY_CALL);
           },
         },
       );
@@ -885,6 +910,18 @@ function systemContext(organizationId: string | undefined, correlationId: string
  */
 function refusedForState(error: unknown): boolean {
   return isRastaError(error) && error.code === 'INVALID_STATE_TRANSITION';
+}
+
+/**
+ * The same words, whatever their line endings. economic-service keeps the text
+ * as sent; once it keeps it with LF line endings (FU-115), this reader still
+ * finds its own dispute and resolution — which is why this release, reading
+ * both, must be every running worker and the rollback floor before that
+ * writer ships (docs/06 § 6.8). This service keeps what the person sent.
+ */
+function sameText(kept: string | null | undefined, sent: string): boolean {
+  const lf = (text: string) => text.replace(/\r\n?/g, '\n');
+  return typeof kept === 'string' && lf(kept) === lf(sent);
 }
 
 /**

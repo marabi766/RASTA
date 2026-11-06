@@ -1830,8 +1830,6 @@ describe('the order saga', () => {
           owner.post = () => {
             throw lost();
           };
-          let failure: unknown;
-
           await run(
             order,
             activities,
@@ -1847,14 +1845,13 @@ describe('the order saga', () => {
               expect(calls).not.toContain('markSettling');
               owner.status = 'REFUNDED';
               await ctx.handle.signal(retryDisputeRelease);
-              failure = await ctx.handle.result().catch((error: unknown) => error);
+              // The owner's answer, and the order cannot follow it: for a person (#796 r1 F3).
+              await phaseIs(ctx.handle, 'OBLIGATION_RECONCILIATION');
+              await atRest(ctx.handle);
             },
             { input: NO_RECHECK, keepRunning: true },
           );
 
-          expect(failure).toBeInstanceOf(WorkflowFailedError);
-          const activity = (failure as WorkflowFailedError).cause as ActivityFailure;
-          expect((activity.cause as ApplicationFailure).type).toBe('OBLIGATION_ALREADY_FINAL');
           expect(calls).not.toContain('markSettling');
         },
       );
@@ -2739,7 +2736,7 @@ describe('the order saga', () => {
       }
     });
 
-    it('refunds nothing it did not record when a cancelled order’s lookup finds other terms', async () => {
+    it('refunds nothing it did not record, and stays, when a cancelled order’s lookup finds other terms', async () => {
       const order = new FakeOrder();
       let lookups = 0;
       const { calls, activities } = recordingActivities(order, {
@@ -2755,10 +2752,18 @@ describe('the order saga', () => {
             : { mismatch: true, transactionIds: ['TXN_PRE_RECORDED'], differ: ['amount'] },
       });
 
-      await expect(run(order, activities, async () => undefined)).rejects.toMatchObject({
-        cause: { type: 'OBLIGATION_TERMS_MISMATCH' },
-      });
-      expect(lookups).toBe(2);
+      await run(
+        order,
+        activities,
+        (ctx) =>
+          eventually(
+            async () =>
+              (await ctx.handle.query<SagaStatus, []>('status')).phase === 'OBLIGATION_MISMATCH',
+            'the saga to stay for the mismatch',
+          ),
+        { keepRunning: true },
+      );
+      expect(lookups).toBeGreaterThanOrEqual(2);
       expect(calls).not.toContain('compensate');
       expect(calls).not.toContain('markCancelled');
     });
@@ -2818,7 +2823,7 @@ describe('the order saga', () => {
       },
     );
 
-    it('stops, refunding nothing, when a cancelled order’s lookup finds its obligation refunded', async () => {
+    it('closes as cancelled, refunding nothing, when a cancelled order’s lookup finds its obligation refunded', async () => {
       const order = new FakeOrder();
       let lookups = 0;
       const { calls, activities } = recordingActivities(order, {
@@ -2832,12 +2837,10 @@ describe('the order saga', () => {
             : { notHeld: true, transactionId: 'TXN_OWN', status: 'REFUNDED', funds: 'RETURNED' },
       });
 
-      await expect(run(order, activities, async () => undefined)).rejects.toMatchObject({
-        cause: { type: 'OBLIGATION_NOT_HELD' },
-      });
+      await expect(run(order, activities, async () => undefined)).resolves.toBe('CANCELLED');
       expect(lookups).toBe(2);
       expect(calls).not.toContain('compensate');
-      expect(calls).not.toContain('markCancelled');
+      expect(calls).toContain('markCancelled');
     });
 
     it('closes as cancelled, with nothing to refund, when the buyer cancelled and the hold was refused', async () => {

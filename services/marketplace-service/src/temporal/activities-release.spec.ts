@@ -4,7 +4,7 @@ import { economicCallsUnconfirmedTotal, releasesUnconfirmedTotal } from '../obse
 import { ActivityFailure } from '@temporalio/client';
 import { RastaError } from '@rasta/nest-common';
 import { ApplicationFailure } from '@temporalio/activity';
-import { OWNER_STATE_IS_FINAL, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
+import { REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
 import { outcomeUnknown } from './workflows';
 import type { EconomicClient } from '../economic/economic.client';
 import type { OrderService } from '../order/order.service';
@@ -63,7 +63,13 @@ it('starts every call behind the wait at zero, not only the first (FU-117)', asy
   const { values } = await economicCallsUnconfirmedTotal.get();
   const operations = values.map((value) => value.labels.operation);
   expect(operations).toEqual(
-    expect.arrayContaining(['authoriseSettlement', 'disputeObligation', 'compensate']),
+    expect.arrayContaining([
+      'readOrder',
+      'authoriseSettlement',
+      'settle',
+      'disputeObligation',
+      'compensate',
+    ]),
   );
 });
 
@@ -134,6 +140,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         refund: failing,
         settle: failing,
         dispute: failing,
+        resolveDispute: failing,
         readObligation: async () => {
           reads += 1;
           return read();
@@ -219,16 +226,19 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
   });
 
   it.each(['REFUNDED', 'CANCELLED', 'FAILED'])(
-    'in doubt, %s is terminal without the effect: the owner’s proof',
+    'in doubt, %s is terminal without the effect: the owner’s answer',
     async (status) => {
       const { activities } = over(refused, obligation(status), () => 2);
-      const caught = await failure(activities.authoriseSettlement('ORD', 'TXN'));
-      expect(caught).toMatchObject({ type: 'OBLIGATION_ALREADY_FINAL', nonRetryable: true });
-      expect(caught.details).toEqual([OWNER_STATE_IS_FINAL]);
+      await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toMatchObject({
+        final: true,
+        status,
+      });
     },
   );
 
-  it('a first attempt’s state refusal with a terminal obligation stays the send’s, not the owner’s', async () => {
+  // Review of #796 r1, F3: the marked refusal ended the saga, and the owner's status
+  // is what decides what the order can do, on the first attempt as on any other.
+  it('a first attempt refused for its state, the obligation terminal: the owner’s answer', async () => {
     const { activities } = over(
       () => {
         throw refuse('INVALID_STATE_TRANSITION');
@@ -236,8 +246,67 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       obligation('REFUNDED'),
       () => 1,
     );
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toEqual({
+      final: true,
+      status: 'REFUNDED',
+      funds: 'RETURNED',
+    });
+  });
+
+  it.each([
+    ['SETTLED', 'PAID_OUT'],
+    ['REVERSED', 'UNPROVEN'],
+    ['REFUNDED', 'RETURNED'],
+    ['CANCELLED', 'NEVER_HELD'],
+    ['FAILED', 'NEVER_HELD'],
+  ])(
+    'a release refused with the obligation %s has nothing left to release',
+    async (status, funds) => {
+      const { activities } = over(() => {
+        throw refuse('INVALID_STATE_TRANSITION');
+      }, obligation(status));
+      await expect(
+        activities.resolveObligationDispute('ORD', 'TXN', 'DSP', 'decided', 'ECON'),
+      ).resolves.toEqual({ final: true, status, funds });
+    },
+  );
+
+  it.each(['HELD', 'DISPUTED', 'PENDING_SETTLEMENT'])(
+    'a release refused with the obligation %s stays refused',
+    async (status) => {
+      const { activities } = over(() => {
+        throw refuse('INVALID_STATE_TRANSITION');
+      }, obligation(status));
+      const caught = await failure(
+        activities.resolveObligationDispute('ORD', 'TXN', 'DSP', 'decided', 'ECON'),
+      );
+      expect(caught.type).toBe('INVALID_STATE_TRANSITION');
+    },
+  );
+
+  it.each(['PARTIALLY_REVERSED', 'REVERSED'])(
+    'a refund refused with the obligation %s is told so: no refund can land past a settlement',
+    async (status) => {
+      const { activities } = over(
+        () => {
+          throw refuse('INVALID_STATE_TRANSITION');
+        },
+        obligation(status),
+        () => 1,
+      );
+      await expect(activities.compensate('ORD', 'TXN', 'why')).resolves.toEqual({
+        final: true,
+        status,
+        funds: 'UNPROVEN',
+      });
+    },
+  );
+
+  it('a first attempt refused otherwise reads nothing, and stays its own proof', async () => {
+    const { activities, reads } = over(refused, obligation('REFUNDED'), () => 1);
     const caught = await failure(activities.authoriseSettlement('ORD', 'TXN'));
     expect(caught.details).toEqual([REFUSED_ON_FIRST_ATTEMPT]);
+    expect(reads()).toBe(0);
   });
 
   it.each([
@@ -349,11 +418,9 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       await expect(call(activities)).resolves.not.toThrow();
     });
 
-    it.each(finals)('in doubt, %s is final: no late request can move it', async (status) => {
+    it.each(finals)('in doubt, %s is final: the answer says so', async (status) => {
       const { activities } = over(refused, obligation(status), () => 2);
-      const caught = await failure(call(activities));
-      expect(caught.type).toBe('OBLIGATION_ALREADY_FINAL');
-      expect(caught.details).toEqual([OWNER_STATE_IS_FINAL]);
+      await expect(call(activities)).resolves.toMatchObject({ final: true, status });
     });
 
     // DISPUTED: no words of this filing's on it, and neither call's final state.

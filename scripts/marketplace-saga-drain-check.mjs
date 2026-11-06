@@ -180,15 +180,17 @@ const PATCH_PROTOCOL = new Map([
   ['dispute-release-durable-wait-v1', 3],
   ['economic-call-durable-wait-v1', 4],
   ['economic-sibling-call-durable-wait-v1', 5],
-  ['economic-hold-call-durable-wait-v1', 6],
+  ['saga-owed-work-durable-v1', 6],
+  ['economic-hold-call-durable-wait-v1', 7],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is
 // the only evidence of what wrote it: `reminderDue` came with protocol 2, and
 // `releaseRounds` means it rolled over inside the release wait of protocol 3,
 // `unconfirmedCall` inside the same wait of an authorisation, protocol 4,
-// `siblingCall` inside that of a dispute filing or a refund, protocol 5, and
-// `holdCall` inside that of the hold, protocol 6.
+// `siblingCall` inside that of a dispute filing or a refund, protocol 5,
+// `outstandingWork` with work owed outside any call's wait, protocol 6, and
+// `holdCall` inside the wait of the hold, protocol 7.
 const RESUME_PROTOCOL = new Map([
   ['status', 1],
   ['mirroredDispute', 1],
@@ -200,7 +202,8 @@ const RESUME_PROTOCOL = new Map([
   ['releaseRounds', 3],
   ['unconfirmedCall', 4],
   ['siblingCall', 5],
-  ['holdCall', 6],
+  ['outstandingWork', 6],
+  ['holdCall', 7],
 ]);
 // Every field a saga has ever been started with; any other could mean anything.
 const INPUT_FIELDS = new Set([

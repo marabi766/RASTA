@@ -18,3 +18,9 @@ ef44711c70b6cfea9b2541968e1d370952ead264:packages/contracts/src/common/zod-accep
 ef44711c70b6cfea9b2541968e1d370952ead264:packages/nest-common/src/legacy-fallback.spec.ts:generic-api-key:19
 ef44711c70b6cfea9b2541968e1d370952ead264:services/audit-service/src/audit/legacy-fallback.spec.ts:generic-api-key:18
 ef44711c70b6cfea9b2541968e1d370952ead264:services/identity-service/src/security-events/legacy-fallback.spec.ts:generic-api-key:13
+# #784 (FU-093) first commit: per-script sha256 pins in scripts/prepush-parity.json whose script names contain "credential"/"key" (e.g. test:kafka-credential-scope) — digests of package.json script bodies, not secrets. The next commit tags them sha256:<hex>, so the final tree no longer flags. PM to verify.
+4afcbdf8763e0c8022b023721e126aa205db6ed4:scripts/prepush-parity.json:generic-api-key:77
+4afcbdf8763e0c8022b023721e126aa205db6ed4:scripts/prepush-parity.json:generic-api-key:79
+4afcbdf8763e0c8022b023721e126aa205db6ed4:scripts/prepush-parity.json:generic-api-key:102
+4afcbdf8763e0c8022b023721e126aa205db6ed4:scripts/prepush-parity.json:generic-api-key:114
+4afcbdf8763e0c8022b023721e126aa205db6ed4:scripts/prepush-parity.json:generic-api-key:118
