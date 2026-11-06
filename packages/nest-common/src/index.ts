@@ -343,6 +343,13 @@ export type { JsonSchema } from './openapi/zod-schema';
 export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
 export { publishApiErrors, healthProbeErrorSchema } from './openapi/error-document';
 export {
+  publishZodRouteInputs,
+  zodRouteInputKey,
+  zodRouteInputProblems,
+  zodRouteInputs,
+} from './openapi/zod-route-inputs';
+export type { RouteDocument, ZodRouteInput } from './openapi/zod-route-inputs';
+export {
   applyOperationSecurity,
   documentationModuleFor,
   routeAccessByOperation,
