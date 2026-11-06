@@ -194,7 +194,8 @@ describe('settlement atomicity (real database)', () => {
   it('refuses to settle when the held amount does not match the obligation', async () => {
     // A mismatch means somebody changed one of the two out of band. Settling
     // either figure would be a guess about which is right, so it is refused
-    // and left for a person.
+    // and left for a person: a hold above or below what its journal moved, and
+    // below the terms, is no funded hold of its own (`wallet_hold_funded`).
     const payer = `${org.a}-MISMATCH`;
     const transaction = await readyToSettle(payer, '1000000');
 
@@ -209,7 +210,7 @@ describe('settlement atomicity (real database)', () => {
       asActor({ organizationId: payer }, () =>
         wiring.settlements.settle(transaction.id, 'USR-ITEST'),
       ),
-    ).rejects.toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
+    ).rejects.toThrow(expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }));
 
     await cleanup(prisma, [payer]);
   });

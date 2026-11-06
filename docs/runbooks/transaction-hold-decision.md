@@ -3,8 +3,8 @@
 **شدت:** 🟠 هشدار — پولی گم نشده، ولی این تراکنش بی تصمیم و بی Hold خودش تسویه نمی‌شود و سفارشش در `FUNDS_HELD` ثبت نمی‌شود.
 **سیگنال محرک:** WARNING ـِ Migration ‏`20261105120000_settlement_creation_proof` («stand on a decision read from a hold not their own»)؛
 Saga سفارش با `OBLIGATION_NOT_HELD`، وضعیت `HELD` و `funds UNPROVEN`؛ تسویهٔ ردشده با `409 INVALID_STATE_TRANSITION` و متن
-«settles only from its own hold»؛ Saga با `SETTLEMENT_EXHAUSTED` روی چنین تراکنشی.
-**دامنه:** ردیف‌های `transaction_hold_reconciliation` با هر نتیجه‌ای جز `RESTORED_TO_PENDING_SETTLEMENT` که هنوز تصمیمی ندارند.
+«settles only from a funded hold»؛ بازپرداخت ردشده با متن «nothing moves until an operator has looked»؛ WARNING ـِ Migration ‏`20261106130000_transaction_funded_hold`؛ Saga با `SETTLEMENT_EXHAUSTED` روی چنین تراکنشی.
+**دامنه:** برای تصمیم: ردیف‌های `transaction_hold_reconciliation` با هر نتیجه‌ای جز `RESTORED_TO_PENDING_SETTLEMENT` که هنوز تصمیمی ندارند. برای بخش «Hold تأمین‌نشده» و «پرداخت‌نشدنی»: هر تراکنشی.
 **ابزار:** `decide_transaction_hold(id, decision, reason)` فقط با نقش migrator؛ نقش runtime سرویس نه EXECUTE دارد و نه می‌تواند ردیف تصمیم بنویسد.
 
 ---
@@ -19,7 +19,9 @@ Saga سفارش با `OBLIGATION_NOT_HELD`، وضعیت `HELD` و `funds UNPROVE
 - هیچ مجوز تسویه‌ای ندارد، حتی با `settlement_authorised_at` پر: نه سرویس تسویه می‌کند و نه پایگاه داده آزادسازی Hold یا رفتن به `SETTLED` را می‌پذیرد.
 - **بازپرداخت باز می‌ماند:** بازپرداخت فقط Hold خود پرداخت‌کننده را به خودش برمی‌گرداند و بی Hold هیچ پولی جابه‌جا نمی‌کند، پس بی‌تصمیم هم راه خروج هست. تعهد صورت‌وضعیت (`STATEMENT`) بازپرداخت نمی‌پذیرد.
 
-**تصمیم فقط دربارهٔ مدرک است و هرگز مجوز پرداخت نیست (D-123).** ردیف فهرست‌شده، جز `RESTORED_TO_PENDING_SETTLEMENT`، فقط از Hold فعال خودش با همان مبلغ و ارز تسویه می‌شود و پس از تصمیم (`transaction_settlement_barred`). `CONFIRMED` یا `VOIDED` آن را به `PENDING_SETTLEMENT` نمی‌برد و هیچ برداشتی از موجودی قابل‌مصرف ممکن نمی‌کند؛ همین برای ردیفی که از پیش `PENDING_SETTLEMENT` است و اعتراضی که بی Hold خود رسیدگی شود (به `HELD` برمی‌گردد) هم برقرار است.
+**تصمیم فقط دربارهٔ مدرک است و هرگز مجوز پرداخت نیست (D-123، D-130).** هر ردیفی که زمانی ادعای Escrow کرده، فقط از Hold فعال و تأمین‌شدهٔ خودش با همان مبلغ و ارز تسویه می‌شود و اگر در فهرست است پس از تصمیم (`transaction_settlement_barred`). ادعای Escrow یعنی یکی از این سه: در فهرست بودن با هر نتیجه‌ای، از جمله `RESTORED_TO_PENDING_SETTLEMENT`؛ داشتن Hold خود با هر وضعیتی؛ یا اینکه زمانی `HELD` بوده است (`held_at`). `CONFIRMED`، `VOIDED` یا `authorise-settlement` هیچ برداشتی از موجودی قابل‌مصرف ممکن نمی‌کند؛ همین برای ردیفی که از پیش `PENDING_SETTLEMENT` است و اعتراضی که بی Hold خود رسیدگی شود (به `HELD` برمی‌گردد) هم برقرار است. فقط تعهدی که هرگز ادعای Escrow نکرده است از موجودی قابل‌مصرف پرداخت می‌شود (ADR-032).
+
+**Hold تأمین‌شده (`wallet_hold_funded`)** یعنی `placed_journal_id` به Journal واقعی ‌`FUNDS_HELD` همان تعهد روی دفتر همان سازمان اشاره کند، آن Journal برنگشته باشد، حساب `ESCROW` همان سازمان را دقیقاً به همان مبلغ و ارز بستانکار کرده باشد و Hold دیگری از همان مرجع به آن اشاره نکند.
 
 ## ۱. فهرست
 
@@ -46,7 +48,15 @@ SELECT h.id, h.organization_id, h.wallet_id, h.status, h.amount_minor, h.currenc
 
 سوابق را هم ببین: `SELECT * FROM settlement_authority_reconciliation WHERE transaction_id = :'transaction_id';`، و اگر `source_type = 'ORDER'` است، سفارش `source_reference` را در marketplace-service.
 
-ردیف `HELD` بی Hold خود که در این فهرست نیست تصمیم نمی‌پذیرد: `heldProven` برابر `false` است و راهش بازپرداخت از راه سرویس است.
+ردیف `HELD` بی Hold خود که در این فهرست نیست تصمیم نمی‌پذیرد: `heldProven` برابر `false` است، پس از `authorise-settlement` هم تسویه نمی‌شود و راهش بازپرداخت از راه سرویس است. ردیفی که در این فهرست نیست و Hold فعال تأمین‌نشده دارد نه تصمیم می‌پذیرد، نه تسویه و نه بازپرداخت: به مالک محصول ارجاع بده.
+
+Holdهای فعال تأمین‌نشده، با هر هدفی:
+
+```sql
+SELECT id, organization_id, reference, reference_type, amount_minor, currency, placed_journal_id
+  FROM wallet_hold
+ WHERE status = 'ACTIVE' AND NOT wallet_hold_funded(id);
+```
 
 ## ۲. تصمیم
 
@@ -54,15 +64,18 @@ SELECT h.id, h.organization_id, h.wallet_id, h.status, h.amount_minor, h.currenc
 | ------------------------------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `HELD`، بی Hold فعال خود                                                                          | پولی در Escrow نیست             | `VOIDED`                                                            | در `HELD` می‌ماند و تسویه نمی‌شود، بی Journal و بی جابه‌جایی پول؛ راه‌های بعدی در پایین                                |
 | `HELD_UNPROVEN` یا `RETURNED_TO_HELD_UNPROVEN` که با مجوز یا اعتراض از `HELD` رفته و هنوز باز است | همان بررسی بالا                 | `CONFIRMED` فقط با Hold فعال خود با همان مبلغ و ارز؛ وگرنه `VOIDED` | وضعیت عوض نمی‌شود؛ تسویه فقط با آن Hold باز می‌شود                                                                     |
-| `HELD`، Hold فعال خود با همان مبلغ و ارز                                                          | منشأ آن Hold را اثبات کن        | `CONFIRMED`                                                         | `heldProven` برابر `true` می‌شود                                                                                       |
-| `HELD`، Hold فعال خود با مبلغ دیگر                                                                | —                               | هر دو رد می‌شوند                                                    | بازپرداخت از راه سرویس، سپس `CONFIRMED` برای بستن پرونده. با ارز دیگر، بازپرداخت هم رد می‌شود: به مالک محصول ارجاع بده |
+| `HELD`، Hold فعال و تأمین‌شدهٔ خود با همان مبلغ و ارز                                             | منشأ آن Hold را اثبات کن        | `CONFIRMED`                                                         | `heldProven` برابر `true` می‌شود                                                                                       |
+| `HELD`، Hold فعال و تأمین‌شدهٔ خود با مبلغ دیگر                                                   | —                               | هر دو رد می‌شوند                                                    | بازپرداخت از راه سرویس، سپس `CONFIRMED` برای بستن پرونده. با ارز دیگر، بازپرداخت هم رد می‌شود: به مالک محصول ارجاع بده |
+| `HELD`، در این فهرست، Hold فعال تأمین‌نشدهٔ خود                                                   | پولی در Escrow نیست             | `VOIDED`                                                            | تسویه و بازپرداخت هر دو رد می‌شوند و هیچ مسیری آن Hold را نمی‌بندد: به مالک محصول ارجاع بده                            |
 | `AUTHORISED_UNRECORDED_UNPROVEN`                                                                  | مجوز قدیمی واقعاً داده شده بود؟ | `CONFIRMED` یا `VOIDED`                                             | `CONFIRMED`: مجوز ثبت‌شده با Hold فعال خود دوباره می‌شمارد. `VOIDED`: برای همیشه نمی‌شمارد و بازپرداخت راه خروج است    |
 | `DISPUTE_RESOLVED_UNPROVEN`                                                                       | تصمیم پیشین درست بود؟           | `CONFIRMED` یا `VOIDED`                                             | گذشته را برنمی‌گرداند؛ ردیف باز فقط با Hold فعال خود تسویه می‌شود                                                      |
 
 **راه‌های پس از تصمیم، فقط این دو:**
 
-1. **Hold تازه:** Hold فعال خود پرداخت‌کننده با همان مبلغ و ارز. آن‌گاه `heldProven` برابر `true` است و ردیف با مجوز عادی (`authorise-settlement`) مانند هر ردیف دیگری تسویه می‌شود. ردیف `PENDING_SETTLEMENT` بی مجوز این لبه را ندارد: از راه اعتراض و رسیدگی به `HELD` برمی‌گردد. **هیچ مسیر سرویسی Hold روی تراکنش موجود نمی‌گذارد:** سرویس Hold را فقط هنگام ساخت تراکنش می‌گذارد، پس برای پرداخت معمولاً تراکنش تازه‌ای از مسیر عادی لازم است. نوشتن دستی Hold تصمیم مالک محصول است و **Hold بی Journal تأمین‌نشده است:** تسویه‌اش از Escrow تعهدهای دیگر همان کیف پول برمی‌دارد، پس هرگز بی Journal آن را ننویس.
-2. **بازپرداخت از راه سرویس (`refund`):** ردیف بی Hold را بی جابه‌جایی پول به `REFUNDED` می‌برد. لبهٔ `CANCEL` فقط از `CREATED` است. تعهد `STATEMENT` هیچ‌کدام را نمی‌پذیرد: به مالک محصول ارجاع بده.
+1. **Hold تازه:** Hold فعال خود پرداخت‌کننده با همان مبلغ و ارز. آن‌گاه `heldProven` برابر `true` است و ردیف با مجوز عادی (`authorise-settlement`) مانند هر ردیف دیگری تسویه می‌شود. ردیف `PENDING_SETTLEMENT` بی مجوز این لبه را ندارد: از راه اعتراض و رسیدگی به `HELD` برمی‌گردد. **هیچ مسیر سرویسی Hold روی تراکنش موجود نمی‌گذارد:** سرویس Hold را فقط هنگام ساخت تراکنش می‌گذارد، پس برای پرداخت معمولاً تراکنش تازه‌ای از مسیر عادی لازم است. نوشتن دستی Hold تصمیم مالک محصول است و **Hold بی Journal تأمین‌نشده است:** هیچ چیز را اثبات نمی‌کند، تسویه و بازپرداخت نمی‌شود و هیچ پولی جابه‌جا نمی‌کند.
+2. **بازپرداخت از راه سرویس (`refund`):** ردیف بی Hold را بی جابه‌جایی پول به `REFUNDED` می‌برد. لبهٔ `CANCEL` فقط از `CREATED` است. ردیفی که Hold فعال تأمین‌نشده دارد بازپرداخت نمی‌شود.
+
+**تعهد `STATEMENT` هیچ‌کدام از این دو راه را ندارد.** تعهد صورت‌وضعیتی که در فهرست است و Hold تأمین‌شده ندارد، با هر تصمیمی و با نتیجهٔ `RESTORED_TO_PENDING_SETTLEMENT`، مسدود می‌ماند: تسویه با `409 INVALID_STATE_TRANSITION` و متن «until the product owner decides» رد می‌شود و بازپرداخت با «not refunded or cancelled». هیچ پولی جابه‌جا نمی‌شود. راه پیش‌رو پرسش بازِ مالک محصول است (D-130): به مالک ارجاع بده.
 
 ```sql
 SELECT decide_transaction_hold(:'transaction_id', 'VOIDED', 'TICKET-123: شخص تصمیم‌گیرنده و دلیل');

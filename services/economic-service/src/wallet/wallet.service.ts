@@ -12,6 +12,10 @@ import { formatMinor } from '../shared/money';
 import { holdsActiveTotal, holdsRefusedTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 
+/** Fixed words, which a payee can read: the hold's id goes to the log alone. */
+export const HOLD_NOT_FUNDED =
+  'This hold cannot be used as recorded: nothing moves until an operator has looked; see the transaction-hold-decision runbook';
+
 /**
  * Wallets, holds, and the hold/release cycle the product document requires
  * (docs/10 § 10.5).
@@ -312,6 +316,11 @@ export class WalletService {
           { walletId: input.wallet.id, reference: input.reference },
         );
       }
+      // A retry trusts only a hold that holds something: a payment refund goes
+      // on to ask the provider on this answer, and could not then record it.
+      if (!(await this.repository.isHoldFunded(tx, existing.id))) {
+        throw RastaError.businessRule(HOLD_NOT_FUNDED, { holdId: existing.id });
+      }
       return {
         holdId: existing.id,
         journalId: existing.placedJournalId,
@@ -458,6 +467,12 @@ export class WalletService {
     // Reporting "nothing to do" rather than throwing keeps the caller
     // idempotent without it having to distinguish the two.
     if (hold.status !== 'ACTIVE') return null;
+    // The journal below debits escrow: of a hold nothing funded, that is the
+    // wallet's other obligations' money (`wallet_hold_funded`, D-130). The
+    // database refuses the same (`trg_wallet_hold_resolved_only_funded`).
+    if (!(await this.repository.isHoldFunded(tx, hold.id))) {
+      throw RastaError.businessRule(HOLD_NOT_FUNDED, { holdId: hold.id });
+    }
 
     const walletAccount = await this.ledger.resolveAccount(
       tx,

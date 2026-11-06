@@ -535,12 +535,13 @@ describe('the proof of a settlement at its creation (real database, runtime role
     });
 
     it.each([
-      ['HELD', 'HELD'],
-      ['CANCELLED', 'CANCELLED'],
-    ])('a whole settlement by hand from %s is refused at the move', async (_label, status) => {
+      // Having been HELD, it answers first that it has no funded hold of its own (FU-164).
+      ['HELD', /settles only from a funded hold/],
+      ['CANCELLED', /settled only from PENDING_SETTLEMENT/],
+    ])('a whole settlement by hand from %s is refused at the move', async (status, refusal) => {
       const transactionId = await pending();
       await update(transactionId, `status = '${status}'`, owner);
-      await expect(write(transactionId)).rejects.toThrow(/settled only from PENDING_SETTLEMENT/);
+      await expect(write(transactionId)).rejects.toThrow(refusal);
     });
 
     it('once settled it does not go back to be settled again', async () => {
@@ -1084,7 +1085,8 @@ describe('the proof of a settlement at its creation (real database, runtime role
               ...changes(journalId),
             }),
         },
-        HOLD,
+        // No journal funded it, and it is a hold of its own: refused at the move, before this proof.
+        /settles only from a funded hold/,
       );
     });
   });
@@ -1608,9 +1610,10 @@ describe('the proof of a settlement at its creation (real database, runtime role
 
         it('its own, for the same purpose and amount, is still a replay', async () => {
           const reference = `REF_${ulid()}`;
-          const own = await planted(reference, { reference_type: 'PAYMENT_REFUND' });
+          const own = await placeHoldFor(reference, 'PAYMENT_REFUND');
+          expect(own.replayed).toBe(false);
           await expect(placeHoldFor(reference, 'PAYMENT_REFUND')).resolves.toMatchObject({
-            holdId: own,
+            holdId: own.holdId,
             replayed: true,
           });
         });

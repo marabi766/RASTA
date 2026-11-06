@@ -375,6 +375,8 @@ model WalletHold {
 
   @@index([organizationId, status])
   @@index([reference])
+  /// `wallet_hold_funded` asks who else names a journal.
+  @@index([placedJournalId])
   @@map("wallet_hold")
 }
 
@@ -491,6 +493,11 @@ model Transaction {
   /// before migration `20260926120000_transaction_state_actors`.
   settlementAuthorisedAt DateTime? @map("settlement_authorised_at")
   settlementAuthorisedBy String?   @map("settlement_authorised_by")
+  /// The first time this row said HELD, whoever wrote it, and never cleared: it claimed
+  /// escrow, so it pays only from a funded hold of its own. Stamped by
+  /// `trg_transaction_held_at`, read by `transaction_settlement_barred` (migration
+  /// `20261106130000_transaction_funded_hold`). The service never writes it.
+  heldAt                 DateTime? @map("held_at")
   cancelledAt            DateTime? @map("cancelled_at")
   cancelledBy            String?   @map("cancelled_by")
   refundedAt             DateTime? @map("refunded_at")
