@@ -315,7 +315,7 @@ sed -n '/^-- BACKFILL BEGIN/,/^-- BACKFILL END/p' \
   grep -E '^INSERT 0 [0-9]+$'
 ```
 
-`scripts/psql-prisma-url.mjs` تنها تبدیل نشانی Prisma به libpq است: `psql` پارامتر `?schema=` را نمی‌پذیرد، و این ابزار آن را به `search_path` تبدیل می‌کند، پس Schema ـی غیر از `public` هم از دست نمی‌رود.
+`scripts/psql-prisma-url.mjs` تنها تبدیل نشانی Prisma به libpq است: `psql` پارامتر `?schema=` را نمی‌پذیرد، و این ابزار آن را به `search_path` تبدیل می‌کند، پس Schema ـی غیر از `public` هم از دست نمی‌رود. نشانی مبهم یا پارامتری که شاید گذرواژه داشته باشد (مانند `sslpassword`) رد می‌شود. این تبدیل از راه `PGOPTIONS` است، پس Migrator باید مستقیم به PostgreSQL وصل شود، چون PgBouncer آن را دور می‌ریزد (FU-144).
 
 `down.sql` این Migration رکورد فراخوانی‌های باز را از بین می‌برد: پیش از اجرایش همین فهرست را ثبت کن.
 

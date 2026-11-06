@@ -2,7 +2,16 @@ import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.t
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { readUrl } from '../packages/config/src/url-reader.js';
+import { libpqInvocation } from './psql-prisma-url.mjs';
+
+export {
+  UNREADABLE_DATABASE_URL,
+  UNSAFE_DATABASE_PARAMETER,
+  UNUSABLE_PRISMA_OPTIONS,
+  UNUSABLE_PRISMA_SCHEMA,
+  libpqInvocation,
+  psqlInvocation,
+} from './psql-prisma-url.mjs';
 
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
@@ -4379,108 +4388,6 @@ export function sqlstateFrom(stderr) {
     if (!code.startsWith('00') && !code.startsWith('01')) found = code;
   }
   return found;
-}
-
-/**
- * Query parameters only Prisma understands. Everything else — `sslmode`,
- * `sslrootcert`, `connect_timeout`, `application_name` and the rest of
- * libpq's — is kept, so psql connects exactly as configured.
- */
-const PRISMA_ONLY_PARAMETERS = [
-  'schema',
-  'connection_limit',
-  'pool_timeout',
-  'socket_timeout',
-  'pgbouncer',
-  'statement_cache_size',
-];
-
-/**
- * `target` with `params` as its query, each name and value percent-encoded.
- *
- * Not `URLSearchParams`: it writes a space as `+`, which libpq's URI parser
- * does not decode — `options=-c TimeZone=UTC` (L7-37) would reach the server
- * as `-c+TimeZone=UTC` and the connection be refused. Prisma reads either.
- */
-function withLibpqQuery(target, params) {
-  const query = params
-    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
-    .join('&');
-  target.search = '';
-  return query ? `${target.toString()}?${query}` : target.toString();
-}
-
-/**
- * What every libpq helper below refuses a URL that does not parse with: a fixed
- * text. `new URL`'s own error keeps the whole input on `.input`, which an
- * uncaught throw prints — the password included, since these run before it is
- * taken out (#385 r5).
- */
-export const UNREADABLE_DATABASE_URL =
-  'the database URL cannot be read as a URL, so it is not handed to psql; its value is not repeated';
-
-/** `url` as libpq should see it: Prisma's own parameters removed, libpq's kept. */
-export function libpqUrl(url) {
-  const target = readUrl(url, { refusal: UNREADABLE_DATABASE_URL });
-  const kept = [...target.searchParams].filter(([name]) => !PRISMA_ONLY_PARAMETERS.includes(name));
-  return withLibpqQuery(target, kept);
-}
-
-/**
- * How to hand `url` to psql without putting its password on the command line,
- * where any local user can read it (`ps`, `/proc/<pid>/cmdline`) for as long
- * as the process runs (D-045 follow-up). `target` is the libpq URL with the
- * password removed — from the userinfo and from a `password=` parameter alike
- * — and `env` carries it as `PGPASSWORD`, which libpq reads when the URL has
- * none. Spread `env` over the child's environment; it is empty when the URL
- * has no password, so an inherited `PGPASSWORD` or `.pgpass` still applies.
- */
-export function libpqInvocation(url) {
-  const target = readUrl(libpqUrl(url), { refusal: UNREADABLE_DATABASE_URL });
-  const password = target.password
-    ? decodeURIComponent(target.password)
-    : target.searchParams.get('password');
-  target.password = '';
-  const kept = [...target.searchParams].filter(([name]) => name !== 'password');
-  return { target: withLibpqQuery(target, kept), env: password ? { PGPASSWORD: password } : {} };
-}
-
-/** What {@link psqlInvocation} refuses a schema with: a fixed text, as the URL is secret. */
-export const UNUSABLE_PRISMA_SCHEMA =
-  'the schema parameter of the database URL is not one plain lowercase identifier, so psql cannot be pointed at it; its value is not repeated';
-
-/** What it refuses a URL with that could still override `PGOPTIONS` or the schema. */
-export const UNUSABLE_PRISMA_OPTIONS =
-  'the database URL names a service or repeats options, so what psql is told could be overridden; its value is not repeated';
-
-/**
- * {@link libpqInvocation} that also lands where Prisma would (FU-128): `?schema=`,
- * `public` when absent as for Prisma, becomes `search_path`.
- *
- * All through `PGOPTIONS`, never the URL's `options`: libpq lets that override
- * `PGOPTIONS`, which would silently drop what the operator set there, such as
- * `default_transaction_read_only=on`. So the URL's own `options` move over, the
- * operator's come after them and win, and the schema comes last: the URL decides it.
- * A service file's `options` would override `PGOPTIONS` too, so `service` is refused.
- */
-export function psqlInvocation(url, inheritedOptions) {
-  const schemas = readUrl(url, { refusal: UNREADABLE_DATABASE_URL }).searchParams.getAll('schema');
-  const schema = schemas.length === 0 ? 'public' : schemas[0];
-  if (schemas.length > 1 || !/^[a-z_][a-z0-9_]*$/.test(schema)) {
-    throw new Error(UNUSABLE_PRISMA_SCHEMA);
-  }
-  const { target, env } = libpqInvocation(url);
-  const parsed = readUrl(target, { refusal: UNREADABLE_DATABASE_URL });
-  const urlOptions = parsed.searchParams.getAll('options');
-  if (parsed.searchParams.has('service') || urlOptions.length > 1) {
-    throw new Error(UNUSABLE_PRISMA_OPTIONS);
-  }
-  const kept = [...parsed.searchParams].filter(([name]) => name !== 'options');
-  const options = [...urlOptions, inheritedOptions, `-c search_path=${schema}`].filter(Boolean);
-  return {
-    target: withLibpqQuery(parsed, kept),
-    env: { ...env, PGOPTIONS: options.join(' ') },
-  };
 }
 
 /**
