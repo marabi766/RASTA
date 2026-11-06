@@ -11,6 +11,7 @@ import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
  * | purpose          | retry | deadline   | stored as                         |
  * | ---------------- | ----- | ---------- | --------------------------------- |
  * | `project-create` | true  | `REQUIRED` | a finite integer (ms since epoch) |
+ * | `procurement-demand` | true | `REQUIRED` | a finite integer (ms since epoch) |
  *
  *   - `retry` — may an unresolved record with the very same key and body be
  *     sent again. True only where the service answers a repeated key with the
@@ -107,6 +108,10 @@ const PURPOSES: Readonly<Record<string, PurposePolicy>> = {
   'project-create': { retry: true, deadline: 'REQUIRED' },
   // supplier-service has no Idempotency-Key and no expiry: never resent, no deadline.
   'supplier-write': { retry: false, deadline: 'NONE' },
+  // procurement-service answers a repeated Idempotency-Key with the first result while it keeps the
+  // key (`PROCUREMENT_IDEMPOTENCY_TTL_HOURS`, counted from the stored answer): resent within the
+  // deadline `server/demand-replay.ts` signs, never after.
+  'procurement-demand': { retry: true, deadline: 'REQUIRED' },
 };
 
 /** The table, as the scripts receive it. A function so a test can stand in extra purposes. */
