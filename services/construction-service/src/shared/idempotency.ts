@@ -122,6 +122,11 @@ export { CLAIM_WAIT_MS };
  * A first claim whose header is already behind service-now is refused the same way, nothing written.
  * Equality: `now == D` is still allowed; the refusal is strictly `now > D`.
  *
+ * A stored response is replayed only after the same decision as an admission, on a FRESH database
+ * clock read after every wait the replay made (the duplicate insert, the read of the row) — the
+ * caller's `H` and the stored `D` alike — never on the replica reading taken before them (FU-172,
+ * PR-844 r1 F1): a replay that finishes past its deadline is `REPLAY_WINDOW_CLOSED`, nothing returned.
+ *
  * ### Admission is decided AFTER the insert, on the database clock (PR #370 r8 F1)
  *
  * The two checks above read the replica's clock BEFORE the claim's transaction begins, and a request
@@ -388,10 +393,7 @@ export class IdempotencyStore {
           });
           // Admission, on the database clock, after the insert and any lock wait it made (see the
           // replay fence above): throwing rolls the new claim back with the transaction.
-          if (replayDeadlineMs !== undefined) {
-            const databaseNow = await this.databaseInstant(tx);
-            if (databaseNow.getTime() > replayDeadlineMs) throw this.windowClosed(endpoint);
-          }
+          await this.assertWindowOpen(tx, endpoint, [replayDeadlineMs]);
         });
         return { kind: 'PROCEED', claim: { organizationId, endpoint, key, token } };
       } catch (error) {
@@ -446,11 +448,37 @@ export class IdempotencyStore {
 
       if (existing.state === 'IN_PROGRESS') throw this.inFlight(endpoint);
 
+      // The last word on the deadline, as for a new claim: on a FRESH database clock read after every
+      // wait this replay made (the duplicate insert, the read) — never `nowMs`, taken before them
+      // (FU-172, PR-844 r1 F1). The caller's deadline and the stored one alike; nothing was written.
+      await this.assertWindowOpen(this.prisma.client, endpoint, [
+        replayDeadlineMs,
+        storedDeadline?.getTime(),
+      ]);
       idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
       return { kind: 'REPLAY', body: existing.responseBody };
     }
 
     throw this.inFlight(endpoint);
+  }
+
+  /**
+   * THE deadline decision (FU-172): the one place a replay deadline is judged against the clock that
+   * decides — a new claim's admission (inside its transaction, after the insert) and a stored
+   * response's replay (after the read and every wait before it) alike. The database clock is read
+   * fresh here ({@link databaseInstant}), never a reading taken before a wait; `T` past ANY of the
+   * given deadlines is `REPLAY_WINDOW_CLOSED`, equality allowed. No deadline, no fence; a clock that
+   * cannot be read throws — refused.
+   */
+  private async assertWindowOpen(
+    client: ExtendedPrismaClient,
+    endpoint: string,
+    deadlinesMs: readonly (number | undefined)[],
+  ): Promise<void> {
+    const binding = deadlinesMs.filter((deadline): deadline is number => deadline !== undefined);
+    if (binding.length === 0) return;
+    const databaseNow = (await this.databaseInstant(client)).getTime();
+    if (binding.some((deadline) => !(databaseNow <= deadline))) throw this.windowClosed(endpoint);
   }
 
   /**

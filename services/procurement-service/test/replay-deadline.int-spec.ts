@@ -147,6 +147,30 @@ describe('Idempotency-Replay-Deadline', () => {
     expect(replay.body).toMatchObject({ code: 'REPLAY_WINDOW_CLOSED' });
   });
 
+  it('FU-172: a replay is judged on the database clock read after its waits, not on this replica’s earlier reading', async () => {
+    const organizationId = h.org();
+    const as = client(h.api, buyer(organizationId));
+    const body = { productId: newProductId(), quantity: 2 };
+    const k = key();
+    const deadline = Date.now() + 60_000;
+    expect(
+      (await as.post('/v1/demand-requests', body, k).set(DEADLINE, String(deadline))).status,
+    ).toBe(201);
+
+    // This replica is still before H; the database clock — what a replay that waited reads — is past it.
+    h.clock.set(new Date(deadline + 1));
+    const late = await as.post('/v1/demand-requests', body, k).set(DEADLINE, String(deadline));
+    expect(late.status).toBe(409);
+    expect(late.body).toMatchObject({ code: 'REPLAY_WINDOW_CLOSED' });
+    expect(late.body).not.toHaveProperty('id');
+
+    // At H exactly the stored response is replayed: equality is allowed.
+    h.clock.set(new Date(deadline));
+    const onTime = await as.post('/v1/demand-requests', body, k).set(DEADLINE, String(deadline));
+    expect(onTime.status).toBe(201);
+    expect(await demandsOf(organizationId)).toBe(1);
+  });
+
   it('is enforced by every keyed command, before its work: a past deadline executes nothing', async () => {
     const organizationId = h.org();
     // Every role a command asks for: the refusal must be the fence's, not an access check's.
