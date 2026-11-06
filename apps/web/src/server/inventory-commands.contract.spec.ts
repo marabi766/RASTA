@@ -213,7 +213,7 @@ describe('the six commands exist, as the portal posts them', () => {
     for (const [controller, method] of handlers) {
       expect(decoratorOf(controller, method, 'RequirePlatformUserId')).toBeDefined();
       const body = handlerOf(controller, method).getText();
-      expect(body).toContain('requiredIdempotencyKey(idempotencyKey)');
+      expect(body).toContain('idempotentRequest(headers)');
       expect(body).toContain('this.idempotency.execute');
     }
   });
@@ -462,6 +462,9 @@ describe('the refusals', () => {
               'INVENTORY_LOCK_TIMEOUT_MS',
               'OPTIMISTIC_LOCK_FAILED',
               'BUSINESS_RULE_VIOLATION',
+              // FU-171: answers only a request carrying a deadline, which this portal does not send
+              // yet; `write.ts` reads it as a proven refusal for any command.
+              'REPLAY_WINDOW_CLOSED',
             ].includes(token);
           expect([operationPath, status, token, known]).toEqual([
             operationPath,
