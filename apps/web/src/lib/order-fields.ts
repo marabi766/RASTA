@@ -1,3 +1,4 @@
+import { TRANSACTION_TEXT_BOUNDS, boundsForAll } from '@rasta/contracts';
 import { ownValue } from '@/lib/own-key';
 /**
  * The shape of the `/orders` screens: labels, the stepper's spine, and the
@@ -91,12 +92,19 @@ export const COMMAND_FIELD = 'command';
  * never less safe.
  */
 export const ORDER_FIELD_LIMITS = {
+  // The three texts the order saga forwards to economic-service take that
+  // service's bounds from the shared table, as marketplace-service does (FU-134).
   /** `raiseDisputeSchema.reason` — at least a sentence, for whoever resolves it. */
-  disputeReason: { min: 10, max: 1000 },
+  disputeReason: TRANSACTION_TEXT_BOUNDS.disputeReason,
   /** `resolveDisputeSchema.resolution`. */
-  resolution: { min: 10, max: 1000 },
+  resolution: TRANSACTION_TEXT_BOUNDS.disputeResolution,
+  /** `REFUND_RESOLUTION_BOUNDS`: a REFUND resolution is also the refund's reason. */
+  refundResolution: boundsForAll(
+    TRANSACTION_TEXT_BOUNDS.disputeResolution,
+    TRANSACTION_TEXT_BOUNDS.closingReason,
+  ),
   /** `cancelOrderSchema.reason`. */
-  cancelReason: { min: 3, max: 500 },
+  cancelReason: TRANSACTION_TEXT_BOUNDS.closingReason,
   /** `fulfillOrderSchema.trackingReference`. */
   trackingReference: { max: 128 },
   /** `fulfillOrderSchema.note`, `confirmReceiptSchema.note`. */
