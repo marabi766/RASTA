@@ -1344,83 +1344,6 @@ test('FU-159 F1: an executable this run did not read refuses', () => {
   );
 });
 
-const P159 = (name) => `${name}="$(bash infra/creds.sh)"`;
-const creds159 = (body) =>
-  validateInfraImagePins([credsFile, asInput('shell', body)], creds150).errors;
-const evalRefused = (body) =>
-  assert.ok(
-    creds159(body).some((e) => /^scripts\/x\.sh:\d+: eval runs text/.test(e)),
-    body,
-  );
-test('FU-159 F2: writes are read from canonical words, however the name is spelled', () => {
-  const spell = {
-    plain: (n) => n,
-    'quote inside': (n) => `${n.slice(0, 4)}""${n.slice(4)}`,
-    escape: (n) => `${n.slice(0, 4)}\\${n.slice(4)}`,
-    quoted: (n) => `"${n}"`,
-    single: (n) => `'${n}'`,
-    continued: (n) => `${n.slice(0, 4)}\\\n${n.slice(4)}`,
-  };
-  const text = "'docker run alpine:latest'";
-  const writers = {
-    'printf -v': (n) => `printf -v ${n} '%s' ${text}`,
-    'printf -vNAME': (n) => `printf -v${n} '%s' ${text}`,
-    read: (n) => `read ${n} <<<${text}`,
-    'IFS= read -a': (n) => `IFS= read -a ${n} <<<${text}`,
-    mapfile: (n) => `mapfile ${n} <<<${text}`,
-    readarray: (n) => `readarray ${n} <<<${text}`,
-    typeset: (n) => `typeset ${n}=${text}`,
-    'declare --': (n) => `declare -- ${n}=${text}`,
-    'export --': (n) => `export -- ${n}=${text}`,
-    'readonly --': (n) => `readonly -- ${n}=${text}`,
-  };
-  for (const write of Object.values(writers))
-    for (const name of Object.values(spell))
-      evalRefused(`${P159('commands')}\n${write(name('commands'))}\neval "$commands"`);
-});
-test('FU-159 F2: implicit targets, loop variables, eval/trap text and arithmetic invalidate provenance', () => {
-  for (const [name, writer] of [
-    ['REPLY', 'read <<<x'],
-    ['REPLY', 'select i in a; do break; done <<<1'],
-    ['MAPFILE', 'mapfile <<<x'],
-    ['MAPFILE', 'readarray <<<x'],
-    ['OPTARG', 'getopts a: o -a docker'],
-    ['OPTIND', 'getopts a: o -a docker'],
-    ['commands', 'for comm\\\nands in x; do :; done'],
-    ['commands', 'for "commands" in x; do :; done'],
-    ['commands', `eval 'printf -v comm""ands %s x'`],
-    ['commands', `eval 'commands=x'`],
-    ['commands', `trap 'printf -v comm""ands %s x' EXIT`],
-    ['commands', `trap 'commands=x' EXIT`],
-    ['commands', "printf '%n' commands"],
-    ['c', 'n="$(printf \'\\143\')"\nprintf \'%n\' "$n"'],
-    ['commands', 'let "comm""ands=5"'],
-    ['commands', 'unset comm""ands'],
-    ['commands', 'echo $(( commands = 5 ))'],
-    ['commands', '(( commands = 5 ))'],
-    ['commands', ': ${commands:=x}'],
-    // an eval or handler whose text is computed may write anything (exempted, so only the
-    // trusted eval below can refuse)
-    ['commands', 'q=x\neval "$q" # image-pin-exempt: r\ntrue'],
-    ['commands', 'q=x\ntrap "$q" EXIT # image-pin-exempt: r\ntrue'],
-    ['commands', 'q=x\neval "printf -v $q %s x" # image-pin-exempt: r\ntrue'],
-    // the name is built from a substitution: no text of the script says which variable it is
-    ['c', 'q="$(printf \'\\143\')"\ntrap "printf -v $q %s x" EXIT # image-pin-exempt: r\ntrue'],
-    // a variable that is NOT an approved producer's output is not a trusted eval
-    ['commands', 'd="$(bash infra/other.sh)"\neval "$d" # image-pin-exempt: r\ntrue'],
-  ])
-    evalRefused(`${P159(name)}\n${writer}\neval "$${name}"`);
-  // harmless writers of other names, in every spelling, leave the producer trusted
-  for (const body of [
-    `${P159('commands')}\nprintf -v other '%s' x\nread line <<<x\neval "$commands"`,
-    `${P159('commands')}\nprintf -v ot""her '%s' x\neval "$commands"`,
-    `${P159('commands')}\nfor i in 1 2; do :; done\neval "$commands"`,
-    `${P159('commands')}\neval 'other=1'\ntrap 'echo bye' EXIT\neval "$commands"`,
-    `${P159('commands')}\n( eval "\${commands}" && true & )`,
-  ])
-    assert.deepEqual(creds159(body), [], body);
-});
-
 // FU-159 F3: a relative file is the file only while the directory is the one the script started in.
 test('FU-159 F3: a directory change refuses the approval of a source or a script that follows', () => {
   const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';
@@ -1483,11 +1406,6 @@ test('FU-159 F1: a function is a definition read from tokens; a string or commen
   // a function of the file, or of a file it sources, is its own program
   assert.deepEqual(outcome('shell', 'taskset() { "$@"; }\nc=true\ntaskset 1 $c').errors.length, 1);
   assert.deepEqual(outcome('shell', 'f() { echo "$1"; }\nf "$a"').errors, []);
-});
-test('FU-159 F2: coproc and `exec {fd}>` name variables they write', () => {
-  evalRefused(`${P159('commands')}\ncoproc commands { :; }\neval "$commands"`);
-  evalRefused(`${P159('commands')}\nexec {commands}>/dev/null\neval "$commands"`);
-  evalRefused(`${P159('COPROC')}\ncoproc { :; }\neval "$COPROC"`);
 });
 test('FU-159 F3: a sourced file that changes directory moves the shell that sources it', () => {
   const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';

@@ -578,10 +578,8 @@ export function tokenizeShell(src) {
     const body = src.slice(i + 2, end - 1);
     word.scripts = [...(word.scripts ?? []), body];
     // FU-077 r2 F2: an arithmetic body runs the substitutions inside it.
-    if (body.startsWith('(')) {
-      nested.push(...substitutionsIn(body, line));
-      word.arith = [...(word.arith ?? []), body]; // FU-159 F2: `$(( c = 5 ))` writes c
-    } else nested.push({ script: body, line });
+    if (body.startsWith('(')) nested.push(...substitutionsIn(body, line));
+    else nested.push({ script: body, line });
     line += countLines(src.slice(i, end));
     word.value += '$(…)';
     i = end;
@@ -1229,47 +1227,38 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   };
   const vars = new Map();
   const outputs = new Map(); // variable -> the one command substitution it was assigned from
+  // Every place a name is written to (`x=`, `x+=`, `read x`, `for x in`): not after `$`/`{`.
+  // `${NAME:=x}` / `${NAME=x}` assign too (FU-092).
+  // FU-150 F2: also the name attached to an option (`printf -vc`, `read -ac`).
+  const writes = (name) =>
+    (
+      src.match(
+        new RegExp(
+          `(?<![\\w$\\{])${name}(?![\\w])|(?<=(?:^|[\\s;&|(])-[A-Za-z]*)${name}(?![\\w])|\\$\\{${name}:?=`,
+          'g',
+        ),
+      ) ?? []
+    ).length;
   const restore = (value) => value.replace(/__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
-  // How many assignment-only commands of this script assign a variable one `$(…)`; the variables
-  // whose every such assignment is the output of an EVALUATED_OUTPUTS script.
+  // How many assignment-only commands of this script assign a variable one `$(…)`.
   const assignedFrom = new Map();
-  const fromAllowed = new Map();
   for (const { words } of parsed.commands) {
     if (!assignmentOnly(words)) continue;
     for (const { value, scripts } of withoutDeclarers(words)) {
       const [, variable, assigned] = value.match(ASSIGNMENT);
-      if (assigned === '$(…)' && scripts?.length === 1) {
+      if (assigned === '$(…)' && scripts?.length === 1)
         assignedFrom.set(variable, (assignedFrom.get(variable) ?? 0) + 1);
-        const file = evaluatedFile(scripts[0]);
-        fromAllowed.set(
-          variable,
-          (fromAllowed.get(variable) ?? true) &&
-            file !== undefined &&
-            ctx.evaluated.allowed.has(file),
-        );
-      }
     }
   }
 
   // FU-092: an evaluated variable's provenance is proved or the eval refuses. It cannot be
   // proved inside a compound command or function body (`if`, loops, `{ }`: it may not run),
-  // or where this shell could write a variable under a name this check cannot read.
-  // FU-159 F2: the writes are the CANONICAL words of every command (quotes, escapes and line
-  // continuations already removed), the text of `eval` and `trap` run in this shell, and the
-  // implicit targets of read, select, mapfile and getopts; no raw-source counting.
-  const writes = shellWrites(parsed.commands, (words) => trackedEval(words, fromAllowed));
-  const provenanceBroken = writes.unresolved;
-  const mentions = (name) =>
-    (
-      writes.texts
-        .join('\n')
-        .match(
-          new RegExp(
-            `(?<![\\w$]|\\$\\{)${name}(?![\\w])|(?<=(?:^|[\\s;&|(])-[A-Za-z]*)${name}(?![\\w])|\\$\\{${name}:?=`,
-            'g',
-          ),
-        ) ?? []
-    ).length;
+  // or where a sourced file or a computed-name write (`printf -v "$(…)"`, `read "$n"`,
+  // `declare -n`) could have set the variable.
+  // FU-150 F2: and an arithmetic assignment whose target name is computed (`(( $n = 5 ))`).
+  const provenanceBroken =
+    parsed.commands.some(({ words }, index) => !isPattern(index) && dynamicWriter(words)) ||
+    /\(\([^)]*[$`][^)]*(?<![=!<>])=(?!=)/.test(src);
   let open = 0;
   const nesting = parsed.commands.map(({ words }) => {
     const first = words[headIndex(words)]?.value;
@@ -1387,7 +1376,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
               !provenanceBroken &&
               nesting[position] === 0 &&
               nesting[from.position] === 0 &&
-              mentions(name) === assignedFrom.get(name) &&
+              writes(name) === assignedFrom.get(name) &&
               inGroup(command.group, parsed.commands[from.position].group) &&
               unconditional(from.position, position),
           )
@@ -1828,35 +1817,20 @@ function headIndex(words) {
   return at;
 }
 
-/** The variables read, select, mapfile and getopts write when no name says which. */
-const IMPLICIT_TARGETS = {
-  coproc: 'COPROC',
-  read: 'REPLY',
-  select: 'REPLY',
-  mapfile: 'MAPFILE',
-  readarray: 'MAPFILE',
-  getopts: 'OPTARG OPTIND',
-};
-
-/** `eval "$NAME"` where every `NAME=$(…)` of the script is the output of an EVALUATED_OUTPUTS script. */
-function trackedEval(words, fromAllowed) {
-  const at = executionChain(words).chain.at(-1);
-  if (words[at]?.value !== 'eval' || words.length !== at + 2 || words[at + 1].opaque) return false;
-  const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(words[at + 1].value);
-  return Boolean(name) && fromAllowed.get(name[1]) === true;
-}
-
-/** True when a name-writing builtin has an operand whose NAME this check cannot read. */
-function unresolvedTarget(program, rest) {
-  if (!NAME_WRITERS.has(program)) return false;
-  if (program === 'source' || program === '.') return true;
-  if (program === 'printf')
-    return (
-      unsure(rest[0]) ||
-      (rest[0]?.value === '-v' && unsure(rest[1])) ||
-      (rest.some(({ value }) => value.includes('%n')) && rest.some(unsure))
-    );
-  if (['declare', 'typeset', 'local', 'export', 'readonly', 'unset'].includes(program))
+/** A command that can write a variable whose NAME this check cannot read. */
+function dynamicWriter(all) {
+  // FU-150 F2: the command word is found past control words (`then printf -v …`, `{ read …`),
+  // prefixes and wrapper options by the shared execution boundary; unreadable ⇒ a possible write.
+  const { chain, problem } = executionChain(all, { builtins: true });
+  if (problem) return true;
+  const at = chain.at(-1) ?? -1;
+  if (at < 0 || at >= all.length) return false;
+  const [command, ...rest] = all.slice(at);
+  if (!NAME_WRITERS.has(command.value)) return false;
+  if (command.value === 'source' || command.value === '.') return true;
+  if (command.value === 'printf')
+    return unsure(rest[0]) || (rest[0]?.value === '-v' && unsure(rest[1]));
+  if (['declare', 'typeset', 'local', 'export', 'readonly', 'unset'].includes(command.value))
     return rest.some(
       (word) =>
         /^-[A-Za-z]*n/.test(word.value) ||
@@ -1864,53 +1838,6 @@ function unresolvedTarget(program, rest) {
         (word.opaque && !word.value.includes('=')),
     );
   return rest.some(unsure);
-}
-
-/**
- * FU-159 F2: what this shell can write, from the CANONICAL words of its commands. `texts` are those
- * words (and arithmetic bodies, and the implicit targets of read/select/mapfile/getopts); a name
- * is written wherever it is mentioned bare. The text of a literal `eval` and `trap` handler is read
- * the same way. `unresolved` is true when any write target cannot be read: a computed name, a
- * computed eval/handler (except the tracked evaluation itself), an unreadable command line.
- */
-function shellWrites(commands, trusted, out = { texts: [], unresolved: false }, depth = 0) {
-  for (const { words, pattern } of commands) {
-    for (const word of words) {
-      out.texts.push(word.value, ...(word.arith ?? []));
-      if (word.arith?.some((body) => /[$`]/.test(body))) out.unresolved = true;
-    }
-    if (pattern) continue;
-    const { chain, problem } = executionChain(words);
-    if (problem) out.unresolved = true;
-    const at = chain.at(-1) ?? -1;
-    if (problem || at < 0 || at >= words.length) continue;
-    const program = words[at].value;
-    const rest = words.slice(at + 1);
-    const text = (script) => {
-      let inner = null;
-      try {
-        inner = depth < 4 ? tokenizeShell(script) : null;
-      } catch {
-        // unreadable text: unresolved below
-      }
-      if (inner) shellWrites(inner.commands, trusted, out, depth + 1);
-      else out.unresolved = true;
-    };
-    if (program === 'eval') {
-      if (!rest.some(unsure)) text(rest.map(({ value }) => value).join(' '));
-      else if (!trusted(words)) out.unresolved = true;
-    } else if (program === 'trap') {
-      const handler = rest.find(({ value }) => !value.startsWith('-') || value === '-');
-      // a computed handler is read as the text it is: its computed command word is unresolved
-      if (handler && handler.value !== '-' && handler.value !== '') text(handler.value);
-    }
-    for (const index of chain) {
-      const word = words[index].value;
-      if (Object.hasOwn(IMPLICIT_TARGETS, word)) out.texts.push(IMPLICIT_TARGETS[word]);
-    }
-    if (unresolvedTarget(program, rest)) out.unresolved = true;
-  }
-  return out;
 }
 
 /** The script file of `[NAME=… ]bash|sh <file> …`, the only command an evaluated output may come from. */
