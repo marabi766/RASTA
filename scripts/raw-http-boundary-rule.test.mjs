@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
@@ -15,6 +17,18 @@ import {
 } from './lint-extensions.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
+/** NUL records preserve Git paths verbatim, including names Git normally quotes. */
+function trackedFiles(cwd = ROOT) {
+  const result = spawnSync('git', ['ls-files', '-z'], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout === '' || result.stdout.endsWith('\0'), 'incomplete Git inventory');
+  return result.stdout.split('\0').filter(Boolean);
+}
+
 const linter = new Linter({ cwd: ROOT });
 /** Findings of the boundary alone, for `code` as the file `path` (repository-relative). */
 const check = (code, { path = 'apps/web/src/server/fixture.ts', playwright = false } = {}) => {
@@ -501,13 +515,7 @@ const WORKSPACE_OF = (file) =>
   (file.startsWith('tests/e2e/') ? 'tests/e2e' : '.');
 
 test('the boundary is on for every in-scope file, in every workspace, and the lint scripts reach them', () => {
-  const tracked = spawnSync('git', ['ls-files'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  assert.equal(tracked.status, 0, tracked.stderr);
-  const files = tracked.stdout.split('\n').filter(inScope);
+  const files = trackedFiles().filter(inScope);
   assert.ok(files.length > 1000, `scope found only ${files.length} files`);
   const byWorkspace = Map.groupBy(files, WORKSPACE_OF);
   const problems = [];
@@ -593,13 +601,7 @@ function transportDirectives(files, read) {
 
 test('no inline directive switches the transport rules off, except the one pinned browser flow', () => {
   // Every tracked file, not a list of top-level directories.
-  const tracked = spawnSync('git', ['ls-files'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  assert.equal(tracked.status, 0, tracked.stderr);
-  const found = transportDirectives(tracked.stdout.split('\n').filter(Boolean), (file) =>
+  const found = transportDirectives(trackedFiles(), (file) =>
     readFileSync(`${ROOT}${file}`, 'utf8'),
   );
   assert.deepEqual(found, [
@@ -683,4 +685,36 @@ test('parsed comments hold multiline directives and refuse unclassifiable source
         /unclassifiable/,
       );
     }
+});
+
+// FU-166 inventory sibling: quoted paths must reach both repository scans.
+test('tracked inventory preserves quoted and multiline filenames for the directive scan', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'fu166-inventory-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git('init', '--quiet');
+  git('config', 'core.quotePath', 'true');
+  mkdirSync(join(root, 'scripts'));
+  const names = ['fu166-café'];
+  if (process.platform !== 'win32') names.push('fu166-line\nbreak', 'fu166-quote"back\\slash');
+  const files = names.flatMap((name) =>
+    EXECUTABLE_EXTENSIONS.map((ext) => `scripts/${name}.${ext}`),
+  );
+  for (const file of files)
+    writeFileSync(join(root, file), `/* ${LINT} no-console: off,\n "internal/raw-http": off */`);
+  git('add', '--', '.');
+  assert.deepEqual(trackedFiles(root).sort(), files.sort());
+  assert.ok(files.every(inScope));
+  const findings = transportDirectives(trackedFiles(root), (file) =>
+    readFileSync(join(root, file), 'utf8'),
+  );
+  assert.equal(findings.length, files.length);
+  for (const file of files)
+    assert.ok(
+      findings.some((finding) => finding.startsWith(`${file}:`)),
+      file,
+    );
 });
