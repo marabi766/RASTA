@@ -427,7 +427,7 @@ export class IdentityRepository {
    * {@link deferLapse}, so no attempt count overflows the arithmetic.
    */
   async deferRegistrationIntake(id: string, intervalSeconds: number, maxIntervals: number) {
-    // TIMESTAMP(3) rounds up: truncate first so persistence cannot exceed the backoff cap.
+    // TIMESTAMP(3) rounds to nearest: truncate so the stored value is exact and cannot exceed the cap.
     await this.client.$executeRaw`
       UPDATE registration_intake
          SET attempts = LEAST(attempts, ${BACKOFF_FAILURES_CAP - 1}) + 1,
@@ -832,7 +832,7 @@ export class IdentityRepository {
    * `BACKOFF_EXPONENT_CAP`), so no failure count can overflow it.
    */
   async deferLapse(membershipId: string, intervalSeconds: number, maxIntervals: number) {
-    // TIMESTAMP(3) rounds up: truncate first so persistence cannot exceed the backoff cap.
+    // TIMESTAMP(3) rounds to nearest: truncate so the stored value is exact and cannot exceed the cap.
     await runUnscoped(
       'the membership expiry sweep covers every organization',
       () =>
