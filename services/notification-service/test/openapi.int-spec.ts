@@ -154,8 +154,11 @@ describe('the published OpenAPI contract (real application)', () => {
     ).get;
     const byName = new Map(list.parameters.map((p) => [p.name, p]));
     expect(byName.get('limit')?.schema).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 200,
       default: 25,
-      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      description: 'Page size. Defaults to 25; above 200 is refused.',
     });
     expect(byName.get('state')?.schema).toMatchObject({ enum: ['UNREAD', 'READ', 'DISMISSED'] });
     expect(byName.get('cursor')?.required).toBe(false);
