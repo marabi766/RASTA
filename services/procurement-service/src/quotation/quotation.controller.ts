@@ -2,7 +2,11 @@ import { Body, Controller, Headers, HttpCode, Param, Post, Put } from '@nestjs/c
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { JSON_BODY_LIMIT_BYTES } from '../shared/body-parser';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import {
   QUOTATION_BODY_MAX_BYTES,
   putQuotationSchema,
@@ -77,9 +81,9 @@ export class QuotationController {
   async put(
     @Param('id') id: string,
     @Body(zodPipe(putQuotationSchema)) dto: PutQuotationDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<QuotationReceiptView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<QuotationReceiptView>(
       PUT_QUOTATION_ENDPOINT,
       key,
@@ -107,9 +111,9 @@ export class QuotationController {
   async withdraw(
     @Param('id') id: string,
     @Body(zodPipe(withdrawQuotationSchema)) dto: WithdrawQuotationDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<QuotationReceiptView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<QuotationReceiptView>(
       WITHDRAW_QUOTATION_ENDPOINT,
       key,

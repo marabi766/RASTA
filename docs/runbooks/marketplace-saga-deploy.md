@@ -214,7 +214,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 3); an absent field means protocol **0**, the strictest legacy
+support (this build: 4); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue. An incompatible
@@ -225,9 +225,9 @@ bypass the gate: it must preserve both continuation state and patched commands.
 
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
-**3**. A marker the gate does not list blocks every target until the gate learns
+**3**, `economic-call-durable-wait-v1` **4**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
-(`reminderDue`: 2, `releaseRounds`: 3; any unlisted field blocks; so does an
+(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
 history requires.
 
@@ -278,6 +278,49 @@ gate, but its call in flight is a pending activity: with workers stopped it stay
 pending, so follow the gate's pending-activity case above. One rollback edge: a
 release whose last attempt failed just as workers stopped has no marker yet, so a
 protocol-2 target passes the gate and then ends that saga as before this wait.
+
+## Unconfirmed economic call (FU-103)
+
+`RastaMarketplaceSagaEconomicCallUnconfirmed` is the same wait for another economic
+call, labelled `operation`, with the same limit: it counts rounds, so it clears
+with workers stopped. Today that is `authoriseSettlement`, in phase
+`AUTHORISATION_UNCONFIRMED`; `disputeObligation` and `compensate` still end the
+saga when their attempts run out. economic-service gave no answer proving the call
+changed nothing, so it may have committed; the call is repeated under the same key,
+doubling from one minute to one hour, and nothing settles meanwhile. After restoring
+economic-service, try now with the same signal, which keeps its name:
+`--name retryDisputeRelease`.
+
+Only a refusal the activity marks as proof ends the saga, with the funds held for a
+person and no alert of its own: its own refusal, by the receipt guard or the send,
+with a code in `PROVEN_REFUSALS` (`economic-refusal.ts`), on the first attempt this
+run scheduled. A `temporal workflow reset` starts a new run with first attempts and no
+memory of the old ones, so read the obligation before resetting such a saga. A code
+says nothing of the attempts before it, so once any attempt went unconfirmed no code
+ends the wait: not a listed 4xx, not a routing or configuration fault, not a failed
+read of the order or of the obligation (`RECONCILIATION_READ_FAILED`). From then on
+each failed send reads the obligation.
+Its effect (`PENDING_SETTLEMENT`, `SETTLED`, or disputed after this saga's own
+authorisation) is the answer and the saga goes on. `REFUNDED`, `CANCELLED` or `FAILED`
+ends the saga (`OBLIGATION_ALREADY_FINAL`), since no late request can move them.
+Anything else stays in this phase, `HELD` included: an earlier request can still
+commit, so `HELD` proves nothing.
+
+A wait that will not clear shows why in the log line's code: fix the route or
+configuration and signal. For a real refusal at `HELD` (a persistent
+`IDEMPOTENCY_KEY_REUSED`, say) read the transaction at economic-service and reconcile
+by hand before terminating anything. For `BUSINESS_RULE_VIOLATION` on an order with no
+receipt, follow `marketplace-receipt-evidence.md`. A dispute also takes the saga out of
+the wait; the doubt goes with it, so if the order comes back to settlement the call
+is sent as in doubt, not as new, and a failure returns to this phase.
+
+Each round reads the order first, and a party's signal starts one early. Once a
+dispute is raised or decided the authorisation stops being sent, but the saga stays
+in this phase until economic-service answers a read of the obligation; only then
+does it file the dispute or refund, and those calls can still end it. One rollback
+edge, as for the release: an authorisation whose last attempt failed just as workers
+stopped has no marker yet, so a protocol-3 target passes the gate and ends that saga
+as before this wait.
 
 ## Continued-as-new visibility gap (FU-046)
 

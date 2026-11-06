@@ -117,14 +117,21 @@ describe('the committed OpenAPI document', () => {
     }
   });
 
-  it('requires an Idempotency-Key on every command and on nothing else', () => {
+  it('requires an Idempotency-Key on every command, offers its replay deadline (FU-156), and nothing else', () => {
     for (const { key, operation } of operations()) {
       const header = (operation.parameters ?? []).filter((p) => p.in === 'header');
       expect({ key, header }).toEqual({
         key,
         header:
           key.startsWith('POST ') || key.startsWith('PUT ')
-            ? [expect.objectContaining({ name: 'Idempotency-Key', required: true })]
+            ? [
+                expect.objectContaining({ name: 'Idempotency-Key', required: true }),
+                expect.objectContaining({
+                  name: 'Idempotency-Replay-Deadline',
+                  required: false,
+                  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
+                }),
+              ]
             : [],
       });
     }
