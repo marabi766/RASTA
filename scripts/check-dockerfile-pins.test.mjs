@@ -1,11 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stringify } from 'yaml';
 import {
   DIGEST_VARIANTS,
+  SOURCED_LIBRARIES,
   TAGLESS,
   tokenizeShell,
   validateDockerfilePins,
@@ -862,4 +865,319 @@ test('PR #805 r2 F2: eval provenance survives prefixes, declarations and list bo
   assert.deepEqual(evaluate(`${producer} || true\neval "\${c}"`).errors, []);
   // the real CI shape: top-level producer, evaluated in a backgrounded subshell
   assert.deepEqual(evaluate(`${producer}\n( eval "\${c}" && true & )`).errors, []);
+});
+
+// FU-150 F1: the program that runs is found through ONE execution boundary: control words,
+// wrappers with option arity, xargs and find -exec. Each of these 84 calls returned no image and no
+// error on 75bf3243 while bash ran `docker <verb> alpine:latest`.
+const BEHIND = {
+  if: (r) => `c=docker\nif $c ${r}; then :; fi`,
+  then: (r) => `c=docker\nif true; then $c ${r}; fi`,
+  else: (r) => `c=docker\nif false; then :; else $c ${r}; fi`,
+  elif: (r) => `c=docker\nif false; then :; elif $c ${r}; then :; fi`,
+  do: (r) => `c=docker\nfor i in 1; do $c ${r}; done`,
+  while: (r) => `c=docker\nwhile $c ${r}; do break; done`,
+  brace: (r) => `c=docker\n{ $c ${r}; }`,
+  '/usr/bin/env': (r) => `c=docker\n/usr/bin/env $c ${r}`,
+  'env -u X': (r) => `c=docker\nenv -u FOO $c ${r}`,
+  'timeout -s SIG N': (r) => `c=docker\ntimeout -s TERM 5 $c ${r}`,
+  'sudo -u U': (r) => `c=docker\nsudo -u root $c ${r}`,
+  'stdbuf -o L': (r) => `c=docker\nstdbuf -o L $c ${r}`,
+  xargs: (r) => `c=docker\nprintf '%s\\n' x | xargs -I{} $c ${r}`,
+  'find -exec': (r) => `c=docker\nfind . -maxdepth 0 -exec $c ${r} \\;`,
+};
+test('FU-150 F1: a computed program behind a control word or a wrapper refuses', () => {
+  for (const [shape, script] of Object.entries(BEHIND))
+    for (const verb of ['run', 'create', 'pull'])
+      for (const kind of ['shell', 'workflow']) {
+        const { errors, found } = outcome(kind, script(`${verb} alpine:latest`));
+        assert.ok(
+          errors.some((error) => /runs the command word \$c/.test(error)) || found,
+          `${shape} ${verb} ${kind}: ${JSON.stringify(errors)}`,
+        );
+      }
+});
+test('FU-150 F1: nested wrappers, other control words and unknown wrapper options refuse', () => {
+  for (const script of [
+    'env -u X timeout -s TERM 5 nice -n 5 $c run alpine:latest',
+    'flock /tmp/l $c run alpine:latest',
+    'coproc $c run alpine:latest',
+    'coproc NAMED { $c run alpine:latest; }',
+    'function f { $c run alpine:latest; }',
+    'case x in y) $c run alpine:latest;; esac',
+    'time -p $c run alpine:latest',
+    'if ! $c run alpine:latest; then :; fi',
+    'nohup $c run alpine:latest',
+    'xargs xargs $c run alpine:latest',
+    'find . -exec env $c run alpine:latest \\;',
+    'find . -execdir $c run alpine:latest +',
+    'exec -a name $c run alpine:latest',
+    'ionice -c 3 $c run alpine:latest',
+    'sudo -uroot "${c}" run alpine:latest',
+    // an option the wrapper table does not list is not read past
+    'timeout --bogus 5 docker version',
+    'sudo -Z true',
+    'sudo --user root $c run alpine:latest',
+    'sudo --user=root $c run alpine:latest',
+    'timeout --signal TERM 5 $c run alpine:latest',
+    'xargs --bogus true',
+    // a redirection in front of the command word is not the command word
+    '>/dev/null $c run alpine:latest',
+    '2>&1 $c run alpine:latest',
+    '>&2 $c run alpine:latest',
+    'env -u X >/dev/null $c run alpine:latest',
+    'exec >/dev/null $c run alpine:latest',
+    'timeout 5 2>/dev/null $c run alpine:latest',
+    '< /dev/null $c run alpine:latest',
+    'timeout >/dev/null 5 $c run alpine:latest',
+    'flock 2>/dev/null /tmp/l $c run alpine:latest',
+    // a program the shell expands from a pattern
+    '{docker,run} alpine:latest',
+    'docker* run alpine:latest',
+    '/usr/bin/doc?er run alpine:latest',
+    'env - $c run alpine:latest',
+    // a one-word command in a case body that is computed is not a pattern
+    'case x in a)\n  $c\n  ;;\nesac',
+    // sourcing and trapping behind a control word or a wrapper
+    'if true; then source tools/other.sh; fi',
+    'env -u X . tools/other.sh',
+    'while true; do trap "$h" EXIT; done',
+  ])
+    assert.ok(outcome('shell', script).errors.length > 0, script);
+});
+test('FU-150 F1: wrappers and control words that run a literal program stay readable', () => {
+  for (const body of [
+    'env -u FOO true',
+    'env A=1 B=2 true',
+    '/usr/bin/env true',
+    'timeout -s TERM 5 sleep 1',
+    'timeout -k5 10 sleep 1',
+    'sudo -u root true',
+    'sudo -uroot -n true',
+    'stdbuf -o L cat',
+    'nice -n 5 sleep 1',
+    'nice -5 sleep 1',
+    'if true; then echo hi; elif false; then echo no; else echo x; fi',
+    'for i in 1 2; do echo "$i"; done',
+    'while read -r line; do echo "$line"; done <<< x',
+    'command -v "$tool" >/dev/null',
+    'printf "%s\\n" x | xargs -n1 -I{} echo {}',
+    'find . -maxdepth 1 -exec echo {} \\;',
+    'find . -maxdepth 1 -exec env -u FOO echo {} +',
+    'f() { echo hi; }; f',
+    'case "$x" in a) echo a;; b|c) echo b;; esac',
+    'time -p true',
+    '>/dev/null true',
+    '2>&1 true',
+    '>&2 echo hi',
+    'exec >/dev/null',
+    'exec 3>&1',
+    'timeout 5 >/dev/null true',
+    'true 2>&1 | cat',
+    '[[ "$a" > "$b" ]] && true',
+    '[ -n x ] && [[ -n y ]] && true',
+    'case "$x" in\n  *-service | other) echo a ;;\n  #*) echo b ;;\n  *) echo c ;;\nesac',
+    'case "$x" in a | b) true ;; esac',
+    // an assignment's value is not a command, whatever its last path component is called
+    'X=dir/alias true',
+    'export Y=dir/trap',
+    'sudo --user root true',
+  ])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+  // a literal docker behind the same wrappers is still read as a docker command
+  for (const body of [
+    'env -u FOO docker run alpine:latest',
+    'timeout -s TERM 5 docker run alpine:latest',
+    'if true; then sudo -u root docker run alpine:latest; fi',
+    "printf '%s\\n' x | xargs -I{} docker run alpine:latest",
+    'find . -maxdepth 0 -exec docker run alpine:latest \\;',
+  ])
+    assert.ok(outcome('shell', body).found, body);
+});
+
+// FU-150 F1: `source` runs the file the EXACT path names, and only a CI .sh file this run read
+// or a .bash library whose sha256 a reviewer pinned. 75bf3243 matched by suffix.
+const libText = 'role_password() { :; }\n';
+const sha = (text) => createHash('sha256').update(text).digest('hex');
+const LIB = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+const withLibrary = {
+  ...bare,
+  sourcedLibraries: new Map([[LIB, { sha256: sha(libText), reason: 'x' }]]),
+};
+const library = (text = libText, name = LIB) => ({ kind: 'library', name, text });
+const sourcing = (word, name = 'infrastructure/docker/postgres/init.sh') => ({
+  kind: 'shell',
+  name,
+  text: `source ${word}\n`,
+});
+const sourceErrors = (script, libs = [library()]) =>
+  validateInfraImagePins([...libs, script], withLibrary).errors;
+test('FU-150 F1: source resolves the exact path of a verified library', () => {
+  assert.deepEqual(
+    sourceErrors(sourcing(`"$(dirname "\${BASH_SOURCE[0]}")/lib/role-passwords.bash"`)),
+    [],
+  );
+  assert.deepEqual(sourceErrors(sourcing('"$(dirname "$0")/lib/role-passwords.bash"')), []);
+  // `..` is normalised: the path that results is the exact one
+  assert.deepEqual(
+    sourceErrors(
+      sourcing(
+        '"$(dirname "$0")/../postgres/lib/role-passwords.bash"',
+        'infrastructure/docker/other/init.sh',
+      ),
+    ),
+    [],
+  );
+  assert.deepEqual(sourceErrors(sourcing(LIB, 'scripts/x.sh')), []);
+  assert.deepEqual(sourceErrors(sourcing(`./${LIB}`, 'scripts/x.sh')), []);
+  for (const [word, name] of [
+    // the reviewer's probe: an arbitrary directory selects other contents
+    ['"${UNTRUSTED}/lib/role-passwords.bash"', undefined],
+    ['"${UNTRUSTED}/infrastructure/docker/postgres/lib/role-passwords.bash"', undefined],
+    [`"$HOME/${LIB}"`, undefined],
+    // a suffix of the listed path is not the path
+    [`evil/${LIB}`, 'scripts/x.sh'],
+    ['"$(dirname "$0")/lib/role-passwords.bash"', 'scripts/x.sh'],
+    ['"$(dirname "$0")/../postgres/lib/role-passwords.bash"', 'scripts/x.sh'],
+    ['"$(pwd)/lib/role-passwords.bash"', undefined],
+    ['"$(dirname "$1")/lib/role-passwords.bash"', undefined],
+    ['"$(cd x; dirname "$0")/lib/role-passwords.bash"', undefined],
+    ['"$(dirname "$0")/lib/$name.bash"', undefined],
+    ['"$(dirname "$0")/lib/*.bash"', undefined],
+    [`${LIB.replace('role', 'other')}`, 'scripts/x.sh'],
+    [`/${LIB}`, 'scripts/x.sh'],
+  ])
+    assert.ok(
+      sourceErrors(sourcing(word, name)).some((error) => /source runs .*does not read/.test(error)),
+      word,
+    );
+  // `$0` of a nested script is not the file's own
+  const nested = {
+    kind: 'shell',
+    name: 'infrastructure/docker/postgres/init.sh',
+    text: `bash <<'EOF'\nsource "$(dirname "$0")/lib/role-passwords.bash"\nEOF\n`,
+  };
+  assert.ok(sourceErrors(nested).some((error) => /source runs/.test(error)));
+});
+test('FU-150 F1: a library is read by contents: unlisted, changed or unread refuses', () => {
+  const script = sourcing(LIB, 'scripts/x.sh');
+  assert.ok(
+    sourceErrors(script, [library('changed\n')]).some((e) =>
+      /contents changed \(sha256 [0-9a-f]{64}\)/.test(e),
+    ),
+  );
+  assert.ok(sourceErrors(script, [library('changed\n')]).some((e) => /source runs/.test(e)));
+  assert.ok(sourceErrors(script, []).some((e) => /source runs/.test(e)));
+  assert.ok(
+    sourceErrors(script, [library(libText, 'infrastructure/new/lib.bash'), library()]).some((e) =>
+      /infrastructure\/new\/lib\.bash: a \.bash file no reviewed list names/.test(e),
+    ),
+  );
+  // text a hash of the decoded characters cannot tell apart refuses, even with the listed hash
+  for (const text of ['x\uFFFD\n', 'x\r\n']) {
+    const listed = {
+      ...withLibrary,
+      sourcedLibraries: new Map([[LIB, { sha256: sha(text), reason: 'x' }]]),
+    };
+    const { errors } = validateInfraImagePins([library(text), script], listed);
+    assert.ok(
+      errors.some((e) => /cannot be read/.test(e)),
+      JSON.stringify(text),
+    );
+    assert.ok(
+      errors.some((e) => /source runs/.test(e)),
+      JSON.stringify(text),
+    );
+  }
+  // once libraries are passed, a listed one the run did not find is stale
+  const two = {
+    ...withLibrary,
+    sourcedLibraries: new Map([
+      ...withLibrary.sourcedLibraries,
+      ['scripts/gone.bash', { sha256: 'x', reason: 'x' }],
+    ]),
+  };
+  assert.ok(
+    validateInfraImagePins([library()], two).errors.some((e) =>
+      /lists scripts\/gone\.bash, which was not found/.test(e),
+    ),
+  );
+  // a library is never run as a script
+  assert.ok(
+    sourceErrors({ kind: 'shell', name: 'scripts/x.sh', text: `bash ${LIB}\n` }).some((e) =>
+      /runs infrastructure.*does not read/.test(e),
+    ),
+  );
+});
+test('FU-150 F1: the CLI reads every .bash file of infrastructure/ and scripts/', () => {
+  const cli = readFileSync(join(root, 'scripts', 'check-dockerfile-pins.mjs'), 'utf8');
+  assert.match(cli, /\\\.\(\?:sh\|bash\)\$/);
+  assert.match(cli, /'library'/);
+  // and the committed libraries are exactly the listed ones, with the pinned contents
+  const found = readdirSync(join(root, 'infrastructure'), { recursive: true })
+    .filter((f) => f.endsWith('.bash'))
+    .map((f) => `infrastructure/${f}`)
+    .concat(
+      readdirSync(join(root, 'scripts'), { recursive: true })
+        .filter((f) => f.endsWith('.bash'))
+        .map((f) => `scripts/${f}`),
+    );
+  assert.deepEqual([...SOURCED_LIBRARIES.keys()].sort(), found.sort());
+});
+
+// FU-150 F2: a write the checker cannot attribute to a name breaks the provenance of an evaluated
+// variable wherever the writing command stands, not only as the first word of a line.
+const creds150 = {
+  ...bare,
+  evaluatedOutputs: new Map([['infra/creds.sh', 'prints exports only']]),
+};
+test('FU-150 F2: writers after control words, in functions and with attached options refuse', () => {
+  const producer = 'c="$(bash infra/creds.sh)"';
+  const dynamic = `printf -v "$(printf '\\143')" '%s' 'docker run alpine:latest'`;
+  const evaluate = (body) =>
+    validateInfraImagePins([credsFile, asInput('shell', body)], creds150).errors;
+  const refused = (body) =>
+    assert.ok(
+      evaluate(body).some((e) => /^scripts\/x\.sh:\d+: eval runs text/.test(e)),
+      body,
+    );
+  for (const writer of [
+    `if ${dynamic}; then :; fi`,
+    `if true; then ${dynamic}; fi`,
+    `if false; then :; else ${dynamic}; fi`,
+    `if false; then :; elif ${dynamic}; then :; fi`,
+    `for i in 1; do ${dynamic}; done`,
+    `while ${dynamic}; do break; done`,
+    `until ${dynamic}; do break; done`,
+    `{ ${dynamic}; }`,
+    `f() { ${dynamic}; }; f`,
+    `function f { ${dynamic}; }; f`,
+    `if true; then builtin ${dynamic}; fi`,
+    `if true; then time -p ${dynamic}; fi`,
+    "printf -vc '%s' x",
+    "if true; then printf -vc '%s' x; fi",
+    'read -ac <<<x',
+    'if true; then read -r "$name"; fi',
+    'if true; then declare -n ref=c; fi',
+    'if true; then source ./other.sh; fi',
+    // a computed target inside arithmetic (the name is built, never written as text)
+    `n="$(printf '\\143')"\n(( \${n}=5 ))`,
+    `n="$(printf '\\143')"\nx=$(( \${n}=5 ))`,
+    `n="$(printf '\\143')"\nif (( \${n}=5 )); then :; fi`,
+    // a declaration whose name is computed
+    'export "$n=docker run alpine:latest"',
+    'if true; then export "$(printf c)=x"; fi',
+    // an exempt line is not read for its command word, but it may still write
+    `timeout --bogus 5 printf -v "$(printf '\\143')" x # image-pin-exempt: reason\ntrue\ntrue`,
+  ])
+    refused(`${producer}\n${writer}\neval "\${c}"`);
+  // the unrelated writers of the same shape do not break the real producer/eval shape
+  for (const body of [
+    `${producer}\nif true; then printf -v other '%s' x; fi\neval "\${c}"`,
+    `${producer}\nfor i in 1; do echo "$i"; done\neval "\${c}"`,
+    `${producer}\n{ echo hi; }\neval "\${c}"`,
+    `${producer}\n( eval "\${c}" && true & )`,
+    `${producer}\nn="$(printf '\\143')"\n(( n=5 ))\neval "\${c}"`,
+  ])
+    assert.deepEqual(evaluate(body), [], body);
 });

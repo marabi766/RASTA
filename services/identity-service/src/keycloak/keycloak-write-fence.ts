@@ -406,9 +406,9 @@ export class KeycloakWriteFences {
    * its own transaction. An insert that cannot commit while the business
    * transaction can still use it is abandoned, and nothing is sent.
    *
-   * The local deadline is measured from **before** the insert. The database
-   * clock is floored to milliseconds, so its deadline can be less than 1 ms
-   * earlier; takeover still requires the separate settle window to elapse.
+   * The local deadline is measured from **before** the insert. Flooring the
+   * database start and complete deadline can shorten it by less than 2 ms;
+   * takeover still requires the separate settle window to elapse.
    */
   async open(
     tx: ExtendedPrismaClient,
@@ -449,9 +449,9 @@ export class KeycloakWriteFences {
                (attempt_id, user_id, keycloak_id, operation,
                 started_at, deadline_at, takeover_at, next_reassert_at)
         SELECT ${attemptId}, ${input.userId}, ${input.keycloakId}, ${input.operation},
-               t.c, t.c + make_interval(secs => ${timeout}),
-               t.c + make_interval(secs => ${timeout + input.settleSeconds}),
-               t.c + make_interval(secs => ${timeout + input.settleSeconds})
+               t.c, date_trunc('milliseconds', t.c + make_interval(secs => ${timeout})),
+               date_trunc('milliseconds', t.c + make_interval(secs => ${timeout + input.settleSeconds})),
+               date_trunc('milliseconds', t.c + make_interval(secs => ${timeout + input.settleSeconds}))
           FROM (SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS c) t`,
       // One budget for the connection wait and the insert together (#458 r2
       // F2): never past what the business transaction has left.
@@ -631,9 +631,9 @@ export class KeycloakWriteFences {
             FROM (SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS c) t,
                  LATERAL (SELECT
                    CASE WHEN ${owed.known} THEN t.c
-                        ELSE t.c + make_interval(secs => ${timeout}) END AS deadline,
+                        ELSE date_trunc('milliseconds', t.c + make_interval(secs => ${timeout})) END AS deadline,
                    CASE WHEN ${owed.known} THEN t.c
-                        ELSE t.c + make_interval(secs => ${timeout + owed.settleSeconds}) END
+                        ELSE date_trunc('milliseconds', t.c + make_interval(secs => ${timeout + owed.settleSeconds})) END
                      AS takeover) w`,
         // One budget, its connection wait and its insert together — and never
         // past a stop's deadline (`transactionBounds`, #458 r2 F2); nothing
@@ -779,10 +779,10 @@ export class KeycloakWriteFences {
     await this.pool.client.$executeRaw`
       UPDATE keycloak_write_attempt
          SET reassert_failures = LEAST(reassert_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-             next_reassert_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
+             next_reassert_at = date_trunc('milliseconds', date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                + make_interval(secs => ${intervalSeconds}
                    * LEAST(POWER(2, LEAST(reassert_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
-                           ${maxIntervals}))
+                           ${maxIntervals})))
        WHERE user_id = ${userId}
          AND account_missing_at IS NULL
          AND takeover_at <= (clock_timestamp() AT TIME ZONE 'UTC')`;
