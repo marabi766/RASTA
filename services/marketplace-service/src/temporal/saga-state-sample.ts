@@ -3,8 +3,11 @@ import { setStateFreshUntil } from '../observability/metrics';
 
 /** How often every replica reads the saga state, on a timer of its own. */
 export const STATE_SAMPLE_INTERVAL_MS = 10_000;
-/** A read's own bound: past the database's (maxWait + timeout), so their failure is seen first. */
-export const STATE_READ_TIMEOUT_MS = SAGA_START_STOP_BUDGET_MS + 1_000;
+/**
+ * A read's own bound: past its two bounded transactions (the reference's and
+ * the read's, maxWait + timeout each), so their own failure is seen first.
+ */
+export const STATE_READ_TIMEOUT_MS = 2 * SAGA_START_STOP_BUDGET_MS + 1_000;
 /** Past this, by the monotonic clock, a sample's series are gone from the scrape. */
 export const STATE_FRESH_MS = 2 * STATE_SAMPLE_INTERVAL_MS + STATE_READ_TIMEOUT_MS;
 

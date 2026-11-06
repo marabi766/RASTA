@@ -2430,17 +2430,17 @@
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 125,
-    "hash": "880bd82bb8c1d66fce335e4154140db5aa1fda8775f49c8b5e6363b246318036",
+    "line": 124,
+    "hash": "f11e4af927c5fc54a56148032f12b985d4ff2cae9d3d7bc68bdaa97aa76f59d5",
     "occurrence": 0,
-    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database; aged in UTC against the forward-only saga_monitor_clock reference"
+    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database; aged in UTC against the forward-only saga_monitor_clock reference, and refuses when that row is missing"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 165,
-    "hash": "c5f08c1d89987e27d1d73f4b4eff5c3375e49d43a894962c416d676aca26ada1",
+    "line": 167,
+    "hash": "6334dc98d6e41bc68c7d21486825a58c45bdd54b683eba60b6e629f61b63a634",
     "occurrence": 0,
-    "decision": "platform-wide: saga unresolved-financial-episode gauge exposes per-reason count, oldest age and overdue count only (#770 r2 F3, #792 r1 F1/F2); every child lookup joins on its row's organization and order; no tenant labels, identifiers or amounts leave the database"
+    "decision": "platform-wide: saga unresolved-financial-episode gauge exposes per-reason count, oldest age and overdue count only (#770 r2 F3, #792 r1 F1/F2); refuses without the saga_monitor_clock row; every child lookup joins on its row's organization and order; no tenant labels, identifiers or amounts leave the database"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",

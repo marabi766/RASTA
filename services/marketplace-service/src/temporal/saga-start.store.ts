@@ -96,39 +96,41 @@ export class SagaStartStore {
   /**
    * The time every saga state gauge ages against (#792 r1 F2): the database's
    * clock, never earlier than any reference handed out before. Moved forward in
-   * the reader's own transaction, so what it reports was persisted first; a
-   * clock set back ages nothing backwards, and an overdue episode stays overdue
-   * until it is resolved. A missing row throws: no reference, no sample.
+   * a short transaction of its own, which holds the row only for this one
+   * statement (#792 r2: a read holding it would make every other read wait);
+   * a row locked past 500 ms fails the sample, never skips the move.
    *
-   * The reads then take it from the row in SQL, not as a parameter, so no driver
-   * or session zone converts it; the row lock taken here keeps the row until
-   * their transaction ends.
+   * A read then ages against the row as committed, taken in SQL rather than as
+   * a parameter so no driver or session zone converts it, and proves it found
+   * the row: a reference never runs back, and none means no sample.
    */
-  private async advanceReference(tx: ExtendedPrismaClient): Promise<void> {
-    // Another replica's reader holds the row only for its own short read.
-    await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
-    const moved = await tx.$executeRaw`
+  private async advanceReference(): Promise<void> {
+    const moved = await this.bounded(async (tx) => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+      return tx.$executeRaw`
       UPDATE saga_monitor_clock SET high_water = GREATEST(high_water, clock_timestamp())
       WHERE id = 1
     `;
-    if (moved !== 1) {
-      throw new Error('saga_monitor_clock has no row: the saga state cannot be aged');
-    }
+    });
+    if (moved !== 1) throw noReference();
   }
 
   async backlog(): Promise<{ count: number; age: number }> {
     // Counts only, no tenant labels, identifiers or amounts leave the DB.
     // created_at is UTC wall time without a zone, read as UTC, so the session's
     // TimeZone cannot shift the age; the reference cannot run back.
-    const [row] = await this.bounded(async (tx) => {
-      await this.advanceReference(tx);
-      return tx.$queryRaw<{ count: bigint; age: number }[]>`
+    await this.advanceReference();
+    const [row] = await this.bounded(
+      (tx) => tx.$queryRaw<{ count: bigint; age: number; referenced: boolean }[]>`
+      WITH clock AS (SELECT high_water AS now FROM saga_monitor_clock WHERE id = 1)
       SELECT count(*) AS count,
-        COALESCE(EXTRACT(EPOCH FROM (SELECT high_water FROM saga_monitor_clock WHERE id = 1)
-          - min(created_at AT TIME ZONE 'UTC')), 0)::float AS age
+        COALESCE(EXTRACT(EPOCH FROM (SELECT now FROM clock) - min(created_at AT TIME ZONE 'UTC')),
+          0)::float AS age,
+        EXISTS (SELECT 1 FROM clock) AS referenced
       FROM "order" WHERE saga_start_delivered_at IS NULL AND status IN ('PENDING', 'CANCELLING')
-    `;
-    });
+    `,
+    );
+    if (!row?.referenced) throw noReference();
     return { count: Number(row.count), age: Math.max(0, row.age) };
   }
 
@@ -160,9 +162,11 @@ export class SagaStartStore {
     overdueSeconds = UNRESOLVED_OVERDUE_SECONDS,
   ): Promise<{ reason: string; count: number; age: number; overdue: number }[]> {
     const custody = SAGA_CUSTODY_STATUSES as string[];
-    const rows = await this.bounded(async (tx) => {
-      await this.advanceReference(tx);
-      return tx.$queryRaw<{ reason: string; count: bigint; age: number; overdue: bigint }[]>`
+    await this.advanceReference();
+    const read = await this.bounded(
+      (tx) => tx.$queryRaw<
+        { reason: string | null; count: bigint; age: number; overdue: bigint }[]
+      >`
       WITH clock AS (SELECT high_water AS now FROM saga_monitor_clock WHERE id = 1),
       episode AS (
         SELECT CASE WHEN c.operation = 'resolveObligationDispute' THEN 'DISPUTE_RELEASE'
@@ -189,8 +193,13 @@ export class SagaStartStore {
         GREATEST(0, EXTRACT(EPOCH FROM clock.now - min(since)))::float AS age,
         count(*) FILTER (WHERE since <= clock.now - ${overdueSeconds} * interval '1 second') AS overdue
       FROM episode CROSS JOIN clock GROUP BY reason, clock.now
-    `;
-    });
+      -- One row with no reason, there only if the reference was: what proves an
+      -- empty result is no episode, not no clock.
+      UNION ALL SELECT NULL, 0, 0, 0 FROM clock
+    `,
+    );
+    if (!read.some((row) => row.reason === null)) throw noReference();
+    const rows = read.filter((row): row is typeof row & { reason: string } => row.reason !== null);
     const reasons = [...custody, 'DISPUTE_RELEASE', 'UNCONFIRMED_CALL'];
     // A reason this list does not know is still money: reported, not dropped.
     for (const row of rows) if (!reasons.includes(row.reason)) reasons.push(row.reason);
@@ -227,4 +236,8 @@ export class SagaStartStore {
     );
     return { calls: rows.slice(0, limit), more: rows.length > limit };
   }
+}
+
+function noReference(): Error {
+  return new Error('saga_monitor_clock has no row: the saga state cannot be aged');
 }

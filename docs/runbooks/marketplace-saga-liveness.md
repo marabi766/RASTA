@@ -38,7 +38,7 @@ An **episode** is one of:
 | `UNCONFIRMED_CALL`  | an open row of any other operation (none is recorded yet; counted rather than dropped)                    | its first opening                                                       | that call's outcome                        |
 
 One order can be two episodes at once (a release owed and the settlement after it): each is counted. A sample that
-fails, that does not answer within its own deadline (3.5 s), or that is older than 23.5 s by the process's monotonic
+fails, that does not answer within its own deadline (6 s), or that is older than 26 s by the process's monotonic
 clock **withdraws** its series instead of leaving the last value, and a replica that is stopping withdraws all of them;
 every alert reads a missing series as unknown and fires.
 
@@ -48,7 +48,7 @@ every alert reads a missing series as unknown and fires.
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `RastaMarketplaceSagaWorkerDown`              | a replica reports `worker_up == 0` for 2 min                                                                     | `run()` failed or ended: 2 min + one scrape. Still `RUNNING` but no longer polling: Temporal drops a poller about 5 min after its last poll (5 min 9 s on the dev server), probed every 15 s, then 2 min — about 7.5 min. |
 | `RastaMarketplaceSagaNoLiveWorker`            | no replica reports `worker_up == 1` — all `0`, or no series at all (every replica down or unscraped) — for 2 min | as above; a replica that is gone stops reporting at its next scrape                                                                                                                                                       |
-| `RastaMarketplaceSagaFinancialEpisodeOverdue` | some replica counts an episode over 1 h old, **or** no replica reports the count, for 5 min                      | 1 h 5 min after the episode began (+ up to 10 s of sampling)                                                                                                                                                              |
+| `RastaMarketplaceSagaFinancialEpisodeOverdue` | some replica counts an episode over 1 h old, **or** no replica reports the count, for 5 min                      | 1 h 5 min after the episode began (+ up to 10 s of sampling), with the application and database clocks in step: see the clock limits below                                                                                |
 
 `FinancialEpisodeOverdue` does **not** clear when the retries stop, when the saga workflow ends, when every worker or
 the whole service dies, when an episode changes reason, or when the database clock is set back: it clears only when no
@@ -84,7 +84,8 @@ back, then work through `WorkerDown` above. `FinancialEpisodeOverdue` follows wi
 1. `rasta_marketplace_saga_unresolved_orders{reason}` and `…_age_seconds{reason}` say which reasons are owed and for how
    long. If the series are missing, the service is down or its sample is failing (log: `A saga state gauge could not be
 sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the reference row is gone: restore it with
-   `INSERT INTO saga_monitor_clock (id, high_water) VALUES (1, clock_timestamp())` only if the clock is known good). The
+   `INSERT INTO saga_monitor_clock (id, high_water) VALUES (1, clock_timestamp())` only if the clock is known good; the
+   reference may then be lower than before, which can delay, never clear, an episode). The
    state is unknown: treat every in-flight order as unresolved until it is measured again.
 2. If a liveness alert fires too, fix that first: the sagas resume at the next poll.
 3. Find the episodes (read-only). The query is `SagaStartStore.unresolved()` in
@@ -126,7 +127,7 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
      economic-service's record of the obligation. After receipt there is no automatic financial compensation
      (`docs/08` § 8.4).
 5. `DISPUTE_RELEASE` whose obligation economic-service already shows released for **this** dispute (its identity, not
-   only the order): the release happened and only its confirmation was lost, or the row came from the migration's
+   only the order; an economic-service that gave no identity cannot prove it: escalate to engineering): the release happened and only its confirmation was lost, or the row came from the migration's
    backfill. Close it as [`marketplace-saga-deploy`](marketplace-saga-deploy.md) § «رکورد فراخوانی‌های تأییدنشده» says,
    with the `generation` you read, and record it in the change record. A row a saga still waits on closes by itself at
    its next attempt. The alert keeps firing until the row is closed, by design (fail closed).
@@ -142,16 +143,26 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
 - A database clock run **forward** and then corrected leaves `saga_monitor_clock` ahead: ages read high (the alert fires
   early, never late) until the real clock catches up. To undo it, set the row to `clock_timestamp()` only once the
   clock is verified right: an episode overdue by the real clock stays overdue. Never lower it for any other reason.
-- Custody ages come from `order_status_history.occurred_at`, written by the application's clock. An episode keeps its
-  start for as long as it lasts, so the overdue count cannot fall while it does; a clock set back before an episode
-  began can make that one episode start late.
+- **Clocks.** The reference is the database's clock; an episode's start (`order_status_history.occurred_at`, a
+  dispute's `resolved_at`, a row's `opened_at`) is written by the application. An episode keeps its start for as long as
+  it lasts, so its age never falls and a counted episode is never cleared. It can be **late**: an application clock
+  ahead of the database's delays every episode it starts by that lead, and a database clock set back by Δ holds the
+  reference still for Δ, so an episode not yet over the hour waits up to Δ longer. Keep both on NTP; stamping starts
+  with the database's clock is the follow-up. An application clock behind starts episodes early (alerts sooner).
+- A party may move an order out of the saga's custody while its episode is overdue: a buyer disputing a settlement
+  stuck in `RECEIPT_CONFIRMED` makes it `DISPUTED` (the operator decides now) and the alert can clear. After the
+  decision the order is counted again, aged from the decision.
 - A saga that replayed past its resume point without `DISPUTE_RESUME_PATCH` releases only at its next wake-up as
   `RECEIPT_CONFIRMED`/`CANCELLING`; until then its row stays open and counts as `DISPUTE_RELEASE`.
 - The probe uses `DescribeTaskQueue` without enhanced mode; if Temporal ever lists only one partition's pollers, a live
   worker can read `0` (a false `WorkerDown`, never a false `1`).
 - The unresolved query scans live orders and open rows every 10 s per replica under a 1 s statement timeout; past it
-  the sample is withdrawn and the alert fires as unknown. Each sample also moves the one `saga_monitor_clock` row (a
-  500 ms lock wait at most). A partial index on `order(status)` is the follow-up if that is ever slow.
+  the sample is withdrawn and the alert fires as unknown. Each sample first moves the one `saga_monitor_clock` row in a
+  transaction of its own; if another session holds the row over 500 ms (one that died mid-update holds it until
+  PostgreSQL drops its connection), every sample fails and the alert fires as unknown. A partial index on `order(status)` is the follow-up if that is ever slow.
 - A run of the saga worker that ends by itself (no `stop()`) exits the process, which is restarted; a worker that never
   started keeps the replica up, reporting `worker_up 0`.
+- **Rollback:** code older than this exports no `rasta_marketplace_saga_unresolved_overdue`, so with it the alert
+  fires as unknown for as long as it runs: roll the rule file back with the code (and only then run `down.sql` of
+  `20261106120000_saga_monitor_clock`).
 - Local Prometheus loads these rules; notification routing is a deployment responsibility.

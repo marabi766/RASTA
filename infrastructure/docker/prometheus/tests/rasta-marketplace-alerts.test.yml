@@ -311,8 +311,10 @@ tests:
         exp_alerts: []
 
   # The database clock is set back an hour at 11m. The replica ages against
-  # saga_monitor_clock, which does not run back, so the overdue count holds;
-  # the age gauges that do move (shown falling) are read by no alert.
+  # saga_monitor_clock, which does not run back, so the overdue count holds
+  # (the SQL is proven in saga-unresolved.int-spec.ts). The age gauges are fed
+  # falling here only to show the rule reads none of them: the replica's own
+  # cannot fall, they age against the same reference.
   # Replica-2 is then withdrawn as stale (a hung read) at 16m: replica-1 is
   # enough. Both gone at 22m: unknown, still firing with no gap. A reporter
   # back at 29m with nothing overdue clears it.
@@ -385,9 +387,9 @@ tests:
         alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
         exp_alerts: []
 
-  # Never overdue: episodes under the hour, whatever their reasons do, and a
-  # replica's age gauge passing 3600 alone (an episode not yet counted by the
-  # clock the replica keeps) does not page: only the count does.
+  # Never overdue: episodes under the hour, whatever their reasons do. The age
+  # gauge passing 3600 with the count at 0 is a state the replica does not
+  # produce; it is here to show that the rule reads only the count.
   - interval: 1m
     input_series:
       - series: 'rasta_marketplace_saga_unresolved_overdue{service="marketplace-service",instance="replica-1"}'

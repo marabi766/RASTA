@@ -384,8 +384,10 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
 
     // The dispute still open, the order no longer DISPUTED (moved by hand):
     // nothing says the operator still decides, so it counts too.
-    await runUnscoped('the suite moves an order it wrote out of DISPUTED by hand', () =>
-      prisma.client.$executeRaw`UPDATE "order" SET status = 'FUNDS_HELD' WHERE id = ${orderId}`,
+    await runUnscoped(
+      'the suite moves an order it wrote out of DISPUTED by hand',
+      () =>
+        prisma.client.$executeRaw`UPDATE "order" SET status = 'FUNDS_HELD' WHERE id = ${orderId}`,
     );
     expect((await read()).DISPUTE_RELEASE!.count).toBe(before.DISPUTE_RELEASE!.count + 2);
   });
@@ -466,6 +468,17 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
     try {
       await expect(store.unresolved()).rejects.toThrow(/saga_monitor_clock has no row/);
       await expect(store.backlog()).rejects.toThrow(/saga_monitor_clock has no row/);
+      // Gone between the move and the read: the read itself refuses, rather
+      // than take an empty result for no episode.
+      const moved = jest
+        .spyOn(store as unknown as { advanceReference(): Promise<void> }, 'advanceReference')
+        .mockResolvedValue(undefined);
+      try {
+        await expect(store.unresolved()).rejects.toThrow(/saga_monitor_clock has no row/);
+        await expect(store.backlog()).rejects.toThrow(/saga_monitor_clock has no row/);
+      } finally {
+        moved.mockRestore();
+      }
     } finally {
       await unscoped(
         () =>
