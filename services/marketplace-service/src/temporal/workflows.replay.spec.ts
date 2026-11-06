@@ -34,10 +34,11 @@ import { Worker } from '@temporalio/worker';
 
 jest.setTimeout(120_000);
 
-function history(name: string): unknown {
-  const file = join(__dirname, '__fixtures__', `order-saga-pre-d083-${name}.history.json`);
+function fixture(name: string): unknown {
+  const file = join(__dirname, '__fixtures__', `order-saga-${name}.history.json`);
   return JSON.parse(readFileSync(file, 'utf8'));
 }
+const history = (name: string): unknown => fixture(`pre-d083-${name}`);
 
 describe('orderSaga replays histories recorded before D-083', () => {
   it.each(['settled', 'disputed', 'resumed'])(
@@ -48,6 +49,29 @@ describe('orderSaga replays histories recorded before D-083', () => {
           { workflowsPath: require.resolve('./workflows') },
           history(name),
           `legacy-${name}`,
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+});
+
+/**
+ * The release wait (FU-080). `pre-fu080-release-refused` is the code before it
+ * (#625's head `dfa48a55`): a release refused, and the saga failed there. The
+ * new code must end the same way, not wait. `fu080-release-wait` is the code
+ * with it: the same refusal, its marker and report, a backoff, the release
+ * confirmed, and the saga on to its end. Its markers also feed the drain gate's
+ * test, as the real SDK's shape of them.
+ */
+describe('orderSaga replays histories on both sides of the release wait', () => {
+  it.each(['pre-fu080-release-refused', 'fu080-release-wait'])(
+    'the %s history replays without divergence',
+    async (name) => {
+      await expect(
+        Worker.runReplayHistory(
+          { workflowsPath: require.resolve('./workflows') },
+          fixture(name),
+          name,
         ),
       ).resolves.toBeUndefined();
     },
