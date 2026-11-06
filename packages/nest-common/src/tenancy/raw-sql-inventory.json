@@ -1087,9 +1087,9 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "8112ba802f501dc0c2c47eb36482d9bf78038b32e6488f8a7f3a9247cd58d192",
+    "hash": "ed2545bc7bd76a4ae872a1e450bec42f5b4a3433dbd8061ecbc1d6909b473590",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and, by transaction id, that transaction's own settlement authority and hold decision (transaction_settlement_authorised, transaction_hold_decision_unresolved), which settlement decides from"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and, by transaction id, that transaction's own settlement authority and hold decision (transaction_settlement_authorised, transaction_settlement_barred), which settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",

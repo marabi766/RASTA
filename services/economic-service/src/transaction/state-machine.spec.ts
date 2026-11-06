@@ -92,6 +92,7 @@ describe('a dispute stops settlement completely', () => {
       nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', {
         settlementAuthorised: true,
         fundsHeld: true,
+        settlementBarred: false,
       }),
     ).toBe('PENDING_SETTLEMENT');
   });
@@ -102,22 +103,36 @@ describe('a dispute stops settlement completely', () => {
         nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', {
           settlementAuthorised: false,
           fundsHeld: true,
+          settlementBarred: false,
         }),
       ).toBe('HELD');
     });
 
     it('returns an authorised transaction to PENDING_SETTLEMENT, held or not', () => {
       for (const fundsHeld of [true, false]) {
-        expect(resolvedStatus({ settlementAuthorised: true, fundsHeld })).toBe(
-          'PENDING_SETTLEMENT',
-        );
+        expect(
+          resolvedStatus({ settlementAuthorised: true, fundsHeld, settlementBarred: false }),
+        ).toBe('PENDING_SETTLEMENT');
       }
     });
 
     it('returns an obligation with no escrow to PENDING_SETTLEMENT: it was authorised when recorded', () => {
-      expect(resolvedStatus({ settlementAuthorised: false, fundsHeld: false })).toBe(
-        'PENDING_SETTLEMENT',
-      );
+      expect(
+        resolvedStatus({ settlementAuthorised: false, fundsHeld: false, settlementBarred: false }),
+      ).toBe('PENDING_SETTLEMENT');
+    });
+
+    // D-123: barred, or not known not to be, whatever the authorisation and the hold say.
+    it('returns a transaction its hold record bars to HELD, never to the settlement queue', () => {
+      for (const settlementAuthorised of [true, false]) {
+        for (const fundsHeld of [true, false]) {
+          for (const settlementBarred of [true, undefined]) {
+            expect(
+              resolvedStatus({ settlementAuthorised, fundsHeld, settlementBarred } as never),
+            ).toBe('HELD');
+          }
+        }
+      }
     });
 
     it('refuses to guess a resolution without the authority it depends on', () => {
@@ -143,7 +158,7 @@ describe('settlement checks its authority, not only its status (D-083, #623 r1 F
       assertSettlementReady('TXN_1', {
         settlementAuthorised: false,
         fundsHeld: true,
-        holdDecisionUnresolved: false,
+        settlementBarred: false,
       });
       throw new Error('settled without authority');
     } catch (error) {
@@ -159,32 +174,37 @@ describe('settlement checks its authority, not only its status (D-083, #623 r1 F
       { settlementAuthorised: false, fundsHeld: false },
     ]) {
       expect(() =>
-        assertSettlementReady('TXN_1', { ...authority, holdDecisionUnresolved: false }),
+        assertSettlementReady('TXN_1', { ...authority, settlementBarred: false }),
       ).not.toThrow();
     }
   });
 
-  // FU-138: nothing held would otherwise say ready, and debit the payer's spendable balance.
+  // FU-138, D-123: nothing held would otherwise say ready, and debit the payer's spendable balance.
   it.each([
     [{ settlementAuthorised: false, fundsHeld: false }],
     [{ settlementAuthorised: false, fundsHeld: true }],
     [{ settlementAuthorised: true, fundsHeld: false }],
     [{ settlementAuthorised: true, fundsHeld: true }],
-  ])('refuses %j while its hold decision is unresolved, or not known', (authority) => {
-    for (const holdDecisionUnresolved of [true, undefined]) {
+  ])('refuses %j while its hold record bars it, or that is not known', (authority) => {
+    for (const settlementBarred of [true, undefined, null, 'false']) {
       expect(() =>
-        assertSettlementReady('TXN_1', { ...authority, holdDecisionUnresolved } as never),
-      ).toThrow(expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }));
+        assertSettlementReady('TXN_1', { ...authority, settlementBarred } as never),
+      ).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_STATE_TRANSITION',
+          message: expect.stringContaining('settles only from its own hold'),
+        }),
+      );
     }
   });
 
   it('agrees with where a resolution sends it: settlement-ready exactly when settleable', () => {
     for (const settlementAuthorised of [true, false]) {
       for (const fundsHeld of [true, false]) {
-        const authority = { settlementAuthorised, fundsHeld };
+        const authority = { settlementAuthorised, fundsHeld, settlementBarred: false };
         const settleable = (() => {
           try {
-            assertSettlementReady('TXN_1', { ...authority, holdDecisionUnresolved: false });
+            assertSettlementReady('TXN_1', authority);
             return true;
           } catch {
             return false;
@@ -272,6 +292,7 @@ describe('a settlement is undone only by a reversal, as far as money moved (docs
       nextStatus('TXN_1', 'SETTLED', 'REVERSE_SETTLEMENT', {
         settlementAuthorised: true,
         fundsHeld: false,
+        settlementBarred: false,
       }),
     ).toThrow('needs its progress');
     expect(() => nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', progress(1n))).toThrow(

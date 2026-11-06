@@ -708,6 +708,7 @@ export class TransactionService {
       const target = nextStatus(transactionId, transaction.status, event, {
         settlementAuthorised: transaction.settlementAuthorised,
         fundsHeld: transaction.fundsHeld,
+        settlementBarred: transaction.settlementBarred,
       });
       if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
         // Fixed words: the identities stay out of the envelope and the log.

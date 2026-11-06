@@ -1,8 +1,7 @@
 -- Reverse of `migration.sql` (20261106120000_transaction_hold_decision).
 --
 -- Gives 20261105120000's three predicates back, byte for byte, and drops the rest. Refuses while
--- any decision is recorded: it is the only record of who decided what and why, and a VOIDED one
--- moved its row. Roll the release back first: this one's
+-- any decision is recorded: it is the only record of who decided what and why. Roll the release back first: this one's
 -- `TransactionRepository.lockForUpdate` and `heldProven` ask the functions that go here.
 BEGIN;
 
@@ -82,6 +81,8 @@ END; $$ LANGUAGE plpgsql;
 
 DROP FUNCTION decide_transaction_hold(TEXT, TEXT, TEXT);
 DROP FUNCTION transaction_held_proven(TEXT);
+DROP FUNCTION transaction_settlement_barred(TEXT);
+DROP FUNCTION transaction_own_hold_for_terms(TEXT);
 DROP FUNCTION transaction_settlement_authorised(TEXT, BOOLEAN);
 DROP FUNCTION transaction_hold_decision_unresolved(TEXT);
 DROP TABLE "transaction_hold_decision";

@@ -125,8 +125,8 @@ export class TransactionRepository {
                  dispute_id                      AS "disputeId",
                  transaction_settlement_authorised(id, settlement_authorised_at IS NOT NULL)
                                                  AS "settlementAuthorised",
-                 transaction_hold_decision_unresolved(id)
-                                                 AS "holdDecisionUnresolved",
+                 transaction_settlement_barred(id)
+                                                 AS "settlementBarred",
                  EXISTS (
                    SELECT 1
                      FROM transaction_holds("transaction".id, "transaction".organization_id) AS hold
@@ -383,8 +383,8 @@ export interface LockedTransaction {
    */
   settlementAuthorised: boolean;
   fundsHeld: boolean;
-  /** It stands on a decision read from a hold not its own, undecided (migration 20261106120000). */
-  holdDecisionUnresolved: boolean;
+  /** Its hold record bars it from settling (`transaction_settlement_barred`, D-123). */
+  settlementBarred: boolean;
 }
 
 export interface TransactionRow {

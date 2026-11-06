@@ -40,7 +40,8 @@ import type { TransactionStatus } from '../generated/prisma';
  * transaction to where its recorded authority stands ({@link resolvedStatus}):
  * `PENDING_SETTLEMENT` when settlement was authorised, or when nothing was
  * ever held (an ADR-032 obligation, authorised when recorded); `HELD` when
- * funds are escrowed and no authorisation is recorded. It used to send every
+ * funds are escrowed and no authorisation is recorded, or its hold record bars
+ * it (D-123). It used to send every
  * dispute to `PENDING_SETTLEMENT`, so an order's obligation disputed before
  * its buyer confirmed receipt came out of the dispute settlement-ready with
  * no receipt behind it (marketplace audit F1, PM decision D-083).
@@ -154,13 +155,19 @@ export interface SettlementAuthority {
   readonly settlementAuthorised: boolean;
   /** The payer's own ACTIVE hold for this transaction (`transaction_holds`): its funds are escrowed. */
   readonly fundsHeld: boolean;
+  /**
+   * `transaction_settlement_barred`: it stands on a hold record, and is undecided
+   * or has no own hold for its terms. An operator's decision disposes of the
+   * evidence and authorises no payment (D-123). Anything but `false` is barred.
+   */
+  readonly settlementBarred: boolean;
 }
 
 /**
  * Where a resolved dispute leaves a transaction: as settlement-ready as its
  * recorded authority makes it, and no more (D-083).
  *
- * - Authorised (`settlement_authorised_at`): `PENDING_SETTLEMENT`. Nothing
+ * - Authorised (`settlement_authorised_at`): `PENDING_SETTLEMENT`. Nothing else
  *   moves an authorised transaction back to `HELD`, so that is where its
  *   dispute found it.
  * - Escrowed and never authorised: `HELD`. Where a dispute raised from `HELD`
@@ -170,8 +177,10 @@ export interface SettlementAuthority {
  *   needs an authorisation first, which is the side to err on with money.
  * - No escrow: `PENDING_SETTLEMENT`. A `DISPUTED` transaction with no active
  *   hold was never `HELD` — a hold is released only by settling or refunding,
- *   both terminal — so it is an ADR-032 obligation, authorised when recorded,
- *   or one an operator has decided holds nothing (migration 20261106120000).
+ *   both terminal — so it is an ADR-032 obligation, authorised when recorded.
+ * - Barred by its hold record: `HELD`, unproven, whatever else it says. It is
+ *   not ready to settle, and from there it can take its own hold and an
+ *   authorisation, or be refunded (D-123).
  */
 export function resolvedStatus(
   authority: SettlementAuthority,
@@ -181,14 +190,16 @@ export function resolvedStatus(
 
 /**
  * The one rule both a resolution and a settlement decide from: a transaction
- * may be settlement-ready only when its settlement was authorised, or when
- * nothing is held for it (an ADR-032 obligation, authorised when recorded).
- * Enforced in the database too (`trg_transaction_settlement_authority`,
+ * may be settlement-ready only when no hold record bars it, and its settlement
+ * was authorised or nothing is held for it (an ADR-032 obligation, authorised
+ * when recorded). Enforced in the database too (`trg_transaction_settlement_authority`,
  * `trg_wallet_hold_release_settlement_authority`, migration
  * 20261103121000_transaction_settlement_authority).
  */
 export function isSettlementReady(authority: SettlementAuthority): boolean {
-  return authority.settlementAuthorised || !authority.fundsHeld;
+  return (
+    authority.settlementBarred === false && (authority.settlementAuthorised || !authority.fundsHeld)
+  );
 }
 
 /**
@@ -197,16 +208,11 @@ export function isSettlementReady(authority: SettlementAuthority): boolean {
  * `INVALID_STATE_TRANSITION` (409), as the state machine refuses: the
  * transaction has to be authorised first, and no retry changes that.
  */
-export function assertSettlementReady(
-  transactionId: string,
-  authority: SettlementAuthority & { readonly holdDecisionUnresolved: boolean },
-): void {
-  // Before the rule below: with nothing held it would say ready. A settlement
-  // then debits the payer's spendable balance on the same unproven history.
-  if (authority.holdDecisionUnresolved !== false) {
+export function assertSettlementReady(transactionId: string, authority: SettlementAuthority): void {
+  if (authority.settlementBarred !== false) {
     throw new RastaError(
       'INVALID_STATE_TRANSITION',
-      'This transaction cannot be settled until an operator has decided its hold record',
+      'This transaction settles only from its own hold, once an operator has decided its hold record',
       { internalContext: { transactionId, ...authority } },
     );
   }

@@ -16,14 +16,17 @@
 --   - `transaction_settlement_authorised(id, column_set)`: an unresolved row is authorised by
 --     nothing, its `settlement_authorised_at` included; a voided one no longer by the frozen
 --     AUTHORISED_UNRECORDED record. The service's lock read and the three predicates ask this.
---   - `trg_transaction_settlement_authority` also refuses to settle an unresolved row with
---     nothing held: that path debits the payer's spendable balance on the same unproven history.
+--   - `transaction_settlement_barred(id)`: payment, apart from the evidence (D-123). A listed row,
+--     but for RESTORED_TO_PENDING_SETTLEMENT, pays only from its own ACTIVE hold for exactly its
+--     gross and currency, and only once decided. A decision disposes of the evidence and authorises
+--     no payment, so nothing held never means the payer's spendable balance. The service's lock
+--     read, the settlement and release triggers and where a resolved dispute returns all ask this.
 --   - `transaction_held_proven(id)`: what HELD says, proven: HELD, resolved, and the payer's own
 --     ACTIVE hold for exactly the gross and currency. Not "not listed": a HELD row no hold names
 --     at all was never listed, and is not escrow either. The API answers it as `heldProven`.
 --
 -- A refund stays open on purpose: it only ever gives the payer's own hold back to the payer, and
--- it is a way out for a row a person will not decide.
+-- it is a way out for a row a person will not decide. With nothing held it moves no money.
 --
 -- ## The decision
 --
@@ -34,11 +37,10 @@
 --   - CONFIRMED: what the row stands on is right. A HELD row, or one found HELD and still open
 --     (an authorisation or a dispute can move it on while it waits), needs its own ACTIVE hold for
 --     exactly its terms: nothing can be confirmed as held that is not.
---   - VOIDED: it is not. A frozen AUTHORISED_UNRECORDED stops counting; a HELD row goes to
---     PENDING_SETTLEMENT with no money moved, as RESTORED_TO_PENDING_SETTLEMENT did, and is refused
---     if it does have a hold of its own: then HELD is true, and a refund or CONFIRMED is the answer.
---     As with RESTORED, it is then an obligation with nothing held: a settlement debits the payer's
---     spendable balance. A row that must not settle is refunded instead.
+--   - VOIDED: it is not. A frozen AUTHORISED_UNRECORDED stops counting, and the row stays where it
+--     stands, barred (D-123). Refused on a HELD row with a hold of its own: then HELD is true, and a
+--     refund or CONFIRMED is the answer. Its ways on: its own hold for its terms, proven and
+--     authorised like any row's, or a refund.
 --
 -- `trg_transaction_hold_decision_guard` refuses a write by anyone but the table's owner: the
 -- runtime role's default privileges include INSERT, and it must not decide its own refusals.
@@ -84,7 +86,7 @@ CREATE TRIGGER "trg_transaction_hold_decision_no_truncate"
   BEFORE TRUNCATE ON "transaction_hold_decision"
   FOR EACH STATEMENT EXECUTE FUNCTION guard_transaction_hold_decision();
 
--- The one interpretation.
+-- The one interpretation of the evidence.
 CREATE OR REPLACE FUNCTION transaction_hold_decision_unresolved(subject TEXT)
 RETURNS BOOLEAN AS $$
   SELECT EXISTS (
@@ -93,6 +95,29 @@ RETURNS BOOLEAN AS $$
        AND c."outcome" <> 'RESTORED_TO_PENDING_SETTLEMENT'
        AND NOT EXISTS (SELECT 1 FROM "transaction_hold_decision" d
                         WHERE d."transaction_id" = c."transaction_id"));
+$$ LANGUAGE sql STABLE;
+
+-- The payer's own ACTIVE hold for exactly the transaction's gross and currency.
+CREATE OR REPLACE FUNCTION transaction_own_hold_for_terms(subject TEXT)
+RETURNS BOOLEAN AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM "transaction" t, transaction_holds(t."id", t."organization_id") h
+     WHERE t."id" = subject
+       AND h."status" = 'ACTIVE'
+       AND h."amount_minor" = t."gross_amount_minor"
+       AND h."currency" = t."currency");
+$$ LANGUAGE sql STABLE;
+
+-- The one interpretation of payment (D-123). Named by exclusion, as the evidence's is. RESTORED is
+-- not barred: no decision stands behind it, the list's migration proved it.
+CREATE OR REPLACE FUNCTION transaction_settlement_barred(subject TEXT)
+RETURNS BOOLEAN AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM "transaction_hold_reconciliation" c
+     WHERE c."transaction_id" = subject
+       AND c."outcome" <> 'RESTORED_TO_PENDING_SETTLEMENT'
+       AND (transaction_hold_decision_unresolved(subject)
+            OR NOT transaction_own_hold_for_terms(subject)));
 $$ LANGUAGE sql STABLE;
 
 -- `column_set`: the caller's `settlement_authorised_at IS NOT NULL`, of the row as it holds it.
@@ -113,15 +138,14 @@ RETURNS BOOLEAN AS $$
      WHERE t."id" = subject
        AND t."status" = 'HELD'
        AND NOT transaction_hold_decision_unresolved(t."id")
-       AND EXISTS (SELECT 1 FROM transaction_holds(t."id", t."organization_id") h
-                    WHERE h."status" = 'ACTIVE'
-                      AND h."amount_minor" = t."gross_amount_minor"
-                      AND h."currency" = t."currency"));
+       AND transaction_own_hold_for_terms(t."id"));
 $$ LANGUAGE sql STABLE;
 
 -- The triggers run as the writer, and PUBLIC has no EXECUTE on what the migrator creates.
--- infrastructure/docker/postgres/lib/runtime-function-grants.txt names the same three.
+-- infrastructure/docker/postgres/lib/runtime-function-grants.txt names the same five.
 GRANT EXECUTE ON FUNCTION transaction_hold_decision_unresolved(TEXT) TO rasta_economic;
+GRANT EXECUTE ON FUNCTION transaction_own_hold_for_terms(TEXT) TO rasta_economic;
+GRANT EXECUTE ON FUNCTION transaction_settlement_barred(TEXT) TO rasta_economic;
 GRANT EXECUTE ON FUNCTION transaction_settlement_authorised(TEXT, BOOLEAN) TO rasta_economic;
 GRANT EXECUTE ON FUNCTION transaction_held_proven(TEXT) TO rasta_economic;
 
@@ -130,6 +154,19 @@ CREATE OR REPLACE FUNCTION enforce_transaction_settlement_authority() RETURNS TR
 BEGIN
   IF transaction_hold_decision_unresolved(OLD."id") THEN
     RAISE EXCEPTION 'A transaction standing on an unresolved hold decision settles only once an operator has decided it'
+      USING ERRCODE = 'check_violation',
+            CONSTRAINT = 'trg_transaction_settlement_authority';
+  END IF;
+  -- settle() has by now released the hold it pays from (the release asked this with it ACTIVE),
+  -- by the journal of the settlement it wrote. No other RELEASED hold speaks for this one.
+  IF transaction_settlement_barred(OLD."id")
+     AND NOT EXISTS (
+       SELECT 1 FROM transaction_holds(OLD."id", OLD."organization_id") h
+         JOIN "settlement" s ON s."transaction_id" = OLD."id" AND s."journal_id" = h."resolved_journal_id"
+        WHERE h."status" = 'RELEASED'
+          AND h."amount_minor" = OLD."gross_amount_minor"
+          AND h."currency" = OLD."currency") THEN
+    RAISE EXCEPTION 'A decision on a hold record authorises no payment: this transaction settles only from its own hold'
       USING ERRCODE = 'check_violation',
             CONSTRAINT = 'trg_transaction_settlement_authority';
   END IF;
@@ -150,6 +187,7 @@ BEGIN
      WHERE t."id" = OLD."reference"
        AND h."id" = OLD."id"
        AND transaction_settlement_authorised(t."id", t."settlement_authorised_at" IS NOT NULL)
+       AND NOT transaction_settlement_barred(t."id")
   ) THEN
     RAISE EXCEPTION 'Escrowed funds are released to the payee only once settlement is authorised'
       USING ERRCODE = 'check_violation',
@@ -165,7 +203,9 @@ BEGIN
   IF OLD."status" <> 'DISPUTED' OR NEW."status" NOT IN ('PENDING_SETTLEMENT', 'HELD') THEN
     RETURN NEW;
   END IF;
-  IF transaction_settlement_authorised(OLD."id", OLD."settlement_authorised_at" IS NOT NULL) THEN
+  IF transaction_settlement_barred(OLD."id") THEN
+    supported := 'HELD';
+  ELSIF transaction_settlement_authorised(OLD."id", OLD."settlement_authorised_at" IS NOT NULL) THEN
     supported := 'PENDING_SETTLEMENT';
   ELSIF EXISTS (SELECT 1 FROM transaction_holds(OLD."id", OLD."organization_id") h
                  WHERE h."status" = 'ACTIVE') THEN
@@ -190,7 +230,7 @@ DECLARE
   outcome TEXT;
   own_hold BOOLEAN;
 BEGIN
-  SELECT t."id", t."status"::text AS status, t."organization_id", t."gross_amount_minor", t."currency"
+  SELECT t."id", t."status"::text AS status, t."organization_id"
     INTO subject
     FROM "transaction" t
    WHERE t."id" = p_transaction_id
@@ -213,11 +253,7 @@ BEGIN
           OR (outcome IN ('HELD_UNPROVEN', 'RETURNED_TO_HELD_UNPROVEN')
               AND subject.status NOT IN ('SETTLED', 'PARTIALLY_REVERSED', 'REVERSED',
                                          'REFUNDED', 'CANCELLED', 'FAILED')))
-     AND NOT EXISTS (
-       SELECT 1 FROM transaction_holds(subject."id", subject."organization_id") h
-        WHERE h."status" = 'ACTIVE'
-          AND h."amount_minor" = subject."gross_amount_minor"
-          AND h."currency" = subject."currency") THEN
+     AND NOT transaction_own_hold_for_terms(subject."id") THEN
     RAISE EXCEPTION 'transaction %: HELD is confirmed only by its own active hold for its amount and currency; VOIDED says nothing is held', subject."id"
       USING ERRCODE = 'check_violation';
   END IF;
@@ -235,12 +271,7 @@ BEGIN
   INSERT INTO "transaction_hold_decision" ("transaction_id", "decision", "reason", "decided_by")
   VALUES (subject."id", p_decision, btrim(p_reason), session_user);
 
-  IF p_decision = 'VOIDED' AND subject.status = 'HELD' THEN
-    UPDATE "transaction"
-       SET "status" = 'PENDING_SETTLEMENT', "updated_at" = CURRENT_TIMESTAMP
-     WHERE "id" = subject."id";
-    RETURN 'PENDING_SETTLEMENT';
-  END IF;
+  -- The evidence only: no decision moves the row or authorises anything (D-123).
   RETURN subject.status;
 END; $$ LANGUAGE plpgsql;
 

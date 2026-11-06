@@ -984,10 +984,10 @@ describe('order saga activities (real database)', () => {
     });
 
     // #762 r3, F2: the reviewer's probe. Every term equal, the status HELD, and nothing in
-    // escrow: unresolved history, or an economic-service that does not prove it.
+    // escrow: unresolved history. Only an answer stops the saga (a missing one: below).
     describe.each([
       ['economic-service says it is not proven', false],
-      ['economic-service says nothing', undefined],
+      ['economic-service answers a word for yes', 'true'],
     ])('HELD, and %s', (_case, heldProven) => {
       async function nothingAdopted(orderId: string) {
         const order = await runUnscoped('the suite reads the order', () =>
@@ -1028,6 +1028,46 @@ describe('order saga activities (real database)', () => {
           nonRetryable: true,
         });
         await nothingAdopted(orderId);
+      });
+    });
+
+    // #824 r1, F3: the hold exists, and an older economic-service does not speak of proof.
+    // Retried (never `nonRetryable`), nothing adopted, and carried on once it does.
+    describe('HELD, from an economic-service too old to say whether it is proven', () => {
+      const WAITS = { type: 'ECONOMIC_HELD_PROOF_UNAVAILABLE', nonRetryable: false };
+      const pending = async (orderId: string) =>
+        expect(
+          await runUnscoped('the suite reads the order', () =>
+            prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+          ),
+        ).toMatchObject({ status: 'PENDING', economicTransactionId: null });
+
+      it('findObligation waits, and answers once economic-service is upgraded', async () => {
+        const { orderId } = await placeOrder();
+        const own = obligation(orderId);
+        const { heldProven: _proof, ...older } = own;
+        const acts = activitiesWith(economicHolding([older]).economic);
+        await expect(acts.findObligation(orderId)).rejects.toMatchObject(WAITS);
+        await pending(orderId);
+
+        const upgraded = activitiesWith(economicHolding([own]).economic);
+        await expect(upgraded.findObligation(orderId)).resolves.toEqual({
+          transactionId: own.id,
+        });
+      });
+
+      it('createObligation waits after the hold exists: retried, and nothing adopted', async () => {
+        const { orderId } = await placeOrder();
+        const { economic } = economicHolding([]);
+        const { heldProven: _proof, ...older } = obligation(orderId, { id: 'TXN_OLD' });
+        Object.assign(economic, {
+          createObligation: async () => ({ id: 'TXN_OLD', status: 'HELD' }),
+          readObligation: async () => older,
+        });
+        await expect(activitiesWith(economic).createObligation(orderId)).rejects.toMatchObject(
+          WAITS,
+        );
+        await pending(orderId);
       });
     });
 

@@ -95,8 +95,11 @@ ADR-032 نیمه اقتصادی این مرز را از پیش تصمیم گرف
 > **`HELD` به‌تنهایی اثبات نیست** (FU-138؛ بازبینی #762 دور ۳، F2). تراکنشی می‌تواند روی تصمیمی برآمده از Hold سازمانی دیگر
 > در `HELD` ایستاده باشد، بی پولی در Escrow. پس `fundsOf` فقط وقتی `HELD` می‌گوید که economic-service همان را با
 > `heldProven: true` اثبات کند: Hold فعال خود پرداخت‌کننده با همان مبلغ و ارز، و بی تصمیم حل‌نشده. نبودِ فیلد هم یعنی
-> اثبات‌نشده، پس ترتیب استقرار این‌جا الزامی است: economic پیش از marketplace. اپراتور با
-> [`transaction-hold-decision`](../runbooks/transaction-hold-decision.md) تصمیم می‌گیرد.
+> اثبات‌نشده، پس ترتیب استقرار اجبار می‌شود: تا `GET /v1/transactions/capabilities` بله نگوید هیچ Saga سفارش تازه‌ای آغاز
+> نمی‌شود و شروعش دوباره تلاش می‌شود، و Sagaیی که پس از ساخت Hold به نسخهٔ قدیمی برخورد منتظر می‌ماند و نمی‌ایستد
+> (`ECONOMIC_HELD_PROOF_UNAVAILABLE`). اپراتور با
+> [`transaction-hold-decision`](../runbooks/transaction-hold-decision.md) تصمیم می‌گیرد؛ تصمیم فقط دربارهٔ مدرک است و
+> مجوز پرداخت نمی‌دهد (D-123).
 
 ### ۳. توکن SERVICE با `org_id` امضاشده
 

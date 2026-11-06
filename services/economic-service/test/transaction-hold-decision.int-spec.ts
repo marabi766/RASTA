@@ -1,10 +1,13 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { ulid } from 'ulid';
-import { runUnscoped } from '@rasta/nest-common';
+import { createSystemContext, runUnscoped, runWithContext } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
-import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
+import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id, ownerDatabaseUrl } from './helpers';
+import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
+import { WalletRepository } from '../src/wallet/wallet.repository';
+import { WalletService } from '../src/wallet/wallet.service';
 
 /**
  * A decision read from a hold not its own proves nothing until a person has decided it
@@ -26,6 +29,7 @@ const UNRESOLVED = [
 ] as const;
 const RELEASE_REFUSED = /trg_wallet_hold_release_settlement_authority|released to the payee only/;
 const SETTLE_REFUSED = /settles only once an operator has decided it/;
+const PAYMENT_REFUSED = /authorises no payment/;
 
 describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real database)', () => {
   let harness: ApiHarness;
@@ -115,16 +119,34 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
   }
 
   /** A hold written by hand: no service route places one on an existing transaction. */
-  const handHold = (transactionId: string, amount = AMOUNT) =>
+  const handHold = (transactionId: string, amount = AMOUNT, currency = 'IRR') =>
     owner.$executeRawUnsafe(
       `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
                                 reference_type, placed_at, placed_by)
-       VALUES ($1, $2, $3, $4, 'IRR', $5, 'TRANSACTION', now(), 'USR-THD')`,
+       VALUES ($1, $2, $3, $4, $6, $5, 'TRANSACTION', now(), 'USR-THD')`,
       `HLD_${ulid()}`,
       payer,
       walletId,
       amount,
       transactionId,
+      currency,
+    );
+
+  /** The service's own hold placement, journal and escrow included: what a fresh hold is. */
+  const fundedHold = (transactionId: string) =>
+    runWithContext(createSystemContext({ correlationId: id('thd'), organizationId: payer }), () =>
+      (harness.prisma.client as unknown as PrismaClient).$transaction(async (tx) => {
+        const db = tx as unknown as ExtendedPrismaClient;
+        const [wallet] = await harness.app.get(WalletRepository).lock(db, [walletId]);
+        await harness.app.get(WalletService).placeHold(db, {
+          wallet: wallet!,
+          amountMinor: AMOUNT,
+          reference: transactionId,
+          referenceType: 'TRANSACTION',
+          transactionId,
+          placedBy: 'USR-THD',
+        });
+      }),
     );
 
   const setStatus = (transactionId: string, status: string) =>
@@ -156,6 +178,16 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       ),
     );
     return row!.authorised;
+  };
+
+  const barred = async (transactionId: string) => {
+    const [row] = await asRuntime((client) =>
+      client.$queryRawUnsafe<{ barred: boolean }[]>(
+        'SELECT transaction_settlement_barred($1) AS barred',
+        transactionId,
+      ),
+    );
+    return row!.barred;
   };
 
   const detail = async (transactionId: string, authorization = asPayer()) =>
@@ -225,6 +257,23 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         transactionId,
       ),
     );
+
+  const authorise = (transactionId: string) =>
+    request(http)
+      .post(`/v1/transactions/${transactionId}/authorise-settlement`)
+      .set('authorization', asPayer())
+      .set('idempotency-key', id('thd-authorise'))
+      .expect(200);
+
+  /** Refused by the service and, behind it, by the database, with a balance that could pay it. */
+  const expectPaysNothing = async (transactionId: string) => {
+    const before = await money(transactionId);
+    expect((await settle(transactionId)).status).toBe(409);
+    await expect(settledAsRuntime(transactionId)).rejects.toThrow(
+      /authorises no payment|settles only once an operator/,
+    );
+    expect(await money(transactionId)).toEqual(before);
+  };
 
   beforeAll(async () => {
     harness = await startApi();
@@ -296,8 +345,10 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         const transactionId = await escrowed();
         await listed(transactionId, outcome);
         expect(await provenEverywhere(transactionId)).toBe(false);
+        expect(await barred(transactionId)).toBe(true);
         await decide(transactionId, 'CONFIRMED');
         expect(await provenEverywhere(transactionId)).toBe(true);
+        expect(await barred(transactionId)).toBe(false);
       },
     );
 
@@ -351,6 +402,19 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         .expect(404);
       expect(await listedRow(transactionId, asStranger, '&includeIncoming=true')).toBeUndefined();
     });
+  });
+
+  // #824 r1, F3: what the order saga asks before any order's work.
+  it('says it proves HELD, to marketplace-service and no other service', async () => {
+    // Of no organization: the saga starter's sweep has none to name.
+    const asked = async (caller: string) =>
+      request(http)
+        .get('/v1/transactions/capabilities')
+        .set('x-internal-token', await internalToken(caller));
+    const answer = await asked('marketplace-service');
+    expect(answer.status).toBe(200);
+    expect(answer.body).toEqual({ heldProven: true });
+    expect((await asked('contract-service')).status).toBe(403);
   });
 
   describe('authorization predicates, with a later own hold', () => {
@@ -457,8 +521,15 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       await expect(settledAsRuntime(transactionId)).rejects.toThrow(SETTLE_REFUSED);
       expect((await money(transactionId)).settlements).toBe(0);
 
+      // D-123: a decision is the evidence's. It opens no spendable balance.
       await decide(transactionId, 'CONFIRMED');
-      await settle(transactionId).expect(201);
+      expect((await settle(transactionId)).status).toBe(409);
+      await expect(settledAsRuntime(transactionId)).rejects.toThrow(PAYMENT_REFUSED);
+      expect(await money(transactionId)).toEqual({
+        status: 'PENDING_SETTLEMENT',
+        holds: [],
+        settlements: 0,
+      });
     });
 
     it('a refund stays open while it is unresolved: the payer’s own hold goes back to the payer', async () => {
@@ -499,7 +570,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       expect((await money(voided)).holds).toEqual(['ACTIVE']);
     });
 
-    it('VOIDED moves a HELD row with nothing held to PENDING_SETTLEMENT, moves no money, and says who and why', async () => {
+    it('VOIDED disposes of the evidence only: the row stays HELD, unproven, and nothing pays it (D-123)', async () => {
       const transactionId = await bare('HELD');
       await listed(transactionId, 'HELD_UNPROVEN');
       const journals = () =>
@@ -511,11 +582,8 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
 
       const [answer] = await decide(transactionId, 'VOIDED', '  nothing backs this row  ');
 
-      expect(answer!.status).toBe('PENDING_SETTLEMENT');
-      expect(await detail(transactionId)).toMatchObject({
-        status: 'PENDING_SETTLEMENT',
-        heldProven: false,
-      });
+      expect(answer!.status).toBe('HELD');
+      expect(await detail(transactionId)).toMatchObject({ status: 'HELD', heldProven: false });
       expect(await journals()).toEqual(before);
       const [row] = await owner.$queryRawUnsafe<
         { decision: string; reason: string; decided_by: string; session: string }[]
@@ -526,8 +594,140 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       );
       expect(row).toMatchObject({ decision: 'VOIDED', reason: 'nothing backs this row' });
       expect(row!.decided_by).toBe(row!.session);
-      // An ordinary obligation from here: nothing unproven is left to refuse it.
+
+      // Not by the status either: authorised onward, it still debits nobody's spendable balance.
+      await authorise(transactionId);
+      expect(await detail(transactionId)).toMatchObject({ status: 'PENDING_SETTLEMENT' });
+      await expectPaysNothing(transactionId);
+    });
+
+    // CONFIRMED of the two HELD outcomes needs the hold itself (the refusals below).
+    it.each<[string, string]>([
+      ...UNRESOLVED.map((outcome): [string, string] => [outcome, 'VOIDED']),
+      ['AUTHORISED_UNRECORDED_UNPROVEN', 'CONFIRMED'],
+      ['DISPUTE_RESOLVED_UNPROVEN', 'CONFIRMED'],
+    ])(
+      'already PENDING_SETTLEMENT, %s, %s, nothing held: nothing pays it',
+      async (outcome, decision) => {
+        const transactionId = await bare('PENDING_SETTLEMENT');
+        await listed(transactionId, outcome);
+        await recordedAuthorised(transactionId);
+        await decide(transactionId, decision);
+        await expectPaysNothing(transactionId);
+      },
+    );
+
+    it.each(['VOIDED', 'undecided'])(
+      'DISPUTED with no own hold, %s, resolves to HELD: not settlement-ready, and nothing pays it',
+      async (decision) => {
+        const transactionId = await bare('HELD');
+        await listed(transactionId, 'DISPUTE_RESOLVED_UNPROVEN');
+        await request(http)
+          .post(`/v1/transactions/${transactionId}/dispute`)
+          .set('authorization', asPayer())
+          .set('idempotency-key', id('thd-void-dispute'))
+          .send({ reason: 'The invoice names another supplier.' })
+          .expect(200);
+        if (decision === 'VOIDED') await decide(transactionId, decision);
+        await expect(
+          asRuntime((client) =>
+            client.$executeRawUnsafe(
+              `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = $1`,
+              transactionId,
+            ),
+          ),
+        ).rejects.toThrow(
+          /trg_transaction_dispute_resolution|where its settlement authority stands/,
+        );
+        const resolved = await request(http)
+          .post(`/v1/transactions/${transactionId}/resolve-dispute`)
+          .set('authorization', `Bearer ${admin(apiTenant('THD-PLATFORM'), ['SYSTEM_ADMIN'])}`)
+          .set('idempotency-key', id('thd-void-resolve'))
+          .send({ resolution: 'The objection is unfounded.' })
+          .expect(200);
+        expect(resolved.body).toMatchObject({ status: 'HELD', heldProven: false });
+        await authorise(transactionId);
+        await expectPaysNothing(transactionId);
+      },
+    );
+
+    it('a voided row with a fresh hold of its own for its terms is proven and settles like any row', async () => {
+      const transactionId = await bare('HELD');
+      await listed(transactionId, 'HELD_UNPROVEN');
+      await decide(transactionId, 'VOIDED');
+      await expectPaysNothing(transactionId);
+
+      await fundedHold(transactionId);
+      expect(await provenEverywhere(transactionId)).toBe(true);
+      // Held is not authorised: that stays its own step.
+      await expect(releaseAsRuntime(transactionId)).rejects.toThrow(RELEASE_REFUSED);
+      await authorise(transactionId);
       await settle(transactionId).expect(201);
+      expect(await money(transactionId)).toEqual({
+        status: 'SETTLED',
+        holds: ['RELEASED'],
+        settlements: 1,
+      });
+    });
+
+    it.each([
+      ['short of the gross', (row: string) => handHold(row, AMOUNT - 1n)],
+      ['in another currency', (row: string) => handHold(row, AMOUNT, 'USD')],
+    ])('a fresh hold %s opens nothing', async (_case, hold) => {
+      const transactionId = await bare('HELD');
+      await listed(transactionId, 'HELD_UNPROVEN');
+      await decide(transactionId, 'VOIDED');
+      await hold(transactionId);
+      expect(await provenEverywhere(transactionId)).toBe(false);
+      await authorise(transactionId);
+      expect((await settle(transactionId)).status).toBe(409);
+      await expect(releaseAsRuntime(transactionId)).rejects.toThrow(RELEASE_REFUSED);
+      expect((await money(transactionId)).settlements).toBe(0);
+    });
+
+    it('no other RELEASED hold speaks for this settlement: the database still refuses', async () => {
+      const transactionId = await bare('PENDING_SETTLEMENT');
+      await listed(transactionId, 'DISPUTE_RESOLVED_UNPROVEN');
+      await decide(transactionId, 'VOIDED');
+      await owner.$executeRawUnsafe(
+        `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
+                                  reference_type, status, placed_at, placed_by, resolved_at,
+                                  resolved_by, resolved_journal_id)
+         SELECT $1, $2, $3, $4, 'IRR', $5, 'TRANSACTION', 'RELEASED', now(), 'USR-THD', now(),
+                'USR-THD', j.id
+           FROM journal j WHERE j.organization_id = $2 LIMIT 1`,
+        `HLD_${ulid()}`,
+        payer,
+        walletId,
+        AMOUNT,
+        transactionId,
+      );
+      await expect(settledAsRuntime(transactionId)).rejects.toThrow(PAYMENT_REFUSED);
+    });
+
+    it('a voided row with nothing held refunds with no money moved: the way out', async () => {
+      const transactionId = await bare('HELD');
+      await listed(transactionId, 'HELD_UNPROVEN');
+      await decide(transactionId, 'VOIDED');
+      await request(http)
+        .post(`/v1/transactions/${transactionId}/refund`)
+        .set('authorization', asPayee())
+        .set('idempotency-key', id('thd-void-refund'))
+        .send({ reason: 'Nothing backs this obligation.' })
+        .expect(200);
+      expect(await money(transactionId)).toEqual({
+        status: 'REFUNDED',
+        holds: [],
+        settlements: 0,
+      });
+    });
+
+    it('control: a row on no list, and a restored one, still pay with nothing held (ADR-032)', async () => {
+      const unlisted = await bare('PENDING_SETTLEMENT');
+      await settle(unlisted).expect(201);
+      const restored = await bare('PENDING_SETTLEMENT');
+      await listed(restored, 'RESTORED_TO_PENDING_SETTLEMENT');
+      await settle(restored).expect(201);
     });
 
     it.each([

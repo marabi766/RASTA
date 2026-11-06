@@ -1,9 +1,9 @@
 # Runbook: تصمیم دربارهٔ تراکنشی که روی Hold دیگران ایستاده است (FU-138)
 
-**شدت:** 🟠 هشدار — پولی گم نشده، ولی تا تصمیم گرفته نشود این تراکنش تسویه نمی‌شود و سفارشش در `FUNDS_HELD` ثبت نمی‌شود.
+**شدت:** 🟠 هشدار — پولی گم نشده، ولی این تراکنش بی تصمیم و بی Hold خودش تسویه نمی‌شود و سفارشش در `FUNDS_HELD` ثبت نمی‌شود.
 **سیگنال محرک:** WARNING ـِ Migration ‏`20261105120000_settlement_creation_proof` («stand on a decision read from a hold not their own»)؛
 Saga سفارش با `OBLIGATION_NOT_HELD`، وضعیت `HELD` و `funds UNPROVEN`؛ تسویهٔ ردشده با `409 INVALID_STATE_TRANSITION` و متن
-«until an operator has decided its hold record»؛ Saga با `SETTLEMENT_EXHAUSTED` روی چنین تراکنشی.
+«settles only from its own hold»؛ Saga با `SETTLEMENT_EXHAUSTED` روی چنین تراکنشی.
 **دامنه:** ردیف‌های `transaction_hold_reconciliation` با هر نتیجه‌ای جز `RESTORED_TO_PENDING_SETTLEMENT` که هنوز تصمیمی ندارند.
 **ابزار:** `decide_transaction_hold(id, decision, reason)` فقط با نقش migrator؛ نقش runtime سرویس نه EXECUTE دارد و نه می‌تواند ردیف تصمیم بنویسد.
 
@@ -17,7 +17,9 @@ Saga سفارش با `OBLIGATION_NOT_HELD`، وضعیت `HELD` و `funds UNPROVE
 
 - برای API اثبات Hold نیست: `heldProven` برابر `false` است و Saga سفارش آن را نمی‌پذیرد و `ORDER_FUNDS_HELD` منتشر نمی‌کند.
 - هیچ مجوز تسویه‌ای ندارد، حتی با `settlement_authorised_at` پر: نه سرویس تسویه می‌کند و نه پایگاه داده آزادسازی Hold یا رفتن به `SETTLED` را می‌پذیرد.
-- **بازپرداخت باز می‌ماند:** بازپرداخت فقط Hold خود پرداخت‌کننده را به خودش برمی‌گرداند، پس معمولاً بی‌تصمیم هم راه خروج هست. تعهد صورت‌وضعیت (`STATEMENT`) بازپرداخت نمی‌پذیرد.
+- **بازپرداخت باز می‌ماند:** بازپرداخت فقط Hold خود پرداخت‌کننده را به خودش برمی‌گرداند و بی Hold هیچ پولی جابه‌جا نمی‌کند، پس بی‌تصمیم هم راه خروج هست. تعهد صورت‌وضعیت (`STATEMENT`) بازپرداخت نمی‌پذیرد.
+
+**تصمیم فقط دربارهٔ مدرک است و هرگز مجوز پرداخت نیست (D-123).** ردیف فهرست‌شده، جز `RESTORED_TO_PENDING_SETTLEMENT`، فقط از Hold فعال خودش با همان مبلغ و ارز تسویه می‌شود و پس از تصمیم (`transaction_settlement_barred`). `CONFIRMED` یا `VOIDED` آن را به `PENDING_SETTLEMENT` نمی‌برد و هیچ برداشتی از موجودی قابل‌مصرف ممکن نمی‌کند؛ همین برای ردیفی که از پیش `PENDING_SETTLEMENT` است و اعتراضی که بی Hold خود رسیدگی شود (به `HELD` برمی‌گردد) هم برقرار است.
 
 ## ۱. فهرست
 
@@ -50,14 +52,17 @@ SELECT h.id, h.organization_id, h.wallet_id, h.status, h.amount_minor, h.currenc
 
 | وضعیت و نتیجه                                                                                     | چه چیزی را بررسی کن             | تصمیم                                                               | اثر                                                                                                                    |
 | ------------------------------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `HELD`، بی Hold فعال خود                                                                          | پولی در Escrow نیست             | `VOIDED`                                                            | به `PENDING_SETTLEMENT` می‌رود، بی Journal و بی جابه‌جایی پول                                                          |
-| `HELD_UNPROVEN` یا `RETURNED_TO_HELD_UNPROVEN` که با مجوز یا اعتراض از `HELD` رفته و هنوز باز است | همان بررسی بالا                 | `CONFIRMED` فقط با Hold فعال خود با همان مبلغ و ارز؛ وگرنه `VOIDED` | وضعیت عوض نمی‌شود؛ تسویه دوباره باز می‌شود                                                                             |
+| `HELD`، بی Hold فعال خود                                                                          | پولی در Escrow نیست             | `VOIDED`                                                            | در `HELD` می‌ماند و تسویه نمی‌شود، بی Journal و بی جابه‌جایی پول؛ راه‌های بعدی در پایین                                |
+| `HELD_UNPROVEN` یا `RETURNED_TO_HELD_UNPROVEN` که با مجوز یا اعتراض از `HELD` رفته و هنوز باز است | همان بررسی بالا                 | `CONFIRMED` فقط با Hold فعال خود با همان مبلغ و ارز؛ وگرنه `VOIDED` | وضعیت عوض نمی‌شود؛ تسویه فقط با آن Hold باز می‌شود                                                                     |
 | `HELD`، Hold فعال خود با همان مبلغ و ارز                                                          | منشأ آن Hold را اثبات کن        | `CONFIRMED`                                                         | `heldProven` برابر `true` می‌شود                                                                                       |
 | `HELD`، Hold فعال خود با مبلغ دیگر                                                                | —                               | هر دو رد می‌شوند                                                    | بازپرداخت از راه سرویس، سپس `CONFIRMED` برای بستن پرونده. با ارز دیگر، بازپرداخت هم رد می‌شود: به مالک محصول ارجاع بده |
-| `AUTHORISED_UNRECORDED_UNPROVEN`                                                                  | مجوز قدیمی واقعاً داده شده بود؟ | `CONFIRMED` یا `VOIDED`                                             | `CONFIRMED`: مجوز ثبت‌شده دوباره می‌شمارد. `VOIDED`: برای همیشه نمی‌شمارد و با Hold فعال خود، بازپرداخت راه خروج است   |
-| `DISPUTE_RESOLVED_UNPROVEN`                                                                       | تصمیم پیشین درست بود؟           | `CONFIRMED` یا `VOIDED`                                             | گذشته را برنمی‌گرداند؛ ولی تسویهٔ ردیف باز را دوباره باز می‌کند                                                        |
+| `AUTHORISED_UNRECORDED_UNPROVEN`                                                                  | مجوز قدیمی واقعاً داده شده بود؟ | `CONFIRMED` یا `VOIDED`                                             | `CONFIRMED`: مجوز ثبت‌شده با Hold فعال خود دوباره می‌شمارد. `VOIDED`: برای همیشه نمی‌شمارد و بازپرداخت راه خروج است    |
+| `DISPUTE_RESOLVED_UNPROVEN`                                                                       | تصمیم پیشین درست بود؟           | `CONFIRMED` یا `VOIDED`                                             | گذشته را برنمی‌گرداند؛ ردیف باز فقط با Hold فعال خود تسویه می‌شود                                                      |
 
-**هشدار:** پس از ثبت هر تصمیم، ردیف مانند هر ردیف دیگری رفتار می‌کند، همان‌طور که ردیف `RESTORED_TO_PENDING_SETTLEMENT`: بی Hold خود، تسویه از موجودی قابل‌مصرف پرداخت‌کننده برداشت می‌کند (ADR-032). پس ردیفی را که نباید تسویه شود **پیش از** تصمیم بازپرداخت کن، نه پس از آن: میان این دو، Saga یا شخصی می‌تواند تسویه کند.
+**راه‌های پس از تصمیم، فقط این دو:**
+
+1. **Hold تازه:** Hold فعال خود پرداخت‌کننده با همان مبلغ و ارز. آن‌گاه `heldProven` برابر `true` است و ردیف با مجوز عادی (`authorise-settlement`) مانند هر ردیف دیگری تسویه می‌شود. ردیف `PENDING_SETTLEMENT` بی مجوز این لبه را ندارد: از راه اعتراض و رسیدگی به `HELD` برمی‌گردد. **هیچ مسیر سرویسی Hold روی تراکنش موجود نمی‌گذارد:** سرویس Hold را فقط هنگام ساخت تراکنش می‌گذارد، پس برای پرداخت معمولاً تراکنش تازه‌ای از مسیر عادی لازم است. نوشتن دستی Hold تصمیم مالک محصول است و **Hold بی Journal تأمین‌نشده است:** تسویه‌اش از Escrow تعهدهای دیگر همان کیف پول برمی‌دارد، پس هرگز بی Journal آن را ننویس.
+2. **بازپرداخت از راه سرویس (`refund`):** ردیف بی Hold را بی جابه‌جایی پول به `REFUNDED` می‌برد. لبهٔ `CANCEL` فقط از `CREATED` است. تعهد `STATEMENT` هیچ‌کدام را نمی‌پذیرد: به مالک محصول ارجاع بده.
 
 ```sql
 SELECT decide_transaction_hold(:'transaction_id', 'VOIDED', 'TICKET-123: شخص تصمیم‌گیرنده و دلیل');
@@ -84,5 +89,5 @@ Hold سازمانی دیگر که نام این تراکنش را می‌برد 
 
 ## ۵. استقرار و بازگشت
 
-- **ترتیب:** economic-service پیش از marketplace-service (ADR-040). marketplace تازه روی economic قدیمی فیلد `heldProven` را نمی‌بیند و هر `HELD` را اثبات‌نشده می‌خواند، پس Saga سفارش‌های تازه با `OBLIGATION_NOT_HELD` می‌ایستد.
-- **بازگشت:** به ترتیب marketplace-service، سپس economic-service، سپس `down.sql`. economic قدیمی زیر marketplace تازه هر Hold واقعی را هم اثبات‌نشده می‌خواند. تا وقتی تصمیمی ثبت شده باشد `down.sql` رد می‌کند، چون تنها سابقهٔ آن تصمیم است.
+- **ترتیب:** economic-service پیش از marketplace-service (ADR-040). اگر رعایت نشود سفارشی از دست نمی‌رود: marketplace تازه تا `GET /v1/transactions/capabilities` بله نگوید هیچ Saga تازه‌ای آغاز نمی‌کند (`rasta_marketplace_saga_start_deliveries_total` با `economic_not_ready`، و صف شروع Saga بالا می‌رود)، و Sagaی در جریان که `HELD` بی فیلد `heldProven` می‌بیند با `ECONOMIC_HELD_PROOF_UNAVAILABLE` منتظر می‌ماند. هر دو پس از ارتقای economic خودکار ادامه می‌دهند، و سفارش `CANCELLING` بی Saga هم تا آن زمان منتظر می‌ماند. هشدار صف شروع Saga (`rasta-marketplace-alerts`) همین حالت را هم نشان می‌دهد. `heldProven: false` پاسخ است و همچنان Saga را متوقف می‌کند.
+- **بازگشت:** به ترتیب marketplace-service، سپس economic-service، سپس `down.sql`. تا وقتی تصمیمی ثبت شده باشد `down.sql` رد می‌کند، چون تنها سابقهٔ آن تصمیم است.
