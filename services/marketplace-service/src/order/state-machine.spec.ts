@@ -4,6 +4,7 @@ import {
   TERMINAL_STATUSES,
   assertTransition,
   canReachSettlement,
+  DISPUTE_ORIGINS,
   canTransition,
   isTerminal,
 } from './state-machine';
@@ -93,8 +94,17 @@ describe('a dispute stops settlement', () => {
     expect(canReachSettlement('DISPUTED')).toBe(false);
   });
 
-  it('leaves DISPUTED only through an operator decision', () => {
-    expect(ORDER_TRANSITIONS.DISPUTED).toEqual(['RECEIPT_CONFIRMED', 'CANCELLING']);
+  it('leaves DISPUTED only through an operator decision: back where it was raised, or cancelled (D-083)', () => {
+    // SETTLE resumes the order where its dispute found it; REFUND cancels it.
+    expect([...ORDER_TRANSITIONS.DISPUTED].sort()).toEqual(
+      [...DISPUTE_ORIGINS, 'CANCELLING'].sort(),
+    );
+    expect([...DISPUTE_ORIGINS].sort()).toEqual([
+      'AWAITING_RECEIPT_CONFIRMATION',
+      'CONFIRMED',
+      'FUNDS_HELD',
+      'RECEIPT_CONFIRMED',
+    ]);
   });
 
   it('is reachable from every state where money is held but not yet moved', () => {

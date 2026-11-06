@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
+import { publishedIsoDateTimeZone } from '@rasta/contracts';
 
 /**
  * Converts the Zod schemas a service validates with into JSON Schema, so its
@@ -95,14 +96,26 @@ export function toJsonSchema(schema: z.ZodType): JsonSchema {
       ? convert(defOf(schema))
       : { type: 'boolean', default: queryBooleanDefaultValue };
 
-  return description ? { ...base, description } : base;
+  if (!description) return base;
+  // A schema's own words come first; a bound its format carries (FU-035) is kept after them.
+  return {
+    ...base,
+    description: base.description ? `${description} ${String(base.description)}` : description,
+  };
 }
 
-/** The bounds a `codePointLength` check on `def` publishes, if any. */
-function codePointBounds(def: any): { minLength: number; maxLength: number } | undefined {
-  let bounds: { minLength: number; maxLength: number } | undefined;
-  for (const { check } of checkDefs(def)) bounds = CODE_POINT_BOUNDS.get(check) ?? bounds;
-  return bounds;
+/** A deliberate omission, not a raw-input constraint. Kept through descriptions/wrappers. */
+const TRANSFORMED_CONSTRAINTS =
+  'Constraints after a value-changing step are omitted; validation applies them to the transformed value.';
+
+function transformedConstraints(input: JsonSchema = {}): JsonSchema {
+  const description = String(input.description ?? '');
+  return {
+    ...input,
+    description: description.includes(TRANSFORMED_CONSTRAINTS)
+      ? description
+      : [description, TRANSFORMED_CONSTRAINTS].filter(Boolean).join(' '),
+  };
 }
 
 function convert(def: any): JsonSchema {
@@ -110,12 +123,8 @@ function convert(def: any): JsonSchema {
     case 'object':
       return objectSchema(def);
 
-    case 'string': {
-      // A refinement is a check on the schema it refines, so a `codePointLength`
-      // bound is found among the string's own checks, and published over them.
-      const bounds = codePointBounds(def);
-      return bounds ? { ...stringSchema(def), ...bounds } : stringSchema(def);
-    }
+    case 'string':
+      return stringSchema(def);
 
     case 'number':
       return numberSchema(def);
@@ -137,13 +146,14 @@ function convert(def: any): JsonSchema {
       const array: JsonSchema = { type: 'array', items: toJsonSchema(def.element as z.ZodType) };
       let minItems: number | undefined;
       let maxItems: number | undefined;
-      for (const { def: check } of checkDefs(def)) {
+      const { checks, changed } = rawChecks(def);
+      for (const { def: check } of checks) {
         if (check.check === 'min_length') minItems = check.minimum as number;
         if (check.check === 'max_length') maxItems = check.maximum as number;
       }
       if (minItems !== undefined) array.minItems = minItems;
       if (maxItems !== undefined) array.maxItems = maxItems;
-      return array;
+      return changed ? transformedConstraints(array) : array;
     }
 
     case 'record':
@@ -161,8 +171,15 @@ function convert(def: any): JsonSchema {
     case 'optional':
       return toJsonSchema(def.innerType);
 
-    case 'nullable':
-      return { ...toJsonSchema(def.innerType), nullable: true };
+    // OpenAPI 3.0's `nullable` qualifies a `type` and means nothing without one ("nullable"
+    // cannot be used without "type", AJV). An inner schema that says nothing already admits
+    // `null`, so it is published as it is rather than as the non-schema `{"nullable":true}`.
+    case 'nullable': {
+      const inner = toJsonSchema(def.innerType);
+      return inner.type === undefined && Object.keys(inner).every((key) => key === 'description')
+        ? inner
+        : { ...inner, nullable: true };
+    }
 
     // `.prefault()` is zod 3's `.default()` (the value is parsed like any
     // input); either way the value written is the one published.
@@ -172,19 +189,117 @@ function convert(def: any): JsonSchema {
 
     // `.transform()` and `z.preprocess()` pipe a schema into or out of a
     // function. What a transform returns cannot be expressed in JSON Schema,
-    // so the schema the input is checked against is published; the cross-field
+    // so only the schema checked before the function is published; the cross-field
     // rules `.refine()` carries — "at least one of hours or kilometres",
     // "periodEnd after periodStart" — are checks, left out the same way, and
-    // stay in the endpoint description where a human will read it. A pipe
-    // between two schemas (`.pipe()`) was never described, and stays so.
+    // stay in the endpoint description where a human will read it.
     case 'pipe':
       if (defOf(def.out).type === 'transform') return toJsonSchema(def.in);
-      if (defOf(def.in).type === 'transform') return toJsonSchema(def.out);
-      return {};
+      if (defOf(def.in).type === 'transform') return transformedConstraints();
+      return pipeBetweenSchemas(def.in, def.out);
 
     default:
       return {};
   }
+}
+
+/** The keywords a later schema in a pipe narrows: the tighter bound of the two is the one that holds. */
+const LOWER_BOUNDS = ['minLength', 'minimum', 'minItems'] as const;
+const UPPER_BOUNDS = ['maxLength', 'maximum', 'maxItems'] as const;
+
+/**
+ * `.pipe()` between two schemas. A value is accepted only when it passes both, so the input
+ * schema's type and constraints are published — never `{}` (FU-078 r1 F2: under `.nullable()` that
+ * published `{"nullable":true}`, which is not a schema).
+ *
+ * The later schema's constraints are added only when the value reaching it IS the raw input: the
+ * input changes nothing on the way (no transform, no overwrite such as `.trim()`, no coercion) and
+ * the two agree on the type; the tighter bound of a pair wins. A JSON Schema validator checks the
+ * raw request text, so a bound the later schema applies to canonicalised text describes a different
+ * string: `identifierText()` NFKC-folds and strips tatweel before `z.string().max(64)`, and merging
+ * that bound published "67 characters is too long" for a value runtime accepts (FU-078 r2 F2).
+ * Anything the converter cannot prove value-preserving is treated as changing it (fail closed):
+ * the input schema alone is published, and a rule on the changed value belongs in a description.
+ *
+ * When the input says nothing (`z.unknown().pipe(…)`) and changes nothing, the later schema is
+ * what is published. When the two disagree on the type, the input schema alone is published: it
+ * is what the client sends.
+ */
+function pipeBetweenSchemas(inSchema: z.ZodType, outSchema: z.ZodType): JsonSchema {
+  const input = toJsonSchema(inSchema);
+  if (changesValue(inSchema)) return transformedConstraints(input);
+  const output = toJsonSchema(outSchema);
+  // A description on the input must not hide an omission made inside the output.
+  const keepMarker = (result: JsonSchema): JsonSchema =>
+    String(output.description ?? '').includes(TRANSFORMED_CONSTRAINTS)
+      ? transformedConstraints(result)
+      : result;
+  if (Object.keys(input).every((key) => key === 'description'))
+    return keepMarker({ ...output, ...input });
+  if (input.type === undefined || input.type !== output.type) return keepMarker(input);
+  const merged: JsonSchema = { ...output, ...input };
+  for (const key of LOWER_BOUNDS) {
+    if (typeof input[key] === 'number' && typeof output[key] === 'number') {
+      merged[key] = Math.max(input[key] as number, output[key] as number);
+    }
+  }
+  for (const key of UPPER_BOUNDS) {
+    if (typeof input[key] === 'number' && typeof output[key] === 'number') {
+      merged[key] = Math.min(input[key] as number, output[key] as number);
+    }
+  }
+  return keepMarker(merged);
+}
+
+/** Types whose parse returns the raw input itself, unless a check on them overwrites it. */
+const VALUE_PRESERVING_TYPES = new Set([
+  'string',
+  'number',
+  'boolean',
+  'bigint',
+  'enum',
+  'literal',
+  'unknown',
+  'any',
+]);
+
+/**
+ * Whether parsing `schema` may hand on a value other than its raw input: a transform, an
+ * overwrite check (`.trim()`, `.toLowerCase()`, `.normalize()`), a coercion — or any type not known
+ * to preserve the value (objects strip keys, defaults substitute), which fails closed.
+ */
+// Unknown/custom checks can assign to Zod's payload.value (.check callbacks).
+// Only built-in checks, and our registered code-point refinement, are proven safe.
+const VALUE_PRESERVING_CHECKS = new Set([
+  'min_length',
+  'max_length',
+  'length_equals',
+  'string_format',
+  'greater_than',
+  'less_than',
+  'number_format',
+  'multiple_of',
+]);
+
+/** Checks before the first check not proven value-preserving, in execution order. */
+function rawChecks(def: any): { checks: ReturnType<typeof checkDefs>; changed: boolean } {
+  const checks = checkDefs(def);
+  const barrier = checks.findIndex(
+    ({ check, def: definition }) =>
+      !CODE_POINT_BOUNDS.has(check) && !VALUE_PRESERVING_CHECKS.has(definition.check as string),
+  );
+  return {
+    checks: barrier < 0 ? checks : checks.slice(0, barrier),
+    changed: barrier >= 0,
+  };
+}
+
+function changesValue(schema: z.ZodType): boolean {
+  const def = defOf(schema);
+  if (rawChecks(def).changed) return true;
+  if (def.type === 'pipe') return changesValue(def.in) || changesValue(def.out);
+  if (def.type === 'optional' || def.type === 'nullable') return changesValue(def.innerType);
+  return !VALUE_PRESERVING_TYPES.has(def.type as string) || def.coerce === true;
 }
 
 function objectSchema(def: any): JsonSchema {
@@ -217,9 +332,14 @@ const STRING_FORMATS: Record<string, string> = {
 };
 
 function stringSchema(def: any): JsonSchema {
+  // Coercion happens before every check, including the string type check.
+  if (def.coerce === true) return transformedConstraints();
   const out: JsonSchema = { type: 'string' };
 
-  for (const { def: check } of checkDefs(def)) {
+  const { checks, changed } = rawChecks(def);
+  for (const { check: instance, def: check } of checks) {
+    const bounds = CODE_POINT_BOUNDS.get(instance);
+    if (bounds) Object.assign(out, bounds);
     if (check.check === 'min_length') out.minLength = check.minimum;
     if (check.check === 'max_length') out.maxLength = check.maximum;
     if (check.check !== 'string_format') continue;
@@ -229,15 +349,24 @@ function stringSchema(def: any): JsonSchema {
     // runs rather than a re-spelling of it. Only a `.regex()` publishes its
     // pattern: a format's pattern is zod's implementation of it.
     if (check.format === 'regex') out.pattern = (check.pattern as RegExp).source;
+    // `format: date-time` admits offsets the platform's `isoDateTime()` refuses (RFC 3339 allows
+    // ±23:59; the UTC-only form takes none), so its accepted zone is published with it (FU-035).
+    const zone = publishedIsoDateTimeZone(instance);
+    if (zone) {
+      out.pattern = zone.pattern;
+      out.description = zone.description;
+    }
   }
 
-  return out;
+  return changed ? transformedConstraints(out) : out;
 }
 
 function numberSchema(def: any): JsonSchema {
+  if (def.coerce === true) return transformedConstraints();
   const out: JsonSchema = { type: 'number' };
 
-  for (const { def: check } of checkDefs(def)) {
+  const { checks, changed } = rawChecks(def);
+  for (const { def: check } of checks) {
     if (check.check === 'number_format' && String(check.format).includes('int')) {
       out.type = 'integer';
     }
@@ -245,7 +374,7 @@ function numberSchema(def: any): JsonSchema {
     if (check.check === 'less_than') out.maximum = check.value;
   }
 
-  return out;
+  return changed ? transformedConstraints(out) : out;
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -268,8 +397,10 @@ export function objectShapeOf(schema: z.ZodType): Record<string, z.ZodType> | un
     if (def.type === 'pipe') {
       const kind = (side: unknown) => (side as { _zod: { def: { type: string } } })._zod.def.type;
       if (kind(def.out) === 'transform') current = def.in as z.ZodType;
-      else if (kind(def.in) === 'transform') current = def.out as z.ZodType;
-      else return undefined;
+      // A preprocessor may replace the entire object: its fields are not raw parameters.
+      else if (kind(def.in) === 'transform') {
+        throw new Error('Cannot publish query fields after a value-changing preprocessor');
+      } else return undefined;
       continue;
     }
     return undefined;

@@ -309,7 +309,7 @@
   },
   {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
-    "line": 237,
+    "line": 239,
     "hash": "1b6e0d58da2ac563b351590150b6090fc4390aa0da3a8ff7701ed151b932f603",
     "occurrence": 0,
     "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
@@ -778,7 +778,14 @@
   },
   {
     "file": "services/contract-service/src/statement/statement.repository.ts",
-    "line": 335,
+    "line": 264,
+    "hash": "f4d8da92b556dd97ac3a2233092f1a6bce298b44a34b2811583b1871d35efb5a",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/contract-service/src/statement/statement.repository.ts",
+    "line": 347,
     "hash": "5cd42f1cbeb0db4b36fd39829879f58136067089a8d83e97b33728c44739a9a5",
     "occurrence": 0,
     "decision": "has bound organization predicate"
@@ -799,7 +806,7 @@
   },
   {
     "file": "services/document-service/src/scanning/scan.repository.ts",
-    "line": 237,
+    "line": 239,
     "hash": "f6262e06e9077efe9b5f6f51356ba7aebfd97f2b804a49cd61ce94a6cf90ac42",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
@@ -919,13 +926,13 @@
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
     "line": 411,
-    "hash": "8b459764d36e9b3f91f2d213bef61051a94e774227d70e6e4503d857acf5d659",
+    "hash": "58052b662cb00ae83ca355c5b6a5c9011c703afbaf8799dca65dfa96a6c2bf79",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler retires stale tasks across tenants under row locks when their marker and hold are absent"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 477,
+    "line": 478,
     "hash": "07cf8007f828a01ba198cc86431ab4e5d027ca688183558aa90a08b7005bc6c8",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
@@ -1080,9 +1087,9 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "daeb0670a1ea029e63f6c4b8d3d5a63c8b1f598b9bdea4b081bae73bba31e0cc",
+    "hash": "a42868e01ac1f252041c961b16859c1710d1c584871cfc1f0daeaf1a2c2afe30",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (wallet_hold by its reference), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
@@ -1482,6 +1489,20 @@
     "hash": "3779f70bec124086c7f4fb01366368e8b0899f3636100813bc67c9ce7c72a9a0",
     "occurrence": 0,
     "decision": "platform-wide: membership administration or expiry operates on a previously locked membership; user-wide projector and expiry scanner intentionally span tenants"
+  },
+  {
+    "file": "services/identity-service/src/identity/identity.repository.ts",
+    "line": 557,
+    "hash": "cf60cf5ffc5bf4d6b675e7741ef3d11c44a1d8c19b35be09ddb6609ea91f753d",
+    "occurrence": 0,
+    "decision": "platform-wide: usernames and emails are unique across the whole platform (ux_user_username_login_key, ux_user_email_login_key, FU-084); answers only whether a holder exists, before a write already authorized for its target"
+  },
+  {
+    "file": "services/identity-service/src/identity/identity.repository.ts",
+    "line": 571,
+    "hash": "1b2d33f032a295176f0064e19b1cb87568802e77931e85178daa0bf7ea8546cf",
+    "occurrence": 0,
+    "decision": "platform-wide: a username's login key is unique across the platform (ux_user_username_login_key, FU-084); returns only the holder's id, which the caller uses to filter its own tenant-scoped read"
   },
   {
     "file": "services/identity-service/src/identity/membership-expiry.scanner.spec.ts",
@@ -2066,7 +2087,7 @@
   },
   {
     "file": "services/inventory-service/src/shipment/shipment.repository.ts",
-    "line": 237,
+    "line": 239,
     "hash": "d339e7177c87984986feb0720c13214dd9a2bb0b15edb45d17d203031ec590bf",
     "occurrence": 0,
     "decision": "platform-wide: shipment is visible to its owner and consignee or buyer; bound visible SQL fragment encodes these party predicates before returning data"
@@ -2325,31 +2346,31 @@
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 45,
+    "line": 62,
     "hash": "923df21729a9cbd916343e75e90434f52e6ac06d83655a14a2221552b47dcce4",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 65,
+    "line": 82,
     "hash": "bd1fdbe4826fde84599880f0fbbdeb0c724aba407464e5066af52509a241532e",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 83,
+    "line": 100,
     "hash": "da1e65d7bec3a22e06d597e227d05819450fbff894df858758eacd0c7790ac96",
     "occurrence": 0,
     "decision": "platform-wide: buyer order placement locks supplier offers and adjusts their inventory across organizations; global offer ids come from priced and locked order lines"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 118,
-    "hash": "8e1ebb76430110c25b9e6ad323180edc8d1900c176721dcd37af282602941b98",
+    "line": 135,
+    "hash": "9444a272eb21edaddb32a8f2e1a63caf4aae24e2e737f8c2812f9deeae8b29d0",
     "occurrence": 0,
-    "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks"
+    "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks; it also reads whether the buyer's receipt is recorded on that same row, which decides where an operator's SETTLE may return the order (D-083)"
   },
   {
     "file": "services/marketplace-service/src/prisma/prisma.service.ts",
@@ -2493,8 +2514,15 @@
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 145,
-    "hash": "617c20175b27dc0da91e2f30b1dcbf667be334084ae7c159c7699d2045c2d581",
+    "line": 130,
+    "hash": "8a1e49d27272963b31ca321f3d3929e1d9982d9df17e107dd7bc091a9c7a982d",
+    "occurrence": 0,
+    "decision": "platform-wide: external codes are unique across the whole registry (ux_organization_external_code_key, FU-084); returns only the holder's id, and the caller is a write already authorized for its target"
+  },
+  {
+    "file": "services/organization-service/src/organization/organization.repository.ts",
+    "line": 166,
+    "hash": "13827a0dd05391c2ec39fd4a3192adb8aa090772e42f4e57611dce58095354f2",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },

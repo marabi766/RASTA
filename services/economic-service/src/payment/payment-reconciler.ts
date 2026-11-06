@@ -255,13 +255,18 @@ export class PaymentReconciler {
     if (!wallet) throw RastaError.internal('Wallet vanished while locking it');
     if (!(await ownership.verify(tx))) throw new LeaseLost();
 
-    const hold = await this.walletRepository.findActiveHold(tx, wallet.id, row.id);
+    const hold = await this.walletRepository.findActiveHold(tx, {
+      walletId: wallet.id,
+      organizationId: wallet.organizationId,
+      reference: row.id,
+      referenceType: REFUND_HOLD_REFERENCE_TYPE,
+    });
     const verdict = decideReconciliation({
       kind: task.kind,
       intentStatus: row.status,
       marker: row.failureReason,
       walletStatus: wallet.status,
-      refundHoldActive: hold?.referenceType === REFUND_HOLD_REFERENCE_TYPE,
+      refundHoldActive: hold !== null,
       answer,
     });
 

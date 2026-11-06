@@ -65,7 +65,8 @@ export const COMMAND_CONSEQUENCES: Readonly<Record<OrderCommand, string>> = {
     'تأیید می‌کنید کالا یا خدمت را دریافت کرده‌اید. این تنها اقدامی است که اجازهٔ تسویه با فروشنده را می‌دهد و بازگشت‌پذیر نیست.',
   RAISE_DISPUTE:
     'تسویه به‌طور کامل متوقف می‌شود تا اپراتور پلتفرم رسیدگی کند. دلیل را روشن بنویسید.',
-  RESOLVE_DISPUTE: 'تصمیم شما سرنوشت وجه نگه‌داشته‌شده را معین می‌کند.',
+  RESOLVE_DISPUTE:
+    'تصمیم شما سرنوشت وجه نگه‌داشته‌شده را معین می‌کند. «ادامهٔ سفارش» آن را به مرحله‌ای برمی‌گرداند که اختلاف در آن ثبت شد و تسویه همچنان منتظر تأیید دریافت از سوی خریدار می‌ماند؛ «بازگشت وجه» سفارش را لغو می‌کند.',
   CANCEL: 'سفارش لغو می‌شود. تا بازگشت کامل وجه، وضعیت «در حال لغو» می‌ماند.',
   REVIEW: 'نظر شما دربارهٔ این سفارش تکمیل‌شده. هر سفارش فقط یک نظر می‌پذیرد.',
 };
@@ -108,7 +109,10 @@ export const DISPUTE_OUTCOMES = ['SETTLE', 'REFUND'] as const;
 export type DisputeOutcome = (typeof DISPUTE_OUTCOMES)[number];
 
 export const DISPUTE_OUTCOME_LABELS: Readonly<Record<DisputeOutcome, string>> = {
-  SETTLE: 'تسویه با فروشنده',
+  // D-083: SETTLE lifts the dispute and resumes the order where the dispute
+  // found it; it is not a receipt, and it settles only an order whose buyer
+  // had already confirmed receipt.
+  SETTLE: 'ادامهٔ سفارش از همان مرحله',
   REFUND: 'بازگشت وجه به خریدار',
 };
 
@@ -135,6 +139,13 @@ export interface OrderCommandFormValues {
   readonly rating: string;
   readonly comment: string;
   /**
+   * The dispute an operator's decision is about: the order's `openDisputeId`
+   * when the page was drawn, posted from a hidden field. The service refuses
+   * a decision naming any other (`DISPUTE_DECISION_STALE`, D-083), so a form
+   * drawn for one dispute never decides a later one.
+   */
+  readonly disputeId: string;
+  /**
    * `'yes'` when the person ticked "I understand this cannot be undone", on
    * the commands in {@link IRREVERSIBLE_COMMANDS}. Checked by the portal's
    * own action and never sent to the service — no DTO has it, and every
@@ -155,6 +166,7 @@ export const EMPTY_ORDER_COMMAND_FORM: OrderCommandFormValues = {
   responsibility: '',
   rating: '',
   comment: '',
+  disputeId: '',
   acknowledge: '',
 };
 

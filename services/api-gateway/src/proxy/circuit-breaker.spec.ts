@@ -5,14 +5,14 @@ import type { AddressInfo } from 'node:net';
 import { InternalTokenService, RastaError, runWithContext } from '@rasta/nest-common';
 import { registry } from '@rasta/observability';
 import { GatewayHealthController } from '../app.module';
-import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
+import { SERVICE_NAMES, type ServiceName, type ServiceUrls } from '../config/routes';
 import {
   CircuitBreakers,
   HALF_OPEN_RETRY_AFTER_SECONDS,
   type CircuitPermit,
 } from './circuit-breaker';
 import { clientCancellation } from './gateway.controller';
-import { ClientCancelledError, ProxyService } from './proxy.service';
+import { ClientCancelledError, ProxyService, READINESS_PATH } from './proxy.service';
 import type { RateLimiter } from './rate-limiter';
 
 /**
@@ -25,12 +25,28 @@ import type { RateLimiter } from './rate-limiter';
 const THRESHOLD = 3;
 const RESET_MS = 30_000;
 
+/**
+ * Every request from an organization of its own: an outage many tenants see, the
+ * only kind that opens a circuit. Who failed is circuit-organizations.spec.ts.
+ */
+class ManyOrganizations extends CircuitBreakers {
+  private caller = 0;
+
+  override admit(service: ServiceName): CircuitPermit {
+    this.caller += 1;
+    return super.admit(service, `ORG_${this.caller}`, `PERSON_${this.caller}`);
+  }
+}
+
 function breakers() {
   let clock = 1_000;
-  const circuits = new CircuitBreakers({
+  const circuits = new ManyOrganizations({
     failureThreshold: THRESHOLD,
+    organizationsToOpen: 1,
     resetAfterMs: RESET_MS,
     now: () => clock,
+    // These schedules are outages: the gateway's own check finds the service not ready.
+    checkReady: () => false,
   });
   return {
     circuits,
@@ -317,8 +333,9 @@ describe('forward settles its permit on every exit path', () => {
   let received = 0;
   let urls: ServiceUrls;
   beforeAll(async () => {
-    server = createServer((_req, res) => {
-      received += 1;
+    server = createServer((req, res) => {
+      // The gateway's own readiness check (FU-113) is not a forwarded request.
+      if (req.url !== READINESS_PATH) received += 1;
       res.writeHead(500, { 'content-type': 'text/plain' });
       res.end('boom');
     });
@@ -334,6 +351,7 @@ describe('forward settles its permit on every exit path', () => {
   const context = {
     correlationId: 'req-exit',
     requestId: 'req-exit',
+    organizationId: 'ORG_EXIT',
     roles: [],
     organizationIds: [],
     authType: 'USER' as const,
@@ -350,6 +368,7 @@ describe('forward settles its permit on every exit path', () => {
     const proxy = new ProxyService(urls, tokens as InternalTokenService, {
       timeoutMs: 2000,
       failureThreshold: 1,
+      organizationsToOpen: 1,
       resetAfterMs: 1000,
       now: () => clock,
     });

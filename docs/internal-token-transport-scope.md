@@ -568,6 +568,12 @@ Node HTTP exports and global/imported process members use the same known-safe li
 so additions require review. Process object imports may only access proven-safe members;
 loader exports, unknown extraction, dynamic loads and unsafe re-exports are refused.
 Process listener results must be discarded, including named imports and aliases.
+Process registry holders (task 1267, FU-029) may use immutable aliases and casts,
+`typeof`/strict null checks, and keys proven to come from the native `Symbol.for`.
+`Object.defineProperty` requires that same key proof and a discarded result because
+it returns the holder. Every alias reference is checked: loader reads, unknown keys,
+shadowed builtins, mutable holders and escaping holders remain refused. This preserves
+the process-wide CLI refusal registry without granting it an audited transport exemption.
 Tooling that needs a computed workspace path uses `scripts/workspace-module.mjs`,
 which checks the real resolved path before loading a local build, generated Prisma
 client or Jest config; dependency paths, symlink escapes and outside paths are refused.

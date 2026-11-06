@@ -158,6 +158,18 @@ export const settlementsExhaustedTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * Rounds of a dispute release economic-service has not confirmed (FU-080): the
+ * obligation stays DISPUTED and the funds held until it does. A stuck saga adds
+ * at least one an hour, so this stays rising for as long as it is stuck.
+ */
+export const releasesUnconfirmedTotal = new Counter({
+  name: 'rasta_marketplace_saga_release_unconfirmed_total',
+  help: 'Rounds of a saga dispute release that economic-service has not confirmed',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
 export const idempotentReplaysTotal = new Counter({
   name: 'rasta_marketplace_idempotent_replays_total',
   help: 'Requests answered from a stored idempotent response instead of re-executing',

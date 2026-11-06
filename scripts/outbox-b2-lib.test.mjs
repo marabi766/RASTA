@@ -11,7 +11,7 @@
 // a single row is touched: that the tool refuses rather than guesses.
 // -----------------------------------------------------------------------------
 import assert from 'node:assert/strict';
-import { commandFailure } from '../packages/config/src/command-failure.js';
+import { commandFailure, markRefusal } from '../packages/config/src/command-failure.js';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
@@ -41,6 +41,8 @@ import {
 } from './outbox-b2-lib.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+/** A stand-in refusal of `code`: its report is the exact line a CLI must print for it. */
+const refusalOf = (code) => markRefusal(new Error(), code);
 
 const refusal = (fn) => {
   try {
@@ -243,7 +245,7 @@ for (const cli of ['outbox-b2-backfill.mjs', 'outbox-b2-vacuum.mjs']) {
       assert.equal(run.events.length, 1, run.stdout);
       const [{ at, ...event }] = run.events;
       assert.ok(at);
-      assert.deepEqual(event, { type: 'refused', reason: commandFailure(null) });
+      assert.deepEqual(event, { type: 'refused', reason: commandFailure(refusalOf('node-env')) });
       assertNoSentinel(run.stdout, `${cli} (${sentinel})`);
     }
   });
@@ -255,7 +257,7 @@ for (const cli of ['outbox-b2-backfill.mjs', 'outbox-b2-vacuum.mjs']) {
     assert.equal(run.status, 1);
     const refused = run.events.find((event) => event.type === 'refused');
     assert.equal(refused.service, 'document', run.stdout);
-    assert.equal(refused.reason, commandFailure(null));
+    assert.equal(refused.reason, commandFailure(refusalOf('database-url-unset')));
   });
 }
 
@@ -271,7 +273,10 @@ test('outbox-b2-backfill.mjs: an owner credential named for no service is refuse
       assert.equal(run.status, 1);
       assert.equal(run.events.length, 1, run.stdout);
       assert.equal(run.events[0].type, 'refused');
-      assert.match(run.events[0].reason, /command failed \(code unknown\); diagnostics withheld/);
+      assert.match(
+        run.events[0].reason,
+        /command refused \(code owner-credential\); diagnostics withheld/,
+      );
       assertNoSentinel(run.stdout + run.stderr, name);
     }
   }

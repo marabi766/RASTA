@@ -1,7 +1,6 @@
 import {
   ActivityFailure,
   continueAsNew,
-  patched,
   workflowInfo,
   type ActivityOptions,
   ApplicationFailure,
@@ -10,6 +9,7 @@ import {
   defineQuery,
   defineSignal,
   isCancellation,
+  patched,
   proxyActivities,
   setHandler,
   sleep,
@@ -53,7 +53,31 @@ import type {
  * Nothing in this file reads a clock, a random number, a database or a socket.
  * Temporal re-executes workflow code on every replay, and any of those would
  * make the replay disagree with the original run. Time comes from `sleep()`
- * and `condition()`, which Temporal records; everything else is an activity.
+ * and `condition()`, which Temporal records, and from `Date.now()`, which in
+ * a workflow is Temporal's recorded time of the current workflow task, not
+ * the host's clock; everything else is an activity.
+ *
+ * ## A dispute settled before receipt resumes the order (D-083)
+ *
+ * An operator's SETTLE returns a disputed order to where the dispute found
+ * it. Raised after receipt, that is RECEIPT_CONFIRMED and the saga settles.
+ * Raised before — FUNDS_HELD, CONFIRMED, AWAITING_RECEIPT_CONFIRMATION — the
+ * saga leaves its dispute wait for that status's own wait, first telling
+ * economic-service the dispute is decided (which returns the obligation to
+ * HELD, not to the settlement queue), and settles only after the buyer's
+ * confirmation, as for an order never disputed. Its reminder deadlines are
+ * the ones it had: a dispute does not buy a fresh window
+ * (`DISPUTE_RESUME_PATCH`).
+ *
+ * ## The saga does not end with a release unconfirmed (FU-080)
+ *
+ * While economic-service has not confirmed a decided dispute's resolution, the
+ * obligation stays DISPUTED and the funds held. So when the call fails — its
+ * attempts exhausted, or refused — the saga stays, in a durable wait that calls
+ * again under the same idempotency key with a bounded backoff, reports each
+ * round for the alert, and takes an operator's `retryDisputeRelease` signal. It
+ * moves nothing else meanwhile, so no receipt can settle past it
+ * (`waitForRelease`).
  *
  * ## What expiry does NOT do
  *
@@ -70,6 +94,8 @@ export const receiptConfirmed = defineSignal('receiptConfirmed');
 export const orderDisputed = defineSignal<[string]>('orderDisputed');
 export const orderCancelled = defineSignal<[string]>('orderCancelled');
 export const disputeResolved = defineSignal<['SETTLE' | 'REFUND']>('disputeResolved');
+/** An operator's: the unconfirmed release is tried now, not at the next backoff. */
+export const retryDisputeRelease = defineSignal('retryDisputeRelease');
 
 export const orderSagaStatus = defineQuery<SagaStatus>('status');
 
@@ -113,7 +139,15 @@ export interface SagaResume {
   mirroredEconomicDispute?: string;
   waitingIn: SagaOrderView['status'];
   nextReminderAt?: number;
+  /**
+   * The other windows' deadlines (`reminderDue`), so a rollover during a
+   * dispute does not buy the resumed order a fresh window (D-083). Absent from
+   * a run continued before D-083.
+   */
+  reminderDue?: [SagaOrderView['status'], number][];
   activitySequence: number;
+  /** Rounds of an unconfirmed release so far, when rolled over inside its wait. */
+  releaseRounds?: number;
 }
 
 /**
@@ -167,6 +201,32 @@ const LOCAL_OPTIONS = {
   },
 } satisfies ActivityOptions;
 const legacyLocal = proxyActivities<OrderActivities>(LOCAL_OPTIONS);
+
+/**
+ * The `patched()` marker of D-083's changes to the waits: a window keeps its
+ * deadline across a dispute instead of starting again, the dispute wait also
+ * ends on a new dispute, and a resumed pre-receipt wait first releases the
+ * mirrored dispute (`mirrorResumed`). A history recorded before it — including
+ * one a previous-release worker wrote for an order resumed during the rollout
+ * — replays its old commands exactly; a run past it records the marker at its
+ * first guarded point.
+ */
+export const DISPUTE_RESUME_PATCH = 'dispute-settle-resumes-order';
+
+/**
+ * The `patched()` marker of the release wait (FU-080). Asked only once the
+ * release has failed: a saga whose release succeeds records nothing, and a
+ * history in which the failure ended the run replays that end.
+ */
+export const RELEASE_WAIT_PATCH = 'dispute-release-durable-wait-v1';
+
+/**
+ * Between release rounds: doubling from a minute, an hour at most. Never zero,
+ * which `condition()` would record as an SDK marker the drain gate refuses.
+ */
+export function releaseBackoffMs(round: number): number {
+  return Math.min(HOUR, 60_000 * 2 ** Math.min(Math.max(round - 1, 0), 6));
+}
 
 /** `docs/08` § 8.4 gives settlement five attempts before a human is needed. */
 const SETTLEMENT_ATTEMPTS = 5;
@@ -264,6 +324,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     markCompleted,
     markCancelled,
     recordReminder,
+    noteReleaseUnconfirmed,
   } = activities(LOCAL_OPTIONS, legacyLocal);
 
   const status: SagaStatus = input.resume?.status ?? {
@@ -286,6 +347,19 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   setHandler(orderDisputed, look);
   setHandler(orderCancelled, look);
   setHandler(disputeResolved, look);
+  let releaseNudged = false;
+  setHandler(retryDisputeRelease, () => {
+    releaseNudged = true;
+  });
+
+  // When each windowed wait is next due a reminder, in workflow time — kept
+  // when the order leaves that status for a dispute, so a resumed order waits
+  // out what remained of its window rather than a new one (D-083). A rollover
+  // carries them on.
+  const reminderDue = new Map<OrderStatus, number>(input.resume?.reminderDue);
+  if (input.resume?.nextReminderAt !== undefined) {
+    reminderDue.set(input.resume.waitingIn, input.resume.nextReminderAt);
+  }
 
   // The dispute economic-service has been told about and not yet told is
   // resolved. An id, not a flag: a second dispute on the same order is a
@@ -296,6 +370,19 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   // since (Codex on #318 round 2, N1). Undefined for a dispute mirrored by a
   // step recorded before economic-service had identities: resolved unnamed.
   let mirroredEconomicDispute: string | undefined = input.resume?.mirroredEconomicDispute;
+  let releaseRounds = input.resume?.releaseRounds ?? 0;
+
+  /** What a rollover hands to the next run. */
+  const resumeFrom = (waitingIn: OrderStatus, nextReminderAt?: number): SagaResume => ({
+    status,
+    mirroredDispute,
+    mirroredEconomicDispute,
+    waitingIn,
+    nextReminderAt,
+    reminderDue: [...reminderDue],
+    activitySequence,
+    ...(releaseRounds > 0 ? { releaseRounds } : {}),
+  });
 
   /** The order now, with the mirrored dispute's resolution when there is one. */
   const read = (): Promise<SagaOrderView> =>
@@ -305,24 +392,116 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * Tells economic-service that the dispute it holds is decided, with that
    * dispute's own resolution — read by its id, since a party may have raised
    * the next one before the saga looked.
+   *
+   * `true` when it had to wait for the release (`waitForRelease`): `order` is
+   * then old news, and a caller about to act on it reads the order again.
    */
-  async function mirrorResolution(order: SagaOrderView, fallback: string): Promise<void> {
-    if (!mirroredDispute) return;
+  async function mirrorResolution(order: SagaOrderView, fallback: string): Promise<boolean> {
+    if (!mirroredDispute) return false;
     // A read recorded before `mirroredDispute` was part of it has only the
     // most recent dispute, which then was this one.
     const resolution = order.mirroredDispute?.resolution ?? order.dispute?.resolution ?? fallback;
     const transactionId = heldTransaction(order);
-    await (mirroredEconomicDispute === undefined
-      ? resolveObligationDispute(orderId, transactionId, mirroredDispute, resolution)
-      : resolveObligationDispute(
-          orderId,
-          transactionId,
-          mirroredDispute,
-          resolution,
-          mirroredEconomicDispute,
-        ));
+    const disputeId = mirroredDispute;
+    const economicDisputeId = mirroredEconomicDispute;
+    const release = (): Promise<void> =>
+      economicDisputeId === undefined
+        ? resolveObligationDispute(orderId, transactionId, disputeId, resolution)
+        : resolveObligationDispute(
+            orderId,
+            transactionId,
+            disputeId,
+            resolution,
+            economicDisputeId,
+          );
+    let waited = false;
+    try {
+      await release();
+    } catch (error) {
+      if (!releaseCanWait(error) || !patched(RELEASE_WAIT_PATCH)) throw error;
+      await waitForRelease(release, order.status, failureOf(error));
+      waited = true;
+    }
     mirroredDispute = undefined;
     mirroredEconomicDispute = undefined;
+    releaseRounds = 0;
+    return waited;
+  }
+
+  /**
+   * Holds the saga until economic-service confirms the release. Every round
+   * sends the same dispute's words under the same idempotency key
+   * (`idempotencyKeyFor.resolveDispute`), so a release that did commit is
+   * answered, not repeated — past the key's expiry, from the obligation itself
+   * (`economicStep`). Nothing else runs meanwhile: no authorisation, settlement
+   * or refund, whatever the order has become; the caller reads it afterwards.
+   *
+   * A refusal waits like an outage: the release is no more confirmed, and a
+   * person has to see it. The history stays bounded by rolling over, and the
+   * next run starts by calling again.
+   */
+  async function waitForRelease(
+    release: () => Promise<void>,
+    at: OrderStatus,
+    firstFailure: string,
+  ): Promise<void> {
+    const phase = status.phase;
+    status.phase = 'RELEASE_UNCONFIRMED';
+    let failure = firstFailure;
+    let backedOff = false;
+    for (;;) {
+      releaseRounds += 1;
+      await noteReleaseUnconfirmed(orderId, releaseRounds, failure);
+      // Not before this run's first backoff: the next run starts by calling, so
+      // runs started past the threshold would otherwise call with none at all.
+      if (backedOff && shouldRollSaga(workflowInfo(), eventThreshold)) {
+        await continueAsNew<typeof orderSaga>({ ...input, resume: resumeFrom(at) });
+      }
+      const backoffMs = releaseBackoffMs(releaseRounds);
+      await condition(() => releaseNudged, backoffMs);
+      backedOff = true;
+      // Cleared before the call: a signal during it may be about a fix the call
+      // did not see, and it must wake the next wait rather than be swallowed.
+      releaseNudged = false;
+      try {
+        await release();
+        break;
+      } catch (error) {
+        if (!releaseCanWait(error)) throw error;
+        failure = failureOf(error);
+      }
+    }
+    status.phase = phase;
+  }
+
+  /**
+   * An order an operator's SETTLE returned to a status before receipt (D-083):
+   * economic-service is told the dispute it holds is decided before the saga
+   * waits there again, which returns the obligation to HELD — never to the
+   * settlement queue, since nothing has authorised it. Without it the
+   * obligation would stay DISPUTED while the order went on, and the buyer's
+   * next dispute or cancellation would find the two services disagreeing.
+   *
+   * Nothing when no dispute is mirrored: an order never disputed, or one whose
+   * dispute was raised and decided before the saga looked, which
+   * economic-service never heard of.
+   *
+   * Behind `DISPUTE_RESUME_PATCH`, because a worker of the previous release
+   * can meet a resumed order too: during a rollout a new API pod resumes it
+   * while an old worker runs its next task, and that history waits at the
+   * pre-receipt status with no call here. Replayed by this code, the call must
+   * not appear — so where the history has no marker, the saga skips it while
+   * it replays. The wait it then enters asks again at every wake-up
+   * (`waitWhile`): the first one past the replay releases the dispute, before
+   * any authorisation. `workflows.replay.spec.ts` replays such a history;
+   * `workflows.spec.ts` replays one and then goes on live.
+   */
+  async function mirrorResumed(order: SagaOrderView): Promise<boolean> {
+    if (mirroredDispute === undefined || !patched(DISPUTE_RESUME_PATCH)) return false;
+    // Time passed in a release wait: `order` is old news, so the next wait looks at once.
+    const waited = await mirrorResolution(order, 'Dispute resolved: SETTLE');
+    if (waited) nudged = true;
+    return waited;
   }
 
   /**
@@ -363,19 +542,23 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   async function waitWhile(
     waitingIn: OrderStatus,
     window?: { firstDays: number; thenDays: number },
+    /**
+     * For the dispute wait: the dispute it waits on. Past the marker, the wait
+     * ends when the order holds another — one settled back and raised again
+     * before the saga looked (D-083) — so that one is mirrored too.
+     */
+    disputeId?: string,
   ): Promise<SagaOrderView> {
     let windowElapsed = false;
+    // The deadline a rollover hands to the next run (`SagaResume`).
     let nextReminderAt =
       input.resume?.waitingIn === waitingIn ? input.resume.nextReminderAt : undefined;
     let windowScope: CancellationScope | undefined;
-    const armWindow = (days: number, resumeAt?: number): void => {
-      // new Date is Temporal's deterministic workflow clock; no host clock I/O.
-      nextReminderAt = resumeAt ?? new Date().getTime() + days * DAY;
-      const delay = durable ? Math.max(0, nextReminderAt - new Date().getTime()) : days * DAY;
+    const sleepFor = (ms: number): void => {
       const scope = new CancellationScope();
       windowScope = scope;
       scope
-        .run(() => sleep(delay))
+        .run(() => sleep(ms))
         .then(
           () => {
             windowElapsed = true;
@@ -385,8 +568,36 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
           },
         );
     };
+    // Since D-083 a window is a deadline, kept across a dispute; a history
+    // recorded before the change replays the old timers (`armWindow`).
+    const keepsDeadlines = window !== undefined && patched(DISPUTE_RESUME_PATCH);
+    const armWindow = (days: number, resumeAt?: number): void => {
+      if (!keepsDeadlines) {
+        // new Date is Temporal's deterministic workflow clock; no host clock I/O.
+        nextReminderAt = resumeAt ?? new Date().getTime() + days * DAY;
+        // Memory only, so no command changes: a dispute after the replay ends
+        // resumes to this deadline, not to a fresh window or a passed one.
+        reminderDue.set(waitingIn, nextReminderAt);
+        sleepFor(durable ? Math.max(0, nextReminderAt - new Date().getTime()) : days * DAY);
+        return;
+      }
+      armUntil(Date.now() + days * DAY);
+    };
+    const armUntil = (dueAt: number): void => {
+      nextReminderAt = dueAt;
+      reminderDue.set(waitingIn, dueAt);
+      const remaining = dueAt - Date.now();
+      // Due while the order was disputed: the reminder is recorded at the
+      // first look, not after another full window.
+      if (remaining <= 0) windowElapsed = true;
+      else sleepFor(remaining);
+    };
 
-    if (window) armWindow(window.firstDays, nextReminderAt);
+    if (window) {
+      const due = keepsDeadlines ? reminderDue.get(waitingIn) : undefined;
+      if (due === undefined) armWindow(window.firstDays, nextReminderAt);
+      else armUntil(due);
+    }
     try {
       for (;;) {
         if (patched(ROLLOVER_PATCH)) {
@@ -396,14 +607,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
             // effects are already recorded by their owner before this checkpoint.
             await continueAsNew<typeof orderSaga>({
               ...input,
-              resume: {
-                status,
-                mirroredDispute,
-                mirroredEconomicDispute,
-                waitingIn,
-                nextReminderAt,
-                activitySequence,
-              },
+              resume: resumeFrom(waitingIn, nextReminderAt),
             });
           }
         }
@@ -414,6 +618,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         nudged = false;
         const order = await read();
         if (order.status !== waitingIn) return order;
+        // Decided again at every wake-up, not once on entry: a wait entered
+        // while replaying a history recorded without the marker answers
+        // `false` only while it replays, and must not carry the old behaviour
+        // into live execution (review of #625 round 1, R1). Replayed, each
+        // call answers `false` again and adds no command.
+        if (waitingIn === 'DISPUTED') {
+          if (order.dispute?.id !== disputeId && patched(DISPUTE_RESUME_PATCH)) return order;
+        } else if (await mirrorResumed(order)) {
+          continue;
+        }
 
         if (window && windowElapsed) {
           windowElapsed = false;
@@ -607,6 +821,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     switch (order.status) {
       case 'FUNDS_HELD':
         status.phase = 'AWAITING_CONFIRMATION';
+        await mirrorResumed(order);
         order = await waitWhile('FUNDS_HELD', {
           firstDays: input.fulfillmentWindowDays,
           thenDays: input.reminderIntervalDays,
@@ -615,6 +830,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
       case 'CONFIRMED':
         status.phase = 'AWAITING_FULFILMENT';
+        await mirrorResumed(order);
         order = await waitWhile('CONFIRMED', {
           firstDays: input.fulfillmentWindowDays,
           thenDays: input.reminderIntervalDays,
@@ -624,6 +840,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       // The wait that has no timeout. Expiry records a reminder and waits again.
       case 'AWAITING_RECEIPT_CONFIRMATION':
         status.phase = 'AWAITING_RECEIPT_CONFIRMATION';
+        await mirrorResumed(order);
         order = await waitWhile('AWAITING_RECEIPT_CONFIRMATION', {
           firstDays: input.receiptWindowDays,
           thenDays: input.reminderIntervalDays,
@@ -644,7 +861,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
           // The dispute economic-service holds was decided and a party raised
           // this one before the saga looked: economic-service hears of the
           // decision first, or it would refuse this dispute as already there.
-          await mirrorResolution(order, 'Dispute resolved: SETTLE');
+          if (await mirrorResolution(order, 'Dispute resolved: SETTLE')) {
+            order = await read();
+            break;
+          }
           // economic-service is told too, so a direct settlement command there
           // is refused independently of anything this service does (ADR-040 § 5).
           const economicDispute = await disputeObligation(
@@ -659,22 +879,33 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
           mirroredEconomicDispute = economicDispute ?? undefined;
         }
         // No window. A dispute that expired into anything would be worse than
-        // one that waits: money would move because nobody looked.
-        order = await waitWhile('DISPUTED');
+        // one that waits: money would move because nobody looked. Since D-083
+        // a dispute settled back before receipt can be raised again before the
+        // saga looks, with the order DISPUTED throughout: the wait ends on a
+        // new dispute too, and this case mirrors the decision and then it. A
+        // history recorded before the change kept waiting there; it replays
+        // the same way, and the wait decides at each wake-up (`waitWhile`).
+        order = await waitWhile('DISPUTED', undefined, order.dispute.id);
         break;
 
       case 'RECEIPT_CONFIRMED':
       case 'SETTLING':
         // The resolution is mirrored back, or economic-service would still
         // refuse to settle a transaction it believes is disputed.
-        await mirrorResolution(order, 'Dispute resolved: SETTLE');
+        if (await mirrorResolution(order, 'Dispute resolved: SETTLE')) {
+          order = await read();
+          break;
+        }
         if (await settleOrder(heldTransaction(order))) return 'COMPLETED';
         order = await read();
         break;
 
       // ---- Compensation ---------------------------------------------------
       case 'CANCELLING': {
-        await mirrorResolution(order, 'Dispute resolved: REFUND');
+        if (await mirrorResolution(order, 'Dispute resolved: REFUND')) {
+          order = await read();
+          break;
+        }
         status.phase = 'COMPENSATING';
         const reason = order.cancellationReason ?? 'Cancelled';
         // An order cancelled before its hold was recorded may still have one:
@@ -703,6 +934,11 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   }
 }
 
+/** A release that failed as a call: not a cancellation, nor the saga's own stop. */
+function releaseCanWait(error: unknown): boolean {
+  return error instanceof ActivityFailure && !isCancellation(error);
+}
+
 /** The obligation an order past `PENDING` holds. The row constraint guarantees one. */
 function heldTransaction(order: SagaOrderView): string {
   if (order.economicTransactionId) return order.economicTransactionId;
@@ -710,6 +946,13 @@ function heldTransaction(order: SagaOrderView): string {
     `Order is ${order.status} with no economic transaction recorded`,
     'SAGA_INCONSISTENT',
   );
+}
+
+/** A failed call as the operator reads it: the code, when it has one, and the words. */
+function failureOf(error: unknown): string {
+  const cause = error instanceof ActivityFailure ? error.cause : undefined;
+  const code = cause instanceof ApplicationFailure ? cause.type : undefined;
+  return code ? `${code}: ${describe(error)}` : describe(error);
 }
 
 function describe(error: unknown): string {

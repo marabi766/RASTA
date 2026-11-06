@@ -20,9 +20,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           }
@@ -297,11 +295,6 @@
         },
         "summary": "Create a warehouse, owned by the organization the request acts for",
         "tags": ["warehouses"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -312,9 +305,7 @@
                   "name": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 200,
-                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the owner’s people; never on an event."
+                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the owner’s people; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "location": {
                     "type": "object",
@@ -346,7 +337,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/warehouses/{id}": {
@@ -494,9 +490,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -872,7 +866,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -930,7 +926,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -955,11 +953,6 @@
         },
         "summary": "Reserve stock: every line, or none",
         "tags": ["reservations"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -981,7 +974,8 @@
                   "expiresAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "Optional. When the reservation is released by itself if not issued or released first. No default: without it a reservation lives until released or issued (Q-102). Must be in the future and at most INVENTORY_RESERVATION_MAX_TTL_SECONDS (7 days by default) ahead, by the service’s clock (422 EXPIRY_OUT_OF_RANGE)."
+                    "pattern": "(?:Z|[+-](?:(?:0\\d|1[0-3]):?[0-5]\\d|14:?00))$",
+                    "description": "Optional. When the reservation is released by itself if not issued or released first. No default: without it a reservation lives until released or issued (Q-102). Must be in the future and at most INVENTORY_RESERVATION_MAX_TTL_SECONDS (7 days by default) ahead, by the service’s clock (422 EXPIRY_OUT_OF_RANGE). ISO 8601 instant that ends in `Z` or a numeric offset within ±14:00 (`+03:30`, `+0330`); an offset beyond ±14:00, which RFC 3339 allows, is invalid here."
                   },
                   "lines": {
                     "type": "array",
@@ -1005,7 +999,7 @@
                     },
                     "minItems": 1,
                     "maxItems": 50,
-                    "description": "1 to 50 lines, each a distinct stock item of one warehouse (422 LINES_SPAN_WAREHOUSES). All or nothing: one line short of available stock reserves none (422 INSUFFICIENT_AVAILABLE_STOCK). One reservation per line."
+                    "description": "1 to 50 lines, each a distinct stock item of one warehouse (422 LINES_SPAN_WAREHOUSES). All or nothing: one line short of available stock reserves none (422 INSUFFICIENT_AVAILABLE_STOCK). One reservation per line. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["lines"],
@@ -1013,7 +1007,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock/reservations/{id}": {
@@ -1365,7 +1364,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -1423,7 +1424,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -1448,11 +1451,6 @@
         },
         "summary": "Release a reservation (ACTIVE → RELEASED): the stock stays",
         "tags": ["reservations"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1470,7 +1468,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock/reservations/{id}/issue": {
@@ -1674,7 +1677,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -1732,7 +1737,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -1757,11 +1764,6 @@
         },
         "summary": "Issue a reservation (ACTIVE → CONSUMED): the stock leaves",
         "tags": ["reservations"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1779,7 +1781,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock": {
@@ -1801,9 +1808,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -1975,9 +1980,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -2519,7 +2522,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -2544,11 +2549,6 @@
         },
         "summary": "Receive stock into a warehouse (on hand grows)",
         "tags": ["stock"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2583,7 +2583,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/stock/adjustments": {
@@ -2838,7 +2843,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -2863,11 +2870,6 @@
         },
         "summary": "Adjust on hand by a signed quantity (a count, a loss, a direct issue)",
         "tags": ["stock"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -2884,7 +2886,7 @@
                     "type": "integer",
                     "minimum": -2147483647,
                     "maximum": 2147483647,
-                    "description": "A signed whole number, never zero: positive adds to on hand, negative removes. On hand may not fall below what is reserved (422 ON_HAND_WOULD_BE_NEGATIVE)."
+                    "description": "A signed whole number, never zero: positive adds to on hand, negative removes. On hand may not fall below what is reserved (422 ON_HAND_WOULD_BE_NEGATIVE). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "sourceReference": {
                     "type": "string",
@@ -2897,7 +2899,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/shipments": {
@@ -2919,9 +2926,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -3275,11 +3280,6 @@
         },
         "summary": "Create a shipment out of one of the owner’s warehouses",
         "tags": ["shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3310,16 +3310,11 @@
                         "carrierName": {
                           "type": "string",
                           "pattern": "^[^\\p{Bidi_Control}]*$",
-                          "minLength": 1,
-                          "maxLength": 200,
-                          "description": "Who carries this leg: trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the shipment’s readers; never on an event (Q-115)."
+                          "description": "Who carries this leg: trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the shipment’s readers; never on an event (Q-115). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "carrierReference": {
                           "type": "string",
-                          "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Bidi_Control}]*$",
-                          "minLength": 1,
-                          "maxLength": 100,
-                          "description": "Optional: the carrier’s own reference (a waybill number). Never on an event."
+                          "description": "Optional: the carrier’s own reference (a waybill number). Never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": ["carrierName"],
@@ -3335,7 +3330,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/shipments/{id}": {
@@ -3816,7 +3816,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -3841,11 +3843,6 @@
         },
         "summary": "Dispatch a shipment (CREATED → DISPATCHED): it left its origin warehouse",
         "tags": ["shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3863,7 +3860,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/shipments/{id}/deliver": {
@@ -4070,7 +4072,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -4095,11 +4099,6 @@
         },
         "summary": "Deliver a shipment (DISPATCHED → DELIVERED), as its origin warehouse’s owner records it",
         "tags": ["shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -4117,7 +4116,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments": {
@@ -4139,9 +4143,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -4665,7 +4667,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -4727,7 +4731,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -4772,11 +4778,6 @@
         },
         "summary": "Record goods of a return as on their way to one of the owner’s warehouses",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -4830,21 +4831,17 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "carrierName": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 200,
-                    "description": "Who carries the goods back: trimmed, 1 to 200 characters. Shown to the shipment’s readers; never on an event."
+                    "description": "Who carries the goods back: trimmed, 1 to 200 characters. Shown to the shipment’s readers; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "carrierReference": {
                     "type": "string",
-                    "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "description": "Optional: the carrier’s own reference. Needs a carrierName. Never on an event."
+                    "description": "Optional: the carrier’s own reference. Needs a carrierName. Never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": [
@@ -4858,7 +4855,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments/{id}": {
@@ -5481,7 +5483,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -5543,7 +5547,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -5568,11 +5574,6 @@
         },
         "summary": "Receive a return shipment (IN_TRANSIT → RECEIVED): the goods arrived",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -5615,7 +5616,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments/{id}/inspection": {
@@ -5896,7 +5902,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -5921,11 +5929,6 @@
         },
         "summary": "Record the inspection of a return shipment (RECEIVED → INSPECTED)",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -5941,9 +5944,7 @@
                   "note": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 1000,
-                    "description": "Optional: what the inspector found, in words. Trimmed, 1 to 1000 characters. Shown to the return shipment’s readers; kept here and never on an event."
+                    "description": "Optional: what the inspector found, in words. Trimmed, 1 to 1000 characters. Shown to the return shipment’s readers; kept here and never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "reportDocumentId": {
                     "type": "string",
@@ -5955,7 +5956,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/return-shipments/{id}/resolution": {
@@ -6236,7 +6242,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -6298,7 +6306,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -6323,11 +6333,6 @@
         },
         "summary": "Resolve a return shipment: give every received unit an outcome (INSPECTED → RESOLVED)",
         "tags": ["return-shipments"],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -6373,7 +6378,7 @@
                     },
                     "minItems": 0,
                     "maxItems": 300,
-                    "description": "Per line, its units by disposition; for every line the quantities add up to exactly what was received (a line that received none needs no row). Empty only when nothing arrived at all, and then only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED allows it (Q-133). This records an outcome for the goods. It moves no stock and asks for no money."
+                    "description": "Per line, its units by disposition; for every line the quantities add up to exactly what was received (a line that received none needs no row). Empty only when nothing arrived at all, and then only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED allows it (Q-133). This records an outcome for the goods. It moves no stock and asks for no money. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["dispositions"],
@@ -6381,7 +6386,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/v1/internal/return-requests/{id}/return-shipment": {
@@ -6623,11 +6633,6 @@
         },
         "summary": "Withdraw a dispatch reservation of a return request, unless it has a shipment (internal)",
         "tags": ["return-requests-internal"],
-        "security": [
-          {
-            "internalToken": []
-          }
-        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -6646,7 +6651,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "internalToken": []
+          }
+        ]
       }
     }
   },
@@ -6669,7 +6679,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Internal-Token",
-        "description": "A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user."
+        "description": "A platform service’s internal token (ADR-020, ADR-035), signed for the organization it acts for, sent without an `Authorization` header: a request carrying both is judged on the bearer token, as a user. Admitted only where the route names the calling service."
       }
     },
     "schemas": {
@@ -6709,7 +6719,9 @@
           },
           "timestamp": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "pattern": "Z$",
+            "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
           },
           "path": {
             "type": "string"

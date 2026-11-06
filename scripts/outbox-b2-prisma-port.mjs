@@ -41,12 +41,16 @@ export function prismaPort(service, givenUrl) {
   const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);
   const generated = join(serviceDir, 'src', 'generated', 'prisma');
   if (!existsSync(serviceDir)) {
-    throw new B2RefusalError(`No such service directory: services/${service}-service.`);
+    throw new B2RefusalError(
+      `No such service directory: services/${service}-service.`,
+      'prisma-client-missing',
+    );
   }
   if (!existsSync(generated)) {
     throw new B2RefusalError(
       `The Prisma client for ${service} has not been generated. ` +
         'Run `pnpm db:generate` before the B2 backfill.',
+      'prisma-client-missing',
     );
   }
 

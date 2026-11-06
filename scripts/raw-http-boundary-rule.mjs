@@ -315,12 +315,87 @@ export default {
       )
         report(node, 'process listener result exposes loaders');
     };
+    const unwrap = (node) => {
+      while (TS_WRAPPERS.has(node?.type)) node = node.expression;
+      return node;
+    };
+    const variableFor = (identifier) => {
+      let scope = context.sourceCode.getScope(identifier);
+      while (scope && !scope.set.has(identifier.name)) scope = scope.upper;
+      return scope?.set.get(identifier.name);
+    };
+    const nativeObject = (node, name) =>
+      node?.type === 'Identifier' &&
+      node.name === name &&
+      !variableFor(node)?.defs.some((definition) => !erased(definition));
+    // Only a native Symbol.for call, optionally held in immutable local bindings,
+    // proves a registry key. Strings, parameters and shadowed Symbol are unknown.
+    const registryKey = (input, seen = new Set()) => {
+      const node = unwrap(input);
+      if (node?.type === 'Identifier') {
+        const variable = variableFor(node);
+        if (!variable || seen.has(variable) || variable.defs.length !== 1) return false;
+        const definition = variable.defs[0];
+        if (definition.parent?.kind !== 'const' || definition.node.id !== definition.name)
+          return false;
+        seen.add(variable);
+        return registryKey(definition.node.init, seen);
+      }
+      return (
+        node?.type === 'CallExpression' &&
+        node.callee.type === 'MemberExpression' &&
+        nativeObject(node.callee.object, 'Symbol') &&
+        staticKey(node.callee) === 'for'
+      );
+    };
     const checkProcessObject = (identifier) => {
-      const parent = identifier.parent;
+      let node = identifier;
+      while (TS_WRAPPERS.has(node.parent?.type) && node.parent.expression === node)
+        node = node.parent;
+      const parent = node.parent;
       if (parent.type === 'UnaryExpression' && parent.operator === 'typeof') return;
       if (
+        parent.type === 'BinaryExpression' &&
+        ['===', '!=='].includes(parent.operator) &&
+        [parent.left, parent.right].some(
+          (operand) => operand.type === 'Literal' && operand.value === null,
+        )
+      )
+        return;
+      if (
+        parent.type === 'VariableDeclarator' &&
+        parent.init === node &&
+        parent.id.type === 'Identifier' &&
+        parent.parent.kind === 'const'
+      ) {
+        for (const variable of context.sourceCode.getDeclaredVariables(parent))
+          for (const reference of variable.references)
+            if (reference.identifier !== parent.id && !inTypePosition(reference.identifier))
+              checkProcessObject(reference.identifier);
+        return;
+      }
+      if (
         parent.type === 'MemberExpression' &&
-        parent.object === identifier &&
+        parent.object === node &&
+        parent.computed &&
+        registryKey(parent.property)
+      )
+        return;
+      if (
+        parent.type === 'CallExpression' &&
+        parent.arguments[0] === node &&
+        parent.callee.type === 'MemberExpression' &&
+        nativeObject(parent.callee.object, 'Object') &&
+        staticKey(parent.callee) === 'defineProperty' &&
+        registryKey(parent.arguments[1])
+      ) {
+        // defineProperty returns its target: retaining that result exposes process.
+        checkListenerCall(parent.callee);
+        return;
+      }
+      if (
+        parent.type === 'MemberExpression' &&
+        parent.object === node &&
         PROCESS_SAFE.has(staticKey(parent))
       ) {
         if (PROCESS_LISTENERS.has(staticKey(parent))) checkListenerCall(parent);

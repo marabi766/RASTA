@@ -83,6 +83,7 @@
 | [069](adr/ADR-069-portal-relays-document-uploads.md)                        | بارگذاری مدرک از سرور پورتال؛ نه مرورگر             | **Proposed**                          | EXP-002 برش ۷؛ ADR-014؛ Q-98                                 |
 | [070](adr/ADR-070-procurement-service-boundary-and-lifecycle.md)            | مرز `procurement-service`: تجمیع، RFQ و سفارش خرید  | **Proposed** (فقط طراحی)              | COM-007؛ Q-10، Q-119 تا Q-124؛ D-055                         |
 | [071](adr/ADR-071-analytics-read-models-and-governed-views.md)              | مرز `analytics-service` و نمای حاکمیتی تجمیعی       | **Proposed**                          | RUN-001؛ Q-141، Q-142                                        |
+| [072](adr/ADR-072-union-membership-and-governed-set.md)                     | رابطهٔ «عضو اتحادیه» و دامنهٔ اتحادیه               | **Proposed** (فقط طراحی)              | Q-80 (پ)، Q-61، Q-63؛ Q-144 تا Q-147؛ D-061                  |
 
 ---
 
