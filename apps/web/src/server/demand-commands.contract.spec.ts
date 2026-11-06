@@ -26,6 +26,7 @@ const machine = squash(readSource(...SERVICE, 'demand', 'demand.state-machine.ts
 const refusal = readSource(...SERVICE, 'shared', 'refusal.ts');
 const env = squash(readSource(...SERVICE, 'config', 'env.ts'))!;
 const controller = squash(readSource(...SERVICE, 'demand', 'demand.controller.ts'))!;
+const store = squash(readSource(...SERVICE, 'shared', 'idempotency.ts'))!;
 const routes = squash(readSource('services', 'api-gateway', 'src', 'config', 'routes.ts'))!;
 
 describe('procurement-service’s demand contract', () => {
@@ -74,10 +75,17 @@ describe('procurement-service’s demand contract', () => {
     expect(() =>
       loadWebServerEnv({ ...base, WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: '299' }),
     ).toThrow();
+    // The schema's floor; with a 1 h retention the shared window maximum (FU-156) asks for 330.
     expect(
-      loadWebServerEnv({ ...base, WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: '300' })
-        .WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS,
-    ).toBe(300);
+      loadWebServerEnv({
+        ...base,
+        WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '1',
+        WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: '330',
+      }).WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS,
+    ).toBe(330);
+    expect(() =>
+      loadWebServerEnv({ ...base, WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: '300' }),
+    ).toThrow('WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS');
   });
 
   it('the mirrored retention has the service’s bounds', () => {
@@ -88,7 +96,12 @@ describe('procurement-service’s demand contract', () => {
 
   it('the endpoint takes a key and replays only for the same caller and body', () => {
     expect(controller).toContain("exportconstSUBMIT_DEMAND_ENDPOINT='POST/v1/demand-requests';");
-    expect(controller).toContain('constkey=requiredIdempotencyKey(idempotencyKey);');
+    expect(controller).toContain('constkey=idempotentRequest(headers);');
+    // FU-156: the key and the replay deadline are read together, by the store's one parser.
+    expect(store).toContain("exportconstREPLAY_DEADLINE_HEADER='Idempotency-Replay-Deadline';");
+    expect(store).toContain(
+      'constreplayDeadlineMs=parseReplayDeadline(headers[REPLAY_DEADLINE_HEADER.toLowerCase()]);',
+    );
     expect(routes).toContain("{prefix:'demand-requests',service:'procurement'}");
   });
 

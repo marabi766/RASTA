@@ -1,4 +1,3 @@
-import { ERROR_CODES } from '@rasta/contracts';
 import { z } from 'zod';
 
 import {
@@ -11,7 +10,7 @@ import {
 
 import type { WebServerEnv } from './env';
 import type { WebSession } from './session';
-import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { isProvenRefusal, writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 
 /**
  * Submitting a demand through the gateway (EXP-004, COM-007;
@@ -25,7 +24,12 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
  * and does nothing again; another body or person under it is `409
  * IDEMPOTENCY_KEY_REUSED`; a duplicate still running is `409 CONFLICT` with
  * `Retry-After`. The key is the form's submission id, and it is sent only inside
- * the deadline the page signed (`demand-replay.ts`).
+ * the deadline the page signed (`demand-replay.ts`) — and WITH that deadline, as
+ * `Idempotency-Replay-Deadline` (FU-156, PM decision D-125): procurement-service
+ * refuses the request on its own clock once it has passed (`409
+ * REPLAY_WINDOW_CLOSED`, nothing executed), so no pause between this portal's
+ * check and the service's claim can execute it after the key was forgotten
+ * (PR-830 r1 F2). The portal's margin stays as a second guard.
  */
 
 /** Never on the buyer side, whatever the configuration says (procurement-service `access.ts`). */
@@ -54,21 +58,19 @@ export const DEMAND_FIELD_MAPPING: FieldMapping<DemandField> = {
   fallback: DEMAND_INVALID_MESSAGE,
 };
 
-/** The platform's documented error codes (docs/06 § 6.7). */
-const DOCUMENTED_CODES: ReadonlySet<string> = new Set(Object.values(ERROR_CODES));
-
 /**
- * Whether a failed write is **proven** not to have written anything: a `4xx`
- * carrying one of the platform's documented codes, a refusal made before any
- * the request was written (procurement-service refuses before the demand is
- * written; `AGGREGATION_DEMAND_LIMIT_REACHED` may still commit the window's
- * EXTEND end, never the demand, and releases the key, so a retry is safe).
- * Everything else — a `5xx` (a post-commit read can fail; the gateway's `503`
- * can follow an upstream reset after the commit), a timeout, a reset, a `4xx`
- * without a documented code (a proxy's page proves nothing) — is unconfirmed.
+ * Whether a failed write is **proven** not to have written anything: the shared
+ * writer's one rule ({@link isProvenRefusal}: a `4xx` whose documented code is
+ * answered with its own status; procurement-service refuses before the demand
+ * is written — `AGGREGATION_DEMAND_LIMIT_REACHED` may still commit the window's
+ * EXTEND end, never the demand, and releases the key). Everything else — a
+ * `5xx` (a post-commit read can fail; the gateway's `503` can follow an upstream
+ * reset after the commit), a timeout, a reset, a `4xx` without a documented code
+ * (a proxy's page proves nothing) — is unconfirmed. It proves only that THIS
+ * attempt did nothing: a retry's refusal says nothing about the earlier one.
  */
 export function provenUnwritten(status: number, code: string | undefined): boolean {
-  return status >= 400 && status < 500 && code !== undefined && DOCUMENTED_CODES.has(code);
+  return isProvenRefusal(status, code);
 }
 
 const answerSchema = z.object({ id: z.string().min(1) });
@@ -78,12 +80,14 @@ export const submitDemand = (
   session: WebSession,
   body: DemandBody,
   submissionId: string,
+  replayDeadline: number,
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenDemand, DemandField>> =>
   writeThroughGateway(session, {
     path: '/v1/demand-requests',
     body,
     submissionId,
+    replayDeadline,
     schema: answerSchema,
     mapping: DEMAND_FIELD_MAPPING,
     fetchImpl,

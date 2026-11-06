@@ -5,6 +5,7 @@ import {
   MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
   MAX_REPLAY_MARGIN_SECONDS,
   MIN_REPLAY_MARGIN_MS,
+  procurementDemandWindowFits,
   projectCreateWindowFits,
   replayMarginCoversClockBudget,
 } from './unresolved-request-policy';
@@ -70,8 +71,9 @@ const OVERSIGHT_ROLE = 'AUDITOR';
 const PLATFORM_ROLE = 'SYSTEM_ADMIN';
 
 /**
- * The smallest `WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS`: procurement-service has no
- * replay fence, so the margin also absorbs an unbounded wait inside the service.
+ * The smallest `WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS`. procurement-service refuses a
+ * passed deadline on its own clock (FU-156); this margin is kept as a second guard,
+ * wide enough to absorb a wait inside the service on its own.
  */
 const PROCUREMENT_MIN_REPLAY_MARGIN_SECONDS = 5 * 60;
 
@@ -514,12 +516,14 @@ const schema = z.object({
 
   /**
    * How much earlier than that retention the portal stops re-sending a demand
-   * command, in seconds. procurement-service has no replay fence of its own
-   * (no `Idempotency-Replay-Deadline`), so this margin is the whole budget: two
-   * clock skews and one request (`MIN_REPLAY_MARGIN_MS`), plus however long the
-   * request waits inside the service before it reads its clock for the key
-   * (guards, a database connection), which nothing bounds. So the floor is five
-   * minutes, well above that budget, and the schema refuses less.
+   * command, in seconds. Every send carries its deadline as
+   * `Idempotency-Replay-Deadline`, which procurement-service refuses on its own
+   * clock once passed (FU-156): that is the guarantee, and this margin a second
+   * guard — two clock skews and one request (`MIN_REPLAY_MARGIN_MS`) plus a wait
+   * inside the service, so the floor stays five minutes. The window (retention
+   * less this margin, plus the portal's 30 s allowance) may not exceed
+   * `PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s), or the
+   * portal refuses to start (`loadWebServerEnv`).
    */
   WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: z.coerce
     .number()
@@ -577,6 +581,16 @@ export function loadWebServerEnv(
     )
   ) {
     missing.push('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+  }
+  // The demand window against procurement-service's fence, by the same shared-constant rule (FU-156).
+  if (
+    parsed.success &&
+    !procurementDemandWindowFits(
+      parsed.data.WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS,
+      parsed.data.WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS,
+    )
+  ) {
+    missing.push('WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS');
   }
 
   if (!parsed.success || missing.length > 0) {

@@ -245,10 +245,11 @@ describe('one demand, and the aggregation it joined (tenant isolation)', () => {
 
 describe('the submission', () => {
   const BODY = { productId: 'PRD_01J00000000000000000000000', quantity: 12 };
+  const DEADLINE = 1_767_225_600_000;
 
   it('posts the body with the submission id as the Idempotency-Key', async () => {
     const { impl, seen } = gateway({ status: 201, body: demand() });
-    expect(await submitDemand(S, BODY, 'sub-key-0001', impl)).toMatchObject({
+    expect(await submitDemand(S, BODY, 'sub-key-0001', DEADLINE, impl)).toMatchObject({
       kind: 'CREATED',
       data: { id: 'DMR_1' },
     });
@@ -256,6 +257,8 @@ describe('the submission', () => {
     expect(new URL(seen[0]!.url).pathname).toBe('/v1/demand-requests');
     expect(seen[0]!.body).toEqual(BODY);
     expect(seen[0]!.headers.get('idempotency-key')).toBe('sub-key-0001');
+    // The stored deadline goes with it: procurement-service refuses it on its own clock (FU-156).
+    expect(seen[0]!.headers.get('idempotency-replay-deadline')).toBe(String(DEADLINE));
   });
 
   it.each(Object.entries(DEMAND_REFUSAL_MESSAGES))(
@@ -266,30 +269,46 @@ describe('the submission', () => {
           { path: 'Demand cannot be submitted', code, message: 'English' },
         ]),
       );
-      expect(await submitDemand(S, BODY, 'sub-key-0001', impl)).toMatchObject({
+      expect(await submitDemand(S, BODY, 'sub-key-0001', DEADLINE, impl)).toMatchObject({
         kind: 'INVALID',
         message: text,
       });
     },
   );
 
-  it('says a reused key and an unknown refusal in fixed words', async () => {
+  it('says a reused key and an unknown detail reason in fixed words', async () => {
     let { impl } = gateway(problem(409, 'IDEMPOTENCY_KEY_REUSED'));
-    expect(await submitDemand(S, BODY, 'sub-key-0001', impl)).toMatchObject({
+    expect(await submitDemand(S, BODY, 'sub-key-0001', DEADLINE, impl)).toMatchObject({
       kind: 'INVALID',
       message: KEY_REUSED_MESSAGE,
     });
-    ({ impl } = gateway(problem(422, 'SOMETHING_NEW')));
-    expect(await submitDemand(S, BODY, 'sub-key-0001', impl)).toMatchObject({
+    ({ impl } = gateway(
+      problem(422, 'BUSINESS_RULE_VIOLATION', [
+        { path: 'Demand cannot be submitted', code: 'SOMETHING_NEW', message: 'English' },
+      ]),
+    ));
+    expect(await submitDemand(S, BODY, 'sub-key-0001', DEADLINE, impl)).toMatchObject({
       kind: 'INVALID',
       message: DEMAND_INVALID_MESSAGE,
     });
+  });
+
+  it('an undocumented top-level code is not a refusal: unconfirmed (PR-830 r1 F1)', async () => {
+    for (const status of [400, 409, 422]) {
+      const { impl } = gateway(problem(status, 'SOMETHING_NEW'));
+      expect(await submitDemand(S, BODY, 'sub-key-0001', DEADLINE, impl)).toMatchObject({
+        kind: 'UNKNOWN_OUTCOME',
+      });
+    }
   });
 
   it('only a 4xx with a documented code proves nothing was written', () => {
     expect(provenUnwritten(413, 'PAYLOAD_TOO_LARGE')).toBe(true);
     expect(provenUnwritten(409, 'IDEMPOTENCY_KEY_REUSED')).toBe(true);
     expect(provenUnwritten(413, undefined)).toBe(false);
+    // A documented code under another status than its own proves nothing either.
+    expect(provenUnwritten(409, 'PAYLOAD_TOO_LARGE')).toBe(false);
+    expect(provenUnwritten(404, 'VALIDATION_FAILED')).toBe(false);
     expect(provenUnwritten(418, 'MADE_UP')).toBe(false);
     expect(provenUnwritten(500, 'INTERNAL_ERROR')).toBe(false);
     expect(provenUnwritten(503, 'SERVICE_UNAVAILABLE')).toBe(false);

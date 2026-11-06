@@ -37,6 +37,18 @@ import type { DemandFormState } from './demand-form-state';
  * deadline — which procurement-service answers with the first result; anything
  * else is `HELD`. A new key needs the person's explicit release, after checking
  * the full list. The store unreachable is not "no hold": nothing is sent.
+ *
+ * Every send carries the record's deadline as `Idempotency-Replay-Deadline`, and
+ * procurement-service refuses it on its own clock once passed (FU-156): the
+ * portal's check below and its margin are a second guard, not the guarantee.
+ *
+ * ## A refused retry keeps the earlier attempt's uncertainty (PR-830 r1 F1)
+ *
+ * A refusal — or a send that never left — proves only that THIS attempt did
+ * nothing. When it was a retry of an unresolved request, the earlier attempt may
+ * still have registered the demand: the store keeps the hold (a retry's `REFUSED`
+ * / `NEVER_SENT` puts it back to unresolved) and the person is told the same —
+ * `UNCONFIRMED`, check the list — never "nothing changed".
  */
 export async function runSubmitDemand(form: FormData): Promise<DemandFormState> {
   const session = await currentSession();
@@ -97,11 +109,14 @@ export async function runSubmitDemand(form: FormData): Promise<DemandFormState> 
       break;
   }
   const { attempt } = reserved;
+  /** A refusal of THIS attempt, as said to the person: a retry's earlier attempt stays unconfirmed. */
+  const refused = (state: DemandFormState, correlationId: string): DemandFormState =>
+    reserved.retry ? { kind: 'UNCONFIRMED', correlationId } : state;
 
   // Again right before the dispatch: the process may have paused since the
-  // reservation. procurement-service has no replay fence, so this check and the
-  // margin it keeps are the portal's whole guarantee. A refusal here proves only
-  // that THIS attempt did nothing: a retry of an unresolved request stays held.
+  // reservation. A second guard: procurement-service refuses the same deadline on
+  // its own clock (FU-156). A refusal here proves only that THIS attempt did
+  // nothing: a retry of an unresolved request stays held, and EXPIRED says so.
   const deadline = reserved.deadline;
   if (deadline === null || Date.now() + MAX_CLOCK_SKEW_MS > deadline) {
     await settleUnresolved(attempt, 'REFUSED');
@@ -110,7 +125,7 @@ export async function runSubmitDemand(form: FormData): Promise<DemandFormState> 
 
   let result;
   try {
-    result = await submitDemand(session, parsed.body, submissionId);
+    result = await submitDemand(session, parsed.body, submissionId, deadline);
   } catch (error) {
     // Anything unexpected after the request may have gone out: unresolved.
     await settleUnresolved(attempt, 'UNRESOLVED');
@@ -134,29 +149,42 @@ export async function runSubmitDemand(form: FormData): Promise<DemandFormState> 
   switch (result.kind) {
     case 'INVALID':
       await settleUnresolved(attempt, 'REFUSED');
-      return {
-        kind: 'INVALID',
-        submissionId,
-        replay,
-        values,
-        fieldErrors: result.fieldErrors,
-        message: result.message,
-      };
+      return refused(
+        {
+          kind: 'INVALID',
+          submissionId,
+          replay,
+          values,
+          fieldErrors: result.fieldErrors,
+          message: result.message,
+        },
+        result.correlationId,
+      );
     case 'FORBIDDEN':
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FORBIDDEN', correlationId: result.correlationId };
+      return refused(
+        { kind: 'FORBIDDEN', correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'NOT_FOUND':
       // The endpoint names no resource to be absent; the shared type is handled, not assumed away.
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
+      return refused(
+        { kind: 'FAILED', status: 404, correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'UNAVAILABLE':
+      // EXPIRED already says an earlier send may have registered it: true for a retry too.
       if (result.replayWindowClosed) {
         await settleUnresolved(attempt, 'REFUSED');
         return { kind: 'EXPIRED', values };
       }
       if (result.neverSent) {
         await settleUnresolved(attempt, 'NEVER_SENT');
-        return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+        return refused(
+          { kind: 'FAILED', status: result.status, correlationId: result.correlationId },
+          result.correlationId,
+        );
       }
       // "Nothing changed" only where the answer proves it; a 5xx may follow the commit.
       if (!provenUnwritten(result.status, result.code)) {
@@ -164,7 +192,10 @@ export async function runSubmitDemand(form: FormData): Promise<DemandFormState> 
         return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
       }
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+      return refused(
+        { kind: 'FAILED', status: result.status, correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'UNKNOWN_OUTCOME':
       await settleUnresolved(attempt, 'UNRESOLVED');
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };

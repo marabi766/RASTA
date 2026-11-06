@@ -41,6 +41,21 @@ import {
 
 const currentSession = jest.fn();
 const submitDemand = jest.fn();
+// The real sender, for the cases that must go through the shared writer's classification.
+const { submitDemand: realSubmitDemand } = jest.requireActual(
+  '@/server/demand-commands',
+) as typeof import('@/server/demand-commands');
+/** The real writer answering `status` with `body` (none: an empty response). */
+const answeredWith =
+  (status: number, body?: unknown) =>
+  (...args: unknown[]) =>
+    (realSubmitDemand as (...a: unknown[]) => unknown)(...args, (async () =>
+      body === undefined
+        ? new Response(null, { status })
+        : new Response(JSON.stringify(body), {
+            status,
+            headers: { 'content-type': 'application/json' },
+          })) as unknown as typeof fetch);
 const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
 });
@@ -188,6 +203,7 @@ describe('what is sent', () => {
       SESSION,
       { productId: PRODUCT, quantity: 12 },
       form.get(SUBMISSION_FIELD),
+      expect.any(Number),
     );
     const url = new URL(redirect.mock.calls[0]![0], 'http://portal.test');
     expect(url.pathname).toBe('/procurement/demands/DMR_1');
@@ -195,6 +211,20 @@ describe('what is sent', () => {
       'submitted',
     );
     expect(await held()).toEqual({ kind: 'NONE' });
+  });
+
+  it('sends the stored deadline with every send, the retry included (PR-830 r1 F2)', async () => {
+    const issuedAt = Date.now();
+    const form = formData(VALID, { replay: issuedAt });
+    submitDemand.mockResolvedValue(LOST);
+    await submit(form);
+    const deadline = submitDemand.mock.calls[0]![3] as number;
+    expect(Number.isSafeInteger(deadline)).toBe(true);
+    expect(deadline).toBeLessThanOrEqual(issuedAt + demandReplayWindowSeconds() * 1000);
+    expect(deadline).toBeGreaterThan(Date.now());
+    submitDemand.mockResolvedValue(CREATED);
+    await expect(submit(form)).rejects.toThrow('NEXT_REDIRECT:');
+    expect(submitDemand.mock.calls[1]![3]).toBe(deadline);
   });
 
   it('never sends an organization written into the form', async () => {
@@ -313,6 +343,22 @@ describe('what comes back', () => {
     expect(await held()).toMatchObject({ kind: 'PENDING' });
   });
 
+  it.each([
+    ['404 without a body (code=null)', 404, undefined],
+    ['403 without a body', 403, undefined],
+    ['400 with an undocumented code', 400, { code: 'SOMETHING_NEW', message: 'x' }],
+    ['409 with an undocumented code', 409, { code: 'SOMETHING_NEW', message: 'x' }],
+    ['422 with an undocumented code', 422, { code: 'SOMETHING_NEW', message: 'x' }],
+  ])(
+    'reviewer probe (PR-830 r1 F1): %s through the real writer is UNCONFIRMED and holds the slot',
+    async (_name, status, body) => {
+      submitDemand.mockImplementation(answeredWith(status, body));
+      const form = formData();
+      expect(await submit(form)).toMatchObject({ kind: 'UNCONFIRMED' });
+      expect((await heldRequest()).key).toBe(form.get(SUBMISSION_FIELD));
+    },
+  );
+
   it('an exception after the dispatch began leaves the request unresolved', async () => {
     submitDemand.mockRejectedValue(new Error('boom'));
     await expect(submit(formData())).rejects.toThrow('boom');
@@ -345,12 +391,30 @@ describe('an unresolved submission outlives the form that sent it (checklist A 2
     expect(await held()).toEqual({ kind: 'NONE' });
   });
 
-  it('a refused retry proves only that attempt did nothing: the request stays held', async () => {
-    const first = await sendAndLose();
-    submitDemand.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'denied' });
-    expect(await submit(first)).toMatchObject({ kind: 'FORBIDDEN' });
-    expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
-  });
+  it.each([
+    ['FORBIDDEN', { kind: 'FORBIDDEN', correlationId: 'denied' }],
+    [
+      'INVALID',
+      { kind: 'INVALID', fieldErrors: {}, message: 'fixed words', correlationId: 'denied' },
+    ],
+    ['NOT_FOUND', { kind: 'NOT_FOUND', correlationId: 'denied' }],
+    [
+      '429 RATE_LIMIT_EXCEEDED (reviewer probe)',
+      { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'denied' },
+    ],
+    [
+      'never sent (reviewer probe)',
+      { kind: 'UNAVAILABLE', status: 503, neverSent: true, correlationId: 'denied' },
+    ],
+  ])(
+    'a retry answered %s proves only that attempt did nothing: held, and said UNCONFIRMED — never "nothing changed"',
+    async (_name, result) => {
+      const first = await sendAndLose();
+      submitDemand.mockResolvedValue(result);
+      expect(await submit(first)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'denied' });
+      expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
+    },
+  );
 
   it('is not resent past its deadline, and stays held', async () => {
     const first = formData(VALID, {

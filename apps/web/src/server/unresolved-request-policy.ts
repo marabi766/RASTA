@@ -1,4 +1,7 @@
-import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import {
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
+  PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
+} from '@rasta/contracts';
 
 /**
  * What every unresolved-request purpose is allowed to do, and the one time
@@ -150,6 +153,19 @@ export function projectCreateWindowFits(ttlHours: number, marginSeconds: number)
   return (
     windowSeconds * 1000 + MAX_CLOCK_SKEW_MS <= PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS * 1000
   );
+}
+
+/**
+ * The same boot check for the demand window (FU-156, PM decision D-125): procurement-service refuses a
+ * replay deadline later than `claim + TTL − B` and refuses to boot unless `TTL − B − skew ≥ K`, with
+ * K = `PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS`. The portal refuses to boot unless
+ *
+ *     window + MAX_CLOCK_SKEW_MS ≤ K          window = WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS · 3600
+ *                                                       − WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS
+ */
+export function procurementDemandWindowFits(ttlHours: number, marginSeconds: number): boolean {
+  const windowSeconds = ttlHours * 3600 - marginSeconds;
+  return windowSeconds * 1000 + MAX_CLOCK_SKEW_MS <= PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS * 1000;
 }
 
 /** The largest `WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS` the setting's schema accepts. */
