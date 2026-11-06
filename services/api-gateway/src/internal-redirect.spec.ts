@@ -19,9 +19,14 @@ describe('gateway RELAY rejects authenticated redirects', () => {
             const gateway = new ProxyService({ IDENTITY_SERVICE_URL: baseUrl } as never, tokens, {
               timeoutMs: 2000,
               failureThreshold: 1,
+              organizationsToOpen: 1,
               resetAfterMs: 60000,
             });
-            const result = runWithContext(createSystemContext({ correlationId: 'COR_1' }), () =>
+            const caller = {
+              ...createSystemContext({ correlationId: 'COR_1' }),
+              organizationId: 'ORG_1',
+            };
+            const result = runWithContext(caller, () =>
               gateway.forward({
                 service: 'identity',
                 method,
@@ -50,14 +55,16 @@ describe('gateway RELAY rejects authenticated redirects', () => {
                 state: 'OPEN',
               });
               await expect(
-                gateway.forward({
-                  service: 'identity',
-                  method,
-                  path: '/v1/users',
-                  query: '',
-                  headers: {},
-                  body: undefined,
-                }),
+                runWithContext(createSystemContext({ correlationId: 'COR_2' }), () =>
+                  gateway.forward({
+                    service: 'identity',
+                    method,
+                    path: '/v1/users',
+                    query: '',
+                    headers: {},
+                    body: undefined,
+                  }),
+                ),
               ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
               expect(probe.sent).toHaveLength(1);
             }

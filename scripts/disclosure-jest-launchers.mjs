@@ -82,7 +82,7 @@ export const JEST_LAUNCHERS = {
       'scripts/integration-partitions.mjs':
         'd593876d547a32a50cc030ccf345f9d153c529eeae54d1dbf11138aef5ac3f7c',
       'scripts/test-phases.test.mjs':
-        'f9343feabd3e2fc1977ac04edff8b135a2011ce9dafb3c52792d23680c52bacd',
+        '2b51ab3aed7f785f404179fd467422cc6dd16b7858e6c2af4447200e5fbc046b',
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
@@ -151,16 +151,16 @@ export const JEST_LAUNCHERS = {
   'scripts/check-unit-step-concurrency.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; the added timeout helper only parses command strings. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
+      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
     sha256: {
       'scripts/ci-node-test-timeouts-lib.mjs':
-        '73f4adbb236d634ff18c58c513eedae4988f66e1f6854f14ccd3c076b0ace679',
+        'a07201011f4b69273ab5c9ec658f407423814ab43ba3bb58b5f0376ea851351e',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '08458ba01284f457a712c4189210c0ea2397e9ba221cd54d2bdb2f6b4a06c96d',
+        '8646335dfd49062b0a7a2ce1479902fc84c933c85c588e8c9c884c84792063db',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
-        '67bd3962244fdf7c909bfb93ce1f07d7ab3643203570f87d3af1d36900ee8795',
+        '6888fb2191981366b42d2eb83c593eb29069ff2d9eb37203cae5c5723c0a5aad',
     },
   },
   'scripts/exchange-deadline-rule.test.mjs': {
@@ -169,7 +169,7 @@ export const JEST_LAUNCHERS = {
       'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
     sha256: {
       'scripts/exchange-deadline-rule.test.mjs':
-        '98a8954bc4da52dee4cbcf512b51a868dd1371f859121f1aadcb9e9f2a2f84e6',
+        'c744d65515dff65bc511c293445a6deb56b696aac675e9151c5fe1594e9e8dc0',
     },
   },
   'scripts/ci-integration-split.test.mjs': {
@@ -178,9 +178,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        '264e7d7b9a3443bb3520b2ff380fc0395733cf2a1ca67d6ea60d9134af9da947',
+        'b7ec47c1b0fb9cb494b4f5348a1e70d571cd08f26965fc8a90ff8f3ad3464a64',
       'scripts/ci-integration-split-lib.mjs':
-        'fdce9bdfac074267f1fc26702ed9af73d9911f94f00a599ddc5d5def2a6912fe',
+        'c1749b54c13c707abffe5cc684a763fd9db540c81c452b95f944d70e1dfd7d70',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
@@ -191,11 +191,11 @@ export const JEST_LAUNCHERS = {
       'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
     sha256: {
       'scripts/testing-dev-only.test.mjs':
-        '7e5223788548f0e6b7fc16366fbd39e735bc8b53c33a215116f4676f7d3b27c6',
+        '8d315c9824364fdbbd6795dc2cb86c0171cb7e65c60599fa299331934aa07c2d',
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
-        '579f4d5a3b4539ca9304b5742fb23b7c826c1f83c085509c0911976775873ab3',
+        '8dde8b52864b7b218461e7a822e0b5cf38bcb106d2ed1a90a9fc39031fdb278b',
     },
   },
   'scripts/lint-scripts-registration.test.mjs': {
@@ -204,7 +204,7 @@ export const JEST_LAUNCHERS = {
       'Spawns git fixture commands and Turbo lint --dry=json snapshots; test runner names are registration fixtures, never executed.',
     sha256: {
       'scripts/lint-scripts-registration.test.mjs':
-        '90f8b760685f446aa47d26ea57690220b35c87e73c38b02825098d6e1ff3e7a6',
+        'e611dc8ccaf8232cfbe179cb4b8f3f5d4443b50424f4cffd0deba6e0c89284a0',
     },
   },
 };

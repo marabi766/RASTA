@@ -57,6 +57,7 @@ export const TENANT_SCOPED_MODELS = [
   'RewardSourceEvaluation',
   'RewardBalance',
   'Settlement',
+  'SettlementReversal',
   'IdempotencyKey',
 ] as const;
 

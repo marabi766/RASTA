@@ -43,22 +43,46 @@ const MARK = /\/\/ ✗ ([\w ]+)$/;
 /** The one file the rule exempts whole (scripts/internal-token-source-rule.mjs). */
 const CLIENT_FILE = 'packages/nest-common/src/http/internal-http-client.ts';
 
+/**
+ * Writes `files` (paths relative to `cwd` → text), refusing to overwrite anything, and returns
+ * the cleanup: it removes only the files written and the directories this call created, deepest
+ * first, each with a non-recursive rmdir, so a file someone else put there fails the cleanup
+ * instead of being deleted.
+ */
+function placeFixtures(cwd, files) {
+  const written = [];
+  const created = new Set();
+  const remove = () => {
+    for (const file of written.splice(0)) fs.rmSync(file, { force: true });
+    for (const dir of [...created].sort((a, b) => b.length - a.length)) fs.rmdirSync(dir);
+    created.clear();
+  };
+  try {
+    for (const relative of Object.keys(files)) {
+      const absolute = path.join(cwd, relative);
+      assert.ok(!fs.existsSync(absolute), `fixture would overwrite ${absolute}`);
+    }
+    for (const [relative, text] of Object.entries(files)) {
+      const absolute = path.join(cwd, relative);
+      for (let dir = path.dirname(absolute); !fs.existsSync(dir); dir = path.dirname(dir)) {
+        created.add(dir);
+      }
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, text, { flag: 'wx' });
+      written.push(absolute);
+    }
+  } catch (error) {
+    remove();
+    throw error;
+  }
+  return remove;
+}
+
 /** Writes `files` (workspace-relative path → text), lints them, removes them. */
 function lintFixtures(workspace, files, { stdin } = {}) {
   const cwd = path.join(ROOT, workspace);
-  const written = [];
-  const directories = new Set();
+  const remove = placeFixtures(cwd, files);
   try {
-    for (const [relative, text] of Object.entries(files)) {
-      const absolute = path.join(cwd, relative);
-      assert.ok(!fs.existsSync(absolute), `fixture would overwrite ${workspace}/${relative}`);
-      for (let dir = path.dirname(absolute); !fs.existsSync(dir); dir = path.dirname(dir)) {
-        directories.add(dir);
-      }
-      fs.mkdirSync(path.dirname(absolute), { recursive: true });
-      fs.writeFileSync(absolute, text);
-      written.push(absolute);
-    }
     const args = [ESLINT, '--format', 'json', '--no-warn-ignored'];
     const result = stdin
       ? spawnSync(process.execPath, [...args, '--stdin', '--stdin-filename', stdin.file], {
@@ -80,10 +104,7 @@ function lintFixtures(workspace, files, { stdin } = {}) {
     }
     return byFile;
   } finally {
-    for (const file of written) fs.rmSync(file, { force: true });
-    for (const dir of [...directories].sort((a, b) => b.length - a.length)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    remove();
   }
 }
 
@@ -961,31 +982,20 @@ test('R8-1: a build-script helper a production page imports is held to the rule'
   // read the secret, imported by a portal page (which R8-1 found passes the portal's own lint:
   // the helpers' code is not its own). The helpers are reached by no lint script, so coverage
   // lints them with the rule wherever they sit, and neither report is a reviewed one.
+  // Every fixture path is under a per-run name, so a real apps/web/scripts/nested (or any other
+  // real file) is neither a collision nor something the cleanup can delete.
   const header = `apps/web/scripts/${TAG}-header.mjs`;
-  const secret = `apps/web/scripts/nested/${TAG}-secret.mjs`;
+  const secret = `apps/web/scripts/${TAG}-nested/secret.mjs`;
   const page = `apps/web/src/app/${TAG}/page.tsx`;
   const files = {
     [header]: "export const makeHeaders = (token) => ({ 'x-internal-token': token });\n",
     [secret]: 'export const secret = () => process.env.INTERNAL_TOKEN_SECRET;\n',
     [page]:
       `import { makeHeaders } from '../../../scripts/${TAG}-header.mjs';\n` +
-      `import { secret } from '../../../scripts/nested/${TAG}-secret.mjs';\n` +
+      `import { secret } from '../../../scripts/${TAG}-nested/secret.mjs';\n` +
       'export default function Page() { return String(makeHeaders(secret())); }\n',
   };
-  for (const file of Object.keys(files)) {
-    assert.ok(!fs.existsSync(path.join(ROOT, file)), `fixture would overwrite ${file}`);
-  }
-  const directories = [`apps/web/scripts/nested`, `apps/web/src/app/${TAG}`];
-  for (const dir of directories) assert.ok(!fs.existsSync(path.join(ROOT, dir)));
-  t.after(() => {
-    for (const file of Object.keys(files)) fs.rmSync(path.join(ROOT, file), { force: true });
-    for (const dir of directories)
-      fs.rmSync(path.join(ROOT, dir), { recursive: true, force: true });
-  });
-  for (const [file, text] of Object.entries(files)) {
-    fs.mkdirSync(path.dirname(path.join(ROOT, file)), { recursive: true });
-    fs.writeFileSync(path.join(ROOT, file), text);
-  }
+  t.after(placeFixtures(ROOT, files));
   const { on, unlinted } = coverage(Object.keys(files));
   assert.ok(on.has(page), 'the page is linted by the portal, with the rule on');
   assert.deepEqual(unlinted, [header, secret]);
@@ -1052,18 +1062,22 @@ test(
   { skip: process.env.INTERNAL_TOKEN_LINT_SCRIPTS !== '1' && 'set INTERNAL_TOKEN_LINT_SCRIPTS=1' },
   () => {
     const placed = [];
+    const removals = [];
+    const reports = fs.mkdtempSync(path.join(os.tmpdir(), `${TAG}-reports-`));
     try {
       for (const { workspace, lint } of lintWorkspaces()) {
         const target = lint.trim().split(/\s+/)[1] === '.' ? '.' : 'src';
-        const file = path.join(ROOT, workspace, target, `${TAG}.ts`);
-        fs.writeFileSync(
-          file,
-          "export const send = (token: string) => fetch('/x', { headers: { 'x-internal-token': token } });\n",
+        const relative = `${target}/${TAG}.ts`;
+        removals.push(
+          placeFixtures(path.join(ROOT, workspace), {
+            [relative]:
+              "export const send = (token: string) => fetch('/x', { headers: { 'x-internal-token': token } });\n",
+          }),
         );
-        placed.push({ workspace, file });
+        placed.push({ workspace, file: path.join(ROOT, workspace, relative) });
       }
       for (const { workspace, file } of placed) {
-        const report = path.join(os.tmpdir(), `${TAG}-${workspace.replace('/', '-')}.json`);
+        const report = path.join(reports, `${workspace.replace('/', '-')}.json`);
         const result = spawnSync('pnpm', ['run', 'lint', '--format', 'json', '-o', report], {
           cwd: path.join(ROOT, workspace),
           encoding: 'utf8',
@@ -1089,7 +1103,8 @@ test(
         );
       }
     } finally {
-      for (const { file } of placed) fs.rmSync(file, { force: true });
+      for (const remove of removals) remove();
+      fs.rmSync(reports, { recursive: true, force: true });
     }
   },
 );

@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Roles, zodPipe } from '@rasta/nest-common';
+import { Roles } from '@rasta/nest-common';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { canonicalBodyPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import {
@@ -58,7 +59,7 @@ export class PaymentReconciliationController {
   requeue(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
+    @Body(canonicalBodyPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
   ) {
     // Authorization first, then the replay (Codex on #175, MED 3): a cached
     // answer goes only to a resolver, and only to the one who made it.
@@ -90,7 +91,7 @@ export class PaymentReconciliationController {
   propose(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(proposeResolutionSchema)) dto: ProposeResolutionDto,
+    @Body(canonicalBodyPipe(proposeResolutionSchema)) dto: ProposeResolutionDto,
   ) {
     // Authorization first, then the replay (Codex on #175, MED 3): a cached
     // answer goes only to a resolver, and only to the one who made it.
@@ -121,7 +122,7 @@ export class PaymentReconciliationController {
     @Param('id') id: string,
     @Param('resolutionId') resolutionId: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
+    @Body(canonicalBodyPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
   ) {
     // Authorization first, then the replay (Codex on #175, MED 3): a cached
     // answer goes only to a resolver, and only to the one who made it.
@@ -148,7 +149,7 @@ export class PaymentReconciliationController {
     @Param('id') id: string,
     @Param('resolutionId') resolutionId: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
+    @Body(canonicalBodyPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
   ) {
     // Authorization first, then the replay (Codex on #175, MED 3): a cached
     // answer goes only to a resolver, and only to the one who made it.

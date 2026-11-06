@@ -337,6 +337,14 @@ export {
 export type { JsonSchema } from './openapi/zod-schema';
 export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
 export { publishApiErrors, healthProbeErrorSchema } from './openapi/error-document';
+export {
+  applyOperationSecurity,
+  documentationModuleFor,
+  routeAccessByOperation,
+  BEARER_SCHEME,
+  INTERNAL_TOKEN_SCHEME,
+} from './openapi/operation-security';
+export type { RouteAccess, ServiceRouteUsers } from './openapi/operation-security';
 // Conformance checks of a published document against the real error bodies; for tests.
 export {
   errorEnvelopeProblems,
@@ -346,6 +354,9 @@ export {
   publishedPathOf,
   publishedResponseSchemaOf,
   realFilterResponse,
+  realRoutesOf,
+  routeErrorProblems,
+  unresolvedRefs,
   validatePublishedBody,
   PROBE_CONTEXTS,
   PROBE_TRACEPARENT,
@@ -357,9 +368,26 @@ export type {
   PublishedErrorResponse,
   PublishedSchema,
   PublishedProbeException,
+  ProbeExceptionOptions,
+  RealRoute,
+  RouteCheckOptions,
+  RoutedApplication,
 } from './openapi/published-body';
 
 export { clientFailureCode } from './database/client-failure';
 export { DatabaseConnectionError, createSafePrismaClient } from './database/safe-prisma-client';
 export type { RuntimeDatabaseSetting } from './database/safe-prisma-client';
 export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';
+
+// Human-typed text a uniqueness constraint compares (FU-084) ----------------
+export {
+  canonicalUniqueText,
+  foldUniqueText,
+  isCanonicalUniqueText,
+  uniqueTextKey,
+  uniqueTextSearchKey,
+  foldAsciiCase,
+  uniqueText,
+  NOT_CANONICAL_TEXT,
+} from './text/canonical-unique-text';
+export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';

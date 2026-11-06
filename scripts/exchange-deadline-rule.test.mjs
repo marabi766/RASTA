@@ -1145,6 +1145,87 @@ test('review N1: a write that also reads is a read, and the write beside a read 
 
 // A computed key that is provably a number, a bigint or a symbol names neither the controller nor
 // the timer; anything not provable could, and fails closed.
+/** The spec's numeric function members of `Math` (ES2025 + f16round, sumPrecise) — FU-001. */
+const FU001_MATH_FUNCTIONS = [
+  'abs',
+  'acos',
+  'acosh',
+  'asin',
+  'asinh',
+  'atan',
+  'atan2',
+  'atanh',
+  'cbrt',
+  'ceil',
+  'clz32',
+  'cos',
+  'cosh',
+  'exp',
+  'expm1',
+  'f16round',
+  'floor',
+  'fround',
+  'hypot',
+  'imul',
+  'log',
+  'log10',
+  'log1p',
+  'log2',
+  'max',
+  'min',
+  'pow',
+  'random',
+  'round',
+  'sign',
+  'sin',
+  'sinh',
+  'sqrt',
+  'sumPrecise',
+  'tan',
+  'tanh',
+  'trunc',
+];
+const FU001_WELL_KNOWN_SYMBOLS = [
+  'asyncDispose',
+  'asyncIterator',
+  'dispose',
+  'hasInstance',
+  'isConcatSpreadable',
+  'iterator',
+  'match',
+  'matchAll',
+  'metadata',
+  'replace',
+  'search',
+  'species',
+  'split',
+  'toPrimitive',
+  'toStringTag',
+  'unscopables',
+];
+/**
+ * Calls/members of `Math` and `Symbol` that are NOT numbers / symbols (FU-001): each could
+ * be or build a name (`Math.constructor('AbortController')` is a String object whose key is
+ * that name), so each is refused.
+ */
+const FU001_NOT_PROVEN = {
+  'Math.toString()': 'Math.toString()',
+  'Math.toLocaleString()': 'Math.toLocaleString()',
+  'Math.valueOf()': 'Math.valueOf()',
+  'Math.constructor builds the name': 'Math.constructor("AbortController")',
+  'Math.hasOwnProperty()': 'Math.hasOwnProperty(x)',
+  'Math.propertyIsEnumerable()': 'Math.propertyIsEnumerable(x)',
+  'Math.isPrototypeOf()': 'Math.isPrototypeOf(x)',
+  'Math.__lookupGetter__()': 'Math.__lookupGetter__(x)',
+  'an unknown Math member': 'Math.notAFunction(x)',
+  'Symbol.name is a string': 'Symbol.name',
+  'Symbol.for, not called': 'Symbol.for',
+  'Symbol.keyFor, not called': 'Symbol.keyFor',
+  'Symbol.prototype': 'Symbol.prototype',
+  'Symbol.constructor': 'Symbol.constructor',
+  'Symbol.length': 'Symbol.length',
+  'an unknown Symbol member': 'Symbol.notWellKnown',
+};
 const NOT_NAMES = {
   zero: '0',
   'negative literal': '-1',
@@ -1192,6 +1273,9 @@ const NOT_NAMES = {
   'symbol.for': 'Symbol.for("x")',
   'well-known symbol': 'Symbol.iterator',
   'conditional of symbols': 'c ? Symbol.iterator : Symbol.asyncIterator',
+  // FU-001: every numeric function member of `Math`, every well-known symbol.
+  ...Object.fromEntries(FU001_MATH_FUNCTIONS.map((f) => [`Math.${f}`, `Math.${f}(x)`])),
+  ...Object.fromEntries(FU001_WELL_KNOWN_SYMBOLS.map((w) => [`Symbol.${w}`, `Symbol.${w}`])),
 };
 // Aliases: a constant holding a provable key inherits it.
 const NOT_NAME_ALIASES = {
@@ -1235,6 +1319,7 @@ const MAY_BE_NAMES = {
   'logical not of a variable': '!x',
   'Symbol description': 'Symbol("x").description',
   'symbol key description': 'Symbol.keyFor(s)',
+  ...FU001_NOT_PROVEN,
 };
 const MAY_BE_NAME_ALIASES = {
   'let reassigned': 'let n = 1; n = pick();',
@@ -1879,5 +1964,332 @@ test('the decision is on the canonical path: the same files reached through a li
   } finally {
     rmSync(join(outside, 'repo'), { force: true });
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// FU-001 (review of #536): a logical assignment is worth the right side OR the value its
+// target already held, and only the numeric members of `Math` / the well-known symbols are
+// proof that a key names no global.
+// ---------------------------------------------------------------------------------------
+const LOGICAL_OPERATORS = ['||=', '&&=', '??='];
+// Each place a value is read; `SRC` is the logical assignment whose LEFT side holds the host.
+const FU001_LOGICAL_READS = {
+  'member read': ['let g = globalThis; export const v = (g OP other)[k];', [BY_NAME]],
+  'member read, chained': [
+    'let g = globalThis; let h; export const v = (h = g OP other)[k];',
+    [BY_NAME],
+  ],
+  'alias of the result': [
+    'let g = globalThis; const h = (g OP other); export const v = h[k];',
+    [BY_NAME],
+  ],
+  'declaration pattern': [
+    'let g = globalThis; const { [k]: C } = (g OP other); export { C };',
+    [BY_NAME],
+  ],
+  'assignment pattern': ['let g = globalThis; let C; ({ [k]: C } = (g OP other));', [BY_NAME]],
+  'controller by member': [
+    'let g = globalThis; export const c = new (g OP other).AbortController();',
+    ['controller'],
+  ],
+  'timer by member': [
+    'let g = globalThis; (g OP other).setTimeout(() => c.abort(), 1);',
+    ['timerAbort'],
+  ],
+  'timer destructured from the result': [
+    'let g = globalThis; const { setTimeout: later } = (g OP other); later(() => c.abort(), 1);',
+    ['timerAbort'],
+  ],
+  'timers module kept on the left': [
+    "let t = require('node:timers'); (t OP other).setTimeout(() => c.abort(), 1);",
+    ['timerAbort'],
+  ],
+};
+test('FU-001: a logical assignment keeps the value its target held — every operator, every read', () => {
+  for (const op of LOGICAL_OPERATORS) {
+    for (const [label, [template, ids]] of Object.entries(FU001_LOGICAL_READS)) {
+      const code = template.replace('OP', op);
+      assert.deepEqual(found(code), [...ids].sort(), `${op} / ${label}: ${code}`);
+    }
+  }
+});
+test('FU-001: a logical assignment of values that are never the global object is still allowed', () => {
+  for (const op of LOGICAL_OPERATORS) {
+    for (const code of [
+      `let s = 1; export const v = (s ${op} 2)[k];`,
+      `let o = { a: 1 }; export const v = (o ${op} other).a;`,
+      `let s = "a"; const { [k]: C } = (s ${op} "b"); export { C };`,
+    ]) {
+      allowed(code);
+    }
+  }
+});
+
+test('FU-001: only the numeric members of Math and the well-known symbols prove a key', () => {
+  for (const [position, build] of Object.entries(KEY_POSITIONS)) {
+    for (const f of FU001_MATH_FUNCTIONS) {
+      allowed(build(`Math.${f}(x)`, ''));
+    }
+    for (const w of FU001_WELL_KNOWN_SYMBOLS) allowed(build(`Symbol.${w}`, ''));
+    for (const [label, key] of Object.entries(FU001_NOT_PROVEN)) {
+      assert.ok(
+        found(build(key, '')).includes(BY_NAME),
+        `${position} / ${label}: ${build(key, '')}`,
+      );
+    }
+  }
+});
+test('FU-001: the Math list is what the runtime says — each present member returns a number', () => {
+  for (const f of FU001_MATH_FUNCTIONS) {
+    if (typeof Math[f] !== 'function') continue; // newer than this runtime (f16round, sumPrecise)
+    const value = f === 'sumPrecise' ? Math[f]([1, 2]) : Math[f](1, 2);
+    assert.equal(typeof value, 'number', `Math.${f}`);
+  }
+  for (const w of FU001_WELL_KNOWN_SYMBOLS) {
+    if (Symbol[w] !== undefined) assert.equal(typeof Symbol[w], 'symbol', `Symbol.${w}`);
+  }
+  // The proven-not cases really are not numbers / symbols.
+  assert.equal(typeof Math.toString(), 'string');
+  assert.equal(String(Math.constructor('AbortController')), 'AbortController');
+  assert.equal(typeof Symbol.name, 'string');
+});
+
+// ---------------------------------------------------------------------------------------
+// FU-001 r1 F1 (review of #674): the shared resolver kept no source it could not place. A
+// timers export selected by member or import, a window reached from the global, an unknown
+// member of the global, and a host held by an inherited / static / namespace member each
+// became 'other' or nothing. Every family, in every file type and every kind of path.
+// ---------------------------------------------------------------------------------------
+const F1_PATHS = [
+  'scripts/probe',
+  'services/fixture-service/src/probe',
+  'packages/fixture/src/probe',
+  'apps/web/src/probe',
+];
+const TS_ONLY = /^(ts|tsx|mts|cts)$/;
+const F1_MODULES = ['timers', 'node:timers', 'timers/promises', 'node:timers/promises'];
+/** Timer exports: `M` is the module name; each form references the platform timer. */
+const F1_TIMER_FORMS = {
+  'namespace import .default': "import * as t from 'M'; t.default.setTimeout(() => c.abort(), 5);",
+  'default import .default': "import t from 'M'; t.default.setTimeout(() => c.abort(), 5);",
+  'awaited import .default':
+    "const t = await import('M'); t.default.setTimeout(() => c.abort(), 5);",
+  'awaited import, member at once': "(await import('M')).default.setTimeout(() => c.abort(), 5);",
+  'require .default': "const t = require('M'); t.default.setTimeout(() => c.abort(), 5);",
+  'import { default as t }': "import { default as t } from 'M'; t.setTimeout(() => c.abort(), 5);",
+  'import { "default" as t }':
+    "import { 'default' as t } from 'M'; t.setTimeout(() => c.abort(), 5);",
+  'destructured default':
+    "import * as t from 'M'; const { default: d } = t; d.setTimeout(() => c.abort(), 5);",
+  'destructured default, nested':
+    "import * as t from 'M'; const { default: { setTimeout: s } } = t; s(() => c.abort(), 5);",
+  'destructured default, assigned':
+    "import * as t from 'M'; let d; ({ default: d } = t); d.setTimeout(() => c.abort(), 5);",
+};
+/** `timers.promises` exists on the callback module only. */
+const F1_PROMISES_FORMS = {
+  'member .promises': "import * as t from 'M'; t.promises.setTimeout(5).then(() => c.abort());",
+  'default import .promises': "import t from 'M'; t.promises.setTimeout(5).then(() => c.abort());",
+  'import { promises as t }':
+    "import { promises as t } from 'M'; t.setTimeout(5).then(() => c.abort());",
+  'import { promises }':
+    "import { promises } from 'M'; promises.setTimeout(5).then(() => c.abort());",
+  'destructured promises':
+    "const { promises: p } = require('M'); p.setTimeout(5).then(() => c.abort());",
+  'destructured promises, nested':
+    "const { promises: { setTimeout: s } } = require('M'); s(5).then(() => c.abort());",
+  'default then promises':
+    "import * as t from 'M'; t.default.promises.setTimeout(5).then(() => c.abort());",
+};
+test('FU-001 r1 F1: the reviewer’s executed probe — t.default.setTimeout is the timer', () => {
+  const code = `
+    import * as t from 'node:timers';
+    export async function call(sender, c) {
+      const timer = t.default.setTimeout(() => c.abort(), 5);
+      try {
+        const response = await sender.send({ signal: c.signal });
+        return response.text();
+      } finally {
+        t.default.clearTimeout(timer);
+      }
+    }`;
+  assert.deepEqual(found(code), [TIMER_ABORT]);
+});
+test('FU-001 r1 F1: a timers export that is the module again keeps it — every form, module, file type, path', () => {
+  for (const module of F1_MODULES) {
+    const forms = module.endsWith('promises')
+      ? F1_TIMER_FORMS
+      : { ...F1_TIMER_FORMS, ...F1_PROMISES_FORMS };
+    for (const [label, template] of Object.entries(forms)) {
+      const code = template.replaceAll("'M'", `'${module}'`);
+      for (const base of F1_PATHS) {
+        for (const ext of FILE_TYPES) {
+          assert.deepEqual(
+            found(code, { path: `${base}.${ext}` }),
+            [TIMER_ABORT],
+            `${module} / ${label} / ${base}.${ext}: ${code}`,
+          );
+        }
+      }
+    }
+  }
+});
+test('FU-001 r1 F1: a timers member the resolver cannot place is unknown, so a computed pattern over it is refused', () => {
+  for (const module of F1_MODULES) {
+    for (const code of [
+      `import * as t from '${module}'; const { [k]: C } = t.scheduler; export { C };`,
+      `import { scheduler } from '${module}'; const { [k]: C } = scheduler; export { C };`,
+      `import * as t from '${module}'; const { [k]: C } = t[k2]; export { C };`,
+    ]) {
+      assert.deepEqual(found(code), [BY_NAME], code);
+    }
+    // A timer function is a function: provably not a host.
+    allowed(`import * as t from '${module}'; const { [k]: C } = t.clearTimeout; export { C };`);
+  }
+});
+
+/** Hosts that hold the global object (or another window) through a member. */
+const F1_WINDOW_HOSTS = [
+  'window.parent',
+  'window.top',
+  'window.opener',
+  'globalThis.parent',
+  'self.top',
+  'frames[0]',
+  'window.frames[0]',
+  'globalThis.window.parent.top',
+  'parent',
+  'top',
+  'opener',
+];
+/** Every read of a host: the computed pattern and member read (rule C) and the named members. */
+const F1_HOST_READS = {
+  'declaration pattern': ['const { [k]: C } = HOST; export { C };', [BY_NAME]],
+  'assignment pattern': ['let C; ({ [k]: C } = HOST);', [BY_NAME]],
+  'parameter default pattern': ['export function f({ [k]: C } = HOST) { return C; }', [BY_NAME]],
+  'for-of head pattern': ['for (const { [k]: C } of [HOST]) use(C);', [BY_NAME]],
+  'member read': ['export const v = HOST[k];', [BY_NAME]],
+  'controller by member': ['export const c = new HOST.AbortController();', [CONTROLLER]],
+  'timer by member': ['HOST.setTimeout(() => c.abort(), 5);', [TIMER_ABORT]],
+};
+test('FU-001 r1 F1: a window reached from the global object is the global object — every read, file type', () => {
+  for (const host of F1_WINDOW_HOSTS) {
+    for (const [label, [template, ids]] of Object.entries(F1_HOST_READS)) {
+      const code = template.replaceAll('HOST', host);
+      for (const ext of FILE_TYPES) {
+        assert.deepEqual(
+          found(code, { path: `services/fixture-service/src/probe.${ext}` }),
+          ids,
+          `${host} / ${label} / ${ext}: ${code}`,
+        );
+      }
+    }
+  }
+});
+test('FU-001 r1 F1: an unknown member of the global object is not provably something else', () => {
+  for (const host of ['globalThis.host', 'window.someLib', 'global.anything', 'self["x"]']) {
+    for (const label of [
+      'declaration pattern',
+      'assignment pattern',
+      'parameter default pattern',
+      'for-of head pattern',
+    ]) {
+      const code = F1_HOST_READS[label][0].replaceAll('HOST', host);
+      assert.deepEqual(found(code), [BY_NAME], `${host} / ${label}: ${code}`);
+    }
+  }
+  // A platform name is provably not a window — as the bare name already was.
+  for (const member of ['process', 'console', 'JSON', 'Math', 'URL']) {
+    allowed(`const { [k]: C } = globalThis.${member}; export { C };`);
+    allowed(`export const v = globalThis.${member}[k];`);
+  }
+});
+
+/** Local containers whose member holds the global object: `G` is where the read happens. */
+const F1_CONTAINERS = {
+  'literal __proto__': ['const box = { __proto__: globalThis };', 'box'],
+  'literal "__proto__"': ["const box = { '__proto__': globalThis };", 'box'],
+  'nested literal __proto__': ['const box = { __proto__: { __proto__: globalThis } };', 'box'],
+  'inherited field through __proto__': ['const box = { __proto__: { g: globalThis } };', 'box.g'],
+  'class declaration static field': ['class K { static g = globalThis; }', 'K.g'],
+  'class expression static field': ['const K = class { static g = globalThis; };', 'K.g'],
+  'named class expression static field': [
+    'const K = class Inner { static g = globalThis; };',
+    'K.g',
+  ],
+  'inherited static field': ['class B { static g = globalThis; } class K extends B {}', 'K.g'],
+  'static field, quoted name': ["class K { static 'g' = globalThis; }", 'K.g'],
+};
+const F1_TS_CONTAINERS = {
+  'namespace export': ['namespace N { export const g = globalThis; }', 'N.g'],
+  'namespace export, let reassigned': ['namespace N { export let g = 1; g = globalThis; }', 'N.g'],
+  'nested namespace export': [
+    'namespace N { export namespace I { export const g = globalThis; } }',
+    'N.I.g',
+  ],
+  'merged namespace': [
+    'namespace N { export const a = 1; } namespace N { export const g = globalThis; }',
+    'N.g',
+  ],
+  'namespace re-exported by import-equals': [
+    'namespace M { export const g = globalThis; } namespace N { export import g = M.g; }',
+    'N.g',
+  ],
+  'import-equals alias of a namespace export': [
+    'namespace N { export const g = globalThis; } import h = N.g;',
+    'h',
+  ],
+  'class static field typed': ['class K { static g: typeof globalThis = globalThis; }', 'K.g'],
+};
+test('FU-001 r1 F1: a host held by an inherited, static or namespace member is followed — every read, file type', () => {
+  const cases = [
+    ...Object.entries(F1_CONTAINERS).map(([label, entry]) => [label, entry, FILE_TYPES]),
+    ...Object.entries(F1_TS_CONTAINERS).map(([label, entry]) => [
+      label,
+      entry,
+      FILE_TYPES.filter((ext) => TS_ONLY.test(ext)),
+    ]),
+  ];
+  for (const [label, [prelude, holder], exts] of cases) {
+    for (const [read, [template, ids]] of Object.entries(F1_HOST_READS)) {
+      const code = `${prelude} ${template.replaceAll('HOST', holder)}`;
+      for (const ext of exts) {
+        assert.deepEqual(
+          found(code, { path: `services/fixture-service/src/probe.${ext}` }),
+          ids,
+          `${label} / ${read} / ${ext}: ${code}`,
+        );
+      }
+    }
+  }
+});
+test('FU-001 r1 F1: a container member the resolver cannot read is unknown — a computed pattern over it is refused', () => {
+  for (const code of [
+    'class K { static { this.g = globalThis; } } const { [k]: C } = K.g; export { C };',
+    'class K { static get g() { return globalThis; } } const { [k]: C } = K.g; export { C };',
+    'export function f(handed) { class K extends handed {} const { [k]: C } = K.g; return C; }',
+    'class K { declare static g: typeof globalThis; } const { [k]: C } = K.g; export { C };',
+    'export function f(handed) { const box = { __proto__: handed }; const { [k]: C } = box.g; return C; }',
+    'namespace A.B { export const g = globalThis; } const { [k]: C } = A.B.g; export { C };',
+  ]) {
+    assert.deepEqual(found(code), [BY_NAME], code);
+  }
+});
+test('FU-001 r1 F1: containers that provably hold something else stay clean (no blanket refusal)', () => {
+  for (const code of [
+    'const box = { __proto__: null, a: 1 }; export const v = box[k];',
+    'const box = { __proto__: null }; const { [k]: C } = box; export { C };',
+    "const box = { ['__proto__']: globalThis }; export const v = box.g[k];",
+    'const __proto__ = globalThis; const box = { __proto__ }; export const v = box.g[k];',
+    'class K { static g = 1; static m() {} } export const v = K.g[k];',
+    'class K { static g = 1; } const { [k]: C } = K.g; export { C };',
+    'class K { g = globalThis; } export const v = K.g[k];',
+    'class K { static #g = globalThis; static h = 1; } export const v = K.h[k];',
+    'class K { static [key: string]: unknown; static h = 1; } const { [k]: C } = K.h; export { C };',
+    'namespace N { export const g = 1; const h = globalThis; } export const v = N.g[k];',
+    "import * as t from 'node:timers'; t.setTimeout(() => done(), 5);",
+  ]) {
+    allowed(code);
   }
 });

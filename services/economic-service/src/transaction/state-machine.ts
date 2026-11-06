@@ -23,6 +23,9 @@ import type { TransactionStatus } from '../generated/prisma';
  *      ├──► PENDING_SETTLEMENT     (an obligation with no escrow — ADR-032)
  *      ├──► CANCELLED
  *      └──► FAILED
+ *
+ *   SETTLED ──► PARTIALLY_REVERSED ──► REVERSED     (only by REVERSE_SETTLEMENT)
+ *      └───────────────────────────────────▲
  * ```
  *
  * ## The two rules that are controls rather than conveniences
@@ -52,6 +55,13 @@ import type { TransactionStatus } from '../generated/prisma';
  * a status written by an older release is not proof of it. A resolution made
  * before D-083 left escrowed, never-authorised rows in `PENDING_SETTLEMENT`;
  * the status alone would pay them (review of #623 round 1, F1).
+ *
+ * **A settlement is undone only by a reversal, and only as far as money moved.**
+ * `REVERSE_SETTLEMENT` is the one edge out of `SETTLED`. Its target is what the
+ * applied reversals add up to ({@link reversedStatus}; docs/24 Q-76, D-115 A),
+ * never `PENDING_SETTLEMENT`: no hold is re-established. The database holds the
+ * same rule (migration 20261104120000_settlement_reversal). No route takes this
+ * edge yet.
  */
 
 /** What can happen to a transaction. Named for the act, not for the state. */
@@ -63,7 +73,8 @@ export type TransactionEvent =
   | 'CANCEL'
   | 'FAIL'
   | 'DISPUTE'
-  | 'RESOLVE_DISPUTE';
+  | 'RESOLVE_DISPUTE'
+  | 'REVERSE_SETTLEMENT';
 
 /**
  * The target of `RESOLVE_DISPUTE`: not one status, but the one of
@@ -73,12 +84,15 @@ export type TransactionEvent =
  */
 type ByAuthority = 'BY_AUTHORITY';
 
+/** The target of `REVERSE_SETTLEMENT`: as far as the applied reversals go ({@link reversedStatus}). */
+type ByReversedAmount = 'BY_REVERSED_AMOUNT';
+
 /** Every status a resolved dispute can return a transaction to. */
 export const RESOLUTION_TARGETS = ['HELD', 'PENDING_SETTLEMENT'] as const;
 
 const TRANSITIONS: Record<
   TransactionStatus,
-  Partial<Record<TransactionEvent, TransactionStatus | ByAuthority>>
+  Partial<Record<TransactionEvent, TransactionStatus | ByAuthority | ByReversedAmount>>
 > = {
   CREATED: {
     HOLD_PLACED: 'HELD',
@@ -104,7 +118,9 @@ const TRANSITIONS: Record<
     RESOLVE_DISPUTE: 'BY_AUTHORITY',
     REFUND: 'REFUNDED',
   },
-  SETTLED: {},
+  SETTLED: { REVERSE_SETTLEMENT: 'BY_REVERSED_AMOUNT' },
+  PARTIALLY_REVERSED: { REVERSE_SETTLEMENT: 'BY_REVERSED_AMOUNT' },
+  REVERSED: {},
   REFUNDED: {},
   CANCELLED: {},
   FAILED: {},
@@ -112,7 +128,7 @@ const TRANSITIONS: Record<
 
 /** Terminal states. Nothing leaves them, by any route. */
 export const TERMINAL_STATUSES: readonly TransactionStatus[] = [
-  'SETTLED',
+  'REVERSED',
   'REFUNDED',
   'CANCELLED',
   'FAILED',
@@ -133,7 +149,7 @@ export function canTransition(from: TransactionStatus, event: TransactionEvent):
 export interface SettlementAuthority {
   /** `settlement_authorised_at` is set: settlement was authorised. */
   readonly settlementAuthorised: boolean;
-  /** An ACTIVE wallet hold names the transaction: its funds are escrowed. */
+  /** The payer's own ACTIVE hold for this transaction (`transaction_holds`): its funds are escrowed. */
   readonly fundsHeld: boolean;
 }
 
@@ -186,6 +202,36 @@ export function assertSettlementReady(transactionId: string, authority: Settleme
   );
 }
 
+/** How far a settlement has been reversed, in minor units: what {@link reversedStatus} decides from. */
+export interface ReversalProgress {
+  /** The settlement's gross. */
+  readonly settlementGrossMinor: bigint;
+  /** Σ gross of its applied reversals, including the one being applied. */
+  readonly reversedGrossMinor: bigint;
+}
+
+/**
+ * `REVERSED` when the whole gross has been reversed, `PARTIALLY_REVERSED` while
+ * some of it has (D-115 A). Nothing reversed, or more than was settled, is not a
+ * reversal at all: refused rather than rounded to the nearer status.
+ */
+export function reversedStatus(progress: ReversalProgress): 'PARTIALLY_REVERSED' | 'REVERSED' {
+  const { settlementGrossMinor, reversedGrossMinor } = progress;
+  if (reversedGrossMinor <= 0n || reversedGrossMinor > settlementGrossMinor) {
+    throw new RastaError(
+      'INVALID_STATE_TRANSITION',
+      'A settlement is reversed by more than nothing and by no more than it settled',
+      {
+        internalContext: {
+          settlementGrossMinor: settlementGrossMinor.toString(),
+          reversedGrossMinor: reversedGrossMinor.toString(),
+        },
+      },
+    );
+  }
+  return reversedGrossMinor === settlementGrossMinor ? 'REVERSED' : 'PARTIALLY_REVERSED';
+}
+
 /**
  * The state after `event`, or a refusal.
  *
@@ -210,11 +256,13 @@ export function nextStatus(
   from: TransactionStatus,
   event: TransactionEvent,
   /**
-   * Required for `RESOLVE_DISPUTE` from `DISPUTED`, whose target depends on
-   * it; unread by every other move. Absent where it is required, the move is
-   * refused rather than guessed.
+   * The facts a move whose target depends on them decides from:
+   * {@link SettlementAuthority} for `RESOLVE_DISPUTE` from `DISPUTED`,
+   * {@link ReversalProgress} for `REVERSE_SETTLEMENT`; unread by every other
+   * move. Absent or of the other kind where required, the move is refused rather
+   * than guessed.
    */
-  authority?: SettlementAuthority,
+  facts?: SettlementAuthority | ReversalProgress,
 ): TransactionStatus {
   const to = TRANSITIONS[from][event];
   if (!to) {
@@ -224,13 +272,19 @@ export function nextStatus(
       { internalContext: { transactionId, from, event } },
     );
   }
+  if (to === 'BY_REVERSED_AMOUNT') {
+    if (!facts || !('settlementGrossMinor' in facts)) {
+      throw new Error(`Reversing transaction ${transactionId}'s settlement needs its progress`);
+    }
+    return reversedStatus(facts);
+  }
   if (to !== 'BY_AUTHORITY') return to;
-  if (!authority) {
+  if (!facts || !('settlementAuthorised' in facts)) {
     throw new Error(
       `Resolving transaction ${transactionId}'s dispute needs its settlement authority`,
     );
   }
-  return resolvedStatus(authority);
+  return resolvedStatus(facts);
 }
 
 function describe(event: TransactionEvent): string {
@@ -251,6 +305,8 @@ function describe(event: TransactionEvent): string {
       return 'be disputed';
     case 'RESOLVE_DISPUTE':
       return 'have a dispute resolved';
+    case 'REVERSE_SETTLEMENT':
+      return 'have its settlement reversed';
   }
 }
 

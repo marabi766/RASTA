@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure, markRefusal } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { OutboxRelay, kafkaConnection, preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -7,6 +7,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { KafkaEventPublisher } from './kafka.publisher';
 import { PrismaOutboxStore } from './outbox.store';
 import { flushOutbox } from './flush.command';
+
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
 
 /**
  * `pnpm --filter @rasta/asset-service outbox:flush [--max-seconds <n>]`
@@ -42,10 +45,10 @@ function parseArgs(argv: readonly string[]): { maxSeconds: number } {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--max-seconds') maxSeconds = Number(argv[++i]);
     // Not repeated: only an argument that matched is ever echoed (#385 r6).
-    else throw new Error(`unknown argument at position ${i + 1}; it is not repeated`);
+    else throw usage(`unknown argument at position ${i + 1}; it is not repeated`);
   }
   if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > 86_400) {
-    throw new Error('--max-seconds must be an integer from 1 to 86400');
+    throw usage('--max-seconds must be an integer from 1 to 86400');
   }
   return { maxSeconds };
 }
