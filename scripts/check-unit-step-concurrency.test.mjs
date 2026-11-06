@@ -98,15 +98,12 @@ const realSettings = [
   ...workspaceInputProblems(root),
 ];
 const realWorkspace = { ...turboTaskGraph(realTurboConfigs), settings: realSettings };
-const [exception] = UNBOUNDED_EXCEPTIONS;
 // FU-077 R1: run text with a CR or another control character is refused by the shared
 // policy (ci-shell-text-lib.mjs) before any grammar, so the CRLF/CR variants of the
 // matrices below expect that refusal instead of what the LF form finds.
 const CR_REFUSAL = /unsupported shell construct: a carriage return, control or invisible blank/;
 const unlessCr = (run, pattern) => (/[\r\v]/.test(run) ? CR_REFUSAL : pattern);
 const unitStep = (doc) => doc.jobs['quality-unit'].steps.find((step) => step.name === 'Unit tests');
-const securityStep = (doc) =>
-  doc.jobs[exception.job].steps.find((step) => step.name === exception.step);
 const problemsAfter = (edit, scripts = realScripts) => {
   const doc = structuredClone(realDoc);
   edit(doc);
@@ -1103,64 +1100,15 @@ for (const command of [
   test(`command-position control accepted: ${command}`, () =>
     assert.deepEqual(extraRun(command), []));
 }
-for (const [name, edit] of [
-  [
-    'removed',
-    (doc) => {
-      securityStep(doc).run = 'echo nothing';
-    },
-  ],
-  [
-    'duplicate line',
-    (doc) => {
-      securityStep(doc).run += `\n${exception.command}`;
-    },
-  ],
-  [
-    'duplicate step',
-    (doc) => {
-      doc.jobs[exception.job].steps.push({ ...securityStep(doc) });
-    },
-  ],
-  [
-    'changed command',
-    (doc) => {
-      securityStep(doc).run = securityStep(doc).run.replace('subtree visibility', 'other');
-    },
-  ],
-  [
-    'changed name',
-    (doc) => {
-      securityStep(doc).name = 'Different';
-    },
-  ],
-  [
-    'changed job',
-    (doc) => {
-      doc.jobs['quality-unit'].steps.push(securityStep(doc));
-      doc.jobs[exception.job].steps = doc.jobs[exception.job].steps.filter(
-        (step) => step.name !== exception.step,
-      );
-    },
-  ],
-]) {
-  test(`exception ${name} is refused`, () =>
-    refused(problemsAfter(edit), /must match exactly once/));
-}
-test('exception workflow identity is exact', () => {
-  const doc = structuredClone(realDoc);
-  const step = securityStep(doc);
-  step.run = 'echo removed';
+test('FU-185: no unbounded exception can restore the duplicate filtered unit run', () => {
+  assert.deepEqual(UNBOUNDED_EXCEPTIONS, []);
   refused(
-    parsedProblems(
-      {
-        'ci.yml': doc,
-        'other.yml': {
-          jobs: { [exception.job]: { steps: [{ name: exception.step, run: exception.command }] } },
-        },
-      },
-      realScripts,
-    ),
+    problemsAfter((doc) => {
+      doc.jobs['integration-security'].steps.find(
+        (step) => step.name === 'Tenant isolation and authorization tests',
+      ).run +=
+        '\npnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"';
+    }),
     /literal unbounded/,
   );
 });
@@ -1426,37 +1374,17 @@ for (const command of [
   test(`comment and continuation boundaries retain invocation: ${JSON.stringify(command)}`, () =>
     refused(extraRun(command), /literal unbounded/));
 }
-test('exception command text remains exact after logical extraction', () => {
-  for (const suffix of [' # comment', ' \\\n', '; true', ' && true', ' | cat'])
-    refused(
-      problemsAfter((doc) => {
-        securityStep(doc).run = exception.command + suffix;
-      }),
-      /must match exactly once/,
-    );
-});
-
-test('compound prefix cannot satisfy the exact exception line', () => {
-  refused(
-    problemsAfter((doc) => {
-      securityStep(doc).run = `true; ${exception.command}`;
-    }),
-    /must match exactly once/,
-  );
-});
-
 for (const option of ['-e', '--eval', '-p', '--print']) {
   test(`node ${option} arguments are not treated as a script filename`, () => {
     assert.deepEqual(extraRun(`node ${option} '"safe"' scripts/run-test-phases.mjs test`), []);
   });
 }
 
-// Keep the full document path, YAML parser and exception contract in the matrix,
+// Keep the full document path and YAML parser in the matrix,
 // without reparsing unrelated production steps thousands of times.
 const grammarWorkflow = stringify({
   jobs: {
     'quality-unit': { steps: [unitStep(realDoc)] },
-    [exception.job]: { steps: [securityStep(realDoc)] },
   },
 });
 const grammarProblems = (file, document, run, scripts = realScripts) =>

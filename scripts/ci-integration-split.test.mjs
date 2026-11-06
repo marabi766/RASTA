@@ -22,6 +22,7 @@ import {
   QUALITY_GATE_JOB,
   QUALITY_JOBS,
   qualitySplitProblems,
+  unitCoverageProblems,
   JOB_FLOOR_MINUTES,
   JOB_SETUP_MINUTES,
   INTEGRATION_PARTITIONS,
@@ -818,7 +819,7 @@ test('a test command made to pass regardless is refused', () => {
   }
   const lastLine = real();
   const isolation = stepNamed(lastLine, 'Tenant isolation and authorization tests');
-  isolation.run = isolation.run.split('\n').slice(0, 3).join('\n');
+  isolation.run = isolation.run.trimEnd().split('\n').slice(0, -1).join('\n');
   fails(lastLine, /"Tenant isolation and authorization tests" must run exactly/);
 });
 
@@ -938,7 +939,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'integration-construction': 25,
       'integration-economic': 24,
       'integration-contract': 23,
-      'integration-security': 42,
+      'integration-security': 34,
       'integration-coverage-critical': 35,
       'integration-coverage': 80,
       'integration-backup-drill': 8,
@@ -1442,5 +1443,35 @@ test('every suite shard refuses no-op commands, changed filters, missing aggrega
       stepNamed(changed, name).env[key] = 'different';
       fails(changed, /must set/);
     }
+  }
+});
+
+test('FU-185: every workspace unit selection survives removal of the filtered rerun', () => {
+  assert.deepEqual(unitCoverageProblems(), []);
+  withLiveWorkspaceCopy((root) => {
+    const file = resolve(root, 'services/identity-service/package.json');
+    const original = JSON.parse(readFileSync(file, 'utf8'));
+    for (const command of [
+      undefined,
+      'jest --selectProjects integration',
+      'jest --selectProjects unit --testNamePattern=tenant',
+      'true',
+    ]) {
+      const manifest = structuredClone(original);
+      manifest.scripts['test:unit'] = command;
+      writeFileSync(file, JSON.stringify(manifest));
+      assert.match(unitCoverageProblems(root).join('\n'), /identity-service.*unit coverage/);
+    }
+  });
+  for (const change of [
+    (w) => dropStep(w.jobs['quality-unit'], 'Unit tests'),
+    (w) => {
+      w.jobs['quality-unit'].steps.find((s) => s.name === 'Unit tests').run +=
+        ' -- --testNamePattern=tenant';
+    },
+  ]) {
+    const workflow = real();
+    change(workflow);
+    assert.match(qualitySplitProblems(workflow).join('\n'), /unfiltered Unit tests/);
   }
 });

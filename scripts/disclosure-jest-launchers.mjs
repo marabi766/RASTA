@@ -158,11 +158,11 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-node-test-timeouts-lib.mjs':
         '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '5bc35b029d5ab3da138660bd09a79e5dd4837a6595e043f528b2bcf8557f78aa',
+        'acd8a153247a934824f49870fe658ff75d558c799d3438d79d37f2184a07fc4d',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
-        'cf298af03890815894a8b4e09524e230638a78bc9c703621a53096b517c6fbe6',
+        '34b0d346f234bf0a529d5541ae09f3801c5c756d41cc51ae97deffc9e5910a78',
     },
   },
   'scripts/exchange-deadline-rule.test.mjs': {
@@ -180,9 +180,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        'ff241898e4e15633254c9e1034afc6b726a58546e8b74c194f94a4060ad570e6',
+        'fe28da80c91b86a5c38b00c608068db9e6d52ead84166ff361d335ffdabbc022',
       'scripts/ci-integration-split-lib.mjs':
-        'c49d3b00663aa7c77a4125220a2d2bdb83746fec8339214d12cd96aef9bcffe2',
+        'b381a24d8a66f9a2e106a25a41f626a3d5b210d45e1ec8d89c9e227cd33b28bc',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

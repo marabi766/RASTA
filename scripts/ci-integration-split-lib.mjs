@@ -342,12 +342,11 @@ export const STEP_INVENTORY = Object.freeze({
   'Tenant isolation and authorization tests': {
     run: withKafka(
       'tests',
-      'pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"',
       'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose',
     ),
     env: { ...KAFKA_TESTS, ...databases(...SERVICES), ...BUCKET, ...SCANNER },
-    // FU-165: ceil(1.5 x measured p95 587 s / 60) = 15 minutes.
-    timeout: 15,
+    // FU-185: integration-only p95 349 s; 480 / 349 = 1.38 (see timing report).
+    timeout: 8,
   },
   'Outbox stream-sequence protocol (ADR-051 B3)': {
     run: ['pnpm run test:outbox-b3'],
@@ -410,7 +409,8 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  * of the job took in those steps over the last 20 green CI runs on main and
  * `mq/train-*` (2026-10-29, GitHub job listings). A job that has step limits
  * is refused here without an entry, rather than assumed to need no setup.
- * Measured maxima, in seconds: suites 298, security 309, critical 281,
+ * Security was re-measured for FU-185 below; the other historical maxima
+ * in seconds: suites 298, critical 281,
  * coverage 310, backup drill 92, migration chain 135 (per shard), migration
  * guards 253, trivy-db 5. `quality-unit` (FU-111): its one limited step is the
  * unit-step concurrency step (74-87 s in green runs); the rest of the job is
@@ -427,7 +427,9 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-construction': 8,
   'integration-economic': 8,
   'integration-contract': 8,
-  'integration-security': 8,
+  // FU-185, Nov 5-6 main window 42091919570..42295730635 (20 successes):
+  // unbounded steps p95/max 320/323 s; ceil(1.3 * 323 / 60) = 7.
+  'integration-security': 7,
   'integration-coverage-critical': 8,
   'integration-coverage': 8,
   'integration-backup-drill': 3,
@@ -637,6 +639,7 @@ export function checkIntegrationSplit(workflow, root = ROOT) {
   }
   problems.push(...integrationPartitionProblems(effective, root));
   problems.push(...qualitySplitProblems(workflow));
+  problems.push(...unitCoverageProblems(root));
   if (stressCount !== 1)
     problems.push(`expected exactly one exclusive stress phase, found ${stressCount}`);
   const jobs = isMapping(workflow?.jobs) ? workflow.jobs : {};
@@ -783,6 +786,36 @@ export function checkIntegrationSplit(workflow, root = ROOT) {
   return problems;
 }
 
+/** FU-185: removing the filtered unit rerun is safe only while the full gate covers it. */
+export function unitCoverageProblems(root = ROOT) {
+  const problems = [];
+  const scripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
+  if (scripts?.['test:unit:ci'] !== 'turbo run test:unit --concurrency=3')
+    problems.push('unit coverage: test:unit:ci must run every workspace without filters');
+  for (const file of workspaceManifestFiles(root)) {
+    const { scripts = {} } = JSON.parse(readFileSync(join(root, file), 'utf8'));
+    if (!Object.hasOwn(scripts, 'test')) continue;
+    // Only the existing Jest forms are proved equivalent. Unknown commands,
+    // selectors, hooks or wrappers require review, never a guessed superset.
+    const normalize = (command) =>
+      typeof command === 'string' &&
+      /^jest(?: --selectProjects unit)?(?: --passWithNoTests)?$/.test(command)
+        ? command.replace(' --passWithNoTests', '')
+        : null;
+    const unit = normalize(scripts['test:unit']);
+    if (
+      unit === null ||
+      unit !== normalize(scripts.test) ||
+      scripts.pretest ||
+      scripts.posttest ||
+      scripts['pretest:unit'] ||
+      scripts['posttest:unit']
+    )
+      problems.push(`${file}: unit coverage requires equivalent test and test:unit Jest selection`);
+  }
+  return problems;
+}
+
 /**
  * FU-111: the required check "Lint, types and unit tests" is an aggregate of
  * the parallel `quality-*` jobs, and nothing may let it pass without every one
@@ -866,6 +899,11 @@ export function qualitySplitProblems(workflow) {
       }
     }
   }
+  const unitRuns = (jobs['quality-unit']?.steps ?? []).filter(
+    (step) => step.name === 'Unit tests' && step.run === 'pnpm run test:unit:ci',
+  );
+  if (unitRuns.length !== 1)
+    problems.push('quality-unit must run the unfiltered Unit tests step exactly once');
   const gate = jobs[QUALITY_GATE_JOB];
   const gateRuns = (Array.isArray(gate?.steps) ? gate.steps : []).filter(
     (step) => isMapping(step) && step.run === 'pnpm run typecheck',
