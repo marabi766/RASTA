@@ -242,6 +242,13 @@ export interface TransactionView {
   failureReason: string | null;
   createdAt: string;
   createdBy: string;
+  /**
+   * What `HELD` says, proven: HELD, the payer's own ACTIVE hold for exactly its
+   * amount and currency, and no unresolved hold decision (migration
+   * 20261106120000). False in every other status. As of when it was written, in
+   * a command's stored answer: a decision is made on a fresh read.
+   */
+  heldProven: boolean;
 }
 
 export interface TransactionDetailView extends TransactionView {

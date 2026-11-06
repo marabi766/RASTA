@@ -83,6 +83,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
       counterpartyOrganizationId: org.supplier,
       transactionType: 'MARKETPLACE_ORDER',
       status: 'HELD',
+      heldProven: true,
       grossAmountMinor: '500000',
       commissionAmountMinor: '0',
       netAmountMinor: '500000',

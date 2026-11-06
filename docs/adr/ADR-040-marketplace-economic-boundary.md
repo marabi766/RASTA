@@ -91,6 +91,12 @@ ADR-032 نیمه اقتصادی این مرز را از پیش تصمیم گرف
 > `OBLIGATION_LOOKUP_PAGES` (۱۰ × ۱۰۰) می‌خواند؛ پاسخی که تا آن‌جا تمام نشود کامل فرض نمی‌شود
 > (`OBLIGATION_LOOKUP_INCOMPLETE`، بدون تکرار). ترتیب استقرار: economic پیش از marketplace (economic قدیمی پارامتر
 > ناشناخته را با `400` رد می‌کند).
+>
+> **`HELD` به‌تنهایی اثبات نیست** (FU-138؛ بازبینی #762 دور ۳، F2). تراکنشی می‌تواند روی تصمیمی برآمده از Hold سازمانی دیگر
+> در `HELD` ایستاده باشد، بی پولی در Escrow. پس `fundsOf` فقط وقتی `HELD` می‌گوید که economic-service همان را با
+> `heldProven: true` اثبات کند: Hold فعال خود پرداخت‌کننده با همان مبلغ و ارز، و بی تصمیم حل‌نشده. نبودِ فیلد هم یعنی
+> اثبات‌نشده، پس ترتیب استقرار این‌جا الزامی است: economic پیش از marketplace. اپراتور با
+> [`transaction-hold-decision`](../runbooks/transaction-hold-decision.md) تصمیم می‌گیرد.
 
 ### ۳. توکن SERVICE با `org_id` امضاشده
 

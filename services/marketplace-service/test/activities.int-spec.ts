@@ -710,6 +710,7 @@ describe('order saga activities (real database)', () => {
       counterpartyOrganizationId: org.supplier,
       transactionType: 'MARKETPLACE_ORDER',
       status: 'HELD',
+      heldProven: true,
       grossAmountMinor: '500000',
       commissionAmountMinor: '0',
       netAmountMinor: '500000',
@@ -979,6 +980,66 @@ describe('order saga activities (real database)', () => {
       const { economic } = economicHolding([decoy, own]);
       await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
         transactionId: own.id,
+      });
+    });
+
+    // #762 r3, F2: the reviewer's probe. Every term equal, the status HELD, and nothing in
+    // escrow: unresolved history, or an economic-service that does not prove it.
+    describe.each([
+      ['economic-service says it is not proven', false],
+      ['economic-service says nothing', undefined],
+    ])('HELD, and %s', (_case, heldProven) => {
+      async function nothingAdopted(orderId: string) {
+        const order = await runUnscoped('the suite reads the order', () =>
+          prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+        );
+        expect(order.status).toBe('PENDING');
+        expect(order.economicTransactionId).toBeNull();
+        const announced = await runUnscoped('the suite reads the outbox', () =>
+          prisma.client.outboxMessage.count({
+            where: { aggregateId: orderId, eventName: 'ORDER_FUNDS_HELD' },
+          }),
+        );
+        expect(announced).toBe(0);
+      }
+
+      it('findObligation answers not held, as a restored row does', async () => {
+        const { orderId } = await placeOrder();
+        const own = obligation(orderId, { heldProven });
+        const { economic } = economicHolding([own]);
+        await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
+          notHeld: true,
+          transactionId: own.id,
+          status: 'HELD',
+          funds: 'UNPROVEN',
+        });
+        await nothingAdopted(orderId);
+      });
+
+      it('createObligation adopts nothing from the stored answer', async () => {
+        const { orderId } = await placeOrder();
+        const { economic } = economicHolding([]);
+        Object.assign(economic, {
+          createObligation: async () => ({ id: 'TXN_STORED', status: 'HELD', heldProven: true }),
+          readObligation: async () => obligation(orderId, { id: 'TXN_STORED', heldProven }),
+        });
+        await expect(activitiesWith(economic).createObligation(orderId)).rejects.toMatchObject({
+          type: 'OBLIGATION_NOT_HELD',
+          nonRetryable: true,
+        });
+        await nothingAdopted(orderId);
+      });
+    });
+
+    it('the restored control still answers not held, whatever proof it carries', async () => {
+      const { orderId } = await placeOrder();
+      const own = obligation(orderId, { status: 'PENDING_SETTLEMENT', heldProven: true });
+      const { economic } = economicHolding([own]);
+      await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
+        notHeld: true,
+        transactionId: own.id,
+        status: 'PENDING_SETTLEMENT',
+        funds: 'UNPROVEN',
       });
     });
 

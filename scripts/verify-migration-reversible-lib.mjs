@@ -667,6 +667,7 @@ export const ASSET_DATA_ROLLBACK = {
 const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
 // Sits on top of the chain, and refuses a bare probe row: the steps writing one take it down first.
 const SETTLEMENT_CREATION_PROOF = '20261105120000_settlement_creation_proof';
+const TRANSACTION_HOLD_DECISION = '20261106120000_transaction_hold_decision';
 
 /** A transaction as the schema before business lines holds it (or after, with a line). */
 const TRANSACTION_MIGCHECK = (id, line = null) => `
@@ -748,7 +749,7 @@ ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN
 const COMMISSION_BUSINESS_LINES_STEPS = [
   {
     label: 'commission: down to the schema before business lines (empty)',
-    runDownScript: [SETTLEMENT_CREATION_PROOF, COMMISSION_BUSINESS_LINES],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF, COMMISSION_BUSINESS_LINES],
   },
   {
     label: 'commission: a priced and an unpriced charge, as the old engine wrote them',
@@ -1120,6 +1121,7 @@ const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_disput
  */
 const RESOLVED_DISPUTE_DOWNS = [
   // These probes move a transaction to SETTLED with no settlement behind it.
+  TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
   '20261103121000_transaction_settlement_authority',
   '20261103120000_transaction_dispute_resolution_by_authority',
@@ -1564,7 +1566,7 @@ const SETTLEMENT_REVERSAL = '20261104120000_settlement_reversal';
 const SETTLEMENT_REVERSAL_STEPS = [
   {
     label: 'settlement reversal: the proof of creation goes first, these probes are bare rows',
-    runDownScript: [SETTLEMENT_CREATION_PROOF],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
   },
   {
     label: 'settlement reversal: a settled transaction, its settlement, and one open case',
@@ -1621,7 +1623,7 @@ const SETTLEMENT_REVERSAL_STEPS = [
   },
   {
     label: 'settlement reversal: the proof of creation goes again, before the probe rows do',
-    runDownScript: [SETTLEMENT_CREATION_PROOF],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
   },
   {
     label: 'settlement reversal: the probe rows are removed before the chain reversal',
@@ -1826,7 +1828,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
   },
   {
     label: 'creation proof: down over them refuses nothing, and leaves every row',
-    runDownScript: [SETTLEMENT_CREATION_PROOF],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
   },
   {
     label: 'creation proof: the rows are all there, and an owner clears the unprovable',
@@ -1857,6 +1859,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
 ];
 
 const HOLD_DECISION_DOWNS = [
+  TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
   SETTLEMENT_REVERSAL,
   '20261103121000_transaction_settlement_authority',
@@ -1950,10 +1953,25 @@ const HOLD_DECISION_STEPS = [
     mustFail: 'fixed by its migration',
   },
   {
+    label: 'hold decisions: an operator decides a listed row',
+    sql: `SELECT decide_transaction_hold('TXN_MIGCHECK_HD_AUTHORISED', 'CONFIRMED', 'the verifier decides this');`,
+  },
+  {
+    label: 'hold decisions: a decision is not undone by a rollback',
+    runDownScript: [TRANSACTION_HOLD_DECISION],
+    mustFail: 'refusing to drop the decisions',
+  },
+  {
+    label: 'hold decisions: the decision is removed with its guard lifted',
+    sql: `ALTER TABLE "transaction_hold_decision" DISABLE TRIGGER "trg_transaction_hold_decision_guard";
+          DELETE FROM "transaction_hold_decision" WHERE transaction_id = 'TXN_MIGCHECK_HD_AUTHORISED';
+          ALTER TABLE "transaction_hold_decision" ENABLE TRIGGER "trg_transaction_hold_decision_guard";`,
+  },
+  {
     label: 'hold decisions: a later move is not undone by the rollback',
     sql: `UPDATE "transaction" SET settlement_authorised_at = now() WHERE id = 'TXN_MIGCHECK_HD_RESTORED';`,
   },
-  { label: 'hold decisions: down', runDownScript: [SETTLEMENT_CREATION_PROOF] },
+  { label: 'hold decisions: down', runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF] },
   {
     label: 'hold decisions: down puts back only what up moved and nothing moved since',
     sql: `DO $$
@@ -2661,6 +2679,8 @@ export const EXPECTED = {
       'settlement_creation_quarantine',
       // What 20261105120000 found standing on a decision read from another's hold (#762 r2, F2).
       'transaction_hold_reconciliation',
+      // Who decided a row of it, and why (FU-138).
+      'transaction_hold_decision',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2723,6 +2743,8 @@ export const EXPECTED = {
       'trg_transaction_id_unclaimed',
       'trg_transaction_hold_reconciliation_frozen',
       'trg_transaction_hold_reconciliation_no_truncate',
+      'trg_transaction_hold_decision_guard',
+      'trg_transaction_hold_decision_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [

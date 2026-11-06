@@ -147,7 +147,10 @@ export function canTransition(from: TransactionStatus, event: TransactionEvent):
  * {@link resolvedStatus} decides from, read under the row lock.
  */
 export interface SettlementAuthority {
-  /** `settlement_authorised_at` is set: settlement was authorised. */
+  /**
+   * Settlement was authorised (`transaction_settlement_authorised`): never while
+   * the row's hold decision is unresolved, whatever the columns say.
+   */
   readonly settlementAuthorised: boolean;
   /** The payer's own ACTIVE hold for this transaction (`transaction_holds`): its funds are escrowed. */
   readonly fundsHeld: boolean;
@@ -167,7 +170,8 @@ export interface SettlementAuthority {
  *   needs an authorisation first, which is the side to err on with money.
  * - No escrow: `PENDING_SETTLEMENT`. A `DISPUTED` transaction with no active
  *   hold was never `HELD` — a hold is released only by settling or refunding,
- *   both terminal — so it is an ADR-032 obligation, authorised when recorded.
+ *   both terminal — so it is an ADR-032 obligation, authorised when recorded,
+ *   or one an operator has decided holds nothing (migration 20261106120000).
  */
 export function resolvedStatus(
   authority: SettlementAuthority,
@@ -193,7 +197,19 @@ export function isSettlementReady(authority: SettlementAuthority): boolean {
  * `INVALID_STATE_TRANSITION` (409), as the state machine refuses: the
  * transaction has to be authorised first, and no retry changes that.
  */
-export function assertSettlementReady(transactionId: string, authority: SettlementAuthority): void {
+export function assertSettlementReady(
+  transactionId: string,
+  authority: SettlementAuthority & { readonly holdDecisionUnresolved: boolean },
+): void {
+  // Before the rule below: with nothing held it would say ready. A settlement
+  // then debits the payer's spendable balance on the same unproven history.
+  if (authority.holdDecisionUnresolved !== false) {
+    throw new RastaError(
+      'INVALID_STATE_TRANSITION',
+      'This transaction cannot be settled until an operator has decided its hold record',
+      { internalContext: { transactionId, ...authority } },
+    );
+  }
   if (isSettlementReady(authority)) return;
   throw new RastaError(
     'INVALID_STATE_TRANSITION',

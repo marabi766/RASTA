@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { registry } from '@rasta/observability';
 import { withRedirectProbe } from '@rasta/testing';
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
@@ -629,7 +631,6 @@ describe('finding the order’s obligation by its exact key (review of #334 roun
 describe('what an obligation’s status says of its funds (review of #334 round 2, F1)', () => {
   // Every status economic-service has (its TransactionStatus enum), and ones it does not.
   it.each<[string, ObligationFunds]>([
-    ['HELD', 'HELD'],
     ['CREATED', 'NEVER_HELD'],
     ['PENDING_SETTLEMENT', 'UNPROVEN'],
     ['DISPUTED', 'UNPROVEN'],
@@ -640,7 +641,28 @@ describe('what an obligation’s status says of its funds (review of #334 round 
     ['A_STATUS_ADDED_LATER', 'UNPROVEN'],
     ['held', 'UNPROVEN'],
   ])('%s → %s', (status, funds) => {
-    expect(fundsOf(status)).toBe(funds);
+    // What a proof says of any other status: nothing.
+    expect(fundsOf({ status })).toBe(funds);
+    expect(fundsOf({ status, heldProven: true })).toBe(funds);
+  });
+
+  // The stand-ins elsewhere only say what this client reads: the owner must document that name.
+  it('reads the field economic-service documents, by that name', () => {
+    const documented = readFileSync(
+      join(__dirname, '../../../economic-service/src/openapi/transaction-view.ts'),
+      'utf8',
+    );
+    expect(documented).toMatch(/^\s+heldProven: \{$/m);
+  });
+
+  // #762 r3, F2: HELD with nothing in escrow. Only the proof makes it HELD.
+  it('HELD is HELD only with economic-service’s proof', () => {
+    expect(fundsOf({ status: 'HELD', heldProven: true })).toBe('HELD');
+    expect(fundsOf({ status: 'HELD', heldProven: false })).toBe('UNPROVEN');
+    expect(fundsOf({ status: 'HELD' })).toBe('UNPROVEN');
+    // A body nobody typed: anything but `true` proves nothing.
+    expect(fundsOf({ status: 'HELD', heldProven: 'true' } as never)).toBe('UNPROVEN');
+    expect(fundsOf({ status: 'HELD', heldProven: 1 } as never)).toBe('UNPROVEN');
   });
 });
 

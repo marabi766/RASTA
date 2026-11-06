@@ -140,7 +140,11 @@ describe('a dispute stops settlement completely', () => {
 describe('settlement checks its authority, not only its status (D-083, #623 r1 F1)', () => {
   it('refuses an escrowed transaction with no recorded authorisation — the legacy PENDING_SETTLEMENT row', () => {
     try {
-      assertSettlementReady('TXN_1', { settlementAuthorised: false, fundsHeld: true });
+      assertSettlementReady('TXN_1', {
+        settlementAuthorised: false,
+        fundsHeld: true,
+        holdDecisionUnresolved: false,
+      });
       throw new Error('settled without authority');
     } catch (error) {
       expect(error).toBeInstanceOf(RastaError);
@@ -154,7 +158,23 @@ describe('settlement checks its authority, not only its status (D-083, #623 r1 F
       { settlementAuthorised: true, fundsHeld: false },
       { settlementAuthorised: false, fundsHeld: false },
     ]) {
-      expect(() => assertSettlementReady('TXN_1', authority)).not.toThrow();
+      expect(() =>
+        assertSettlementReady('TXN_1', { ...authority, holdDecisionUnresolved: false }),
+      ).not.toThrow();
+    }
+  });
+
+  // FU-138: nothing held would otherwise say ready, and debit the payer's spendable balance.
+  it.each([
+    [{ settlementAuthorised: false, fundsHeld: false }],
+    [{ settlementAuthorised: false, fundsHeld: true }],
+    [{ settlementAuthorised: true, fundsHeld: false }],
+    [{ settlementAuthorised: true, fundsHeld: true }],
+  ])('refuses %j while its hold decision is unresolved, or not known', (authority) => {
+    for (const holdDecisionUnresolved of [true, undefined]) {
+      expect(() =>
+        assertSettlementReady('TXN_1', { ...authority, holdDecisionUnresolved } as never),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }));
     }
   });
 
@@ -164,7 +184,7 @@ describe('settlement checks its authority, not only its status (D-083, #623 r1 F
         const authority = { settlementAuthorised, fundsHeld };
         const settleable = (() => {
           try {
-            assertSettlementReady('TXN_1', authority);
+            assertSettlementReady('TXN_1', { ...authority, holdDecisionUnresolved: false });
             return true;
           } catch {
             return false;

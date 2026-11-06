@@ -97,6 +97,8 @@ class EconomicLedger {
       organizationId: this.buyer,
       transactionType: 'MARKETPLACE_ORDER',
       status: this.status,
+      // This stand-in places its hold for real, so what HELD says is proven.
+      heldProven: this.status === 'HELD',
       sourceReference: orderId,
       disputeId: this.disputeId,
       disputedAt: this.disputedAt,

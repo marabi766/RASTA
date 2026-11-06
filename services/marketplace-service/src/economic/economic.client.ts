@@ -104,6 +104,12 @@ export interface TransactionView {
   currency: string;
   sourceType: string | null;
   sourceReference: string | null;
+  /**
+   * economic-service's proof that `HELD` is true (`transaction_held_proven`).
+   * Optional because an economic-service older than it does not send it, which
+   * proves nothing (`fundsOf`): economic-service deploys first (ADR-040).
+   */
+  heldProven?: boolean;
 }
 
 /**
@@ -211,13 +217,13 @@ export function termsDiffer(terms: ObligationTerms, transaction: TransactionView
 /**
  * What a found obligation's status says about the buyer's money.
  *
- * - `HELD`: in escrow now. The only status that proves it: economic-service
- *   places the hold and moves the obligation to HELD in one transaction, and
- *   every way the money leaves escrow moves it on.
+ * - `HELD`: in escrow now: HELD, and economic-service proves it (`heldProven`).
+ *   The status alone does not: a transaction can stand in HELD on a decision
+ *   read from a hold not its own, with nothing in escrow (#762 r3, F2).
  * - `UNPROVEN`: PENDING_SETTLEMENT or DISPUTED. Reached from HELD with the
  *   hold still in place, but also from CREATED with none (an obligation with
  *   no escrow, ADR-032) — and a status the saga's own creation never leaves
- *   it in, so somebody else moved it.
+ *   it in, so somebody else moved it. Or HELD without that proof.
  * - `RETURNED`: REFUNDED — back with the buyer.
  * - `PAID_OUT`: SETTLED.
  * - `NEVER_HELD`: CREATED, CANCELLED, FAILED.
@@ -226,10 +232,12 @@ export function termsDiffer(terms: ObligationTerms, transaction: TransactionView
  */
 export type ObligationFunds = 'HELD' | 'UNPROVEN' | 'RETURNED' | 'PAID_OUT' | 'NEVER_HELD';
 
-export function fundsOf(status: string): ObligationFunds {
-  switch (status) {
+export function fundsOf(
+  transaction: Pick<TransactionView, 'status' | 'heldProven'>,
+): ObligationFunds {
+  switch (transaction.status) {
     case 'HELD':
-      return 'HELD';
+      return transaction.heldProven === true ? 'HELD' : 'UNPROVEN';
     case 'REFUNDED':
       return 'RETURNED';
     case 'SETTLED':

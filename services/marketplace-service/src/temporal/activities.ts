@@ -315,7 +315,7 @@ export function createActivities(deps: ActivityDependencies) {
           buyerOrganizationId: order.buyerOrganizationId,
           correlationId: order.correlationId,
         });
-        const funds = now ? fundsOf(now.status) : 'UNPROVEN';
+        const funds = now ? fundsOf(now) : 'UNPROVEN';
         if (funds === 'HELD') return;
         logger.error(
           `Order ${order.id}: its obligation ${held.transactionId} is ${now?.status ?? 'not found as its own'} ` +
@@ -369,7 +369,7 @@ export function createActivities(deps: ActivityDependencies) {
           const terms = obligationTermsOf(order);
           const own = found.find((transaction) => termsDiffer(terms, transaction).length === 0);
           if (own) {
-            const funds = fundsOf(own.status);
+            const funds = fundsOf(own);
             if (funds === 'HELD') return { transactionId: own.id };
             logger.error(
               `Order ${order.id}: economic-service holds its obligation ${own.id} as ${own.status} ` +
