@@ -225,6 +225,7 @@ export const STEP_INVENTORY = Object.freeze({
           shard,
           run: withKafka('tests', `pnpm run test:integration --shard=${shard} -- --verbose`),
           env: {
+            TEMPORAL_TEST_SERVER_DIR: '${{ runner.temp }}/temporal-test-server',
             KAFKA_SECRETS_DIR: '${{ runner.temp }}/rasta-kafka-secrets',
             NODE_ENV: 'test',
             KAFKA_BROKERS: 'localhost:9092',

@@ -1,6 +1,7 @@
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { TestWorkflowEnvironment, MockActivityEnvironment } from '@temporalio/testing';
+import { MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { InternalTokenService } from '@rasta/nest-common';
 import { createActivities } from './activities';
@@ -64,7 +65,7 @@ it('real Temporal cancellation reaches a financial fetch through heartbeats with
     ) => effect(),
     markFailed,
   } as unknown as OrderService;
-  const env = await TestWorkflowEnvironment.createTimeSkipping();
+  const env = await createTemporalTestEnvironment();
   try {
     const worker = await Worker.create({
       connection: env.nativeConnection,

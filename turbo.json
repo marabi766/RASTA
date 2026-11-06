@@ -15,6 +15,7 @@
     "tests/e2e/src/api.ts",
     "apps/web/e2e/expect.ts"
   ],
+  "globalPassThroughEnv": ["TEMPORAL_TEST_SERVER_DIR"],
   "globalEnv": ["NODE_ENV", "CI"],
   "tasks": {
     "build": {
