@@ -30,7 +30,6 @@ import {
   sealRepairOrderBaseline,
   startRepair,
 } from './repair-order-commands';
-import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 import { actingAccessToken } from '@/test/session-token';
 
@@ -646,14 +645,12 @@ describe('writing', () => {
       });
     });
 
-    it('shows the generic Persian sentence under a code with no fallback, never the English', async () => {
+    it('an undocumented code is unconfirmed, never the English (PR-830 r1 F1)', async () => {
       const result = await call(
         recording(409, { code: 'SOME_NEW_CODE', message: 'A repair order cannot be frobbed' }).impl,
       );
-      expect(result).toMatchObject({
-        kind: 'INVALID',
-        message: GENERIC_REFUSAL_MESSAGE,
-      });
+      expect(result.kind).toBe('UNKNOWN_OUTCOME');
+      expect(JSON.stringify(result)).not.toContain('frobbed');
     });
   });
 
@@ -684,7 +681,7 @@ describe('writing', () => {
         ORDER,
         NO_SUMMARY,
         's',
-        recording(403, { code: 'FORBIDDEN' }).impl,
+        recording(403, { code: 'FORBIDDEN', message: 'no' }).impl,
       ),
     ).toMatchObject({ kind: 'FORBIDDEN' });
     expect(
@@ -693,7 +690,7 @@ describe('writing', () => {
         ORDER,
         NO_SUMMARY,
         's',
-        recording(404, { code: 'NOT_FOUND' }).impl,
+        recording(404, { code: 'NOT_FOUND', message: 'no' }).impl,
       ),
     ).toMatchObject({ kind: 'NOT_FOUND' });
   });

@@ -1,7 +1,12 @@
 import { Module, VersioningType, type INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
-import { publishApiErrors, healthProbeErrorSchema, type PublishedSchema } from '@rasta/nest-common';
+import {
+  publishApiErrors,
+  publishZodRouteInputs,
+  healthProbeErrorSchema,
+  type PublishedSchema,
+} from '@rasta/nest-common';
 import { OrganizationController } from '../organization/organization.controller';
 import { OrganizationService } from '../organization/organization.service';
 import { z } from 'zod';
@@ -11,9 +16,12 @@ import { HealthController, MetricsController } from '../health/health.controller
 import { PrismaService } from '../prisma/prisma.service';
 import { KafkaEventPublisher } from '../outbox/kafka.publisher';
 
-/** What the routes themselves declare, before the shared error envelope is published. */
+/**
+ * What the routes themselves declare, before the shared error envelope is published: the
+ * decorators, and every body and query a route validates with `zodPipe`, from that schema.
+ */
 export function organizationRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
-  return SwaggerModule.createDocument(
+  const routes = SwaggerModule.createDocument(
     app,
     new DocumentBuilder()
       .setTitle('Rasta — Organization Service')
@@ -25,6 +33,7 @@ export function organizationRouteDocument(app: INestApplication, version = '0.1.
       .addBearerAuth()
       .build(),
   );
+  return publishZodRouteInputs(app, routes);
 }
 
 /** D-121: the one registry of probe routes whose 503 is a health body, not the envelope. */

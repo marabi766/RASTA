@@ -298,6 +298,7 @@ const INTERNAL_STATUS_TEXT: Record<number, string> = {
 export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
   'GET /v1/wallets/me': 'users-accepted',
   'GET /v1/transactions': 'users-accepted',
+  'GET /v1/transactions/capabilities': 'users-accepted',
   'GET /v1/transactions/{id}': 'users-accepted',
   'POST /v1/transactions': 'users-accepted',
   'POST /v1/transactions/{id}/authorise-settlement': 'users-accepted',

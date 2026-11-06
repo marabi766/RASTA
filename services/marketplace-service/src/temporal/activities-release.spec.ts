@@ -621,7 +621,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
           const send = jest.fn(() => ({ id: 'TXN' }));
           const { activities } = over(
             send,
-            () => ({ status: 'HELD' }),
+            () => ({ status: 'HELD', heldProven: true }),
             () => 1,
           );
           await expect(activities.createObligation('ORD')).resolves.toEqual({
@@ -673,7 +673,7 @@ describe('every guard of an economic step reads the order after the step looked'
       economic: {
         createObligation: send,
         authoriseSettlement: send,
-        readObligation: async () => ({ status: 'HELD' }),
+        readObligation: async () => ({ status: 'HELD', heldProven: true }),
       } as unknown as EconomicClient,
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
       currentAttempt: () => 1,
@@ -763,7 +763,7 @@ describe('the deadline of a hold (D-132)', () => {
       } as unknown as OrderService,
       economic: {
         createObligation: send,
-        readObligation: async () => ({ status: 'HELD' }),
+        readObligation: async () => ({ status: 'HELD', heldProven: true }),
       } as unknown as EconomicClient,
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
       currentAttempt: () => attempt,

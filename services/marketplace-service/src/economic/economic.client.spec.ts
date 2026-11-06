@@ -1,9 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { registry } from '@rasta/observability';
 import { withRedirectProbe } from '@rasta/testing';
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
 import {
   EconomicClient,
   fundsOf,
+  heldProofMissing,
   idempotencyKeyFor,
   OBLIGATION_LOOKUP_PAGES,
   ObligationLookupIncomplete,
@@ -647,10 +650,44 @@ describe('finding the order’s obligation by its exact key (review of #334 roun
   });
 });
 
+describe('whether economic-service proves held funds (#824 r1, F3)', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  it.each<[string, { status: number; body: unknown }, boolean]>([
+    ['its explicit yes', { status: 200, body: { heldProven: true } }, true],
+    ['its explicit no', { status: 200, body: { heldProven: false } }, false],
+    ['a body that does not say', { status: 200, body: {} }, false],
+    ['a word for yes', { status: 200, body: { heldProven: 'true' } }, false],
+    ['no body', { status: 204, body: null }, false],
+    [
+      'an older release: the path reads as a transaction id',
+      { status: 404, body: { code: 'NOT_FOUND', message: 'Transaction not found' } },
+      false,
+    ],
+    ['an outage', { status: 503, body: { code: 'UPSTREAM_UNAVAILABLE', message: 'down' } }, false],
+  ])('%s', async (_case, response, proves) => {
+    const { impl, calls } = stubFetch(response);
+    globalThis.fetch = impl as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.provesHeldFunds()).resolves.toBe(proves);
+    expect(calls[0]!.url).toMatch(/\/v1\/transactions\/capabilities$/);
+  });
+
+  it('an unreachable service is a no, not a failure', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.provesHeldFunds()).resolves.toBe(false);
+  });
+});
+
 describe('what an obligation’s status says of its funds (review of #334 round 2, F1)', () => {
   // Every status economic-service has (its TransactionStatus enum), and ones it does not.
   it.each<[string, ObligationFunds]>([
-    ['HELD', 'HELD'],
     ['CREATED', 'NEVER_HELD'],
     ['PENDING_SETTLEMENT', 'UNPROVEN'],
     ['DISPUTED', 'UNPROVEN'],
@@ -661,7 +698,38 @@ describe('what an obligation’s status says of its funds (review of #334 round 
     ['A_STATUS_ADDED_LATER', 'UNPROVEN'],
     ['held', 'UNPROVEN'],
   ])('%s → %s', (status, funds) => {
-    expect(fundsOf(status)).toBe(funds);
+    // What a proof says of any other status: nothing.
+    expect(fundsOf({ status })).toBe(funds);
+    expect(fundsOf({ status, heldProven: true })).toBe(funds);
+  });
+
+  // The stand-ins elsewhere only say what this client reads: the owner must document that name.
+  it('reads the field economic-service documents, by that name', () => {
+    const documented = readFileSync(
+      join(__dirname, '../../../economic-service/src/openapi/transaction-view.ts'),
+      'utf8',
+    );
+    expect(documented).toMatch(/^\s+heldProven: \{$/m);
+  });
+
+  // #824 r1, F3: an older economic-service says nothing. That is no verdict, and no adoption.
+  it('only HELD with no proof field at all is a missing proof', () => {
+    expect(heldProofMissing({ status: 'HELD' })).toBe(true);
+    expect(heldProofMissing({ status: 'HELD', heldProven: true })).toBe(false);
+    expect(heldProofMissing({ status: 'HELD', heldProven: false })).toBe(false);
+    expect(heldProofMissing({ status: 'HELD', heldProven: null } as never)).toBe(false);
+    expect(heldProofMissing({ status: 'HELD', heldProven: 'true' } as never)).toBe(false);
+    expect(heldProofMissing({ status: 'PENDING_SETTLEMENT' })).toBe(false);
+  });
+
+  // #762 r3, F2: HELD with nothing in escrow. Only the proof makes it HELD.
+  it('HELD is HELD only with economic-service’s proof', () => {
+    expect(fundsOf({ status: 'HELD', heldProven: true })).toBe('HELD');
+    expect(fundsOf({ status: 'HELD', heldProven: false })).toBe('UNPROVEN');
+    expect(fundsOf({ status: 'HELD' })).toBe('UNPROVEN');
+    // A body nobody typed: anything but `true` proves nothing.
+    expect(fundsOf({ status: 'HELD', heldProven: 'true' } as never)).toBe('UNPROVEN');
+    expect(fundsOf({ status: 'HELD', heldProven: 1 } as never)).toBe('UNPROVEN');
   });
 });
 

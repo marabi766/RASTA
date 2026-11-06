@@ -586,11 +586,14 @@ describe('which answers confirm a command', () => {
       kind: 'INVALID',
       message: CONTRACT_CODE_TEXT.OPTIMISTIC_LOCK_FAILED,
     });
-    reply = () => refusal(422, 'SOMETHING_NEW');
+    reply = () => refusal(409, 'ALREADY_EXISTS');
     expect(await send(binding, null)).toMatchObject({
       kind: 'INVALID',
       message: CONTRACT_REFUSAL_FALLBACK,
     });
+    // PR-830 r1 F1: an undocumented code proves nothing.
+    reply = () => refusal(422, 'SOMETHING_NEW');
+    expect((await send(binding, null)).kind).toBe('UNKNOWN_OUTCOME');
     reply = () => refusal(503, 'SERVICE_UNAVAILABLE');
     expect((await send(binding, null)).kind).toBe('UNKNOWN_OUTCOME');
   });

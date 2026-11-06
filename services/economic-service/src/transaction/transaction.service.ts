@@ -708,6 +708,7 @@ export class TransactionService {
       const target = nextStatus(transactionId, transaction.status, event, {
         settlementAuthorised: transaction.settlementAuthorised,
         fundsHeld: transaction.fundsHeld,
+        settlementBarred: transaction.settlementBarred,
       });
       if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
         // Fixed words: the identities stay out of the envelope and the log.
@@ -882,11 +883,21 @@ export class TransactionService {
     // names nothing is just that text (S-09). A path id is in the logged path.
     if (!transaction) throw RastaError.notFound('Transaction');
     assertTransactionVisible(transaction);
-    return transaction as unknown as TransactionDetail;
+    const proven =
+      transaction.status === 'HELD' ? await this.repository.heldProven([id], client) : null;
+    return { ...transaction, heldProven: proven?.has(id) === true } as unknown as TransactionDetail;
   }
 
-  list(filter: TransactionFilter) {
-    return this.repository.list(getOrganizationId(), filter);
+  /** Asked only of what reads as HELD: a page is at most 100, and no other status claims escrow. */
+  async list(filter: TransactionFilter) {
+    const page = await this.repository.list(getOrganizationId(), filter);
+    const proven = await this.repository.heldProven(
+      page.items.filter((row) => row.status === 'HELD').map((row) => row.id),
+    );
+    return {
+      ...page,
+      items: page.items.map((row) => ({ ...row, heldProven: proven.has(row.id) })),
+    };
   }
 }
 
@@ -971,6 +982,8 @@ export interface TransactionDetail {
   failureReason: string | null;
   createdAt: Date;
   createdBy: string;
+  /** What `HELD` says, proven (`transaction_held_proven`). */
+  heldProven: boolean;
   settlementAuthorisedAt: Date | null;
   settlementAuthorisedService: string | null;
   settlementAuthorisationKey: string | null;

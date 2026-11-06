@@ -19,12 +19,21 @@ const collectCoverageFrom = [
   '!src/main.ts',
 ];
 
+// Measures workflow code inside Temporal's bundle (see the threshold below), for the
+// gate's own command only: instrumenting has a cost a plain test run should not pay,
+// and a bare `jest --coverage` without it can only report a lower number.
+const measuresCoverage = process.env.npm_lifecycle_event === 'test:coverage';
+const setupFilesAfterEnv = [
+  disclosureGuard,
+  ...(measuresCoverage ? [require.resolve('./test/temporal-workflow-coverage.setup.ts')] : []),
+];
+
 /** @type {import('jest').Config} */
 module.exports = {
   projects: [
     {
       displayName: 'unit',
-      setupFilesAfterEnv: [disclosureGuard],
+      setupFilesAfterEnv,
       rootDir: __dirname,
       roots: ['<rootDir>/src'],
       testEnvironment: 'node',
@@ -36,7 +45,7 @@ module.exports = {
     },
     {
       displayName: 'integration',
-      setupFilesAfterEnv: [disclosureGuard],
+      setupFilesAfterEnv,
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
       testEnvironment: 'node',
@@ -55,18 +64,12 @@ module.exports = {
   // rather than at whatever the suite currently reaches, so it measures the
   // requirement and not the status quo.
   //
-  // `src/temporal/workflows.ts` is counted here and is largely unmeasurable:
-  // Temporal executes workflow code from a webpack bundle inside an isolated
-  // V8 context, where Istanbul's instrumentation does not reach. Its 31
-  // branches are therefore reported as uncovered even though
-  // `workflows.spec.ts` executes them against a real time-skipping Temporal
-  // server. It is deliberately **not** excluded: an exclusion would raise the
-  // number by hiding a tooling limit, and would also hide the workflow itself
-  // if its tests were ever deleted. The threshold is met with the file left in.
-  //
-  // `test:coverage` skips the workflow's own specs (`src/temporal/workflows*`):
-  // what they run is that bundle, so they add nothing the report can see and
-  // most of the 8 minutes the CI step has. The Unit tests job runs them in full.
+  // `src/temporal/workflows.ts` is counted here and is measured: Temporal executes
+  // workflow code from a webpack bundle inside an isolated V8 context, where Jest's
+  // instrumentation does not reach, so `test/temporal-workflow-coverage.ts` instruments
+  // the bundle with `@temporalio/nyc-test-coverage` and merges the result into this run.
+  // The workflow specs therefore count: deleting one lowers the number. The file is
+  // deliberately **not** excluded, and the threshold is met with it left in.
   coverageThreshold: {
     global: { branches: 75, functions: 75, lines: 75, statements: 75 },
   },

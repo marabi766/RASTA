@@ -8,7 +8,7 @@ groups:
           severity: critical
         annotations:
           summary: Order saga starts are waiting
-          description: A start intent has waited over five minutes. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+          description: A start intent has waited over five minutes. Check Temporal connectivity, the economic-service release and namespace retention before reconciling ambiguous legacy starts.
           runbook: docs/runbooks/marketplace-saga-deploy.md
   - name: rasta-marketplace-saga-release
     rules:

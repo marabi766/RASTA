@@ -1,4 +1,5 @@
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ERROR_STATUS } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
@@ -367,24 +368,8 @@ describe('the order saga', () => {
   let env: TestWorkflowEnvironment;
   let queues = 0;
 
-  /**
-   * A time-skipping server. CI points TEMPORAL_TEST_SERVER_DIR at a cached
-   * directory. The time-skipping server is a ~300 MB download, and fetching it
-   * on every run was what made this hook exceed its timeout on a slow network:
-   * the whole file failed before a single saga ran. Locally it falls back to
-   * the system temp dir.
-   */
-  const timeSkippingServer = (): Promise<TestWorkflowEnvironment> => {
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    return TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
-  };
-
   beforeAll(async () => {
-    env = await timeSkippingServer();
+    env = await createTemporalTestEnvironment();
   }, 300_000);
 
   afterAll(async () => {
@@ -957,7 +942,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -1345,7 +1330,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -1383,7 +1368,31 @@ describe('the order saga', () => {
         );
     const phaseIs = (handle: WorkflowHandle, phase: string): Promise<void> =>
       eventually(async () => (await handle.query<SagaStatus, []>('status')).phase === phase, phase);
-    /** The receipt is confirmed and the saga at rest in the wait, a round reported. */
+    /**
+     * The saga is blocked in a backoff: past the workflow tasks, the last
+     * thing in its history is the timer it armed. Not {@link atRest}: the test
+     * server also records a workflow task with no command while the round's
+     * report is still running, and the saga then had a round in flight that
+     * the test took for over (FU-174).
+     */
+    const backingOff = (handle: WorkflowHandle): Promise<void> =>
+      eventually(async () => {
+        const last = ((await handle.fetchHistory()).events ?? [])
+          .filter(
+            (e) =>
+              !e.workflowTaskScheduledEventAttributes &&
+              !e.workflowTaskStartedEventAttributes &&
+              !e.workflowTaskCompletedEventAttributes,
+          )
+          .at(-1);
+        return Boolean(last?.timerStartedEventAttributes);
+      }, 'the backoff to be armed');
+    /**
+     * The receipt is confirmed and the saga waiting out a backoff, a round
+     * reported. Not necessarily the first: the receipt's signal can land while
+     * the read that already saw it runs, and that nudge ends the first backoff
+     * at once (FU-174). Waiting for the timer is what makes the rounds settled.
+     */
     const toWait = async (
       { party, held, handle }: { party: Party; held: () => Promise<void>; handle: WorkflowHandle },
       rounds: () => number,
@@ -1394,7 +1403,7 @@ describe('the order saga', () => {
       await party.confirmReceipt();
       await phaseIs(handle, 'AUTHORISATION_UNCONFIRMED');
       await until(() => rounds() > 0, 'the round to be reported');
-      await atRest(handle);
+      await backingOff(handle);
     };
 
     it('exhausted: the saga stays, settles nothing, and goes on once confirmed', async () => {
@@ -2977,7 +2986,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -3524,12 +3533,7 @@ describe('a saga the previous release started, replayed and then run live (#625 
   let queues = 0;
 
   beforeAll(async () => {
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
+    env = await createTemporalTestEnvironment();
     bundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
   }, 300_000);
 

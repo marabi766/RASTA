@@ -91,9 +91,10 @@ async function bootstrap(): Promise<void> {
         'x-correlation-id',
         'x-organization-id',
         'idempotency-key',
+        'idempotency-replay-deadline',
         'if-match',
       ],
-      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag'],
+      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag', 'retry-after'],
       maxAge: 600,
     });
   }

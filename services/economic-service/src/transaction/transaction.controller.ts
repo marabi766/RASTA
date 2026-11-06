@@ -103,6 +103,20 @@ export class TransactionController {
     };
   }
 
+  /** Before `:id`, which an older release answers this path with: a 404, so not capable. */
+  @Get('capabilities')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN')
+  @AllowService('marketplace-service')
+  @ApiOperation({
+    summary: 'What this release proves about a transaction',
+    description:
+      '`heldProven`: every transaction view says whether HELD is proven. The order saga starts ' +
+      'no order until this answers true (ADR-040). No tenant data.',
+  })
+  capabilities() {
+    return { heldProven: true };
+  }
+
   @Get(':id')
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN')
   @AllowService('marketplace-service', 'contract-service', 'procurement-service')

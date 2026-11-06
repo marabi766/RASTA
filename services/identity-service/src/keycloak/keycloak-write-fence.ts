@@ -406,8 +406,9 @@ export class KeycloakWriteFences {
    * its own transaction. An insert that cannot commit while the business
    * transaction can still use it is abandoned, and nothing is sent.
    *
-   * The local deadline is measured from **before** the insert, so it falls no
-   * later, in real time, than the `deadline_at` the database stamps.
+   * The local deadline is measured from **before** the insert. The database
+   * clock is floored to milliseconds, so its deadline can be less than 1 ms
+   * earlier; takeover still requires the separate settle window to elapse.
    */
   async open(
     tx: ExtendedPrismaClient,
@@ -451,7 +452,7 @@ export class KeycloakWriteFences {
                t.c, t.c + make_interval(secs => ${timeout}),
                t.c + make_interval(secs => ${timeout + input.settleSeconds}),
                t.c + make_interval(secs => ${timeout + input.settleSeconds})
-          FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t`,
+          FROM (SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS c) t`,
       // One budget for the connection wait and the insert together (#458 r2
       // F2): never past what the business transaction has left.
       { budgetMs: budget, statementTimeoutMs: budget },
@@ -627,7 +628,7 @@ export class KeycloakWriteFences {
                   started_at, deadline_at, takeover_at, next_reassert_at)
           SELECT ${attemptId}, ${owed.userId}, ${owed.keycloakId}, ${owed.operation},
                  t.c, w.deadline, w.takeover, w.takeover
-            FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t,
+            FROM (SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS c) t,
                  LATERAL (SELECT
                    CASE WHEN ${owed.known} THEN t.c
                         ELSE t.c + make_interval(secs => ${timeout}) END AS deadline,
@@ -683,7 +684,7 @@ export class KeycloakWriteFences {
            SET deadline_at = LEAST(takeover_at, t.c),
                takeover_at = LEAST(takeover_at, t.c),
                next_reassert_at = LEAST(next_reassert_at, t.c)
-          FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t
+          FROM (SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS c) t
          WHERE attempt_id = ANY(${[...attemptIds]}::text[])`;
       return true;
     } catch {
@@ -774,10 +775,11 @@ export class KeycloakWriteFences {
     intervalSeconds: number,
     maxIntervals: number,
   ): Promise<void> {
+    // TIMESTAMP(3) rounds to nearest: truncate so the stored value is exact and cannot exceed the cap.
     await this.pool.client.$executeRaw`
       UPDATE keycloak_write_attempt
          SET reassert_failures = LEAST(reassert_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-             next_reassert_at = (clock_timestamp() AT TIME ZONE 'UTC')
+             next_reassert_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                + make_interval(secs => ${intervalSeconds}
                    * LEAST(POWER(2, LEAST(reassert_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
                            ${maxIntervals}))
