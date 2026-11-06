@@ -405,3 +405,25 @@ tests:
       - eval_time: 20m
         alertname: RastaMarketplaceSagaFinancialEpisodeOverdue
         exp_alerts: []
+  - interval: 1h
+    input_series:
+      # Hourly rounds, then it is confirmed.
+      - series: 'rasta_marketplace_saga_economic_call_unconfirmed_total{service="marketplace-service",operation="authoriseSettlement"}'
+        values: '0 0 1 2 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: RastaMarketplaceSagaEconomicCallUnconfirmed
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: RastaMarketplaceSagaEconomicCallUnconfirmed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              operation: authoriseSettlement
+            exp_annotations:
+              summary: A saga's authoriseSettlement call is unconfirmed
+              description: economic-service has given no answer proving the call changed nothing, so its outcome is unknown and the funds stay held. The saga keeps trying and moves nothing else; the log names the order.
+              runbook: docs/runbooks/marketplace-saga-deploy.md
+      - eval_time: 8h
+        alertname: RastaMarketplaceSagaEconomicCallUnconfirmed
+        exp_alerts: []

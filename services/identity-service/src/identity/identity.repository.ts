@@ -427,10 +427,11 @@ export class IdentityRepository {
    * {@link deferLapse}, so no attempt count overflows the arithmetic.
    */
   async deferRegistrationIntake(id: string, intervalSeconds: number, maxIntervals: number) {
+    // TIMESTAMP(3) rounds up: truncate first so persistence cannot exceed the backoff cap.
     await this.client.$executeRaw`
       UPDATE registration_intake
          SET attempts = LEAST(attempts, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-             next_attempt_at = (clock_timestamp() AT TIME ZONE 'UTC')
+             next_attempt_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                + make_interval(secs => ${intervalSeconds}
                    * LEAST(POWER(2, LEAST(attempts, ${BACKOFF_EXPONENT_CAP})),
                            ${maxIntervals}))
@@ -831,13 +832,14 @@ export class IdentityRepository {
    * `BACKOFF_EXPONENT_CAP`), so no failure count can overflow it.
    */
   async deferLapse(membershipId: string, intervalSeconds: number, maxIntervals: number) {
+    // TIMESTAMP(3) rounds up: truncate first so persistence cannot exceed the backoff cap.
     await runUnscoped(
       'the membership expiry sweep covers every organization',
       () =>
         this.client.$executeRaw`
         UPDATE membership
            SET lapse_failures = LEAST(lapse_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-               lapse_retry_at = (clock_timestamp() AT TIME ZONE 'UTC')
+               lapse_retry_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                  + make_interval(secs => ${intervalSeconds}
                      * LEAST(POWER(2, LEAST(lapse_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
                              ${maxIntervals}))

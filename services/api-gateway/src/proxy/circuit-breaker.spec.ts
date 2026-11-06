@@ -12,7 +12,7 @@ import {
   type CircuitPermit,
 } from './circuit-breaker';
 import { clientCancellation } from './gateway.controller';
-import { ClientCancelledError, ProxyService } from './proxy.service';
+import { ClientCancelledError, ProxyService, READINESS_PATH } from './proxy.service';
 import type { RateLimiter } from './rate-limiter';
 
 /**
@@ -45,6 +45,8 @@ function breakers() {
     organizationsToOpen: 1,
     resetAfterMs: RESET_MS,
     now: () => clock,
+    // These schedules are outages: the gateway's own check finds the service not ready.
+    checkReady: () => false,
   });
   return {
     circuits,
@@ -331,8 +333,9 @@ describe('forward settles its permit on every exit path', () => {
   let received = 0;
   let urls: ServiceUrls;
   beforeAll(async () => {
-    server = createServer((_req, res) => {
-      received += 1;
+    server = createServer((req, res) => {
+      // The gateway's own readiness check (FU-113) is not a forwarded request.
+      if (req.url !== READINESS_PATH) received += 1;
       res.writeHead(500, { 'content-type': 'text/plain' });
       res.end('boom');
     });

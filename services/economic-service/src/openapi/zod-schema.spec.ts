@@ -205,7 +205,10 @@ describe('the listing contracts', () => {
       Record<string, unknown>
     >;
 
-    expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
+    expect(properties.limit).toEqual({
+      default: 25,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
     expect(properties.status).toMatchObject({ type: 'string' });
   });
 });

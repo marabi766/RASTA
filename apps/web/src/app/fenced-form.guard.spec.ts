@@ -1174,6 +1174,200 @@ describe('the guard fails where it must', () => {
       });
     });
 
+    describe('FU-106: returned expressions and bound inline functions', () => {
+      const boundary = 'submitThroughSlot({})';
+      const reducer = (body: string) =>
+        COMPLIANT.replace(
+          /const send = useCallback\([\s\S]*?\n {6}\);/,
+          `const send = useCallback(async (previous, form) => ${body}, []);`,
+        );
+
+      const inlineStore = (target: string) => ({
+        'lib/inline-store.ts': `import { fencedSlot } from './unresolved-tenancy';
+          const slot = fencedSlot('inline.'); export const G = (${target}).bind(null);`,
+      });
+      const importG = "import { G } from '@/lib/inline-store';";
+
+      it.each(['slot.start()', "fencedSlot('j.')"])(
+        'r1 F1 refuses anonymous store JSX in forms and other files: %s',
+        (body) => {
+          const extra = inlineStore(`() => { ${body}; return null; }`);
+          expect(rules(`${COMPLIANT} ${importG} const X = () => <G />;`, extra)).toContain(
+            'unresolved',
+          );
+          expect(
+            rules(COMPLIANT, { ...extra, 'app/Other.tsx': `${importG} const X = () => <G />;` }),
+          ).toContain('unresolved');
+        },
+      );
+
+      it.each([
+        '({ f: () => slot.start() }).f',
+        '(Math.random() ? () => slot.start() : () => null)',
+        '(() => () => fencedSlot("z."))()',
+      ])('r1 F2 refuses unresolvable bound targets outside and inside send: %s', (target) => {
+        for (const form of [
+          `${COMPLIANT} ${importG} G();`,
+          `${importG} ${COMPLIANT.replace('send: () => submitThing(previous, form)', 'send: () => G()')}`,
+        ])
+          expect(rules(form, inlineStore(target))).toContain('unresolved');
+      });
+
+      it.each([
+        '(() => fencedSlot("x.")).bind(null)',
+        '(function () { return fencedSlot("x."); }).bind(null)',
+        'Function.prototype.bind.call(() => fencedSlot("x."), null)',
+        'Reflect.apply(Function.prototype.bind, () => fencedSlot("x."), [null])',
+      ])('r1 F3 refuses anonymous factories inside send through adapters: %s', (bound) => {
+        const form = `${importG} ${COMPLIANT.replace('send: () => submitThing(previous, form)', 'send: () => G()')}`;
+        expect(
+          rules(form, {
+            'lib/inline-store.ts': `import { fencedSlot } from './unresolved-tenancy'; export const G = ${bound};`,
+          }),
+        ).toContain('store');
+      });
+
+      it.each(['for await (const x of [0]) {}', 'await using r = null;'])(
+        'r1 F4 counts every callback-owned await form: %s',
+        (suspend) => {
+          expect(rules(reducer(`{ ${suspend} return ${boundary}; }`))).toContain('callback');
+        },
+      );
+
+      it.each([
+        '(Promise.reject(0), submitThroughSlot)({})',
+        '(Promise.reject(previous), SB).submitThroughSlot({})',
+        '(Promise.reject(previous), SB)["submitThroughSlot"]({})',
+        'submitThroughSlot((Promise.reject(previous), {}))',
+        '((Promise.reject(0), submitThroughSlot) as T)!({})',
+        'submitThroughSlot(((Promise.reject(previous), {}) satisfies T)!)',
+      ])(
+        'r1 F5 refuses discarded operands at every returned boundary position: %s',
+        (expression) => {
+          for (const body of [expression, `{ return ${expression}; }`]) {
+            const form = `import * as SB from '@/lib/fenced-submission'; ${reducer(body)}`;
+            expect(rules(form)).toEqual(expect.arrayContaining(['callback', 'boundary']));
+          }
+        },
+      );
+
+      it('r1 F5 discarded options never protect eager store calls', () => {
+        expect(rules(reducer('submitThroughSlot((0, { send: saveThing() }))'))).toContain('store');
+      });
+
+      it('r1 F5 checks effective options bound before the returned call', () => {
+        const form = reducer('execute()').replace(
+          'const send = useCallback(',
+          'const execute = submitThroughSlot.bind(null, (Promise.reject(0), {})); const send = useCallback(',
+        );
+        expect(rules(form)).toEqual(expect.arrayContaining(['callback', 'boundary']));
+      });
+
+      it.each([
+        '{ for (const x of [0]) {} using r = null; return submitThroughSlot({}); }',
+        'submitThroughSlot({ send: async () => { for await (const x of [0]) {} await using r = null; } })',
+        'submitThroughSlot({ send: () => (0, saveThing()) })',
+      ])('r1 preserves synchronous loops/using and nested function ownership: %s', (body) => {
+        expect(rules(reducer(body))).toEqual([]);
+      });
+
+      it.each(['await Promise.resolve(0)', 'Promise.reject(previous)', boundary, '0'])(
+        'N1 refuses discarded comma operand %s in expression and block returns',
+        (left) => {
+          for (const expression of [`(${left}, ${boundary})`, `((${left}, ${boundary}) as T)!`]) {
+            for (const body of [expression, `{ return ${expression}; }`]) {
+              expect(rules(reducer(body))).toEqual(
+                expect.arrayContaining(['callback', 'boundary']),
+              );
+            }
+          }
+        },
+      );
+
+      it.each([
+        'submitThroughSlot({ ...(await options) })',
+        'submitThroughSlot({ remember: await makeRemember() })',
+        '(submitThroughSlot({ ...(await options) }) satisfies T)!',
+      ])('N1 scans expression bodies for callback-owned awaits: %s', (expression) => {
+        expect(rules(reducer(expression))).toContain('callback');
+      });
+
+      it.each([
+        `(${boundary})`,
+        `(${boundary} as T)`,
+        `(${boundary} satisfies T)`,
+        `(${boundary})!`,
+        `((${boundary} as T) satisfies T)!`,
+        'submitThroughSlot({ send: async () => await submitThing(previous, form) })',
+        'submitThroughSlot({ async send() { return await submitThing(previous, form); } })',
+        'submitThroughSlot({ send: async function () { return await submitThing(previous, form); } })',
+      ])('N1 preserves wrappers and nested function ownership: %s', (expression) => {
+        for (const body of [expression, `{ return ${expression}; }`])
+          expect(rules(reducer(body))).toEqual([]);
+      });
+
+      it.each([
+        '(() => null).bind(null)',
+        '(function () { return null; }).bind(null)',
+        '((() => null) as T).bind(null).bind(null)',
+        '((() => null) satisfies T)!.bind(null)',
+        '(0, () => null).bind(null)',
+        'Function.prototype.bind.call(() => null, null)',
+        'Reflect.apply(Function.prototype.bind, () => null, [null])',
+      ])('N2 resolves inline bound JSX inside and outside forms: %s', (bound) => {
+        expect(rules(`${COMPLIANT} const G = ${bound}; const X = () => <G />;`)).toEqual([]);
+        expect(
+          rules(COMPLIANT, {
+            'lib/component.ts': `export const G = ${bound};`,
+            'app/Other.tsx': "import { G } from '@/lib/component'; export const X = () => <G />;",
+          }),
+        ).toEqual([]);
+      });
+
+      it('N2 retains the defining module for form discovery and refuses anonymous store JSX', () => {
+        const form = `
+          import { G } from '@/lib/thing-store';
+          import { useSlotActionState, submitThroughSlot } from '@/lib/fenced-submission';
+          import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
+          useSlotActionState(() => submitThroughSlot({}), null);
+          const X = () => <UnresolvedForm><G /></UnresolvedForm>;
+        `;
+        const sources = tree(form, {
+          'lib/thing-store.ts': `${STORE} export const G = (() => null).bind(null);`,
+        });
+        expect(fencedForms(sources)).toEqual(['app/thing/ThingForm.tsx']);
+        expect(fencedFormViolations(sources).map((violation) => violation.rule)).toEqual([
+          'unresolved',
+        ]);
+      });
+
+      it.each(['slot.start()', "fencedSlot('other.')"])(
+        'N2 refuses invoking an anonymous bound store target outside the boundary: %s',
+        (body) => {
+          const form = `${COMPLIANT} import { run } from '@/lib/inline-store'; run();`;
+          const extra = {
+            'lib/inline-store.ts': `import { fencedSlot } from './unresolved-tenancy';
+              const slot = fencedSlot('inline.'); export const run = (() => ${body}).bind(null);`,
+          };
+          expect(rules(form, extra)).toContain('store');
+        },
+      );
+
+      it.each(['missing', 'Unknown', 'cycle'])(
+        'N2 still refuses an unresolved bound target: %s',
+        (target) => {
+          const imports =
+            "import { missing } from '@/lib/thing-store'; import { cycle } from '@/lib/cycle';";
+          expect(
+            rules(COMPLIANT, {
+              'lib/cycle.ts': 'export { cycle } from "./cycle";',
+              'app/Other.tsx': `${imports} const G = ${target}.bind(null); const X = () => <G />;`,
+            }),
+          ).toContain('unresolved');
+        },
+      );
+    });
+
     it('refuses when resolution is exhausted, keeping where it stopped', () => {
       const cycle = {
         'lib/a.ts': "export { x } from './b'; export * from './thing-store';",

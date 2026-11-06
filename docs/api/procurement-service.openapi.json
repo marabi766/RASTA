@@ -237,9 +237,7 @@
                   "note": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 500,
-                    "description": "Optional free text, trimmed, up to 500 characters, without bidirectional control characters. Read through this API by the buyer only; never on an event."
+                    "description": "Optional free text, trimmed, up to 500 characters, without bidirectional control characters. Read through this API by the buyer only; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["productId", "quantity"],
@@ -267,9 +265,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -798,9 +794,7 @@
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 8,
-                    "maxLength": 500,
-                    "description": "Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with the demand and read through this API; never on an event."
+                    "description": "Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with the demand and read through this API; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reason"],
@@ -830,9 +824,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -1512,9 +1504,7 @@
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 8,
-                    "maxLength": 500,
-                    "description": "Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with the aggregation and read through this API; never on an event."
+                    "description": "Why, 8 to 500 characters, trimmed, without bidirectional control characters. Kept with the aggregation and read through this API; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reason"],
@@ -1609,9 +1599,7 @@
                           "label": {
                             "type": "string",
                             "pattern": "^[^\\p{Bidi_Control}]*$",
-                            "minLength": 1,
-                            "maxLength": 200,
-                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                           },
                           "weightBp": {
                             "type": "integer",
@@ -1893,9 +1881,7 @@
                         "label": {
                           "type": "string",
                           "pattern": "^[^\\p{Bidi_Control}]*$",
-                          "minLength": 1,
-                          "maxLength": 200,
-                          "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                          "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "weightBp": {
                           "type": "integer",
@@ -1920,7 +1906,7 @@
                     },
                     "minItems": 1,
                     "maxItems": 50,
-                    "description": "Copied into the RFQ and frozen with it (ADR-067 § 1): 1 to 50, unique codes, weights summing to exactly 10000."
+                    "description": "Copied into the RFQ and frozen with it (ADR-067 § 1): 1 to 50, unique codes, weights summing to exactly 10000. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "invitedSupplierOrganizationIds": {
                     "type": "array",
@@ -1928,6 +1914,7 @@
                       "anyOf": [
                         {
                           "type": "string",
+                          "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
                           "description": "ORG identifier"
                         },
                         {
@@ -1938,7 +1925,7 @@
                     },
                     "minItems": 1,
                     "maxItems": 500,
-                    "description": "The organizations invited to quote (Q-121 (1): invitation only). Each must hold an approved GOODS_SUPPLY qualification and no open suspension now, by supplier-service (422 INVITEE_NOT_ELIGIBLE; unreachable, 503). Never the buyer. At most PROCUREMENT_RFQ_MAX_INVITEES (default 200; 422 INVITEE_LIMIT_EXCEEDED above it), and never more than 500."
+                    "description": "The organizations invited to quote (Q-121 (1): invitation only). Each must hold an approved GOODS_SUPPLY qualification and no open suspension now, by supplier-service (422 INVITEE_NOT_ELIGIBLE; unreachable, 503). Never the buyer. At most PROCUREMENT_RFQ_MAX_INVITEES (default 200; 422 INVITEE_LIMIT_EXCEEDED above it), and never more than 500. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": [
@@ -1974,9 +1961,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -2064,9 +2049,7 @@
                                 "label": {
                                   "type": "string",
                                   "pattern": "^[^\\p{Bidi_Control}]*$",
-                                  "minLength": 1,
-                                  "maxLength": 200,
-                                  "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                                  "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                                 },
                                 "weightBp": {
                                   "type": "integer",
@@ -2290,9 +2273,7 @@
                           "label": {
                             "type": "string",
                             "pattern": "^[^\\p{Bidi_Control}]*$",
-                            "minLength": 1,
-                            "maxLength": 200,
-                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                           },
                           "weightBp": {
                             "type": "integer",
@@ -2512,9 +2493,7 @@
                           "label": {
                             "type": "string",
                             "pattern": "^[^\\p{Bidi_Control}]*$",
-                            "minLength": 1,
-                            "maxLength": 200,
-                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                           },
                           "weightBp": {
                             "type": "integer",
@@ -2820,9 +2799,7 @@
                           "label": {
                             "type": "string",
                             "pattern": "^[^\\p{Bidi_Control}]*$",
-                            "minLength": 1,
-                            "maxLength": 200,
-                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                            "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                           },
                           "weightBp": {
                             "type": "integer",
@@ -3062,9 +3039,7 @@
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 0,
-                    "maxLength": 500,
-                    "description": "Optional: why, up to 500 characters, trimmed, without bidirectional control characters (empty is none). Kept with the RFQ and read by the buyer through this API; never on an event."
+                    "description": "Optional: why, up to 500 characters, trimmed, without bidirectional control characters (empty is none). Kept with the RFQ and read by the buyer through this API; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reasonCode"],
@@ -3337,7 +3312,7 @@
                       "unitPriceMinor": {
                         "type": "string",
                         "pattern": "^[1-9][0-9]{0,18}$",
-                        "description": "The price of one unit in rials (minor units) as a decimal string, never a float; > 0. Times the RFQ’s totalQuantity it must not exceed 2^63 − 1 (422 QUOTATION_AMOUNT_OUT_OF_RANGE, before anything is sealed or written)."
+                        "description": "The price of one unit in rials (minor units) as a decimal string, never a float; > 0. Times the RFQ’s totalQuantity it must not exceed 2^63 − 1 (422 QUOTATION_AMOUNT_OUT_OF_RANGE, before anything is sealed or written). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "answers": {
                         "type": "array",
@@ -3352,9 +3327,7 @@
                             "answer": {
                               "type": "string",
                               "pattern": "^[^\\p{Bidi_Control}]*$",
-                              "minLength": 1,
-                              "maxLength": 2000,
-                              "description": "Trimmed, line endings as LF, Unicode NFC, 1 to 2000 characters, without bidirectional control characters."
+                              "description": "Trimmed, line endings as LF, Unicode NFC, 1 to 2000 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             }
                           },
                           "required": ["criterionCode", "answer"],
@@ -3362,14 +3335,12 @@
                         },
                         "minItems": 1,
                         "maxItems": 50,
-                        "description": "One answer per criterion of the RFQ, by code (Q-120): a code the RFQ does not have is 422 UNKNOWN_CRITERION, a criterion left unanswered 422 CRITERION_UNANSWERED."
+                        "description": "One answer per criterion of the RFQ, by code (Q-120): a code the RFQ does not have is 422 UNKNOWN_CRITERION, a criterion left unanswered 422 CRITERION_UNANSWERED. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "note": {
                         "type": "string",
                         "pattern": "^[^\\p{Bidi_Control}]*$",
-                        "minLength": 1,
-                        "maxLength": 2000,
-                        "description": "Trimmed, line endings as LF, Unicode NFC, 1 to 2000 characters, without bidirectional control characters."
+                        "description": "Trimmed, line endings as LF, Unicode NFC, 1 to 2000 characters, without bidirectional control characters. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       }
                     },
                     "required": ["unitPriceMinor", "answers"],

@@ -316,12 +316,17 @@ export const CLI_CONTRACT = Object.freeze({
       '--interactive',
       '--label',
       '--log-level',
+      '--login',
       '--memory',
       '--mount',
       '--name',
       '--net',
       '--network',
+      '--noediting',
+      '--noprofile',
+      '--norc',
       '--platform',
+      '--posix',
       '--publish',
       '--pull',
       '--quiet',
@@ -369,15 +374,22 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/ci-integration-split-lib.mjs': { other: ['--filter', '--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
+  // FU-077: and the argument shapes of the tools it reads as inert (prettier, tsc, jest).
   'scripts/ci-node-test-timeouts-lib.mjs': {
     other: [
+      '--check',
       '--enable-source-maps',
       '--filter',
+      '--frozen-lockfile',
       '--import',
+      '--noEmit',
       '--no-warnings',
+      '--passWithNoTests',
       '--require',
+      '--selectProjects',
       '--test',
       '--test-timeout',
+      '-p',
     ],
   },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
@@ -469,8 +481,11 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
-  // The name of a DATABASE_URL_* variable, never its value, then what psql is to be told.
-  'scripts/psql-prisma-url.mjs': { positionals: ['identifier', 'forwarded'] },
+  // The name of a DATABASE_URL_* variable, never its value, then the few flags it passes on to psql.
+  'scripts/psql-prisma-url.mjs': {
+    positionals: ['identifier', 'forwarded'],
+    other: ['--file', '--set', '-c', '-f', '-v'],
+  },
   'scripts/replay-dlq-lib.mjs': {
     accepts: {
       '--allow-stale': 'identifier',

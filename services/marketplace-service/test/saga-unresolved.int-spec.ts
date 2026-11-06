@@ -503,6 +503,9 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       orders: wiring.orders,
       economic: {
         ...economic,
+        // An authorisation outside a worker is in doubt (FU-103) and reads the
+        // obligation: still HELD, so the lost call stays unanswered.
+        readObligation: async () => ({ status: 'HELD' }),
         authoriseSettlement: async () => {
           if (!answers.authorise) throw lost();
         },
