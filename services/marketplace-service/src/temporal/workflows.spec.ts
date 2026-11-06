@@ -1,4 +1,5 @@
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ERROR_STATUS } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
@@ -358,24 +359,8 @@ describe('the order saga', () => {
   let env: TestWorkflowEnvironment;
   let queues = 0;
 
-  /**
-   * A time-skipping server. CI points TEMPORAL_TEST_SERVER_DIR at a cached
-   * directory. The time-skipping server is a ~300 MB download, and fetching it
-   * on every run was what made this hook exceed its timeout on a slow network:
-   * the whole file failed before a single saga ran. Locally it falls back to
-   * the system temp dir.
-   */
-  const timeSkippingServer = (): Promise<TestWorkflowEnvironment> => {
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    return TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
-  };
-
   beforeAll(async () => {
-    env = await timeSkippingServer();
+    env = await createTemporalTestEnvironment();
   }, 300_000);
 
   afterAll(async () => {
@@ -948,7 +933,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -2349,7 +2334,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -2896,12 +2881,7 @@ describe('a saga the previous release started, replayed and then run live (#625 
   let queues = 0;
 
   beforeAll(async () => {
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
+    env = await createTemporalTestEnvironment();
     bundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
   }, 300_000);
 
