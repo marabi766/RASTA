@@ -180,8 +180,10 @@ describe('the real document DTOs', () => {
     >;
 
     expect(properties.limit).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 100,
       default: 25,
-      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
     });
 
     // A logical boolean, not the `boolean | string` union the parser accepts.
