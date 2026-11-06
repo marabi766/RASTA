@@ -29,6 +29,19 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 describe('organization-service published errors (D-121)', () => {
+  it.each(['', '0x10', '1e1', ' 16 '])(
+    'FU-131 HTTP refuses non-decimal latitude %j',
+    async (value) => {
+      const response = await request(app.getHttpServer())
+        .get('/v1/organizations/nearby')
+        .query({ latitude: value, longitude: '0' });
+      expect(response.status).toBe(400);
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: 'latitude' })]),
+      );
+    },
+  );
+
   let app: INestApplication;
   let document: OpenAPIObject;
 
