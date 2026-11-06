@@ -1,5 +1,5 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { Worker } from '@temporalio/worker';
+import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
 import { RastaError } from '@rasta/nest-common';
 import type { WorkflowHandle, WorkflowHandleWithFirstExecutionRunId } from '@temporalio/client';
@@ -79,9 +79,12 @@ function markersOf(history: Awaited<ReturnType<WorkflowHandle['fetchHistory']>>)
 
 describe('work the saga owes (#796 r1)', () => {
   let env: TestWorkflowEnvironment;
+  // One bundle for the file: per test, it took more time than the tests.
+  let workflowBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
   let queues = 0;
 
   beforeAll(async () => {
+    workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
     const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
     env = await TestWorkflowEnvironment.createTimeSkipping(
       downloadDir
@@ -164,7 +167,7 @@ describe('work the saga owes (#796 r1)', () => {
     const running = await Worker.create({
       connection: env.nativeConnection,
       taskQueue,
-      workflowsPath: require.resolve('./workflows'),
+      workflowBundle,
       activities: worker ? worker(activities) : activities,
     });
     return running.runUntil(async () => {

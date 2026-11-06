@@ -3039,8 +3039,9 @@ jobs:
         # comes from the integration suites — a unit-only run would report a
         # number far below the truth and fail a gate that should pass. In band
         # for the same reason every other integration step here is: the suites
-        # share one database.
-        timeout-minutes: 8
+        # share one database. It takes over 8 minutes with the saga's replay
+        # histories and owed-work spec (FU-117).
+        timeout-minutes: 12
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
