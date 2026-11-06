@@ -688,7 +688,7 @@ describe('every guard of an economic step reads the order after the step looked'
     correlationId: 'COR',
     receiptConfirmed: true,
     totalAmountMinor: '1000',
-    economicTransactionId: null,
+    economicTransactionId: null as string | null,
   });
 
   it.each(['FAILED', 'CANCELLED'])(
@@ -706,7 +706,7 @@ describe('every guard of an economic step reads the order after the step looked'
   );
 
   it('createObligation: a hold recorded during the lookup is that hold, not a second send', async () => {
-    const row: ReturnType<typeof pending> & { economicTransactionId: string | null } = pending();
+    const row = pending();
     const { activities, looking, resume, sent } = racing(row);
     const attempt = activities.createObligation('ORD');
     await looking;
