@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Context, CancelledFailure } from '@temporalio/activity';
 import { foreignFailure } from '../temporal/foreign-failure';
 import { InternalHttpClient, exchangeWithDeadline } from '@rasta/nest-common';
@@ -104,6 +105,13 @@ export interface TransactionView {
   currency: string;
   sourceType: string | null;
   sourceReference: string | null;
+  /**
+   * economic-service's proof that `HELD` is true (`transaction_held_proven`).
+   * Optional because an economic-service older than it does not send it, which
+   * proves nothing (`fundsOf`) and refutes nothing (`heldProofMissing`):
+   * economic-service deploys first (ADR-040).
+   */
+  heldProven?: boolean;
 }
 
 /**
@@ -211,25 +219,39 @@ export function termsDiffer(terms: ObligationTerms, transaction: TransactionView
 /**
  * What a found obligation's status says about the buyer's money.
  *
- * - `HELD`: in escrow now. The only status that proves it: economic-service
- *   places the hold and moves the obligation to HELD in one transaction, and
- *   every way the money leaves escrow moves it on.
+ * - `HELD`: in escrow now: HELD, and economic-service proves it (`heldProven`).
+ *   The status alone does not: a transaction can stand in HELD on a decision
+ *   read from a hold not its own, with nothing in escrow (#762 r3, F2).
  * - `UNPROVEN`: PENDING_SETTLEMENT or DISPUTED. Reached from HELD with the
  *   hold still in place, but also from CREATED with none (an obligation with
  *   no escrow, ADR-032) — and a status the saga's own creation never leaves
- *   it in, so somebody else moved it.
+ *   it in, so somebody else moved it. Or HELD without that proof.
  * - `RETURNED`: REFUNDED — back with the buyer.
  * - `PAID_OUT`: SETTLED.
  * - `NEVER_HELD`: CREATED, CANCELLED, FAILED.
  *
  * A status this service does not know is `UNPROVEN`, never `HELD`.
  */
+/**
+ * HELD from an economic-service that does not speak of proof at all: a release
+ * or replica older than `heldProven`, not a verdict. The saga waits for one that
+ * does; it never adopts this (`fundsOf` stays UNPROVEN) and never stops on it,
+ * since the hold may be real. A present `false` or malformed value is an answer.
+ */
+export function heldProofMissing(
+  transaction: Pick<TransactionView, 'status' | 'heldProven'>,
+): boolean {
+  return transaction.status === 'HELD' && transaction.heldProven === undefined;
+}
+
 export type ObligationFunds = 'HELD' | 'UNPROVEN' | 'RETURNED' | 'PAID_OUT' | 'NEVER_HELD';
 
-export function fundsOf(status: string): ObligationFunds {
-  switch (status) {
+export function fundsOf(
+  transaction: Pick<TransactionView, 'status' | 'heldProven'>,
+): ObligationFunds {
+  switch (transaction.status) {
     case 'HELD':
-      return 'HELD';
+      return transaction.heldProven === true ? 'HELD' : 'UNPROVEN';
     case 'REFUNDED':
       return 'RETURNED';
     case 'SETTLED':
@@ -252,6 +274,8 @@ interface TransactionPage {
 
 /** The lookup's page: economic-service's largest. */
 const OBLIGATION_LOOKUP_PAGE_SIZE = 100;
+/** A placement waits for this, inside the gateway's deadline; a slow answer is retried by the poll. */
+const CAPABILITY_TIMEOUT_MS = 1000;
 
 /**
  * Pages the lookup reads before it gives up on a complete answer. The exact
@@ -430,6 +454,32 @@ export class EconomicClient {
     return ours ? transaction : null;
   }
 
+  /**
+   * Whether economic-service proves HELD (`heldProven`): asked before any order's
+   * work starts, of no organization's data. Anything but its explicit yes is no, an
+   * older release's 404 and an outage alike; the start is retried.
+   */
+  async provesHeldFunds(): Promise<boolean> {
+    try {
+      const answer = await this.call<{ heldProven?: unknown } | null>(
+        'capabilities',
+        {
+          method: 'GET',
+          path: '/v1/transactions/capabilities',
+          correlationId: randomUUID(),
+        },
+        CAPABILITY_TIMEOUT_MS,
+      );
+      return answer?.heldProven === true;
+    } catch (error) {
+      this.logger.warn(
+        { failure: foreignFailure(error) },
+        'The capability question went unanswered',
+      );
+      return false;
+    }
+  }
+
   /** Marks the obligation ready to settle. Only reachable after receipt. */
   async authoriseSettlement(input: {
     orderId: string;
@@ -569,11 +619,12 @@ export class EconomicClient {
     request: {
       method: 'POST' | 'GET';
       path: string;
-      organizationId: string;
+      organizationId?: string;
       idempotencyKey?: string;
       correlationId: string;
       body?: unknown;
     },
+    timeoutMs = this.env.ECONOMIC_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
     const sender = await new InternalHttpClient(this.tokens).authorize({
       from: SERVICE_NAME,
@@ -597,10 +648,10 @@ export class EconomicClient {
       /* Non-activity callers have no cancellation owner. */
     }
     let received: { ok: boolean; status: number; parsed: unknown };
-    const deadlineAt = performance.now() + this.env.ECONOMIC_REQUEST_TIMEOUT_MS;
+    const deadlineAt = performance.now() + timeoutMs;
     try {
       received = await exchangeWithDeadline(
-        this.env.ECONOMIC_REQUEST_TIMEOUT_MS,
+        timeoutMs,
         (signal) =>
           sender.send(url, {
             method: request.method,

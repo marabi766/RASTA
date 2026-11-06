@@ -3,7 +3,6 @@ import { redirect } from 'next/navigation';
 import { BASELINE_FIELD, FLASH_PARAM } from '@/lib/form-fields';
 import {
   INBOX_FLASH_SUBJECT,
-  isProvenRefusalStatus,
   STALE_MESSAGE,
   type ParsedProjectForm,
   type ProjectCommand,
@@ -19,7 +18,7 @@ import {
 } from '@/server/project-commands';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
-import type { WriteResult } from '@/server/write';
+import { isProvenRefusal, type WriteResult } from '@/server/write';
 
 import type { ProjectFormState } from './project-form-state';
 import { pageContext } from '@/server/page-context';
@@ -171,10 +170,10 @@ export async function runProjectCommand<V, B, F extends string>(
     case 'NOT_FOUND':
       return { kind: 'NOT_FOUND', correlationId: result.correlationId };
     case 'UNAVAILABLE':
-      // "Nothing was changed" only for a refusal that proves it (4xx). A 5xx may
-      // follow the commit (the answer is built by a read after it), so it is as
-      // unconfirmed as a dropped connection.
-      if (!isProvenRefusalStatus(result.status)) {
+      // "Nothing was changed" only for a refusal that proves it (a documented 4xx,
+      // the writer's one rule). A 5xx may follow the commit (the answer is built by
+      // a read after it), so it is as unconfirmed as a dropped connection.
+      if (!isProvenRefusal(result.status, result.code)) {
         return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
       }
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };

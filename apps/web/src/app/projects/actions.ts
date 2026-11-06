@@ -3,11 +3,12 @@
 import { redirect } from 'next/navigation';
 
 import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
-import { isProvenRefusalStatus, parseCreateForm, projectFormValues } from '@/lib/project-commands';
+import { parseCreateForm, projectFormValues } from '@/lib/project-commands';
 import { verifyCsrf } from '@/server/csrf';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
 import { createProject } from '@/server/project-commands';
+import { isProvenRefusal } from '@/server/write';
 import {
   checkCreateStamp,
   createBodyDigest,
@@ -115,6 +116,11 @@ export async function submitCreateProject(
       break;
   }
   const { attempt } = reserved;
+  // A refusal (or a send that never left) proves only that THIS attempt did nothing (PR-830 r1 F1):
+  // a retry's earlier attempt may have created the project. The store keeps the hold — a retry's
+  // REFUSED / NEVER_SENT puts it back to unresolved — and the person is told the same.
+  const refused = (state: CreateProjectFormState, correlationId: string): CreateProjectFormState =>
+    reserved.retry ? { kind: 'UNCONFIRMED', correlationId } : state;
 
   // Re-checked right before the dispatch, after the reservation: the process may have been paused
   // between the reserve and here (a stall, a slow store). UX only — a send this check lets through is
@@ -151,23 +157,32 @@ export async function submitCreateProject(
   switch (result.kind) {
     case 'INVALID':
       await settleUnresolved(attempt, 'REFUSED');
-      return {
-        kind: 'INVALID',
-        submissionId,
-        replay,
-        values,
-        fieldErrors: result.fieldErrors,
-        message: result.message,
-      };
+      return refused(
+        {
+          kind: 'INVALID',
+          submissionId,
+          replay,
+          values,
+          fieldErrors: result.fieldErrors,
+          message: result.message,
+        },
+        result.correlationId,
+      );
     case 'FORBIDDEN':
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FORBIDDEN', correlationId: result.correlationId };
+      return refused(
+        { kind: 'FORBIDDEN', correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'NOT_FOUND':
       // construction-service never answers 404 for this endpoint — there is no
       // referenced resource to be absent — but the type is shared across every
       // write, so it is handled rather than assumed away.
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
+      return refused(
+        { kind: 'FAILED', status: 404, correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'UNAVAILABLE':
       // The service's own clock is past the deadline this request carried: refused before it wrote
       // anything (`REPLAY_WINDOW_CLOSED`). That proves this attempt did nothing — never that an earlier
@@ -181,15 +196,22 @@ export async function submitCreateProject(
       // the hold this attempt made goes (or, for a retry, goes back).
       if (result.neverSent) {
         await settleUnresolved(attempt, 'NEVER_SENT');
-        return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+        return refused(
+          { kind: 'FAILED', status: result.status, correlationId: result.correlationId },
+          result.correlationId,
+        );
       }
-      // Only a 4xx proves nothing was created; a 5xx may follow the commit.
-      if (!isProvenRefusalStatus(result.status)) {
+      // Only a documented 4xx proves nothing was created (the writer's one rule); a 5xx may follow
+      // the commit.
+      if (!isProvenRefusal(result.status, result.code)) {
         await settleUnresolved(attempt, 'UNRESOLVED');
         return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
       }
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+      return refused(
+        { kind: 'FAILED', status: result.status, correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved".
       await settleUnresolved(attempt, 'UNRESOLVED');

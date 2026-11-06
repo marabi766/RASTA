@@ -63,6 +63,8 @@ function env(overrides: Partial<MarketplaceEnv> = {}): MarketplaceEnv {
   } as any as MarketplaceEnv;
 }
 
+const economicReady = { provesHeldFunds: async () => true };
+
 /** A stub Temporal client that records what it was asked to do. */
 function stubTemporal(
   overrides: {
@@ -109,12 +111,81 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
+describe('the economic-service prerequisite (#824 r1, F3)', () => {
+  const claim = {
+    id: 'ORD_30',
+    organization_id: 'ORG_BUYER',
+    first_possible_start_at: new Date(0),
+    age_ms: 0,
+    token: 'token',
+  };
+  const claims = () =>
+    ({
+      claim: jest.fn(async () => [claim]),
+      finish: jest.fn(async () => 1),
+      backlog: jest.fn(async () => ({ count: 1, age: 0 })),
+    }) as unknown as jest.Mocked<SagaStartStore>;
+  const inContext = (act: () => Promise<void>) =>
+    runWithContext(
+      createSystemContext({ organizationId: 'ORG_BUYER', correlationId: 'prerequisite-test' }),
+      act,
+    );
+
+  // Not even claimed: a claim starts the clock after which a start is presumed to have happened.
+  it('claims and starts no order against an economic-service that cannot prove a hold', async () => {
+    const temporal = stubTemporal();
+    const store = claims();
+    const client = new OrderSagaClient(env(), store, { provesHeldFunds: async () => false });
+
+    await client.tick();
+    await inContext(() => client.start('ORD_30'));
+
+    expect(store.claim).not.toHaveBeenCalled();
+    expect(temporal.start).not.toHaveBeenCalled();
+    // Still counted: this is what the backlog alert reads.
+    expect(store.backlog).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts it once economic-service is upgraded', async () => {
+    const temporal = stubTemporal();
+    const store = claims();
+    let upgraded = false;
+    const client = new OrderSagaClient(env(), store, { provesHeldFunds: async () => upgraded });
+    await client.tick();
+    upgraded = true;
+    await client.tick();
+
+    expect(temporal.start).toHaveBeenCalledTimes(1);
+    expect(store.finish).toHaveBeenCalledWith(claim, true);
+  });
+
+  it('claims nothing once stopped while the question was out', async () => {
+    const store = claims();
+    let answer: (ready: boolean) => void = () => undefined;
+    const client = new OrderSagaClient(env(), store, {
+      provesHeldFunds: () =>
+        new Promise<boolean>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    const tick = client.tick();
+    const stopping = client.stop();
+    answer(true);
+    await Promise.all([tick, stopping]);
+    expect(store.claim).not.toHaveBeenCalled();
+  });
+});
+
 describe('when Temporal is disabled', () => {
   it('does not dial anything and says so, rather than failing the order', async () => {
     // The state a developer without a Temporal server gets. The order exists
     // and is PENDING, which is visible and recoverable; a thrown error would
     // instead tell the buyer their order did not happen when it did.
-    const client = new OrderSagaClient(env({ MARKETPLACE_TEMPORAL_ENABLED: false }), store);
+    const client = new OrderSagaClient(
+      env({ MARKETPLACE_TEMPORAL_ENABLED: false }),
+      store,
+      economicReady,
+    );
 
     await client.deliver('ORD_1');
     await client.signal('ORD_1', 'confirmed');
@@ -129,7 +200,7 @@ describe('starting a saga', () => {
     // saga per order" a property of the system rather than a rule this code
     // has to keep, which is why the id is derived and not random.
     const temporal = stubTemporal();
-    await new OrderSagaClient(env(), store).deliver('ORD_7');
+    await new OrderSagaClient(env(), store, economicReady).deliver('ORD_7');
 
     expect(temporal.start).toHaveBeenCalledTimes(1);
     const [workflowName, options] = temporal.start.mock.calls[0] as unknown as [
@@ -153,6 +224,7 @@ describe('starting a saga', () => {
         MARKETPLACE_SAGA_RECHECK_HOURS: 6,
       }),
       store,
+      economicReady,
     ).deliver('ORD_8');
 
     const [, options] = temporal.start.mock.calls[0] as unknown as [
@@ -172,7 +244,7 @@ describe('starting a saga', () => {
     // A replay of `POST /orders` calls start() again. While the first saga
     // runs Temporal refuses by id; after it closes only this policy does.
     const temporal = stubTemporal();
-    await new OrderSagaClient(env(), store).deliver('ORD_11');
+    await new OrderSagaClient(env(), store, economicReady).deliver('ORD_11');
 
     const [, options] = temporal.start.mock.calls[0] as unknown as [
       string,
@@ -188,7 +260,9 @@ describe('starting a saga', () => {
           new WorkflowExecutionAlreadyStartedError('already started', 'order-ORD_12', 'orderSaga'),
         ),
     });
-    await expect(new OrderSagaClient(env(), store).deliver('ORD_12')).resolves.toBe(true);
+    await expect(new OrderSagaClient(env(), store, economicReady).deliver('ORD_12')).resolves.toBe(
+      true,
+    );
   });
 
   it('swallows a failure, because the order already exists', async () => {
@@ -197,19 +271,25 @@ describe('starting a saga', () => {
     // succeeded and invite a retry that places a second order.
     stubTemporal({ start: () => Promise.reject(new Error('temporal is down')) });
 
-    await expect(new OrderSagaClient(env(), store).deliver('ORD_9')).resolves.toBe(false);
+    await expect(new OrderSagaClient(env(), store, economicReady).deliver('ORD_9')).resolves.toBe(
+      false,
+    );
   });
 
   it('swallows a connection failure too', async () => {
     connect.mockRejectedValue(new Error('ECONNREFUSED'));
-    await expect(new OrderSagaClient(env(), store).deliver('ORD_10')).resolves.toBe(false);
+    await expect(new OrderSagaClient(env(), store, economicReady).deliver('ORD_10')).resolves.toBe(
+      false,
+    );
   });
 });
 
 describe('signalling a running saga', () => {
   it('signals the workflow that belongs to the order', async () => {
     const temporal = stubTemporal();
-    await new OrderSagaClient(env(), store).signal('ORD_11', 'receiptConfirmed', { by: 'buyer' });
+    await new OrderSagaClient(env(), store, economicReady).signal('ORD_11', 'receiptConfirmed', {
+      by: 'buyer',
+    });
 
     expect(temporal.getHandle).toHaveBeenCalledWith('order-ORD_11');
     expect(temporal.signal).toHaveBeenCalledWith('receiptConfirmed', { by: 'buyer' });
@@ -224,7 +304,7 @@ describe('signalling a running saga', () => {
     });
 
     await expect(
-      new OrderSagaClient(env(), store).signal('ORD_12', 'confirmed'),
+      new OrderSagaClient(env(), store, economicReady).signal('ORD_12', 'confirmed'),
     ).resolves.toBeUndefined();
   });
 
@@ -232,7 +312,7 @@ describe('signalling a running saga', () => {
     stubTemporal({ signal: () => Promise.reject(new Error('deadline exceeded')) });
 
     await expect(
-      new OrderSagaClient(env(), store).signal('ORD_13', 'confirmed'),
+      new OrderSagaClient(env(), store, economicReady).signal('ORD_13', 'confirmed'),
     ).resolves.toBeUndefined();
   });
 });
@@ -242,7 +322,7 @@ describe('the connection', () => {
     stubTemporal();
     const settings = env();
 
-    await new OrderSagaClient(settings, store).deliver('ORD_21');
+    await new OrderSagaClient(settings, store, economicReady).deliver('ORD_21');
 
     const install = installTemporalRuntimeLogger as jest.Mock;
     expect(install).toHaveBeenCalledWith(settings);
@@ -252,7 +332,7 @@ describe('the connection', () => {
   it('is established once and reused across calls', async () => {
     // One TCP connection per command would be a new connection per order.
     const temporal = stubTemporal();
-    const client = new OrderSagaClient(env(), store);
+    const client = new OrderSagaClient(env(), store, economicReady);
 
     await client.deliver('ORD_14');
     await client.signal('ORD_14', 'confirmed');
@@ -275,7 +355,7 @@ describe('the connection', () => {
     const start = jest.fn(async () => undefined);
     stubTemporal({ start });
 
-    const client = new OrderSagaClient(env(), store);
+    const client = new OrderSagaClient(env(), store, economicReady);
     const both = Promise.all([client.deliver('ORD_16'), client.deliver('ORD_17')]);
     release({ close: async () => undefined });
     await both;
@@ -287,7 +367,7 @@ describe('the connection', () => {
     // A failed connect must not poison every later command. The first attempt
     // fails, the second reaches a healthy server.
     connect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-    const client = new OrderSagaClient(env(), store);
+    const client = new OrderSagaClient(env(), store, economicReady);
     await client.deliver('ORD_18');
 
     const temporal = stubTemporal();
@@ -298,9 +378,9 @@ describe('the connection', () => {
 
   it('is closed on shutdown, and closing an unopened one is not an error', async () => {
     const temporal = stubTemporal();
-    const client = new OrderSagaClient(env(), store);
+    const client = new OrderSagaClient(env(), store, economicReady);
 
-    await new OrderSagaClient(env(), store).onModuleDestroy();
+    await new OrderSagaClient(env(), store, economicReady).onModuleDestroy();
     expect(temporal.close).not.toHaveBeenCalled();
 
     await client.deliver('ORD_20');
@@ -332,7 +412,9 @@ describe('what is logged about Temporal (#385 r6)', () => {
         ),
     });
 
-    await expect(new OrderSagaClient(env(), store).deliver('ORD_20')).resolves.toBe(true);
+    await expect(new OrderSagaClient(env(), store, economicReady).deliver('ORD_20')).resolves.toBe(
+      true,
+    );
     expect(error).not.toHaveBeenCalled();
     expect(debug).toHaveBeenCalledWith({ orderId: 'ORD_20' }, 'The order saga was already started');
   });
@@ -344,7 +426,7 @@ describe('what is logged about Temporal (#385 r6)', () => {
       signal: () => Promise.reject(new WorkflowNotFoundError('gone', 'order-ORD_21', 'rasta')),
     });
 
-    await new OrderSagaClient(env(), store).signal('ORD_21', 'confirmed');
+    await new OrderSagaClient(env(), store, economicReady).signal('ORD_21', 'confirmed');
     expect(error).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
   });
@@ -353,7 +435,9 @@ describe('what is logged about Temporal (#385 r6)', () => {
     const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     stubTemporal({ start: () => Promise.reject(leaky()) });
 
-    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store).deliver('ORD_22');
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store, economicReady).deliver(
+      'ORD_22',
+    );
     expect(error).toHaveBeenCalledWith(
       { orderId: 'ORD_22', failure: { type: 'Error' } },
       'Could not start the order saga',
@@ -364,9 +448,11 @@ describe('what is logged about Temporal (#385 r6)', () => {
   it('a failed connection and a failed signal are logged alike', async () => {
     const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     connect.mockRejectedValue(Object.assign(leaky(), { code: 14 }));
-    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store).deliver('ORD_23');
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store, economicReady).deliver(
+      'ORD_23',
+    );
     stubTemporal({ signal: () => Promise.reject(leaky()) });
-    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store).signal(
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store, economicReady).signal(
       'ORD_24',
       'confirmed',
     );
@@ -382,7 +468,9 @@ describe('what is logged about Temporal (#385 r6)', () => {
   it('a connection is announced by the setting, never the address it dialled', async () => {
     const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     stubTemporal();
-    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store).deliver('ORD_25');
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS }), store, economicReady).deliver(
+      'ORD_25',
+    );
 
     expect(log).toHaveBeenCalledWith('Temporal client connected (TEMPORAL_ADDRESS)');
     expect(logged(log)).not.toMatch(SENTINEL);
@@ -406,18 +494,24 @@ describe('history retention reconciliation', () => {
   const old = 2 * 86400_000;
   it('never starts from absent history outside retention', async () => {
     const temporal = stubTemporal();
-    expect(await new OrderSagaClient(env(), store).deliver('ORD_OLD', old)).toBe(false);
+    expect(await new OrderSagaClient(env(), store, economicReady).deliver('ORD_OLD', old)).toBe(
+      false,
+    );
     expect(temporal.start).not.toHaveBeenCalled();
     expect(temporal.describe).toHaveBeenCalledTimes(1);
   });
   it('records existing failed or closed executions as delivered, without restarting', async () => {
     const temporal = stubTemporal({ describe: async () => ({ status: 'FAILED' }) });
-    expect(await new OrderSagaClient(env(), store).deliver('ORD_OLD', old)).toBe(true);
+    expect(await new OrderSagaClient(env(), store, economicReady).deliver('ORD_OLD', old)).toBe(
+      true,
+    );
     expect(temporal.start).not.toHaveBeenCalled();
   });
   it('unknown retention fails closed', async () => {
     const temporal = stubTemporal({ retention: 0 });
-    expect(await new OrderSagaClient(env(), store).deliver('ORD_OLD', 0)).toBe(false);
+    expect(await new OrderSagaClient(env(), store, economicReady).deliver('ORD_OLD', 0)).toBe(
+      false,
+    );
     expect(temporal.start).not.toHaveBeenCalled();
   });
 });
@@ -442,7 +536,7 @@ describe('starter shutdown', () => {
       finish,
       backlog: async () => ({ count: 0, age: 0 }),
     } as unknown as SagaStartStore;
-    const client = new OrderSagaClient(env(), persistence);
+    const client = new OrderSagaClient(env(), persistence, economicReady);
     jest.spyOn(client, 'deliver').mockResolvedValue(true);
     let joined = false;
     const tick = client.tick().then(() => {
@@ -459,10 +553,14 @@ describe('starter shutdown', () => {
   it('disabled polling samples backlog without marking an unattempted intent as attempted', async () => {
     const claim = jest.fn();
     const backlog = jest.fn(async () => ({ count: 2, age: 60 }));
-    const client = new OrderSagaClient(env({ MARKETPLACE_TEMPORAL_ENABLED: false }), {
-      claim,
-      backlog,
-    } as unknown as SagaStartStore);
+    const client = new OrderSagaClient(
+      env({ MARKETPLACE_TEMPORAL_ENABLED: false }),
+      {
+        claim,
+        backlog,
+      } as unknown as SagaStartStore,
+      economicReady,
+    );
     await runWithContext(
       createSystemContext({ organizationId: 'ORG_DISABLED', correlationId: 'disabled-start-test' }),
       () => client.start('ORD_DISABLED'),
@@ -484,9 +582,10 @@ describe('starter shutdown', () => {
     const backlog = jest.fn();
     const finish = jest.fn();
     const persistence = { claim, backlog, finish } as unknown as SagaStartStore;
-    const client = new OrderSagaClient(env(), persistence);
+    const client = new OrderSagaClient(env(), persistence, economicReady);
     const deliver = jest.spyOn(client, 'deliver');
     const tick = client.tick();
+    await new Promise<void>((entered) => setImmediate(entered));
     const stop = client.stop();
     resolve([]);
     await Promise.all([tick, stop]);
@@ -515,7 +614,7 @@ test('Temporal close failures expose fixed diagnostics only', async () => {
       cause: new Error('private-sentinel-79'),
     }),
   );
-  const client = new OrderSagaClient(env(), store);
+  const client = new OrderSagaClient(env(), store, economicReady);
   await client.deliver('ORD_CLOSE');
   const failure: unknown = await client.onModuleDestroy().catch((error: unknown) => error);
   expect(failure).toBeInstanceOf(Error);

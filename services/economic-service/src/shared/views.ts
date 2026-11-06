@@ -212,6 +212,8 @@ export interface TransactionRowLike {
   failureReason: string | null;
   createdAt: Date;
   createdBy: string;
+  /** Absent on a row that was not asked: not proven. */
+  heldProven?: boolean;
 }
 
 export function toTransactionView(row: TransactionRowLike): TransactionView {
@@ -239,6 +241,7 @@ export function toTransactionView(row: TransactionRowLike): TransactionView {
     failureReason: row.failureReason,
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,
+    heldProven: row.heldProven === true,
   };
 }
 

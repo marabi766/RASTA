@@ -15,7 +15,7 @@ import {
   TableScroll,
 } from '@/ui';
 import {
-  transactionStatusLabel,
+  presentTransactionStatus,
   transactionStatusOptions,
   transactionTypeLabel,
   transactionTypeOptions,
@@ -261,7 +261,7 @@ function TransactionRows({
                 <td className="p-3">
                   <StatusBadge
                     status={transaction.status}
-                    label={transactionStatusLabel(transaction.status)}
+                    label={presentTransactionStatus(transaction)}
                   />
                 </td>
                 <td className="p-3 text-content-muted">

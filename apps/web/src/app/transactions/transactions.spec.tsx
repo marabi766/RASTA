@@ -487,6 +487,30 @@ describe('the dispute state, as the record says it', () => {
   });
 });
 
+// #824 r1, F2: HELD is economic-service's claim of escrow, and only its proof backs it.
+describe('what HELD says on the detail (FU-138)', () => {
+  it.each([
+    ['false', false],
+    ['missing', undefined],
+  ])(
+    'with its proof %s: no «در وثیقه», on the badge or in the dispute’s sentence',
+    (_c, heldProven) => {
+      for (const row of [HELD, { ...DISPUTED, status: 'HELD' }]) {
+        const { container, unmount } = renderScreen(ok({ ...row, heldProven }));
+        expect(container.textContent).not.toContain('در وثیقه');
+        expect(container.textContent).toContain('وثیقه اثبات‌نشده');
+        unmount();
+      }
+    },
+  );
+
+  it('with its proof: «در وثیقه»', () => {
+    const { container } = renderScreen(ok({ ...HELD, heldProven: true }));
+    expect(container.textContent).toContain('در وثیقه');
+    expect(container.textContent).not.toContain('اثبات‌نشده');
+  });
+});
+
 describe('raw codes and English wording in the detail', () => {
   it.each([
     ['ORDER', 'سفارش'],
