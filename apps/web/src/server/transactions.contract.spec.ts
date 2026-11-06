@@ -208,7 +208,7 @@ describe('the bodies', () => {
       // its entry, and the portal's limits are that entry.
       const entry = BOUNDS_ENTRY[field];
       expect(schema).toContain(
-        `${field}:textWithin(z.string().trim(),TRANSACTION_TEXT_BOUNDS.${entry})`,
+        `${field}:keptTextWithin(z.string().trim(),TRANSACTION_TEXT_BOUNDS.${entry})`,
       );
       expect(DISPUTE_FIELD_LIMITS[field]).toEqual(TRANSACTION_TEXT_BOUNDS[entry]);
     },

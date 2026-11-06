@@ -7,7 +7,7 @@ import {
   numberInput,
   organizationIdSchema,
   TRANSACTION_TEXT_BOUNDS,
-  textWithin,
+  keptTextWithin,
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { identifier } from '../shared/canonical';
@@ -171,7 +171,7 @@ export const disputeTransactionSchema = z
      * Bounds from `TRANSACTION_TEXT_BOUNDS`: marketplace-service validates the
      * buyer's dispute reason, which its saga forwards here, with the same ones.
      */
-    reason: textWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.disputeReason),
+    reason: keptTextWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.disputeReason),
   })
   .strict();
 
@@ -180,7 +180,7 @@ export type DisputeTransactionDto = z.infer<typeof disputeTransactionSchema>;
 export const resolveDisputeSchema = z
   .object({
     /** Bounds from `TRANSACTION_TEXT_BOUNDS`, which marketplace's decision is held to. */
-    resolution: textWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.disputeResolution),
+    resolution: keptTextWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.disputeResolution),
     /**
      * The dispute this resolution decides, as `GET /v1/transactions/{id}`
      * names it (`disputeId`). Optional; when sent, the transaction must still
@@ -202,7 +202,7 @@ export const cancelTransactionSchema = z
      * operator's REFUND resolution — and refuses either at the command when it
      * would not fit, never discovering it here with the funds held (FU-134).
      */
-    reason: textWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.closingReason),
+    reason: keptTextWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.closingReason),
   })
   .strict();
 

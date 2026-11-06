@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { ulid } from 'ulid';
 import { z } from 'zod';
 import { runUnscoped } from '@rasta/nest-common';
-import { TRANSACTION_TEXT_BOUNDS, textWithin } from '@rasta/contracts';
+import { TRANSACTION_TEXT_BOUNDS, keptTextWithin } from '@rasta/contracts';
 import {
   apiKey,
   apiTenant,
@@ -43,7 +43,7 @@ describe('a REFUND decision is bounded by the refund it causes (FU-134, HTTP)', 
 
   const CLOSING = TRANSACTION_TEXT_BOUNDS.closingReason;
   /** economic-service's refund/cancel `reason`, as its DTO declares it (same table). */
-  const economicClosingReason = textWithin(z.string().trim(), CLOSING);
+  const economicClosingReason = keptTextWithin(z.string().trim(), CLOSING);
   const text = (length: number) => 'ب'.repeat(length);
 
   const disputeOf = new Map<string, string>();
@@ -176,6 +176,27 @@ describe('a REFUND decision is bounded by the refund it causes (FU-134, HTTP)', 
       keys: 1,
     });
     // What the saga will send as the refund's reason, through economic's bound.
+    expect(economicClosingReason.safeParse(after.cancellationReason).success).toBe(true);
+  });
+
+  it(`accepts a REFUND resolution of ${CLOSING.max} characters sent with CRLF, stores it LF, and replays the LF retry (PR-806 r1, F1)`, async () => {
+    const orderId = await disputedOrder();
+    const key = apiKey('rrb-crlf');
+    const crlf = `${text(CLOSING.max - 2)}\r\nب`; // one over as sent, the maximum once LF
+    const lf = `${text(CLOSING.max - 2)}\nب`;
+
+    const decided = await decide(orderId, key, 'REFUND', crlf).expect(200);
+    const replayed = await decide(orderId, key, 'REFUND', lf).expect(200);
+
+    expect(replayed.body).toEqual(decided.body);
+    const after = await written(orderId, key);
+    expect(after).toEqual({
+      status: 'CANCELLING',
+      cancellationReason: lf,
+      disputes: ['RESOLVED_REFUND'],
+      resolvedEvents: 1,
+      keys: 1,
+    });
     expect(economicClosingReason.safeParse(after.cancellationReason).success).toBe(true);
   });
 

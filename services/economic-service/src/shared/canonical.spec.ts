@@ -568,18 +568,23 @@ describe('every idempotent command’s body (task 129)', () => {
       expect(canonicalForm(dto)).toEqual({ ...dto, grossAmountMinor: '700' });
     });
 
-    it('never exists where the previous release refused the body: it is refused (PR-747 r2, F3)', () => {
-      // 1 201 UTF-16 units as sent, over the limit; 801 once LF. Accepted
-      // here, it would be refused on a retry the previous release answers.
+    it('counts transaction text with LF line endings, and executes it as sent (PR-806 r1, F1)', () => {
+      // 1 201 UTF-16 units as sent, over the 1 000 limit; 801 once LF. Its
+      // bound is counted on the LF form (`keptTextWithin`, @rasta/contracts):
+      // accepted, executed and stored as sent (FU-115), hashed also as LF.
+      // This replaces PR-747 r2 F3's "refused as the previous release did"
+      // for these four bodies; the rollback edge it guarded is docs/06 § 6.8.
       const reason = `${'a\r\n'.repeat(400)}x`;
       expect(reason).toHaveLength(1201);
-      expect(canonicalBody({ reason }, canonicalFieldsOf(disputeTransactionSchema))).toEqual({
-        reason: expect.stringMatching(/^[^\r]{801}$/),
+      const dto = pipeOf(disputeTransactionSchema)({ reason });
+      expect(dto).toEqual({ reason });
+      expect(canonicalForm(dto)).toEqual({ reason: expect.stringMatching(/^[^\r]{801}$/) });
+      // Over the limit however it is counted: refused, with the as-sent refusal.
+      const over = `${'a\r\n'.repeat(500)}x`; // 1 501 as sent, 1 001 once LF
+      expect(refusalOf(() => pipeOf(disputeTransactionSchema)({ reason: over }))).toEqual({
+        error: expect.any(String),
+        details: [expect.objectContaining({ path: 'reason', code: 'too_big' })],
       });
-      expect(refusalOf(() => pipeOf(disputeTransactionSchema)({ reason }))).toEqual(
-        refusalOf(() => previousRelease(disputeTransactionSchema, { reason })),
-      );
-      expect(refusalOf(() => pipeOf(disputeTransactionSchema)({ reason }))).toBeDefined();
     });
 
     it('is found inside any wrapper of plain objects and arrays, however deep (PR-747 r1, F1)', () => {
