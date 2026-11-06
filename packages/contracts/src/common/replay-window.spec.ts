@@ -1,4 +1,5 @@
 import {
+  INVENTORY_MAX_REPLAY_WINDOW_SECONDS,
   PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
   PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
 } from './replay-window';
@@ -30,5 +31,13 @@ describe('PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (FU-156)', () => {
   it('fits inside the shortest retention procurement-service allows (1 h) with its default fence budget', () => {
     // 3 600 − B(67) − default skew(30) = 3 503 ≥ K
     expect(3600 - 67 - 30).toBeGreaterThanOrEqual(PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS);
+  });
+});
+
+describe('INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171)', () => {
+  it('is 3 300 s and fits inside the shortest retention inventory-service allows (1 h) with its default fence budget', () => {
+    expect(INVENTORY_MAX_REPLAY_WINDOW_SECONDS).toBe(3300);
+    // 3 600 − B(67) − default skew(30) = 3 503 ≥ K
+    expect(3600 - 67 - 30).toBeGreaterThanOrEqual(INVENTORY_MAX_REPLAY_WINDOW_SECONDS);
   });
 });
