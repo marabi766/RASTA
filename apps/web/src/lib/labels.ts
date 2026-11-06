@@ -240,6 +240,31 @@ const PRODUCT_KINDS: Readonly<Record<string, string>> = {
   SERVICE: 'خدمت',
 };
 
+/** procurement-service `DEMAND_STATES` (`demand/demand.state-machine.ts`). */
+const DEMAND_STATUSES: Readonly<Record<string, string>> = {
+  SUBMITTED: 'ثبت‌شده',
+  WITHDRAWN: 'پس‌گرفته',
+  REFERRED: 'ارجاع‌شده',
+  LAPSED: 'منقضی‌شده',
+};
+
+/** procurement-service `AGGREGATION_STATES`. */
+const AGGREGATION_STATUSES: Readonly<Record<string, string>> = {
+  OPEN: 'پنجره باز',
+  READY: 'آماده استعلام',
+  RFQ_ISSUED: 'استعلام صادرشده',
+  REFERRED: 'ارجاع‌شده',
+  LAPSED: 'منقضی‌شده',
+  CANCELLED: 'لغوشده',
+};
+
+/** procurement-service `SHORTFALL_POLICIES`: what a window that misses its threshold does. */
+const SHORTFALL_POLICIES: Readonly<Record<string, string>> = {
+  EXTEND: 'تمدید پنجره',
+  REFER: 'ارجاع',
+  CLOSE: 'بستن',
+};
+
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
   // Own keys only (`own-key.ts`): «constructor» or «toString» is a word a person may type.
   return ownText(table, value) ?? value;
@@ -353,6 +378,10 @@ export const transactionStatusLabel = (value: string): string =>
 export const transactionTypeLabel = (value: string): string => lookup(TRANSACTION_TYPES, value);
 export const walletHoldStatusLabel = (value: string): string => lookup(WALLET_HOLD_STATUSES, value);
 export const productKindLabel = (value: string): string => lookup(PRODUCT_KINDS, value);
+export const demandStatusLabel = (value: string): string => lookup(DEMAND_STATUSES, value);
+export const aggregationStatusLabel = (value: string): string =>
+  lookup(AGGREGATION_STATUSES, value);
+export const shortfallPolicyLabel = (value: string): string => lookup(SHORTFALL_POLICIES, value);
 
 /** The options a filter offers, in the order a person reads them. */
 export const assetTypeOptions = ASSET_TYPES.map((value) => ({
