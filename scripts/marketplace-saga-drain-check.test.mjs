@@ -748,6 +748,7 @@ const PATCHES = {
   'order-saga-durable-rollover-v1': 1,
   'dispute-settle-resumes-order': 2,
   'dispute-release-durable-wait-v1': 3,
+  'economic-call-durable-wait-v1': 4,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -787,7 +788,7 @@ const REFUSED_NAMES =
 // are the timeouts proven non-zero: a client sends hours of at least 1 (env.ts:174), and
 // the release backoff is never under a minute, whatever its round (workflows.spec.ts).
 const RECHECK = '(input.recheckIntervalHours ?? DEFAULT_RECHECK_HOURS) * HOUR';
-const RELEASE_BACKOFF = 'releaseBackoffMs(releaseRounds)';
+const RELEASE_BACKOFF = 'releaseBackoffMs(round)';
 
 /**
  * The compiler's own binder and checker over this one file: a name means what
@@ -976,6 +977,7 @@ test('the source scan refuses what it cannot read, so a marker cannot hide from 
     `let ms = ${RECHECK};\ncondition(fn, ms);`,
     `const ms = Math.max(0, ${RECHECK});\ncondition(fn, ms);`,
     'const ms = releaseBackoffMs(round) - HOUR;\ncondition(fn, ms);',
+    'const ms = releaseBackoffMs(other);\ncondition(fn, ms);',
     `let ms = ${RELEASE_BACKOFF};\ncondition(fn, ms);`,
     `const ms = ${RECHECK};\ncondition(fn, ms, opts);`,
   ]) {
@@ -1205,6 +1207,7 @@ const RESUME_FIELDS = {
   activitySequence: 1,
   reminderDue: 2,
   releaseRounds: 3,
+  unconfirmedCall: 4,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1349,6 +1352,19 @@ for (const [name, edits, reason = /cannot enumerate the saga (input|resume)/] of
   });
 }
 
+test("a continuation rolled over in a sibling call's wait needs protocol 4", () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        unconfirmedCall: { operation: 'authoriseSettlement', rounds: 2 },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(3)).stderr, /requires saga protocol 4; incompatible/);
+  assert.equal(run(rolled, targetOf(4)).status, 0);
+});
+
 test('a continuation rolled over in the release wait needs protocol 3', () => {
   const rolled = withHistory(history({ resume: { activitySequence: 1, releaseRounds: 2 } }));
   assert.match(run(rolled, targetOf(2)).stderr, /requires saga protocol 3; incompatible/);
@@ -1359,6 +1375,7 @@ test('a continuation rolled over in the release wait needs protocol 3', () => {
 for (const [name, required] of [
   ['pre-fu080-release-refused', 2],
   ['fu080-release-wait', 3],
+  ['fu103-authorise-wait', 4],
 ]) {
   test(`a real captured history (${name}) requires protocol ${required}`, () => {
     const real = JSON.parse(

@@ -1,6 +1,6 @@
 import { Injectable, type OnModuleInit } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError } from '../errors/rasta-error';
 import { parse } from 'node:querystring';
 
 /**
@@ -22,7 +22,7 @@ export const MAX_QUERY_SEGMENTS = 1000;
  *
  * Throws from the lazy `req.query` getter, i.e. inside Nest's handler
  * pipeline, where the exception filter turns it into the standard envelope.
- * Service-agnostic on purpose: FU-072 can lift it into `@rasta/nest-common`.
+ * Shared by every HTTP service's AppModule (FU-072).
  */
 export function strictQueryParser(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'string' || raw.length === 0) return {};

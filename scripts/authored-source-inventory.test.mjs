@@ -1689,7 +1689,8 @@ const OTHER_CAPABILITY = [
   'scripts/verify-migration-reversible-lib.test.mjs',
   'scripts/verify-migration-reversible.mjs',
   'scripts/verify-outbox-claim-migration.mjs',
-  'scripts/verify-seed-guard.mjs',
+  'scripts/workspace-module.mjs', // :20 require(resolved): a module chosen at run time, but the regex above it admits only workspace dist/*.js, src/generated/prisma/*.js and jest.config.js; lists nothing
+  'scripts/zod-coercion-rule.test.mjs', // :298 node:vm + a createRequire handle on @rasta/contracts to run rule fixtures in a fresh context; lists nothing
   'services/contract-service/test/migration-rollback.int-spec.ts',
   'services/document-service/test/instants-timestamptz.int-spec.ts',
   'services/economic-service/src/prisma/test-mutation-scope.spec.ts',
@@ -1706,20 +1707,13 @@ const LOADS_BY_BUILT_PATH = [
   'apps/web/src/token-roles-screens.spec.ts',
   'packages/observability/src/__tests__/telemetry-boundary.fixture.ts',
   'scripts/check-db-runtime-privileges-boundary.pg.test.mjs',
-  'scripts/check-kafka-topic-limits.mjs',
   'scripts/create-topics.broker.test.mjs',
   'scripts/dead-letter-escape.broker.test.mjs',
   'scripts/internal-token-source-workspace.test.mjs', // :617,:888 import(path.join(ROOT, 'eslint.config.mjs'))
-  'scripts/kafka-acl-generate.mjs',
   'scripts/kafka-topic-limits-lib.test.mjs',
-  'scripts/outbox-b2-backfill.mjs',
   'scripts/outbox-b2-backfill.pg.test.mjs',
-  'scripts/outbox-b2-prisma-port.mjs',
   'scripts/outbox-b3-protocol.pg.test.mjs',
   'scripts/replay-dlq-lib.test.mjs',
-  'scripts/replay-dlq.mjs',
-  'scripts/runtime-preflight.e2e.mjs',
-  'scripts/verify-test-independence.mjs',
   'services/economic-service/test/settlement-acting-organization-rollback.int-spec.ts',
 ];
 // FU-126: hands `process` / the global object on (dependency injection, a registry on `process`, an
@@ -1730,7 +1724,6 @@ const PASSES_GLOBALS_ON = [
   'apps/web/src/test/build-controller.mjs', // also loads the supervisor by a built URL
   'apps/web/src/test/setup.ts',
   'packages/config/src/command-failure.js',
-  'packages/nest-common/src/lifecycle/graceful-shutdown.ts',
   'packages/testing/src/disclosure-guard.ts',
   'scripts/exchange-deadline-rule.test.mjs', // :2054 `Math.constructor(...)` on a builtin, as test data
   'scripts/raw-http-boundary-rule.test.mjs',
