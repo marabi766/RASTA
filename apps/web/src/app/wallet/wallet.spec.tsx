@@ -259,6 +259,17 @@ describe('transaction history', () => {
         name: /سفارش بازار/,
       });
 
+    // #824 r1, F2: the row carries economic-service's proof to the one wording of a status.
+    it.each([
+      ['false', { heldProven: false }, /وثیقه اثبات‌نشده/],
+      ['missing', {}, /وثیقه اثبات‌نشده/],
+      ['true', { heldProven: true }, /در وثیقه/],
+    ])('HELD with its proof %s reads as such', (proof, fields, wording) => {
+      const row = heldRow({ ...HELD, items: [{ ...HELD.items[0]!, ...fields }] });
+      expect(row).toHaveTextContent(wording);
+      if (proof !== 'true') expect(row.textContent).not.toContain('در وثیقه');
+    });
+
     it('keeps the net at zero and shows the gross, labelled as the gross', () => {
       const row = heldRow();
       expect(row).toHaveTextContent(`${formatMoney('0')}`);

@@ -92,17 +92,17 @@ describe('zod to JSON Schema', () => {
     it('publishes an integer with its bounds', () => {
       const s = toJsonSchema(createScheduleSchema);
       const intervalDays = (s.properties as Record<string, Record<string, unknown>>).intervalDays;
-      expect(intervalDays).toEqual({
-        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
-      });
+      expect(intervalDays).toEqual({ type: 'integer', minimum: 1, maximum: 3650 });
     });
 
     it('publishes a coerced pagination limit with its default', () => {
       const s = toJsonSchema(listRequestsQuerySchema);
       const limit = (s.properties as Record<string, Record<string, unknown>>).limit;
       expect(limit).toEqual({
+        type: 'integer',
+        minimum: 1,
+        maximum: 200,
         default: 25,
-        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
       });
     });
   });
