@@ -109,3 +109,10 @@ contract. Asset query parameters use this same converter as request bodies, incl
 fields; `numberInput` acceptance is unchanged. Query-object preprocessors are refused rather than publishing their output fields.
 The marker survives optional/nullable wrappers, descriptions and pipes. This intentionally describes
 less than all validation; it never presents a post-transform check as a raw-input check.
+
+FU-152: only pattern refinements created by the private registry's constructor are trusted as
+value-preserving; attaching a symbol to a check cannot grant trust. Both registered refinements
+and `.regex()` publish a pattern only with no flags or with `u`. Consumers **must compile published
+patterns with the Unicode `u` flag**, including Unicode property escapes. Patterns with any other
+flags are omitted: OpenAPI carries only their source and cannot preserve those flags' semantics.
+Other proven raw-input constraints remain published; runtime validation is unchanged.
