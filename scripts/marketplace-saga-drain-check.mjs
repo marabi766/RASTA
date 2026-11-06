@@ -184,6 +184,7 @@ const PATCH_PROTOCOL = new Map([
   ['saga-owed-work-durable-v1', 6],
   ['economic-hold-call-durable-wait-v1', 7],
   ['economic-hold-refusal-exit-v1', 8],
+  ['economic-hold-send-fence-v1', 9],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is
@@ -192,8 +193,8 @@ const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // `unconfirmedCall` inside the same wait of an authorisation, protocol 4,
 // `siblingCall` inside that of a dispute filing or a refund, protocol 5,
 // `outstandingWork` with work owed outside any call's wait, protocol 6,
-// `holdCall` inside the wait of the hold, protocol 7, and `lateHoldWatch` after
-// giving that hold up, protocol 8.
+// `holdCall` inside the wait of the hold, protocol 7, `lateHoldWatch` after giving
+// that hold up, protocol 8, and `holdNotAfter` in that wait with a fenced hold, protocol 9.
 const RESUME_PROTOCOL = new Map([
   ['status', 1],
   ['mirroredDispute', 1],
@@ -208,6 +209,7 @@ const RESUME_PROTOCOL = new Map([
   ['outstandingWork', 6],
   ['holdCall', 7],
   ['lateHoldWatch', 8],
+  ['holdNotAfter', 9],
 ]);
 // Every field a saga has ever been started with; any other could mean anything.
 const INPUT_FIELDS = new Set([

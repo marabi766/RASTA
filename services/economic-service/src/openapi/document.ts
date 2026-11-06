@@ -264,7 +264,8 @@ const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
       'settlement fails closed without a commission rule (docs/24 Q-29; on outside development ' +
       'and test, `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`), so a new obligation must name ' +
       '`businessLine`. Only marketplace-service recording its own `ORDER` may leave it out ' +
-      '(docs/24 Q-130)',
+      '(docs/24 Q-130) — or HOLD_DEADLINE_PASSED: the `holdNotAfter` the caller fixed has passed ' +
+      "by this service's clock, and this key answers that from now on",
   },
   'POST /v1/settlements': {
     422:

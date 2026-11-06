@@ -8,6 +8,7 @@ import {
   FINAL_ANSWER_CONTRACT,
   OWNER_STATE_IS_FINAL,
   REFUSED_ON_FIRST_ATTEMPT,
+  REFUSED_PAST_HOLD_DEADLINE,
 } from './economic-refusal';
 import { outcomeUnknown } from './workflows';
 import type { EconomicClient } from '../economic/economic.client';
@@ -637,5 +638,171 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction);
       expect((await failure(activities.createObligation('ORD'))).details ?? []).toEqual([]);
     });
+  });
+});
+
+/**
+ * Review of #812 F1, executed: `describe()` before the awaited `onceForSaga()` lookup, the
+ * order closed in between, printed `sent: 1` for both FAILED and CANCELLED.
+ */
+describe('every guard of an economic step reads the order after the step looked', () => {
+  const refuse = (code: string): Error => new RastaError(code as never, 'answered');
+  function racing(row: Record<string, unknown>, read: () => Promise<unknown> = async () => row) {
+    let resume: () => void = () => undefined;
+    const lookup = new Promise<void>((resolve) => (resume = resolve));
+    let entered: () => void = () => undefined;
+    const looking = new Promise<void>((resolve) => (entered = resolve));
+    const sent: unknown[] = [];
+    let reads = 0;
+    const send = async (input: unknown) => {
+      sent.push(input);
+      return { id: 'TXN' };
+    };
+    const activities = createActivities({
+      orders: {
+        describe: async () => {
+          reads += 1;
+          return { ...((reads === 1 ? row : await read()) as object) };
+        },
+        onceForSaga: async (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => {
+          entered();
+          await lookup;
+          return call();
+        },
+      } as unknown as OrderService,
+      economic: {
+        createObligation: send,
+        authoriseSettlement: send,
+        readObligation: async () => ({ status: 'HELD' }),
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => 1,
+    });
+    return { activities, looking, resume, sent };
+  }
+  const pending = () => ({
+    id: 'ORD',
+    status: 'PENDING',
+    buyerOrganizationId: 'ORG',
+    supplierOrganizationId: 'SUP',
+    correlationId: 'COR',
+    receiptConfirmed: true,
+    totalAmountMinor: '1000',
+    economicTransactionId: null,
+  });
+
+  it.each(['FAILED', 'CANCELLED'])(
+    'createObligation: the order closed %s during the lookup sends nothing',
+    async (closed) => {
+      const row = pending();
+      const { activities, looking, resume, sent } = racing(row);
+      const attempt = activities.createObligation('ORD', '2026-11-07T00:00:00.000Z');
+      await looking;
+      row.status = closed;
+      resume();
+      await expect(attempt).rejects.toMatchObject({ type: 'ORDER_ALREADY_CLOSED', details: [] });
+      expect(sent).toEqual([]);
+    },
+  );
+
+  it('createObligation: a hold recorded during the lookup is that hold, not a second send', async () => {
+    const row: ReturnType<typeof pending> & { economicTransactionId: string | null } = pending();
+    const { activities, looking, resume, sent } = racing(row);
+    const attempt = activities.createObligation('ORD');
+    await looking;
+    row.economicTransactionId = 'TXN_KNOWN';
+    resume();
+    await expect(attempt).resolves.toEqual({ transactionId: 'TXN_KNOWN' });
+    expect(sent).toEqual([]);
+  });
+
+  it('authoriseSettlement: its `requires` reads the same fresh order', async () => {
+    const row = pending();
+    const { activities, looking, resume, sent } = racing(row);
+    const attempt = activities.authoriseSettlement('ORD', 'TXN');
+    await looking;
+    row.receiptConfirmed = false;
+    resume();
+    await expect(attempt).rejects.toMatchObject({ type: 'BUSINESS_RULE_VIOLATION' });
+    expect(sent).toEqual([]);
+  });
+
+  it('a read that fails after the lookup is no refusal of the call: not marked, nothing sent', async () => {
+    const { activities, resume, sent } = racing(pending(), async () => {
+      throw refuse('NOT_FOUND');
+    });
+    resume();
+    const caught = await activities.createObligation('ORD').then(
+      () => {
+        throw new Error('expected to fail');
+      },
+      (error: ApplicationFailure) => error,
+    );
+    expect(caught.type).toBe('NOT_FOUND');
+    expect(caught.details ?? []).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+});
+
+describe('the deadline of a hold (D-132)', () => {
+  const DEADLINE = '2026-11-07T00:00:00.000Z';
+  function sending(answer: () => unknown, attempt = 1) {
+    const send = jest.fn(async (_input: { holdNotAfter?: string }) => answer());
+    const activities = createActivities({
+      orders: {
+        describe: async () => ({
+          id: 'ORD',
+          status: 'PENDING',
+          buyerOrganizationId: 'ORG',
+          supplierOrganizationId: 'SUP',
+          correlationId: 'COR',
+          totalAmountMinor: '1000',
+          economicTransactionId: null,
+        }),
+        onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+      } as unknown as OrderService,
+      economic: {
+        createObligation: send,
+        readObligation: async () => ({ status: 'HELD' }),
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => attempt,
+    });
+    return { activities, send };
+  }
+  const past = () => {
+    throw new RastaError('HOLD_DEADLINE_PASSED', 'past it');
+  };
+
+  it('goes to economic-service as the workflow fixed it', async () => {
+    const { activities, send } = sending(() => ({ id: 'TXN' }));
+    await activities.createObligation('ORD', DEADLINE);
+    expect(send.mock.calls[0]?.[0].holdNotAfter).toBe(DEADLINE);
+  });
+
+  it('a workflow from before the fence sends none', async () => {
+    const { activities, send } = sending(() => ({ id: 'TXN' }));
+    await activities.createObligation('ORD');
+    expect(send.mock.calls[0]?.[0]).not.toHaveProperty('holdNotAfter');
+  });
+
+  it.each([1, 2, 3])('its refusal is marked on attempt %d, and not retried', async (attempt) => {
+    const { activities } = sending(past, attempt);
+    await expect(activities.createObligation('ORD', DEADLINE)).rejects.toMatchObject({
+      type: 'HOLD_DEADLINE_PASSED',
+      nonRetryable: true,
+      details: [REFUSED_PAST_HOLD_DEADLINE],
+    });
+  });
+
+  it('the same code to a request that set no deadline proves nothing', async () => {
+    const { activities } = sending(past, 2);
+    const caught = await activities.createObligation('ORD').then(
+      () => {
+        throw new Error('expected to fail');
+      },
+      (error: ApplicationFailure) => error,
+    );
+    expect(caught.details ?? []).not.toContain(REFUSED_PAST_HOLD_DEADLINE);
   });
 });

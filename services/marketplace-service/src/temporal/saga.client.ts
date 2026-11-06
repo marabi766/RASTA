@@ -180,7 +180,6 @@ export class OrderSagaClient implements OnModuleDestroy {
                 receiptWindowDays: this.env.MARKETPLACE_RECEIPT_WINDOW_DAYS,
                 reminderIntervalDays: this.env.MARKETPLACE_REMINDER_INTERVAL_DAYS,
                 recheckIntervalHours: this.env.MARKETPLACE_SAGA_RECHECK_HOURS,
-                economicKeyRetentionHours: this.env.ECONOMIC_IDEMPOTENCY_TTL_HOURS,
               },
             ],
           });

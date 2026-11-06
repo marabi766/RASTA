@@ -3,7 +3,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, RastaError, Roles, getContext, zodPipe } from '@rasta/nest-common';
 import { mayRecordSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 import { TransactionService, type TransactionDetail } from './transaction.service';
-import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { IdempotencyStore, targeted, type TerminalRefusals } from '../shared/idempotency';
 import { canonicalBodyPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
@@ -143,7 +143,9 @@ export class TransactionController {
       '(400 VALIDATION_FAILED on `sourceType`). Where settlement fails closed without a ' +
       'commission rule (docs/24 Q-29, on outside development and test), `businessLine` is ' +
       'required — 422 BUSINESS_LINE_REQUIRED, nothing recorded — except for marketplace-service ' +
-      'recording its own `ORDER` (docs/24 Q-130).',
+      'recording its own `ORDER` (docs/24 Q-130). With `holdNotAfter`, past that instant by this ' +
+      "service's clock: 422 HOLD_DEADLINE_PASSED, nothing recorded or held, and the key answers " +
+      'it from then on.',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
@@ -165,10 +167,19 @@ export class TransactionController {
       dto,
       201,
       (answer) => this.transactions.create({ ...dto, idempotencyKey: key }, answer.map(detailView)),
-      // No target in the path: the stored answer names the transaction it made.
+      // No target in the path: the stored answer names the transaction it made. A
+      // recorded refusal names none: it says nothing but its own name, to its own actor.
       {
-        mayReplay: (stored) => this.transactions.assertMayReplay(createdId(stored), 'READ'),
+        mayReplay: async (stored) => {
+          if (stored !== undefined) {
+            await this.transactions.assertMayReplay(createdId(stored), 'READ');
+          }
+        },
         stored: storedTransactionDetailView,
+        terminalRefusals: CREATE_REFUSALS,
+        ...(dto.holdNotAfter === undefined
+          ? {}
+          : { notAfter: { at: new Date(dto.holdNotAfter), refusal: 'HOLD_DEADLINE_PASSED' } }),
       },
     );
   }
@@ -365,7 +376,15 @@ function detailView(transaction: TransactionDetail) {
   return toTransactionDetailView(transaction as never);
 }
 
-/** The transaction a stored creation answer names. A creation records no refusal. */
+/** What a creation records as its key's answer. Everything else frees the key. */
+const CREATE_REFUSALS: TerminalRefusals = {
+  HOLD_DEADLINE_PASSED: {
+    code: 'HOLD_DEADLINE_PASSED',
+    message: 'The deadline for placing this hold has passed; nothing was recorded or held',
+  },
+};
+
+/** The transaction a stored creation answer names. */
 function createdId(stored: unknown): string {
   const id = (stored as { id?: unknown } | undefined)?.id;
   if (typeof id !== 'string') {

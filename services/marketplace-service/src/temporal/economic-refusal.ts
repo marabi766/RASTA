@@ -17,7 +17,8 @@
  * say nothing of the transaction: `CONFLICT` (the key's request is in flight),
  * `IDEMPOTENCY_KEY_REUSED` and `REPLAY_WINDOW_CLOSED` (the key was used, perhaps
  * to effect), `OPTIMISTIC_LOCK_FAILED`, `RATE_LIMIT_EXCEEDED`, and the 401s of a
- * token this service mints afresh per call.
+ * token this service mints afresh per call. `HOLD_DEADLINE_PASSED` is not here either:
+ * it has a mark and a rule of its own (`sentPastHoldFence`).
  */
 export const PROVEN_REFUSALS: ReadonlySet<string> = new Set([
   'VALIDATION_FAILED',
@@ -40,10 +41,38 @@ export const PROVEN_REFUSALS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * How long a hold's doubt must last before a marked refusal can end it: the retention
- * of economic-service's keys (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`), and a quarter of that
- * again as the margin, so that one setting moves both. Null for anything that is not a
- * retention: no age proves anything then.
+ * The fence on a hold (D-132), the one source of both periods. `sendWindowMs`: how long
+ * after its first send a hold may still be placed. `clockMarginMs`: how far past that
+ * deadline the saga waits before it believes a refusal, for the two services' clocks, a
+ * transaction already past economic-service's check, and the watch after the exit.
+ * Changing either changes what a live history decides: it needs a new patch.
+ */
+export const HOLD_FENCE = {
+  sendWindowMs: 24 * 60 * 60 * 1000,
+  clockMarginMs: 60 * 60 * 1000,
+} as const;
+
+/** economic-service's answer past that deadline, which it records under the key. */
+export const HOLD_DEADLINE_PASSED = 'HOLD_DEADLINE_PASSED';
+
+/** In a failure's details: that answer, to a request that carried a deadline. Any attempt. */
+export const REFUSED_PAST_HOLD_DEADLINE = 'REFUSED_PAST_HOLD_DEADLINE';
+
+/** The deadline of every request under a hold's key, from the moment of the first. */
+export function holdDeadlineFrom(firstSendAt: number): string {
+  return new Date(firstSendAt + HOLD_FENCE.sendWindowMs).toISOString();
+}
+
+/** Sent past the deadline and its margin. Anything unreadable is not past anything. */
+export function sentPastHoldFence(holdNotAfter: string, sentAt: number): boolean {
+  return sentAt > Date.parse(holdNotAfter) + HOLD_FENCE.clockMarginMs;
+}
+
+/**
+ * Retired with its exit (D-132): only a history that recorded that exit still asks, on
+ * replay (`placeHold`). How long a hold's doubt had to last before a marked refusal ended
+ * it, from a retention marketplace-service could not verify. Null for anything that is
+ * not a retention.
  */
 export function doubtOutlivesKeyMs(retentionHours: unknown): number | null {
   if (typeof retentionHours !== 'number' || !(retentionHours > 0) || retentionHours === Infinity) {

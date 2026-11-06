@@ -223,9 +223,9 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**, `saga-owed-work-durable-v1` **6**, `economic-hold-call-durable-wait-v1` **7**, `economic-hold-refusal-exit-v1` **8**. A marker the gate does not list blocks every target until the gate learns
+**5**, `saga-owed-work-durable-v1` **6**, `economic-hold-call-durable-wait-v1` **7**, `economic-hold-refusal-exit-v1` **8**, `economic-hold-send-fence-v1` **9**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
-(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 7, `lateHoldWatch`: 8; any unlisted field blocks; so does an
+(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 7, `lateHoldWatch`: 8, `holdNotAfter`: 9; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
 history requires.
 
@@ -324,33 +324,62 @@ is not `HELD` or not on the order's terms stops the saga as it always did
 (`OBLIGATION_NOT_HELD`, `OBLIGATION_TERMS_MISMATCH`). With economic-service down, a lookup that cannot answer
 counts as a round.
 
-A refusal that persists, an empty wallet say, ends this wait only in time (protocol 8).
-Once the last request not answered by a marked refusal is older than
-`ECONOMIC_IDEMPOTENCY_TTL_HOURS` plus a quarter of it (30 h at the default), a marked
-refusal with an empty lookup after it counts as proof: the order closes, `FAILED` or
-`CANCELLED` if the buyer cancelled, which returns its stock, and the saga sends nothing
-more. A 5xx, a timeout or an unmarked code starts that age again, so a flapping service
-keeps the saga here with the alert on. For one more such period the phase is
-`LATE_HOLD_WATCH`: the saga asks at most hourly and refunds any hold that landed, and the
-order stays closed; a failed lookup or refund counts as a `compensate` round, and a
-status no refund can reach stays in `OBLIGATION_RECONCILIATION`. marketplace-service reads
-the same variable as economic-service, so give both the same value; nothing compares the
-two at start, and a saga keeps the value it started with. A saga started before that field
-has no retention in its input and never takes this exit. A closed order cannot move, so
-reconciliation on one does not clear by itself: once the obligation is settled by hand,
-terminate that saga. **Do not terminate or
-cancel a saga in this wait** to clear the alert, since a hold that lands later would have
-nothing to release it: check the obligation at economic-service and escalate.
+A refusal that persists, an empty wallet say, ends this wait only behind a fence
+(protocol 9, D-132). The saga's first send fixes a deadline, 24 h on (`HOLD_FENCE` in
+`economic-refusal.ts`), and every request under the key carries it as `holdNotAfter`,
+across rollovers too. economic-service judges it by its own database clock, in the
+transaction that writes the claim and again in the hold's own, as the last thing before its
+answer. Past it, `422 HOLD_DEADLINE_PASSED` with nothing recorded or held, and the key answers
+that from then on, whenever a stalled request arrives and whatever
+`ECONOMIC_IDEMPOTENCY_TTL_HOURS` says: a purged record is claimed anew and refused again.
+A transaction that passed that last check and then sits idle for 30 s is ended by
+PostgreSQL, so it cannot commit later.
 
-**Operator check: a hold on a closed order.** The watch ends, and sagas closed by an
-older build never had one, so after an incident in this wait compare the two services
-(separate databases, no join): `SELECT id, source_reference FROM "transaction" WHERE
-source_type = 'ORDER' AND status = 'HELD';` at economic-service, then `SELECT id, status
-FROM "order" WHERE id = ANY($1) AND status IN ('FAILED', 'CANCELLED');` at
+The saga closes the order only on all three together: a request **sent** more than the
+margin (1 h, the same constant) past the deadline, that refusal to it, and an empty lookup
+after it. A 5xx, a timeout or any other code keeps the saga here with the alert on,
+past the deadline too, as does a guard refusing before the key is reached. So a hold in doubt
+ends within about 26 h of its first send once economic-service answers, and an outage that long
+fails the order instead of placing the hold when the service returns. A pod that dies holding the
+claim leaves it `IN_PROGRESS`, answering `CONFLICT` until it expires, so retention can still
+delay this end (up to `ECONOMIC_IDEMPOTENCY_TTL_HOURS` after that claim), though it no longer
+decides whether a hold can land. The order closes
+`FAILED`, or `CANCELLED` if the buyer cancelled, which returns its stock, and the saga sends
+nothing more. For one more margin the phase is `LATE_HOLD_WATCH`: the saga asks at most
+hourly and refunds a hold that was already committing, and the order stays closed; a failed
+lookup or refund counts as a `compensate` round, and a status no refund can reach stays in
+`OBLIGATION_RECONCILIATION`. A closed order cannot move, so reconciliation on one does not
+clear by itself: once the obligation is settled by hand, terminate that saga. **Do not
+terminate or cancel a saga in this wait** to clear the alert: check the obligation at
+economic-service and escalate. **Do not reset such a saga to before its first send, or start
+another for the order, until its deadline and margin have passed.** The deadline lives in the
+workflow, so the new run forgets it and fixes another. With an empty wallet there is no key
+record to collide with, so its first refusal fails the order at once while the old run's stalled
+request can still hold, until the old deadline.
+
+**Deploy economic-service first.** Its request schema is strict, so a build without the
+fence refuses `holdNotAfter` with `400 VALIDATION_FAILED` rather than ignoring it. That
+keeps the fence fail-closed through a rollback: a saga in doubt goes on waiting. But a new
+marketplace-service ahead of it fails each new order on its first send, nothing held.
+
+A saga whose first send predates protocol 9 carries no deadline, and economic-service holds
+for such a request as it always did: nothing can prove it will not land, so that saga never
+takes this exit and waits as protocol 7 did. This is safe only because the platform has not
+launched: no real money waits on such a run. Before launch, drain them, since an empty
+wallet leaves one waiting for good. Its input may still carry `economicKeyRetentionHours`
+from protocol 8; it decides nothing live. That exit is kept for replay alone, and a history
+that took it replays it. `HOLD_FENCE` decides what a live history does: changing it needs a new patch.
+
+**Operator check: a hold on a closed order.** No longer the only guarantee: the fence is what
+stops a late request, and this check is a second look at it. Run it after an incident in this wait, and for
+sagas closed by an older build, which had no fence; no automatic detector exists yet (FU-167).
+Compare the two services (separate databases, no join): `SELECT id, source_reference FROM
+"transaction" WHERE source_type = 'ORDER' AND status = 'HELD';` at economic-service, then
+`SELECT id, status FROM "order" WHERE id = ANY($1) AND status IN ('FAILED', 'CANCELLED');` at
 marketplace-service with those `source_reference` values. Any row is money held for an
 order that has ended, including the accepted cutover edge of a protocol-5 saga past its
 decision that closed as cancelled on an empty lookup: refund that obligation under the
-platform's refund procedure and record why. No code runs this check.
+platform's refund procedure and record why.
 
 A wait that will not clear shows why in the log line's code: fix the route or
 configuration and signal. For a real refusal at `HELD` (a persistent
@@ -382,8 +411,12 @@ history in which a lower protocol already recorded `FAILED` replays that end.
 
 Protocol 8 is the exit from that wait, with its own marker and its own resume field
 (`lateHoldWatch`), so that the gate refuses a lower target for a saga that gave its hold up:
-that build would send the hold again, or close without the watch. A history that went on
-waiting past the limit replays that wait, and takes the exit at its next refused round.
+that build would send the hold again, or close without the watch. Retired by protocol 9: no
+live run takes it, and a history that recorded it replays it.
+
+Protocol 9 is the fence, with its own marker at the first send and its own resume field
+(`holdNotAfter`), so that the gate refuses a lower target for a saga whose requests carry a
+deadline: that build would send under the same key without one, and be refused for ever.
 
 ### Owed work (FU-117, protocol 6)
 

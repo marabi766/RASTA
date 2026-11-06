@@ -3,6 +3,7 @@ import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
 import type { WorkflowHandle, WorkflowHandleWithFirstExecutionRunId } from '@temporalio/client';
 import {
+  HOLD_FENCE_PATCH,
   HOLD_REFUSAL_EXIT_PATCH,
   HOLD_WAIT_PATCH,
   orderSaga,
@@ -15,27 +16,32 @@ import type { OrderActivities } from './activities';
 import {
   FINAL_ANSWER_CONTRACT,
   doubtOutlivesKeyMs,
+  HOLD_DEADLINE_PASSED,
+  HOLD_FENCE,
+  holdDeadlineFrom,
   REFUSED_ON_FIRST_ATTEMPT,
+  REFUSED_PAST_HOLD_DEADLINE,
+  sentPastHoldFence,
 } from './economic-refusal';
 
 /**
  * Review of #812: after one 5xx, a refusal that persists kept the saga waiting for
- * good, the order CANCELLING and its stock reserved. The exit: a marked refusal counts
- * once the doubt has outlived the key, and the saga stays to refund a hold that lands
- * after it.
+ * good, the order CANCELLING and its stock reserved. The exit (D-132): every request
+ * carries the deadline its first send fixed, economic-service refuses past it (its own
+ * specs), and only that refusal, to a request sent past the deadline and its margin,
+ * with an empty lookup after it, ends the wait. The saga stays one margin more.
  */
 
 jest.setTimeout(120_000);
 
-const RETENTION_HOURS = 1;
-const LIMIT_MS = doubtOutlivesKeyMs(RETENTION_HOURS) as number;
+/** From the first send to the first request whose refusal counts. */
+const LIMIT_MS = HOLD_FENCE.sendWindowMs + HOLD_FENCE.clockMarginMs;
 const INPUT: OrderSagaInput = {
   orderId: 'ORD_EXIT',
   fulfillmentWindowDays: 7,
   receiptWindowDays: 3,
   reminderIntervalDays: 3,
   recheckIntervalHours: 24 * 365,
-  economicKeyRetentionHours: RETENTION_HOURS,
 };
 const TXN = 'TXN_LATE';
 /** A step answered with nothing about the money: every 5xx, reset and timeout. */
@@ -46,6 +52,15 @@ const marked = (code = 'INSUFFICIENT_BALANCE') =>
     type: code,
     nonRetryable: true,
     details: [REFUSED_ON_FIRST_ATTEMPT],
+  });
+const FENCE_WORDS = 'The deadline for placing this hold has passed';
+/** The key's own answer past the deadline, as the activity marks it on any attempt. */
+const fenced = () =>
+  ApplicationFailure.create({
+    message: FENCE_WORDS,
+    type: HOLD_DEADLINE_PASSED,
+    nonRetryable: true,
+    details: [REFUSED_PAST_HOLD_DEADLINE],
   });
 const STATUS = {
   phase: 'WAS',
@@ -100,6 +115,12 @@ describe('a hold refused after a lost answer (#812)', () => {
     await env?.teardown();
   });
 
+  /** What an empty wallet's economic-service says: its refusal, and past the deadline the fence's. */
+  const refusalTo = async (holdNotAfter?: string) =>
+    holdNotAfter !== undefined && (await env.currentTimeMs()) > Date.parse(holdNotAfter)
+      ? fenced()
+      : marked();
+
   /** The saga over a small order row; each `acts` replaces an activity. */
   function saga(acts: (state: State, s: { rounds: string[] }) => Record<string, Fn> = () => ({})) {
     const state: State = {
@@ -116,9 +137,9 @@ describe('a hold refused after a lost answer (#812)', () => {
       // Once a 5xx, then the refusal, every round.
       createObligation: (() => {
         let sends = 0;
-        return () => {
+        return async (_id: string, holdNotAfter?: string) => {
           sends += 1;
-          throw sends === 1 ? gone() : marked();
+          throw sends === 1 ? gone() : await refusalTo(holdNotAfter);
         };
       })(),
       findObligation: () => null,
@@ -220,20 +241,21 @@ describe('a hold refused after a lost answer (#812)', () => {
   }
   const replay = async (handle: WorkflowHandle) =>
     Worker.runReplayHistory({ workflowBundle }, await handle.fetchHistory(), handle.workflowId);
-  /** A run continued in the hold's wait, its doubt `age` old. */
+  /** A run continued in the hold's wait, whose first send was `age` ago. */
   const inWait = async (age: number, rounds = 4): Promise<Partial<OrderSagaInput>> => ({
     resume: {
       status: STATUS,
       waitingIn: 'PENDING',
       activitySequence: 7,
-      holdCall: { rounds, doubtAt: (await env.currentTimeMs()) - age },
+      holdCall: { rounds },
+      holdNotAfter: holdDeadlineFrom((await env.currentTimeMs()) - age),
     } as SagaResume,
   });
   /** Started just past the limit, so its first refused send gives the hold up. */
   const pastLimit = () => inWait(LIMIT_MS + 1);
   const refusing = {
-    createObligation: () => {
-      throw marked();
+    createObligation: async (_id: string, holdNotAfter?: string) => {
+      throw await refusalTo(holdNotAfter);
     },
   };
   /** Refused for good, its lookup finding the hold once it has `landed`. */
@@ -249,11 +271,26 @@ describe('a hold refused after a lost answer (#812)', () => {
   };
 
   describe('the rule', () => {
+    it('the deadline is the first send and the window, in the one form economic-service hashes', () => {
+      expect(holdDeadlineFrom(1_000)).toBe(new Date(1_000 + HOLD_FENCE.sendWindowMs).toISOString());
+    });
+    it.each([
+      ['at the deadline', 0, false],
+      ['one margin past it, to the millisecond', HOLD_FENCE.clockMarginMs, false],
+      ['just past that', HOLD_FENCE.clockMarginMs + 1, true],
+      ['just before the deadline', -1, false],
+    ])('a request sent %s', (_name, after, past) => {
+      const deadline = holdDeadlineFrom(5_000);
+      expect(sentPastHoldFence(deadline, Date.parse(deadline) + after)).toBe(past);
+    });
+    it.each(['', 'not an instant'])('a deadline %j is not past anything', (deadline) => {
+      expect(sentPastHoldFence(deadline, Number.MAX_SAFE_INTEGER)).toBe(false);
+    });
     it.each([
       [24, 30 * 60 * 60 * 1000],
       [1, 75 * 60 * 1000],
       [168, 210 * 60 * 60 * 1000],
-    ])('retention %d h gives a limit of %d ms, margin included', (hours, limit) => {
+    ])('retired, for replay only: retention %d h gave a limit of %d ms', (hours, limit) => {
       expect(doubtOutlivesKeyMs(hours)).toBe(limit);
     });
     it.each([undefined, null, 0, -1, NaN, Infinity, '24'])('%s is no retention', (hours) => {
@@ -266,17 +303,12 @@ describe('a hold refused after a lost answer (#812)', () => {
     // up on"), on a real database; here the saga has to reach that close.
     it('the 150-round probe: one 5xx, refused every round, cancelled: the saga closes the order', async () => {
       const s = saga();
-      const hours = 24;
-      const result = await drive(
-        s,
-        async (handle) => {
-          await eventually(() => s.rounds.length > 0, 'the first round');
-          await atRest(handle);
-          cancelled(s.state);
-          return resultOf(handle);
-        },
-        { economicKeyRetentionHours: hours },
-      );
+      const result = await drive(s, async (handle) => {
+        await eventually(() => s.rounds.length > 0, 'the first round');
+        await atRest(handle);
+        cancelled(s.state);
+        return resultOf(handle);
+      });
       expect(result).toBe('CANCELLED');
       expect(s.state.status).toBe('CANCELLED');
       expect(s.calls).toContain('markCancelled');
@@ -293,24 +325,22 @@ describe('a hold refused after a lost answer (#812)', () => {
         return resultOf(handle);
       });
       expect(result).toBe('FAILED');
-      expect(s.sent.markFailed).toEqual([[INPUT.orderId, 'Insufficient balance']]);
+      expect(s.sent.markFailed).toEqual([[INPUT.orderId, FENCE_WORDS]]);
       expect(s.calls.lastIndexOf('createObligation')).toBeLessThan(s.calls.indexOf('markFailed'));
       const history = await (seen as WorkflowHandle).fetchHistory();
       const [first] = scheduledAt(history, 'createObligation');
       const [closed] = scheduledAt(history, 'markFailed');
       expect((closed as number) - (first as number)).toBeGreaterThan(LIMIT_MS);
       expect(markersOf(history)).toEqual(
-        expect.arrayContaining([HOLD_WAIT_PATCH, HOLD_REFUSAL_EXIT_PATCH]),
+        expect.arrayContaining([HOLD_WAIT_PATCH, HOLD_FENCE_PATCH]),
       );
+      // The retired exit's marker is for the histories that took it, and no others.
+      expect(markersOf(history)).not.toContain(HOLD_REFUSAL_EXIT_PATCH);
       await replay(seen as WorkflowHandle);
     });
 
-    it('just before the limit it waits, and just after it the same saga closes', async () => {
-      const s = saga(() => ({
-        createObligation: () => {
-          throw marked();
-        },
-      }));
+    it('refused by the fence, a request sent just before deadline + margin waits; the next one closes', async () => {
+      const s = saga(() => refusing);
       await drive(
         s,
         async (handle) => {
@@ -318,7 +348,7 @@ describe('a hold refused after a lost answer (#812)', () => {
           await atRest(handle);
           expect(s.calls).not.toContain('markFailed');
           expect(await phase(handle)).toBe('HOLD_UNCONFIRMED');
-          expect(markersOf(await handle.fetchHistory())).not.toContain(HOLD_REFUSAL_EXIT_PATCH);
+          expect(s.rounds.at(-1)).toContain(HOLD_DEADLINE_PASSED);
           await env.sleep(90_000);
           await handle.signal(retryDisputeRelease);
           await eventually(() => s.calls.includes('markFailed'), 'the exit');
@@ -329,12 +359,8 @@ describe('a hold refused after a lost answer (#812)', () => {
       expect(s.state.status).toBe('FAILED');
     });
 
-    it('a doubt just past the limit: the first send refused ends it', async () => {
-      const s = saga(() => ({
-        createObligation: () => {
-          throw marked();
-        },
-      }));
+    it('a wait just past deadline + margin: the first send refused ends it', async () => {
+      const s = saga(() => refusing);
       await drive(
         s,
         async (handle) => {
@@ -347,29 +373,49 @@ describe('a hold refused after a lost answer (#812)', () => {
       expect(s.state.status).toBe('FAILED');
     });
 
-    it('a 5xx starts the age again: refused rounds after it wait out a whole limit', async () => {
+    it('a 5xx past deadline + margin is no refusal: only the round refused after it ends the wait', async () => {
       let sends = 0;
       const s = saga(() => ({
-        createObligation: () => {
+        createObligation: async (_id: string, holdNotAfter?: string) => {
           sends += 1;
-          throw sends === 1 ? gone() : marked();
+          throw sends === 1 ? gone() : await refusalTo(holdNotAfter);
         },
       }));
-      let seen: WorkflowHandle | undefined;
-      const result = await drive(
+      const result = await drive(s, async (handle) => resultOf(handle), await pastLimit());
+      expect(result).toBe('FAILED');
+      expect(sends).toBe(2);
+      expect(s.rounds).toEqual([expect.stringMatching(/^createObligation: UPSTREAM_UNAVAILABLE/)]);
+    });
+
+    it('sent before deadline + margin and answered after it: the send is what counts', async () => {
+      let lookups = 0;
+      let looked = 0;
+      const s = saga(() => ({
+        ...refusing,
+        // Retried by the activity's own policy, so workflow time passes after the send.
+        findObligation: async () => {
+          lookups += 1;
+          if (lookups < 3) throw ApplicationFailure.retryable('down', 'UPSTREAM_UNAVAILABLE');
+          looked = await env.currentTimeMs();
+          return null;
+        },
+      }));
+      const started = await inWait(LIMIT_MS - 2_500);
+      const limit =
+        Date.parse((started.resume as SagaResume).holdNotAfter as string) +
+        HOLD_FENCE.clockMarginMs;
+      await drive(
         s,
         async (handle) => {
-          seen = handle;
-          return resultOf(handle);
+          await eventually(() => s.rounds.length > 0, 'its round');
+          await atRest(handle);
+          expect(await phase(handle)).toBe('HOLD_UNCONFIRMED');
         },
-        await inWait(10 * LIMIT_MS),
+        started,
       );
-      expect(result).toBe('FAILED');
-      const history = await (seen as WorkflowHandle).fetchHistory();
-      const [fiveHundred] = scheduledAt(history, 'createObligation');
-      const [closed] = scheduledAt(history, 'markFailed');
-      expect((closed as number) - (fiveHundred as number)).toBeGreaterThan(LIMIT_MS);
-      expect(s.rounds.length).toBeGreaterThan(1);
+      // Not vacuous: the answer did come past the limit.
+      expect(looked).toBeGreaterThan(limit);
+      expect(s.calls).not.toContain('markFailed');
     });
 
     it.each([
@@ -383,7 +429,23 @@ describe('a hold refused after a lost answer (#812)', () => {
         () => ApplicationFailure.nonRetryable('there', 'ALREADY_EXISTS'),
       ],
       ['a mark on a code nobody listed', () => marked('CONFLICT')],
-    ])('%s never counts, however old the doubt', async (_name, failure) => {
+      ['a first-attempt refusal', () => marked()],
+      [
+        'the code without its mark',
+        () => ApplicationFailure.nonRetryable('no', HOLD_DEADLINE_PASSED),
+      ],
+      ['the first-attempt mark on the code', () => marked(HOLD_DEADLINE_PASSED)],
+      [
+        'its mark on another code',
+        () =>
+          ApplicationFailure.create({
+            message: 'no',
+            type: 'CONFLICT',
+            nonRetryable: true,
+            details: [REFUSED_PAST_HOLD_DEADLINE],
+          }),
+      ],
+    ])('%s never counts, however far past the fence', async (_name, failure) => {
       const s = saga(() => ({
         createObligation: () => {
           throw failure();
@@ -407,11 +469,9 @@ describe('a hold refused after a lost answer (#812)', () => {
         'cannot finish',
         () => ApplicationFailure.nonRetryable('more', 'OBLIGATION_LOOKUP_INCOMPLETE'),
       ],
-    ])('a lookup that %s is no proof, however old the doubt', async (_name, failure) => {
+    ])('a lookup that %s is no proof, however far past the fence', async (_name, failure) => {
       const s = saga(() => ({
-        createObligation: () => {
-          throw marked();
-        },
+        ...refusing,
         findObligation: () => {
           throw failure();
         },
@@ -427,11 +487,9 @@ describe('a hold refused after a lost answer (#812)', () => {
       expect(s.calls).not.toContain('markFailed');
     });
 
-    it('an obligation found after the refusal is adopted, however old the doubt', async () => {
+    it('an obligation found after the refusal is adopted, however far past the fence', async () => {
       const s = saga(() => ({
-        createObligation: () => {
-          throw marked();
-        },
+        ...refusing,
         findObligation: () => ({ transactionId: TXN }),
       }));
       await drive(
@@ -439,7 +497,6 @@ describe('a hold refused after a lost answer (#812)', () => {
         async (handle) => {
           await eventually(() => s.calls.includes('markFundsHeld'), 'the hold adopted');
           await atRest(handle);
-          expect(markersOf(await handle.fetchHistory())).not.toContain(HOLD_REFUSAL_EXIT_PATCH);
         },
         await inWait(10 * LIMIT_MS),
       );
@@ -447,7 +504,7 @@ describe('a hold refused after a lost answer (#812)', () => {
       expect(s.state.economicTransactionId).toBe(TXN);
     });
 
-    it('an obligation not adopted stops the saga as ever, and records no exit, however old the doubt', async () => {
+    it('an obligation not adopted stops the saga as ever, however far past the fence', async () => {
       const s = saga(() => ({
         ...refusing,
         findObligation: () => ({
@@ -456,51 +513,108 @@ describe('a hold refused after a lost answer (#812)', () => {
           differ: ['payee'],
         }),
       }));
-      let seen: WorkflowHandle | undefined;
       await expect(
-        drive(
-          s,
-          async (handle) => {
-            seen = handle;
-            return handle.result();
-          },
-          await inWait(10 * LIMIT_MS),
-        ),
+        drive(s, async (handle) => handle.result(), await inWait(10 * LIMIT_MS)),
       ).rejects.toMatchObject({ cause: { type: 'OBLIGATION_TERMS_MISMATCH' } });
       expect(s.calls).not.toContain('markFailed');
-      expect(markersOf(await (seen as WorkflowHandle).fetchHistory())).not.toContain(
-        HOLD_REFUSAL_EXIT_PATCH,
-      );
     });
 
     it.each([
+      ["the executed probe, 1 h against economic-service's 168 h", 1],
+      ['the default', 24],
       ['absent', undefined],
-      ['zero', 0],
-      ['negative', -24],
-      ['not a number', '24'],
-    ])('a retention %s proves nothing, however old the doubt', async (_name, hours) => {
-      const s = saga(() => ({
-        createObligation: () => {
-          throw marked();
-        },
-      }));
+    ])(
+      'with no deadline nothing can be fenced, so no live age ends the wait: retention %s',
+      async (_name, hours) => {
+        const s = saga(() => refusing);
+        await drive(
+          s,
+          async (handle) => {
+            await eventually(() => s.rounds.length > 0, 'a round');
+            await atRest(handle);
+            expect(await phase(handle)).toBe('HOLD_UNCONFIRMED');
+          },
+          {
+            economicKeyRetentionHours: hours,
+            resume: {
+              status: STATUS,
+              waitingIn: 'PENDING',
+              activitySequence: 7,
+              holdCall: { rounds: 4, doubtAt: (await env.currentTimeMs()) - 1000 * LIMIT_MS },
+            } as SagaResume,
+          },
+        );
+        expect(s.calls).not.toContain('markFailed');
+      },
+    );
+
+    it('a retention still in the input decides nothing: 1 h against 168 h, past 2.05 h the order stays', async () => {
+      const s = saga();
       await drive(
         s,
         async (handle) => {
-          await eventually(() => s.rounds.length > 0, 'a round');
+          await eventually(() => s.rounds.length > 0, 'the first round');
           await atRest(handle);
+          await env.sleep(2.1 * 60 * 60_000);
+          await atRest(handle);
+          expect(s.calls).not.toContain('markFailed');
+          expect(await phase(handle)).toBe('HOLD_UNCONFIRMED');
         },
-        { ...(await inWait(1000 * LIMIT_MS)), economicKeyRetentionHours: hours as never },
+        { economicKeyRetentionHours: 1 },
       );
-      expect(s.calls).not.toContain('markFailed');
+    });
+
+    it('the stalled request of the review: it resumes after the saga ended, and economic-service refuses it', async () => {
+      // economic-service as its specs show it, with a wallet funded by then.
+      const economic = { held: false, stalled: [] as (string | undefined)[] };
+      const receive = async (holdNotAfter?: string) => {
+        if (holdNotAfter !== undefined && (await env.currentTimeMs()) > Date.parse(holdNotAfter)) {
+          throw fenced();
+        }
+        economic.held = true;
+      };
+      const s = saga(() => ({
+        createObligation: async (_id: string, holdNotAfter?: string) => {
+          // The first request never reaches it: only its answer is lost.
+          if (economic.stalled.length === 0) {
+            economic.stalled.push(holdNotAfter);
+            throw gone();
+          }
+          throw await refusalTo(holdNotAfter);
+        },
+      }));
+      // The retention is what the reviewed build gave up by, 60 h before this request arrives.
+      const result = await drive(s, async (handle) => resultOf(handle), {
+        economicKeyRetentionHours: 24,
+      });
+      expect(result).toBe('FAILED');
+      expect(s.state.status).toBe('FAILED');
+      await expect(receive(economic.stalled[0])).rejects.toMatchObject({
+        type: HOLD_DEADLINE_PASSED,
+      });
+      expect(economic.held).toBe(false);
+    });
+
+    it('every request carries the deadline of the first send, and only a hold is sent one', async () => {
+      const s = saga();
+      let seen: WorkflowHandle | undefined;
+      await drive(s, async (handle) => {
+        seen = handle;
+        return resultOf(handle);
+      });
+      const deadlines = new Set(s.sent.createObligation?.map((args) => args[1]));
+      expect(deadlines.size).toBe(1);
+      const [firstSend] = scheduledAt(
+        await (seen as WorkflowHandle).fetchHistory(),
+        'createObligation',
+      );
+      const [deadline] = [...deadlines] as unknown as [string];
+      const from = Date.parse(deadline) - HOLD_FENCE.sendWindowMs;
+      expect(Math.abs(from - (firstSend as number))).toBeLessThan(5_000);
     });
 
     it('a refused first attempt with no doubt still fails at once, with nothing to watch', async () => {
-      const s = saga(() => ({
-        createObligation: () => {
-          throw marked();
-        },
-      }));
+      const s = saga(() => refusing);
       let seen: WorkflowHandle | undefined;
       const result = await drive(s, async (handle) => {
         seen = handle;
@@ -508,9 +622,8 @@ describe('a hold refused after a lost answer (#812)', () => {
       });
       expect(result).toBe('FAILED');
       expect(s.calls.filter((call) => call === 'findObligation')).toHaveLength(1);
-      expect(markersOf(await (seen as WorkflowHandle).fetchHistory())).not.toContain(
-        HOLD_REFUSAL_EXIT_PATCH,
-      );
+      expect(s.sent.createObligation).toHaveLength(1);
+      await replay(seen as WorkflowHandle);
     });
   });
 
@@ -541,7 +654,6 @@ describe('a hold refused after a lost answer (#812)', () => {
         await handle.signal(retryDisputeRelease);
         await eventually(() => s.calls.includes('markFundsHeld'), 'the hold');
         await atRest(handle);
-        expect(markersOf(await handle.fetchHistory())).not.toContain(HOLD_REFUSAL_EXIT_PATCH);
       });
       expect(s.state.status).toBe('FUNDS_HELD');
       expect(s.calls).not.toContain('markFailed');
@@ -565,8 +677,8 @@ describe('a hold refused after a lost answer (#812)', () => {
     it('after the exit: nothing is sent, so a funded wallet places no hold', async () => {
       const wallet = { funded: false };
       const s = saga(() => ({
-        createObligation: () => {
-          if (!wallet.funded) throw marked();
+        createObligation: async (_id: string, holdNotAfter?: string) => {
+          if (!wallet.funded) throw await refusalTo(holdNotAfter);
           return { transactionId: TXN };
         },
       }));
@@ -698,7 +810,7 @@ describe('a hold refused after a lost answer (#812)', () => {
       expect(s.calls).not.toContain('compensate');
     });
 
-    it('none lands: the saga looks for one more limit, and then ends', async () => {
+    it('none lands: the saga looks for one more margin, and then ends', async () => {
       const s = saga();
       let seen: WorkflowHandle | undefined;
       const result = await drive(s, async (handle) => {
@@ -714,7 +826,8 @@ describe('a hold refused after a lost answer (#812)', () => {
       const last = lookups.at(-1) as number;
       expect(lookups.filter((at) => at > (closed as number)).length).toBeGreaterThan(1);
       // The saga's clock read when it gave up is at or before the step's scheduling.
-      expect(last - (closed as number)).toBeGreaterThanOrEqual(LIMIT_MS - 5000);
+      expect(last - (closed as number)).toBeGreaterThanOrEqual(HOLD_FENCE.clockMarginMs - 5000);
+      expect(last - (closed as number)).toBeLessThan(2 * HOLD_FENCE.clockMarginMs);
       expect(s.calls).not.toContain('compensate');
     });
 
@@ -825,7 +938,7 @@ describe('a hold refused after a lost answer (#812)', () => {
       ).resume;
     };
 
-    it('the age is carried, not started again, and a resumed run may close on an empty lookup', async () => {
+    it('the deadline is carried, not fixed again, and a resumed run may close on an empty lookup', async () => {
       const s = saga();
       let seen: WorkflowHandleWithFirstExecutionRunId | undefined;
       const result = await drive(
@@ -841,31 +954,26 @@ describe('a hold refused after a lost answer (#812)', () => {
       );
       expect(result).toBe('CANCELLED');
       expect(s.calls).toContain('markCancelled');
-      // Run by run, from the first: every wait carried the first failure's time.
-      const doubts: number[] = [];
+      // Run by run, from the first: every wait carried the first send's deadline.
+      const carried: unknown[] = [];
+      let runs = 0;
       let runId: string | undefined = seen?.firstExecutionRunId;
-      const first = await env.client.workflow
-        .getHandle(seen?.workflowId as string, runId)
-        .fetchHistory();
       while (runId) {
         const history = await env.client.workflow
           .getHandle(seen?.workflowId as string, runId)
           .fetchHistory();
-        const started = history.events?.[0]?.workflowExecutionStartedEventAttributes;
-        const payload = started?.input?.payloads?.[0];
-        const { resume } = JSON.parse(Buffer.from(payload?.data as Uint8Array).toString()) as {
-          resume?: SagaResume;
-        };
-        if (resume?.holdCall) doubts.push(resume.holdCall.doubtAt as number);
+        const resume = await inputOf(seen?.workflowId as string, runId);
+        if (resume?.holdCall) carried.push(resume.holdNotAfter);
+        runs += 1;
         runId =
           history.events?.at(-1)?.workflowExecutionContinuedAsNewEventAttributes
             ?.newExecutionRunId ?? undefined;
       }
-      expect(doubts.length).toBeGreaterThan(0);
-      expect(new Set(doubts).size).toBe(1);
-      // Within the time a first failure's task takes of sending it.
-      const [sentAt] = scheduledAt(first, 'createObligation');
-      expect((doubts[0] as number) - (sentAt as number)).toBeLessThan(60_000);
+      expect(runs).toBeGreaterThan(1);
+      expect(carried.length).toBeGreaterThan(0);
+      const sent = new Set(s.sent.createObligation?.map((args) => args[1]));
+      expect(sent.size).toBe(1);
+      expect(new Set(carried)).toEqual(sent);
     });
 
     it('the watch rolls over with its deadline, and the next run still refunds', async () => {
@@ -912,7 +1020,7 @@ describe('a hold refused after a lost answer (#812)', () => {
           waitingIn: 'FAILED',
           activitySequence: 40,
           outstandingWork: { operation: 'compensate', rounds: 0, noHold: true },
-          lateHoldWatch: { until, reason: 'Insufficient balance' },
+          lateHoldWatch: { until, reason: FENCE_WORDS },
         } as SagaResume,
       });
       expect(result).toBe('FAILED');
@@ -965,18 +1073,15 @@ describe('a hold refused after a lost answer (#812)', () => {
       expect(s.calls).not.toContain('createObligation');
     });
 
-    it('a hold wait rolled over before doubtAt existed starts the age where it resumes', async () => {
-      const s = saga(() => ({
-        createObligation: () => {
-          throw marked();
-        },
-      }));
+    it('a hold wait rolled over before the fence goes on with no deadline, and does not start one', async () => {
+      const s = saga(() => refusing);
       await drive(
         s,
         async (handle) => {
           await eventually(() => s.rounds.length > 0, 'a refused round');
           await atRest(handle);
           expect(await phase(handle)).toBe('HOLD_UNCONFIRMED');
+          expect(markersOf(await handle.fetchHistory())).not.toContain(HOLD_FENCE_PATCH);
         },
         {
           resume: {
@@ -988,6 +1093,7 @@ describe('a hold refused after a lost answer (#812)', () => {
         },
       );
       expect(s.calls).not.toContain('markFailed');
+      expect(s.sent.createObligation?.[0]?.[1]).toBeUndefined();
     });
 
     it('a refused markFailed at the exit waits and is asked again', async () => {

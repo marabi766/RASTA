@@ -7,7 +7,12 @@ import { isUniqueViolation } from '../ledger/ledger.repository';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
-import { CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+import {
+  CLAIM_WAIT_MS,
+  FENCE_COMMIT_IDLE_MS,
+  WAIT_TRANSACTION_SLACK_MS,
+} from '../config/operation-budgets';
+import { databaseNow } from './database-clock';
 import { canonicalForm } from './canonical';
 
 export { CLAIM_WAIT_MS };
@@ -107,6 +112,19 @@ interface Fingerprints {
  * request's key, and that request's retries replayed the wrong answer. A stale
  * token matches nothing, so the late effect rolls back with a retryable
  * conflict and the replacement claim is left to its owner.
+ *
+ * ## A deadline the caller fixed (`notAfter`, D-132)
+ *
+ * A request can stall for any time before it reaches this store, and retention starts
+ * only when it claims the key, so no retention can say that a late request will not act.
+ * The caller's deadline can, and the database's clock judges it, twice: in the transaction
+ * that writes the claim, where past it the row written IS the recorded refusal; and in the
+ * transaction that applies the effect, as the last thing before its answer, since a
+ * claim is committed apart from its work and that work can stall too. Past that second
+ * check only an UPDATE and a COMMIT remain, and PostgreSQL ends a transaction idle longer
+ * than {@link FENCE_COMMIT_IDLE_MS}. An expired or purged record is claimed anew and judged
+ * again, so the answer outlives the record; a stored success is still replayed, as it
+ * took effect in time.
  */
 @Injectable()
 export class IdempotencyStore {
@@ -138,6 +156,7 @@ export class IdempotencyStore {
     key: string,
     body: unknown,
     fingerprintVersion?: string,
+    fence?: Fence,
   ): Promise<Claim> {
     const fingerprint = (value: unknown) =>
       fingerprintVersion ? `${fingerprintVersion}:${this.hash(value)}` : this.hash(value);
@@ -158,7 +177,7 @@ export class IdempotencyStore {
     const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
-      const outcome = await this.claimOnce(endpoint, key, fingerprints, actorHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, fingerprints, actorHash, deadline, fence);
       if (outcome !== RETRY_CLAIM) return outcome;
     }
     // Every attempt found the key vanishing under it: other requests are
@@ -219,6 +238,7 @@ export class IdempotencyStore {
     { requestHash, canonicalHash }: Fingerprints,
     actorHash: string,
     deadline: number,
+    fence?: Fence,
   ): Promise<Claim | typeof RETRY_CLAIM> {
     const organizationId = getOrganizationId();
     const now = new Date();
@@ -229,8 +249,10 @@ export class IdempotencyStore {
 
     try {
       // Waits behind an uncommitted removal of the same key — within the budget only.
-      await this.withinBudget(endpoint, deadline, (tx) =>
-        tx.idempotencyKey.create({
+      const refused = await this.withinBudget(endpoint, deadline, async (tx) => {
+        // Read here, so the verdict and the row that records it are one commit.
+        const past = fence !== undefined && (await databaseNow(tx)) > fence.notAfter;
+        await tx.idempotencyKey.create({
           data: {
             key,
             organizationId,
@@ -239,12 +261,21 @@ export class IdempotencyStore {
             canonicalHash,
             actorHash,
             claimToken,
-            state: 'IN_PROGRESS',
             expiresAt,
+            ...(past
+              ? {
+                  state: 'COMPLETED' as const,
+                  responseStatus: fence.refusal.status,
+                  responseBody: { refusal: fence.refusal.refusal },
+                }
+              : { state: 'IN_PROGRESS' as const }),
           },
-        }),
-      );
-      return { kind: 'PROCEED', token: claimToken };
+        });
+        return past;
+      });
+      return refused && fence
+        ? { kind: 'REPLAY', status: fence.refusal.status, body: { refusal: fence.refusal.refusal } }
+        : { kind: 'PROCEED', token: claimToken };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
     }
@@ -390,6 +421,10 @@ export class IdempotencyStore {
    * documents before it is replayed: one stored by an earlier release lacks
    * what was added since, and is returned as it was otherwise (Codex on #352,
    * finding 2).
+   *
+   * `options.notAfter` is the deadline the caller fixed (see the class comment): its
+   * `refusal` must be declared in `terminalRefusals`, and past `at` the work neither starts
+   * nor commits.
    */
   async run<T>(
     endpoint: string,
@@ -402,9 +437,11 @@ export class IdempotencyStore {
       fingerprintVersion?: string;
       terminalRefusals?: TerminalRefusals;
       stored?: (answer: T) => T;
+      notAfter?: { at: Date; refusal: string };
     },
   ): Promise<T> {
-    const claim = await this.claim(endpoint, key, body, options.fingerprintVersion);
+    const fence = fenceOf(options.notAfter, options.terminalRefusals);
+    const claim = await this.claim(endpoint, key, body, options.fingerprintVersion, fence);
     if (claim.kind === 'REPLAY') {
       const refused = claim.status >= REFUSAL_STATUS_FLOOR;
       // Before anything of the record leaves: what a fresh request would be
@@ -418,6 +455,7 @@ export class IdempotencyStore {
     let answered: { response: T } | undefined;
     const answer = new IdempotentAnswer<T>(
       async (tx, response) => {
+        await refuseWhenPast(tx, fence);
         await this.complete(tx, endpoint, key, token, successStatus, response);
         answered = { response };
       },
@@ -426,6 +464,7 @@ export class IdempotencyStore {
         // to the release below, and the effect it ends is never rolled back
         // for it.
         if (!declaredBy(options.terminalRefusals, refusal)) return;
+        await refuseWhenPast(tx, fence);
         await this.complete(tx, endpoint, key, token, refusal.status, {
           refusal: refusal.refusal,
         });
@@ -537,6 +576,37 @@ export interface TerminalRefusal {
 }
 
 export type TerminalRefusals = Readonly<Record<string, TerminalRefusal>>;
+
+/** A deadline for {@link IdempotencyStore.run}, with the refusal that answers past it. */
+interface Fence {
+  readonly notAfter: Date;
+  readonly refusal: TerminalRefusalError;
+}
+
+/** An undeclared refusal could never be replayed: a fault, before anything is claimed. */
+function fenceOf(
+  notAfter: { at: Date; refusal: string } | undefined,
+  refusals: TerminalRefusals = {},
+): Fence | undefined {
+  if (!notAfter) return undefined;
+  if (!isDeclared(refusals, notAfter.refusal) || Number.isNaN(notAfter.at.getTime())) {
+    throw RastaError.internal('A deadline names a refusal its endpoint does not declare');
+  }
+  return {
+    notAfter: notAfter.at,
+    refusal: new TerminalRefusalError(
+      notAfter.refusal,
+      refusals[notAfter.refusal] as TerminalRefusal,
+    ),
+  };
+}
+
+/** The check in the effect's transaction. Thrown, it rolls the effect back; the store records it. */
+async function refuseWhenPast(tx: ExtendedPrismaClient, fence: Fence | undefined): Promise<void> {
+  if (!fence) return;
+  await tx.$queryRaw`SELECT set_config('idle_in_transaction_session_timeout', ${`${FENCE_COMMIT_IDLE_MS}ms`}, true)`;
+  if ((await databaseNow(tx)) > fence.notAfter) throw fence.refusal;
+}
 
 /** A declared refusal: thrown by an endpoint's work, recorded and replayed by the store. */
 export class TerminalRefusalError extends RastaError {

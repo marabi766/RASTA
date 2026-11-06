@@ -24,9 +24,11 @@ import {
 import { SERVICE_NAME } from '../config/env';
 import {
   FINAL_ANSWER_CONTRACT,
+  HOLD_DEADLINE_PASSED,
   OWNER_STATE_IS_FINAL,
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
+  REFUSED_PAST_HOLD_DEADLINE,
 } from './economic-refusal';
 import {
   economicCallsUnconfirmedTotal,
@@ -325,6 +327,11 @@ export function createActivities(deps: ActivityDependencies) {
    * an unconfirmed attempt — a failed send asks the obligation, because a code
    * then says nothing of the attempts before it: its effect or a terminal status
    * is the answer (`finalFor`), and anything else stays unknown.
+   *
+   * Every guard, the call's own and `requires`, reads the order after the step's lookup
+   * awaited: a snapshot from before it can be of an order since closed (review of #812,
+   * F1). The closure holds only what cannot change, so no guard can reach the old read.
+   * A failed read is no refusal of the call: it stays outside what `unanswered` marks.
    */
   async function economicStep<T>(
     orderId: string,
@@ -351,12 +358,13 @@ export function createActivities(deps: ActivityDependencies) {
     const inDoubt = confirmed !== undefined && (confirmed.inDoubt || currentAttempt() !== 1);
     const unanswered = (refusal: unknown): unknown =>
       confirmed && !inDoubt ? provenIfListed(refusal) : refusal;
-    return asSystemFor(orderId, (order) =>
+    return asSystemFor(orderId, ({ id, buyerOrganizationId }) =>
       deps.orders.onceForSaga(
-        { id: order.id, organizationId: order.buyerOrganizationId },
+        { id, organizationId: buyerOrganizationId },
         step,
         activity,
         async () => {
+          const order = await deps.orders.describe(id);
           try {
             confirmed?.requires?.(order);
           } catch (refusal) {
@@ -415,8 +423,11 @@ export function createActivities(deps: ActivityDependencies) {
      * obligation as economic-service has it now, outside the step's record,
      * on every attempt. Not HELD: a non-retryable `OBLIGATION_NOT_HELD`, and
      * the workflow's recovery (`findObligation`) names the status and stops.
+     *
+     * `holdNotAfter` is the deadline the workflow fixed at its first send; only a
+     * workflow from before the fence sends none (`placeHold`).
      */
-    async createObligation(orderId: string): Promise<HeldResult> {
+    async createObligation(orderId: string, holdNotAfter?: string): Promise<HeldResult> {
       const held = await economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
           // A retry after the call succeeded but the recording did not. The
@@ -436,8 +447,22 @@ export function createActivities(deps: ActivityDependencies) {
           .createObligation({
             ...obligationTermsOf(order),
             correlationId: order.correlationId,
+            ...(holdNotAfter === undefined ? {} : { holdNotAfter }),
           })
           .catch((refusal: unknown) => {
+            // The key's own answer, whichever attempt hears it, to a request that set it.
+            if (
+              holdNotAfter !== undefined &&
+              isRastaError(refusal) &&
+              refusal.code === HOLD_DEADLINE_PASSED
+            ) {
+              throw ApplicationFailure.create({
+                message: refusal.message,
+                type: HOLD_DEADLINE_PASSED,
+                nonRetryable: true,
+                details: [REFUSED_PAST_HOLD_DEADLINE],
+              });
+            }
             // Only the send's own refusal on its first attempt is proof (`placeHold`).
             // Not ALREADY_EXISTS: that says an obligation is there, the opposite of
             // nothing having moved.

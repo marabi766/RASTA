@@ -963,6 +963,7 @@ const PATCHES = {
   'saga-owed-work-durable-v1': 6,
   'economic-hold-call-durable-wait-v1': 7,
   'economic-hold-refusal-exit-v1': 8,
+  'economic-hold-send-fence-v1': 9,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -1426,6 +1427,7 @@ const RESUME_FIELDS = {
   outstandingWork: 6,
   holdCall: 7,
   lateHoldWatch: 8,
+  holdNotAfter: 9,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1608,6 +1610,20 @@ test('a continuation that gave its hold up needs protocol 8', () => {
   );
   assert.match(run(rolled, targetOf(7)).stderr, /requires saga protocol 8; incompatible/);
   assert.equal(run(rolled, targetOf(8)).status, 0);
+});
+
+test('a continuation whose hold carries a deadline needs protocol 9', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        holdCall: { rounds: 2 },
+        holdNotAfter: '2026-11-07T00:00:00.000Z',
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(8)).stderr, /requires saga protocol 9; incompatible/);
+  assert.equal(run(rolled, targetOf(9)).status, 0);
 });
 
 test('the retention in a start input asks nothing of the target', () => {

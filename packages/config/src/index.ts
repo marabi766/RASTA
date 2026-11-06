@@ -34,7 +34,6 @@ export {
   PRISMA_DEFAULT_TRANSACTION_BUDGET,
   outboxPurgeOperationBudget,
   idempotencyClaimOperationBudget,
-  economicIdempotencyTtlHoursSchema,
   urlWithProtocol,
   urlWithProtocolMessages,
   CONFIG_ENV_MESSAGES,

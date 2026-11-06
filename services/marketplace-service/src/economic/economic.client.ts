@@ -315,7 +315,7 @@ export class EconomicClient {
    * the hold the money can go.
    */
   async createObligation(
-    input: ObligationTerms & { correlationId: string },
+    input: ObligationTerms & { correlationId: string; holdNotAfter?: string },
   ): Promise<TransactionView> {
     return this.call<TransactionView>('createObligation', {
       method: 'POST',
@@ -331,6 +331,7 @@ export class EconomicClient {
         sourceType: OBLIGATION_SOURCE_TYPE,
         sourceReference: input.orderId,
         holdFunds: true,
+        ...(input.holdNotAfter === undefined ? {} : { holdNotAfter: input.holdNotAfter }),
       },
     });
   }

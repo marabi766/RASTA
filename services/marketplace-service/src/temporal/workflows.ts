@@ -26,9 +26,14 @@ import type {
 import {
   doubtOutlivesKeyMs,
   FINAL_ANSWER_CONTRACT,
+  HOLD_DEADLINE_PASSED,
+  HOLD_FENCE,
+  holdDeadlineFrom,
   OWNER_STATE_IS_FINAL,
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
+  REFUSED_PAST_HOLD_DEADLINE,
+  sentPastHoldFence,
 } from './economic-refusal';
 
 export { PROVEN_REFUSALS };
@@ -116,16 +121,19 @@ export { PROVEN_REFUSALS };
  * an answer: money back with the buyer, or never held, lets a cancellation finish;
  * anything else stays for a person (`staysForReconciliation`), never a false one.
  *
- * ## A refusal that persists ends a hold's doubt, in time (FU-117)
+ * ## The hold is fenced where it lands (D-132)
  *
  * The one exception to "no code ends the wait", and only for the hold, where nothing
  * else ever could: with no obligation found, the buyer's empty wallet refuses every
- * round. Once the last request that went unanswered is older than the key's retention
- * and its margin (`doubtOutlivesKeyMs`), a marked refusal with an empty lookup after it
- * is taken as proof. A 5xx, a timeout or an unmarked code starts that age again. The
- * order closes as it would have, which returns its stock, no further request is sent,
- * and the saga stays one more such period to refund whatever still lands
- * (`watchForLateHold`).
+ * round. Every request under the hold's key carries one deadline, fixed by the first
+ * send (`holdDeadlineFrom`), and economic-service refuses past it by its own clock, under
+ * the claim and again in the hold's transaction, for good, however late a stalled request
+ * arrives and whatever either service's retention. So the wait ends on three things
+ * together (`sentPastHoldFence`, `placeHold`): a request sent past that deadline and its
+ * margin, that refusal to it, and an empty lookup after it. Anything else, a 5xx, a timeout,
+ * another code, waits. The order closes as it would have, which returns its stock, no
+ * further request is sent, and the saga looks for one more margin, to refund a hold that
+ * was already committing (`watchForLateHold`).
  *
  * ## What expiry does NOT do
  *
@@ -179,8 +187,8 @@ export interface OrderSagaInput {
   /** Internal lower threshold for deterministic rollover tests; never raises production limits. */
   historyEventThreshold?: number;
   /**
-   * `ECONOMIC_IDEMPOTENCY_TTL_HOURS`. Without it, as for a saga started before this
-   * field, no age proves anything: a hold in doubt keeps waiting (`doubtOutlivesKeyMs`).
+   * Retired (D-132), no client sends it. Read only to replay a history that took the
+   * exit it once allowed (`doubtOutlivesKeyMs`).
    */
   economicKeyRetentionHours?: number;
   resume?: SagaResume;
@@ -235,6 +243,12 @@ export interface SagaResume {
    * this field is what tells the drain gate so before the first workflow task.
    */
   holdCall?: { rounds: number; doubtAt?: number };
+  /**
+   * The deadline that hold's requests carry (`placeHold`). Absent: its first send predates
+   * the fence, so no request ever carries one. Not in `holdCall`, as a lower build reads
+   * that one and would lose this, which is what tells the drain gate so.
+   */
+  holdNotAfter?: string;
   /** The hold given up on, and the period a late one is still refunded in (`watchForLateHold`). */
   lateHoldWatch?: LateHoldWatch;
   /** Work owed outside any call's wait, when rolled over with it (`owedWork`, FU-117). */
@@ -355,11 +369,17 @@ export const HOLD_WAIT_PATCH = 'economic-hold-call-durable-wait-v1';
 export const OWED_WORK_PATCH = 'saga-owed-work-durable-v1';
 
 /**
- * The exit from the hold's wait on a refusal older than the key (FU-117). Asked only
- * once that proof stands, so a history that kept waiting there replays its wait. Not
- * the hold's marker: a lower build would send again and could hold for a closed order.
+ * The exit from the hold's wait on a refusal older than the key (FU-117). Retired (D-132):
+ * asked only on replay, for a history that took it. Nothing fenced the requests it gave
+ * up on, so no live run takes it again.
  */
 export const HOLD_REFUSAL_EXIT_PATCH = 'economic-hold-refusal-exit-v1';
+
+/**
+ * The hold's deadline (D-132). Asked at its first send: the marker commits with the first
+ * request that carries one, and a history that sent without it never starts to.
+ */
+export const HOLD_FENCE_PATCH = 'economic-hold-send-fence-v1';
 
 /** On economic-service's record of a refund no party asked for. */
 const LATE_HOLD_REFUND_REASON = 'A hold arrived after the saga gave up on it';
@@ -549,7 +569,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   // Proof that no hold of this saga is on its way. A run continued without it knows nothing.
   let lateHold: LateHoldWatch | undefined = input.resume?.lateHoldWatch;
   let noHold = !input.resume || outstanding?.noHold === true;
-  // How old a doubt must be for a refusal to end it, and when the hold last went unanswered.
+  // One deadline for every request under the hold's key, and whether it is still to be fixed.
+  let holdNotAfter = input.resume?.holdNotAfter;
+  let holdFirstSend = !input.resume;
+  // For replaying the retired exit: how old a doubt had to be, and when the hold last went unanswered.
   const doubtLimitMs = doubtOutlivesKeyMs(input.economicKeyRetentionHours);
   let holdDoubtAt = input.resume?.holdCall
     ? (input.resume.holdCall.doubtAt ?? Date.now())
@@ -618,7 +641,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     ...(releaseRounds > 0 ? { releaseRounds } : {}),
     ...(unconfirmed ? { unconfirmedCall: unconfirmed } : {}),
     ...(sibling?.operation === 'createObligation'
-      ? { holdCall: { rounds: sibling.rounds, doubtAt: holdDoubtAt } }
+      ? {
+          holdCall: { rounds: sibling.rounds, doubtAt: holdDoubtAt },
+          ...(holdNotAfter === undefined ? {} : { holdNotAfter }),
+        }
       : sibling
         ? { siblingCall: sibling }
         : {}),
@@ -1115,17 +1141,25 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * again; if the buyer has cancelled meanwhile `markFundsHeld` yields and the saga
    * refunds.
    *
-   * Only a marked refusal older than the doubt's limit ends it (`outlivedKey`), with
-   * the lookup after it empty: this round's request is answered, and every earlier one
-   * is too old to land. The age runs from the last request not answered so.
+   * Only the fence's refusal to a request sent past the deadline and its margin ends it
+   * (`fencedOut`), with the lookup after it empty: economic-service's clock has passed the
+   * deadline, so no request under this key can hold any more. A request that
+   * carries no deadline, as in a history from before the fence, never ends it live:
+   * economic-service cannot refuse that request, so nothing can prove it will not land.
    */
   async function placeHold(): Promise<
     { held: true; transactionId: string } | { held: false; reason: string }
   > {
     let unanswered: unknown;
+    let sentAt = 0;
     const place = async (inDoubt: boolean): Promise<string> => {
+      if (holdFirstSend) {
+        holdFirstSend = false;
+        if (patched(HOLD_FENCE_PATCH)) holdNotAfter = holdDeadlineFrom(Date.now());
+      }
+      sentAt = Date.now();
       try {
-        return (await createObligation(orderId)).transactionId;
+        return (await createObligation(orderId, holdNotAfter)).transactionId;
       } catch (error) {
         if (outcomeUnknown(error, false) || (inDoubt && holdDoubtAt === undefined)) {
           holdDoubtAt = Date.now();
@@ -1141,37 +1175,46 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         throw error;
       }
     };
-    const outlivedKey = (error: unknown): boolean =>
-      error === unanswered &&
-      !outcomeUnknown(error, false) &&
-      doubtLimitMs !== null &&
-      holdDoubtAt !== undefined &&
-      Date.now() - holdDoubtAt > doubtLimitMs &&
-      patched(HOLD_REFUSAL_EXIT_PATCH);
+    const fencedOut = (error: unknown): boolean => {
+      if (error !== unanswered) return false;
+      if (holdNotAfter !== undefined) {
+        return refusedPastHoldDeadline(error) && sentPastHoldFence(holdNotAfter, sentAt);
+      }
+      return (
+        !outcomeUnknown(error, false) &&
+        doubtLimitMs !== null &&
+        holdDoubtAt !== undefined &&
+        Date.now() - holdDoubtAt > doubtLimitMs &&
+        workflowInfo().unsafe.isReplaying &&
+        patched(HOLD_REFUSAL_EXIT_PATCH)
+      );
+    };
     try {
-      const { answer } = await siblingCall({ operation: 'createObligation' }, place, outlivedKey);
+      const { answer } = await siblingCall({ operation: 'createObligation' }, place, fencedOut);
       return { held: true, transactionId: answer };
     } catch (error) {
       // A lookup that failed, or an obligation not adopted, is not the hold's refusal.
       if (error !== unanswered) throw error;
       const reason = describe(error);
       if (sibling) {
-        // Only `outlivedKey` ends a wait here. From now on nothing is sent, and what
+        // Only `fencedOut` ends a wait here. From now on nothing is sent, and what
         // this saga still owes is the order's end and any refund.
         sibling = undefined;
         noHold = true;
         owe('compensate');
-        lateHold = { until: Date.now() + (doubtLimitMs as number), reason };
+        const watchMs =
+          holdNotAfter === undefined ? (doubtLimitMs as number) : HOLD_FENCE.clockMarginMs;
+        lateHold = { until: Date.now() + watchMs, reason };
       }
       return { held: false, reason };
     }
   }
 
   /**
-   * The order is closed on a hold given up on: for one more limit the saga stays and
-   * asks, and refunds whatever landed, as nothing else would ever look. Past that, the
-   * requests are twice the limit old and the runbook's operator check is what is left.
-   * A failed lookup or refund waits; a status no refund can reach stays for a person.
+   * The order is closed on a hold given up on: for one more margin the saga stays and
+   * asks, and refunds a hold that was already committing when the lookup found none. Past
+   * that, economic-service's refusal is what fences any later request. A failed lookup or
+   * refund waits; a status no refund can reach stays for a person.
    */
   async function watchForLateHold(closed: OrderStatus): Promise<void> {
     if (!lateHold) return;
@@ -1660,6 +1703,16 @@ export function outcomeUnknown(error: unknown, inDoubt: boolean): boolean {
   const proof: unknown = cause.details?.[0];
   if (proof === OWNER_STATE_IS_FINAL) return false;
   return inDoubt || proof !== REFUSED_ON_FIRST_ATTEMPT || !PROVEN_REFUSALS.has(cause.type ?? '');
+}
+
+/** economic-service's own answer past the deadline, as the activity marked it. Nothing else. */
+function refusedPastHoldDeadline(error: unknown): boolean {
+  const cause = error instanceof ActivityFailure ? error.cause : undefined;
+  return (
+    cause instanceof ApplicationFailure &&
+    cause.type === HOLD_DEADLINE_PASSED &&
+    cause.details?.[0] === REFUSED_PAST_HOLD_DEADLINE
+  );
 }
 
 /** The obligation an order past `PENDING` holds. The row constraint guarantees one. */

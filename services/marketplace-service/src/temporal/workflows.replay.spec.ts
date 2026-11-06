@@ -113,6 +113,14 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     // answer final (above, it followed the answer, as no history in service does).
     'fu117r3-declared-filing-release-refund',
     'fu117r3-declared-authorise-final',
+    // #812 r1 (D-132): the fence, its marker with the first send; the exit from a run
+    // continued short of its limit. The `fu117r3` hold exits above took the retired exit,
+    // and must keep replaying it.
+    'fu117r4-fence-exit-failed',
+    'fu117r4-fence-exit-cancelled',
+    'fu117r4-fence-late-hold-refunded',
+    'fu117r4-fence-first-send-refused',
+    'fu117r4-fence-wait-then-held-cancelled',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(

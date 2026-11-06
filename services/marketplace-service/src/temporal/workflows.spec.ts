@@ -1627,6 +1627,8 @@ describe('the order saga', () => {
         'REPLAY_WINDOW_CLOSED',
         'OPTIMISTIC_LOCK_FAILED',
         'RATE_LIMIT_EXCEEDED',
+        // Has its own mark and rule instead (`sentPastHoldFence`), and never ends a wait alone.
+        'HOLD_DEADLINE_PASSED',
       ];
       for (const [code, status] of Object.entries(ERROR_STATUS)) {
         const proof = status < 500 && !notProof.includes(code);
