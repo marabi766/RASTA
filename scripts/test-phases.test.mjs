@@ -1,11 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readTestPhaseInputs } from './check-test-phases.mjs';
+import { listFiles, readTestPhaseInputs } from './check-test-phases.mjs';
 import {
   CALIBRATION_SCRIPT,
   EXCLUSIVE_PHASE,
@@ -611,5 +619,22 @@ test('the executable identity shard runs stress after workspace failure and pres
     );
     assert.equal(refused.status, 2, refused.stderr);
     assert.throws(() => readFileSync(trace), /ENOENT/);
+  }
+});
+
+test('the identity file list never opens git-ignored generated output (FU-090)', () => {
+  // `db:generate` rewrites src/generated while checks run (a listed file can be gone:
+  // ENOENT). A directory that cannot be read stands in for that: it must never be opened.
+  const dir = mkdtempSync(resolve(tmpdir(), 'test-phases-generated-'));
+  const unreadable = resolve(dir, 'src/generated/prisma');
+  try {
+    mkdirSync(unreadable, { recursive: true });
+    writeFileSync(resolve(dir, 'src/app.ts'), 'export {};\n');
+    chmodSync(unreadable, 0o000);
+    if (process.getuid?.() === 0) return; // root reads it anyway: nothing to prove
+    assert.deepEqual(listFiles(dir, resolve(dir, 'src')), ['src/app.ts']);
+  } finally {
+    chmodSync(unreadable, 0o755);
+    rmSync(dir, { recursive: true, force: true });
   }
 });

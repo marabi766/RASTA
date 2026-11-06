@@ -165,6 +165,18 @@ describe('tenant isolation', () => {
       expect(a?.capabilities).toEqual(['WORKSHOP_SERVICE']);
       expect(a?.qualifiedFor).toEqual([]);
     });
+
+    it("narrowed to A's organization (FU-019), still gives B the directory entry only", async () => {
+      const page = await asSupplier(orgB, () =>
+        w.suppliers.search({ organizationId: [orgA], limit: 200 }),
+      );
+      const serialised = JSON.stringify(page.items);
+
+      expect(page.items.map((item) => item.id)).toEqual([supplierA.id]);
+      expect(serialised).not.toContain('DOC_PRIVATE_A');
+      expect(serialised).not.toContain('Private statement A');
+      expect(serialised).not.toContain(qualificationA.id);
+    });
   });
 
   describe('the review queue', () => {

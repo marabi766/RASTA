@@ -1,7 +1,8 @@
 /**
  * @jest-environment node
  */
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
@@ -121,5 +122,22 @@ describe('the guard', () => {
     ]);
     expect(filesMatching('services/asset-service/src/no-such-dir/**')).toEqual([]);
     expect(filesMatching('services/asset-service/NOT-A-FILE.ts')).toEqual([]);
+  });
+
+  it('never opens git-ignored generated output while matching (regenerated mid-walk, FU-090)', () => {
+    // `db:generate` rewrites src/generated while checks run (a listed file can be gone:
+    // ENOENT). A directory that cannot be read stands in for that.
+    const root = mkdtempSync(path.join(tmpdir(), 'turbo-generated-'));
+    const unreadable = path.join(root, 'services/svc/src/generated/prisma');
+    try {
+      mkdirSync(unreadable, { recursive: true });
+      writeFileSync(path.join(root, 'services/svc/src/app.ts'), 'export {};\n');
+      chmodSync(unreadable, 0o000);
+      if (process.getuid?.() === 0) return; // root reads it anyway: nothing to prove
+      expect(filesMatching('services/svc/src/**', root)).toEqual(['services/svc/src/app.ts']);
+    } finally {
+      chmodSync(unreadable, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

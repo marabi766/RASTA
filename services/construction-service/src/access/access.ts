@@ -38,11 +38,17 @@ import type { ConstructionEnv } from '../config/env';
  * even if both configured lists were edited to include it, and the
  * configuration itself refuses to start with it listed (`config/env.ts`).
  *
- * ## Service callers get nothing
+ * ## Service callers get nothing here
  *
- * No endpoint carries `@AllowService`, so `AuthGuard` refuses a service token
- * first; this class refuses one again rather than treating an internal token as
- * a wildcard role.
+ * Only the handlers that carry `@AllowService` admit a service token, and only
+ * from the services it names; `AuthGuard` refuses every other one first. Which
+ * routes those are is not restated here: `src/openapi/document.spec.ts` ("documents
+ * a service token on every @AllowService route, and only there") reads them from
+ * the controllers, and `SERVICE_ROUTES` in `src/openapi/document.ts` must list
+ * each. Those handlers authorize a service caller in their own service
+ * (`completion-fact.ts`, `AwardService.authorizeService`), never through this
+ * class: it refuses a service token again rather than treating an internal token
+ * as a wildcard role.
  */
 
 export const SUPER_ROLE = 'SYSTEM_ADMIN';

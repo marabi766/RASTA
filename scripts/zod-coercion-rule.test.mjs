@@ -295,9 +295,9 @@ for (const code of [
 ])
   it(`F3 proven helper call: ${code}`, () => assert.deepEqual(messages(code), []));
 
-import { mkdtempSync, cpSync, appendFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, cpSync, appendFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { verifiedCallbackHelper } from './zod-callback-helpers.mjs';
 it('reviewed helper provenance refuses unknown, missing and changed source', () => {
   const root = mkdtempSync(join(tmpdir(), 'rasta-zod-helper-'));
@@ -568,6 +568,247 @@ for (const code of [
 ])
   it(`F3 codec preserves: ${code}`, () => assert.deepEqual(messages(code), []));
 
+// Reviewed string canonicaliser (FU-084 `canonicalUniqueText`), allowed by binding, never by name.
+// A callback that converts an input already proven to be a string is accepted by the rule's own
+// design, so every refusal below uses a body or operand the baseline analysis refuses (BigInt of a
+// non-literal, any conversion of an unproven value): only a wrongly granted allowance could pass it.
+const UNIQUE_TEXT = 'packages/nest-common/src/text/canonical-unique-text';
+const IMPORT_UNIQUE_TEXT = `import { canonicalUniqueText } from '../../../${UNIQUE_TEXT}'; `;
+const PROBE = 'services/organization-service/src/probe.ts';
+const uniqueTextMessages = (code, file = `${UNIQUE_TEXT}.ts`) =>
+  linter.verify(
+    z + code,
+    [
+      {
+        files: ['**/*.ts', '**/*.tsx', '**/*.mjs', '**/*.js'],
+        languageOptions: { parser: tseslint.parser },
+        plugins: { boundary: { rules: { coercion: rule } } },
+        rules: { 'boundary/coercion': 'error' },
+      },
+    ],
+    { filename: `${ROOT}${file}` },
+  );
+const refused = (code, file) =>
+  uniqueTextMessages(code, file).some((m) => m.ruleId === 'boundary/coercion');
+const shape = (decl) =>
+  `${decl} export function uniqueText(options) { return z.string().transform((raw, ctx) => { const canonical = canonicalUniqueText(raw, options); if (canonical === null) { ctx.addIssue({ code: 'custom', message: 'bad' }); return z.NEVER; } return canonical; }); }`;
+const safeDecl = `function canonicalUniqueText(raw, options) { return raw; }`;
+const coercingDecl = `function canonicalUniqueText(raw, options) { return BigInt(raw); }`;
+it('canonicalUniqueText: the exact uniqueText shape passes in the pinned defining module', () => {
+  assert.deepEqual(uniqueTextMessages(shape(safeDecl)), []);
+});
+it('canonicalUniqueText: the allowance is the pinned file, not the name or a sibling spelling', () => {
+  // The same shape with a body the baseline refuses passes only where the pinned file vouches for it.
+  assert.deepEqual(uniqueTextMessages(shape(coercingDecl)), []);
+  for (const file of [
+    'packages/nest-common/src/text/other.ts',
+    `${UNIQUE_TEXT}.mjs`,
+    `${UNIQUE_TEXT}.tsx`,
+    `${UNIQUE_TEXT}.js`,
+    'services/organization-service/src/canonical-unique-text.ts',
+  ])
+    assert.ok(refused(shape(coercingDecl), file), file);
+});
+it('canonicalUniqueText: an import carries the allowance only for the exact module', () => {
+  const use = `z.string().transform((raw) => canonicalUniqueText(raw, { caseFold: false }) ?? '');`;
+  for (const from of [`../../../${UNIQUE_TEXT}`, `../../../${UNIQUE_TEXT}.ts`])
+    assert.deepEqual(
+      uniqueTextMessages(`import { canonicalUniqueText } from '${from}'; ${use}`, PROBE),
+      [],
+      from,
+    );
+  assert.deepEqual(
+    uniqueTextMessages(
+      `import { canonicalUniqueText as c } from '../../../${UNIQUE_TEXT}'; z.string().transform((raw) => c(raw, { caseFold: true }) ?? '');`,
+      PROBE,
+    ),
+    [],
+  );
+  // A const alias is the same binding; no other reading of the name is.
+  assert.deepEqual(
+    uniqueTextMessages(
+      `${IMPORT_UNIQUE_TEXT}const alias = canonicalUniqueText; z.string().transform((raw) => alias(raw, { caseFold: false }) ?? '');`,
+      PROBE,
+    ),
+    [],
+  );
+  for (const from of [
+    // Sibling spellings and other modules that happen to export the same name.
+    `../../../${UNIQUE_TEXT}.mjs`,
+    `../../../${UNIQUE_TEXT}.js`,
+    `../../../${UNIQUE_TEXT}.tsx`,
+    '../../../packages/nest-common/src/text/other',
+    `../../../${UNIQUE_TEXT}/`,
+    `../../../${UNIQUE_TEXT}/.`,
+    `../../../${UNIQUE_TEXT}/index`,
+    '@rasta/nest-common',
+    'unknown-package',
+  ])
+    assert.ok(refused(`import { canonicalUniqueText } from '${from}'; ${use}`, PROBE), from);
+});
+for (const code of [
+  // A same-named local function or variable in any other file proves nothing.
+  `function canonicalUniqueText(v) { return BigInt(v); } z.string().transform((raw) => canonicalUniqueText(raw));`,
+  `const canonicalUniqueText = (v) => BigInt(v); z.string().transform((raw) => canonicalUniqueText(raw));`,
+  `const canonicalUniqueText = Number; z.unknown().transform((raw) => canonicalUniqueText(raw));`,
+  // A re-assigned alias, and a namespace member, never inherit the capability.
+  `${IMPORT_UNIQUE_TEXT}let alias = canonicalUniqueText; alias = BigInt; z.string().transform((raw) => alias(raw));`,
+  `${IMPORT_UNIQUE_TEXT}let alias = canonicalUniqueText; alias = Number; z.unknown().transform((raw) => alias(raw));`,
+  `import * as text from '../../../${UNIQUE_TEXT}'; z.string().transform((raw) => text.canonicalUniqueText(raw));`,
+  // The reviewed result is `string | null`, never a string proof for a conversion.
+  `${IMPORT_UNIQUE_TEXT}z.string().transform((raw) => Number(canonicalUniqueText(raw, { caseFold: false })));`,
+  `${IMPORT_UNIQUE_TEXT}z.string().transform((raw) => new Date(canonicalUniqueText(raw, { caseFold: false })));`,
+  `${IMPORT_UNIQUE_TEXT}z.string().transform((raw) => BigInt(canonicalUniqueText(raw, { caseFold: false })));`,
+  // A coercion of an unproven value beside the reviewed call.
+  `${IMPORT_UNIQUE_TEXT}z.unknown().transform((raw) => { canonicalUniqueText('x', { caseFold: false }); return Number(raw); });`,
+  `${IMPORT_UNIQUE_TEXT}z.unknown().transform((raw) => { canonicalUniqueText('x', { caseFold: false }); return new Date(raw); });`,
+  `${IMPORT_UNIQUE_TEXT}z.unknown().transform((raw) => { canonicalUniqueText('x', { caseFold: false }); return BigInt(raw); });`,
+  `${IMPORT_UNIQUE_TEXT}z.string().transform((raw) => { canonicalUniqueText(raw, { caseFold: false }); return BigInt(raw); });`,
+  // The reviewed call is only for text: an unproven or converted argument is refused.
+  `${IMPORT_UNIQUE_TEXT}z.unknown().transform((raw) => canonicalUniqueText(raw, { caseFold: false }));`,
+  `${IMPORT_UNIQUE_TEXT}z.unknown().transform((raw) => canonicalUniqueText(Number(raw), { caseFold: false }));`,
+])
+  it(`canonicalUniqueText refused: ${code}`, () => assert.ok(refused(code, PROBE), code));
+it('canonicalUniqueText: coercion beside the call inside the defining module is refused', () => {
+  for (const body of [
+    `return canonicalUniqueText(raw, options) ?? Number(ctx);`,
+    `return canonicalUniqueText(raw, options) ?? new Date(ctx);`,
+    `return canonicalUniqueText(raw, options) ?? BigInt(raw);`,
+    `return Number(canonicalUniqueText(raw, options));`,
+    `return canonicalUniqueText(Number(ctx), options);`,
+  ])
+    assert.ok(
+      refused(`${safeDecl} z.string().transform((raw, ctx) => { ${body} });`, `${UNIQUE_TEXT}.ts`),
+      body,
+    );
+  // Re-assigning the declared function in the defining module withdraws the allowance.
+  assert.ok(
+    refused(
+      `${coercingDecl} canonicalUniqueText = Number; z.string().transform((raw) => canonicalUniqueText(raw));`,
+      `${UNIQUE_TEXT}.ts`,
+    ),
+  );
+  // So does a variable standing in for the declaration.
+  assert.ok(
+    refused(
+      `const canonicalUniqueText = (raw) => BigInt(raw); z.string().transform((raw) => canonicalUniqueText(raw));`,
+      `${UNIQUE_TEXT}.ts`,
+    ),
+  );
+});
+it('canonicalUniqueText: the pin matches the real source, and changed source refuses', () => {
+  assert.equal(
+    verifiedCallbackHelper(ROOT, UNIQUE_TEXT, 'canonicalUniqueText', {
+      spelling: 'canonical-unique-text.ts',
+      definition: 'FunctionName',
+    }),
+    'canonicalizer',
+  );
+  // No binding information, or a variable binding, never carries an `exact` allowance.
+  assert.equal(verifiedCallbackHelper(ROOT, UNIQUE_TEXT, 'canonicalUniqueText'), undefined);
+  assert.equal(
+    verifiedCallbackHelper(ROOT, UNIQUE_TEXT, 'canonicalUniqueText', {
+      spelling: 'canonical-unique-text',
+      definition: 'Variable',
+    }),
+    undefined,
+  );
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-unique-text-'));
+  try {
+    const target = join(root, `${UNIQUE_TEXT}.ts`);
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(join(ROOT, `${UNIQUE_TEXT}.ts`), target);
+    const binding = { spelling: UNIQUE_TEXT.split('/').pop(), definition: 'ImportBinding' };
+    assert.equal(
+      verifiedCallbackHelper(root, UNIQUE_TEXT, 'canonicalUniqueText', binding),
+      'canonicalizer',
+    );
+    appendFileSync(target, '\n// changed source\n');
+    assert.equal(
+      verifiedCallbackHelper(root, UNIQUE_TEXT, 'canonicalUniqueText', binding),
+      undefined,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The two other main-side hits of the merge train: `canonicalIdentifier` (asset-service) and the
+// `isOrderCommand` predicate whose pinned source moved with #728, plus the string-schema factory
+// `plainText()` that carries the string proof through `.pipe(plainText())`.
+const ASSET = 'services/asset-service/src/asset/dto.ts';
+const IDENTIFIER = 'services/asset-service/src/asset/identifier';
+const IMPORT_IDENTIFIER = `import { canonicalIdentifier } from './identifier'; `;
+const IMPORT_PLAIN = `import { plainText } from '@rasta/contracts'; `;
+it('canonicalIdentifier: the asset DTO chain passes, by exact binding and string-schema proof', () => {
+  for (const code of [
+    `${IMPORT_IDENTIFIER}z.string().transform(canonicalIdentifier);`,
+    `${IMPORT_IDENTIFIER}${IMPORT_PLAIN}z.string().min(3).max(9).pipe(plainText()).transform(canonicalIdentifier).pipe(z.string().min(3).max(9));`,
+    `${IMPORT_IDENTIFIER}z.string().transform((v) => canonicalIdentifier(v));`,
+  ])
+    assert.deepEqual(uniqueTextMessages(code, ASSET), [], code);
+});
+for (const code of [
+  // Another module, a sibling spelling, a same-named local, an unproven input, a coercion beside it.
+  `import { canonicalIdentifier } from './identifier.mjs'; z.string().transform(canonicalIdentifier);`,
+  `import { canonicalIdentifier } from './identifier.js'; z.string().transform(canonicalIdentifier);`,
+  `import { canonicalIdentifier } from './identifier/'; z.string().transform(canonicalIdentifier);`,
+  `import { canonicalIdentifier } from './identifier/.'; z.string().transform(canonicalIdentifier);`,
+  `import { canonicalIdentifier } from './other'; z.string().transform(canonicalIdentifier);`,
+  `import { canonicalIdentifier } from '@rasta/contracts'; z.string().transform(canonicalIdentifier);`,
+  `function canonicalIdentifier(v) { return BigInt(v); } z.string().transform(canonicalIdentifier);`,
+  `const canonicalIdentifier = BigInt; z.string().transform(canonicalIdentifier);`,
+  `${IMPORT_IDENTIFIER}z.unknown().transform(canonicalIdentifier);`,
+  `${IMPORT_IDENTIFIER}let alias = canonicalIdentifier; alias = Number; z.unknown().transform(alias);`,
+  `${IMPORT_IDENTIFIER}z.unknown().transform((v) => { canonicalIdentifier('x'); return Number(v); });`,
+  `${IMPORT_IDENTIFIER}z.string().transform((v) => BigInt(canonicalIdentifier(v)));`,
+  // Without a string schema the pipe carries no proof; plainText must be the contracts export.
+  `${IMPORT_IDENTIFIER}z.string().pipe(unknownSchema()).transform(canonicalIdentifier);`,
+  `${IMPORT_IDENTIFIER}import { plainText } from './plain'; z.string().pipe(plainText()).transform(canonicalIdentifier);`,
+  `${IMPORT_IDENTIFIER}function plainText() { return z.unknown(); } z.string().pipe(plainText()).transform(canonicalIdentifier);`,
+  `${IMPORT_IDENTIFIER}${IMPORT_PLAIN}z.string().pipe(plainText(1)).transform(canonicalIdentifier);`,
+  `${IMPORT_IDENTIFIER}${IMPORT_PLAIN}z.string().pipe(plainText).transform(canonicalIdentifier);`,
+  `${IMPORT_PLAIN}z.string().transform(plainText);`,
+])
+  it(`canonicalIdentifier/plainText refused: ${code}`, () => assert.ok(refused(code, ASSET), code));
+it('reviewed sources: every pin matches the real tree (drift fails here, with a name)', () => {
+  const binding = { spelling: IDENTIFIER.split('/').pop(), definition: 'ImportBinding' };
+  for (const [module, name, kind] of [
+    [IDENTIFIER, 'canonicalIdentifier', 'string'],
+    ['@rasta/contracts', 'plainText', 'string-schema'],
+    ['apps/web/src/lib/order-fields', 'isOrderCommand', 'predicate'],
+  ])
+    assert.equal(
+      verifiedCallbackHelper(ROOT, module, name, binding),
+      kind,
+      `${module} ${name}: its pinned source changed; review the helper again and re-pin it in scripts/zod-callback-helpers.mjs`,
+    );
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-identifier-'));
+  try {
+    const target = join(root, `${IDENTIFIER}.ts`);
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(join(ROOT, `${IDENTIFIER}.ts`), target);
+    assert.equal(
+      verifiedCallbackHelper(root, IDENTIFIER, 'canonicalIdentifier', binding),
+      'string',
+    );
+    appendFileSync(target, '\n// changed source\n');
+    assert.equal(
+      verifiedCallbackHelper(root, IDENTIFIER, 'canonicalIdentifier', binding),
+      undefined,
+    );
+    // A variable binding or a sibling spelling never carries the allowance.
+    assert.equal(
+      verifiedCallbackHelper(ROOT, IDENTIFIER, 'canonicalIdentifier', {
+        spelling: 'identifier.mjs',
+        definition: 'ImportBinding',
+      }),
+      undefined,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 // F1: the reviewer's 41 executable escapes, including all 22 constructor
 // detections present at 46422b9d. Mini unions have no public .options field.
 import { createRequire } from 'node:module';

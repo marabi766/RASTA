@@ -55,9 +55,10 @@ const emit = (event) => {
   process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 };
 
-const refuse = (message) => {
-  throw new B2RefusalError(message);
+const refuse = (message, code) => {
+  throw new B2RefusalError(message, code);
 };
+const usage = (message) => refuse(message, 'usage');
 
 /** `--service <name>` (repeatable) or `--all`, and nothing else — no URL, ever. */
 export function parseVacuumOptions(argv, env = {}) {
@@ -69,26 +70,25 @@ export function parseVacuumOptions(argv, env = {}) {
       all = true;
     } else if (arg === '--service') {
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) refuse('--service needs a value.');
+      if (next === undefined || next.startsWith('--')) usage('--service needs a value.');
       services.push(next);
       i += 1;
     } else {
-      refuse(
+      usage(
         `Unknown option at position ${i + 1}; it is not repeated. Known: --service, --all. ` +
           'The connection comes from ' +
           'DATABASE_URL_<SERVICE>_MIGRATOR in the environment, never from an argument.',
       );
     }
   }
-  if (all && services.length > 0) refuse('--all and --service contradict each other.');
+  if (all && services.length > 0) usage('--all and --service contradict each other.');
   const selected = all ? [...SERVICES] : services;
   if (selected.length === 0) {
-    refuse(`No target selected. Pass --service <name> or --all. Known: ${SERVICES.join(', ')}.`);
+    usage(`No target selected. Pass --service <name> or --all. Known: ${SERVICES.join(', ')}.`);
   }
   for (const service of selected) databaseUrlKey(service); // refuses an unknown one
   const duplicates = selected.filter((s, i) => selected.indexOf(s) !== i);
-  if (duplicates.length > 0)
-    refuse(`Named more than once: ${[...new Set(duplicates)].join(', ')}.`);
+  if (duplicates.length > 0) usage(`Named more than once: ${[...new Set(duplicates)].join(', ')}.`);
   assertEnvironment(env);
   return { services: selected };
 }
@@ -98,7 +98,10 @@ const count = (value) => Number(value);
 async function facts(db, service) {
   const [row] = await db.query(vacuumFactsSql());
   if (!row) {
-    refuse(`${service}: there is no outbox table on this connection's search_path.`);
+    refuse(
+      `${service}: there is no outbox table on this connection's search_path.`,
+      'no-outbox-table',
+    );
   }
   return {
     role: row.role,
@@ -117,6 +120,7 @@ export async function vacuumService({ service, db, settleMs = SETTLE_MS }) {
       `${service}: ${before.role} does not own ${before.table}, so PostgreSQL would skip its ` +
         `VACUUM. Set ${databaseUrlKey(service)}_MIGRATOR to the service's migrator — the ` +
         "table's owner since D-045.",
+      'not-table-owner',
     );
   }
 
@@ -136,6 +140,7 @@ export async function vacuumService({ service, db, settleMs = SETTLE_MS }) {
         `not move (vacuum_count ${before.vacuumCount} → ${after.vacuumCount}, analyze_count ` +
         `${before.analyzeCount} → ${after.analyzeCount}); it did not run. Nothing is reported ` +
         'as vacuumed.',
+      'vacuum-unproven',
     );
   }
   return {
@@ -156,7 +161,7 @@ async function main() {
     try {
       const key = `${databaseUrlKey(service)}_MIGRATOR`;
       const url = process.env[key];
-      if (!url) refuse(`${key} is not set (see .env.migrator.example).`);
+      if (!url) refuse(`${key} is not set (see .env.migrator.example).`, 'database-url-unset');
       db = prismaPort(service, url);
       const result = await vacuumService({ service, db });
       outcome = 'verified';

@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-10-23",
+  "asOf": "2026-11-04",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -524,6 +524,26 @@
           "kind": "DOCUMENT",
           "ref": "docs/24-open-questions.md",
           "note": "Checked again on 2026-10-15: the second acceptance criterion is still not met. Score computation and marketplace-facing rating remain blocked on Q-56 (quality signal, 🟡), Q-77, Q-78 and Q-79 (sample-size/coverage thresholds, component denominators, \"on time\" definition, all 🟠) — all still open. Only Q-75 (who may change the formula) is closed. No score is computed or published; the item correctly stays IN_PROGRESS."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/543",
+          "note": "Product Owner answers Q-56 (quality signal), Q-77 (insufficient samples and coverage), Q-78 (component denominators) and Q-79 (the meaning of on time). The questions that blocked the second criterion are closed; the scoring that uses them is not yet built. Merge commit 0dcb903, merged 2026-11-01."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/568",
+          "note": "Second criterion groundwork: marketplace captures the buyer's separate qualityRating (1-5) on a review and carries it on REVIEW_SUBMITTED v1, the producer Q-56 names. Merge commit efb589a, merged 2026-11-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/585",
+          "note": "The buyer's offer comparison shows the supplier name and a qualification badge (qualification state only, no performance score). Merge commit 4dbcee0, merged 2026-11-03."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "services/supplier-service/src/performance",
+          "note": "Checked on 2026-11-04 for Product Owner acceptance (delegated to the PM on 2026-11-01): NOT accepted. The first criterion is met (#31). The second is still open: the formula, event and snapshot tables (#120) and the fact consumer (#126, #142) exist, but no score is computed from the Q-56/Q-77/Q-78/Q-79 answers and no rating is supplied to the marketplace."
         }
       ]
     },
@@ -618,6 +638,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/349",
           "note": "ADR-070 PR 6, second criterion, partial: issue an RFQ (criteria frozen, invited suppliers checked against supplier-service standing), close it at its deadline, cancel it. NOT yet merged: RFQ evaluation and purchase-order issuance. Merge commit 54e834d, merged 2026-10-23."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/590",
+          "note": "ADR-070 PR 7, second criterion, partial: the RFQ quotation receipt chain is held in audit-service, outside procurement (consumer audit-service.rfq-evidence, append-only rfq_receipt_link). Open review follow-ups FU-025, FU-026 and FU-030 (Medium) are against this evidence chain. RFQ evaluation and purchase-order issuance are not merged. Merge commit dac13ab, merged 2026-11-03."
         }
       ]
     },
@@ -1090,6 +1115,21 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/347",
           "note": "Test fix after #334: the statement read's other-source case records an unreserved source type. Merge commit 58611da, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/567",
+          "note": "D-081 prerequisite: construction-service exposes a tenant-bound internal read of a project's completion facts for contract-service (task 1213 part A). Merge commit e88d114, merged 2026-11-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/543",
+          "note": "Product Owner answers Q-125: statement deduction rules are written and retired under four eyes. That is new work under the second criterion (CON-003-1, PR #677, open on 2026-11-04). Merge commit 0dcb903, merged 2026-11-01."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "Checked on 2026-11-04 for Product Owner acceptance (delegated to the PM on 2026-11-01): NOT accepted. The first criterion is met (#228) and both approval chains and the settlement handshake are merged (#312, #315, #320, #329, #340, #343, #321), but the Q-125 four-eyes deduction-rule work is unmerged (#677 open, with Medium review follow-up FU-060) and Q-95, Q-96 and Q-97 remain open (🟠)."
         }
       ]
     },
@@ -1448,6 +1488,31 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/346",
           "note": "Evaluate and award a tender on /tenders/[id]. Merge commit a6ccde0, merged 2026-10-18."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/356",
+          "note": "Same-key retry for the tender owner commands the service replays by Idempotency-Key (task 190). Merge commit 1530c36, merged 2026-10-23."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/370",
+          "note": "Construction project lifecycle write screens on /projects: create, edit, approvals, start, complete, cancel. Merge commit 7ad3085, merged 2026-10-24."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/366",
+          "note": "Supplier write screens on /suppliers: register, qualify, approve or reject, suspend and reinstate. Merge commit 2c5f519, merged 2026-10-25."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/363",
+          "note": "Inventory write screens on /inventory: warehouse, stock and shipment commands. Merge commit 2fd895e, merged 2026-11-02."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "apps/web/src/app",
+          "note": "Checked on 2026-11-04 for Product Owner acceptance (delegated to the PM on 2026-11-01): NOT accepted. Supplier, logistics, construction, tender and contract screens follow real APIs, but no procurement screen exists (no demand, RFQ or purchase-order route under apps/web/src/app), so the first criterion is still partial."
         }
       ]
     },
@@ -1468,7 +1533,13 @@
         "docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰",
         "docs/adr/ADR-073-implementation-plan.md"
       ],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/368",
+          "note": "Design only: ADR-073 PWA and offline usage queue and its implementation plan; Q-148 to Q-153 raised. No code. Merge commit 44b5037, merged 2026-10-25."
+        }
+      ]
     },
     {
       "id": "EXP-006",
@@ -1511,6 +1582,11 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/372",
           "note": "First criterion, partial: usage replay bound to user, body and read rule, re-checked under lock (ADR-073 plan PR 1). Merge commit ade49b7, merged 2026-10-24."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-073-implementation-plan.md",
+          "note": "Checked on 2026-11-04: no further slice is merged after #372. The reported-interval attribution half of the first criterion and the whole second criterion (arrival-order-independent maintenance meter, reconciliation, fleet reference reads) are open."
         }
       ]
     },
@@ -1543,6 +1619,16 @@
           "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/355",
           "note": "CI: the analytics coverage gate (75% threshold) runs in integration-coverage. Merge commit e83929e, merged 2026-10-23."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/384",
+          "note": "Second criterion, partial: GET /v1/kpis with append-only baseline storage; a missing baseline is reported as INSUFFICIENT_BASELINE. Merge commit bc74c20, merged 2026-10-24."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/493",
+          "note": "A KPI window analytics cannot vouch for reports NO_DATA, not zero (Q-154, D-082). Merge commit f723c49, merged 2026-10-29. The aggregate-only governance views (ADR-071 plan PR 3 and PR 7) and the other projections (PR 4 to PR 6) are not merged."
         }
       ]
     },
@@ -1590,6 +1676,11 @@
           "kind": "DOCUMENT",
           "ref": "docs/23-risks-and-tradeoffs.md",
           "note": "D-045 is recorded as priority 'بالا (RUN-002)' and status 'رفع‌شده' (fixed) as of 2026-10-01. This is real progress on migration/secrets hardening, but is not the whole second criterion: no image provenance or signing step exists in .github/workflows/ci.yml (images are pinned by digest, not signed/attested), and no deployment-level rollback mechanism exists beyond per-service database migration rollback. The first criterion (a reproducible staging deployment with default-deny network policy) is NOT STARTED: no k8s/helm manifests or values-staging.yaml exist anywhere in the repository; docs/12-deployment-architecture.md only diagrams the planned staging environment. Item moves from READY to IN_PROGRESS on the strength of the second criterion's partial progress; neither criterion is fully met."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/428",
+          "note": "Step 0, design only: ADR-074 staging on a single host. No deployment and no code. Merge commit 6e59741, merged 2026-11-03."
         }
       ]
     },
@@ -1600,14 +1691,40 @@
       "scope": "MVP",
       "priority": "P2",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Load, trace, alert and runbook gates meet documented thresholds",
         "A real restore proves data availability and ledger balance"
       ],
       "dependencies": ["RUN-002"],
       "sourceRefs": ["docs/17-mvp-scope.md#۱۷۳-p2--سختسازی-روز-۳۰"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/374",
+          "note": "Second criterion, partial: backup and restore drill with a ledger balance check and a byte-identical schema reference (D-068). Merge commit e3ab1ce, merged 2026-10-24."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/425",
+          "note": "Drill hardening: dump provenance, contained child errors and a cleanup-ownership report. Merge commit 6a8e9ba, merged 2026-10-25."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/477",
+          "note": "Drill restore inputs bound to their dump evidence; the ledger comparison refuses the same object on both sides. Merge commit 7376f48, merged 2026-10-29."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/478",
+          "note": "Monthly scheduled full backup and restore drill in CI, synthetic data only (task 827). Merge commit 0c1fa34, merged 2026-10-30."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": ".github/workflows/backup-drill-monthly.yml",
+          "note": "The restore is proven on synthetic data only; no restore of real or staging data exists yet. The first criterion (load, trace, alert and runbook gates against documented thresholds) is not started."
+        }
+      ]
     },
     {
       "id": "RUN-004",
@@ -2537,7 +2654,7 @@
         "soThat": "money follows the physical outcome under one ledger owner, without the marketplace or inventory moving money"
       },
       "points": 5,
-      "status": "BLOCKED",
+      "status": "READY",
       "acceptanceCriteria": [
         {
           "given": "a return resolved with a refundable disposition on a SETTLED order",
@@ -2552,7 +2669,13 @@
       ],
       "dependencies": ["RLG-001", "COM-001"],
       "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md", "docs/24-open-questions.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/543",
+          "note": "Product Owner answers Q-76 (what reversing a settlement, refund or reward means), the decision that blocked this story. The story is unblocked and READY; no refund or correction code is merged. Merge commit 0dcb903, merged 2026-11-01."
+        }
+      ]
     }
   ],
   "changeLog": [

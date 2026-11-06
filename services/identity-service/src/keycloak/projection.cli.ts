@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure, markRefusal } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -17,6 +17,9 @@ import {
   type ProjectionCommandMode,
 } from './projection.command';
 
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
+
 /**
  * `pnpm --filter @rasta/identity-service keycloak:reconcile` / `keycloak:backfill`.
  *
@@ -33,9 +36,12 @@ import {
  * failure code, never the URL.
  */
 async function main(): Promise<number> {
-  const mode = process.argv[2];
-  if (mode !== 'reconcile' && mode !== 'backfill') {
-    throw new Error('usage: projection.cli.ts <reconcile|backfill>');
+  // Exactly one argument, the mode (#673 r1 F2): `backfill --dry-run` must not
+  // project every account because the prefix was valid. Checked before the
+  // environment, the database or Keycloak is touched.
+  const [mode, ...rest] = process.argv.slice(2);
+  if ((mode !== 'reconcile' && mode !== 'backfill') || rest.length > 0) {
+    throw usage('usage: projection.cli.ts <reconcile|backfill>');
   }
 
   assertNoMigratorCredentials(process.env);

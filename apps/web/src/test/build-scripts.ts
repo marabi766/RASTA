@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -31,10 +31,58 @@ export function runModule(code: string): { out: unknown; stdout: string; stderr:
   };
 }
 
-/** Whether a process (or, negative, a process group) may exist. */
-export const alive = (target: number): boolean => {
+type ProcessTarget = number | { group: number };
+const positivePid = (pid: number): boolean => Number.isSafeInteger(pid) && pid > 0;
+const signalTarget = (target: ProcessTarget): number => {
+  const pid = typeof target === 'number' ? target : target.group;
+  if (!positivePid(pid))
+    throw new Error(
+      `invalid pid ${pid}: expected a positive integer; use { group: pgid } explicitly for a process group`,
+    );
+  return typeof target === 'number' ? pid : -pid;
+};
+const targetName = (target: ProcessTarget): string => {
+  const pid = signalTarget(target);
+  return `${pid < 0 ? 'process group' : 'pid'} ${Math.abs(pid)}`;
+};
+
+type ChildRecord = { pid: number; group: number; capturePath: string };
+export function waitForPidFile(file: string, json?: false, ms?: number): Promise<number>;
+export function waitForPidFile(file: string, json: true, ms?: number): Promise<ChildRecord>;
+/** Existence is not readiness: retry empty/partial writes, but never return an invalid PID. */
+export async function waitForPidFile(
+  file: string,
+  json = false,
+  ms = 15_000,
+): Promise<number | ChildRecord> {
+  const deadline = performance.now() + ms;
+  for (;;) {
+    try {
+      const text = readFileSync(file, 'utf8').trim();
+      const value: ChildRecord | number = JSON.parse(
+        json ? text : /^\d+$/.test(text) ? text : 'null',
+      );
+      if (!json && typeof value === 'number' && positivePid(value)) return value;
+      if (json && value && typeof value === 'object') {
+        const { pid, group, capturePath } = value;
+        const validIds = positivePid(pid) && positivePid(group);
+        if (validIds && typeof capturePath === 'string' && capturePath.length > 0) return value;
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== 'ENOENT')
+        throw error;
+    }
+    if (performance.now() >= deadline)
+      throw new Error(`pid file ${file}: no complete positive integer pid record within ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/** Whether a process, or an explicitly selected process group, may exist. */
+export const alive = (target: ProcessTarget): boolean => {
+  const pid = signalTarget(target);
   try {
-    process.kill(target, 0);
+    process.kill(pid, 0);
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ESRCH';
@@ -46,14 +94,14 @@ export const alive = (target: number): boolean => {
  * and be reaped (a zombie still answers a signal-0 probe), after the sender's `kill` returned.
  * So "it ended" is a bounded wait, never a single probe (FU-038: an instant `alive()` right
  * after a group kill found the linger process still there and turned main red).
- * Fails, naming the pid (negative: the group), when the target outlives `ms`.
+ * Fails, naming the pid or explicit group, when the target outlives `ms`.
  */
-export async function waitGone(target: number, what: string, ms = 15_000): Promise<void> {
+export async function waitGone(target: ProcessTarget, what: string, ms = 15_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (alive(target) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   if (alive(target)) {
     throw new Error(
-      `${what}: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still alive ${ms} ms after it should have ended`,
+      `${what}: ${targetName(target)} still alive ${ms} ms after it should have ended`,
     );
   }
 }
@@ -69,7 +117,7 @@ const STAT = /^[DIKPRSTtWXxZ][<NLsl+]*$/;
 const UNPROVEN = 'cannot prove a writer is gone';
 
 /**
- * Members of each of `targets` (a pid, or, negative, a process group) that are LIVE right
+ * Members of each of `targets` (a pid or an explicit process group) that are LIVE right
  * now, aligned with `targets`: ONE `ps` snapshot of pid, pgid and state for all of them (a
  * second snapshot taken later is a second moment, FU-040 r2 F1), minus zombies. A zombie has
  * released its memory and its files, so it cannot write, but it still answers `kill(pid, 0)`
@@ -79,7 +127,8 @@ const UNPROVEN = 'cannot prove a writer is gone';
  * calling process (known live) must be in the census, so a snapshot that cannot be taken, read
  * or is incomplete proves nothing and throws (`ps`: test seam).
  */
-export function liveMembers(targets: readonly number[], ps = 'ps'): number[][] {
+export function liveMembers(targets: readonly ProcessTarget[], ps = 'ps'): number[][] {
+  const ids = targets.map(signalTarget);
   const census = spawnSync(ps, ['-axo', 'pid=,pgid=,stat='], { encoding: 'utf8' });
   if (census.status !== 0) throw new Error(`process census failed: ${UNPROVEN}`);
   const rows = census.stdout
@@ -96,7 +145,7 @@ export function liveMembers(targets: readonly number[], ps = 'ps'): number[][] {
   if (!rows.some((row) => row.pid === process.pid && row.live)) {
     throw new Error(`process census incomplete (the calling process is missing): ${UNPROVEN}`);
   }
-  return targets.map((target) =>
+  return ids.map((target) =>
     rows
       .filter((row) => row.live && (target < 0 ? row.pgid === -target : row.pid === target))
       .map((row) => row.pid),
@@ -115,7 +164,7 @@ export function liveMembers(targets: readonly number[], ps = 'ps'): number[][] {
  * within its budget (FU-040). No target proves nothing, so it throws.
  */
 export async function goneAtBoundary(
-  targets: ReadonlyArray<readonly [target: number, what: string]>,
+  targets: ReadonlyArray<readonly [target: ProcessTarget, what: string]>,
   ms?: number,
 ): Promise<void> {
   if (targets.length === 0) throw new Error(`no process to check at the boundary: ${UNPROVEN}`);
@@ -124,7 +173,7 @@ export async function goneAtBoundary(
     live[i].length === 0
       ? []
       : [
-          `${what}: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still has a live writer (${live[i].join(', ')}) at the point the lock was released`,
+          `${what}: ${targetName(target)} still has a live writer (${live[i].join(', ')}) at the point the lock was released`,
         ],
   );
   if (refused.length > 0) throw new Error(refused.join('\n'));
@@ -213,8 +262,10 @@ const DRIVER = `
   let uncertain = false;
   const afterSpawn = async ({ pid, group, capturePath }) => {
     scratch = dirname(capturePath);
-    writeFileSync(join(dir, 'driver-child-' + process.pid + '.json'), JSON.stringify({ pid, group, capturePath }));
-    if (options.recordChild) writeFileSync(options.recordChild, JSON.stringify({ pid, group, capturePath }));
+    for (const file of [join(dir, 'driver-child-' + process.pid + '.json'), options.recordChild].filter(Boolean)) {
+      writeFileSync(file + '.tmp', JSON.stringify({ pid, group, capturePath }));
+      renameSync(file + '.tmp', file);
+    }
     if (options.afterSpawn === 'kill') process.kill(process.pid, 'SIGKILL');
     if (options.afterSpawn === 'throw') throw new Error('injected');
     if (options.afterSpawn === 'readonly-lock') chmodSync(lockDir, 0o500);
@@ -508,7 +559,10 @@ export function plantFakeNext(root: string): { nextFrom: string; fault: string }
 const [ms, loadsAfterMs, ignoreTerm, startupMs] = process.argv.slice(2).map(Number);
 if (startupMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupMs);
 if (ignoreTerm) process.on('SIGTERM', () => {});
-fs.writeFileSync('linger.pid', String(process.pid));
+// Atomic: a reader that sees linger.pid sees the whole pid (FU-095: an empty file read as pid 0,
+// and kill(0, 0) probes the test's own group, so it never "ended").
+fs.writeFileSync('linger.pid.tmp', String(process.pid));
+fs.renameSync('linger.pid.tmp', 'linger.pid');
 const timer = setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-linger', String(Date.now())); }, 50);
 if (loadsAfterMs > 0) setTimeout(() => require('../server/config.js').default('phase-production-build', process.cwd()).catch(() => {}), loadsAfterMs);
 setTimeout(() => { clearInterval(timer); fs.writeFileSync('linger.done', ''); }, ms);

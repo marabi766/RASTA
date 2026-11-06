@@ -3,6 +3,7 @@ import { ApplicationFailure, Context, CancelledFailure } from '@temporalio/activ
 import {
   createSystemContext,
   isRastaError,
+  RastaError,
   runWithContext,
   type RequestContext,
 } from '@rasta/nest-common';
@@ -21,7 +22,7 @@ import {
   type TransactionDetailView,
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
-import { settlementsExhaustedTotal } from '../observability/metrics';
+import { releasesUnconfirmedTotal, settlementsExhaustedTotal } from '../observability/metrics';
 
 /**
  * Everything the order saga does that touches the world.
@@ -171,6 +172,8 @@ function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>)
 
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
+  // At zero from the start: `increase()` cannot see a series' first increment.
+  releasesUnconfirmedTotal.inc({ service: SERVICE_NAME }, 0);
 
   /**
    * Runs `fn` as the system, acting for the order's buying organization.
@@ -427,6 +430,19 @@ export function createActivities(deps: ActivityDependencies) {
         orderId,
         'authoriseSettlement',
         async (order) => {
+          // The buyer's receipt is what authorises settlement; without it on
+          // the row, nothing is asked of economic-service. An order an older
+          // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
+          // otherwise authorise an obligation migration 20261103121000 put
+          // back in HELD (#625 round 2 self-review). Refused for good: the
+          // saga stops with the funds held, for the runbook
+          // (docs/runbooks/marketplace-receipt-evidence.md).
+          if (!order.receiptConfirmed) {
+            throw RastaError.businessRule(
+              'Settlement is authorised only for an order whose receipt the buyer confirmed',
+              { orderId: order.id },
+            );
+          }
           await deps.economic.authoriseSettlement({
             orderId: order.id,
             transactionId,
@@ -603,7 +619,7 @@ export function createActivities(deps: ActivityDependencies) {
           // resolution — which the saga sends only after this step — changes
           // them.
           answer: (transaction) =>
-            transaction.status === 'DISPUTED' && transaction.disputeReason === reason
+            transaction.status === 'DISPUTED' && sameText(transaction.disputeReason, reason)
               ? { result: transaction.disputeId ?? null }
               : null,
         },
@@ -616,9 +632,8 @@ export function createActivities(deps: ActivityDependencies) {
      * With `economicDisputeId`, only that dispute: economic-service refuses the
      * resolution, under its row lock, once the transaction holds another — one
      * raised since the dispute decided here was taken, after that one was
-     * resolved there (Codex on #318 round 2, N1). The refusal stands, and the
-     * saga stops with the funds held for an operator, as it did before the
-     * order took economic-service's disputes at all.
+     * resolved there (Codex on #318 round 2, N1). The refusal stands: the saga
+     * waits with the funds held and the alert on, for an operator (FU-080).
      */
     async resolveObligationDispute(
       orderId: string,
@@ -662,11 +677,26 @@ export function createActivities(deps: ActivityDependencies) {
               transaction.disputedAt !== null;
             const ours =
               economicDisputeId === undefined
-                ? resolutionOf(transaction) === resolution
+                ? sameText(resolutionOf(transaction), resolution)
                 : transaction.disputeId === economicDisputeId;
             return released && ours ? { result: undefined } : null;
           },
         },
+      );
+    },
+
+    /**
+     * Reports a round of a dispute release economic-service has not confirmed
+     * (FU-080), from an activity because the SDK logger discards a workflow's
+     * words (`TemporalRuntimeLogger`) and only a worker holds the registry.
+     * Touches nothing else, so it cannot fail for the reason the release did.
+     */
+    async noteReleaseUnconfirmed(orderId: string, round: number, failure: string): Promise<void> {
+      releasesUnconfirmedTotal.inc({ service: SERVICE_NAME });
+      logger.error(
+        `The dispute release of order ${orderId} is unconfirmed after round ${round} ` +
+          `(${failure}); its funds stay held and the saga keeps trying ` +
+          '(docs/runbooks/marketplace-saga-deploy.md)',
       );
     },
 
@@ -724,6 +754,18 @@ function systemContext(organizationId: string | undefined, correlationId: string
  */
 function refusedForState(error: unknown): boolean {
   return isRastaError(error) && error.code === 'INVALID_STATE_TRANSITION';
+}
+
+/**
+ * The same words, whatever their line endings. economic-service keeps the text
+ * as sent; once it keeps it with LF line endings (FU-115), this reader still
+ * finds its own dispute and resolution — which is why this release, reading
+ * both, must be every running worker and the rollback floor before that
+ * writer ships (docs/06 § 6.8). This service keeps what the person sent.
+ */
+function sameText(kept: string | null | undefined, sent: string): boolean {
+  const lf = (text: string) => text.replace(/\r\n?/g, '\n');
+  return typeof kept === 'string' && lf(kept) === lf(sent);
 }
 
 /**
