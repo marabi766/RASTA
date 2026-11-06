@@ -3921,7 +3921,8 @@
                       "anyOf": [
                         {
                           "type": "string",
-                          "description": "AST identifier Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                          "pattern": "^AST_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "description": "AST identifier"
                         },
                         {
                           "type": "string",

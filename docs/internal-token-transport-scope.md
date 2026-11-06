@@ -568,12 +568,24 @@ Node HTTP exports and global/imported process members use the same known-safe li
 so additions require review. Process object imports may only access proven-safe members;
 loader exports, unknown extraction, dynamic loads and unsafe re-exports are refused.
 Process listener results must be discarded, including named imports and aliases.
-Process registry holders (task 1267, FU-029) may use immutable aliases and casts,
-`typeof`/strict null checks, and keys proven to come from the native `Symbol.for`.
-`Object.defineProperty` requires that same key proof and a discarded result because
-it returns the holder. Every alias reference is checked: loader reads, unknown keys,
-shadowed builtins, mutable holders and escaping holders remain refused. This preserves
-the process-wide CLI refusal registry without granting it an audited transport exemption.
+Process registry holders (FU-127) may use module-local, non-exported `const` aliases
+and casts, `typeof`/strict null checks, and literal `Symbol.for('<string>')` keys
+(optionally through immutable aliases). Every declaration and reference is inspected,
+including writes and exports. Slots may be read or assigned a proven plain value;
+calling/tagging a slot would give it the process receiver and is refused.
+`Object.defineProperty` requires exactly an object-literal `{ value: ... }` descriptor
+and a discarded result. Plain values are literals, recursively plain object/array
+literals or the existing no-argument native `WeakMap` registry, optionally held in
+immutable aliases. Functions, classes, accessors, spreads and unknown values refuse.
+Both `Symbol` and `Object` must be unshadowed at the use; aliases, reassignment,
+property writes and indirect/reflected uses of these globals anywhere in the file
+invalidate the exemption, regardless of statement order. Global-object symbol slots
+use the same key/receiver/intrinsic checks. Exported loader aliases also refuse.
+This preserves the process-wide CLI refusal registry without granting an audited
+transport exemption. As with D-086/D-088, this source rule cannot attest to runtime
+patches in other modules or preloads; it is not a same-process JavaScript sandbox.
+Ordinary process listener callbacks receiving `this` remain the separate pre-existing
+N1-e follow-up; this change restricts registry slots and holder/loader declarations.
 Tooling that needs a computed workspace path uses `scripts/workspace-module.mjs`,
 which checks the real resolved path before loading a local build, generated Prisma
 client or Jest config; dependency paths, symlink escapes and outside paths are refused.
