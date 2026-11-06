@@ -265,6 +265,7 @@ describe('zod-3 golden: list queries as they arrive in a query string', () => {
         limit: { limit: '5' },
         limitZero: { limit: '0' },
         limitTooBig: { limit: '101' },
+        // FU-131 deliberately corrects this snapshot: reject text before integer checks.
         limitFraction: { limit: '5.5' },
         limitText: { limit: 'abc' },
         cursor: { cursor: 'TXN_01J9ZS3X5Y0000000000000000' },

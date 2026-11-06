@@ -265,7 +265,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 25
             }
           },
@@ -824,7 +826,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 25
             }
           },
@@ -1961,7 +1965,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 25
             }
           },
