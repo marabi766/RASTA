@@ -340,13 +340,6 @@ export class IdempotencyStore {
     private readonly clock: Pick<DatabaseClock, 'now'>,
   ) {}
 
-  /**
-   * This replica's clock, in ms: every expiry and deadline of the store is read through it. A test
-   * stands in a skewed or later replica by overriding it.
-   */
-  protected nowMs(): number {
-    return Date.now();
-  }
 
   /**
    * Runs `work` at most once for this key, and returns its result — or the stored result of
@@ -458,7 +451,7 @@ export class IdempotencyStore {
         responseBody: body as object,
         expiresAt: new Date(
           completedExpiryMs(
-            this.nowMs(),
+            Date.now(),
             this.env.PROCUREMENT_IDEMPOTENCY_TTL_HOURS,
             replayDeadlineMs,
             this.budgetMs(),
@@ -550,7 +543,7 @@ export class IdempotencyStore {
     replayDeadlineMs: number | undefined,
   ): Promise<Claim | typeof RETRY_CLAIM | typeof IN_FLIGHT> {
     const organizationId = getOrganizationId();
-    const now = new Date(this.nowMs());
+    const now = new Date();
 
     // The replay fence, before anything is read or written: it depends on nothing stored, so it
     // discloses nothing about the key. Every attempt re-reads the clock (a wait on a holder is one).
@@ -718,7 +711,7 @@ export class IdempotencyStore {
     return runUnscoped(
       'expired idempotency records are platform upkeep, deleted by age alone and never by tenant',
       async () => {
-        const now = new Date(this.nowMs());
+        const now = new Date();
         const keys = await this.prisma.client.idempotencyKey.deleteMany({
           where: { expiresAt: { lt: now } },
         });
