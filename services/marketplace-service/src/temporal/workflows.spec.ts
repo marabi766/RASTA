@@ -347,6 +347,34 @@ async function atRest(handle: WorkflowHandle): Promise<void> {
   }, 'the saga to come to rest');
 }
 
+/**
+ * The saga has nothing in flight at all: every activity it scheduled has been
+ * answered, and the last event of its history is the timer it armed — no
+ * workflow task scheduled or started. A test that stops a worker and goes on
+ * with another must stop it from here (FU-147). Not a phase query: it replays
+ * the events it was sent, answered or not, so it reports the phase of a
+ * workflow task the worker is still running (the history ended in
+ * WorkflowTaskStarted in 25 of 25 local runs when the old test took that
+ * phase for rest). Not {@link atRest} either, which a workflow task with no
+ * command satisfies while an activity is still running.
+ */
+async function quiet(handle: WorkflowHandle): Promise<void> {
+  await eventually(async () => {
+    const events = (await handle.fetchHistory()).events ?? [];
+    const open = new Set<number>();
+    for (const e of events) {
+      if (e.activityTaskScheduledEventAttributes) open.add(Number(e.eventId));
+      const answered =
+        e.activityTaskCompletedEventAttributes ??
+        e.activityTaskFailedEventAttributes ??
+        e.activityTaskTimedOutEventAttributes ??
+        e.activityTaskCanceledEventAttributes;
+      if (answered) open.delete(Number(answered.scheduledEventId));
+    }
+    return open.size === 0 && Boolean(events.at(-1)?.timerStartedEventAttributes);
+  }, 'the saga to have nothing in flight');
+}
+
 async function until(predicate: () => boolean, what: string): Promise<void> {
   for (let i = 0; i < 400; i += 1) {
     if (predicate()) return;
@@ -2939,8 +2967,16 @@ describe('a saga the previous release started, replayed and then run live (#625 
         maxCachedWorkflows: 0,
         patchActivationCallback: () => false,
       });
+      // Stopped from a history with nothing in flight, not from the phase the
+      // saga reported: that was read off a workflow task still running, and
+      // the next worker's wake-up then depended on how that task ended
+      // (FU-147).
       await old.runUntil(
-        within(STEP_DEADLINE_MS, previous({ party, handle }), 'the previous release to drive'),
+        within(
+          STEP_DEADLINE_MS,
+          previous({ party, handle }).then(() => quiet(handle)),
+          'the previous release to drive',
+        ),
       );
       const fresh = await Worker.create({
         connection: env.nativeConnection,
