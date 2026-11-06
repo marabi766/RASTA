@@ -86,8 +86,10 @@ const pins = {
     '5eb97cc83fd4f3dd9a9e39c88513aa5673f22ab2d8a978cd8000d78144b89ee9',
   'apps/web/src/lib/repair-order-fields.ts':
     'b80e6b6a0fccce159661427e3c1e0dce973c93e1837ea632d7b47533a9944b13',
-  'packages/contracts/src/common/iso-datetime.ts':
+  'packages/contracts/src/common/iso-datetime.ts': [
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
+    '0575a17e05a4e9808cd0948bf5aa0f14b3e1abf68782907fedab9fc3cba158de',
+  ],
   'packages/contracts/src/common/text.ts':
     'ff9708d0c86b5121a653c9e9aef3bf86d34a85ece0a499e219e8d8819ca5d30e',
   'packages/contracts/src/index.ts': [
