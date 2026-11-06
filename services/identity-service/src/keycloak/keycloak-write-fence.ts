@@ -774,10 +774,11 @@ export class KeycloakWriteFences {
     intervalSeconds: number,
     maxIntervals: number,
   ): Promise<void> {
+    // TIMESTAMP(3) rounds up: truncate first so persistence cannot exceed the backoff cap.
     await this.pool.client.$executeRaw`
       UPDATE keycloak_write_attempt
          SET reassert_failures = LEAST(reassert_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-             next_reassert_at = (clock_timestamp() AT TIME ZONE 'UTC')
+             next_reassert_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                + make_interval(secs => ${intervalSeconds}
                    * LEAST(POWER(2, LEAST(reassert_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
                            ${maxIntervals}))

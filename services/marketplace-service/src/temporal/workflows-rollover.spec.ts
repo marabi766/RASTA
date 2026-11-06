@@ -1,6 +1,8 @@
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TestWorkflowEnvironment, MockActivityEnvironment } from '@temporalio/testing';
+import { MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { ApplicationFailure, Context } from '@temporalio/activity';
 import { FINAL_ANSWER_CONTRACT, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
@@ -90,7 +92,7 @@ describe('history rollover on real Temporal', () => {
     throw new Error(`${workflowId} did not come to rest`);
   };
   beforeAll(async () => {
-    env = await TestWorkflowEnvironment.createTimeSkipping();
+    env = await createTemporalTestEnvironment();
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();
@@ -1566,6 +1568,8 @@ describe('history rollover on real Temporal', () => {
           await atRest(taskQueue);
           const seen = await env.client.workflow.getHandle(taskQueue).query<SagaStatus>('status');
           expect(seen.phase).toBe('AWAITING_CONFIRMATION');
+          // At rest can mean the task that scheduled the reminder has just completed.
+          await eventually(() => reminders === remindersBeforeDeadline);
         });
         expect(reminders).toBe(remindersBeforeDeadline);
 

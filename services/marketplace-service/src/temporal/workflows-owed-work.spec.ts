@@ -1,4 +1,5 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
 import { RastaError } from '@rasta/nest-common';
@@ -85,12 +86,7 @@ describe('work the saga owes (#796 r1)', () => {
 
   beforeAll(async () => {
     workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
+    env = await createTemporalTestEnvironment();
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();
