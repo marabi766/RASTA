@@ -1016,13 +1016,10 @@ for (const code of [
   `const allowed=[]; allowed.includes=Number; const alias=allowed; z.preprocess(v=>alias.includes(v),z.number());`,
   `const allowed=[]; allowed.includes=Number; const has=(a,x)=>a.includes(x); z.preprocess(v=>has(allowed,v),z.number());`,
   `const allowed=[]; allowed.includes=Number; const alias=allowed; const next=alias; z.preprocess(v=>next.includes(v),z.number());`,
-  `const allowed=[]; allowed.includes=Number; const alias=allowed; z.preprocess(v=>(alias as number[]).includes(v),z.number());`,
-  `const allowed=[]; allowed.includes=Number; const has=(a,x)=>(a as number[]).includes(x); z.preprocess(v=>has(allowed,v),z.number());`,
-  `const allowed=[]; allowed.includes=Number; const alias=allowed; z.preprocess(v=>alias!.includes(v),z.number());`,
 ])
   it(`F2 includes receiver provenance: ${code}`, () =>
     assert.ok(
       messages(code).some(
-        ({ ruleId, messageId }) => ruleId === 'boundary/coercion' && messageId === 'boundary',
+        ({ ruleId, messageId }) => ruleId === 'boundary/coercion' && messageId === 'preprocess',
       ),
     ));

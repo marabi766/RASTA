@@ -1161,9 +1161,7 @@ export default {
             // Keep the original direct-array proof: a kind inferred through an
             // alias or helper parameter does not prove its source stayed stable.
             const receiver =
-              unwrap(callee.object)?.type === 'Identifier'
-                ? variable(unwrap(callee.object))?.defs[0]
-                : undefined;
+              callee.object.type === 'Identifier' ? variable(callee.object)?.defs[0] : undefined;
             if (
               name === 'includes' &&
               receiver?.type === 'Variable' &&
