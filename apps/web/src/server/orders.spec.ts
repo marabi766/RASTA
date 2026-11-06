@@ -316,6 +316,29 @@ describe('an operator’s decision names the dispute the page showed (D-083)', (
     expect(parsed.fieldErrors.disputeId).not.toBe(GENERIC_FIELD_MESSAGE);
   });
 
+  // FU-134: a REFUND resolution is also the refund's reason, shorter than a
+  // resolution; said before the post, in the service's own bounds.
+  it.each([
+    ['REFUND', 500, true],
+    ['REFUND', 501, false],
+    ['SETTLE', 1000, true],
+    ['SETTLE', 1001, false],
+  ] as const)('a %s resolution of %i characters: accepted %s', (outcome, length, accepted) => {
+    const parsed = parseOrderCommand(
+      values({ ...decision, disputeId: DISPUTE, outcome, resolution: 'ب'.repeat(length) }),
+    );
+    expect(parsed.ok).toBe(accepted);
+    if (!parsed.ok) expect(parsed.fieldErrors.resolution).toEqual(expect.any(String));
+  });
+
+  it('names the REFUND bound in the refusal, as written: declared, so not the generic message', () => {
+    const parsed = parseOrderCommand(
+      values({ ...decision, disputeId: DISPUTE, outcome: 'REFUND', resolution: 'ب'.repeat(501) }),
+    );
+    if (parsed.ok) throw new Error('expected a refusal');
+    expect(parsed.fieldErrors.resolution).toBe('شرح تصمیم بازگشت وجه نباید بیش از ۵۰۰ نویسه باشد');
+  });
+
   it('shows the outcome sentence as written: declared, so not the generic message', () => {
     const parsed = parseOrderCommand(values({ ...decision, disputeId: DISPUTE, outcome: '' }));
     expect(parsed).toMatchObject({

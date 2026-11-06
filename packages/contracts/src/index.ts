@@ -33,6 +33,14 @@ export {
 export { patternRefinement, publishedRefinementPattern } from './common/pattern-refinement';
 
 export { withMaxKeys } from './common/bounds';
+export {
+  TRANSACTION_TEXT_BOUNDS,
+  boundsForAll,
+  isWithin,
+  keptTextWithin,
+  textWithin,
+  type TextBounds,
+} from './common/transaction-text';
 export { parsableUrl } from './common/parsable-url';
 export {
   isoDateTime,
@@ -96,7 +104,10 @@ export type { BusinessLine } from './common/business-line';
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 
-export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';
+export {
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
+  PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
+} from './common/replay-window';
 
 export {
   DEFAULT_PAGE_SIZE,

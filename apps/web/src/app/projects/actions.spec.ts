@@ -340,7 +340,7 @@ describe('what comes back', () => {
       { kind: 'FAILED', status: 404, correlationId: 'c2' },
     ],
     [
-      { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+      { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c3' },
       { kind: 'FAILED', status: 429, correlationId: 'c3' },
     ],
     // A 5xx may follow the commit: never "nothing was saved".
@@ -569,7 +569,10 @@ describe('an unresolved create outlives the form that sent it', () => {
   });
 
   it.each([
-    ['a proven refusal', { kind: 'UNAVAILABLE', status: 429, correlationId: 'c' }],
+    [
+      'a proven refusal',
+      { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c' },
+    ],
     ['a forbidden', { kind: 'FORBIDDEN', correlationId: 'c' }],
     ['a service refusal', { kind: 'INVALID', fieldErrors: {}, message: 'm', correlationId: 'c' }],
   ])('is not made by %s', async (_name, result) => {
@@ -601,14 +604,32 @@ describe('an unresolved create outlives the form that sent it', () => {
       correlationId: 'refused',
       neverSent: true,
     });
-    await submit(first);
+    // And says so: the earlier attempt may have created the project (PR-830 r1 F1).
+    expect(await submit(first)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'refused' });
     expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
   });
+
+  it.each([
+    ['INVALID', { kind: 'INVALID', fieldErrors: {}, message: 'x', correlationId: 'denied' }],
+    ['NOT_FOUND', { kind: 'NOT_FOUND', correlationId: 'denied' }],
+    [
+      '429 RATE_LIMIT_EXCEEDED',
+      { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'denied' },
+    ],
+  ])(
+    'a retry answered %s stays held and is said UNCONFIRMED (PR-830 r1 F1)',
+    async (_n, result) => {
+      const first = await sendAndLose();
+      createProject.mockResolvedValue(result);
+      expect(await submit(first)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'denied' });
+      expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
+    },
+  );
 
   it('keeps an earlier unresolved request when the retry is refused (e.g. by authorization before replay)', async () => {
     const first = await sendAndLose();
     createProject.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'denied' });
-    expect(await submit(first)).toMatchObject({ kind: 'FORBIDDEN' });
+    expect(await submit(first)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'denied' });
     expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
     // And the held request is still the only one that may go out.
     createProject.mockClear();

@@ -104,7 +104,7 @@
         "kafka:acl:apply:dev": "sha256:50e5a166c2f97463511d5d270fac55c7278ab7d8aa6c2cddef91c2bb650aeeb1",
         "kafka:acl:generate": "sha256:ee4659401f4676bdc0e40b82b80ce75d0548e3b410c2a1b1ffd49216551a7e8d",
         "lint": "sha256:47526954ecdd9d1686ca23262e20e104b7e04075cc780ca0978403557d723dba",
-        "lint:scripts": "sha256:947e23cd145bf47440f0e801f06f0754d5f3254a435780359231a36d50122160",
+        "lint:scripts": "sha256:0cea1205e1102ae5380b9ed59afd9fb8137f56dd8453f4196b43a3046b337a68",
         "progress:check": "sha256:ab5a810b400430809cf78d779732045019dec0af950b48665a93cd33f10d1d80",
         "progress:report": "sha256:352b1e054bc1779878165f64ad42834a1ddebed72457773aaa8e8a5d86e96664",
         "recover:aggregation-campaign-logs": "sha256:c2e5ebb59addea1d0be46770a068daf2e6966ef599b4c91f1152a7a8c27fb39a",
@@ -120,6 +120,7 @@
         "test:ci-integration-split": "sha256:1478e392aeb8cb9b57e7942b8892cc661a0bd786b9942a392532f0984708e2a4",
         "test:ci-pg-connections": "sha256:2016ccf3d9faeeac8c23e461a30c7122cc5151d9892d727684d3e500f5a12e3b",
         "test:ci-pull-image": "sha256:d618ab887da4f542256ef3d0250893ee8033bfa3e3b3c75d9a05af45afcf8723",
+        "test:ci-temporal-cache": "sha256:870bc26b18f6bb4eea2243d0b8e584c44bce10117b571e976b78868ca8ed29af",
         "test:ci-trivy-db": "sha256:16ca2f79b1ba147f4a88294dad4ea32ba131e4440099155eda8fd66ec82be93c",
         "test:compose-ports": "sha256:bb6786a1a3cef801da4bb566befb7ef941f609f465ac4ab93d885f2740c90d39",
         "test:config-disclosure": "sha256:6b7f178cdaf617baa2ede7c47871d7ee70276f92dd2057bc14aab270db507b9b",
@@ -173,6 +174,7 @@
         "test:service-boundaries-lib": "sha256:c103d0181c29753e666160581e8efb6b04aa1e49e63ae73069685750923cba63",
         "test:service-env-turbo": "sha256:9f4cdbd18c20d9f5d91eb10eeded6a05750ee6790f67a7274961dc3de436937b",
         "test:session-statement-timeout": "sha256:dffece8b5ccaa3ad70728b9734d4f2f834e6adb25396024a0e54161853854c03",
+        "test:strict-query-parser-wiring": "sha256:096eed642093e4b3981c4642d48de186fcafa6287b8e3040127c15ddd96489bf",
         "test:supplier-privilege-split": "sha256:7ec77b5058dd00823f550e753c1717c154c52a3d1ab21491b8eccdde9d59507a",
         "test:telemetry-order": "sha256:02c587218e36a0bbe76ebcffbbfb6786ee4dda8ea4d0184849b678068ce3bb72",
         "test:tenant-index-order": "sha256:72318cabfa2341c559c280f64a4985e95e855bc7231d0717b0fe7871dd3b19ae",
@@ -281,6 +283,14 @@
       "ci": {
         "name": "Disclosure guard reaches every Jest project and Playwright spec (#452)",
         "run": "pnpm run test:disclosure-guard-wiring"
+      },
+      "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
+        "name": "Every HTTP service installs the strict query parser (FU-072)",
+        "run": "pnpm run test:strict-query-parser-wiring"
       },
       "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
     },
@@ -656,6 +666,14 @@
         }
       },
       "reason": "CI runner setup/cache action; local installed tooling is a prerequisite and Temporal timing belongs to C."
+    },
+    {
+      "job": "quality-unit",
+      "ci": {
+        "name": "Temporal specs share a cached test server",
+        "run": "pnpm run test:ci-temporal-cache"
+      },
+      "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
     },
     {
       "job": "quality-unit",

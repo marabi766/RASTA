@@ -1,5 +1,5 @@
+import { createTemporalTestEnvironment } from './temporal-environment';
 import { setTenantEligibilityFixture } from '@rasta/testing';
-import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Connection } from '@temporalio/client';
 import { Worker } from '@temporalio/worker';
 import { installTemporalRuntimeLogger } from '../src/temporal/runtime-logger';
@@ -12,12 +12,7 @@ import { asActor, cleanup, key, newPrisma, publishOffer, tenants, wire, testEnv 
 
 it('a cancelled order recovered after missed start completes once without creating a hold', async () => {
   installTemporalRuntimeLogger(testEnv());
-  const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-  const temporal = await TestWorkflowEnvironment.createTimeSkipping(
-    downloadDir
-      ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-      : undefined,
-  );
+  const temporal = await createTemporalTestEnvironment();
   // The Java time-skipping server does not expose namespace retention. Stub
   // that metadata only; all starts, workflow tasks and activities are real.
   const connect = jest.spyOn(Connection, 'connect').mockResolvedValue(temporal.connection);
