@@ -5,7 +5,7 @@ import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { isUniqueViolation } from '../ledger/ledger.repository';
-import { WalletRepository, type LockedWallet } from './wallet.repository';
+import { WalletRepository, type HoldPurpose, type LockedWallet } from './wallet.repository';
 import { assertSufficient, balancesFrom, type Balances } from './balances';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor } from '../shared/money';
@@ -279,7 +279,7 @@ export class WalletService {
    *
    * Idempotent by construction rather than by check. The partial unique index
    * `uq_wallet_hold_active_reference` permits one live hold per
-   * `(wallet, reference)`, so two concurrent retries of the same request both
+   * `(wallet, owner, reference, purpose)`, so two concurrent retries of the same request both
    * pass the pre-flight read below and exactly one survives the insert. The
    * pre-flight exists only to return the existing hold instead of an error,
    * which is what a retrying client should see.
@@ -290,12 +290,17 @@ export class WalletService {
       wallet: LockedWallet;
       amountMinor: bigint;
       reference: string;
-      referenceType: string;
+      referenceType: HoldPurpose;
       transactionId: string;
       placedBy: string;
     },
   ): Promise<{ holdId: string; journalId: string | null; balances: Balances; replayed: boolean }> {
-    const existing = await this.repository.findActiveHold(tx, input.wallet.id, input.reference);
+    const existing = await this.repository.findActiveHold(tx, {
+      walletId: input.wallet.id,
+      organizationId: input.wallet.organizationId,
+      reference: input.reference,
+      referenceType: input.referenceType,
+    });
     if (existing) {
       if (existing.amountMinor !== input.amountMinor) {
         // Same obligation, different amount. Refusing is the only safe answer:
@@ -432,6 +437,7 @@ export class WalletService {
     input: {
       wallet: LockedWallet;
       holdId: string;
+      referenceType: HoldPurpose;
       transactionId: string;
       note: string;
       resolvedBy: string;
@@ -439,6 +445,15 @@ export class WalletService {
   ): Promise<{ journalId: string; amountMinor: bigint; balances: Balances } | null> {
     const hold = await this.repository.findHoldById(tx, input.holdId);
     if (!hold) throw RastaError.notFound('WalletHold', input.holdId);
+    // The journal below is the wallet's and for this purpose, whatever the hold
+    // says: refused before anything is built from a hold that is not that.
+    if (
+      hold.walletId !== input.wallet.id ||
+      hold.organizationId !== input.wallet.organizationId ||
+      hold.referenceType !== input.referenceType
+    ) {
+      throw RastaError.internal('A refund names a hold of another wallet or purpose');
+    }
     // Already resolved — by a concurrent request, or by a retry of this one.
     // Reporting "nothing to do" rather than throwing keeps the caller
     // idempotent without it having to distinguish the two.

@@ -80,8 +80,8 @@ describe('asset-service publishes every Zod-validated body and query', () => {
     await app.close();
   });
 
-  // Query strings are published by #711's `ValidatedQuery` (`parametersOf`), held to their
-  // validators by document.spec.ts; the converter is not applied to this service (PM, #710 sync).
+  // Query strings and request bodies use the same converter (FU-120); document.spec.ts
+  // holds the parameters published from `ValidatedQuery` to their validators.
   it('publishes each route body from its schema, with no exception', () => {
     const inputs = zodRouteInputs(app).filter((input) => input.kind === 'body');
     expect(inputs.length).toBeGreaterThan(0);
@@ -91,11 +91,15 @@ describe('asset-service publishes every Zod-validated body and query', () => {
   it('publishes `q` without the bounds its validator applies only after `.trim()` (FU-120)', () => {
     // `z.string().trim().min(1).max(100)`: the bounds hold for the trimmed text, not the raw
     // query a JSON Schema validator checks, so publishing them would refuse what the runtime
-    // accepts. Fails if the converter (which still publishes them) writes asset queries again.
+    // accepts. The omission marker explains why those bounds are absent.
     const q = document.paths['/v1/assets']?.get?.parameters?.find(
       (p) => 'in' in p && p.in === 'query' && p.name === 'q',
     ) as { schema?: Record<string, unknown> } | undefined;
-    expect(q?.schema).toEqual({ type: 'string' });
+    expect(q?.schema).toEqual({
+      type: 'string',
+      description:
+        'Constraints after a value-changing step are omitted; validation applies them to the transformed value.',
+    });
     expect(q?.schema).not.toHaveProperty('minLength');
     expect(q?.schema).not.toHaveProperty('maxLength');
   });

@@ -24,6 +24,45 @@ const accepted = (body: unknown): AuditCorrectionCommand => {
 };
 
 describe('auditCorrectionCommandSchema', () => {
+  it.each([
+    '2026-09-15T12:00:00.000Z',
+    '2026-09-15T12:00Z',
+    '2026-09-15T15:30:00+03:30',
+    '2026-09-15T15:30:00+0330',
+    '2026-09-15T00:00:00-12:00',
+    '2026-09-15T12:00:00.123456Z',
+    '2024-02-29T12:00:00Z',
+    '2026-09-15T14:00:00+14:00',
+  ])('preserves the canonical instant and digest for %s', (occurredAt) => {
+    const command = accepted({ ...VALID, occurredAt });
+    const canonical = new Date(occurredAt).toISOString();
+    expect(command.occurredAt).toBe(canonical);
+    expect(hashCorrectionCommand(command)).toBe(
+      hashCorrectionCommand(accepted({ ...VALID, occurredAt: canonical })),
+    );
+  });
+
+  it.each([
+    'yesterday',
+    '',
+    '2026-02-29T12:00:00Z',
+    '2026-09-15T12:00:00',
+    '2026-09-15',
+    '2026-09-15T12:00:00+14:01',
+    '2026-09-15T12:00:00+24:00',
+    '2026-09-15T12:00:60Z',
+    '2026-09-15T12:00:00Z ',
+    null,
+    undefined,
+    0,
+    true,
+    [],
+    {},
+    new Date('2026-09-15T12:00:00Z'),
+  ])('refuses an invalid timestamp (%p) before conversion', (occurredAt) => {
+    expect(parse({ ...VALID, occurredAt }).success).toBe(false);
+  });
+
   it('accepts a minimal valid command', () => {
     expect(accepted(VALID)).toEqual(VALID);
   });

@@ -20,9 +20,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           }
@@ -307,9 +305,7 @@
                   "name": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 200,
-                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the owner’s people; never on an event."
+                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the owner’s people; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "location": {
                     "type": "object",
@@ -494,9 +490,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -1005,7 +999,7 @@
                     },
                     "minItems": 1,
                     "maxItems": 50,
-                    "description": "1 to 50 lines, each a distinct stock item of one warehouse (422 LINES_SPAN_WAREHOUSES). All or nothing: one line short of available stock reserves none (422 INSUFFICIENT_AVAILABLE_STOCK). One reservation per line."
+                    "description": "1 to 50 lines, each a distinct stock item of one warehouse (422 LINES_SPAN_WAREHOUSES). All or nothing: one line short of available stock reserves none (422 INSUFFICIENT_AVAILABLE_STOCK). One reservation per line. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["lines"],
@@ -1814,9 +1808,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -1988,9 +1980,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -2896,7 +2886,7 @@
                     "type": "integer",
                     "minimum": -2147483647,
                     "maximum": 2147483647,
-                    "description": "A signed whole number, never zero: positive adds to on hand, negative removes. On hand may not fall below what is reserved (422 ON_HAND_WOULD_BE_NEGATIVE)."
+                    "description": "A signed whole number, never zero: positive adds to on hand, negative removes. On hand may not fall below what is reserved (422 ON_HAND_WOULD_BE_NEGATIVE). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "sourceReference": {
                     "type": "string",
@@ -2936,9 +2926,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -3322,16 +3310,11 @@
                         "carrierName": {
                           "type": "string",
                           "pattern": "^[^\\p{Bidi_Control}]*$",
-                          "minLength": 1,
-                          "maxLength": 200,
-                          "description": "Who carries this leg: trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the shipment’s readers; never on an event (Q-115)."
+                          "description": "Who carries this leg: trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the shipment’s readers; never on an event (Q-115). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "carrierReference": {
                           "type": "string",
-                          "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Bidi_Control}]*$",
-                          "minLength": 1,
-                          "maxLength": 100,
-                          "description": "Optional: the carrier’s own reference (a waybill number). Never on an event."
+                          "description": "Optional: the carrier’s own reference (a waybill number). Never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": ["carrierName"],
@@ -4160,9 +4143,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -4850,21 +4831,17 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "carrierName": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 200,
-                    "description": "Who carries the goods back: trimmed, 1 to 200 characters. Shown to the shipment’s readers; never on an event."
+                    "description": "Who carries the goods back: trimmed, 1 to 200 characters. Shown to the shipment’s readers; never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "carrierReference": {
                     "type": "string",
-                    "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "description": "Optional: the carrier’s own reference. Needs a carrierName. Never on an event."
+                    "description": "Optional: the carrier’s own reference. Needs a carrierName. Never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": [
@@ -5967,9 +5944,7 @@
                   "note": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 1000,
-                    "description": "Optional: what the inspector found, in words. Trimmed, 1 to 1000 characters. Shown to the return shipment’s readers; kept here and never on an event."
+                    "description": "Optional: what the inspector found, in words. Trimmed, 1 to 1000 characters. Shown to the return shipment’s readers; kept here and never on an event. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "reportDocumentId": {
                     "type": "string",
@@ -6403,7 +6378,7 @@
                     },
                     "minItems": 0,
                     "maxItems": 300,
-                    "description": "Per line, its units by disposition; for every line the quantities add up to exactly what was received (a line that received none needs no row). Empty only when nothing arrived at all, and then only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED allows it (Q-133). This records an outcome for the goods. It moves no stock and asks for no money."
+                    "description": "Per line, its units by disposition; for every line the quantities add up to exactly what was received (a line that received none needs no row). Empty only when nothing arrived at all, and then only where INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED allows it (Q-133). This records an outcome for the goods. It moves no stock and asks for no money. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["dispositions"],

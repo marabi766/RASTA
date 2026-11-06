@@ -108,6 +108,42 @@ describe('AuditTargetLookupService', () => {
 });
 
 describe('auditTargetLookupQuerySchema', () => {
+  it.each([
+    '2026-09-15T12:00:00.000Z',
+    '2026-09-15T12:00Z',
+    '2026-09-15T15:30:00+03:30',
+    '2026-09-15T15:30:00+0330',
+    '2026-09-15T00:00:00-12:00',
+    '2026-09-15T12:00:00.123456Z',
+    '2024-02-29T12:00:00Z',
+    '2026-09-15T14:00:00+14:00',
+  ])('preserves the Date instant for %s', (occurredAt) => {
+    const parsed = auditTargetLookupQuerySchema.parse({ occurredAt }).occurredAt;
+    expect(parsed).toBeInstanceOf(Date);
+    expect(parsed.getTime()).toBe(new Date(occurredAt).getTime());
+  });
+
+  it.each([
+    'yesterday',
+    '',
+    '2026-02-29T12:00:00Z',
+    '2026-09-15T12:00:00',
+    '2026-09-15',
+    '2026-09-15T12:00:00+14:01',
+    '2026-09-15T12:00:00+24:00',
+    '2026-09-15T12:00:60Z',
+    '2026-09-15T12:00:00Z ',
+    null,
+    undefined,
+    0,
+    true,
+    [],
+    {},
+    new Date('2026-09-15T12:00:00Z'),
+  ])('refuses an invalid timestamp (%p) before conversion', (occurredAt) => {
+    expect(auditTargetLookupQuerySchema.safeParse({ occurredAt }).success).toBe(false);
+  });
+
   it('requires the instant and refuses anything else', () => {
     expect(auditTargetLookupQuerySchema.safeParse({}).success).toBe(false);
     expect(auditTargetLookupQuerySchema.safeParse({ occurredAt: 'yesterday' }).success).toBe(false);

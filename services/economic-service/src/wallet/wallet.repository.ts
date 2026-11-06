@@ -6,6 +6,12 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import { balancesFrom, type Balances } from './balances';
 
 /**
+ * What a hold this service places is for: `wallet_hold.reference_type`. The
+ * reference is a transaction's id for one, a payment intent's for the other.
+ */
+export type HoldPurpose = 'TRANSACTION' | 'PAYMENT_REFUND';
+
+/**
  * Wallet persistence, and the concurrency control the whole domain rests on.
  *
  * Two methods here are the reason this file exists rather than the queries
@@ -293,9 +299,35 @@ export class WalletRepository {
     return result.count;
   }
 
-  findActiveHold(tx: ExtendedPrismaClient, walletId: string, reference: string) {
+  /**
+   * The ACTIVE hold of one obligation: for this purpose, this organization's,
+   * on a wallet of its own, as `transaction_holds` asks in SQL. `reference` is
+   * free text and unique only per wallet, so a hold for something else or of
+   * someone else may name the same id; it is not this obligation's, and neither
+   * settles, refunds nor replays as it (#762 r2, F2). Every part is required, so
+   * no caller can ask a looser question.
+   */
+  findActiveHold(
+    tx: ExtendedPrismaClient,
+    key: {
+      walletId: string;
+      organizationId: string;
+      reference: string;
+      referenceType: HoldPurpose;
+    },
+  ) {
+    const { walletId, organizationId, reference, referenceType } = key;
     return runUnscoped('a hold lookup happens inside a cross-tenant settlement', () =>
-      tx.walletHold.findFirst({ where: { walletId, reference, status: 'ACTIVE' } }),
+      tx.walletHold.findFirst({
+        where: {
+          walletId,
+          organizationId,
+          reference,
+          referenceType,
+          status: 'ACTIVE',
+          wallet: { organizationId },
+        },
+      }),
     );
   }
 

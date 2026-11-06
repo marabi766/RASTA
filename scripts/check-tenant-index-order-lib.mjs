@@ -530,8 +530,8 @@ export const EXEMPTIONS = {
       reason: `one leg per (transaction, role) — an invariant of one transaction; ${perParentUnique('transaction_id')}; ${PARENT_LOAD}`,
     },
     uq_wallet_hold_active_reference: {
-      index: 'wallet_hold (wallet_id, reference)',
-      reason: `one live hold per (wallet, reference) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
+      index: 'wallet_hold (wallet_id, organization_id, reference, reference_type)',
+      reason: `one live hold per (wallet, owner, reference, purpose) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
     },
   },
 };
