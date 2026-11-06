@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
@@ -15,6 +17,28 @@ import {
 } from './lint-extensions.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
+// Never let a hook's repository/index or command-scope config escape into fixtures.
+function fixtureGitEnv() {
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+}
+
+/** NUL records preserve Git paths verbatim, including names Git normally quotes. */
+function trackedFiles(cwd = ROOT) {
+  const result = spawnSync('git', ['ls-files', '-z'], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    env: fixtureGitEnv(),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout === '' || result.stdout.endsWith('\0'), 'incomplete Git inventory');
+  return result.stdout.split('\0').filter(Boolean);
+}
+
 const linter = new Linter({ cwd: ROOT });
 /** Findings of the boundary alone, for `code` as the file `path` (repository-relative). */
 const check = (code, { path = 'apps/web/src/server/fixture.ts', playwright = false } = {}) => {
@@ -588,13 +612,7 @@ const WORKSPACE_OF = (file) =>
   (file.startsWith('tests/e2e/') ? 'tests/e2e' : '.');
 
 test('the boundary is on for every in-scope file, in every workspace, and the lint scripts reach them', () => {
-  const tracked = spawnSync('git', ['ls-files'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  assert.equal(tracked.status, 0, tracked.stderr);
-  const files = tracked.stdout.split('\n').filter(inScope);
+  const files = trackedFiles().filter(inScope);
   assert.ok(files.length > 1000, `scope found only ${files.length} files`);
   const byWorkspace = Map.groupBy(files, WORKSPACE_OF);
   const problems = [];
@@ -639,24 +657,46 @@ test('the boundary is on for every in-scope file, in every workspace, and the li
   assert.deepEqual(problems, []);
 });
 
-const DIRECTIVE =
-  /(?:\/\/|\/\*)\s*eslint(?:-disable(?:-next-line|-line)?|-enable)?(?=\s|\*\/|$)([^\n]*)/g;
-/**
- * Every inline directive in `files` that could switch the boundary off: a blanket
- * disable, or one naming an internal rule. Every executable extension is read
- * (FU-074 r2 F1: `.mts`/`.cts`/`.jsx` were skipped, and ESLint honours them).
- */
+const PINNED_FILE = 'apps/web/e2e/action-outcome.ts';
+const PINNED_DIRECTIVE = `${PINNED_FILE}:108:8 Line eslint-disable-next-line: internal/raw-http`;
+
+const DIRECTIVE = /^\s*eslint(-disable(?:-next-line|-line)?|-enable)?(?=\s|$)([\s\S]*)/;
+/** Parse real comments, including their complete bodies; syntax failures refuse. */
 function transportDirectives(files, read) {
   const found = [];
   for (const file of files.filter(isExecutable)) {
-    for (const match of read(file).matchAll(DIRECTIVE)) {
-      const rules = match[1]
-        .replace(/\*\/.*$/, '')
-        .split('--')[0]
-        .trim();
-      // A blanket disable would switch the boundary off with everything else.
-      if (rules === '' || /internal\//.test(rules))
-        found.push(`${file}: ${rules || '(all rules)'}`);
+    let comments;
+    try {
+      comments = tseslint.parser.parseForESLint(read(file), {
+        filePath: file,
+        project: false,
+        projectService: false,
+        sourceType: 'module',
+        ecmaFeatures: { jsx: true },
+        comment: true,
+      }).ast.comments;
+      assert.ok(Array.isArray(comments), 'parser did not classify comments');
+    } catch {
+      found.push(`${file}: unclassifiable source`);
+      continue;
+    }
+    for (const comment of comments) {
+      // Also refuse directive-shaped JSDoc; never treat a nested-looking opener
+      // or a quoted comment delimiter as a separate comment.
+      const match = comment.value.replace(/^\s*\*/gm, '').match(DIRECTIVE);
+      if (!match) continue;
+      const rules = match[2].split(/\s--\s/)[0].trim();
+      // Only a simple list of unrelated rule names is proven safe. General
+      // inline configuration (quoted/escaped keys, values, etc.) is refused.
+      const names = rules.split(/\s*,\s*/);
+      if (
+        file === PINNED_FILE ||
+        !match[1] ||
+        names.some((name) => !/^[@\w/-]+$/.test(name) || name.startsWith('internal/'))
+      )
+        found.push(
+          `${file}:${comment.loc.start.line}:${comment.loc.start.column} ${comment.type} eslint${match[1] ?? ''}: ${rules || '(all rules)'}`,
+        );
     }
   }
   return found;
@@ -664,21 +704,55 @@ function transportDirectives(files, read) {
 
 test('no inline directive switches the transport rules off, except the one pinned browser flow', () => {
   // Every tracked file, not a list of top-level directories.
-  const tracked = spawnSync('git', ['ls-files'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  assert.equal(tracked.status, 0, tracked.stderr);
-  const found = transportDirectives(tracked.stdout.split('\n').filter(Boolean), (file) =>
+  const found = transportDirectives(trackedFiles(), (file) =>
     readFileSync(`${ROOT}${file}`, 'utf8'),
   );
   assert.deepEqual(found, [
     // In the page, not the runner: the browser's own same-origin form post (Q-155 scope),
     // the one transport every spec that proves an action's outcome uses (PR #541 r1 F1).
-    'apps/web/e2e/action-outcome.ts: internal/raw-http',
+    PINNED_DIRECTIVE,
   ]);
 });
+
+// Compare with the real source's inventory too: these regressions must reject
+// broadening, relocation and additions even with the old file/rule-only record.
+for (const [name, mutate] of [
+  [
+    'file-wide disable',
+    (source, directive) => source.replace(directive, `/* ${LINT}-disable internal/raw-http */`),
+  ],
+  ['moved directive', (source, directive) => source.replace(directive, `\n        ${directive}`)],
+  [
+    'duplicate directive',
+    (source, directive) => source.replace(directive, `${directive}\n        ${directive}`),
+  ],
+  ['extra directive', (source) => `${source}\n// ${LINT}-disable-next-line no-console\n`],
+  [
+    'block next-line directive',
+    (source, directive) =>
+      source.replace(directive, `/* ${LINT}-disable-next-line internal/raw-http */`),
+  ],
+  [
+    'same-line directive',
+    (source, directive) => source.replace(directive, `// ${LINT}-disable-line internal/raw-http`),
+  ],
+  ['moved column', (source, directive) => source.replace(directive, ` ${directive}`)],
+  [
+    'different rule',
+    (source, directive) =>
+      source.replace(directive, `// ${LINT}-disable-next-line internal/transport`),
+  ],
+]) {
+  test(`the browser-flow pin rejects a ${name}`, () => {
+    const source = readFileSync(`${ROOT}${PINNED_FILE}`, 'utf8');
+    const directive = `// ${LINT}-disable-next-line internal/raw-http -- browser form replay`;
+    assert.ok(source.includes(directive));
+    assert.notDeepEqual(
+      transportDirectives([PINNED_FILE], () => mutate(source, directive)),
+      transportDirectives([PINNED_FILE], () => source),
+    );
+  });
+}
 
 // FU-074 r2 F1: one file per entry-point family, in every executable extension.
 const FAMILIES = [
@@ -719,4 +793,89 @@ test('the directive scan and the scope reach every extension in every entry-poin
         );
       }
     }
+});
+
+// FU-166 F1: multiline bodies cannot hide a rule or forge the pinned exception.
+test('parsed comments hold multiline directives and refuse unclassifiable source', () => {
+  for (const family of FAMILIES)
+    for (const ext of EXECUTABLE_EXTENSIONS) {
+      const file = `${family}.${ext}`;
+      for (const newline of ['\n', '\r\n', '\r'])
+        for (const directive of [
+          `/* ${LINT} no-console: off,${newline} "internal/raw-http": off */`,
+          `/* ${LINT}-disable no-console,${newline} internal/raw-http */`,
+          `/** ${LINT}-disable no-console,${newline} * internal/raw-http */`,
+          `/* ${LINT} no-console: off,${newline} /* "internal/raw-http": off */`,
+          `/* ${LINT} "internal\\u002fraw-http": off */`,
+          `/* ${LINT}-disable "internal/raw-http" */`,
+        ])
+          assert.equal(transportDirectives([file], () => directive).length, 1, directive);
+      for (const text of [
+        `const fake = ${JSON.stringify(`/* ${LINT}-disable internal/raw-http */`)};`,
+        `/* prose\n // ${LINT}-disable internal/raw-http */`,
+        `/* ${LINT}-disable no-console,\n @typescript-eslint/no-explicit-any */`,
+      ])
+        assert.deepEqual(
+          transportDirectives([file], () => text),
+          [],
+          text,
+        );
+      assert.match(transportDirectives([file], () => '/* unterminated')[0], /unclassifiable/);
+      assert.match(
+        transportDirectives([file], () => {
+          throw Error('unreadable');
+        })[0],
+        /unclassifiable/,
+      );
+    }
+});
+
+// FU-166 inventory sibling: quoted paths must reach both repository scans.
+test('tracked inventory preserves quoted and multiline filenames for the directive scan', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'fu166-inventory-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Model a Git hook without pointing at any shared repository or index.
+  const redirects = {
+    GIT_DIR: join(root, 'redirect', '.git'),
+    GIT_WORK_TREE: join(root, 'redirect'),
+    GIT_INDEX_FILE: join(root, 'redirect', 'index'),
+    GIT_OBJECT_DIRECTORY: join(root, 'redirect', 'objects'),
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.bare',
+    GIT_CONFIG_VALUE_0: 'true',
+  };
+  const previous = Object.fromEntries(Object.keys(redirects).map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, redirects);
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8', env: fixtureGitEnv() });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git('init', '--quiet');
+  git('config', 'core.quotePath', 'true');
+  mkdirSync(join(root, 'scripts'));
+  const names = ['fu166-café'];
+  if (process.platform !== 'win32') names.push('fu166-line\nbreak', 'fu166-quote"back\\slash');
+  const files = names.flatMap((name) =>
+    EXECUTABLE_EXTENSIONS.map((ext) => `scripts/${name}.${ext}`),
+  );
+  for (const file of files)
+    writeFileSync(join(root, file), `/* ${LINT} no-console: off,\n "internal/raw-http": off */`);
+  git('add', '--', '.');
+  assert.deepEqual(trackedFiles(root).sort(), files.sort());
+  assert.ok(files.every(inScope));
+  const findings = transportDirectives(trackedFiles(root), (file) =>
+    readFileSync(join(root, file), 'utf8'),
+  );
+  assert.equal(findings.length, files.length);
+  for (const file of files)
+    assert.ok(
+      findings.some((finding) => finding.startsWith(`${file}:`)),
+      file,
+    );
 });

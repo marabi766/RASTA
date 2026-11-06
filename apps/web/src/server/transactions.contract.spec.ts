@@ -316,7 +316,8 @@ describe('the answer the portal reads', () => {
     '`%s` is always sent, so the portal requires it — nullable exactly when the service says `| null`',
     (field) => {
       expect(viewFields.has(field)).toBe(true);
-      expect(shape[field]!.isOptional()).toBe(false);
+      // The one exception: absent from an older service, it reads as not proven, in words.
+      expect(shape[field]!.isOptional()).toBe(field === 'heldProven');
       expect(shape[field]!.isNullable()).toBe(viewFields.get(field));
       // Built for every row, not on some paths only.
       expect(views).toMatch(new RegExp(`\\b${field}:`));

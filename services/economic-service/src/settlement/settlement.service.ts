@@ -244,6 +244,7 @@ export class SettlementService {
     assertSettlementReady(transactionId, {
       settlementAuthorised: transaction.settlementAuthorised,
       fundsHeld: transaction.fundsHeld || hold !== null,
+      settlementBarred: transaction.settlementBarred,
     });
 
     // With no escrow behind it — the maintenance obligation of ADR-032 — the
