@@ -747,6 +747,7 @@ for (const [name, recorded] of Object.entries({
 const PATCHES = {
   'order-saga-durable-rollover-v1': 1,
   'dispute-settle-resumes-order': 2,
+  'dispute-release-durable-wait-v1': 3,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -782,9 +783,11 @@ const WORKFLOW_IMPORTS = new Set(
 // The SDK's other ways to a marker, which the gate refuses, and what reaches them unseen.
 const REFUSED_NAMES =
   'proxyLocalActivities scheduleLocalActivity patchInternal __TEMPORAL_ACTIVATOR__ globalThis eval Function';
-// `condition(fn, 0)` records `__sdk_internal_patch_number:1` (SDK workflow.js:901). This
-// is the one timeout proven non-zero: a client sends hours of at least 1 (env.ts:174).
+// `condition(fn, 0)` records `__sdk_internal_patch_number:1` (SDK workflow.js:901). These
+// are the timeouts proven non-zero: a client sends hours of at least 1 (env.ts:174), and
+// the release backoff is never under a minute, whatever its round (workflows.spec.ts).
 const RECHECK = '(input.recheckIntervalHours ?? DEFAULT_RECHECK_HOURS) * HOUR';
+const RELEASE_BACKOFF = 'releaseBackoffMs(releaseRounds)';
 
 /**
  * The compiler's own binder and checker over this one file: a name means what
@@ -867,7 +870,8 @@ function patchIdsIn(sources) {
           ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node;
         assert.ok(isCall, 'unscannable use of condition');
         const [, timeout, ...others] = parent.arguments;
-        const proven = constInitializer(timeout, checker)?.getText() === RECHECK;
+        const initializer = constInitializer(timeout, checker)?.getText();
+        const proven = initializer === RECHECK || initializer === RELEASE_BACKOFF;
         assert.ok(others.length === 0 && (!timeout || proven), 'condition timeout may be zero');
         return;
       }
@@ -921,7 +925,13 @@ test('the source scan refuses what it cannot read, so a marker cannot hide from 
     ['one', 'two', 'inner'],
   );
   assert.deepEqual(
-    [...patchIdsIn(['condition(fn);', `const ms = ${RECHECK};\ncondition(fn, ms);`])],
+    [
+      ...patchIdsIn([
+        'condition(fn);',
+        `const ms = ${RECHECK};\ncondition(fn, ms);`,
+        `const ms = ${RELEASE_BACKOFF};\ncondition(fn, ms);`,
+      ]),
+    ],
     [],
   );
   // A parameter default does not see the body's binding at run time, nor here.
@@ -965,6 +975,8 @@ test('the source scan refuses what it cannot read, so a marker cannot hide from 
     'const ms = 0;\ncondition(fn, ms);',
     `let ms = ${RECHECK};\ncondition(fn, ms);`,
     `const ms = Math.max(0, ${RECHECK});\ncondition(fn, ms);`,
+    'const ms = releaseBackoffMs(round) - HOUR;\ncondition(fn, ms);',
+    `let ms = ${RELEASE_BACKOFF};\ncondition(fn, ms);`,
     `const ms = ${RECHECK};\ncondition(fn, ms, opts);`,
   ]) {
     assert.throws(() => patchIdsIn([source]), assert.AssertionError, source);
@@ -1192,6 +1204,7 @@ const RESUME_FIELDS = {
   nextReminderAt: 1,
   activitySequence: 1,
   reminderDue: 2,
+  releaseRounds: 3,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1336,28 +1349,33 @@ for (const [name, edits, reason = /cannot enumerate the saga (input|resume)/] of
   });
 }
 
-// The SDK's own marker, not this file's idea of one: a saga run at #625's head
-// (`dfa48a55`) against Temporal's test server, saved with `historyToJSON`.
-test('a real captured history with the dispute marker requires protocol 2', () => {
-  const real = JSON.parse(
-    readFileSync(
-      new URL(
-        'temporal/__fixtures__/order-saga-pre-fu080-release-refused.history.json',
-        SAGA_SOURCE,
-      ),
-    ),
-  );
-  const scenario = withHistory(real);
-  scenario['workflow count'] = { stdout: { count: '1' } };
-  scenario['workflow list'] = { stdout: [execution('A')] };
-  const queue = real.events[0].workflowExecutionStartedEventAttributes.taskQueue.name;
-  scenario['workflow describe order-A'].stdout.executionConfig.taskQueue.name = queue;
-  const settings = { ...SETTINGS, MARKETPLACE_TEMPORAL_TASK_QUEUE: queue };
-  assert.equal(run(scenario, { settings, ...targetOf(2) }).status, 0);
-  const below = run(scenario, { settings, ...targetOf(1) });
-  assert.equal(below.status, 1);
-  assert.match(below.stderr, /requires saga protocol 2; incompatible/);
+test('a continuation rolled over in the release wait needs protocol 3', () => {
+  const rolled = withHistory(history({ resume: { activitySequence: 1, releaseRounds: 2 } }));
+  assert.match(run(rolled, targetOf(2)).stderr, /requires saga protocol 3; incompatible/);
+  assert.equal(run(rolled, targetOf(3)).status, 0);
 });
+
+// The SDK's own markers, not this file's idea of them.
+for (const [name, required] of [
+  ['pre-fu080-release-refused', 2],
+  ['fu080-release-wait', 3],
+]) {
+  test(`a real captured history (${name}) requires protocol ${required}`, () => {
+    const real = JSON.parse(
+      readFileSync(new URL(`temporal/__fixtures__/order-saga-${name}.history.json`, SAGA_SOURCE)),
+    );
+    const scenario = withHistory(real);
+    scenario['workflow count'] = { stdout: { count: '1' } };
+    scenario['workflow list'] = { stdout: [execution('A')] };
+    const queue = real.events[0].workflowExecutionStartedEventAttributes.taskQueue.name;
+    scenario['workflow describe order-A'].stdout.executionConfig.taskQueue.name = queue;
+    const settings = { ...SETTINGS, MARKETPLACE_TEMPORAL_TASK_QUEUE: queue };
+    assert.equal(run(scenario, { settings, ...targetOf(required) }).status, 0);
+    const below = run(scenario, { settings, ...targetOf(required - 1) });
+    assert.equal(below.status, 1);
+    assert.match(below.stderr, new RegExp(`requires saga protocol ${required}; incompatible`));
+  });
+}
 
 test('legacy-only histories accept an explicitly declared legacy target', () => {
   assert.equal(

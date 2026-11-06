@@ -26,6 +26,7 @@ import {
   url,
   liveMembers,
   waitGone,
+  waitForPidFile,
   WEB,
   type Result,
 } from './test/build-scripts';
@@ -699,7 +700,7 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
   // r4 F1: a process the config starts in the build process (not in its workers) that keeps
   // writing into `.next` and records its pid; it never exits by itself.
   const WRITER = `import { spawn } from 'node:child_process';\nif (!process.env.IS_NEXT_WORKER && !globalThis.__writer) {\n  globalThis.__writer = true;\n  spawn(process.execPath, ['-e', ${JSON.stringify(
-    "const fs = require('fs'); fs.writeFileSync('writer.pid', String(process.pid)); setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-writer', String(Date.now())); }, 100);",
+    "const fs = require('fs'); fs.writeFileSync('writer.pid.tmp', String(process.pid)); fs.renameSync('writer.pid.tmp', 'writer.pid'); setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-writer', String(Date.now())); }, 100);",
   )}], { stdio: 'ignore' }).unref();\n}\n`;
   let fault: string;
   const FIXTURES: Fixture[] = [
@@ -801,11 +802,11 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
     );
     const done = await Promise.all(
       drivers.map((d, i) =>
-        d.done.then((result) => {
+        d.done.then(async (result) => {
           const writerFile = join(dirs[FIXTURES[i].name], 'writer.pid');
           if (existsSync(writerFile)) {
             liveAtReturn[FIXTURES[i].name] = liveMembers([
-              Number(readFileSync(writerFile, 'utf8')),
+              await waitForPidFile(writerFile, false, 0),
             ])[0];
           }
           return result;
@@ -938,7 +939,7 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
       expect(problems).toEqual([
         'next build: a process it started was still running after it exited; refusing',
       ]);
-      const writer = Number(readFileSync(join(dirs[name], 'writer.pid'), 'utf8'));
+      const writer = await waitForPidFile(join(dirs[name], 'writer.pid'), false, 0);
       // The case is not vacuous: the writer did write into `.next` during the build ...
       expect(existsSync(join(dirs[name], '.next/from-writer'))).toBe(true);
       // ... and it was stopped and awaited before the wrapper returned and released the lock:
@@ -1047,10 +1048,7 @@ describe('two invocations in one package (r3 F1: real `next build`)', () => {
       handshakeMs: 20_000,
     }).done;
     expect(a.signal).toBe('SIGKILL');
-    const { pid, capturePath } = JSON.parse(readFileSync(record, 'utf8')) as {
-      pid: number;
-      capturePath: string;
-    };
+    const { pid, capturePath } = await waitForPidFile(record, true, 0);
     // The orphan is alive, waiting for a handshake that cannot come; the lock names a dead
     // wrapper and no group, so nothing is in progress and B takes the package over at once.
     expect(alive(pid)).toBe(true);
