@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { inspect } from 'node:util';
@@ -1570,19 +1570,15 @@ test('psql-prisma-url passes on the flags that can hold nothing, and no URL opti
 });
 
 test('no document hands a database URL straight to psql (FU-128, FU-104)', (t) => {
-  const documents = readdirSync(join(ROOT, 'docs'), { recursive: true })
-    .map(String)
-    .filter((name) => name.endsWith('.md'))
-    .map((name) => join(ROOT, 'docs', name));
+  // Git's file lists (the inventory), never a directory walk (FU-112).
+  const documents = authoredFiles(join(ROOT, 'docs')).filter((file) => file.endsWith('.md'));
   assert.ok(documents.length > 10, 'the walk found the documents');
   // A down.sql's header tells the operator how to run it.
-  const downFiles = readdirSync(join(ROOT, 'services')).flatMap((service) => {
-    const dir = join(ROOT, 'services', service, 'prisma', 'migrations');
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir)
-      .map((migration) => join(dir, migration, 'down.sql'))
-      .filter((file) => existsSync(file));
-  });
+  const downFiles = authoredFiles(join(ROOT, 'services')).filter((file) =>
+    /^[^/]+\/prisma\/migrations\/[^/]+\/down\.sql$/.test(
+      relative(join(ROOT, 'services'), file).split(sep).join('/'),
+    ),
+  );
   assert.ok(downFiles.length > 10, 'the walk found the down.sql files');
   const { seen, run } = recordingPsqlCommand(t);
   let commands = 0;
