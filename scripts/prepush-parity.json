@@ -174,6 +174,7 @@
         "test:service-boundaries-lib": "sha256:c103d0181c29753e666160581e8efb6b04aa1e49e63ae73069685750923cba63",
         "test:service-env-turbo": "sha256:9f4cdbd18c20d9f5d91eb10eeded6a05750ee6790f67a7274961dc3de436937b",
         "test:session-statement-timeout": "sha256:dffece8b5ccaa3ad70728b9734d4f2f834e6adb25396024a0e54161853854c03",
+        "test:strict-query-parser-wiring": "sha256:096eed642093e4b3981c4642d48de186fcafa6287b8e3040127c15ddd96489bf",
         "test:supplier-privilege-split": "sha256:7ec77b5058dd00823f550e753c1717c154c52a3d1ab21491b8eccdde9d59507a",
         "test:telemetry-order": "sha256:02c587218e36a0bbe76ebcffbbfb6786ee4dda8ea4d0184849b678068ce3bb72",
         "test:tenant-index-order": "sha256:72318cabfa2341c559c280f64a4985e95e855bc7231d0717b0fe7871dd3b19ae",
@@ -282,6 +283,14 @@
       "ci": {
         "name": "Disclosure guard reaches every Jest project and Playwright spec (#452)",
         "run": "pnpm run test:disclosure-guard-wiring"
+      },
+      "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
+        "name": "Every HTTP service installs the strict query parser (FU-072)",
+        "run": "pnpm run test:strict-query-parser-wiring"
       },
       "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
     },

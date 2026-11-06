@@ -59,11 +59,12 @@
  * script and shell.
  */
 import { spawnSync } from 'node:child_process';
-import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { workspaceManifestFiles } from './workspace-roots-lib.mjs';
 
 export const AGGREGATE_JOB = 'integration';
 export const AGGREGATE_NAME = 'Integration and security tests';
@@ -99,39 +100,10 @@ export { INTEGRATION_PARTITIONS };
 
 /** Read every configured workspace root; never infer membership from the registry. */
 export function discoverIntegrationPackages(root = ROOT) {
-  const patterns = parseYaml(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8'))?.packages;
-  if (!Array.isArray(patterns) || patterns.length === 0) {
-    throw new Error('pnpm-workspace.yaml must declare nonempty packages');
-  }
-  for (const pattern of patterns) {
-    if (
-      typeof pattern !== 'string' ||
-      pattern.replace(/^!/, '').length === 0 ||
-      isAbsolute(pattern.replace(/^!/, '')) ||
-      pattern.includes('..') ||
-      pattern.includes('\\')
-    ) {
-      throw new Error('workspace package patterns must be relative globs inside the repository');
-    }
-  }
-  const manifests = globSync(
-    patterns
-      .filter((pattern) => !pattern.startsWith('!'))
-      .map((pattern) => `${pattern}/package.json`),
-    {
-      cwd: root,
-      exclude: [
-        '**/node_modules/**',
-        ...patterns
-          .filter((pattern) => pattern.startsWith('!'))
-          .map((pattern) => `${pattern.slice(1)}/package.json`),
-      ],
-    },
-  );
+  // Membership is the shared, fail-closed reader's (scripts/workspace-roots-lib.mjs).
+  const manifests = workspaceManifestFiles(root);
   const names = new Set();
-  for (const file of new Set(manifests)) {
-    // pnpm includes the repository root implicitly; it orchestrates, never shards.
-    if (resolve(root, file) === resolve(root, 'package.json')) continue;
+  for (const file of manifests) {
     const manifest = JSON.parse(readFileSync(join(root, file), 'utf8'));
     if (!Object.hasOwn(manifest.scripts ?? {}, 'test:integration')) continue;
     if (
@@ -554,14 +526,14 @@ const budgetTable = (table) => new Map(Object.entries(table));
 /** The inventory by step name; a step's name comes from the workflow, so no plain-object lookup. */
 const INVENTORY = new Map(Object.entries(STEP_INVENTORY));
 
-export function checkIntegrationSplitText(text) {
+export function checkIntegrationSplitText(text, root = ROOT) {
   let workflow;
   try {
     workflow = parseYaml(text);
   } catch (error) {
     return [`ci.yml is not valid YAML: ${error.message}`];
   }
-  return checkIntegrationSplit(workflow);
+  return checkIntegrationSplit(workflow, root);
 }
 
 /** FU-027: ownership, command inventory and executable workflow must agree on step keys. */
@@ -618,9 +590,9 @@ export function integrationPartitionStepProblems(
   return problems;
 }
 
-export function checkIntegrationSplit(workflow) {
+export function checkIntegrationSplit(workflow, root = ROOT) {
   const problems = [
-    ...integrationPartitionProblems(),
+    ...integrationPartitionProblems(INTEGRATION_PARTITIONS, root),
     ...integrationPartitionStepProblems(workflow),
   ];
   // Inspect the exact plan the executable runner consumes, not only ownership.
@@ -662,7 +634,7 @@ export function checkIntegrationSplit(workflow) {
       problems.push(`${name}: effective execution failed: ${error.message}`);
     }
   }
-  problems.push(...integrationPartitionProblems(effective));
+  problems.push(...integrationPartitionProblems(effective, root));
   problems.push(...qualitySplitProblems(workflow));
   if (stressCount !== 1)
     problems.push(`expected exactly one exclusive stress phase, found ${stressCount}`);

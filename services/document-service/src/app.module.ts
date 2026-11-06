@@ -22,6 +22,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -74,6 +75,9 @@ import { clamdAddress, loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from '.
 @Module({
   controllers: [DocumentController, HealthController, MetricsController],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadDocumentEnv() },
 
     {

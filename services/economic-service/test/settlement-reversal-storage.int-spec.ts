@@ -47,6 +47,9 @@ const APPROVER = ['USR-RLG-APPROVER', ISSUER, 'sub-approver'] as const;
 
 const noCommission = (gross: bigint): Amounts => ({ gross, commission: 0n, net: gross });
 
+/** Stands for a real journal that is not this settlement's: `forgeSettlement` resolves it. */
+const ANOTHER_JOURNAL = 'ANOTHER_JOURNAL';
+
 /** Everything that could be swapped by replacing a settlement row. */
 const REPLACEMENTS: readonly (readonly [label: string, changes: SettlementRow])[] = [
   ['larger figures', { gross_amount_minor: 20_000, net_amount_minor: 20_000 }],
@@ -55,7 +58,7 @@ const REPLACEMENTS: readonly (readonly [label: string, changes: SettlementRow])[
   ['another payee', { payee_organization_id: 'ORG-ELSEWHERE' }],
   ['another payer', { payer_organization_id: 'ORG-ELSEWHERE' }],
   ['another currency', { currency: 'USD' }],
-  ['another journal', { journal_id: `JRN_${ulid()}` }],
+  ['another journal', { journal_id: ANOTHER_JOURNAL }],
 ];
 
 describe('settlement reversal storage (real database, runtime role)', () => {
@@ -282,19 +285,52 @@ describe('settlement reversal storage (real database, runtime role)', () => {
    */
   const forgeSettlement = async (id: string, changes: SettlementRow) => {
     const row = await settlementRow(id);
+    const replaced = { ...row, ...changes };
+    if (replaced.journal_id === ANOTHER_JOURNAL) replaced.journal_id = await heldJournal(row);
     await owner.$transaction(async (tx) => {
       // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
       await tx.$executeRawUnsafe(
         'ALTER TABLE settlement DISABLE TRIGGER trg_settlement_append_only',
       );
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE settlement DISABLE TRIGGER trg_settlement_creation_proven',
+      );
       await tx.$executeRawUnsafe('DELETE FROM settlement WHERE id = $1', id);
-      await insertSettlement(tx, { ...row, ...changes });
+      await insertSettlement(tx, replaced);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE settlement ENABLE TRIGGER trg_settlement_creation_proven',
+      );
       // ISOLATION-ALLOW-UNBOUNDED: as above.
       await tx.$executeRawUnsafe(
         'ALTER TABLE settlement ENABLE TRIGGER trg_settlement_append_only',
       );
     });
   };
+
+  /** A real journal no settlement names, whose foreign key holds: the one that held this row's funds. */
+  const heldJournal = async (row: SettlementRow) => {
+    const [found] = await owner.$queryRawUnsafe<{ id: string }[]>(
+      `SELECT id FROM journal WHERE transaction_id = $1 AND journal_type = 'FUNDS_HELD'`,
+      row.transaction_id,
+    );
+    return found!.id;
+  };
+
+  /** A row from before the proof of a settlement's creation (FU-097), or a restore: planted past it. */
+  const plantSettlement = (row: SettlementRow) =>
+    owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE settlement DISABLE TRIGGER trg_settlement_creation_proven',
+      );
+      await insertSettlement(tx, row);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE settlement ENABLE TRIGGER trg_settlement_creation_proven',
+      );
+    });
 
   const leg = (
     tx: Tx,
@@ -452,9 +488,13 @@ describe('settlement reversal storage (real database, runtime role)', () => {
 
     it('refuses a transaction that is not settled, whatever its settlement row says', async () => {
       const fixture = await settled();
-      // Moved for this one owner transaction: the refusal rolls it back.
+      // Moved past its guard (FU-097) for this one owner transaction: the refusal rolls both back.
       await expect(
         owner.$transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_status_edges',
+          );
           await moveTransaction(tx, fixture.transactionId, 'REFUNDED');
           await open(fixture, {}, tx);
         }),
@@ -996,6 +1036,19 @@ describe('settlement reversal storage (real database, runtime role)', () => {
             `UPDATE "transaction" SET ${assignment} WHERE id = $1`,
             fixture.transactionId,
           ),
+        ).rejects.toThrow(/settled at never changes/);
+        // And its CHECK, under that guard (FU-097), past which this one owner transaction goes.
+        await expect(
+          owner.$transaction(async (tx) => {
+            // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+            await tx.$executeRawUnsafe(
+              'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_status_edges',
+            );
+            await tx.$executeRawUnsafe(
+              `UPDATE "transaction" SET ${assignment} WHERE id = $1`,
+              fixture.transactionId,
+            );
+          }),
         ).rejects.toThrow(/ck_transaction_reversed_settled/);
       }
     });
@@ -1587,15 +1640,27 @@ describe('settlement reversal storage (real database, runtime role)', () => {
     it("a change to the transaction's id cannot cascade into its settlement", async () => {
       // Nothing but the settlement refers to this one, so only its guard can answer.
       const transactionId = await settledWithNoRow(payee);
-      await insertSettlement(runtime, rowFor(transactionId, `JRN_${ulid()}`));
+      const journalId = await runtime.$transaction(async (tx) => {
+        const id = await emptyJournal(tx, transactionId, { type: 'SETTLEMENT' });
+        await leg(tx, id, await account(tx, payer), payer, 'DEBIT', GROSS);
+        await leg(tx, id, await account(tx, payee), payee, 'CREDIT', GROSS);
+        return id;
+      });
+      await plantSettlement(rowFor(transactionId, journalId));
       await expect(
-        rolledBack((tx) =>
-          tx.$executeRawUnsafe(
+        owner.$transaction(async (tx) => {
+          // The transaction's own guard refuses first (FU-097); lifted, so this one answers.
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; rolled back with the rest.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_terms_fixed',
+          );
+          await tx.$executeRawUnsafe(
             `UPDATE "transaction" SET id = $2 WHERE id = $1`,
             transactionId,
             `TXN_${ulid()}`,
-          ),
-        ),
+          );
+          throw new Error('rolled back: nothing was refused');
+        }),
       ).rejects.toThrow(/A settlement is append-only/);
     });
 
@@ -1627,7 +1692,7 @@ describe('settlement reversal storage (real database, runtime role)', () => {
       it('nor against the journal of another transaction', async () => {
         const [fixture, other] = [await settled(), await settled()];
         const otherJournal = (await settlementRow(other.settlementId)).journal_id;
-        await forgeSettlement(other.settlementId, { journal_id: `JRN_${ulid()}` });
+        await forgeSettlement(other.settlementId, { journal_id: ANOTHER_JOURNAL });
         await forgeSettlement(fixture.settlementId, { journal_id: otherJournal });
         await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
       });
@@ -1736,7 +1801,7 @@ describe('settlement reversal storage (real database, runtime role)', () => {
         const transactionId = await settledWithNoRow(null);
         const settlementId = `STL_${ulid()}`;
         const fixture = { transactionId, settlementId, payeeOrganizationId: payee };
-        await insertSettlement(runtime, {
+        await plantSettlement({
           ...rowFor(transactionId, await forgedJournal(fixture)),
           id: settlementId,
         });
