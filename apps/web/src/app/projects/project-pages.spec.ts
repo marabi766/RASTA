@@ -12,6 +12,7 @@
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { boundQuery } from '@/test/page-context';
+import { callGateway } from '@/server/gateway';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -27,6 +28,9 @@ const ORG = 'ORG-OWNER';
 const mockSession = { current: null as unknown };
 const mockFetched: string[] = [];
 const mockAnswers: Record<string, unknown> = {};
+
+jest.mock('@/server/gateway', () => ({ callGateway: jest.fn() }));
+jest.mock('@/server/demo-mode', () => ({ fetchDemoMode: async () => 'UNKNOWN' }));
 
 jest.mock('@/server/current-session', () => ({
   currentSession: async () => mockSession.current,
@@ -183,6 +187,10 @@ const offeredIn = (tree: ReactNode): string[] =>
   Object.keys(
     propsOf<{ tokens: Record<string, unknown> }>(ofType(tree, ProjectCommands)[0]).tokens ?? {},
   ).sort();
+
+afterEach(() => {
+  expect(callGateway).not.toHaveBeenCalled();
+});
 
 describe('/projects/[id]', () => {
   it('sends a person with no session to sign in, and back', async () => {
