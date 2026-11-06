@@ -201,7 +201,7 @@ describe('query parameters', () => {
     ]);
   });
 
-  it('publishes organizationId as an optional bounded list of organization ids (FU-019)', () => {
+  it('marks post-preprocess organizationId list constraints as omitted (FU-019)', () => {
     const document = enrichOpenApiDocument(withPaths({ '/v1/suppliers': { get: {} } }));
     const parameter = (
       op(document, '/v1/suppliers', 'get').parameters as {
@@ -212,10 +212,12 @@ describe('query parameters', () => {
     ).find((p) => p.name === 'organizationId');
 
     expect(parameter?.required).toBe(false);
-    expect(parameter?.schema).toMatchObject({ type: 'array', minItems: 1, maxItems: 200 });
+    expect(parameter?.schema).toEqual({
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 
-  it('publishes the item pattern the runtime enforces, so both refuse the same ids (PR 699 F2)', () => {
+  it('omits post-preprocess item patterns while runtime still refuses malformed ids (FU-120)', () => {
     const document = enrichOpenApiDocument(withPaths({ '/v1/suppliers': { get: {} } }));
     const schema = (
       op(document, '/v1/suppliers', 'get').parameters as {
@@ -223,21 +225,9 @@ describe('query parameters', () => {
         schema: { anyOf?: { type: string; items?: { type: string; pattern?: string } }[] };
       }[]
     ).find((p) => p.name === 'organizationId')?.schema;
-    // Every branch the converter publishes — the single string and the array —
-    // carries the pattern; a bare `{"type":"string"}` anywhere is the bug.
-    const strings: { pattern?: string }[] = [];
-    const walk = (node: unknown): void => {
-      if (Array.isArray(node)) return node.forEach(walk);
-      if (typeof node !== 'object' || node === null) return;
-      if ((node as { type?: string }).type === 'string') strings.push(node);
-      Object.values(node).forEach(walk);
-    };
-    walk(schema);
-    expect(strings.length).toBeGreaterThan(0);
-    const patterns = strings.map((node) => node.pattern);
-    expect(patterns.every((pattern) => pattern !== undefined)).toBe(true);
-
-    const published = new RegExp(patterns[0] as string);
+    expect(schema).toEqual({
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
     const runtime = (id: string) =>
       searchSuppliersQuerySchema.safeParse({ organizationId: id }).success;
     for (const bad of [
@@ -249,12 +239,10 @@ describe('query parameters', () => {
       'X'.repeat(60),
     ]) {
       expect([bad, runtime(bad)]).toEqual([bad, false]);
-      expect([bad, published.test(bad)]).toEqual([bad, false]);
       expect([bad, organizationIdSchema.safeParse(bad).success]).toEqual([bad, false]);
     }
     for (const good of ['ORG_01JBQ0000000000000000000AA', 'ORG-UNION-YAZD', 'ORG-BATCH-7']) {
       expect([good, runtime(good)]).toEqual([good, true]);
-      expect([good, published.test(good)]).toEqual([good, true]);
       expect([good, organizationIdSchema.safeParse(good).success]).toEqual([good, true]);
     }
   });
