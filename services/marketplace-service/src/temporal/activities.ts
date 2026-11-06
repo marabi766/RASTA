@@ -13,6 +13,7 @@ import type { SagaActivity, SagaStep } from '../order/order.repository';
 import type { OrderStatus } from '../generated/prisma';
 import {
   fundsOf,
+  heldProofMissing,
   idempotencyKeyFor,
   ObligationLookupIncomplete,
   termsDiffer,
@@ -195,6 +196,18 @@ function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>)
 
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
+
+  /** A version mismatch, not a verdict: nothing is adopted, and nothing is stopped for good. */
+  function heldProofUnavailable(orderId: string, transactionId: string): ApplicationFailure {
+    logger.error(
+      `Order ${orderId}: economic-service reads its obligation ${transactionId} as HELD and does not ` +
+        'say whether that is proven: it is older than this release, which waits for it to be upgraded',
+    );
+    return ApplicationFailure.retryable(
+      `economic-service does not yet prove order ${orderId}'s funds held`,
+      'ECONOMIC_HELD_PROOF_UNAVAILABLE',
+    );
+  }
   // At zero from the start: `increase()` cannot see a series' first increment.
   releasesUnconfirmedTotal.inc({ service: SERVICE_NAME }, 0);
   for (const operation of UNCONFIRMED_OPERATIONS) {
@@ -363,6 +376,8 @@ export function createActivities(deps: ActivityDependencies) {
      * obligation as economic-service has it now, outside the step's record,
      * on every attempt. Not HELD: a non-retryable `OBLIGATION_NOT_HELD`, and
      * the workflow's recovery (`findObligation`) names the status and stops.
+     * HELD from a release too old to say whether it is proven: retryable, and
+     * that recovery waits for one that can (`heldProofUnavailable`).
      */
     async createObligation(orderId: string): Promise<HeldResult> {
       const held = await economicStep(orderId, 'createObligation', async (order) => {
@@ -385,7 +400,8 @@ export function createActivities(deps: ActivityDependencies) {
           buyerOrganizationId: order.buyerOrganizationId,
           correlationId: order.correlationId,
         });
-        const funds = now ? fundsOf(now.status) : 'UNPROVEN';
+        if (now && heldProofMissing(now)) throw heldProofUnavailable(order.id, now.id);
+        const funds = now ? fundsOf(now) : 'UNPROVEN';
         if (funds === 'HELD') return;
         logger.error(
           `Order ${order.id}: its obligation ${held.transactionId} is ${now?.status ?? 'not found as its own'} ` +
@@ -439,7 +455,10 @@ export function createActivities(deps: ActivityDependencies) {
           const terms = obligationTermsOf(order);
           const own = found.find((transaction) => termsDiffer(terms, transaction).length === 0);
           if (own) {
-            const funds = fundsOf(own.status);
+            // Retried until it answers (LOCAL_OPTIONS): the order waits, and carries on
+            // by itself once economic-service is upgraded (FU-138; ADR-040).
+            if (heldProofMissing(own)) throw heldProofUnavailable(order.id, own.id);
+            const funds = fundsOf(own);
             if (funds === 'HELD') return { transactionId: own.id };
             logger.error(
               `Order ${order.id}: economic-service holds its obligation ${own.id} as ${own.status} ` +

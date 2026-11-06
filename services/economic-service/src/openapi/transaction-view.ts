@@ -73,6 +73,13 @@ const TRANSACTION_VIEW_PROPERTIES: Record<string, JsonSchema> = {
   failureReason: nullableText(),
   createdAt: instant(),
   createdBy: text(),
+  heldProven: {
+    type: 'boolean',
+    description:
+      'What `HELD` says, proven: HELD, the payer’s own active hold for exactly its amount and ' +
+      'currency, and no unresolved hold decision. False in every other status, and on a HELD ' +
+      'row that nothing proves is in escrow. As of when written, in a command’s stored answer.',
+  },
 };
 
 const objectOf = (properties: Record<string, JsonSchema>): JsonSchema => ({
