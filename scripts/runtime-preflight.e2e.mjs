@@ -45,9 +45,10 @@
 // URL (audit: also read back for its rows); KAFKA_SASL_PASSWORD_<SERVICE> and the producer's. The event id passes
 // from `refused` to `consumed` in PREFLIGHT_STATE_DIR (default /tmp/rasta-logs).
 // -----------------------------------------------------------------------------
+import { Kafka, logLevel } from 'kafkajs';
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -56,14 +57,12 @@ import { withUtcSession } from './prisma-lib.mjs';
 import { psqlRunner } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(import.meta.url);
-const { Kafka, logLevel } = require(
-  join(ROOT, 'packages', 'nest-common', 'node_modules', 'kafkajs'),
-);
-const { KafkaConnectionConfigError, kafkaClientConfig, kafkaConnectionFor } = require(
+const { KafkaConnectionConfigError, kafkaClientConfig, kafkaConnectionFor } = loadWorkspaceModule(
   join(ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
 );
-const { kafkaPasswordVariable } = require(join(ROOT, 'packages', 'config', 'dist', 'index.js'));
+const { kafkaPasswordVariable } = loadWorkspaceModule(
+  join(ROOT, 'packages', 'config', 'dist', 'index.js'),
+);
 const serviceDir = (service) => join(ROOT, 'services', service);
 
 /**
@@ -74,7 +73,7 @@ const serviceDir = (service) => join(ROOT, 'services', service);
  * folds it into a usage meter of its own (Codex on #178).
  */
 const usageRecorded = (stamp) => {
-  const { usageRecordedPayload } = require(
+  const { usageRecordedPayload } = loadWorkspaceModule(
     join(serviceDir('fleet-service'), 'dist', 'fleet', 'events.js'),
   );
   const periodEnd = new Date();
@@ -117,7 +116,7 @@ const SERVICES = {
     runtimeVariables: ['DATABASE_URL_AUDIT'],
     migrator: 'rasta_audit_migrator',
     group: () =>
-      require(join(serviceDir('audit-service'), 'dist', 'audit', 'audit.mapper.js'))
+      loadWorkspaceModule(join(serviceDir('audit-service'), 'dist', 'audit', 'audit.mapper.js'))
         .DOMAIN_PROJECTOR_CONSUMER,
     topic: 'rasta.asset.v1',
     producer: 'asset-service',
@@ -128,7 +127,7 @@ const SERVICES = {
       payload: { reason: 'runtime-preflight regression' },
     }),
     async records(eventId) {
-      const { PrismaClient } = require(
+      const { PrismaClient } = loadWorkspaceModule(
         join(serviceDir('audit-service'), 'src', 'generated', 'prisma'),
       );
       const prisma = new PrismaClient({
@@ -183,7 +182,7 @@ const SERVICES = {
      * this usage record. 0 unless both are there.
      */
     async records(eventId) {
-      const { PrismaClient } = require(
+      const { PrismaClient } = loadWorkspaceModule(
         join(serviceDir('maintenance-service'), 'src', 'generated', 'prisma'),
       );
       const prisma = new PrismaClient({
