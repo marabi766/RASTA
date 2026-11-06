@@ -446,12 +446,17 @@ describe.each(CASES)('$command', (testCase) => {
         { kind: 'NOT_FOUND', correlationId: 'c2' },
       ],
       [
-        { kind: 'UNAVAILABLE', status: 401, correlationId: 'c3' },
+        { kind: 'UNAVAILABLE', status: 401, code: 'UNAUTHENTICATED', correlationId: 'c3' },
         { kind: 'FAILED', status: 401, correlationId: 'c3' },
       ],
       [
-        { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+        { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c3' },
         { kind: 'FAILED', status: 429, correlationId: 'c3' },
+      ],
+      // A 4xx without a documented code proves nothing (PR-830 r1 F1).
+      [
+        { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3' },
       ],
       // A 5xx may follow the commit (the answer is built by a read after it):
       // never "nothing changed".

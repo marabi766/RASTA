@@ -415,9 +415,12 @@ describe('what every answer becomes', () => {
     expect(raced).toMatchObject({ kind: 'INVALID', message: STATEMENT_REFUSAL_TEXT.STEP_DECIDED });
   });
 
-  it('an unknown refusal is one fixed sentence', async () => {
+  it('an unnamed documented refusal is one fixed sentence; an undocumented code is unconfirmed', async () => {
+    const unnamed = await approve(jest.fn(async () => problem(409, 'ALREADY_EXISTS')));
+    expect(unnamed).toMatchObject({ kind: 'INVALID', message: STATEMENT_REFUSAL_FALLBACK });
+    // PR-830 r1 F1.
     const odd = await approve(jest.fn(async () => problem(422, 'SOMETHING_NEW')));
-    expect(odd).toMatchObject({ kind: 'INVALID', message: STATEMENT_REFUSAL_FALLBACK });
+    expect(odd.kind).toBe('UNKNOWN_OUTCOME');
   });
 
   it('places a line’s field error on the form row it came from', async () => {
