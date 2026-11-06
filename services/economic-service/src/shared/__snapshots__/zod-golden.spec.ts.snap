@@ -593,7 +593,7 @@ exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/tra
     "details": [
       {
         "code": "invalid_type",
-        "message": "Expected integer, received float",
+        "message": "Expected number, received nan",
         "path": "limit",
       },
     ],
