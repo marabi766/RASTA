@@ -35,13 +35,15 @@ export function shellTextProblem(text) {
 export const SHELL_WORD = /(?:^|\/)(?:r?ba|da|k|z|a|c|tc|fi)?sh$/;
 const SHELL_LONG_OPTIONS = new Set(['--norc', '--noprofile', '--posix', '--login', '--noediting']);
 const computed = (word) => Boolean(word.opaque || word.dynamic || word.value.includes('$'));
+/** A script operand that is standard input under another name: the shell reads a pipe, not a file. */
+const STDIN_FILE = /^(?:\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d+)$/;
 
 /**
  * FU-092: what ONE shell invocation runs, decided from the words after the shell word and
  * never assumed: `{ body }` (the -c operand, a word to read as a script), `{ file }` (the
  * script operand, which the caller must prove it reads), `{ stdin: true }` (the commands come
  * from standard input: a pipe, a here-string, a here-document or the terminal), or
- * `{ problem }`. Bash accepts `-` and `+` option clusters alike (`bash +c 'cmd'` runs cmd,
+ * `{ problem }` (`/dev/stdin` and `/dev/fd/N` operands are standard input, not files). Bash accepts `-` and `+` option clusters alike (`bash +c 'cmd'` runs cmd,
  * `+sc` too), `-o`/`-O` take a value even inside a cluster (`-eo pipefail -c`), `-` is `--`,
  * and a computed word may be an option, a body or a file: all of those are refused, never
  * read as "some other operand". A long option other than the listed inert ones can name a
@@ -88,7 +90,7 @@ export function shellInvocation(args, name = 'the shell') {
     return operand
       ? { body: operand }
       : { problem: `${name} -c runs a body this check cannot read` };
-  return stdin || !operand ? { stdin: true } : { file: operand };
+  return stdin || !operand || STDIN_FILE.test(operand.value) ? { stdin: true } : { file: operand };
 }
 
 const CONTINUATIONS = /(?:\\\n)+/y;

@@ -530,13 +530,14 @@ const RESIDUALS = {
     (v) => `<<EOF env bash\ndocker ${v} alpine:latest\nEOF`,
     'image',
   ],
+  // PR #805 r2 F1: the expanded text is what runs, so any expansion in the body refuses.
   'expanding here-document into bash, substitution in a comment': [
     (v) => `bash <<EOF\n# $(docker ${v} alpine:latest)\nEOF`,
-    'image',
+    /expanding here-document read by a shell contains an expansion/,
   ],
   'expanding here-document into bash, substitution in single quotes': [
     (v) => `bash <<EOF\necho '$(docker ${v} alpine:latest)'\nEOF`,
-    'image',
+    /expanding here-document read by a shell contains an expansion/,
   ],
   'escaped newline after $ in a here-document': [
     (v) => `cat <<EOF\n$\\\n(docker ${v} alpine:latest)\nEOF`,
@@ -567,7 +568,7 @@ const RESIDUALS = {
   ],
   'a pipe into bash /dev/stdin': [
     (v) => `echo 'docker ${v} alpine:latest' | bash /dev/stdin`,
-    /runs \/dev\/stdin, a script this check does not read/,
+    /reads its commands from a pipe/,
   ],
   'a script that is not a CI shell file': [
     (v) => `printf '%s' 'docker ${v} alpine:latest' > tools/other.sh\nbash tools/other.sh`,
@@ -739,4 +740,126 @@ test('PR #727 r2 F3: an indented, continued or lower-case FROM is read; none at 
   }
   const good = `# syntax=docker/dockerfile:1.7\n# a note, then FROM inside text: FROM x\n  FROM node:22@${A} AS a\n  # a comment\n  FROM a\n`;
   assert.deepEqual(validateDockerfilePins([file(good)]).errors, []);
+});
+
+// PR #805 r2 F1: text that is generated, rewritten or handed to another program as a command
+// string is never "nothing relevant". Each shape returned no image and no error on ea79eb47
+// while bash ran the docker command: it is read (the image is found) or refused.
+const GENERATED = {
+  'expanding here-document into bash, substitution output as the script': `bash <<EOF\n$(printf '%s\\n' 'docker run alpine:latest')\nEOF`,
+  'expanding here-document into bash, a variable as the script': `payload='docker run alpine:latest'\nbash <<EOF\n$payload\nEOF`,
+  'a command substitution as the executable': `$(printf '%s%s run alpine:latest' dock er)`,
+  'a variable as the executable': `c=docker\n$c run alpine:latest`,
+  'a quoted variable as the executable behind env': `c=docker\nenv "$c" run alpine:latest`,
+  'source of a here-document through /dev/stdin': `source /dev/stdin <<'EOF'\ndocker run alpine:latest\nEOF`,
+  'dot of a here-document through /dev/stdin': `. /dev/stdin <<'EOF'\ndocker run alpine:latest\nEOF`,
+  'source of a file that is not a CI shell file': `source tools/other.sh`,
+  'xargs rewrites the shell text': `printf '%s\\n' 'docker run alpine:latest' | xargs -I{} bash -c '{}'`,
+  'find -exec rewrites the shell text': `find . -maxdepth 0 -exec sh -c '{}' \\;`,
+  'flock command string': `flock /tmp/l -c 'docker run alpine:latest'`,
+  'su command string': `su -c 'docker run alpine:latest' nobody`,
+  'script command string': `script -qc 'docker run alpine:latest' /dev/null`,
+  'ssh command string': `ssh host 'docker run alpine:latest'`,
+  'watch command string': `watch -n1 'docker run alpine:latest'`,
+  'flock behind env options': `env -u FOO flock /tmp/l -c 'docker run alpine:latest'`,
+  'ssh behind timeout operands': `timeout 5 ssh host 'docker run alpine:latest'`,
+  'sudo -s command string': `sudo -s 'docker run alpine:latest'`,
+  'a computed command string for su': `cmd='docker run alpine:latest'\nsu -c "$cmd" nobody`,
+  'commands piped into ssh': `printf '%s\\n' 'docker run alpine:latest' | ssh host`,
+  'env -S splits a string into a command': `env -S 'docker run alpine:latest'`,
+  alias: `alias d='docker run alpine:latest'\nd`,
+  'trap handler': `trap 'docker run alpine:latest' EXIT`,
+  'trap handler behind a computed text': `h='docker run alpine:latest'\ntrap "$h" EXIT`,
+  'BASH_ENV assigned in the script': `BASH_ENV=./other.sh bash -c true`,
+  'BASH_ENV exported': `export BASH_ENV=./other.sh\nbash -c true`,
+  'BASH_ENV behind env': `env BASH_ENV=./other.sh bash -c true`,
+};
+test('PR #805 r2 F1: generated and rewritten shell text is read or refused, never dropped', () => {
+  for (const [shape, script] of Object.entries(GENERATED))
+    for (const kind of ['shell', 'workflow']) {
+      const { errors, found } = outcome(kind, script);
+      assert.ok(errors.length > 0 || found, `${shape} (${kind}): nothing read, nothing refused`);
+    }
+});
+test('PR #805 r2 F1: a workflow env that a shell evaluates at startup refuses', () => {
+  for (const level of ['workflow', 'job', 'step']) {
+    const step = { run: 'true', ...(level === 'step' && { env: { BASH_ENV: './x.sh' } }) };
+    const doc = {
+      ...(level === 'workflow' && { env: { BASH_ENV: './x.sh' } }),
+      jobs: { j: { ...(level === 'job' && { env: { BASH_ENV: './x.sh' } }), steps: [step] } },
+    };
+    const { errors } = validateInfraImagePins(
+      [{ kind: 'workflow', name: '.github/workflows/x.yml', text: stringify(doc) }],
+      bare,
+    );
+    assert.ok(
+      errors.some((error) => /env sets BASH_ENV/.test(error)),
+      level,
+    );
+  }
+});
+test('PR #805 r2 F1: string runners keep the command string they carry', () => {
+  for (const script of [
+    `flock /tmp/l -c 'docker run alpine:latest'`,
+    `su -c 'docker run alpine:latest' nobody`,
+    `script -qc 'docker run alpine:latest' /dev/null`,
+    `ssh host 'docker run alpine:latest'`,
+    `watch -n1 'docker run alpine:latest'`,
+    `trap 'docker run alpine:latest' EXIT`,
+  ])
+    assert.ok(outcome('shell', script).found, script);
+});
+test('PR #805 r2 F1: the harmless controls stay readable', () => {
+  for (const body of [
+    "flock /tmp/l -c 'echo hi'",
+    "ssh host 'uptime'",
+    "trap 'echo bye' EXIT",
+    'trap - EXIT\ntrap -l',
+    'bash <<EOF\necho hi\nEOF',
+    "bash <<'EOF'\necho $HOME\nEOF",
+    'cat <<EOF\n$HOME\nEOF',
+    'x=$(date)\necho "$x"',
+    'timeout 5 sleep 1',
+    'env FOO=1 true',
+    'BASH_ENV_NOT=1 true',
+  ])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+});
+
+// PR #805 r2 F2: the eval exemption proves where the evaluated variable came from. Every row
+// is a producer that did not reach the evaluating shell, or a write the first-word reader of
+// ea79eb47 did not see; each was approved there and printed the docker marker under bash.
+test('PR #805 r2 F2: eval provenance survives prefixes, declarations and list boundaries', () => {
+  const creds = { ...bare, evaluatedOutputs: new Map([['infra/creds.sh', 'prints exports only']]) };
+  const producer = 'c="$(bash infra/creds.sh)"';
+  const evaluate = (body) => validateInfraImagePins([credsFile, asInput('shell', body)], creds);
+  assert.deepEqual(evaluate(`${producer}\neval "\${c}"`).errors, []);
+  for (const body of [
+    `${producer}\nbuiltin printf -v "$(printf '\\143')" '%s' 'docker run alpine:latest'\neval "\${c}"`,
+    `${producer}\ncommand printf -v "$(printf '\\143')" '%s' 'docker run alpine:latest'\neval "\${c}"`,
+    `${producer}\nbuiltin read -r "$name"\neval "\${c}"`,
+    `${producer}\ncommand read -r "$name"\neval "\${c}"`,
+    `${producer}\nbuiltin declare -n ref=c\nref=x\neval "\${c}"`,
+    `${producer}\ncommand -p printf -v "$n" x\neval "\${c}"`,
+    `function f { ${producer}; }\neval "\${c}"`,
+    `function f {\n  ${producer}\n}\neval "\${c}"`,
+    `coproc { ${producer}; }\neval "\${c}"`,
+    `coproc NAMED { ${producer}; }\neval "\${c}"`,
+    `time if false; then\n  ${producer}\nfi\neval "\${c}"`,
+    `! if false; then\n  ${producer}\nfi\neval "\${c}"`,
+    `time while false; do\n  ${producer}\ndone\neval "\${c}"`,
+    `time case x in y)\n  ${producer}\n  ;;\nesac\neval "\${c}"`,
+    `! { ${producer}; }\neval "\${c}"`,
+    `${producer} || true &\neval "\${c}"`,
+    `${producer} || true &\n( eval "\${c}" )`,
+    `${producer} || exit 1 &\neval "\${c}"`,
+  ])
+    assert.ok(
+      evaluate(body).errors.some((error) => /^scripts\/x\.sh:\d+: eval runs text/.test(error)),
+      body,
+    );
+  // a list that ends before the background marker is still the producer's own
+  assert.deepEqual(evaluate(`${producer} || true\neval "\${c}"`).errors, []);
+  // the real CI shape: top-level producer, evaluated in a backgrounded subshell
+  assert.deepEqual(evaluate(`${producer}\n( eval "\${c}" && true & )`).errors, []);
 });

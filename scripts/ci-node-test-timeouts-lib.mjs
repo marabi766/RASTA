@@ -371,7 +371,7 @@ function envProblems(name, env) {
  * FU-092: pnpm settings that change what an install or a script run does (`script-shell`,
  * `shell-emulator`, `node-options`, `ignore-scripts`, a `.pnpmfile.cjs` hook ...) are read
  * from the places pnpm reads them: `.npmrc`, `pnpm-workspace.yaml` (parsed), the root
- * manifest's `pnpm` field and the presence of a `.pnpmfile.cjs`. A setting outside the
+ * manifest's `pnpm` field and the presence of a pnpmfile (PNPMFILE_NAMES). A setting outside the
  * reviewed inert lists refuses; so does a file that cannot be read. Returns the problems.
  */
 const INERT_NPMRC = new Set(
@@ -382,6 +382,32 @@ const INERT_WORKSPACE = new Set(
     ' ',
   ),
 );
+/**
+ * PR #805 r2 F4: every file name pnpm reads as an install hook or as a package manifest, in ONE
+ * list (pnpm 11 loads `.pnpmfile.mjs` before `.pnpmfile.cjs`, and reads `package.json5` and
+ * `package.yaml` as manifests with their own lifecycle scripts). The enumeration of a workspace
+ * and the settings check both take these names; a name added here is read or refused everywhere.
+ */
+export const PNPMFILE_NAMES = ['.pnpmfile.cjs', '.pnpmfile.mjs'];
+export const MANIFEST_NAMES = ['package.json', 'package.json5', 'package.yaml'];
+
+/**
+ * The problems of one directory's file `names` (a listing): a pnpm hook runs code at install, and
+ * a manifest other than `package.json` is a package whose scripts this check does not read.
+ */
+export function pnpmInputProblems(directory, names) {
+  if (!Array.isArray(names)) return [`${directory} was not listed`];
+  const where = (name) => (directory === '.' ? name : `${directory}/${name}`);
+  return [
+    ...PNPMFILE_NAMES.filter((name) => names.includes(name)).map(
+      (name) => `${where(name)} may run code at install`,
+    ),
+    ...MANIFEST_NAMES.slice(1)
+      .filter((name) => names.includes(name))
+      .map((name) => `${where(name)} is a package manifest this check does not read`),
+  ];
+}
+
 export function pnpmSettingsProblems({ npmrc, workspace, manifestPnpm, pnpmfile } = {}) {
   const problems = [];
   if (typeof npmrc !== 'string') problems.push('.npmrc was not read');
@@ -401,7 +427,9 @@ export function pnpmSettingsProblems({ npmrc, workspace, manifestPnpm, pnpmfile 
   if (manifestPnpm !== undefined)
     problems.push('the root package.json has a pnpm field, which this check does not read');
   if (pnpmfile !== false)
-    problems.push('a .pnpmfile.cjs may run code at install (or was not looked for)');
+    problems.push(
+      `a ${PNPMFILE_NAMES.join(' or ')} may run code at install (or was not looked for)`,
+    );
   return problems;
 }
 

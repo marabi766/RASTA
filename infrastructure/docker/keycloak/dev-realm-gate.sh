@@ -44,4 +44,5 @@ if [[ "${RASTA_KEYCLOAK_DEV_REALM:-}" != "allow" ]]; then
 fi
 
 export RASTA_DEV_REALM_GATE=true
+# image-pin-exempt: execs the Keycloak launcher inside the image this script runs in (a test overrides its path); it starts no other image
 exec "${KEYCLOAK_LAUNCHER:-/opt/keycloak/bin/kc.sh}" "$@"

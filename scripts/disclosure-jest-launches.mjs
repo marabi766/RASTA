@@ -13,13 +13,19 @@ const CONFIG_FLAG =
   /^(?:--(?:config|projects|preset|rootDir|root-dir|setupFilesAfterEnv|setup-files-after-env)(?:=|$)|-c)/;
 const SCRIPT_FILE = /\.(?:sh|bash|mjs|cjs|js|ts)$/;
 
-/** Deliberately a token pre-check, not an interpreter. False positives need a reviewed registry row. */
-export function launcherCandidate(source, path) {
-  if (/\.(?:sh|bash)$/.test(path)) return shellCandidate(source, 0);
+/**
+ * Deliberately a token pre-check, not an interpreter. False positives need a reviewed registry
+ * row. PR #805 r2 F3: a shell file (`shell`, or a .sh/.bash name) is read by the shared dispatch
+ * reader, and a script that can start a process is a candidate unless every process it starts is
+ * named by a plain string literal: the tokens of a computed command prove nothing.
+ */
+export function launcherCandidate(source, path, shell = false) {
+  if (shell || /\.(?:sh|bash)$/.test(path)) return shellCandidate(source, 0);
   const ts = require('typescript');
   const identifiers = [];
   const literals = [];
   const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
+  const launching = launchingProcesses(ts, ast);
   const visit = (node) => {
     if (ts.isIdentifier(node)) identifiers.push(node.text);
     if (
@@ -34,21 +40,155 @@ export function launcherCandidate(source, path) {
   visit(ast);
   const tokens = [...identifiers, ...literals].join(' ');
   return (
-    (literals.includes('node:child_process') ||
+    launching.computed ||
+    ((literals.includes('node:child_process') ||
       literals.includes('child_process') ||
       literals.includes('execa') ||
       identifiers.some((word) => /^(?:spawn\w*|exec\w*|fork)$/.test(word))) &&
-    (/\bjest\b/.test(tokens) ||
-      (literals.some((value) => /^(?:pnpm|npm|turbo)$/.test(value)) &&
-        literals.some((value) => /^test(?::[\w-]+)?$/.test(value))) ||
-      literals.some((value) => /\b(?:pnpm|npm)\s+(?:run\s+)?test(?::|\b)/.test(value)))
+      (/\bjest\b/.test(tokens) ||
+        (literals.some((value) => /^(?:pnpm|npm|turbo)$/.test(value)) &&
+          literals.some((value) => /^test(?::[\w-]+)?$/.test(value))) ||
+        literals.some((value) => /\b(?:pnpm|npm)\s+(?:run\s+)?test(?::|\b)/.test(value))))
   );
+}
+
+/**
+ * PR #805 r2 F3: whether a script starts a process whose command is not a plain string literal.
+ * The process-starting bindings are the names bound from child_process/execa (imports, requires,
+ * dynamic imports, destructuring, aliases); a call through one must name its command by a
+ * literal (or a name: `process.execPath`, a constant), and a binding used any other way (handed
+ * to another function as a value) is computed too.
+ */
+function launchingProcesses(ts, ast) {
+  const modules = /^(?:node:)?child_process$|^execa$/;
+  const bound = new Set();
+  const isModule = (node) => ts.isStringLiteralLike(node) && modules.test(node.text);
+  const covered = new Set(); // module loads whose result is bound to a name
+  const loads = (node) => {
+    let current = node;
+    while (current) {
+      if (ts.isAwaitExpression(current) || ts.isParenthesizedExpression(current))
+        current = current.expression;
+      else if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current))
+        current = current.expression;
+      else if (ts.isCallExpression(current)) {
+        const [first] = current.arguments;
+        if (first && isModule(first)) {
+          covered.add(current);
+          return true;
+        }
+        current = current.expression;
+      } else return false;
+    }
+    return false;
+  };
+  const bind = (name) => {
+    if (ts.isIdentifier(name)) bound.add(name.text);
+    else
+      for (const element of name.elements) if (!ts.isOmittedExpression(element)) bind(element.name);
+  };
+  const declared = new Set();
+  const collect = (node) => {
+    if (ts.isImportDeclaration(node) && isModule(node.moduleSpecifier) && node.importClause) {
+      const { name, namedBindings } = node.importClause;
+      for (const local of [
+        name,
+        ...(namedBindings && ts.isNamespaceImport(namedBindings)
+          ? [namedBindings.name]
+          : (namedBindings?.elements ?? []).map((element) => element.name)),
+      ]) {
+        if (!local) continue;
+        bound.add(local.text);
+        declared.add(local);
+      }
+    } else if (ts.isVariableDeclaration(node) && node.initializer && loads(node.initializer)) {
+      bind(node.name);
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(ast);
+  // a module load whose result is not bound to a name (`import(…).then(({ spawn }) => …)`)
+  let computed = false;
+  const unbound = (node) => {
+    const [first] = ts.isCallExpression(node) ? node.arguments : [];
+    if (first && isModule(first) && !covered.has(node)) computed = true;
+    ts.forEachChild(node, unbound);
+  };
+  unbound(ast);
+  const root = (expression) => {
+    let current = expression;
+    while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current))
+      current = current.expression;
+    return current;
+  };
+  const callees = new Set();
+  // A command that is a literal, the running node, or a name whose every declaration is one.
+  const declarations = new Map();
+  const declare = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name))
+      declarations.set(node.name.text, [
+        ...(declarations.get(node.name.text) ?? []),
+        node.initializer,
+      ]);
+    else if (ts.isParameter(node) && ts.isIdentifier(node.name))
+      declarations.set(node.name.text, [...(declarations.get(node.name.text) ?? []), undefined]);
+    ts.forEachChild(node, declare);
+  };
+  declare(ast);
+  const plain = (expression, seen = new Set()) => {
+    if (ts.isStringLiteralLike(expression)) return true;
+    if (ts.isPropertyAccessExpression(expression))
+      return expression.getText() === 'process.execPath';
+    if (!ts.isIdentifier(expression) || seen.has(expression.text)) return false;
+    const all = declarations.get(expression.text);
+    return Boolean(
+      all?.length && all.every((init) => init && plain(init, new Set([...seen, expression.text]))),
+    );
+  };
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const base = root(node.expression);
+      if (ts.isIdentifier(base) && bound.has(base.text)) {
+        callees.add(base);
+        const [command] = node.arguments;
+        if (!command || !plain(command)) computed = true;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  // a launching binding that is not the root of a call (`run(spawn, …)`) hands the process out
+  const references = (node) => {
+    if (
+      ts.isIdentifier(node) &&
+      bound.has(node.text) &&
+      !declared.has(node) &&
+      !callees.has(node)
+    ) {
+      const parent = node.parent;
+      const declaration = ts.isVariableDeclaration(parent) && parent.name === node;
+      const specifier = ts.isImportSpecifier(parent) || ts.isBindingElement(parent);
+      if (!declaration && !specifier && !ts.isPropertyAccessExpression(parent)) computed = true;
+      else if (
+        ts.isPropertyAccessExpression(parent) &&
+        parent.expression === node &&
+        !callees.has(node)
+      )
+        computed = true;
+    }
+    ts.forEachChild(node, references);
+  };
+  references(ast);
+  return { computed };
 }
 
 /**
  * FU-077 r2 F2: every command of a shell file, nested ones included (substitutions, also in
  * `${…}`, `$((…))` and expanding here-documents, and here-documents fed to a shell). Text the
  * tokenizer cannot split is a candidate, so it reaches the registry and refuses.
+ * PR #805 r2 F3: a shell inside it is read by the shared dispatch (shellInvocation): its -c body
+ * is read as a script of its own, and a shell that reads a pipe, a computed text or another script
+ * file is a candidate, because what it runs cannot be seen from here.
  */
 function shellCandidate(source, depth) {
   let parsed;
@@ -58,12 +198,30 @@ function shellCandidate(source, depth) {
     return true;
   }
   if (depth > 30) return true;
+  const hides = ({ words, input }) => {
+    const at = words.findIndex(({ value }) => SHELL_WORD.test(value));
+    if (at < 0) return false;
+    const run = shellInvocation(words.slice(at + 1), words[at].value);
+    if (run.body) return shellCandidate(run.body.value, depth + 1);
+    if (containerised(words.slice(0, at).map(({ value }) => value))) return false;
+    if (run.problem || run.file) return true;
+    const text = input.hereString;
+    if (text) return text === true || computedWord(text) || shellCandidate(text.value, depth + 1);
+    return Boolean(input.pipe);
+  };
   return (
-    parsed.commands.some(({ words }) =>
-      /\bjest\b|\b(?:pnpm|npm)\b[\s\S]*\btest\b/.test(words.map(({ value }) => value).join(' ')),
+    parsed.commands.some(
+      (command) =>
+        /\bjest\b|\b(?:pnpm|npm)\b[\s\S]*\btest\b/.test(
+          command.words.map(({ value }) => value).join(' '),
+        ) || hides(command),
     ) || parsed.nested.some(({ script }) => shellCandidate(script, depth + 1))
   );
 }
+
+/** A shell after a docker word runs in the container's file system, not on the runner's. */
+const containerised = (before) => before.some((word) => /(?:^|\/)docker(?:-compose)?$/.test(word));
+const computedWord = (word) => Boolean(word.opaque || word.dynamic || word.value.includes('$'));
 
 /** Discover launches; unsupported configuration forwarding or file launchers are refusal records. */
 export function jestCommands(paths, read) {
@@ -117,6 +275,9 @@ export function jestCommands(paths, read) {
       // shared shellInvocation (`+c`, `+sc`, `-eo pipefail -c`, a computed option, `-`), never by
       // a pattern of its own; a shell that reads a pipe or a here-string reads text we inspect.
       const shellIndex = words.findIndex((word) => SHELL_WORD.test(word));
+      // PR #805 r2 F3: the script operand of any recognised shell is a launcher file, resolved below
+      // like every other one; the shared reader alone decides which word it is.
+      let shellOperand = -1;
       if (shellIndex >= 0) {
         const run = shellInvocation(command.words.slice(shellIndex + 1), words[shellIndex]);
         if (run.problem) {
@@ -139,6 +300,8 @@ export function jestCommands(paths, read) {
             continue;
           }
         }
+        if (run.file && !containerised(words.slice(0, shellIndex)))
+          shellOperand = command.words.indexOf(run.file);
       }
       const jestIndex = words.findIndex((word) => /(?:^|\/)jest(?:\.js)?$/.test(word));
       const managerIndex = words.findIndex((word) => /(?:^|\/)(?:pnpm|npm|turbo)$/.test(word));
@@ -193,11 +356,13 @@ export function jestCommands(paths, read) {
         : SCRIPT_FILE.test(words[executable] ?? '')
           ? executable
           : -1;
-      for (const index of runner
-        ? words.flatMap((word, index) => (SCRIPT_FILE.test(word) ? [index] : []))
-        : fileIndex >= 0
-          ? [fileIndex]
-          : []) {
+      for (const index of shellOperand >= 0
+        ? [shellOperand]
+        : runner
+          ? words.flatMap((word, index) => (SCRIPT_FILE.test(word) ? [index] : []))
+          : fileIndex >= 0
+            ? [fileIndex]
+            : []) {
         const path = relative(root, resolve(root, cwd, words[index]));
         let source;
         try {
@@ -205,12 +370,13 @@ export function jestCommands(paths, read) {
           if (typeof source !== 'string') throw new Error('unreadable source');
         } catch {
           // A statically absent executable cannot launch Jest. Unreadable existing sources refuse.
-          if (paths.includes(path) || /[$]/.test(words[index]))
+          // A shell's script operand may be generated before the shell runs: it refuses too.
+          if (shellOperand >= 0 || paths.includes(path) || /[$]/.test(words[index]))
             refuse(name, `unreadable launcher ${path}`);
           continue;
         }
         const entry = JEST_LAUNCHERS[path];
-        if (!entry && !launcherCandidate(source, path)) continue;
+        if (!entry && !launcherCandidate(source, path, shellOperand >= 0)) continue;
         if (!entry) {
           refuse(name, `unregistered Jest launcher ${path}`);
           continue;
@@ -229,7 +395,8 @@ export function jestCommands(paths, read) {
         }
         const args = words.slice(index + 1);
         // Registered adapters accept only the reviewed argument grammar; forwarding elsewhere refuses.
-        if (opaque) {
+        // `inertArguments`: reviewed, no argument of this launcher reaches a Jest launch (an image ref).
+        if (opaque && !entry.inertArguments) {
           refuse(name, `opaque launcher ${path}`);
           continue;
         }
@@ -292,7 +459,7 @@ export function jestCommands(paths, read) {
           refuse(name, `unsupported registered launcher ${path}`);
         continue;
       }
-      if (fileIndex >= 0) continue;
+      if (fileIndex >= 0 || shellOperand >= 0) continue;
       // Defaults are scanned as package scripts below; forwarded configuration must be expanded here.
       const override = words.some(
         (word, index) => index > managerIndex && !consumed.has(index) && CONFIG_FLAG.test(word),

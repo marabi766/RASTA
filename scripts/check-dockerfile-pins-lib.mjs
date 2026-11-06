@@ -206,6 +206,21 @@ export const EVALUATED_OUTPUTS = new Map([
   ],
 ]);
 
+/**
+ * PR #805 r2 F1: `source`/`.` runs a file in the same shell. A CI `.sh` file is read by this
+ * check itself; these `.bash` libraries (init-time, not scanned: their `[[ ]]`, `(( ))` and
+ * case syntax is outside the tokenizer) are the only other files a script may source, each
+ * reviewed to start no container and run no evaluated text (it never mentions docker, eval
+ * or a shell -c outside comments).
+ */
+export const SOURCED_LIBRARIES = new Map(
+  [
+    'infrastructure/docker/postgres/lib/role-passwords.bash',
+    'infrastructure/docker/postgres/lib/disposable-marker.bash',
+    'infrastructure/docker/postgres/lib/service-privilege-split.bash',
+  ].map((path) => [path, 'init-time psql library; starts no container']),
+);
+
 /** The compose file the checker validates; a `docker compose -f` naming any other fails closed. */
 export const COMPOSE_FILES = ['docker-compose.yml'];
 
@@ -397,8 +412,12 @@ export function tokenizeShell(src) {
   let nextGroup = 1;
   const groups = [];
   const parents = [-1]; // parents[group]: the group it was opened in
+  const arrays = new Set(); // the groups that are array literals
   let pending = '';
   let cmdSep = '';
+  // PR #805 r2 F2: the operator in front of a `( … )` group (`a &⏎( b )`: b is in a list `a` is part of).
+  let lead = '';
+  let cmdLead = '';
   // FU-077 r2 F2: where each command's standard input comes from, so a shell that reads its
   // commands from a pipe or a here-string is seen.
   let input = {};
@@ -408,6 +427,7 @@ export function tokenizeShell(src) {
     if (startLine === null) {
       startLine = line;
       cmdSep = pending;
+      cmdLead = pending === '(' ? lead : '';
     }
   };
   let hereStringWord = false;
@@ -423,7 +443,7 @@ export function tokenizeShell(src) {
   const endCommand = () => {
     pushWord();
     if (words.length > 0) {
-      commands.push({ startLine, endLine: line, words, input, group, sep: cmdSep });
+      commands.push({ startLine, endLine: line, words, input, group, sep: cmdSep, lead: cmdLead });
       input = {};
     }
     words = [];
@@ -505,6 +525,12 @@ export function tokenizeShell(src) {
           body.push(text);
         }
         if (!closed) throw new ShellSyntaxError(`here-document ${delimiter} is never closed`);
+        // PR #805 r2 F1: a shell reading an EXPANDING body runs the expanded text, which is
+        // whatever its substitutions and variables print: refused, never read as written.
+        if (feedsShell && expands && /[$`]/.test(body.join('\n')))
+          throw new ShellSyntaxError(
+            `an expanding here-document read by a shell contains an expansion (line ${bodyLine})`,
+          );
         if (feedsShell) nested.push({ script: body.join('\n'), line: bodyLine });
         // FU-077 r2 F2: an unquoted delimiter expands the body, running its substitutions;
         // FU-092: also when a shell then reads the expanded body (`bash <<EOF` with `$(…)`).
@@ -531,12 +557,16 @@ export function tokenizeShell(src) {
       continue;
     }
     if (c === '(' || c === ')') {
+      // PR #805 r2 F1: `name=( … )` is an array literal: its words are elements, not commands.
+      const array = c === '(' && !pending.startsWith('(') && Boolean(word?.value.endsWith('='));
       endCommand();
       if (c === '(') {
         groups.push(group);
         parents[nextGroup] = group;
+        if (array) arrays.add(nextGroup);
         group = nextGroup++;
       } else group = groups.pop() ?? 0;
+      if (c === '(' && pending !== '(') lead = pending;
       pending = c;
       i += 1;
       continue;
@@ -637,7 +667,7 @@ export function tokenizeShell(src) {
   }
   endCommand();
   if (heredocs.length > 0) throw new ShellSyntaxError('here-document is never closed');
-  return { commands, nested, parents };
+  return { commands, nested, parents, arrays };
 }
 
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
@@ -671,7 +701,11 @@ export function validateInfraImagePins(files, policy = {}) {
   const evaluated = { allowed: policy.evaluatedOutputs ?? EVALUATED_OUTPUTS, used: new Set() };
   // FU-092: a script a shell is told to run is read only if it is one of these files.
   const shellFiles = new Set(files.filter(({ kind }) => kind === 'shell').map(({ name }) => name));
-  const shared = { composeFiles, evaluated, shellFiles };
+  const sourced = new Set([
+    ...shellFiles,
+    ...(policy.sourcedLibraries ?? SOURCED_LIBRARIES).keys(),
+  ]);
+  const shared = { composeFiles, evaluated, shellFiles, sourced };
   const errors = [];
   const images = [];
   const usedTagless = new Set();
@@ -831,6 +865,8 @@ function workflowImages({ name, text }, images, errors, shared) {
   const addEnv = (block, path) => {
     if (!isObject(block)) return;
     for (const [key, value] of Object.entries(block)) {
+      if (STARTUP_TEXT.test(key))
+        errors.push(`${name}: env sets ${key}, which a shell evaluates at startup`);
       if (!env.has(key)) env.set(key, new Set());
       env.get(key).add(String(value));
       if (/_IMAGE$/.test(key)) {
@@ -887,6 +923,7 @@ function workflowImages({ name, text }, images, errors, shared) {
             env,
             ...shared,
             shellFiles: moved ? new Set() : shared.shellFiles,
+            sourced: moved ? new Set() : shared.sourced,
           },
           images,
           errors,
@@ -973,10 +1010,11 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   // `declare -n`) could have set the variable.
   const provenanceBroken = parsed.commands.some(({ words }) => dynamicWriter(words));
   let open = 0;
-  const nesting = parsed.commands.map(({ words: [first] }) => {
-    if (CLOSERS.has(first.value)) open = Math.max(0, open - 1);
+  const nesting = parsed.commands.map(({ words }) => {
+    const first = words[headIndex(words)]?.value;
+    if (CLOSERS.has(first)) open = Math.max(0, open - 1);
     const at = open;
-    if (OPENERS.has(first.value)) open += 1;
+    if (OPENERS.has(first)) open += 1;
     return at;
   });
   /** `group` is `ancestor` or a subshell opened inside it: it inherits the variables set there. */
@@ -991,8 +1029,14 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   const unconditional = (position, later) => {
     const { group } = parsed.commands[position];
     let end = position + 1;
-    while (parsed.commands[end]?.sep === '&&' && parsed.commands[end].group === group) end += 1;
-    if (['&', '|', '|&'].includes(parsed.commands[end]?.sep) && !(later >= position && later < end))
+    // A `||` list is one list too: `producer || true &` runs all of it in the background.
+    while (['&&', '||'].includes(parsed.commands[end]?.sep) && parsed.commands[end].group === group)
+      end += 1;
+    const after = parsed.commands[end];
+    if (
+      ['&', '|', '|&'].includes(after?.sep === '(' ? after.lead : after?.sep) &&
+      !(later >= position && later < end)
+    )
       return false;
     for (let k = position; k >= 0; k -= 1) {
       const at = parsed.commands[k];
@@ -1006,6 +1050,9 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   for (const [position, command] of parsed.commands.entries()) {
     const where = `${ctx.file}:${ctx.lineOf(command.startLine)}`;
     let words = command.words;
+    // PR #805 r2 F1: a variable a shell evaluates at startup is text this check does not read.
+    if (words.some(({ value }) => STARTUP_TEXT.test(value)))
+      errors.push(`${where}: sets a variable a shell evaluates at startup (BASH_ENV, ENV ...)`);
     // Assignments before a command, or alone (a variable for later commands).
     let index = 0;
     while (
@@ -1036,6 +1083,19 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     if (isExempt) continue;
     const problem = (text) => errors.push(`${where}: ${text}`);
     const at = words.findIndex(({ value }) => /(^|\/)docker(-compose)?$/.test(value));
+    // PR #805 r2 F1: stages that turn text into commands keep what they carry or refuse it.
+    const staged = parsed.arrays.has(command.group)
+      ? {}
+      : textStage(command.words, command.input, ctx.sourced);
+    if (staged.problem) problem(staged.problem);
+    for (const script of staged.scripts ?? [])
+      shellImages(
+        script,
+        { ...ctx, lineOf: (n) => ctx.lineOf(command.startLine + n) },
+        images,
+        errors,
+        state,
+      );
     // FU-077 r2 F2: a shell or eval before any docker word runs text as commands. Words after
     // docker are the container's command, which runs inside the pinned image.
     const shellAt = (at === -1 ? words : words.slice(0, at)).findIndex(
@@ -1156,6 +1216,115 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   }
 }
 
+// PR #805 r2 F1: variables whose value a shell runs at startup or between commands.
+const STARTUP_TEXT = /^(?:BASH_ENV|ENV|PROMPT_COMMAND|PS0|PS1|PS4|SHELLOPTS|BASHOPTS)(?:\+?=.*)?$/;
+/** Programs that run an operand string as a command line, or read commands from standard input. */
+const STRING_RUNNERS = new Set('flock su runuser sg script ssh watch at batch parallel'.split(' '));
+const STRING_WRAPPERS = new Set(['sudo', 'doas']);
+/** Names that take text wherever they stand in a command (not `source` and `.`: those are arguments too). */
+const TAKES_TEXT = new Set(
+  ['alias trap env xargs find', ...[...STRING_RUNNERS, ...STRING_WRAPPERS]].flatMap((names) =>
+    names.split(' '),
+  ),
+);
+/** Programs that substitute into the command they run (`xargs -I{}`, `find -exec … {}`). */
+const REWRITERS = new Set(['xargs', 'find', 'parallel']);
+/** Words that are followed by the command they run. */
+const COMMAND_PREFIXES = new Set(
+  'builtin command exec time ! nohup env sudo doas nice ionice setsid stdbuf timeout'.split(' '),
+);
+const computedWord = (word) => Boolean(word.opaque || word.value.includes('$'));
+/** `a=b`, `a+=b`, `a[$i]=b`, and the declarers in front of them: no program runs. */
+const ASSIGN_LIKE = /^(?:[A-Za-z_][A-Za-z0-9_]*|\$\{?[A-Za-z0-9_]+\}?)(?:\[[^\]]*\])?\+?=/;
+/** The program is named by a computed LAST path component (`$cmd`, `$(…)`, `a/${b}`): `${D}/x.sh` is a file. */
+const computedProgram = (word) =>
+  word.opaque ||
+  word.value
+    .replace(/\$\{[^}]*\}/g, '$')
+    .split('/')
+    .at(-1)
+    .includes('$');
+/**
+ * PR #805 r2 F1: what the stages between a command line and the commands it runs do. A stage
+ * that rewrites, generates or hands over text is read (`{ scripts }`) or refused (`{ problem }`);
+ * none is "nothing relevant".
+ */
+function textStage(words, input, sourced) {
+  const start = words.findIndex(({ value }) => !ASSIGN_LIKE.test(value) && !DECLARERS.has(value));
+  if (start < 0) return {};
+  // Stages: the chain of words that each run the next (`time nohup source x`), and every word
+  // naming a program that takes text anywhere in the command (`env -u X flock l -c '…'` hides
+  // flock behind an option operand). Each is read once.
+  const chain = new Set();
+  let at = start;
+  for (;;) {
+    chain.add(at);
+    if (!COMMAND_PREFIXES.has(words[at].value)) break;
+    at += 1;
+    while (
+      at < words.length - 1 &&
+      (ASSIGN_LIKE.test(words[at].value) || /^(?:-.*|\d+[smhd]?)$/.test(words[at].value))
+    )
+      at += 1;
+    if (at >= words.length) break;
+  }
+  const scripts = [];
+  for (const [index, word] of words.entries()) {
+    const name = word.value.split('/').at(-1);
+    if (index < start || !(chain.has(index) || TAKES_TEXT.has(name))) continue;
+    if (chain.has(index) && computedProgram(word))
+      return { problem: `runs the command word ${word.value}, which this check cannot read` };
+    const stage = wordStage(name, words.slice(index + 1), input, sourced);
+    if (stage.problem) return stage;
+    scripts.push(...(stage.scripts ?? []));
+  }
+  return { scripts };
+}
+
+/** The stage the program `name` is, given the words after it. */
+function wordStage(name, args, input, sourced) {
+  const standardInput = input.pipe || input.hereString || input.hereDocument;
+  if (name === 'alias') return { problem: 'alias defines text a later command runs' };
+  if (name === 'trap') {
+    const handler = args.find(({ value }) => !value.startsWith('-') || value === '-');
+    if (!handler || handler.value === '-' || handler.value === '') return {};
+    return computedWord(handler)
+      ? { problem: 'trap runs a handler this check cannot read' }
+      : { scripts: [handler.value] };
+  }
+  if (name === 'source' || name === '.') {
+    const file = args[0]?.value.replace(/^\.\//, '');
+    // `$(dirname "$0")/lib/x.bash`: a computed directory in front of a literal path that is the
+    // tail of a file this check reads or SOURCED_LIBRARIES lists (the sibling-script idiom).
+    const tail = /^(?:\$\(…\)|\$\{[^}]*\}|\$\w+)(\/[^$]*)$/.exec(file ?? '')?.[1];
+    const known =
+      file !== undefined &&
+      (tail === undefined
+        ? !computedWord(args[0]) && sourced.has(file)
+        : [...sourced].some((path) => path.endsWith(tail)));
+    return known
+      ? {}
+      : { problem: `${name} runs ${file ?? 'nothing'}, a script this check does not read` };
+  }
+  if (name === 'env' && args.some(({ value }) => /^(?:-[A-Za-z]*S|--split-string)/.test(value)))
+    return { problem: 'env -S splits a string into a command this check does not read' };
+  if (REWRITERS.has(name) && args.some(({ value }) => SHELL_WORD.test(value) || value === 'eval'))
+    return { problem: `${name} rewrites the text a shell runs` };
+  const runner = STRING_RUNNERS.has(name);
+  if (!runner && !STRING_WRAPPERS.has(name)) return {};
+  if (runner && standardInput)
+    return {
+      problem: `${name} reads commands from standard input, which this check does not read`,
+    };
+  const scripts = [];
+  for (const word of args) {
+    if (computedWord(word) && runner)
+      return { problem: `${name} runs a command string this check cannot read` };
+    if (!computedWord(word) && /\s/.test(word.value)) scripts.push(word.value);
+  }
+  return { scripts };
+}
+
 /**
  * FU-077 r2 F2: what a shell or `eval` command runs. `{ script }` is text to read as a script
  * of its own, `{}` is input read elsewhere (a CI `.sh` file this check validates, or a
@@ -1206,7 +1375,7 @@ const assignmentOnly = (words) => {
   const plain = withoutDeclarers(words);
   return plain.length > 0 && plain.every(({ value }) => ASSIGNMENT.test(value));
 };
-const OPENERS = new Set('if while until for select case {'.split(' '));
+const OPENERS = new Set('if while until for select case { function coproc'.split(' '));
 const CLOSERS = new Set('fi done esac }'.split(' '));
 const LIST_STARTS = new Set(['', '\n', ';', '(']);
 const NAME_WRITERS = new Set(
@@ -1215,10 +1384,24 @@ const NAME_WRITERS = new Set(
   ),
 );
 const unsure = (word) => Boolean(word?.opaque) || /[$`]/.test(word?.value ?? '');
+/**
+ * Where a command's own word is, past assignments and the prefixes that run the next word
+ * (`builtin printf`, `command read`, `time if`, `! {`) and their options (`command -p`).
+ */
+const HEAD_PREFIXES = new Set(['builtin', 'command', 'exec', 'time', '!']);
+function headIndex(words) {
+  let at = words.findIndex(({ value }) => !ASSIGNMENT.test(value));
+  while (at >= 0 && HEAD_PREFIXES.has(words[at]?.value)) {
+    at += 1;
+    while (/^-/.test(words[at]?.value ?? '')) at += 1;
+  }
+  return at;
+}
+
 /** A command that can write a variable whose NAME this check cannot read. */
 function dynamicWriter(all) {
-  const at = all.findIndex(({ value }) => !ASSIGNMENT.test(value));
-  if (at < 0) return false;
+  const at = headIndex(all);
+  if (at < 0 || at >= all.length) return false;
   const [command, ...rest] = all.slice(at);
   if (!NAME_WRITERS.has(command.value)) return false;
   if (command.value === 'source' || command.value === '.') return true;

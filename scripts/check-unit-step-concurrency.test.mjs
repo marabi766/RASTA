@@ -27,6 +27,8 @@ import {
   nodeTestSegments,
   nodeTestTimeoutProblems,
   parseCommands,
+  PNPMFILE_NAMES,
+  pnpmInputProblems,
   pnpmSettingsProblems,
   reachableScripts,
   runsNodeTest,
@@ -52,6 +54,25 @@ const turboFiles = (directory) =>
   );
 const realTurboConfigs = [{ directory: '.', files: turboFiles('.') }];
 const realPackages = {};
+/**
+ * PR #805 r2 F4: every directory pnpm reads as a project (the root and each `dir/*` workspace
+ * entry, whatever manifest it holds) is listed and checked by the library's pnpmInputProblems:
+ * a pnpm hook or a manifest in another format is refused, never skipped.
+ */
+function workspaceInputProblems(base) {
+  const patterns = parse(readFileSync(join(base, 'pnpm-workspace.yaml'), 'utf8')).packages;
+  const found = [...pnpmInputProblems('.', readdirSync(base))];
+  for (const pattern of patterns) {
+    const dir = /^([a-z]+)\/\*$/.exec(pattern)?.[1];
+    if (!dir) throw new Error(`workspace pattern ${pattern} is not read`);
+    for (const entry of readdirSync(join(base, dir), { withFileTypes: true }))
+      if (entry.isDirectory())
+        found.push(
+          ...pnpmInputProblems(`${dir}/${entry.name}`, readdirSync(join(base, dir, entry.name))),
+        );
+  }
+  return found;
+}
 for (const pattern of pnpmWorkspace.packages) {
   const dir = /^([a-z]+)\/\*$/.exec(pattern)?.[1];
   if (!dir) throw new Error(`workspace pattern ${pattern} is not read`);
@@ -67,12 +88,15 @@ for (const pattern of pnpmWorkspace.packages) {
   }
 }
 // FU-092: the pnpm settings every pnpm command of the job runs under, read from where pnpm reads them.
-const realSettings = pnpmSettingsProblems({
-  npmrc: readFileSync(join(root, '.npmrc'), 'utf8'),
-  workspace: pnpmWorkspace,
-  manifestPnpm: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).pnpm,
-  pnpmfile: existsSync(join(root, '.pnpmfile.cjs')),
-});
+const realSettings = [
+  ...pnpmSettingsProblems({
+    npmrc: readFileSync(join(root, '.npmrc'), 'utf8'),
+    workspace: pnpmWorkspace,
+    manifestPnpm: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).pnpm,
+    pnpmfile: PNPMFILE_NAMES.some((name) => existsSync(join(root, name))),
+  }),
+  ...workspaceInputProblems(root),
+];
 const realWorkspace = { ...turboTaskGraph(realTurboConfigs), settings: realSettings };
 const [exception] = UNBOUNDED_EXCEPTIONS;
 // FU-077 R1: run text with a CR or another control character is refused by the shared
@@ -2912,5 +2936,72 @@ test('FU-092: a job container refuses; so do unread pnpm settings', () => {
       settings: read({ npmrc: `${npmrc}\nscript-shell=/tmp/sh` }),
     }),
     /the pnpm settings cannot be read: \.npmrc sets script-shell/,
+  );
+});
+
+// PR #805 r2 F4: pnpm's install hooks and package manifests are enumerated from ONE list
+// (PNPMFILE_NAMES, MANIFEST_NAMES in the library), for the root and for every workspace entry.
+// On ea79eb47 `.pnpmfile.mjs` left the settings clean, and a package that held only a
+// package.json5 or package.yaml (with a postinstall node --test) was never listed.
+test('PR #805 r2 F4: every pnpm hook and manifest format is refused, in the root and each package', () => {
+  const tree = mkdtempSync(join(tmpdir(), 'rasta-pnpm-inputs-'));
+  try {
+    writeFileSync(join(tree, 'pnpm-workspace.yaml'), 'packages:\n  - apps/*\n  - services/*\n');
+    writeFileSync(join(tree, 'package.json'), '{}');
+    mkdirSync(join(tree, 'services'), { recursive: true });
+    mkdirSync(join(tree, 'apps/plain'), { recursive: true });
+    writeFileSync(join(tree, 'apps/plain/package.json'), '{}');
+    assert.deepEqual(workspaceInputProblems(tree), []);
+    const cases = [
+      ['.pnpmfile.mjs', /^\.pnpmfile\.mjs may run code at install$/],
+      ['.pnpmfile.cjs', /^\.pnpmfile\.cjs may run code at install$/],
+      ['package.json5', /^package\.json5 is a package manifest this check does not read$/],
+      ['package.yaml', /^package\.yaml is a package manifest this check does not read$/],
+    ];
+    for (const [name, pattern] of cases) {
+      writeFileSync(join(tree, name), 'x');
+      refused(workspaceInputProblems(tree), pattern);
+      rmSync(join(tree, name));
+      // a workspace package holding ONLY that file (no package.json) is not skipped either
+      const lone = join(tree, 'services/lone');
+      mkdirSync(lone, { recursive: true });
+      writeFileSync(join(lone, name), 'x');
+      refused(
+        workspaceInputProblems(tree),
+        new RegExp(`^services/lone/${name.replace('.', '\\.')} `),
+      );
+      rmSync(lone, { recursive: true });
+    }
+    // with both a package.json and a second manifest in one package
+    mkdirSync(join(tree, 'apps/both'), { recursive: true });
+    writeFileSync(join(tree, 'apps/both/package.json'), '{}');
+    writeFileSync(join(tree, 'apps/both/package.yaml'), 'x');
+    refused(workspaceInputProblems(tree), /^apps\/both\/package\.yaml /);
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+  // the names are one list: the settings check names every pnpmfile, and a directory not listed refuses
+  assert.deepEqual(PNPMFILE_NAMES, ['.pnpmfile.cjs', '.pnpmfile.mjs']);
+  assert.deepEqual(pnpmInputProblems('x', undefined), ['x was not listed']);
+  assert.match(
+    pnpmSettingsProblems({
+      npmrc: '',
+      workspace: pnpmWorkspace,
+      pnpmfile: true,
+      manifestPnpm: undefined,
+    }).join(),
+    /\.pnpmfile\.cjs or \.pnpmfile\.mjs may run code at install/,
+  );
+  // the real tree has none of them
+  assert.deepEqual(workspaceInputProblems(root), []);
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      ...realWorkspace,
+      settings: [
+        ...realSettings,
+        'apps/x/package.json5 is a package manifest this check does not read',
+      ],
+    }),
+    /the pnpm settings cannot be read: apps\/x\/package\.json5/,
   );
 });
