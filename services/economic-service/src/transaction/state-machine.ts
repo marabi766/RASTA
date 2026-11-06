@@ -149,7 +149,7 @@ export function canTransition(from: TransactionStatus, event: TransactionEvent):
 export interface SettlementAuthority {
   /** `settlement_authorised_at` is set: settlement was authorised. */
   readonly settlementAuthorised: boolean;
-  /** An ACTIVE wallet hold names the transaction: its funds are escrowed. */
+  /** The payer's own ACTIVE hold for this transaction (`transaction_holds`): its funds are escrowed. */
   readonly fundsHeld: boolean;
 }
 

@@ -22,7 +22,7 @@ import {
   type TransactionDetailView,
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
-import { settlementsExhaustedTotal } from '../observability/metrics';
+import { releasesUnconfirmedTotal, settlementsExhaustedTotal } from '../observability/metrics';
 
 /**
  * Everything the order saga does that touches the world.
@@ -172,6 +172,8 @@ function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>)
 
 export function createActivities(deps: ActivityDependencies) {
   const logger = new Logger('OrderSagaActivities');
+  // At zero from the start: `increase()` cannot see a series' first increment.
+  releasesUnconfirmedTotal.inc({ service: SERVICE_NAME }, 0);
 
   /**
    * Runs `fn` as the system, acting for the order's buying organization.
@@ -630,9 +632,8 @@ export function createActivities(deps: ActivityDependencies) {
      * With `economicDisputeId`, only that dispute: economic-service refuses the
      * resolution, under its row lock, once the transaction holds another — one
      * raised since the dispute decided here was taken, after that one was
-     * resolved there (Codex on #318 round 2, N1). The refusal stands, and the
-     * saga stops with the funds held for an operator, as it did before the
-     * order took economic-service's disputes at all.
+     * resolved there (Codex on #318 round 2, N1). The refusal stands: the saga
+     * waits with the funds held and the alert on, for an operator (FU-080).
      */
     async resolveObligationDispute(
       orderId: string,
@@ -681,6 +682,21 @@ export function createActivities(deps: ActivityDependencies) {
             return released && ours ? { result: undefined } : null;
           },
         },
+      );
+    },
+
+    /**
+     * Reports a round of a dispute release economic-service has not confirmed
+     * (FU-080), from an activity because the SDK logger discards a workflow's
+     * words (`TemporalRuntimeLogger`) and only a worker holds the registry.
+     * Touches nothing else, so it cannot fail for the reason the release did.
+     */
+    async noteReleaseUnconfirmed(orderId: string, round: number, failure: string): Promise<void> {
+      releasesUnconfirmedTotal.inc({ service: SERVICE_NAME });
+      logger.error(
+        `The dispute release of order ${orderId} is unconfirmed after round ${round} ` +
+          `(${failure}); its funds stay held and the saga keeps trying ` +
+          '(docs/runbooks/marketplace-saga-deploy.md)',
       );
     },
 
@@ -745,7 +761,8 @@ function refusedForState(error: unknown): boolean {
  * as sent; once it keeps it with LF line endings (FU-115), this reader still
  * finds its own dispute and resolution — which is why this release, reading
  * both, must be every running worker and the rollback floor before that
- * writer ships (docs/06 § 6.8). This service keeps what the person sent.
+ * writer ships (docs/06 § 6.8). This service keeps the four transaction texts
+ * with LF line endings (PR-806 r1 F1); a text stored before that may hold CRLF.
  */
 function sameText(kept: string | null | undefined, sent: string): boolean {
   const lf = (text: string) => text.replace(/\r\n?/g, '\n');

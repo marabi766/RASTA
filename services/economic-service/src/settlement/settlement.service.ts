@@ -229,7 +229,12 @@ export class SettlementService {
     const payee = locked.find((wallet) => wallet.id === payeeWallet.id);
     if (!payer || !payee) throw RastaError.internal('A wallet vanished while locking it');
 
-    const hold = await this.walletRepository.findActiveHold(tx, payer.id, transaction.id);
+    const hold = await this.walletRepository.findActiveHold(tx, {
+      walletId: payer.id,
+      organizationId: transaction.organizationId,
+      reference: transaction.id,
+      referenceType: 'TRANSACTION',
+    });
 
     // Escrowed money moves only on a recorded authorisation, whatever the
     // status says: an older release's resolution left escrowed, never

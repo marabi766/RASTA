@@ -41,7 +41,8 @@ beforeEach(() => resetUnrecordedOutcomes());
 // exercise that path on purpose, so the line is swallowed here; a spec that
 // cares asserts on `console.error` (it stays a jest spy). Any other
 // `console.error` still reaches the terminal.
-const realConsoleError = console.error.bind(console);
+const savedConsoleError = console.error;
+const realConsoleError: typeof console.error = (...args) => savedConsoleError.apply(console, args);
 beforeEach(() => {
   jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
     if (typeof args[0] === 'string' && args[0].includes('web.unmapped_service_message')) return;

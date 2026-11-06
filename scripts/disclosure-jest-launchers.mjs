@@ -17,7 +17,7 @@ export const JEST_LAUNCHERS = {
       'Package-local Jest binary; --selectProjects defaults to integration; whole-file and per-name runs differ only in test selection.',
     sha256: {
       'scripts/verify-test-independence.mjs':
-        '0f9ca1aa3fee4606560fcbd8fe32ce9debe08a74e0010b85426bd9eb846db7ad',
+        '73cdc9c671360b4d144a1fa8c1f29986db1647fd8faa1d13be519e8704ccb28d',
     },
   },
   'scripts/aggregation-evidence.mjs': {
@@ -171,7 +171,20 @@ export const JEST_LAUNCHERS = {
       'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
     sha256: {
       'scripts/exchange-deadline-rule.test.mjs':
-        '1b3a35b144a1d10fcfec2b1a496e134d8f30c744c13d27845aa7bbc89676763c',
+        'c744d65515dff65bc511c293445a6deb56b696aac675e9151c5fe1594e9e8dc0',
+    },
+  },
+  'scripts/ci-integration-split.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
+    sha256: {
+      'scripts/ci-integration-split.test.mjs':
+        'b7ec47c1b0fb9cb494b4f5348a1e70d571cd08f26965fc8a90ff8f3ad3464a64',
+      'scripts/ci-integration-split-lib.mjs':
+        'c1749b54c13c707abffe5cc684a763fd9db540c81c452b95f944d70e1dfd7d70',
+      'scripts/workspace-roots-lib.mjs':
+        'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
   },
   'scripts/testing-dev-only.test.mjs': {
@@ -184,7 +197,7 @@ export const JEST_LAUNCHERS = {
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
-        '8dde8b52864b7b218461e7a822e0b5cf38bcb106d2ed1a90a9fc39031fdb278b',
+        '3466c4f1a151720eedbe2bdc4550503bf100695027f871aeae95bb0225c6bd08',
     },
   },
   'scripts/lint-scripts-registration.test.mjs': {
