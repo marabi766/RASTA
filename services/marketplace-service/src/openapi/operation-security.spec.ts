@@ -1,3 +1,5 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { createProductSchema } from '../offer/dto';
 import { VersioningType, type INestApplication, type Type } from '@nestjs/common';
 import { MODULE_METADATA } from '@nestjs/common/constants';
 import { NestFactory } from '@nestjs/core';
@@ -30,6 +32,18 @@ describe('published security equals the guard decision (FU-075)', () => {
     );
   });
   afterAll(() => app.close());
+
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(JSON.stringify(document.paths['/v1/products']!.post!.requestBody));
+    expect(body.content['application/json'].schema.properties.name).toEqual({
+      type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = createProductSchema.shape.name;
+    expect(field.safeParse(' ' + 'a'.repeat(200) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
+  });
 
   it('documents bearer, internal token, both or none exactly where the guard admits them', () => {
     const expected = new Map<string, string[]>();
