@@ -92,9 +92,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -134,8 +132,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 100
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           }
         ],
@@ -186,28 +183,24 @@
                 "type": "object",
                 "properties": {
                   "username": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "email": {
                     "type": "string",
-                    "format": "email",
-                    "maxLength": 255
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "firstName": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "pattern": "^(?![\\s\\S]*\\p{Bidi_Control})[\\p{Script=Arabic}\\p{Script=Latin}\\p{Mark}\\s‌'’\\-.]+$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "lastName": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "pattern": "^(?![\\s\\S]*\\p{Bidi_Control})[\\p{Script=Arabic}\\p{Script=Latin}\\p{Mark}\\s‌'’\\-.]+$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "phone": {
                     "type": "string",
-                    "pattern": "^(?:\\+98|0)9\\d{9}$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "organizationId": {
                     "anyOf": [
@@ -415,19 +408,15 @@
                 "properties": {
                   "firstName": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "pattern": "^(?![\\s\\S]*\\p{Bidi_Control})[\\p{Script=Arabic}\\p{Script=Latin}\\p{Mark}\\s‌'’\\-.]+$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "lastName": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "pattern": "^(?![\\s\\S]*\\p{Bidi_Control})[\\p{Script=Arabic}\\p{Script=Latin}\\p{Mark}\\s‌'’\\-.]+$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "phone": {
                     "type": "string",
-                    "pattern": "^(?:\\+98|0)9\\d{9}$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   }
                 },
@@ -586,8 +575,7 @@
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 3,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["roles", "reason"],
@@ -639,8 +627,7 @@
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 3,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["reason"],
@@ -681,28 +668,24 @@
                 "type": "object",
                 "properties": {
                   "username": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "email": {
                     "type": "string",
-                    "format": "email",
-                    "maxLength": 255
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "firstName": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "pattern": "^(?![\\s\\S]*\\p{Bidi_Control})[\\p{Script=Arabic}\\p{Script=Latin}\\p{Mark}\\s‌'’\\-.]+$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "lastName": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "pattern": "^(?![\\s\\S]*\\p{Bidi_Control})[\\p{Script=Arabic}\\p{Script=Latin}\\p{Mark}\\s‌'’\\-.]+$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "phone": {
                     "type": "string",
-                    "pattern": "^(?:\\+98|0)9\\d{9}$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "requestedOrganizationId": {
                     "anyOf": [
@@ -741,14 +724,13 @@
                   "justification": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "maxLength": 1000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "documentRefs": {
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Bidi_Control}]*$",
-                      "minLength": 1
+                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                     },
                     "maxItems": 10,
                     "default": []
@@ -786,9 +768,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
               "default": 25
             }
           },
@@ -806,7 +786,8 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           }
         ],
@@ -937,8 +918,7 @@
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 10,
-                    "maxLength": 1000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["reason"],
@@ -990,9 +970,7 @@
                 "properties": {
                   "auditEventId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64,
-                    "pattern": "^[0-9A-Za-z_-]+$"
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "occurredAt": {
                     "type": "string",
@@ -1003,8 +981,7 @@
                   "reason": {
                     "type": "string",
                     "pattern": "^[^\\p{Bidi_Control}]*$",
-                    "minLength": 1,
-                    "maxLength": 1000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "changes": {
                     "type": "array",
@@ -1014,7 +991,8 @@
                         "field": {
                           "type": "string",
                           "minLength": 1,
-                          "maxLength": 128
+                          "maxLength": 128,
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "from": {
                           "anyOf": [
