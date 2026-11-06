@@ -1320,6 +1320,127 @@ test('R1 unsupported shell/inline launchers refuse instead of hiding configurati
   }
 });
 
+// FU-092 (PR #727 r2 F2 residuals): a shell reads its commands from many places and every
+// expansion stage can carry one. Jest hidden in any of them still reaches the effective
+// configuration inspection (a record with its arguments) or refuses (an opaque record). The
+// spelling je''st is read as jest by the shell but is not matched by the token pre-check, so
+// only a real read of the shell text finds it; each of these returned no record on d409a643.
+test('FU-092: Jest behind a shell dispatch, a here-document or an escaped newline stays visible', () => {
+  const jest = "je''st --config alternative.cjs";
+  for (const run of [
+    `<<'EOF' bash\n${jest}\nEOF`,
+    `<<EOF env bash\n${jest}\nEOF`,
+    `bash <<EOF\n# $(${jest})\nEOF`,
+    `cat <<EOF\n$\\\n(${jest})\nEOF`,
+    `bash +c "${jest}"`,
+    `bash +sc "${jest}"`,
+    `bash -eo pipefail -c "${jest}"`,
+    `OPT=-c; bash "$OPT" "${jest}"`,
+    `bash <<< "${jest}"`,
+    `echo "${jest}" | bash -`,
+    `ash -c "${jest}"`,
+    `fish -c "${jest}"`,
+  ]) {
+    const commands = launchControl(run);
+    assert.ok(
+      commands.some((command) => command.opaque || command.args?.includes('alternative.cjs')),
+      `${run}: ${JSON.stringify(commands)}`,
+    );
+  }
+  // the reading is exact: a shell running a script file does not refuse, and data stays data
+  assert.deepEqual(launchControl('bash +c "echo hi"'), []);
+  assert.deepEqual(launchControl("<<'EOF' cat\nje''st --config alternative.cjs\nEOF"), []);
+});
+
+// PR #805 r2 F3: a shell's script operand and the pre-check of a launcher file are read by the
+// same dispatch reader as every other shell text (shellInvocation), never by a pattern of their
+// own. Each row returned no record on ea79eb47 while the shell ran Jest with an alternative
+// configuration: a record is `opaque` (refused) or carries the arguments.
+const hiddenJest = (commands) =>
+  commands.some((command) => command.opaque || command.args?.includes('alternative.cjs'));
+test('PR #805 r2 F3: shell file operands go through the shared reader for every shell', () => {
+  const jest = "je''st --config alternative.cjs";
+  const rows = [
+    // standard input under another name, a generated file, and the shells the runner list omitted
+    [`printf '%s\n' "${jest}" | bash /dev/stdin`, {}],
+    [`printf '%s\n' "${jest}" | bash /dev/fd/0`, {}],
+    [`printf '%s\n' "${jest}" | sh /proc/self/fd/0`, {}],
+    [`printf '%s\n' 'jest' > generated.sh\nbash generated.sh`, {}],
+    [`printf '%s\n' 'jest' > generated.sh\nksh generated.sh`, {}],
+    ...['ash', 'rbash', 'ksh', 'zsh', 'dash', 'sh', 'bash'].map((shell) => [
+      `${shell} launcher.sh`,
+      { 'launcher.sh': 'jest --config alternative.cjs' },
+    ]),
+    ['bash -eo pipefail launcher.sh', { 'launcher.sh': 'jest --config alternative.cjs' }],
+    // a launcher without an extension is still a shell file
+    ['bash launcher', { launcher: 'jest --config alternative.cjs' }],
+  ];
+  for (const [run, extra] of rows)
+    for (const place of ['workflow', 'package', 'composite']) {
+      const commands = launchControl(run, place, extra);
+      assert.ok(hiddenJest(commands), `${place} ${run}: ${JSON.stringify(commands)}`);
+    }
+});
+test('PR #805 r2 F3: a launcher file is a candidate when its own shell or process text hides Jest', () => {
+  const hiding = {
+    'bash +c body': ['launcher.sh', `bash +c "je''st --config alternative.cjs"`],
+    'bash -c body': ['launcher.sh', `bash -c "je''st --config alternative.cjs"`],
+    'ksh -c body': ['launcher.sh', `ksh -c "je''st --config alternative.cjs"`],
+    'a nested -c body': ['launcher.sh', `bash -c "sh -c \\"je''st --config alternative.cjs\\""`],
+    'a pipe into a shell': ['launcher.sh', `printf '%s' "je''st --config alternative.cjs" | bash`],
+    'a shell file operand': ['launcher.sh', 'bash other.sh'],
+    'a computed -c body': ['launcher.sh', 'bash -c "$BODY"'],
+    'a concatenated command': [
+      'launcher.mjs',
+      "import { spawnSync } from 'node:child_process'; spawnSync('je' + 'st', ['--config', 'alternative.cjs']);",
+    ],
+    'a computed command': [
+      'launcher.mjs',
+      "import { spawnSync } from 'node:child_process'; const c = ['je', 'st'].join(''); spawnSync(c, []);",
+    ],
+    'an aliased launcher': [
+      'launcher.mjs',
+      "import { spawn as go } from 'node:child_process'; go(`${'je'}st`, []);",
+    ],
+    'a namespace launcher': [
+      'launcher.cjs',
+      "const cp = require('child_process'); cp.execFileSync(String.fromCharCode(106, 101, 115, 116));",
+    ],
+    'a dynamic import that is not bound to a name': [
+      'launcher.mjs',
+      "import('node:child_process').then(({ spawn }) => spawn(`${'je'}st`, []));",
+    ],
+    'a launcher passed as a value': [
+      'launcher.mjs',
+      "import { spawn } from 'node:child_process'; const run = (f, c) => f(c, []); run(spawn, 'je' + 'st');",
+    ],
+  };
+  for (const [shape, [file, body]] of Object.entries(hiding)) {
+    const run = /\.(?:mjs|cjs)$/.test(file) ? `node ${file}` : `bash ${file}`;
+    const commands = launchControl(run, 'workflow', { [file]: body, 'other.sh': 'echo hi' });
+    assert.ok(
+      commands.some((command) => /unregistered Jest launcher/.test(command.reason ?? '')),
+      `${shape}: ${JSON.stringify(commands)}`,
+    );
+  }
+});
+test('PR #805 r2 F3: launcher controls that cannot launch Jest stay accepted', () => {
+  for (const [run, extra] of [
+    ['bash safe.sh', { 'safe.sh': 'echo hi' }],
+    ['bash safe.sh', { 'safe.sh': 'bash +c "echo hi"' }],
+    ['bash safe.sh', { 'safe.sh': 'sh -c "echo hi"; cat <<EOF\nhi\nEOF' }],
+    [
+      'node safe.mjs',
+      {
+        'safe.mjs': "import { spawnSync } from 'node:child_process'; spawnSync('git', ['status']);",
+      },
+    ],
+    ['node safe.mjs', { 'safe.mjs': "console.log('no processes')" }],
+    ['bash +c "echo hi"', {}],
+  ])
+    assert.deepEqual(launchControl(run, 'workflow', extra), [], run);
+});
+
 test('R1 unsupported cwd selectors and ambiguous Jest script dispatch refuse', () => {
   for (const prefix of [
     'pnpm -Capps/web exec',
