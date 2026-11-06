@@ -132,10 +132,8 @@ export class TransactionRepository {
                   ))                             AS "settlementAuthorised",
                  EXISTS (
                    SELECT 1
-                     FROM wallet_hold
-                    WHERE wallet_hold.reference = "transaction".id
-                      AND wallet_hold.reference_type = 'TRANSACTION'
-                      AND wallet_hold.status = 'ACTIVE'
+                     FROM transaction_holds("transaction".id, "transaction".organization_id) AS hold
+                    WHERE hold.status = 'ACTIVE'
                  )                               AS "fundsHeld"
             FROM "transaction"
            WHERE id = ${id}

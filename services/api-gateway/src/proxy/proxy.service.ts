@@ -8,11 +8,12 @@ import {
   exchangeWithDeadline,
   getContext,
   httpStatusToCode,
+  internalFetch,
   requestPath,
   type InternalTokenService,
   type RequestContext,
 } from '@rasta/nest-common';
-import { apiErrorSchema, type ApiError } from '@rasta/contracts';
+import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
 import type { GatewayEnv } from '../config/env';
 import {
   TENDER_OPENING_ROUTES,
@@ -174,6 +175,7 @@ export class ProxyService {
       failureThreshold: options.failureThreshold,
       resetAfterMs: options.resetAfterMs,
       now: options.now ?? (() => performance.now()),
+      checkReady: (service) => this.ready(service),
       ...(options.organizationsToOpen !== undefined
         ? { organizationsToOpen: options.organizationsToOpen }
         : {}),
@@ -230,7 +232,31 @@ export class ProxyService {
       }
       throw error;
     } finally {
-      this.circuits.settle(permit, outcome);
+      // Never rejects; waits only for a readiness check this outcome sent or found.
+      await this.circuits.settle(permit, outcome);
+    }
+  }
+
+  /**
+   * The gateway's own readiness check of `service` (FU-113): its `GET
+   * /health/ready`, with no caller's headers, identity, input or deadline. Ready
+   * only on a complete 2xx within the default deadline; anything else — another
+   * status, a redirect, a timeout, a network error — is not ready.
+   */
+  private async ready(service: ServiceName): Promise<boolean> {
+    const target = `${serviceUrl(this.urls, service)}${READINESS_PATH}`;
+    try {
+      return await exchangeWithDeadline(
+        this.options.timeoutMs,
+        // Never follows a redirect: one is refused, and so not ready.
+        (signal) => internalFetch(target, { method: 'GET', signal }),
+        async (response) => {
+          await response.text();
+          return response.ok;
+        },
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -339,9 +365,10 @@ export class ProxyService {
           const text = await response.text();
 
           if (response.status >= 500) {
-            // A 5xx counts toward the circuit, once. (#381's expected identity
-            // refusals would be the one exception: `release`, never `success` —
-            // and only with the body complete; see the caller-gone branch below.)
+            // A 5xx counts toward the circuit, once, unless it is one of
+            // identity's exempt refusals (`answerOutcome`): with its body
+            // complete and valid, a `release`, never `success`; a caller gone
+            // before then is a failure (see the caller-gone branch below).
             //
             // Parsed once, and only the parsed, allow-listed fields travel. The
             // schema accepting a body says nothing about what else the body held:
@@ -350,7 +377,7 @@ export class ProxyService {
             const envelope = platformErrorEnvelope(response.status, text, request);
             if (envelope) {
               return {
-                outcome: 'failure',
+                outcome: answerOutcome(request.service, response.status, envelope),
                 response: {
                   status: response.status,
                   headers: this.responseHeaders(response),
@@ -375,11 +402,10 @@ export class ProxyService {
             );
           }
 
-          // 4xx does not count against the circuit: a client sending bad requests
-          // is not evidence that the downstream is unhealthy — it answered.
+          // A 4xx refused this one request: no evidence either way (FU-109).
           if (response.status >= 400) {
             return {
-              outcome: 'success',
+              outcome: answerOutcome(request.service, response.status, null),
               response: {
                 status: response.status,
                 headers: this.responseHeaders(response),
@@ -389,7 +415,7 @@ export class ProxyService {
           }
 
           return {
-            outcome: 'success',
+            outcome: answerOutcome(request.service, response.status, null),
             response: {
               status: response.status,
               headers: this.responseHeaders(response),
@@ -566,6 +592,44 @@ export class ProxyService {
       return { raw: text };
     }
   }
+}
+
+/** Where every service answers whether it can serve traffic (each `HealthController`). */
+export const READINESS_PATH = '/health/ready';
+
+/**
+ * Identity's refusals that are not the service failing (docs/06, #381 r4 F2):
+ * 503 `KEYCLOAK_WRITE_SETTLING` (one user's earlier write may still land, D-069)
+ * and 503 `KEYCLOAK_UNAVAILABLE` (a narrowing change refused, nothing changed,
+ * D-064).
+ */
+const IDENTITY_EXEMPT_CODES: ReadonlySet<string> = new Set([
+  ERROR_CODES.KEYCLOAK_WRITE_SETTLING,
+  ERROR_CODES.KEYCLOAK_UNAVAILABLE,
+]);
+
+/**
+ * What one complete answer proves about its service, decided in one place
+ * (FU-109, FU-110). Only a 2xx or 3xx is affirmative evidence that the service
+ * works (`success`: it may clear failures and close the circuit). A 4xx refused
+ * this one request — its input, its rights, its state — and says nothing either
+ * way: `release`. So is identity's exempt 503, but only as a complete platform
+ * envelope (`envelope`, already parsed and validated) from identity itself.
+ * Every other 5xx is a `failure`.
+ */
+export function answerOutcome(
+  service: ServiceName,
+  status: number,
+  envelope: ApiError | null,
+): CircuitOutcome {
+  if (status < 400) return 'success';
+  if (status < 500) return 'release';
+  const exempt =
+    service === 'identity' &&
+    status === HttpStatus.SERVICE_UNAVAILABLE &&
+    envelope !== null &&
+    IDENTITY_EXEMPT_CODES.has(envelope.code);
+  return exempt ? 'release' : 'failure';
 }
 
 /** Raised inside `exchange` for a failure of the service, carrying what the caller is told. */
