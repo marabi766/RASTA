@@ -11,7 +11,11 @@ describe('durable saga start delivery (PostgreSQL)', () => {
   const org = tenants();
   const store = new SagaStartStore(prisma);
   const otherStore = new SagaStartStore(replica);
-  const starter = new OrderSagaClient({ ...wiring.env, MARKETPLACE_TEMPORAL_ENABLED: true }, store);
+  const starter = new OrderSagaClient(
+    { ...wiring.env, MARKETPLACE_TEMPORAL_ENABLED: true },
+    store,
+    { provesHeldFunds: async () => true },
+  );
   const workflows = new Set<string>();
   const deliveries: string[] = [];
   let down = false;
@@ -83,7 +87,9 @@ describe('durable saga start delivery (PostgreSQL)', () => {
     down = true;
     await asActor({ organizationId: org.buyer }, () => starter.start(order.id));
     expect((await stored(order.id)).sagaStartDeliveredAt).toBeNull();
-    const disabled = new OrderSagaClient(wiring.env, store);
+    const disabled = new OrderSagaClient(wiring.env, store, {
+      provesHeldFunds: async () => true,
+    });
     expect(await disabled.deliver(order.id)).toBe(false);
     await disabled.stop();
     down = false;

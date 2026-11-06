@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { UNSUPPORTED_CHARACTERS } from '@rasta/contracts';
+import { ERROR_STATUS, UNSUPPORTED_CHARACTERS } from '@rasta/contracts';
 import type { z } from 'zod';
 
 import { toPersianDigits } from '@/lib/format';
@@ -56,7 +56,9 @@ export type WriteResult<T, F extends string> =
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
   /**
    * Any other refusal or failure the gateway answered with a status. A `4xx`
-   * is a refusal before anything was written; a `5xx` is **not** proof of that
+   * here is always a **proven** refusal ({@link isProvenRefusal}: a documented
+   * code answered with its own status — any other `4xx` is `UNKNOWN_OUTCOME`);
+   * a `5xx` is **not** proof that nothing was written
    * (a post-commit read can fail, an upstream reset after the commit surfaces
    * as `503`). A keyed write may resend it under the same key, which replays
    * rather than repeats; a key-less one (`idempotency: 'NONE'`) must treat a
@@ -70,7 +72,10 @@ export type WriteResult<T, F extends string> =
       readonly kind: 'UNAVAILABLE';
       readonly status: number;
       readonly correlationId: string;
-      /** The platform error `code` (docs/06 § 6.7), when the response — a `4xx` — carried one. */
+      /**
+       * The platform error `code` (docs/06 § 6.7). Present exactly when the status is a `4xx`, which
+       * is then a proven refusal; absent on a `5xx` and on `neverSent`.
+       */
       readonly code?: string;
       readonly neverSent?: true;
       /**
@@ -107,6 +112,22 @@ export type WriteResult<T, F extends string> =
  * the platform sends one second, and a wrong header must not lock a form.
  */
 export const MAX_IN_PROGRESS_WAIT_SECONDS = 30;
+
+/**
+ * Whether a `4xx` answer **proves** that this attempt wrote nothing (PR-830 r1
+ * F1, checklist A1): its body parsed as the platform's error, and its `code` is
+ * one of the platform's documented codes answered with that code's own status
+ * (`ERROR_STATUS`, the one table every service's exception filter answers by).
+ * Everything else — no body, a body that is not the platform's error (a
+ * proxy's or load balancer's page), a code the platform does not document, or
+ * a documented code under another status — proves nothing about the write and
+ * is `UNKNOWN_OUTCOME`, never "nothing changed". One rule for every write, so
+ * no caller can reach a refusal state on weaker evidence.
+ */
+export function isProvenRefusal(status: number, code: string | undefined | null): boolean {
+  if (status < 400 || status >= 500 || typeof code !== 'string') return false;
+  return ownValue(ERROR_STATUS, code) === status;
+}
 
 /**
  * How a service's error details map onto a form.
@@ -349,6 +370,17 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     // UPSTREAM_TIMEOUT: the gateway forwarded the write and gave up waiting —
     // the same unknown, one hop further on.
     if (status === 504) return { kind: 'UNKNOWN_OUTCOME', correlationId };
+    // No byte left this portal: known, and known to have done nothing.
+    if (error instanceof GatewayNeverSentError) {
+      return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
+    }
+    // Before any status is mapped to a refusal: a `4xx` this portal cannot
+    // prove was the platform's refusal (a bodyless 403/404, an unknown or
+    // mismatched code) is unconfirmed (PR-830 r1 F1). Below this line every
+    // `4xx` carries a documented code.
+    if (status < 500 && !isProvenRefusal(status, problem?.code)) {
+      return { kind: 'UNKNOWN_OUTCOME', correlationId };
+    }
     if (status === 409 && problem?.code === 'CONFLICT' && error.retryAfterSeconds !== null) {
       return {
         kind: 'IN_PROGRESS',
@@ -361,7 +393,13 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     }
     // Before the generic 409 below, which would turn it into a message on a field.
     if (status === 409 && problem?.code === 'REPLAY_WINDOW_CLOSED') {
-      return { kind: 'UNAVAILABLE', status, correlationId, replayWindowClosed: true };
+      return {
+        kind: 'UNAVAILABLE',
+        status,
+        correlationId,
+        code: problem.code,
+        replayWindowClosed: true,
+      };
     }
     if (status === 403) {
       const reasons = (problem?.details ?? []).flatMap((detail) =>
@@ -376,9 +414,6 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
         correlationId,
         ...mapProblemToFields(problem, call.mapping, status),
       };
-    }
-    if (error instanceof GatewayNeverSentError) {
-      return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
     }
     return {
       kind: 'UNAVAILABLE',

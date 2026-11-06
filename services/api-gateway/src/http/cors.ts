@@ -26,6 +26,7 @@ export function corsOptions(origins: string[]): CorsOptions {
       'x-correlation-id',
       'x-organization-id',
       'idempotency-key',
+      'idempotency-replay-deadline',
       'if-match',
     ],
     exposedHeaders: [

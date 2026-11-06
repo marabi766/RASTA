@@ -16,7 +16,7 @@ import { blockerWording } from './availability-wording';
 import { isProjectWorkflow } from './project-commands';
 import { returnDispositionLabel, returnShipmentStatusLabel } from './return-fields';
 import { OWNER_FORBIDDEN_TEXT } from './tender-owner-fields';
-import { disputeTextLabel } from './labels';
+import { disputeTextLabel, presentTransactionStatus } from './labels';
 import { ownText, ownValue } from './own-key';
 import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from '../server/write';
 
@@ -60,6 +60,14 @@ describe('ownValue / ownText', () => {
   it('never returns a non-string from ownText', () => {
     const odd = { A: 1 } as unknown as Record<string, string>;
     expect(ownText(odd, 'A')).toBeUndefined();
+  });
+});
+
+describe('the status of a transaction, which takes the row and not the name', () => {
+  it('answers a string for an inherited name', () => {
+    for (const key of INHERITED) {
+      expect(typeof presentTransactionStatus({ status: key })).toBe('string');
+    }
   });
 });
 

@@ -15,7 +15,7 @@ import {
   disputeTextLabel,
   transactionReasonLabel,
   transactionSourceLabel,
-  transactionStatusLabel,
+  presentTransactionStatus,
   transactionTypeLabel,
 } from '@/lib/labels';
 import {
@@ -137,7 +137,7 @@ export function TransactionDetailScreen({
       <Section headingId="transaction" title="تراکنش">
         <dl className="text-sm">
           <Row term="وضعیت">
-            <StatusBadge status={t.status} label={transactionStatusLabel(t.status)} />
+            <StatusBadge status={t.status} label={presentTransactionStatus(t)} />
           </Row>
           <Row term="نوع">{transactionTypeLabel(t.transactionType)}</Row>
           <Row term="مبلغ کل">{money(t.grossAmountMinor)}</Row>
@@ -270,7 +270,7 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
       <div className="flex flex-col gap-3">
         <p className="text-sm">
           برای این تراکنش در {formatJalaliDateLong(t.disputedAt)} اعتراض ثبت شده بود و اکنون در
-          وضعیت «{transactionStatusLabel(t.status)}» است.
+          وضعیت «{presentTransactionStatus(t)}» است.
         </p>
         <dl className="text-sm">
           {t.disputeReason !== null ? (

@@ -6,7 +6,7 @@ export const JEST_LAUNCHERS = {
       'Git fixture commands and Node environment probe; Turbo selection is mocked or --dry=json and missing-binary refusal never enters its JS launcher. No Jest or task execution.',
     sha256: {
       'scripts/prepush-scope.test.mjs':
-        '4f9d1329d3d25f39f4c558cbee2e1162098fc9514ce04e7f11e0f8f12552f07e',
+        '0b4a445f1f742b33b051723952b7d8ee74bd76648ef1e3c80e5a2a63aaf7028a',
       'scripts/prepush-scope-lib.mjs':
         'a7cb60ff2283945e9eee8a7bc9b83cbe05cdb680af0ea74e54afc561f3e66e13',
     },
@@ -182,7 +182,7 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-integration-split.test.mjs':
         'b7ec47c1b0fb9cb494b4f5348a1e70d571cd08f26965fc8a90ff8f3ad3464a64',
       'scripts/ci-integration-split-lib.mjs':
-        'c1749b54c13c707abffe5cc684a763fd9db540c81c452b95f944d70e1dfd7d70',
+        '6338e0e7e1675c6595d9d43108ea224bca891a968407e946cd8fed8f76261d4e',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
