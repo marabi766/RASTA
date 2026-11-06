@@ -1,5 +1,18 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/verify-migration-reversible-lib.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
+    sha256: {
+      'scripts/verify-migration-reversible-lib.test.mjs':
+        'def875018903ff377cd99173ceeaf4f5676905ed91d313da44c9be225fd83423',
+      'scripts/verify-migration-reversible-lib.mjs':
+        '0f9e617bfb2d7ba482a3aa7b2439ba8326c42283fa40675843a9466889289f8d',
+      'scripts/psql-prisma-url.mjs':
+        '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
+    },
+  },
   'scripts/prepush-scope.test.mjs': {
     kind: 'non-jest',
     reaches:
@@ -180,9 +193,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        'b7ec47c1b0fb9cb494b4f5348a1e70d571cd08f26965fc8a90ff8f3ad3464a64',
+        'ff241898e4e15633254c9e1034afc6b726a58546e8b74c194f94a4060ad570e6',
       'scripts/ci-integration-split-lib.mjs':
-        '6338e0e7e1675c6595d9d43108ea224bca891a968407e946cd8fed8f76261d4e',
+        'c49d3b00663aa7c77a4125220a2d2bdb83746fec8339214d12cd96aef9bcffe2',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

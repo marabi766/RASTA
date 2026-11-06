@@ -29,7 +29,7 @@ function outcome(schema: { safeParse(input: unknown): unknown }, input: unknown)
   return issues.map((issue) => [issue.path.map(String).join('.'), issue.code, issue.message]);
 }
 
-/** Recorded under zod 3 on main 5c88ae21; never written by a test run. */
+/** Recorded under zod 3 on main 5c88ae21, with the explicit FU-131 correction below. */
 const ZOD3: Record<string, unknown> = {
   'searchSuppliersQuerySchema m1 limit=0.5': [
     ['limit', 'invalid_type', 'Expected integer, received float'],
@@ -49,16 +49,9 @@ const ZOD3: Record<string, unknown> = {
       'qualifiedFor already implies an active supplier; a suspended supplier is never currently qualified, so the two filters cannot be combined',
     ],
   ],
+  // FU-131: fractional query text is refused before the integer/refinement checks.
   'searchSuppliersQuerySchema review r2: qualifiedFor already implies an active supplier; a suspended':
-    [
-      ['limit', 'invalid_type', 'Expected integer, received float'],
-      ['limit', 'too_small', 'Number must be greater than or equal to 1'],
-      [
-        'status',
-        'custom',
-        'qualifiedFor already implies an active supplier; a suspended supplier is never currently qualified, so the two filters cannot be combined',
-      ],
-    ],
+    [['limit', 'invalid_type', 'Expected number, received nan']],
 };
 
 const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [

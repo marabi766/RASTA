@@ -23,7 +23,7 @@ import { invalidPayloadError } from './invalid-payload';
  * (`~/worker2/session/t109/scripts/record.sh`).
  */
 
-/** Recorded under zod 3 on main 745d0434; never written by a test run. */
+/** Recorded under zod 3 on main 745d0434, with the two explicit FU-131 corrections below. */
 const ZOD3: Record<string, unknown> = {
   'pipe a one-value enum given another value': [
     { path: 'currency', message: "Invalid enum value. Expected 'IRR'", code: 'invalid_enum_value' },
@@ -47,16 +47,16 @@ const ZOD3: Record<string, unknown> = {
   'pipe an enum given a number': [
     { path: 'kind', message: "Expected 'A' | 'B', received number", code: 'invalid_type' },
   ],
+  // FU-131 rejects exponent syntax before numeric checks.
   'pipe limit 1e999': [
-    { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-    { path: 'limit', message: 'Number must be less than or equal to 200', code: 'too_big' },
+    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
   ],
   'pipe limit nope': [
     { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
   ],
+  // FU-131 rejects fractional integer text before numeric checks.
   'pipe limit 0.5': [
-    { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-    { path: 'limit', message: 'Number must be greater than or equal to 1', code: 'too_small' },
+    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
   ],
   'pipe an id neither seed nor ULID': [
     { path: 'ownerId', message: 'Expected an identifier of the form ORG_<ULID>', code: 'custom' },
