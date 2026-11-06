@@ -305,6 +305,93 @@ test('process registry keys refuse unproven or shadowed symbols and mutable hold
     assert.ok(check(code).length, code);
 });
 
+// FU-127: each of these escapes was accepted at the reviewed 8546796e head.
+const HOLDER_ESCAPES = {
+  'a exported holder declaration': 'export const holder = process;',
+  'b slot function receiver':
+    "const K = Symbol.for('k'); const h = process; h[K] = function () { return this; }; const p = h[K]();",
+  'c slot getter receiver':
+    "const K = Symbol.for('k'); Object.defineProperty(process, K, { get() { return this; } }); const p = process[K];",
+  'd descriptor function value':
+    "const K = Symbol.for('k'); Object.defineProperty(process, K, { value: function () { return this; } }); const p = process[K]();",
+  'e patched Symbol.for':
+    "Symbol.for = (k) => k; const K = Symbol.for('getBuiltinModule'); const h = process; const load = h[K]; load('http');",
+  'e patched Object.defineProperty':
+    "const stash = {}; Object.defineProperty = (t) => { stash.p = t; }; Object.defineProperty(process, Symbol.for('k'), { value: 1 });",
+};
+for (const [name, code] of Object.entries(HOLDER_ESCAPES))
+  test(`FU-127 refuses ${name}`, () => assert.ok(check(code).length, code));
+
+test('FU-127 refuses sibling declaration, receiver, descriptor and intrinsic escapes', () => {
+  const prefix = "const K = Symbol.for('k'); const h = process;";
+  for (const use of [
+    'export const alias = h;',
+    'export const alias = (h as unknown);',
+    'const alias = h; export default alias;',
+    'h[K]();',
+    'h[K]`tag`;',
+    '(h[K] as Function)();',
+    'h[K] = () => 1;',
+    'h[K] = class {};',
+    'const fn = function () { return this; }; h[K] = fn;',
+    'h[K] = unknown;',
+    'h[K] += 1;',
+    'h[K]++;',
+    'delete h[K];',
+    '({ value: h[K] } = unknown);',
+    '[h[K]] = unknown;',
+    'for (h[K] of values) {}',
+    'Object.defineProperty(h, K, { set(v) {} });',
+    'Object.defineProperty(h, K, { get: () => 1 });',
+    'Object.defineProperty(h, K, { value() { return this; } });',
+    'Object.defineProperty(h, K, { value: class {} });',
+    'Object.defineProperty(h, K, { value: unknown });',
+    'Object.defineProperty(h, K, { value: 1, ...unknown });',
+    'Object.defineProperty(h, K, descriptor);',
+    'Object.defineProperty(h, K, { value: 1, get() {} });',
+    'Object.defineProperty(h, K, { [name]: 1 });',
+    'const S = Symbol; S.for = (k) => k; h[K];',
+    'const O = Object; O.defineProperty = capture; h[K];',
+    "Reflect.set(Symbol, 'for', capture); h[K];",
+    "Object.defineProperty(Object, 'defineProperty', { value: capture }); h[K];",
+    'globalThis.Symbol.for = capture; h[K];',
+    'Symbol = replacement; h[K];',
+    'Object = replacement; h[K];',
+    'h[K]; Symbol.for = capture;',
+    'WeakMap = capture; Object.defineProperty(h, K, { value: new WeakMap() });',
+    "Symbol.__defineGetter__('for', () => capture); h[K];",
+    "Object.__defineGetter__('defineProperty', () => capture); h[K];",
+    "function f(Object) { h[Symbol.for('k')]; }",
+    'function f(Symbol) { Object.defineProperty(h, K, { value: 1 }); }',
+  ])
+    assert.ok(check(prefix + use).length, use);
+  for (const key of [
+    'Symbol.for()',
+    'Symbol.for(unknown)',
+    "Symbol.for('k', 1)",
+    'Symbol.for(`k`)',
+  ])
+    assert.ok(check(`const h = process; h[${key}];`).length, key);
+  for (const code of [
+    'export const req = require;',
+    "import { createRequire } from 'node:module'; export const load = createRequire(import.meta.url);",
+    "Symbol.for = (k) => k; const p = globalThis[Symbol.for('process')];",
+    "import p from 'node:process'; export const holder = p;",
+    "import * as p from 'process'; export const holder = p;",
+    'const h = process; h = other;',
+  ])
+    assert.ok(check(code).length, code);
+});
+
+test('FU-127 preserves plain registry values and immutable key/value aliases', () => {
+  for (const value of ['1', 'null', '{ value: [1, null] }', 'new WeakMap()', 'v']) {
+    const code = `const K = Symbol.for('k'); const KEY = K; const v = new WeakMap();
+      const h = process; h[KEY] = ${value};
+      Object.defineProperty(h, KEY, { value: ${value} }); const read = h[KEY];`;
+    assert.deepEqual(check(code), [], code);
+  }
+});
+
 // Both actual E2E configs must reject the import class in every supported source extension.
 for (const [workspace, base] of [
   ['apps/web', 'e2e/raw-process.spec'],
