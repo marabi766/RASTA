@@ -1443,8 +1443,8 @@
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 429,
-    "hash": "15972c932cc80fbaa8efc9f3e97c10107b604fc40458c94b571841280ea3d07b",
+    "line": 431,
+    "hash": "c0e6ea85c92c29175a6e736a37e97114db381c67676c8c4e9591a3245de3889a",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
   },
@@ -1485,8 +1485,8 @@
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 822,
-    "hash": "3779f70bec124086c7f4fb01366368e8b0899f3636100813bc67c9ce7c72a9a0",
+    "line": 839,
+    "hash": "23ef18576099d996661b9e3ef9e2fbebbbb920d51802da232b166415b90496fb",
     "occurrence": 0,
     "decision": "platform-wide: membership administration or expiry operates on a previously locked membership; user-wide projector and expiry scanner intentionally span tenants"
   },
@@ -1618,8 +1618,8 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 777,
-    "hash": "8ac1e8a8e75e392651da9dfc6d47aa7bd94ab6ad30cc902f88c63ce460a8de67",
+    "line": 778,
+    "hash": "0304c7b0389f22ec5cb94f821ecc542d3d0cc5743528dd1cf8a93a0cc3659fe1",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
   },

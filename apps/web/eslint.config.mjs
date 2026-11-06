@@ -21,6 +21,8 @@ import rawHttpBoundary from '../../scripts/raw-http-boundary-rule.mjs';
 // the files that own one (#507 r2 F2). The portal's server and browser code
 // made its own deadline once (session-refusal.ts), so it is not exempt.
 import exchangeDeadline from '../../scripts/exchange-deadline-rule.mjs';
+// One list of executable extensions for every raw-HTTP block (FU-074).
+import { code } from '../../scripts/lint-extensions.mjs';
 
 const internal = {
   rules: {
@@ -74,7 +76,7 @@ export default tseslint.config(
   {
     // Production source only, as in the services: specs and test helpers
     // build credential sentinels against local fakes.
-    files: ['src/**/*.{ts,tsx}'],
+    files: [code('src/**/*')],
     ignores: ['**/*.spec.{ts,tsx}', 'src/test/**'],
     plugins: { internal },
     rules: {
@@ -86,7 +88,7 @@ export default tseslint.config(
   {
     // Live suites aim at an endpoint the environment names, with real
     // credentials, as in the root config (PR #492 r2 F2).
-    files: ['**/*.live-spec.ts'],
+    files: [code('**/*.live-spec')],
     plugins: { internal },
     rules: { 'internal/raw-http': 'error' },
   },
@@ -95,7 +97,7 @@ export default tseslint.config(
     // Keycloak admin password, password grants, bearers) and signed storage
     // URLs: all of them, specs included, go through guardedFetch or the
     // request fixture that e2e/expect.ts guards (PR #492 r1 F2).
-    files: ['e2e/**/*.{ts,tsx,js,mjs,cjs}'],
+    files: [code('e2e/**/*')],
     plugins: { internal },
     rules: {
       'internal/transport': 'error',

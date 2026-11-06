@@ -1954,7 +1954,8 @@
                       "anyOf": [
                         {
                           "type": "string",
-                          "description": "ORG identifier Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                          "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "description": "ORG identifier"
                         },
                         {
                           "type": "string",

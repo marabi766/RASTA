@@ -326,18 +326,41 @@ export default {
         ;
         binding &&
         binding !== root &&
-        !['AssignmentExpression', 'VariableDeclarator'].includes(binding.type);
+        ![
+          'AssignmentExpression',
+          'VariableDeclarator',
+          'ForOfStatement',
+          'ForInStatement',
+        ].includes(binding.type);
         binding = binding.parent
       ) {
         if (binding.type === 'RestElement') {
           path.unshift({ rest: true });
           continue;
         }
+        if (binding.parent?.type === 'AssignmentPattern' && binding.parent.left === binding)
+          path.unshift({ fallback: binding.parent.right });
         if (binding.parent?.type === 'Property') path.unshift(key(binding.parent));
         if (binding.type !== 'RestElement' && binding.parent?.type === 'ArrayPattern')
           path.unshift(binding.parent.elements.indexOf(binding));
       }
       return path;
+    };
+    const project = (result, path, seen, receiver) => {
+      for (const name of path)
+        result = name?.fallback
+          ? (result ?? origin(name.fallback, seen))
+          : result && access(result, name, receiver);
+      return result;
+    };
+    const iterationOrigin = (result) => {
+      if (result?.container === 'list') return { schema: true };
+      if (result?.container !== 'literal') return result ? { opaque: true } : undefined;
+      const children = [...result.children.values(), iterationOrigin(result.spread)].filter(
+        Boolean,
+      );
+      if (children.some((child) => child.raw)) return { raw: true, ambiguous: true };
+      return mergeOrigins(...children);
     };
     // Follow binding definitions, not spellings: aliases, nested destructuring and const chains.
     // Keep schema results distinct from parsed/metadata data and raw factories.
@@ -356,22 +379,23 @@ export default {
           }
           if (def.type === 'Variable') {
             let result = origin(def.node.init, next);
+            const loop = def.parent.parent;
+            if (loop?.type === 'ForOfStatement') result = iterationOrigin(origin(loop.right, next));
             const path = bindingPath(def.name, def.node.id);
-            for (const name of path) if (result) result = access(result, name, def.node.init);
-            if (result?.raw) resolved = result;
-            else if ((result?.schema || result?.container) && !resolved?.raw) resolved = result;
-            resolved ??= result;
+            result = project(result, path, next, def.node.init);
+            resolved = mergeOrigins(resolved, result);
           }
         }
         // Mutable aliases cannot erase provenance by being reassigned later.
         for (const ref of v.references) {
           if (ref.writeExpr && !ref.init) {
             let result = origin(ref.writeExpr, next);
+            const write = writeTarget(ref.identifier);
+            if (write?.type === 'ForOfStatement') result = iterationOrigin(result);
+            if (write?.type === 'ForInStatement') result = undefined;
             const path = bindingPath(ref.identifier);
-            for (const name of path) if (result) result = access(result, name);
-            if (result?.raw) resolved = result;
-            else if ((result?.schema || result?.container) && !resolved?.raw) resolved = result;
-            resolved ??= result;
+            result = project(result, path, next);
+            resolved = mergeOrigins(resolved, result);
           }
         }
         return (resolved?.raw || resolved?.schema || resolved?.container) &&
@@ -462,14 +486,93 @@ export default {
       }
       return false;
     };
+    // Walk the target grammar, never the RHS/default expression. This covers
+    // assignment, patterns and loop targets uniformly, including member writes.
+    const writeTarget = (node) => {
+      for (let parent = node.parent; parent; node = parent, parent = parent.parent) {
+        if (
+          (['AssignmentExpression', 'ForOfStatement', 'ForInStatement'].includes(parent.type) &&
+            parent.left === node) ||
+          (parent.type === 'UpdateExpression' && parent.argument === node)
+        )
+          return parent;
+        if (
+          (parent.type === 'MemberExpression' && parent.object === node) ||
+          (parent.type === 'Property' &&
+            parent.value === node &&
+            parent.parent.type === 'ObjectPattern') ||
+          (parent.type === 'AssignmentPattern' && parent.left === node) ||
+          ['ObjectPattern', 'ArrayPattern', 'RestElement'].includes(parent.type) ||
+          unwrap(parent) === node
+        )
+          continue;
+        break;
+      }
+    };
+    const enclosingFunction = (node) => {
+      while (node && !FUNCTION_TYPES.has(node.type)) node = node.parent;
+      return node;
+    };
+    const stableReceiver = (raw, at, seen = new Set()) => {
+      const node = unwrap(raw);
+      if (node?.type !== 'Identifier') return node?.type === 'ArrayExpression';
+      const binding = variable(node);
+      if (!binding || seen.has(binding)) return true;
+      seen.add(binding);
+      return binding.references.every((ref) => {
+        if (ref.init) return true;
+        if (ref.isWrite() || writeTarget(ref.identifier)) return false;
+        const parent = ref.identifier.parent;
+        if (parent.type === 'VariableDeclarator' && parent.init === ref.identifier)
+          return stableReceiver(parent.id, at, seen);
+        // A fresh local value can be returned after this synchronous use. It
+        // cannot have escaped to a caller before its own construction/use.
+        if (
+          parent.type === 'ReturnStatement' &&
+          ref.identifier.range[0] > at.range[0] &&
+          ['NewExpression', 'ArrayExpression', 'Literal'].includes(
+            binding.defs[0]?.node.init?.type,
+          ) &&
+          enclosingFunction(binding.defs[0].node) === enclosingFunction(at) &&
+          enclosingFunction(ref.identifier) === enclosingFunction(at)
+        )
+          return true;
+        return parent.type === 'MemberExpression' && parent.object === ref.identifier;
+      });
+    };
+    const absent = (raw, seen = new Set()) => {
+      const node = unwrap(raw);
+      if (!node || globalName(node, 'undefined')) return true;
+      if (node.type === 'Identifier' && node.name === 'undefined') return false;
+      if (node.type === 'UnaryExpression' && node.operator === 'void') return true;
+      if (node.type !== 'Identifier') return false;
+      const binding = variable(node),
+        def = binding?.defs[0];
+      return (
+        def?.type === 'Variable' &&
+        def.parent.kind === 'const' &&
+        def.node.id.type === 'Identifier' &&
+        !!def.node.init &&
+        !seen.has(binding) &&
+        !binding.references.some((ref) => ref.isWrite() && !ref.init) &&
+        absent(def.node.init, new Set([...seen, binding]))
+      );
+    };
     const options = (raw, seen = new Set(), requireKnown = false) => {
       const node = unwrap(raw);
-      if (!node || seen.has(node)) return;
+      if (absent(node) || seen.has(node)) return;
       seen.add(node);
       if (node.type === 'Identifier') {
+        if (requireKnown && node.name === 'undefined') {
+          report(node);
+          return;
+        }
         const binding = variable(node),
           def = binding?.defs[0];
-        if (def?.type === 'Variable' && def.node.init) options(def.node.init, seen, requireKnown);
+        if (requireKnown && def?.type === 'Variable' && def.node.id.type !== 'Identifier')
+          report(node);
+        else if (def?.type === 'Variable' && def.node.init)
+          options(def.node.init, seen, requireKnown);
         else if (requireKnown) report(node);
         if (requireKnown)
           for (const ref of binding?.references ?? []) {
@@ -477,15 +580,14 @@ export default {
             let read = ref.identifier;
             while (read.parent && unwrap(read.parent) === unwrap(read)) read = read.parent;
             const member = read.parent;
+            const write = writeTarget(ref.identifier);
             if (
-              member.type === 'MemberExpression' &&
-              member.object === read &&
-              (key(member) === 'coerce' || key(member) === undefined) &&
-              ['AssignmentExpression', 'UpdateExpression'].includes(member.parent.type) &&
-              (member.parent.left ?? member.parent.argument) === member &&
-              constant(member.parent.right) !== false
+              write &&
+              (!ref.isWrite() ||
+                write.type !== 'AssignmentExpression' ||
+                write.left !== ref.identifier)
             )
-              report(member);
+              report(ref.identifier);
             // A helper/container could mutate an otherwise empty options object
             // (Object.assign, defineProperty, or an opaque alias). Do not guess
             // what happened there. Primitive message strings cannot be mutated.
@@ -643,7 +745,7 @@ export default {
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
         const fields = (raw, seen = new Set()) => {
           const definition = unwrap(raw);
-          if (!definition || seen.has(definition)) return;
+          if (absent(definition) || seen.has(definition)) return;
           seen.add(definition);
           if (definition.type === 'Identifier') {
             const binding = variable(definition),
@@ -682,6 +784,7 @@ export default {
             return;
           }
           for (const prop of definition.properties) {
+            if (prop.type === 'SpreadElement' && absent(prop.argument)) continue;
             if (
               prop.type === 'SpreadElement' ||
               key(prop) === undefined ||
@@ -729,8 +832,7 @@ export default {
         const proofOptions = (raw) => {
           const value = unwrap(raw);
           if (
-            !value ||
-            globalName(value, 'undefined') ||
+            absent(value) ||
             typeof constant(value) === 'string' ||
             value.type === 'TemplateLiteral' ||
             (value.type === 'CallExpression' &&
@@ -743,20 +845,21 @@ export default {
             value.type === 'ObjectExpression' &&
             value.properties.every(
               (prop) =>
-                prop.type === 'Property' &&
-                prop.kind === 'init' &&
-                ([
-                  'error',
-                  'errorMap',
-                  'message',
-                  'description',
-                  'required_error',
-                  'invalid_type_error',
-                  'abort',
-                  'path',
-                  'params',
-                ].includes(key(prop)) ||
-                  (key(prop) === 'coerce' && constant(prop.value) === false)),
+                (prop.type === 'SpreadElement' && absent(prop.argument)) ||
+                (prop.type === 'Property' &&
+                  prop.kind === 'init' &&
+                  ([
+                    'error',
+                    'errorMap',
+                    'message',
+                    'description',
+                    'required_error',
+                    'invalid_type_error',
+                    'abort',
+                    'path',
+                    'params',
+                  ].includes(key(prop)) ||
+                    (key(prop) === 'coerce' && constant(prop.value) === false))),
             )
           );
         };
@@ -1038,6 +1141,12 @@ export default {
             const name = key(callee);
             const kind = valueKind(callee.object, callee, parameters);
             if (
+              callee.object.type === 'Identifier' &&
+              ['array', 'strings', 'Date', 'regex'].includes(kind) &&
+              !stableReceiver(callee.object, callee)
+            )
+              return true;
+            if (
               (kind === 'string' && STRING_METHODS.has(name)) ||
               (kind === 'regex' && ['test', 'exec'].includes(name)) ||
               (kind === 'Date' && ['getTime', 'toISOString'].includes(name)) ||
@@ -1072,12 +1181,15 @@ export default {
               stringValue(callee.object, callee, new Set(), parameters)
             )
               return false;
+            // Keep the original direct-array proof: a kind inferred through an
+            // alias or helper parameter does not prove its source stayed stable.
             const receiver =
               callee.object.type === 'Identifier' ? variable(callee.object)?.defs[0] : undefined;
             if (
               name === 'includes' &&
               receiver?.type === 'Variable' &&
-              receiver.node.init?.type === 'ArrayExpression'
+              receiver.node.init?.type === 'ArrayExpression' &&
+              stableReceiver(callee.object, callee)
             )
               return false;
             if (
