@@ -1,3 +1,5 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { withdrawDemandSchema } from '../demand/dto';
 import { errorEnvelopeProblems } from '@rasta/nest-common';
 import { refusal, type RefusalArea, type ReasonOf, REFUSAL_REASONS } from '../shared/refusal';
 import { readFileSync } from 'node:fs';
@@ -29,6 +31,23 @@ describe('the committed OpenAPI document', () => {
   });
 
   const docs = join(__dirname, '..', '..', '..', '..', 'docs', 'api');
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(
+      JSON.stringify(
+        buildProcurementOpenApiDocument(app).paths['/v1/demand-requests/{id}/withdraw']!.post!
+          .requestBody,
+      ),
+    );
+    expect(body.content['application/json'].schema.properties.reason).toEqual({
+      type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = withdrawDemandSchema.shape.reason;
+    expect(field.safeParse(' ' + 'a'.repeat(500) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
+  });
+
   const committedPath = join(docs, 'procurement-service.openapi.json');
 
   type Operation = {
