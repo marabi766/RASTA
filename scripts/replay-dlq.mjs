@@ -35,7 +35,7 @@
  * It connects as `ops-replay` and nothing else: without that credential it
  * refuses to run.
  */
-import { createRequire } from 'node:module';
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -66,7 +66,7 @@ import {
 const { Kafka, logLevel } = kafkajs;
 const PRINCIPAL = 'ops-replay';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const contracts = createRequire(import.meta.url)(resolve(root, 'packages/contracts/dist/index.js'));
+const contracts = loadWorkspaceModule(resolve(root, 'packages/contracts/dist/index.js'));
 
 function fail(message, code = 1) {
   process.stderr.write(`replay-dlq: ${message}\n`);

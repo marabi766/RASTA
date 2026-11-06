@@ -1,9 +1,11 @@
 import { envEnumProbes } from '@rasta/config';
 import { randomBytes } from 'node:crypto';
 import { MAX_QUANTITY } from '../demand/dto';
+import { PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
 import {
   corsOrigins,
   loadProcurementEnv,
+  replayWindowRoomSeconds,
   procurementEnvSchema,
   MAX_FOLLOW_BATCH_SIZE,
   DEFAULT_MAX_LIVE_DEMANDS,
@@ -12,7 +14,7 @@ import {
   QUOTATION_RECEIPT_CHAIN_LIMIT,
   MAX_LIVE_DEMANDS_LIMIT,
 } from './env';
-import { procurementOperationBudgets } from './operation-budgets';
+import { procurementOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
   KAFKA_BROKERS: 'localhost:9092',
@@ -194,6 +196,39 @@ describe('overrides', () => {
       load({ PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE: String(MAX_FOLLOW_BATCH_SIZE) })
         .PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE,
     ).toBe(MAX_FOLLOW_BATCH_SIZE);
+  });
+});
+
+describe('the replay fence budget (FU-156, PM decision D-125)', () => {
+  it('defaults to a 30 s skew: B = 2 · 30 s + 7 s', () => {
+    expect(load().PROCUREMENT_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(replayFenceBudgetMs(30)).toBe(67_000);
+  });
+
+  it.each([['-1'], ['301'], ['1.5']])('refuses a skew of %s at startup', (skew) => {
+    expect(() => load({ PROCUREMENT_CLOCK_SKEW_SECONDS: skew })).toThrow();
+  });
+
+  it('holds TTL − B − skew at or above PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS, at the edge', () => {
+    // 1 h: 3 600 − (2s + 7) − s ≥ 3 300  ⇔  s ≤ 97.
+    expect(
+      replayWindowRoomSeconds({
+        PROCUREMENT_IDEMPOTENCY_TTL_HOURS: 1,
+        PROCUREMENT_CLOCK_SKEW_SECONDS: 97,
+      }),
+    ).toBe(PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS + 2);
+    expect(
+      load({ PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '1', PROCUREMENT_CLOCK_SKEW_SECONDS: '97' })
+        .PROCUREMENT_CLOCK_SKEW_SECONDS,
+    ).toBe(97);
+    expect(() =>
+      load({ PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '1', PROCUREMENT_CLOCK_SKEW_SECONDS: '98' }),
+    ).toThrow(/PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS/);
+    // A longer retention leaves room for the largest skew.
+    expect(
+      load({ PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '2', PROCUREMENT_CLOCK_SKEW_SECONDS: '300' })
+        .PROCUREMENT_CLOCK_SKEW_SECONDS,
+    ).toBe(300);
   });
 });
 
