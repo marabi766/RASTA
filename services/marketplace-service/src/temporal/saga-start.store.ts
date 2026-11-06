@@ -2,12 +2,14 @@ import { SAGA_START_DB_MAX_WAIT_MS, SAGA_START_DB_TIMEOUT_MS } from '../config/o
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import { RELEASE_WATCHED_STATUSES, SAGA_CUSTODY_STATUSES } from '../order/state-machine';
+import { SAGA_CUSTODY_STATUSES } from '../order/state-machine';
 
 export const START_BATCH_SIZE = 4;
 export const START_LEASE_SECONDS = 30;
 export const START_RETRY_SECONDS = 30;
 export const OPEN_UNCONFIRMED_CALLS_LIMIT = 1000;
+/** An unresolved financial episode older than this is overdue (#792 r1 F2). */
+export const UNRESOLVED_OVERDUE_SECONDS = 3600;
 
 export interface StartClaim {
   id: string;
@@ -91,78 +93,115 @@ export class SagaStartStore {
     );
   }
 
+  /**
+   * The time every saga state gauge ages against (#792 r1 F2): the database's
+   * clock, never earlier than any reference handed out before. Moved forward in
+   * the reader's own transaction, so what it reports was persisted first; a
+   * clock set back ages nothing backwards, and an overdue episode stays overdue
+   * until it is resolved. A missing row throws: no reference, no sample.
+   *
+   * The reads then take it from the row in SQL, not as a parameter, so no driver
+   * or session zone converts it; the row lock taken here keeps the row until
+   * their transaction ends.
+   */
+  private async advanceReference(tx: ExtendedPrismaClient): Promise<void> {
+    // Another replica's reader holds the row only for its own short read.
+    await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+    const moved = await tx.$executeRaw`
+      UPDATE saga_monitor_clock SET high_water = GREATEST(high_water, clock_timestamp())
+      WHERE id = 1
+    `;
+    if (moved !== 1) {
+      throw new Error('saga_monitor_clock has no row: the saga state cannot be aged');
+    }
+  }
+
   async backlog(): Promise<{ count: number; age: number }> {
     // Counts only, no tenant labels, identifiers or amounts leave the DB.
-    // created_at is UTC wall time without a zone: now is taken in UTC too, so
-    // the session's TimeZone cannot shift the age.
-    const [row] = await this.bounded(
-      (tx) => tx.$queryRaw<{ count: bigint; age: number }[]>`
+    // created_at is UTC wall time without a zone, read as UTC, so the session's
+    // TimeZone cannot shift the age; the reference cannot run back.
+    const [row] = await this.bounded(async (tx) => {
+      await this.advanceReference(tx);
+      return tx.$queryRaw<{ count: bigint; age: number }[]>`
       SELECT count(*) AS count,
-        COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC') - min(created_at)), 0)::float AS age
+        COALESCE(EXTRACT(EPOCH FROM (SELECT high_water FROM saga_monitor_clock WHERE id = 1)
+          - min(created_at AT TIME ZONE 'UTC')), 0)::float AS age
       FROM "order" WHERE saga_start_delivered_at IS NULL AND status IN ('PENDING', 'CANCELLING')
-    `,
-    );
+    `;
+    });
     return { count: Number(row.count), age: Math.max(0, row.age) };
   }
 
   /**
-   * Orders waiting on a financial step the saga owes, by reason, with the
-   * oldest wait (#770 r2 F3). State, not attempts: an order counts until it
-   * moves on, whether the saga retries, has stopped, or has no worker.
+   * Unresolved financial episodes, by reason (#770 r2 F3, #792 r1 F1/F2): how
+   * many, the oldest one's age, and how many are past `overdueSeconds`. State,
+   * not attempts: an episode counts until it is resolved, whether the saga
+   * retries, has stopped, or has no worker.
    *
-   * - `DISPUTE_RELEASE`, first: any live order outside DISPUTED whose last
-   *   dispute mirror (`disputeObligation` / `markObligationDisputed` step) is
-   *   newer than its last `resolveObligationDispute` step — economic-service
-   *   still holds the obligation DISPUTED (D-083). Whatever a party does next
-   *   (confirms receipt, cancels), it stays this, aged from when the order
-   *   left DISPUTED, so a party's move neither clears nor re-ages it.
-   * - Otherwise a `SAGA_CUSTODY` status, aged from when the order last left a
-   *   party's hands (a transition from a party or terminal status; else its
-   *   creation), so a settlement bouncing RECEIPT_CONFIRMED ↔ SETTLING does
-   *   not reset it.
+   * - Each open `saga_unconfirmed_call` row (#769) is an episode of its own: one
+   *   per dispute, so a second dispute, a lost step record or a clock that ran
+   *   back cannot hide the first one's release. Whatever the order's status. The
+   *   one row not counted is a dispute still open on an order still DISPUTED:
+   *   the operator decides, nothing is due. A release is due from its dispute's
+   *   decision; a row whose dispute is missing, or any other call, from its
+   *   first opening. `DISPUTE_RELEASE` for a release, `UNCONFIRMED_CALL` for
+   *   any other operation (none is recorded yet; counted, never dropped).
+   * - An order in a `SAGA_CUSTODY` status is one more, aged from when it last
+   *   left a party's hands (a transition from a party or terminal status; else
+   *   its creation), so RECEIPT_CONFIRMED ↔ SETTLING and PENDING → CANCELLING do
+   *   not restart it. Refund and settlement have no call record yet: status is
+   *   all there is.
    *
-   * Times without a zone are UTC wall time; now is taken in UTC to match.
-   * Counts and ages only leave the database.
+   * Ages are taken against `advanceReference()`, so none decreases while its episode
+   * lasts. Times without a zone are UTC wall time. Counts and ages only leave
+   * the database.
    */
-  async unresolved(): Promise<{ reason: string; count: number; age: number }[]> {
+  async unresolved(
+    overdueSeconds = UNRESOLVED_OVERDUE_SECONDS,
+  ): Promise<{ reason: string; count: number; age: number; overdue: number }[]> {
     const custody = SAGA_CUSTODY_STATUSES as string[];
-    const live = RELEASE_WATCHED_STATUSES as string[];
-    const rows = await this.bounded(
-      (tx) => tx.$queryRaw<{ reason: string; count: bigint; age: number }[]>`
-      WITH candidate AS (
-        SELECT o.id, o.organization_id, o.status::text AS status, o.created_at,
-          COALESCE((SELECT max(s.applied_at) FROM saga_step s
-              WHERE s.organization_id = o.organization_id AND s.order_id = o.id
-                AND s.activity IN ('disputeObligation', 'markObligationDisputed'))
-            > COALESCE((SELECT max(s.applied_at) FROM saga_step s
-              WHERE s.organization_id = o.organization_id AND s.order_id = o.id
-                AND s.activity = 'resolveObligationDispute'), '-infinity'::timestamptz),
-            false) AS release_owed
+    const rows = await this.bounded(async (tx) => {
+      await this.advanceReference(tx);
+      return tx.$queryRaw<{ reason: string; count: bigint; age: number; overdue: bigint }[]>`
+      WITH clock AS (SELECT high_water AS now FROM saga_monitor_clock WHERE id = 1),
+      episode AS (
+        SELECT CASE WHEN c.operation = 'resolveObligationDispute' THEN 'DISPUTE_RELEASE'
+            ELSE 'UNCONFIRMED_CALL' END AS reason,
+          COALESCE(CASE WHEN d.status <> 'OPEN' THEN d.resolved_at AT TIME ZONE 'UTC' END,
+            c.opened_at) AS since
+        FROM saga_unconfirmed_call c
+        LEFT JOIN "order" o ON o.organization_id = c.organization_id AND o.id = c.order_id
+        LEFT JOIN order_dispute d ON d.organization_id = c.organization_id
+          AND d.order_id = c.order_id AND d.id = c.subject
+        WHERE c.confirmed_at IS NULL
+          AND NOT COALESCE(c.operation = 'resolveObligationDispute' AND d.status = 'OPEN'
+            AND o.status = 'DISPUTED', false)
+        UNION ALL
+        SELECT o.status::text,
+          COALESCE((SELECT max(h.occurred_at) FROM order_status_history h
+              WHERE h.organization_id = o.organization_id AND h.order_id = o.id
+                AND h.kind = 'TRANSITION' AND NOT (h.from_status::text = ANY(${custody}::text[]))),
+            o.created_at) AT TIME ZONE 'UTC'
         FROM "order" o
-        WHERE o.status::text = ANY(${live}::text[])
-      ),
-      owed AS (
-        SELECT CASE WHEN c.release_owed THEN 'DISPUTE_RELEASE' ELSE c.status END AS reason,
-          COALESCE(CASE WHEN c.release_owed THEN
-            (SELECT max(h.occurred_at) FROM order_status_history h
-              WHERE h.organization_id = c.organization_id AND h.order_id = c.id
-                AND h.kind = 'TRANSITION' AND h.from_status = 'DISPUTED')
-          ELSE
-            (SELECT max(h.occurred_at) FROM order_status_history h
-              WHERE h.organization_id = c.organization_id AND h.order_id = c.id
-                AND h.kind = 'TRANSITION' AND NOT (h.from_status::text = ANY(${custody}::text[])))
-          END, c.created_at) AS since
-        FROM candidate c
-        WHERE c.release_owed OR c.status = ANY(${custody}::text[])
+        WHERE o.status::text = ANY(${custody}::text[])
       )
       SELECT reason, count(*) AS count,
-        GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC') - min(since)))::float AS age
-      FROM owed GROUP BY reason
-    `,
-    );
-    return [...custody, 'DISPUTE_RELEASE'].map((reason) => {
+        GREATEST(0, EXTRACT(EPOCH FROM clock.now - min(since)))::float AS age,
+        count(*) FILTER (WHERE since <= clock.now - ${overdueSeconds} * interval '1 second') AS overdue
+      FROM episode CROSS JOIN clock GROUP BY reason, clock.now
+    `;
+    });
+    const reasons = [...custody, 'DISPUTE_RELEASE', 'UNCONFIRMED_CALL'];
+    // A reason this list does not know is still money: reported, not dropped.
+    for (const row of rows) if (!reasons.includes(row.reason)) reasons.push(row.reason);
+    return reasons.map((reason) => {
       const row = rows.find((candidate) => candidate.reason === reason);
-      return { reason, count: Number(row?.count ?? 0), age: row?.age ?? 0 };
+      return {
+        reason,
+        count: Number(row?.count ?? 0),
+        age: row?.age ?? 0,
+        overdue: Number(row?.overdue ?? 0),
+      };
     });
   }
 

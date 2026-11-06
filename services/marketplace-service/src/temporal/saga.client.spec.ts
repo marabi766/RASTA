@@ -462,6 +462,7 @@ describe('starter shutdown', () => {
     const client = new OrderSagaClient(env({ MARKETPLACE_TEMPORAL_ENABLED: false }), {
       claim,
       backlog,
+      unresolved: async () => [],
     } as unknown as SagaStartStore);
     await runWithContext(
       createSystemContext({ organizationId: 'ORG_DISABLED', correlationId: 'disabled-start-test' }),
@@ -469,6 +470,9 @@ describe('starter shutdown', () => {
     );
     await client.tick();
     expect(claim).not.toHaveBeenCalled();
+    // On its own timer since #792 r1 F3, not the claim tick's.
+    expect(backlog).not.toHaveBeenCalled();
+    await client.sampleState();
     expect(backlog).toHaveBeenCalledTimes(1);
     await client.stop();
   });

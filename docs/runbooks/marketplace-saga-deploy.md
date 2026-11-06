@@ -34,7 +34,7 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 - میان گام ۲ و ۴ marketplace-service در دسترس نیست (سفارشی ثبت نمی‌شود). این بهای Gate است.
 - خروجی گام ۳ (متن و کد خروج) و زمانش را در Change Record استقرار ثبت کن.
 - میان گام ۲ و ۴ هیچ نمونه‌ای گزارش نمی‌دهد و هیچ Worker ـی Poll نمی‌کند، پس `RastaMarketplaceSagaNoLiveWorker`،
-  `RastaMarketplaceSagaStartBacklogAging` و `RastaMarketplaceSagaFinancialStepUnresolved` فعال می‌شوند. این انتظار می‌رود:
+  `RastaMarketplaceSagaStartBacklogAging` و `RastaMarketplaceSagaFinancialEpisodeOverdue` فعال می‌شوند. این انتظار می‌رود:
   فقط برای همین بازه، با شناسهٔ Change Record و پایانی معین، Silence کن ([`marketplace-saga-liveness`](marketplace-saga-liveness.md)).
 
 ### گام ۳ — Gate
@@ -246,11 +246,13 @@ above; a history change during inspection requires another drain/check.
 
 ## Unconfirmed dispute release (FU-080)
 
-`RastaMarketplaceSagaDisputeReleaseUnconfirmed` fires from the first round of
-`rasta_marketplace_saga_release_unconfirmed_total` until two hours after the last.
-It counts rounds, not stuck sagas, and rounds need a running worker: with workers
-stopped or failed it clears while the funds are still held. A resolved alert is
-not a confirmed release; the saga's status query is. A decided dispute's
+`RastaMarketplaceSagaFinancialEpisodeOverdue`
+([`marketplace-saga-liveness`](marketplace-saga-liveness.md), reason
+`DISPUTE_RELEASE`) fires once a release has been owed for an hour. It reads the
+dispute's open `saga_unconfirmed_call` row, so it does not clear when the rounds
+stop, the saga ends or no worker runs; it replaces the alert on
+`rasta_marketplace_saga_release_unconfirmed_total`, which did (#792 r1). The
+counter still counts rounds, for diagnosis. A decided dispute's
 resolution has not been confirmed by economic-service: the obligation stays
 DISPUTED and its funds held. The saga does not end. It waits in phase
 `RELEASE_UNCONFIRMED` (`workflow query --name status`) and calls again with the
@@ -285,7 +287,8 @@ protocol-2 target passes the gate and then ends that saga as before this wait.
 `saga_unconfirmed_call` رکورد پایدار فراخوانی‌هایی به economic-service است که نتیجه‌شان تأیید نشده است. ردیف پیش از فراخوانی نوشته می‌شود،
 هر تلاش تازه آن را دوباره باز می‌کند و `generation` را جلو می‌برد، و فقط تأیید همان تلاش آن را می‌بندد؛ پس تأیید دیرهنگام تلاشی قدیمی‌تر چیزی را نمی‌بندد،
 و ردیف با توقف Worker یا پایان Saga از بین نمی‌رود. فعلاً فقط `resolveObligationDispute` ثبت می‌شود، پس ردیف بسته فقط تأیید همان آزادسازی است و ثابت نمی‌کند بازپرداخت یا تسویهٔ پس از آن هم انجام شده است.
-این جدول فقط ثبت می‌کند: هنوز هیچ هشداری آن را نمی‌خواند، پس برای دیدن ردیف‌های باز این پرس‌وجو را اجرا کن (`opened_at` زمان نخستین بازشدن است و با تلاش تازه جلو نمی‌رود):
+این جدول فقط ثبت می‌کند و تصمیمی نمی‌گیرد. `RastaMarketplaceSagaFinancialEpisodeOverdue` ردیف باز را یک ساعت پس از تصمیم اختلافش (یا پس از نخستین بازشدن، اگر اختلافی پشتش نباشد) دیرکرد می‌شمارد، با هر وضعیتی که سفارش داشته باشد ([`marketplace-saga-liveness`](marketplace-saga-liveness.md)).
+برای دیدن ردیف‌های باز این پرس‌وجو را اجرا کن (`opened_at` زمان نخستین بازشدن است و با تلاش تازه جلو نمی‌رود):
 
 ```sql
 SELECT organization_id, order_id, operation, subject AS dispute_id, generation, opened_at
@@ -306,6 +309,7 @@ WHERE organization_id = '<org>' AND order_id = '<order>' AND operation = 'resolv
 Migration برای **هر** اختلافی که سفارشش `COMPLETED` یا `CANCELLED` نیست ردیف می‌نویسد، چه اختلاف باز باشد چه تصمیم‌گرفته، چه Saga ـش زنده باشد چه بسته. هیچ رسید و هیچ زمانی
 این را تغییر نمی‌دهد: رسید آزادسازی نمی‌گوید پاسخ کدام اختلاف است، زمانش با ساعت دیگری از زمان تصمیم ثبت می‌شود، و ممکن است دیر برسد یا هرگز نوشته نشود. پس آزادسازی‌ای که واقعاً
 انجام شده هم ردیف می‌گیرد: Saga ـی که منتظر است ردیف خود را با تلاش بعدی‌اش می‌بندد (در فاز `RELEASE_UNCONFIRMED`، `retryDisputeRelease` آن را زودتر می‌کند)، و بقیه را با economic-service تطبیق بده، با همان مسیر بالا ببند و ثبت کن.
+پس پس از نخستین استقرار `RastaMarketplaceSagaFinancialEpisodeOverdue` برای این ردیف‌ها فعال می‌شود؛ این انتظار می‌رود و تا بسته‌شدن آخرین ردیف دیرکرد فعال می‌ماند.
 
 Migration پیش از توقف نسخهٔ قدیمی اجرا می‌شود (گام ۱) و آن نسخه تا گام ۲ هنوز می‌تواند اختلافی را ثبت کند. پس **در هر تلاش استقرار، میان گام ۲ و ۴ این پرکردن را دوباره اجرا کن**، از جمله پس از Rollback: `db:migrate` دوم کاری نمی‌کند، و اختلافی که نسخهٔ قدیمی در این میان ثبت کرده ردیف نمی‌گیرد؛
 همان عبارت Migration است، تکرارش بی‌خطر است و ردیف موجود را تغییر نمی‌دهد. از ریشهٔ مخزن اجرا کن. کد خروج غیرصفر (از جمله وقتی عبارتی پیدا نشود) استقرار را متوقف می‌کند،

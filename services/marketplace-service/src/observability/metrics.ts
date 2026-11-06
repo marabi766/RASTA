@@ -185,19 +185,46 @@ export const productSearchesTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * Monotonic deadlines (`performance.now()`) of the saga state gauges' last good
+ * sample, by gauge (#792 r1 F3). A scrape past the deadline, or with none,
+ * finds the gauge withdrawn: a reporter that hangs, whatever it hangs on, reads
+ * as unknown and never as the last value it published. Only `StateSample` in
+ * `temporal/saga-state-sample.ts` sets them.
+ */
+const stateFreshUntil = new WeakMap<object, number>();
+
+export function setStateFreshUntil(gauges: readonly object[], until: number | undefined): void {
+  for (const gauge of gauges) {
+    if (until === undefined) stateFreshUntil.delete(gauge);
+    else stateFreshUntil.set(gauge, until);
+  }
+}
+
+/** A gauge of saga state: withdrawn at scrape once its sample is no longer fresh. */
+function stateGauge<T extends string>(name: string, help: string, labelNames: readonly T[]) {
+  return new Gauge<T>({
+    name,
+    help,
+    labelNames,
+    registers: [registry],
+    collect() {
+      if (!(performance.now() < (stateFreshUntil.get(this) ?? -Infinity))) this.reset();
+    },
+  });
+}
+
 /** Durable starter backlog; no tenant/order labels or monetary values. */
-export const sagaStartBacklogCount = new Gauge({
-  name: 'rasta_marketplace_saga_start_backlog',
-  help: 'Orders awaiting proven saga acceptance',
-  labelNames: ['service'] as const,
-  registers: [registry],
-});
-export const sagaStartBacklogAge = new Gauge({
-  name: 'rasta_marketplace_saga_start_backlog_age_seconds',
-  help: 'Age of oldest undelivered saga start intent',
-  labelNames: ['service'] as const,
-  registers: [registry],
-});
+export const sagaStartBacklogCount = stateGauge(
+  'rasta_marketplace_saga_start_backlog',
+  'Orders awaiting proven saga acceptance',
+  ['service'] as const,
+);
+export const sagaStartBacklogAge = stateGauge(
+  'rasta_marketplace_saga_start_backlog_age_seconds',
+  'Age of oldest undelivered saga start intent',
+  ['service'] as const,
+);
 export const sagaStartDeliveries = new Counter({
   name: 'rasta_marketplace_saga_start_deliveries_total',
   help: 'Saga start delivery attempts by fixed outcome',
@@ -220,21 +247,31 @@ export const sagaWorkerUp = new Gauge({
 });
 
 /**
- * Orders whose next financial step belongs to the saga, by why (#770 r2 F3):
- * a saga-custody status (`SAGA_CUSTODY`), or `DISPUTE_RELEASE` — a dispute
- * mirrored to economic-service, decided here, and not yet released there.
- * State read from the database, not a count of attempts: it stays until the
- * order moves on, whatever the worker does. Every reason is always present.
+ * Unresolved financial episodes, by why (#770 r2 F3, #792 r1 F1): an open
+ * `saga_unconfirmed_call` row (`DISPUTE_RELEASE`, or `UNCONFIRMED_CALL` for any
+ * other call), or an order in a saga-custody status (`SAGA_CUSTODY`). State
+ * read from the database, not a count of attempts. Every reason is always
+ * present. For diagnosis: no alert reads the reason.
  */
-export const sagaUnresolvedOrders = new Gauge({
-  name: 'rasta_marketplace_saga_unresolved_orders',
-  help: 'Orders waiting on a financial step the saga owes, by reason',
-  labelNames: ['service', 'reason'] as const,
-  registers: [registry],
-});
-export const sagaUnresolvedAge = new Gauge({
-  name: 'rasta_marketplace_saga_unresolved_age_seconds',
-  help: 'Seconds the oldest such order has waited on the saga, by reason (0 when none)',
-  labelNames: ['service', 'reason'] as const,
-  registers: [registry],
-});
+export const sagaUnresolvedOrders = stateGauge(
+  'rasta_marketplace_saga_unresolved_orders',
+  'Unresolved financial episodes the saga owes, by reason',
+  ['service', 'reason'] as const,
+);
+export const sagaUnresolvedAge = stateGauge(
+  'rasta_marketplace_saga_unresolved_age_seconds',
+  'Seconds the oldest such episode has waited, by reason (0 when none)',
+  ['service', 'reason'] as const,
+);
+/**
+ * How many unresolved financial episodes are past the hour (#792 r1 F2), aged
+ * against `saga_monitor_clock`, which never runs back: an episode, once
+ * counted, stays counted until it is resolved, whatever its reason becomes or
+ * the database clock does. No reason label, so a change of reason is not a new
+ * alert. `RastaMarketplaceSagaFinancialEpisodeOverdue` reads only this.
+ */
+export const sagaUnresolvedOverdue = stateGauge(
+  'rasta_marketplace_saga_unresolved_overdue',
+  'Unresolved financial episodes past the overdue threshold',
+  ['service'] as const,
+);

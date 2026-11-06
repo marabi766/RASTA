@@ -9,7 +9,7 @@ import { hostname } from 'node:os';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { Inject } from '@nestjs/common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
-import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import { fatalShutdown, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 import { sagaWorkerUp } from '../observability/metrics';
@@ -52,6 +52,13 @@ import { installTemporalRuntimeLogger } from './runtime-logger';
  * ended, stopping, a probe that failed or timed out — is 0. The server's list
  * is what catches a worker that says RUNNING but no longer polls: Temporal
  * drops a poller about five minutes after its last poll.
+ *
+ * ## A run that ends by itself ends the process (#769 r2 ruling)
+ *
+ * Nothing in the process would ever start the worker again, so a `run()` that
+ * resolves or rejects without `stop()` asking for it requests the service's
+ * fatal shutdown (non-zero exit, the way a terminal consumer crash does): the
+ * restart is the retry. Until the process is gone, the gauge reads 0.
  */
 /** Well inside Temporal's ~5 min poller expiry, so expiry dominates the detection time. */
 export const LIVENESS_PROBE_INTERVAL_MS = 15_000;
@@ -69,6 +76,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
   private probeTimer?: NodeJS.Timeout;
   private probing?: Promise<boolean>;
   private ended = false;
+  private stopRequested = false;
 
   constructor(
     @Inject(ENV) private readonly env: MarketplaceEnv,
@@ -111,14 +119,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
       // would block Nest's bootstrap forever.
       this.running = this.worker.run().then(
         () => this.end(),
-        (error: unknown) => {
-          this.end();
-          // Also what the SDK raises when the force time passes first.
-          this.logger.error(
-            { failure: foreignFailure(error) },
-            'The order saga worker ended with an error; rasta_marketplace_saga_worker_up is 0',
-          );
-        },
+        (error: unknown) => this.end(error),
       );
       this.logger.log('Order saga worker polling (MARKETPLACE_TEMPORAL_TASK_QUEUE)');
       if (!this.ended) {
@@ -209,11 +210,29 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
     );
   }
 
-  /** The run is over, by error or not: down at once, and nothing probes any more. */
-  private end(): void {
+  /**
+   * The run is over, by error or not: down at once, and nothing probes any more.
+   * Asked to by `stop()`, that is the shutdown; otherwise the process exits.
+   */
+  private end(error?: unknown): void {
     this.ended = true;
     if (this.probeTimer) clearInterval(this.probeTimer);
     sagaWorkerUp.set({ service: SERVICE_NAME }, 0);
+    if (this.stopRequested) {
+      // Also what the SDK raises when the force time passes first.
+      if (error !== undefined) {
+        this.logger.warn(
+          { failure: foreignFailure(error) },
+          'The order saga worker ended with an error',
+        );
+      }
+      return;
+    }
+    this.logger.error(
+      { failure: error === undefined ? undefined : foreignFailure(error) },
+      'The order saga worker stopped by itself; exiting so that it is restarted',
+    );
+    fatalShutdown.request();
   }
 
   /**
@@ -234,6 +253,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
    * does not return.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopRequested = true;
     this.stopping ??= this.halt(
       options.deadlineAt ?? Date.now() + outboxShutdownBudgetMs(this.env),
     );

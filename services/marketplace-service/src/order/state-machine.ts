@@ -124,14 +124,3 @@ export const SAGA_CUSTODY: Readonly<Record<OrderStatus, 'SAGA' | 'PARTY' | 'TERM
 export const SAGA_CUSTODY_STATUSES = (Object.keys(SAGA_CUSTODY) as OrderStatus[]).filter(
   (status) => SAGA_CUSTODY[status] === 'SAGA',
 );
-
-/**
- * Where an order can be while economic-service still holds its obligation
- * DISPUTED for a dispute decided here (D-083): every live status but DISPUTED
- * itself. SETTLE resumes a party wait or RECEIPT_CONFIRMED, REFUND goes to
- * CANCELLING, and a party may move a resumed order on before the saga
- * releases it.
- */
-export const RELEASE_WATCHED_STATUSES = (Object.keys(SAGA_CUSTODY) as OrderStatus[]).filter(
-  (status) => SAGA_CUSTODY[status] !== 'TERMINAL' && status !== 'DISPUTED',
-);

@@ -1,4 +1,5 @@
 import { NativeConnection, Worker } from '@temporalio/worker';
+import { fatalShutdown } from '@rasta/nest-common';
 import { sagaWorkerUp } from '../observability/metrics';
 import { LIVENESS_PROBE_INTERVAL_MS, OrderSagaWorker } from './worker';
 
@@ -66,12 +67,19 @@ function build(options: { pollers?: Pollers; state?: () => string } = {}) {
   };
 }
 
+let fatal: jest.SpyInstance;
+
 describe('OrderSagaWorker liveness (FU-104)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     sagaWorkerUp.set({ service: 'marketplace-service' }, 1);
+    // Unhandled, it is process.exit(1): never let a case reach the real one.
+    fatal = jest.spyOn(fatalShutdown, 'request').mockImplementation(() => undefined);
   });
-  afterEach(() => jest.useRealTimers());
+  afterEach(() => {
+    jest.useRealTimers();
+    fatal.mockRestore();
+  });
 
   it('is 1 when running and listed by Temporal on both queues under its own identity', async () => {
     const { worker, describeTaskQueue, withDeadline } = build();
@@ -158,6 +166,35 @@ describe('OrderSagaWorker liveness (FU-104)', () => {
     expect(harness.describeTaskQueue.mock.calls.length).toBe(asked);
     // An explicit look after the end still reads 0.
     await expect(harness.worker.probeLiveness()).resolves.toBe(false);
+    expect(await up()).toBe(0);
+  });
+
+  // #769 r2 ruling: nothing in the process would start the worker again, so a
+  // run that ends by itself ends the process; the restart is the retry.
+  it.each([
+    ['fails', (h: ReturnType<typeof build>) => h.fail(new Error('poll failed'))],
+    ['returns', (h: ReturnType<typeof build>) => h.finish()],
+  ])('asks for the fatal shutdown when run() %s with no stop requested', async (_name, end) => {
+    const harness = build();
+    await harness.worker.onApplicationBootstrap();
+    expect(fatal).not.toHaveBeenCalled();
+
+    end(harness);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fatal).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['fails', (h: ReturnType<typeof build>) => h.fail(new Error('force time passed'))],
+    ['returns', (h: ReturnType<typeof build>) => h.finish()],
+  ])('does not when run() %s after stop() asked for it', async (_name, end) => {
+    const harness = build();
+    await harness.worker.onApplicationBootstrap();
+    const stopping = harness.worker.stop({ deadlineAt: Date.now() + 1_000 });
+    end(harness);
+    await stopping;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fatal).not.toHaveBeenCalled();
     expect(await up()).toBe(0);
   });
 
