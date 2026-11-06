@@ -1321,7 +1321,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
