@@ -104,7 +104,7 @@
         "kafka:acl:apply:dev": "sha256:50e5a166c2f97463511d5d270fac55c7278ab7d8aa6c2cddef91c2bb650aeeb1",
         "kafka:acl:generate": "sha256:ee4659401f4676bdc0e40b82b80ce75d0548e3b410c2a1b1ffd49216551a7e8d",
         "lint": "sha256:47526954ecdd9d1686ca23262e20e104b7e04075cc780ca0978403557d723dba",
-        "lint:scripts": "sha256:947e23cd145bf47440f0e801f06f0754d5f3254a435780359231a36d50122160",
+        "lint:scripts": "sha256:73137cfd5402a0f4a8c7ac79071f57677d82fb36d1cf1f76642a0323509329d5",
         "progress:check": "sha256:ab5a810b400430809cf78d779732045019dec0af950b48665a93cd33f10d1d80",
         "progress:report": "sha256:352b1e054bc1779878165f64ad42834a1ddebed72457773aaa8e8a5d86e96664",
         "recover:aggregation-campaign-logs": "sha256:c2e5ebb59addea1d0be46770a068daf2e6966ef599b4c91f1152a7a8c27fb39a",

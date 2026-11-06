@@ -7,7 +7,7 @@
 // real database through a port pointed at an isolated schema, rather than
 // against a mock or a second copy of the SQL.
 // -----------------------------------------------------------------------------
-import { createRequire } from 'node:module';
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -16,7 +16,7 @@ import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 // The services' own startup gate (@rasta/nest-common runtime-role.ts), as built.
-const { preflightRuntimeRole } = createRequire(import.meta.url)(
+const { preflightRuntimeRole } = loadWorkspaceModule(
   join(REPO_ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
 );
 
@@ -54,8 +54,7 @@ export function prismaPort(service, givenUrl) {
     );
   }
 
-  const require = createRequire(join(serviceDir, 'package.json'));
-  const { PrismaClient } = require(generated);
+  const { PrismaClient } = loadWorkspaceModule(generated);
   const client = new PrismaClient({ datasources: { db: { url } } });
 
   const wrap = (handle) => ({

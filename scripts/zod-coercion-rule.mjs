@@ -62,6 +62,23 @@ const DATA_RESULTS = new Set(
   treeifyError prettifyError registry get`.split(/\s+/),
 );
 const SCHEMA_FIELDS = new Set(['element', 'keyType', 'valueType', 'innerType', 'in', 'out']);
+const DEFINITION_SCHEMA_FIELDS = new Set(
+  'element keyType valueType innerType in out left right rest catchall type schema input output args returns'.split(
+    ' ',
+  ),
+);
+const SCHEMA_CONTAINERS = {
+  shape: 'shape',
+  options: 'list',
+  items: 'list',
+  optionsMap: 'map',
+  def: 'definition',
+  _def: 'definition',
+  _zod: 'internals',
+};
+const SAFE_RESULTS = new Set(
+  'safeParse safeParseAsync spa safeEncode safeDecode safeEncodeAsync safeDecodeAsync'.split(' '),
+);
 const COERCING_API = -2;
 // Namespace factories, core Class-first factories and derived definitions share one signature.
 const optionsIndex = ({ name, raw, method, owner } = {}) => {
@@ -72,6 +89,7 @@ const optionsIndex = ({ name, raw, method, owner } = {}) => {
   const kind = api?.replace(/^\$?Zod(?:Mini)?/, '').toLowerCase();
   if (name === 'clone') return method ? 0 : raw ? 1 : 0;
   if (name === 'constructor') return 0;
+  if (name === 'init' && (owner === 'constructor' || /^\$?Zod/.test(owner ?? ''))) return 1;
   if (name === 'create') return owner ? optionsIndex({ name: owner, raw: true }) : 0;
   if (api === 'hash') return 1 + core;
   if (api === 'stringFormat') return 2 + core;
@@ -115,7 +133,7 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
       api === 'codec'
         ? 2
         : ['clone', 'constructor'].includes(api)
-          ? name === 'clone' && !receiverSchema
+          ? (name === 'clone' && !receiverSchema) || init
             ? 1
             : 0
           : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|CheckOverwrite)/.test(api)
@@ -222,20 +240,105 @@ export default {
       zodModule(def.parent.source?.value) &&
       def.parent.importKind !== 'type' &&
       def.node.importKind !== 'type';
-    const access = (result, name, receiver) => ({
-      ...result,
-      receiver: result.schema ? receiver : undefined,
-      raw:
-        (result.raw ||
-          (result.schema &&
-            (['constructor', 'clone'].includes(name) || CALLBACK_APIS.has(name)))) &&
-        capability(name),
-      receiverSchema: !!result.schema,
-      schema: !!result.schema && SCHEMA_FIELDS.has(name),
-      method: !result.raw,
-      owner: result.name,
-      name,
-    });
+    const mergeOrigins = (...results) => {
+      const variants = results.flatMap((result) => result?.variants ?? (result ? [result] : []));
+      if (variants.length < 2) return variants[0];
+      const primary =
+        variants.find((result) => result.raw) ??
+        variants.find((result) => result.opaque) ??
+        variants.find((result) => result.schema) ??
+        variants.find((result) => result.container) ??
+        variants[0];
+      return { ...primary, variants };
+    };
+    const access = (result, name, receiver) => {
+      // Containers carry schema capability, never raw namespace capability. Their
+      // children must survive aliases and patterns without tainting ordinary data.
+      if (name?.rest || result.opaque) return result;
+      if (result.variants)
+        return mergeOrigins(
+          ...result.variants.map((variant) =>
+            access(
+              { ...variant, ambiguous: result.ambiguous || variant.ambiguous },
+              name,
+              receiver,
+            ),
+          ),
+        );
+      if (name === undefined && result.container === 'literal')
+        return mergeOrigins(
+          ...result.children.values(),
+          result.spread && access(result.spread, name),
+        );
+      if (name === undefined && result.container && !['shape', 'list'].includes(result.container))
+        return { opaque: true };
+      if (result.container) {
+        if (result.container === 'literal')
+          return mergeOrigins(
+            result.children.get(name) ??
+              result.children.get(String(name)) ??
+              result.children.get(Number(name)),
+            result.children.get(undefined),
+            result.spread && access(result.spread, name),
+          );
+        if (result.container === 'map')
+          return name === 'get' ? { elementMethod: true } : { opaque: true };
+        if (result.container === 'definition' && name === 'getter') return { elementMethod: true };
+        if (result.container === 'result') return name === 'data' ? result.data : undefined;
+        if (['shape', 'list'].includes(result.container)) {
+          if (result.container === 'list' && name === 'at')
+            return { elementMethod: true, ambiguous: result.ambiguous };
+          if (result.container === 'list' && name === 'length') return undefined;
+          return { schema: true, ambiguous: result.ambiguous };
+        }
+        if (result.container === 'internals' && name === 'constr')
+          return { raw: true, name: 'constructor', ambiguous: result.ambiguous };
+        if (result.container === 'internals' && name === 'def') return { container: 'definition' };
+        if (DEFINITION_SCHEMA_FIELDS.has(name))
+          return { schema: true, ambiguous: result.ambiguous };
+        const container = Object.hasOwn(SCHEMA_CONTAINERS, name)
+          ? SCHEMA_CONTAINERS[name]
+          : undefined;
+        return container ? { container, ambiguous: result.ambiguous } : undefined;
+      }
+      return {
+        receiver: result.schema ? receiver : undefined,
+        raw:
+          (result.raw ||
+            (result.schema &&
+              (['constructor', 'clone'].includes(name) || CALLBACK_APIS.has(name)))) &&
+          capability(name),
+        receiverSchema: !!result.schema,
+        schema: !!result.schema && SCHEMA_FIELDS.has(name),
+        container:
+          result.schema && Object.hasOwn(SCHEMA_CONTAINERS, name)
+            ? SCHEMA_CONTAINERS[name]
+            : undefined,
+        ambiguous: result.ambiguous,
+        method: !result.raw,
+        owner: result.name,
+        name,
+      };
+    };
+    const bindingPath = (binding, root) => {
+      const path = [];
+      for (
+        ;
+        binding &&
+        binding !== root &&
+        !['AssignmentExpression', 'VariableDeclarator'].includes(binding.type);
+        binding = binding.parent
+      ) {
+        if (binding.type === 'RestElement') {
+          path.unshift({ rest: true });
+          continue;
+        }
+        if (binding.parent?.type === 'Property') path.unshift(key(binding.parent));
+        if (binding.type !== 'RestElement' && binding.parent?.type === 'ArrayPattern')
+          path.unshift(binding.parent.elements.indexOf(binding));
+      }
+      return path;
+    };
     // Follow binding definitions, not spellings: aliases, nested destructuring and const chains.
     // Keep schema results distinct from parsed/metadata data and raw factories.
     const origin = (raw, seen = new Set()) => {
@@ -253,15 +356,10 @@ export default {
           }
           if (def.type === 'Variable') {
             let result = origin(def.node.init, next);
-            const path = [];
-            let binding = def.name;
-            while (binding && binding !== def.node.id) {
-              if (binding.parent?.type === 'Property') path.unshift(key(binding.parent));
-              binding = binding.parent;
-            }
+            const path = bindingPath(def.name, def.node.id);
             for (const name of path) if (result) result = access(result, name, def.node.init);
             if (result?.raw) resolved = result;
-            else if (result?.schema && !resolved?.raw) resolved = result;
+            else if ((result?.schema || result?.container) && !resolved?.raw) resolved = result;
             resolved ??= result;
           }
         }
@@ -269,24 +367,29 @@ export default {
         for (const ref of v.references) {
           if (ref.writeExpr && !ref.init) {
             let result = origin(ref.writeExpr, next);
-            const path = [];
-            for (
-              let binding = ref.identifier;
-              binding && binding.type !== 'AssignmentExpression';
-              binding = binding.parent
-            ) {
-              if (binding.parent?.type === 'Property') path.unshift(key(binding.parent));
-            }
+            const path = bindingPath(ref.identifier);
             for (const name of path) if (result) result = access(result, name);
             if (result?.raw) resolved = result;
-            else if (result?.schema && !resolved?.raw) resolved = result;
+            else if ((result?.schema || result?.container) && !resolved?.raw) resolved = result;
             resolved ??= result;
           }
         }
-        return (resolved?.raw || resolved?.schema) &&
+        return (resolved?.raw || resolved?.schema || resolved?.container) &&
           v.references.some((ref) => ref.isWrite() && !ref.init)
           ? { ...resolved, ambiguous: true }
           : resolved;
+      }
+      if (['ObjectExpression', 'ArrayExpression'].includes(node.type)) {
+        const children = new Map();
+        let spread;
+        for (const [index, entry] of (node.properties ?? node.elements).entries()) {
+          if (!entry) continue;
+          const child = origin(entry.argument ?? entry.value ?? entry, seen);
+          if (!child?.raw && !child?.schema && !child?.container) continue;
+          if (entry.type === 'SpreadElement') spread = mergeOrigins(spread, child);
+          else children.set(node.type === 'ObjectExpression' ? key(entry) : index, child);
+        }
+        if (children.size || spread) return { container: 'literal', children, spread };
       }
       if (node.type === 'MemberExpression') {
         const result = origin(node.object, seen);
@@ -297,13 +400,18 @@ export default {
           return { raw: true };
         const factory = origin(node.callee, seen);
         if (factory) {
+          if (factory.elementMethod) return { schema: true, ambiguous: factory.ambiguous };
+          // v3 exposes definition shapes as thunks; classic/mini expose objects.
+          if (factory.container === 'shape') return factory;
+          const input = origin(node.arguments[factory.receiverSchema ? 0 : 1], seen);
+          if (SAFE_RESULTS.has(factory.name)) return { container: 'result', data: input };
           const data =
             DATA_RESULTS.has(factory.name) ||
             (factory.name === 'meta' && factory.receiverSchema && !node.arguments.length);
           const inputSchema =
             ['parse', 'parseAsync', 'decode', 'decodeAsync', 'encode', 'encodeAsync'].includes(
               factory.name,
-            ) && origin(node.arguments[factory.receiverSchema ? 0 : 1], seen)?.schema;
+            ) && input?.schema;
           return {
             raw: false,
             schema: !!inputSchema || (!data && !!(factory.raw || factory.receiverSchema)),
@@ -508,6 +616,7 @@ export default {
         escape(node);
         const factory = origin(node.callee);
         if (!factory) return;
+        if (factory.schema || factory.opaque) report(node);
         if (
           factory.raw &&
           factory.ambiguous &&
