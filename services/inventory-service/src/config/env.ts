@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
-import { RETURN_DISPOSITIONS } from '@rasta/contracts';
+import { INVENTORY_MAX_REPLAY_WINDOW_SECONDS, RETURN_DISPOSITIONS } from '@rasta/contracts';
 import {
   authEnvSchema,
   baseEnvSchema,
@@ -11,7 +11,7 @@ import {
   outboxPurgeEnvSchema,
   serviceUrlSchema,
 } from '@rasta/config';
-import { inventoryOperationBudgets } from './operation-budgets';
+import { inventoryOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
 const { fixed, seal } = fixedEnvMessages();
@@ -31,6 +31,12 @@ export const DEFAULT_PORT = '3109';
  */
 const REFUSED_ROLES = ['AUDITOR', 'SYSTEM_ADMIN'] as const;
 
+const REPLAY_WINDOW_DOES_NOT_FIT = fixed(
+  'INVENTORY_IDEMPOTENCY_TTL_HOURS · 3600 − B − INVENTORY_CLOCK_SKEW_SECONDS must be at least ' +
+    `${INVENTORY_MAX_REPLAY_WINDOW_SECONDS} s (INVENTORY_MAX_REPLAY_WINDOW_SECONDS), with ` +
+    'B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + 7 s: otherwise a window the shared bound allows could ' +
+    'be refused by the replay fence',
+);
 const UNKNOWN_DISPOSITION = fixed(
   `Unknown disposition in INVENTORY_RETURN_DISPOSITIONS_ALLOWED (${RETURN_DISPOSITIONS.join(', ')})`,
 );
@@ -130,6 +136,9 @@ function roleList(name: string) {
  *                                       How long a completed command's response is replayed,
  *                                       and how long an in-flight claim holds its key before a
  *                                       retry may take it over (docs/06 § 6.8).
+ *   INVENTORY_CLOCK_SKEW_SECONDS       The clock-offset bound the replay fence rests on (FU-171):
+ *                                       TTL · 3600 − (2 · skew + 7) − skew must be at least
+ *                                       INVENTORY_MAX_REPLAY_WINDOW_SECONDS, or the boot fails.
  *
  * No unit of measure, no low-stock threshold (Q-106), no partial issue (Q-107), no warehouse
  * lifecycle (Q-108), no control on a negative adjustment beyond the operator role (Q-109), no
@@ -231,11 +240,47 @@ export const inventoryEnvSchema = baseEnvSchema
       .min(10)
       .max(900)
       .prefault(120),
+
+    /**
+     * The largest offset of any replica's clock (and the database's) from true time, in seconds
+     * (FU-171, PM decision D-133). The replay fence (`shared/idempotency.ts`) compares a clock with a
+     * deadline the caller fixed and keeps the response for another replica to find, so its budget is
+     * `B = 2 · skew + margin`: a deadline must end `B` before the retention, and a completed response
+     * is kept at least `B` past it. Beyond this offset the guarantee is void — alarm on a clock offset
+     * above half of it. At its largest (300) B is 607 s.
+     */
+    INVENTORY_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
+  })
+  .superRefine((env, ctx) => {
+    // A window of the shared bound's size must be accepted on the slowest legal clock:
+    //   TTL − B − skew ≥ K        (B = 2 · skew + margin)
+    // Otherwise an honest client could meet the 400: fail the boot instead.
+    if (replayWindowRoomSeconds(env) < INVENTORY_MAX_REPLAY_WINDOW_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['INVENTORY_IDEMPOTENCY_TTL_HOURS'],
+        message: REPLAY_WINDOW_DOES_NOT_FIT,
+      });
+    }
   });
 
 export const INVENTORY_ENV_MESSAGES = seal();
 
 export type InventoryEnv = z.infer<typeof inventoryEnvSchema>;
+
+/**
+ * The longest replay window (seconds) this service can accept on its slowest legal clock:
+ * `TTL − B − skew`. The boot check holds it at or above `INVENTORY_MAX_REPLAY_WINDOW_SECONDS`.
+ */
+export function replayWindowRoomSeconds(
+  env: Pick<InventoryEnv, 'INVENTORY_IDEMPOTENCY_TTL_HOURS' | 'INVENTORY_CLOCK_SKEW_SECONDS'>,
+): number {
+  return (
+    env.INVENTORY_IDEMPOTENCY_TTL_HOURS * 3600 -
+    replayFenceBudgetMs(env.INVENTORY_CLOCK_SKEW_SECONDS) / 1000 -
+    env.INVENTORY_CLOCK_SKEW_SECONDS
+  );
+}
 
 /**
  * Loads and validates the environment, once, at startup.

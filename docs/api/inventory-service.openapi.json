@@ -105,7 +105,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -166,6 +166,16 @@
               "type": "string",
               "minLength": 8,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
             }
           }
         ],
@@ -232,7 +242,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -262,7 +272,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -616,7 +626,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -677,6 +687,16 @@
               "type": "string",
               "minLength": 8,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
             }
           }
         ],
@@ -775,7 +795,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -815,7 +835,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1186,6 +1206,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -1273,7 +1303,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1313,7 +1343,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1499,6 +1529,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -1586,7 +1626,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1626,7 +1666,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1912,7 +1952,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2096,7 +2136,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2285,6 +2325,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -2421,7 +2471,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2461,7 +2511,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -2606,6 +2656,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -2742,7 +2802,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2782,7 +2842,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3055,7 +3115,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3116,6 +3176,16 @@
               "type": "string",
               "minLength": 8,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
             }
           }
         ],
@@ -3207,7 +3277,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3247,7 +3317,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3635,6 +3705,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -3725,7 +3805,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3765,7 +3845,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (shipment: SHIPMENT_NOT_CREATED, SHIPMENT_NOT_DISPATCHED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (shipment: SHIPMENT_NOT_CREATED, SHIPMENT_NOT_DISPATCHED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3891,6 +3971,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -3981,7 +4071,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4021,7 +4111,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (shipment: SHIPMENT_NOT_CREATED, SHIPMENT_NOT_DISPATCHED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (shipment: SHIPMENT_NOT_CREATED, SHIPMENT_NOT_DISPATCHED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -4350,7 +4440,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4411,6 +4501,16 @@
               "type": "string",
               "minLength": 8,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
             }
           }
         ],
@@ -4570,7 +4670,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -4610,7 +4710,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5228,6 +5328,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -5386,7 +5496,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5426,7 +5536,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5647,6 +5757,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -5805,7 +5925,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5845,7 +5965,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -5987,6 +6107,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -6145,7 +6275,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6185,7 +6315,7 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (returnShipment: RETURN_ALREADY_DISPATCHED, RETURN_SHIPMENT_NOT_IN_TRANSIT, RETURN_DISPATCH_WITHDRAWN, RETURN_SHIPMENT_NOT_RECEIVED, RETURN_SHIPMENT_NOT_INSPECTED)",
             "headers": {
               "Retry-After": {
                 "required": false,
