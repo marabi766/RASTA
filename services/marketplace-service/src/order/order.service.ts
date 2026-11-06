@@ -1252,6 +1252,15 @@ export class OrderService {
     );
   }
 
+  /** See `OrderRepository.confirmSagaCallsOn`. */
+  confirmSagaCallsOn(
+    order: { id: string; organizationId: string },
+    operations: readonly SagaActivity[],
+    subject: string,
+  ): Promise<void> {
+    return this.repository.confirmSagaCallsOn(this.prisma.client, order, operations, subject);
+  }
+
   /** What the saga needs to know to drive an order without re-reading it. */
   async describe(orderId: string): Promise<{
     id: string;

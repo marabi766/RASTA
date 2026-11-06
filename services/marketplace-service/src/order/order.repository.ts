@@ -270,6 +270,11 @@ export class OrderRepository {
    * says anything about the funds now (#769 r1 F3). A false open row from a late attempt
    * is an operator's to close; a closed row over a held dispute is silent.
    *
+   * The row's `opened_at` is when its episode began: kept while the row stays
+   * open, however many attempts follow, so a retry never makes unconfirmed money
+   * younger; restarted only when a confirmed call is made again, a new command
+   * (#792 r2 F2).
+   *
    * @returns the generation this attempt confirms with.
    */
   async openSagaCall(
@@ -281,13 +286,18 @@ export class OrderRepository {
     const key = { organizationId: order.organizationId, orderId: order.id, operation, subject };
     const { generation } = await runUnscoped(
       'a saga step records its call on the order it drives, under its tenant',
-      () =>
-        client.sagaUnconfirmedCall.upsert({
+      async () => {
+        await client.sagaUnconfirmedCall.updateMany({
+          where: { ...key, confirmedAt: { not: null } },
+          data: { openedAt: new Date() },
+        });
+        return client.sagaUnconfirmedCall.upsert({
           where: { organizationId_orderId_operation_subject: key },
           create: key,
           update: { confirmedAt: null, generation: { increment: 1 } },
           select: { generation: true },
-        }),
+        });
+      },
     );
     return generation;
   }
@@ -311,6 +321,31 @@ export class OrderRepository {
           operation,
           subject,
           generation,
+          confirmedAt: null,
+        },
+        data: { confirmedAt: new Date() },
+      }),
+    );
+  }
+
+  /**
+   * economic-service has refunded the obligation `subject` (#792 r2 F2): REFUNDED
+   * is terminal there, so no call of `operations` on it can still have moved
+   * money. Closes every open row of theirs on it, whatever its generation.
+   */
+  async confirmSagaCallsOn(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    operations: readonly SagaActivity[],
+    subject: string,
+  ): Promise<void> {
+    await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
+      client.sagaUnconfirmedCall.updateMany({
+        where: {
+          organizationId: order.organizationId,
+          orderId: order.id,
+          operation: { in: [...operations] },
+          subject,
           confirmedAt: null,
         },
         data: { confirmedAt: new Date() },

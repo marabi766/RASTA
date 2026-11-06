@@ -25,17 +25,21 @@ An **episode** is one of:
 - an open row of `saga_unconfirmed_call` (#769): a call to economic-service nothing has confirmed. One row per dispute, so
   a second dispute, a lost `saga_step` record or step times written by a clock that ran back cannot hide the first
   dispute's release. Counted whatever the order's status, terminal included. The one row not counted: a dispute still
-  `OPEN` on an order still `DISPUTED` (the operator decides; nothing is due yet).
+  `OPEN` on an order still `DISPUTED` (the operator decides; nothing is due yet). Recorded calls (FU-104, FU-145): the
+  release, and every authorisation (`authoriseSettlement`), settlement (`settle`) and refund (`compensate`), each
+  opened before the call and closed only by that attempt's own answer. A buyer's dispute and an operator's decision do
+  not close one: they pause settlement and confirm nothing about a command already sent (#792 r2 F2). A confirmed
+  refund also closes the authorisation and settlement rows of the same obligation (`REFUNDED` is terminal).
 - an order in a saga-custody status (`SAGA_CUSTODY` in `state-machine.ts`).
 
-| `reason`            | The episode is …                                                                                          | Aged from                                                               | The saga owes …                            |
-| ------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------ |
-| `PENDING`           | an order placed; the hold is not confirmed                                                                | when it left a party's hands, else its creation                         | the hold (`createObligation`), or `FAILED` |
-| `RECEIPT_CONFIRMED` | an order confirmed by the buyer, or back after a failed settlement attempt                                | the same; a `RECEIPT_CONFIRMED ↔ SETTLING` bounce does not reset it     | authorisation and settlement               |
-| `SETTLING`          | an order in a settlement attempt                                                                          | the same                                                                | the settlement's outcome                   |
-| `CANCELLING`        | an order cancelled, or refunded by a dispute decision                                                     | the same; `PENDING → CANCELLING` does not reset it                      | the refund (`compensate`)                  |
-| `DISPUTE_RELEASE`   | an open `resolveObligationDispute` row: a dispute economic-service was told of, its release not confirmed | the dispute's decision; a row whose dispute row is missing, its opening | the release (`resolveObligationDispute`)   |
-| `UNCONFIRMED_CALL`  | an open row of any other operation (none is recorded yet; counted rather than dropped)                    | its first opening                                                       | that call's outcome                        |
+| `reason`            | The episode is …                                                                                          | Aged from                                                                      | The saga owes …                            |
+| ------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------ |
+| `PENDING`           | an order placed; the hold is not confirmed                                                                | when it left a party's hands, else its creation                                | the hold (`createObligation`), or `FAILED` |
+| `RECEIPT_CONFIRMED` | an order confirmed by the buyer, or back after a failed settlement attempt                                | the same; a `RECEIPT_CONFIRMED ↔ SETTLING` bounce does not reset it            | authorisation and settlement               |
+| `SETTLING`          | an order in a settlement attempt                                                                          | the same                                                                       | the settlement's outcome                   |
+| `CANCELLING`        | an order cancelled, or refunded by a dispute decision                                                     | the same; `PENDING → CANCELLING` does not reset it                             | the refund (`compensate`)                  |
+| `DISPUTE_RELEASE`   | an open `resolveObligationDispute` row: a dispute economic-service was told of, its release not confirmed | the dispute's decision; a row whose dispute row is missing, its opening        | the release (`resolveObligationDispute`)   |
+| `UNCONFIRMED_CALL`  | an open `authoriseSettlement`, `settle` or `compensate` row (`subject` is the obligation), or any other   | its first opening while open; a call confirmed and made again, its new opening | that call's outcome                        |
 
 One order can be two episodes at once (a release owed and the settlement after it): each is counted. A sample that
 fails, that does not answer within its own deadline (6 s), or that is older than 26 s by the process's monotonic
@@ -131,15 +135,26 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
    backfill. Close it as [`marketplace-saga-deploy`](marketplace-saga-deploy.md) § «رکورد فراخوانی‌های تأییدنشده» says,
    with the `generation` you read, and record it in the change record. A row a saga still waits on closes by itself at
    its next attempt. The alert keeps firing until the row is closed, by design (fail closed).
+6. `UNCONFIRMED_CALL` (`authoriseSettlement`, `settle`, `compensate`; `subject` is the obligation): read the obligation
+   at economic-service. Authorised (`PENDING_SETTLEMENT` or `SETTLED`) answers an authorisation; `SETTLED` with its
+   settlement answers a settlement (record it on the order before closing: the money moved); `REFUNDED` answers all
+   three. Anything else is still unanswered: the saga's next attempt, or a person's decision (`docs/08` § 8.4), ends it.
+   Close a row only with an answer, the same way and with the `generation` you read.
 
 ## Known limits
 
 - **First deploy:** the backfill of `20261105130000_saga_unconfirmed_call` gives a row to every dispute of an
-  unfinished order, released or not, so `FinancialEpisodeOverdue` fires at once for releases that did happen. Expected:
-  reconcile them (step 5) before treating the alert as a new incident.
-- Refund and settlement have no call record yet: `CANCELLING`, `RECEIPT_CONFIRMED` and `SETTLING` come from the order's
-  status. A refund that fails after a confirmed release leaves the order `CANCELLING`, which is counted; an order a person
-  moves out of those statuses by hand is not.
+  unfinished order, released or not, so `FinancialEpisodeOverdue` fires for releases that did happen: a backfilled row
+  becomes overdue one hour after its dispute's decision (or its opening, if it has no decision), and the alert fires once
+  that has held for five minutes — at once only for decisions already over an hour old. Rows of disputes still `OPEN` on
+  orders still `DISPUTED` are not counted until decided. Expected: reconcile them (step 5) before treating the alert as a
+  new incident.
+- **Calls made before this deploy** have no record: an authorisation or settlement an older worker left unanswered is
+  counted only while its order is `RECEIPT_CONFIRMED` or `SETTLING`, and a dispute raised on it still takes it out of
+  the count. At the first deploy, list such orders read-only (`SELECT organization_id, id, status FROM "order" WHERE
+receipt_confirmed_at IS NOT NULL AND status IN ('RECEIPT_CONFIRMED', 'SETTLING', 'DISPUTED')`) and reconcile them
+  with economic-service; a backfill for them is the follow-up.
+- An order a person moves out of a custody status by hand is not counted by status; its open call rows still are.
 - A database clock run **forward** and then corrected leaves `saga_monitor_clock` ahead: ages read high (the alert fires
   early, never late) until the real clock catches up. To undo it, set the row to `clock_timestamp()` only once the
   clock is verified right: an episode overdue by the real clock stays overdue. Never lower it for any other reason.
@@ -149,9 +164,8 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
   ahead of the database's delays every episode it starts by that lead, and a database clock set back by Δ holds the
   reference still for Δ, so an episode not yet over the hour waits up to Δ longer. Keep both on NTP; stamping starts
   with the database's clock is the follow-up. An application clock behind starts episodes early (alerts sooner).
-- A party may move an order out of the saga's custody while its episode is overdue: a buyer disputing a settlement
-  stuck in `RECEIPT_CONFIRMED` makes it `DISPUTED` (the operator decides now) and the alert can clear. After the
-  decision the order is counted again, aged from the decision.
+- A refusal before anything is sent (an order with no recorded receipt) also leaves its authorisation row open: fail
+  closed, the operator reconciles it.
 - A saga that replayed past its resume point without `DISPUTE_RESUME_PATCH` releases only at its next wake-up as
   `RECEIPT_CONFIRMED`/`CANCELLING`; until then its row stays open and counts as `DISPUTE_RELEASE`.
 - The probe uses `DescribeTaskQueue` without enhanced mode; if Temporal ever lists only one partition's pollers, a live

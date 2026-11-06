@@ -150,6 +150,9 @@ export interface DisputedObligation {
   economicDisputeId?: string | null;
 }
 
+/** The economic-service calls with a durable record until answered (FU-104, FU-145). */
+type RecordedCall = 'authoriseSettlement' | 'settle' | 'compensate' | 'resolveObligationDispute';
+
 /** What `authoriseSettlement` answers. Undefined: authorised. */
 export type AuthorisationResult = DisputedObligation | undefined;
 
@@ -221,15 +224,38 @@ export function createActivities(deps: ActivityDependencies) {
 
   const currentStep = deps.currentStep ?? temporalStep;
 
-  /** The durable record of an unconfirmed release (FU-104), under the order's own tenant. */
-  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
+  /**
+   * The durable record of an economic-service call whose outcome is not yet
+   * confirmed (FU-104, FU-145), under the order's own tenant: opened before the
+   * call, since one that fails may still have committed, and closed only by
+   * that attempt's own answer. It outlives the order's status: a dispute raised
+   * on an order a failed settlement left RECEIPT_CONFIRMED pauses settlement,
+   * and confirms nothing about the command already sent (#792 r2 F2).
+   */
+  const openCall = (orderId: string, operation: RecordedCall, subject: string): Promise<number> =>
     asSystemFor(orderId, (order) =>
       deps.orders.openSagaCall(
         { id: order.id, organizationId: order.buyerOrganizationId },
-        'resolveObligationDispute',
-        disputeId,
+        operation,
+        subject,
       ),
     );
+  const confirmCall = (
+    orderId: string,
+    operation: RecordedCall,
+    subject: string,
+    generation: number,
+  ): Promise<void> =>
+    asSystemFor(orderId, (order) =>
+      deps.orders.confirmSagaCall(
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        operation,
+        subject,
+        generation,
+      ),
+    );
+  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
+    openCall(orderId, 'resolveObligationDispute', disputeId);
 
   /**
    * An economic-service call, made at most once per scheduled activity
@@ -436,7 +462,10 @@ export function createActivities(deps: ActivityDependencies) {
       orderId: string,
       transactionId: string,
     ): Promise<AuthorisationResult> {
-      return economicStep<AuthorisationResult>(
+      // Either answer is economic-service's: authorised, or disputed since this
+      // order's own authorisation. A refusal or no answer leaves the record open.
+      const generation = await openCall(orderId, 'authoriseSettlement', transactionId);
+      const authorisation = await economicStep<AuthorisationResult>(
         orderId,
         'authoriseSettlement',
         async (order) => {
@@ -477,6 +506,8 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
+      await confirmCall(orderId, 'authoriseSettlement', transactionId, generation);
+      return authorisation;
     },
 
     async markSettling(orderId: string): Promise<OrderStatus> {
@@ -493,7 +524,10 @@ export function createActivities(deps: ActivityDependencies) {
       orderId: string,
       transactionId: string,
     ): Promise<SettledResult | DisputedObligation> {
-      return economicStep<SettledResult | DisputedObligation>(
+      // An attempt that gets no answer leaves the record open after the saga
+      // gives up (SETTLEMENT_EXHAUSTED), whatever the order's status becomes.
+      const generation = await openCall(orderId, 'settle', transactionId);
+      const settled = await economicStep<SettledResult | DisputedObligation>(
         orderId,
         'settle',
         async (order) => {
@@ -531,6 +565,8 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
+      await confirmCall(orderId, 'settle', transactionId, generation);
+      return settled;
     },
 
     /**
@@ -568,6 +604,7 @@ export function createActivities(deps: ActivityDependencies) {
      * compensation entirely.
      */
     async compensate(orderId: string, transactionId: string, reason: string): Promise<void> {
+      const generation = await openCall(orderId, 'compensate', transactionId);
       await economicStep(
         orderId,
         'compensate',
@@ -587,6 +624,16 @@ export function createActivities(deps: ActivityDependencies) {
           answer: (transaction) =>
             transaction.status === 'REFUNDED' ? { result: undefined } : null,
         },
+      );
+      await confirmCall(orderId, 'compensate', transactionId, generation);
+      // REFUNDED is terminal: nothing of this obligation can settle any more, so
+      // an authorisation or settlement left unanswered on it is answered now.
+      await asSystemFor(orderId, (order) =>
+        deps.orders.confirmSagaCallsOn(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          ['authoriseSettlement', 'settle'],
+          transactionId,
+        ),
       );
     },
 
@@ -703,14 +750,7 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
-      await asSystemFor(orderId, (order) =>
-        deps.orders.confirmSagaCall(
-          { id: order.id, organizationId: order.buyerOrganizationId },
-          'resolveObligationDispute',
-          disputeId,
-          generation,
-        ),
-      );
+      await confirmCall(orderId, 'resolveObligationDispute', disputeId, generation);
     },
 
     /**

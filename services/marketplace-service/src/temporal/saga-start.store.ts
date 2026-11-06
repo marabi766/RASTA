@@ -147,12 +147,12 @@ export class SagaStartStore {
    *   the operator decides, nothing is due. A release is due from its dispute's
    *   decision; a row whose dispute is missing, or any other call, from its
    *   first opening. `DISPUTE_RELEASE` for a release, `UNCONFIRMED_CALL` for
-   *   any other operation (none is recorded yet; counted, never dropped).
+   *   authorisation, settlement or refund (FU-145) and any other operation.
    * - An order in a `SAGA_CUSTODY` status is one more, aged from when it last
    *   left a party's hands (a transition from a party or terminal status; else
    *   its creation), so RECEIPT_CONFIRMED ↔ SETTLING and PENDING → CANCELLING do
-   *   not restart it. Refund and settlement have no call record yet: status is
-   *   all there is.
+   *   not restart it. The call record outlives it: a dispute that takes the
+   *   order out of custody leaves an unanswered call counted (#792 r2 F2).
    *
    * Ages are taken against `advanceReference()`, so none decreases while its episode
    * lasts. Times without a zone are UTC wall time. Counts and ages only leave

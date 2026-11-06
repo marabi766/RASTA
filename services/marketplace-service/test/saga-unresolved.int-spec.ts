@@ -487,4 +487,196 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       );
     }
   });
+
+  // #792 r2 F2 (FU-145): an authorisation or settlement economic-service never
+  // answered is money in an unknown state, whatever the order's status becomes
+  // next. A buyer's dispute and an operator's decision pause settlement; they
+  // do not confirm a command already sent. Until economic-service answers, the
+  // call stays one episode, aged from its first opening.
+  describe('an unanswered authorisation or settlement (#792 r2 F2)', () => {
+    const answers = { authorise: true, settle: true };
+    const lost = () => new Error('economic-service did not answer (socket hang up)');
+    const money: OrderActivities = createActivities({
+      orders: wiring.orders,
+      economic: {
+        ...economic,
+        authoriseSettlement: async () => {
+          if (!answers.authorise) throw lost();
+        },
+        settle: async () => {
+          if (!answers.settle) throw lost();
+          return { settlementId: `STL_${ulid()}`, commissionAmountMinor: '0', netAmountMinor: '0' };
+        },
+        refund: async () => undefined,
+      } as unknown as EconomicClient,
+      currentStep: sagaStep,
+    });
+    afterEach(() => {
+      answers.authorise = true;
+      answers.settle = true;
+    });
+
+    async function awaitingSettlement(): Promise<{ orderId: string; transactionId: string }> {
+      const { orderId, transactionId } = await held();
+      await asSupplier(() => wiring.orders.confirm(orderId));
+      await asSupplier(() => wiring.orders.fulfill(orderId, { trackingReference: 'TRK-F2' }));
+      await asBuyer(() => wiring.orders.confirmReceipt(orderId, {}));
+      return { orderId, transactionId };
+    }
+
+    /** What `settleOrder` does when no settlement attempt is answered: SETTLEMENT_EXHAUSTED. */
+    async function exhaust(orderId: string, transactionId: string): Promise<void> {
+      answers.settle = false;
+      await money.authoriseSettlement(orderId, transactionId);
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        expect(await money.markSettling(orderId)).toBe('SETTLING');
+        await expect(money.settle(orderId, transactionId)).rejects.toThrow(/did not answer/);
+        await money.markSettlementFailed(orderId);
+      }
+    }
+
+    const overdue = (state: Record<string, { overdue: number }>) =>
+      Object.values(state).reduce((sum, { overdue: n }) => sum + n, 0);
+
+    it('keeps an exhausted settlement owed, and its age, through a buyer dispute and its decision', async () => {
+      const before = await read();
+      const { orderId, transactionId } = await awaitingSettlement();
+      await exhaust(orderId, transactionId);
+      await age(orderId, 8000);
+
+      // The review's sequence: the buyer disputes the order the saga left RECEIPT_CONFIRMED.
+      await asBuyer(() => wiring.orders.raiseDispute(orderId, { reason: 'paid, never settled' }));
+      const disputed = await read();
+      expect(disputed.UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 1);
+      expect(disputed.UNCONFIRMED_CALL!.days).toBeGreaterThan(7999.9);
+      expect(overdue(disputed)).toBe(overdue(before) + 1);
+
+      // The saga mirrors it, an operator decides: the age does not restart.
+      const disputeId = await openDisputeId(prisma, orderId);
+      await money.disputeObligation(orderId, transactionId, disputeId, 'paid, never settled');
+      await asOperator(() => resolveOpenDispute(wiring, orderId, settle));
+      const decided = await read();
+      expect(decided.UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 1);
+      expect(decided.UNCONFIRMED_CALL!.days).toBeGreaterThan(7999.9);
+      expect(decided.UNCONFIRMED_CALL!.overdue).toBe(before.UNCONFIRMED_CALL!.overdue + 1);
+
+      // Only economic-service's answer ends it: released, authorised, settled.
+      await money.resolveObligationDispute(orderId, transactionId, disputeId, settle.resolution);
+      answers.settle = true;
+      await money.authoriseSettlement(orderId, transactionId);
+      expect(await money.markSettling(orderId)).toBe('SETTLING');
+      await money.settle(orderId, transactionId);
+      expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count);
+    });
+
+    it('keeps an unanswered authorisation owed, and its age, through a buyer dispute and its decision', async () => {
+      const before = await read();
+      const { orderId, transactionId } = await awaitingSettlement();
+      answers.authorise = false;
+      await expect(money.authoriseSettlement(orderId, transactionId)).rejects.toThrow(
+        /did not answer/,
+      );
+      await age(orderId, 9000);
+
+      await asBuyer(() => wiring.orders.raiseDispute(orderId, { reason: 'paid, never settled' }));
+      const disputed = await read();
+      expect(disputed.UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 1);
+      expect(disputed.UNCONFIRMED_CALL!.days).toBeGreaterThan(8999.9);
+      expect(overdue(disputed)).toBe(overdue(before) + 1);
+
+      const disputeId = await openDisputeId(prisma, orderId);
+      await money.disputeObligation(orderId, transactionId, disputeId, 'paid, never settled');
+      await asOperator(() =>
+        resolveOpenDispute(wiring, orderId, {
+          outcome: 'REFUND',
+          resolution: 'never delivered',
+          responsibility: 'SUPPLIER',
+        }),
+      );
+      const decided = await read();
+      expect(decided.UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 1);
+      expect(decided.UNCONFIRMED_CALL!.days).toBeGreaterThan(8999.9);
+
+      // A confirmed refund of the same obligation is economic-service's final
+      // word on it: REFUNDED is terminal, so no authorisation or settlement of
+      // it is still in doubt.
+      await money.resolveObligationDispute(orderId, transactionId, disputeId, 'never delivered');
+      await money.compensate(orderId, transactionId, 'never delivered');
+      await money.markCancelled(orderId, 'never delivered');
+      expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count);
+    });
+
+    it('starts a new episode for a call confirmed and then made again, and keeps the first while unanswered', async () => {
+      const before = await read();
+      const { orderId, transactionId } = await awaitingSettlement();
+      // Authorised and confirmed long ago.
+      await money.authoriseSettlement(orderId, transactionId);
+      await age(orderId, 9500);
+      // A later authorisation (after a dispute decided SETTLE) is a new command:
+      // not overdue from the first one's time.
+      answers.authorise = false;
+      await expect(money.authoriseSettlement(orderId, transactionId)).rejects.toThrow(
+        /did not answer/,
+      );
+      const again = await read();
+      expect(again.UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 1);
+      expect(again.UNCONFIRMED_CALL!.overdue).toBe(before.UNCONFIRMED_CALL!.overdue);
+      // Unanswered again: the retry does not restart it.
+      await age(orderId, 9600);
+      await expect(money.authoriseSettlement(orderId, transactionId)).rejects.toThrow(
+        /did not answer/,
+      );
+      expect((await read()).UNCONFIRMED_CALL!.days).toBeGreaterThan(9599.9);
+      answers.authorise = true;
+      await money.authoriseSettlement(orderId, transactionId);
+      expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count);
+    });
+
+    it("closes on a refund only that order's own rows of that obligation (AGENTS.md tenancy)", async () => {
+      const before = await read();
+      const mine = await awaitingSettlement();
+      const theirs = await awaitingSettlement();
+      answers.authorise = false;
+      // The same subject on another order, and another subject on this one.
+      for (const [orderId, subject] of [
+        [mine.orderId, mine.transactionId],
+        [theirs.orderId, mine.transactionId],
+        [mine.orderId, `TXN_${ulid()}`],
+      ] as const) {
+        await expect(money.authoriseSettlement(orderId, subject)).rejects.toThrow(/did not answer/);
+      }
+      expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 3);
+      await money.compensate(mine.orderId, mine.transactionId, 'never delivered');
+      // Its own refund row and authorisation of that obligation close; nothing else does.
+      expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 2);
+      await runUnscoped(
+        'the suite closes the rows it opened',
+        () =>
+          prisma.client.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
+          WHERE order_id IN (${mine.orderId}, ${theirs.orderId}) AND confirmed_at IS NULL`,
+      );
+    });
+
+    it('counts an unanswered refund, which only its own confirmation ends', async () => {
+      const before = await read();
+      const { orderId, transactionId } = await held();
+      await asBuyer(() => wiring.orders.cancel(orderId, { reason: 'no longer needed' }));
+      const refusing = createActivities({
+        orders: wiring.orders,
+        economic: {
+          refund: async () => {
+            throw lost();
+          },
+        } as unknown as EconomicClient,
+        currentStep: sagaStep,
+      });
+      await expect(refusing.compensate(orderId, transactionId, 'no longer needed')).rejects.toThrow(
+        /did not answer/,
+      );
+      expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 1);
+      await money.compensate(orderId, transactionId, 'no longer needed');
+      await money.markCancelled(orderId, 'no longer needed');
+      expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count);
+    });
+  });
 });
