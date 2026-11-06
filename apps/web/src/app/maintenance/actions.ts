@@ -13,6 +13,7 @@ import {
   reportRequestFormValues,
 } from '@/server/maintenance-commands';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import { EDIT_AS_NEW_INTENT, REPORT_INTENT_FIELD, type ReportRequestFormState } from './form-state';
 import { pageContext } from '@/server/page-context';
 import { withContext } from '@/lib/page-context';
@@ -27,9 +28,13 @@ import { withContext } from '@/lib/page-context';
  */
 
 export async function submitReportRequest(
-  _previous: ReportRequestFormState,
+  previous: ReportRequestFormState,
   form: FormData,
 ): Promise<ReportRequestFormState> {
+  return keepUnconfirmed(previous, () => attemptReportRequest(form));
+}
+
+async function attemptReportRequest(form: FormData): Promise<ReportRequestFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 

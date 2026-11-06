@@ -9,6 +9,7 @@ import { mayDispatch } from '@/server/money-gate';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { issueOrderCommand, orderCommandFormValues, parseOrderCommand } from '@/server/orders';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { OrderCommandFormState } from './form-state';
 import { flashHref } from '@/server/flash';
 
@@ -34,7 +35,14 @@ import { flashHref } from '@/server/flash';
  */
 export async function submitOrderCommand(
   orderId: string,
-  _previous: OrderCommandFormState,
+  previous: OrderCommandFormState,
+  form: FormData,
+): Promise<OrderCommandFormState> {
+  return keepUnconfirmed(previous, () => attemptOrderCommand(orderId, form));
+}
+
+async function attemptOrderCommand(
+  orderId: string,
   form: FormData,
 ): Promise<OrderCommandFormState> {
   const session = await currentSession();

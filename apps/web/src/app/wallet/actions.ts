@@ -15,6 +15,7 @@ import {
   topUpWallet,
 } from '@/server/wallet';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { TopUpFormState } from './form-state';
 
 /**
@@ -29,9 +30,13 @@ import type { TopUpFormState } from './form-state';
  */
 export async function submitTopUp(
   walletId: string,
-  _previous: TopUpFormState,
+  previous: TopUpFormState,
   form: FormData,
 ): Promise<TopUpFormState> {
+  return keepUnconfirmed(previous, () => attemptTopUp(walletId, form));
+}
+
+async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 

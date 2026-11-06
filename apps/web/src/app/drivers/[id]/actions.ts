@@ -22,6 +22,7 @@ import {
   parseEndAssignmentForm,
 } from '@/server/assignments';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type {
   AssignFormState,
   ChangeStatusFormState,
@@ -46,7 +47,14 @@ import type {
 
 export async function submitUpdateDriver(
   driverId: string,
-  _previous: UpdateDriverFormState,
+  previous: UpdateDriverFormState,
+  form: FormData,
+): Promise<UpdateDriverFormState> {
+  return keepUnconfirmed(previous, () => attemptUpdateDriver(driverId, form));
+}
+
+async function attemptUpdateDriver(
+  driverId: string,
   form: FormData,
 ): Promise<UpdateDriverFormState> {
   const session = await currentSession();
@@ -105,7 +113,14 @@ export async function submitUpdateDriver(
 
 export async function submitChangeStatus(
   driverId: string,
-  _previous: ChangeStatusFormState,
+  previous: ChangeStatusFormState,
+  form: FormData,
+): Promise<ChangeStatusFormState> {
+  return keepUnconfirmed(previous, () => attemptChangeStatus(driverId, form));
+}
+
+async function attemptChangeStatus(
+  driverId: string,
   form: FormData,
 ): Promise<ChangeStatusFormState> {
   const session = await currentSession();
@@ -161,9 +176,13 @@ export async function submitChangeStatus(
 
 export async function submitAssign(
   driverId: string,
-  _previous: AssignFormState,
+  previous: AssignFormState,
   form: FormData,
 ): Promise<AssignFormState> {
+  return keepUnconfirmed(previous, () => attemptAssign(driverId, form));
+}
+
+async function attemptAssign(driverId: string, form: FormData): Promise<AssignFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
@@ -221,7 +240,15 @@ export async function submitAssign(
 export async function submitEndAssignment(
   driverId: string,
   assignmentId: string,
-  _previous: EndAssignmentFormState,
+  previous: EndAssignmentFormState,
+  form: FormData,
+): Promise<EndAssignmentFormState> {
+  return keepUnconfirmed(previous, () => attemptEndAssignment(driverId, assignmentId, form));
+}
+
+async function attemptEndAssignment(
+  driverId: string,
+  assignmentId: string,
   form: FormData,
 ): Promise<EndAssignmentFormState> {
   const session = await currentSession();

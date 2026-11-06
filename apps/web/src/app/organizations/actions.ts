@@ -19,6 +19,7 @@ import {
   updateMemberRolesFormValues,
 } from '@/server/members';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type {
   RevokeMembershipFormState,
   UpdateMemberRolesFormState,
@@ -62,9 +63,13 @@ async function gate(form: FormData) {
 }
 
 export async function submitUpdateOrganization(
-  _previous: UpdateOrganizationFormState,
+  previous: UpdateOrganizationFormState,
   form: FormData,
 ): Promise<UpdateOrganizationFormState> {
+  return keepUnconfirmed(previous, () => attemptUpdateOrganization(form));
+}
+
+async function attemptUpdateOrganization(form: FormData): Promise<UpdateOrganizationFormState> {
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 
@@ -126,9 +131,13 @@ export async function submitUpdateOrganization(
 }
 
 export async function submitUpdateMemberRoles(
-  _previous: UpdateMemberRolesFormState,
+  previous: UpdateMemberRolesFormState,
   form: FormData,
 ): Promise<UpdateMemberRolesFormState> {
+  return keepUnconfirmed(previous, () => attemptUpdateMemberRoles(form));
+}
+
+async function attemptUpdateMemberRoles(form: FormData): Promise<UpdateMemberRolesFormState> {
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 
@@ -176,9 +185,13 @@ export async function submitUpdateMemberRoles(
 }
 
 export async function submitRevokeMembership(
-  _previous: RevokeMembershipFormState,
+  previous: RevokeMembershipFormState,
   form: FormData,
 ): Promise<RevokeMembershipFormState> {
+  return keepUnconfirmed(previous, () => attemptRevokeMembership(form));
+}
+
+async function attemptRevokeMembership(form: FormData): Promise<RevokeMembershipFormState> {
   const gated = await gate(form);
   if (!gated.ok) return gated.state;
 

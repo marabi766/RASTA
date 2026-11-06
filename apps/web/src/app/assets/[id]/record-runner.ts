@@ -12,6 +12,7 @@ import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { WriteResult } from '@/server/write';
 
 import type { RecordFormState } from './record-form-state';
@@ -75,6 +76,16 @@ export async function runRecord<V, B, F extends string>(
    * The asset of the page this form was drawn on — bound by the form, never a
    * field of it, and acted on only when the signed baseline names it too.
    */
+  assetId: string,
+  /** The form's state before this post: a retry of an unresolved send stays unresolved. */
+  previous: RecordFormState<V, F>,
+  form: FormData,
+): Promise<RecordFormState<V, F>> {
+  return keepUnconfirmed(previous, () => attemptRecord(command, assetId, form));
+}
+
+async function attemptRecord<V, B, F extends string>(
+  command: RecordCommand<V, B, F>,
   assetId: string,
   form: FormData,
 ): Promise<RecordFormState<V, F>> {

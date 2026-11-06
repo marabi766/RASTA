@@ -7,6 +7,7 @@ import { verifyCsrf } from '@/server/csrf';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { createDriver, createDriverFormValues, parseCreateDriverForm } from '@/server/drivers';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { CreateDriverFormState } from './form-state';
 
 /**
@@ -18,9 +19,13 @@ import type { CreateDriverFormState } from './form-state';
  */
 
 export async function submitCreateDriver(
-  _previous: CreateDriverFormState,
+  previous: CreateDriverFormState,
   form: FormData,
 ): Promise<CreateDriverFormState> {
+  return keepUnconfirmed(previous, () => attemptCreateDriver(form));
+}
+
+async function attemptCreateDriver(form: FormData): Promise<CreateDriverFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 

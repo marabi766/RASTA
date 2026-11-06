@@ -22,7 +22,7 @@ import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/serve
 import type { WebSession } from '@/server/session';
 import { withForgedMac } from '@/test/forged-token';
 
-import { IDLE_DOCUMENT_FORM } from './document-form-state';
+import { IDLE_DOCUMENT_FORM, type DocumentFormState } from './document-form-state';
 import { actingAccessToken } from '@/test/session-token';
 
 /**
@@ -460,6 +460,27 @@ describe('a resend is not a second upload', () => {
     );
     expect(state).toMatchObject({ kind: 'INVALID', resume: token });
     nothingSent();
+  });
+
+  it('keeps an unconfirmed attach UNCONFIRMED, with its token, when the resend is refused (FU-173)', async () => {
+    attachAssetDocument
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const first = (await submit(formData(VALID, { submission }))) as DocumentFormState & {
+      resume: string;
+    };
+    expect(first).toMatchObject({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    const resend = formData(VALID, { submission, uploaded: first.resume, file: null });
+    expect(await actions.submitAttachDocument(ASSET_ID, first, resend)).toEqual(first);
+    // Refused before the post is even read (the session ended): the token the form held stays.
+    currentSession.mockResolvedValueOnce(null);
+    expect(await actions.submitAttachDocument(ASSET_ID, first, resend)).toEqual(first);
+    expect(uploadDocument).toHaveBeenCalledTimes(1);
   });
 });
 

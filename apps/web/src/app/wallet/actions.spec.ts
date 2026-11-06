@@ -179,6 +179,25 @@ describe('topping up — the full order of checks', () => {
     expect(ids).toEqual([submission, submission]);
   });
 
+  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+    // The first answer was lost; the same form again meets the gateway's rate limit,
+    // which says nothing about the first send.
+    topUpWallet.mockReset();
+    topUpWallet
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData({ amountMinor: '1000000' });
+    const first = await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, form);
+    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(await submitTopUp(WALLET_ID, first, form)).toEqual(first);
+    expect(topUpWallet).toHaveBeenCalledTimes(2);
+  });
+
   it('returns the service refusal as a banner', async () => {
     topUpWallet.mockResolvedValue({
       kind: 'INVALID',

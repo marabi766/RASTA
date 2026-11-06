@@ -196,6 +196,25 @@ describe('what the service refuses', () => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
+  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+    // The first answer was lost; the same form again meets the gateway's rate limit,
+    // which says nothing about the first send.
+    createDriver.mockReset();
+    createDriver
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData(VALID);
+    const first = await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, form);
+    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(await submitCreateDriver(first, form)).toEqual(first);
+    expect(createDriver).toHaveBeenCalledTimes(2);
+  });
+
   it('reports an outage with its status and correlation id', async () => {
     createDriver.mockResolvedValue({
       kind: 'UNAVAILABLE',

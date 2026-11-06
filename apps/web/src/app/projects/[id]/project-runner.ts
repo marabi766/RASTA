@@ -18,6 +18,7 @@ import {
 } from '@/server/project-commands';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import { isProvenRefusal, type WriteResult } from '@/server/write';
 
 import type { ProjectFormState } from './project-form-state';
@@ -51,6 +52,11 @@ import { withContext } from '@/lib/page-context';
  * moves the version, so a second send of the same form is a `409` from
  * construction-service, which this runner sends to a fresh read with a sentence
  * saying nothing was written this time (`stale`).
+ *
+ * A second press after an `UNCONFIRMED` answer is held to the shared rule
+ * (`server/unconfirmed-retry.ts`, FU-173): no refusal of it — a `429` the gateway
+ * gives before the service sees the version, the `409` the first press itself may
+ * have caused — is taken as "nothing changed"; it stays `UNCONFIRMED`.
  */
 
 export type ProjectPlace = 'project' | 'inbox';
@@ -92,6 +98,17 @@ function landing(
 export async function runProjectCommand<V, B, F extends string>(
   command: ProjectCommandSpec<V, B, F>,
   /** The page's own target, bound by the form — never a field of it. */
+  targetId: string,
+  place: ProjectPlace,
+  /** The form's state before this post: a retry of an unresolved send stays unresolved. */
+  previous: ProjectFormState<V, F>,
+  form: FormData,
+): Promise<ProjectFormState<V, F>> {
+  return keepUnconfirmed(previous, () => attempt(command, targetId, place, form));
+}
+
+async function attempt<V, B, F extends string>(
+  command: ProjectCommandSpec<V, B, F>,
   targetId: string,
   place: ProjectPlace,
   form: FormData,

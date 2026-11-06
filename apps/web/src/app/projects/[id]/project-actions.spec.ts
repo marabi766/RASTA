@@ -15,7 +15,7 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import { withForgedMac } from '@/test/forged-token';
 
-import { IDLE_PROJECT_FORM } from './project-form-state';
+import { IDLE_PROJECT_FORM, type ProjectFormState } from './project-form-state';
 import type { ProjectPlace } from './project-runner';
 import { actingAccessToken } from '@/test/session-token';
 
@@ -68,6 +68,10 @@ Object.assign(process.env, {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const actions = require('./project-actions') as typeof import('./project-actions');
 
+const REAL_SENDS = jest.requireActual(
+  '@/server/project-commands',
+) as typeof import('@/server/project-commands');
+
 const SESSION = {
   subject: 'user-1',
   username: 'owner',
@@ -97,7 +101,20 @@ interface Case {
   /** What the form is bound to: a project, or an approval step. */
   readonly targetId: string;
   readonly baseline: Partial<ProjectBaseline>;
-  readonly submit: (place: ProjectPlace, form: FormData) => Promise<unknown>;
+  readonly submit: (
+    place: ProjectPlace,
+    form: FormData,
+    previous?: ProjectFormState<never, never>,
+  ) => Promise<unknown>;
+  /** The real gateway call `send` stands in for (`@/server/project-commands`). */
+  readonly real:
+    | 'updateProject'
+    | 'requestApproval'
+    | 'startProject'
+    | 'completeProject'
+    | 'cancelProject'
+    | 'grantApproval'
+    | 'rejectApproval';
   readonly send: jest.Mock;
   readonly valid: Record<string, string>;
   readonly notice: ProjectNotice;
@@ -112,8 +129,10 @@ const CASES: readonly Case[] = [
     command: 'edit',
     targetId: PROJECT_ID,
     baseline: { digests: editDigests(INITIAL) },
-    submit: (place, form) => actions.submitEditProject(PROJECT_ID, place, IDLE_PROJECT_FORM, form),
+    submit: (place, form, previous = IDLE_PROJECT_FORM) =>
+      actions.submitEditProject(PROJECT_ID, place, previous, form),
     send: updateProject,
+    real: 'updateProject',
     valid: { ...INITIAL, title: 'بازسازی پل شمالی' },
     notice: 'updated',
     args: [PROJECT_ID, { title: 'بازسازی پل شمالی' }, VERSION],
@@ -124,9 +143,10 @@ const CASES: readonly Case[] = [
     command: 'requestApproval',
     targetId: PROJECT_ID,
     baseline: {},
-    submit: (place, form) =>
-      actions.submitRequestApproval(PROJECT_ID, place, IDLE_PROJECT_FORM, form),
+    submit: (place, form, previous = IDLE_PROJECT_FORM) =>
+      actions.submitRequestApproval(PROJECT_ID, place, previous, form),
     send: requestApproval,
+    real: 'requestApproval',
     valid: {},
     notice: 'approvalRequested',
     args: [PROJECT_ID, VERSION],
@@ -137,8 +157,10 @@ const CASES: readonly Case[] = [
     command: 'start',
     targetId: PROJECT_ID,
     baseline: { status: 'APPROVED' },
-    submit: (place, form) => actions.submitStartProject(PROJECT_ID, place, IDLE_PROJECT_FORM, form),
+    submit: (place, form, previous = IDLE_PROJECT_FORM) =>
+      actions.submitStartProject(PROJECT_ID, place, previous, form),
     send: startProject,
+    real: 'startProject',
     valid: {},
     notice: 'started',
     args: [PROJECT_ID, VERSION],
@@ -149,9 +171,10 @@ const CASES: readonly Case[] = [
     command: 'complete',
     targetId: PROJECT_ID,
     baseline: { status: 'IN_PROGRESS' },
-    submit: (place, form) =>
-      actions.submitCompleteProject(PROJECT_ID, place, IDLE_PROJECT_FORM, form),
+    submit: (place, form, previous = IDLE_PROJECT_FORM) =>
+      actions.submitCompleteProject(PROJECT_ID, place, previous, form),
     send: completeProject,
+    real: 'completeProject',
     valid: {},
     notice: 'completionRequested',
     args: [PROJECT_ID, VERSION],
@@ -162,9 +185,10 @@ const CASES: readonly Case[] = [
     command: 'cancel',
     targetId: PROJECT_ID,
     baseline: {},
-    submit: (place, form) =>
-      actions.submitCancelProject(PROJECT_ID, place, IDLE_PROJECT_FORM, form),
+    submit: (place, form, previous = IDLE_PROJECT_FORM) =>
+      actions.submitCancelProject(PROJECT_ID, place, previous, form),
     send: cancelProject,
+    real: 'cancelProject',
     valid: { reason: 'بودجه تأمین نشد', confirm: 'yes' },
     notice: 'cancelled',
     args: [PROJECT_ID, { reason: 'بودجه تأمین نشد' }, VERSION],
@@ -175,9 +199,10 @@ const CASES: readonly Case[] = [
     command: 'grant',
     targetId: APPROVAL_ID,
     baseline: { status: 'PENDING' },
-    submit: (place, form) =>
-      actions.submitGrantApproval(APPROVAL_ID, place, IDLE_PROJECT_FORM, form),
+    submit: (place, form, previous = IDLE_PROJECT_FORM) =>
+      actions.submitGrantApproval(APPROVAL_ID, place, previous, form),
     send: grantApproval,
+    real: 'grantApproval',
     valid: { decisionNumber: '۱۲۳/ب', conditions: 'با رعایت حریم' },
     notice: 'granted',
     args: [APPROVAL_ID, { decisionNumber: '۱۲۳/ب', conditions: 'با رعایت حریم' }, VERSION],
@@ -188,9 +213,10 @@ const CASES: readonly Case[] = [
     command: 'reject',
     targetId: APPROVAL_ID,
     baseline: { status: 'PENDING' },
-    submit: (place, form) =>
-      actions.submitRejectApproval(APPROVAL_ID, place, IDLE_PROJECT_FORM, form),
+    submit: (place, form, previous = IDLE_PROJECT_FORM) =>
+      actions.submitRejectApproval(APPROVAL_ID, place, previous, form),
     send: rejectApproval,
+    real: 'rejectApproval',
     valid: { reason: 'برآورد با نقشه نمی‌خواند' },
     notice: 'rejected',
     args: [APPROVAL_ID, { reason: 'برآورد با نقشه نمی‌خواند' }, VERSION],
@@ -485,6 +511,75 @@ describe.each(CASES)('$command', (testCase) => {
       expect(await run()).toEqual(expected);
       expect(testCase.send).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/**
+ * FU-173 (PR-830 r2 F1): the first send's answer is lost, the same form is sent
+ * again, and the retry is refused before construction-service sees it — a `429`
+ * from the gateway's rate limit — or by the version the first send itself moved.
+ * Neither says what happened to the first send, so the form stays UNCONFIRMED.
+ * Through the real writer: only `fetch` is stubbed.
+ */
+describe.each(CASES)('$command: a retry of an unconfirmed send', (testCase) => {
+  const problem = (status: number, code: string) =>
+    new Response(JSON.stringify({ code, message: code }), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  let answers: Response[] = [];
+
+  beforeEach(() => {
+    answers = [];
+    testCase.send.mockImplementation((...args: unknown[]) =>
+      (REAL_SENDS[testCase.real] as (...a: unknown[]) => Promise<unknown>)(...args),
+    );
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      const next = answers.shift();
+      if (!next) throw new Error('unexpected request');
+      return next;
+    });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  /** First send: the gateway timed out upstream (`504`): UNCONFIRMED. Then the same form again. */
+  async function sendTwice(retryAnswer: Response) {
+    const form = formData(testCase);
+    answers.push(problem(504, 'UPSTREAM_TIMEOUT'), retryAnswer);
+    const first = (await testCase.submit('project', form)) as ProjectFormState<never, never>;
+    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: expect.any(String) });
+    return { first, second: testCase.submit('project', form, first) };
+  }
+
+  it('a 429 on the retry keeps the first send UNCONFIRMED — never "nothing changed"', async () => {
+    const { first, second } = await sendTwice(problem(429, 'RATE_LIMIT_EXCEEDED'));
+    expect(await second).toEqual(first);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('a stale version on the retry is UNCONFIRMED too, not a notice that nothing was written', async () => {
+    const { first, second } = await sendTwice(problem(409, 'OPTIMISTIC_LOCK_FAILED'));
+    expect(await second).toEqual(first);
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('control: the same 429 on a first send is the documented refusal', async () => {
+    answers.push(problem(429, 'RATE_LIMIT_EXCEEDED'));
+    expect(await testCase.submit('project', formData(testCase))).toEqual({
+      kind: 'FAILED',
+      status: 429,
+      correlationId: expect.any(String),
+    });
+  });
+
+  it('a success on the retry is the confirmation: it redirects', async () => {
+    testCase.send.mockResolvedValue({
+      kind: 'CREATED',
+      data: { id: PROJECT_ID },
+      correlationId: 'c',
+    });
+    const previous = { kind: 'UNCONFIRMED', correlationId: 'COR-FIRST' } as const;
+    await redirectedTo(testCase.submit('project', formData(testCase), previous));
   });
 });
 
