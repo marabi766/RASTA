@@ -340,7 +340,6 @@ export class IdempotencyStore {
     private readonly clock: Pick<DatabaseClock, 'now'>,
   ) {}
 
-
   /**
    * Runs `work` at most once for this key, and returns its result — or the stored result of
    * the request that already ran it, once `stillVisible` has confirmed the caller may still
