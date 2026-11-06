@@ -114,6 +114,24 @@ test('unknown selection or omitted expansion is refused, never zero packages OK'
 test('real Git preserves committed, staged, unstaged, renamed, deleted and untracked paths', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'prepush-scope-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Model a Git hook without pointing at any shared repository or index.
+  const redirects = {
+    GIT_DIR: join(root, 'redirect', '.git'),
+    GIT_WORK_TREE: join(root, 'redirect'),
+    GIT_INDEX_FILE: join(root, 'redirect', 'index'),
+    GIT_OBJECT_DIRECTORY: join(root, 'redirect', 'objects'),
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.bare',
+    GIT_CONFIG_VALUE_0: 'true',
+  };
+  const previous = Object.fromEntries(Object.keys(redirects).map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, redirects);
   const git = scopeRunner(root);
   const run = (...args) => git('git', args);
   const write = (path, value = 'initial\n') => {

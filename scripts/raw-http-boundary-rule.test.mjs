@@ -17,12 +17,22 @@ import {
 } from './lint-extensions.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
+// Never let a hook's repository/index or command-scope config escape into fixtures.
+function fixtureGitEnv() {
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+}
+
 /** NUL records preserve Git paths verbatim, including names Git normally quotes. */
 function trackedFiles(cwd = ROOT) {
   const result = spawnSync('git', ['ls-files', '-z'], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: fixtureGitEnv(),
   });
   assert.equal(result.status, 0, result.stderr);
   assert.ok(result.stdout === '' || result.stdout.endsWith('\0'), 'incomplete Git inventory');
@@ -560,6 +570,9 @@ test('the boundary is on for every in-scope file, in every workspace, and the li
   assert.deepEqual(problems, []);
 });
 
+const PINNED_FILE = 'apps/web/e2e/action-outcome.ts';
+const PINNED_DIRECTIVE = `${PINNED_FILE}:108:8 Line eslint-disable-next-line: internal/raw-http`;
+
 const DIRECTIVE = /^\s*eslint(-disable(?:-next-line|-line)?|-enable)?(?=\s|$)([\s\S]*)/;
 /** Parse real comments, including their complete bodies; syntax failures refuse. */
 function transportDirectives(files, read) {
@@ -590,10 +603,13 @@ function transportDirectives(files, read) {
       // inline configuration (quoted/escaped keys, values, etc.) is refused.
       const names = rules.split(/\s*,\s*/);
       if (
+        file === PINNED_FILE ||
         !match[1] ||
         names.some((name) => !/^[@\w/-]+$/.test(name) || name.startsWith('internal/'))
       )
-        found.push(`${file}: ${rules || '(all rules)'}`);
+        found.push(
+          `${file}:${comment.loc.start.line}:${comment.loc.start.column} ${comment.type} eslint${match[1] ?? ''}: ${rules || '(all rules)'}`,
+        );
     }
   }
   return found;
@@ -607,9 +623,49 @@ test('no inline directive switches the transport rules off, except the one pinne
   assert.deepEqual(found, [
     // In the page, not the runner: the browser's own same-origin form post (Q-155 scope),
     // the one transport every spec that proves an action's outcome uses (PR #541 r1 F1).
-    'apps/web/e2e/action-outcome.ts: internal/raw-http',
+    PINNED_DIRECTIVE,
   ]);
 });
+
+// Compare with the real source's inventory too: these regressions must reject
+// broadening, relocation and additions even with the old file/rule-only record.
+for (const [name, mutate] of [
+  [
+    'file-wide disable',
+    (source, directive) => source.replace(directive, `/* ${LINT}-disable internal/raw-http */`),
+  ],
+  ['moved directive', (source, directive) => source.replace(directive, `\n        ${directive}`)],
+  [
+    'duplicate directive',
+    (source, directive) => source.replace(directive, `${directive}\n        ${directive}`),
+  ],
+  ['extra directive', (source) => `${source}\n// ${LINT}-disable-next-line no-console\n`],
+  [
+    'block next-line directive',
+    (source, directive) =>
+      source.replace(directive, `/* ${LINT}-disable-next-line internal/raw-http */`),
+  ],
+  [
+    'same-line directive',
+    (source, directive) => source.replace(directive, `// ${LINT}-disable-line internal/raw-http`),
+  ],
+  ['moved column', (source, directive) => source.replace(directive, ` ${directive}`)],
+  [
+    'different rule',
+    (source, directive) =>
+      source.replace(directive, `// ${LINT}-disable-next-line internal/transport`),
+  ],
+]) {
+  test(`the browser-flow pin rejects a ${name}`, () => {
+    const source = readFileSync(`${ROOT}${PINNED_FILE}`, 'utf8');
+    const directive = `// ${LINT}-disable-next-line internal/raw-http -- browser form replay`;
+    assert.ok(source.includes(directive));
+    assert.notDeepEqual(
+      transportDirectives([PINNED_FILE], () => mutate(source, directive)),
+      transportDirectives([PINNED_FILE], () => source),
+    );
+  });
+}
 
 // FU-074 r2 F1: one file per entry-point family, in every executable extension.
 const FAMILIES = [
@@ -691,8 +747,26 @@ test('parsed comments hold multiline directives and refuse unclassifiable source
 test('tracked inventory preserves quoted and multiline filenames for the directive scan', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'fu166-inventory-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Model a Git hook without pointing at any shared repository or index.
+  const redirects = {
+    GIT_DIR: join(root, 'redirect', '.git'),
+    GIT_WORK_TREE: join(root, 'redirect'),
+    GIT_INDEX_FILE: join(root, 'redirect', 'index'),
+    GIT_OBJECT_DIRECTORY: join(root, 'redirect', 'objects'),
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.bare',
+    GIT_CONFIG_VALUE_0: 'true',
+  };
+  const previous = Object.fromEntries(Object.keys(redirects).map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, redirects);
   const git = (...args) => {
-    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8', env: fixtureGitEnv() });
     assert.equal(result.status, 0, result.stderr);
   };
   git('init', '--quiet');
