@@ -182,7 +182,7 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-integration-split.test.mjs':
         '4241d21f47e953752999acb65fadf69709586ea59db8951341744b14c4555217',
       'scripts/ci-integration-split-lib.mjs':
-        'c1749b54c13c707abffe5cc684a763fd9db540c81c452b95f944d70e1dfd7d70',
+        '6338e0e7e1675c6595d9d43108ea224bca891a968407e946cd8fed8f76261d4e',
       'scripts/workspace-roots-lib.mjs':
         '4da347ee566298cb7b2f3aea50d1c69d338983b74f610b85ac7cee4a7282e634',
     },
