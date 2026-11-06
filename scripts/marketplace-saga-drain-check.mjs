@@ -179,6 +179,7 @@ const PATCH_PROTOCOL = new Map([
   ['dispute-settle-resumes-order', 2],
   ['dispute-release-durable-wait-v1', 3],
   ['economic-call-durable-wait-v1', 4],
+  ['authorisation-order-fence-v1', 5],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is

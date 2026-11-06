@@ -742,6 +742,7 @@ const PATCHES = {
   'dispute-settle-resumes-order': 2,
   'dispute-release-durable-wait-v1': 3,
   'economic-call-durable-wait-v1': 4,
+  'authorisation-order-fence-v1': 5,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);

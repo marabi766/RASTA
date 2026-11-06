@@ -26,6 +26,7 @@ import {
 } from '../organization/organization-hierarchy';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
+import { ORDER_HOLD_TRANSACTION_MS, ORDER_HOLD_WAIT_MS } from '../config/operation-budgets';
 import {
   disputesRaisedTotal,
   orderRefusalsTotal,
@@ -37,6 +38,7 @@ import { isUniqueViolation, violatedConstraint } from '../shared/prisma-errors';
 import type { RecordResponse } from '../shared/idempotency';
 import {
   OrderRepository,
+  type HeldOrderRow,
   type LockedOrderRow,
   ORDER_VIEW_INCLUDE,
   type SagaActivity,
@@ -1217,6 +1219,28 @@ export class OrderService {
       );
     }
     return result;
+  }
+
+  /**
+   * Runs `fn` on the order as it stands, and keeps it so until `fn` has answered
+   * (D-138): a saga step that asks another service for something a transition
+   * here would forbid. A status that cannot change until the answer is in leaves
+   * no gap between the check and the request. A dispute either commits first, and
+   * `fn` reads it, or waits behind the request.
+   *
+   * Across a call, as an operator's decision is, so `fn`'s budget comes from the
+   * commands waiting behind it (`ORDER_HOLD_SEND_DEADLINE_MS`). `fn` must not
+   * use `this.prisma.client` for a write that needs this row's lock. Past its wait
+   * it fails with nothing asked, and the activity's retry tries again.
+   */
+  async whileOrderHeld<T>(orderId: string, fn: (order: HeldOrderRow) => Promise<T>): Promise<T> {
+    return this.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${ORDER_HOLD_WAIT_MS}ms`}, true)`;
+        return fn(await this.repository.holdOrder(tx as ExtendedPrismaClient, orderId));
+      },
+      { timeout: ORDER_HOLD_TRANSACTION_MS },
+    );
   }
 
   /** What the saga needs to know to drive an order without re-reading it. */
