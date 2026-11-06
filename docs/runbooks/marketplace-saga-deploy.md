@@ -211,7 +211,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 5); an absent field means protocol **0**, the strictest legacy
+support (this build: 6); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue. An incompatible
@@ -223,9 +223,9 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**. A marker the gate does not list blocks every target until the gate learns
+**5**, `saga-owed-work-durable-v1` **6**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
-(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5; any unlisted field blocks; so does an
+(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
 history requires.
 
@@ -282,8 +282,8 @@ protocol-2 target passes the gate and then ends that saga as before this wait.
 `RastaMarketplaceSagaEconomicCallUnconfirmed` is the same wait for another economic
 call, labelled `operation`, with the same limit: it counts rounds, so it clears
 with workers stopped. Those calls are `authoriseSettlement` (phase
-`AUTHORISATION_UNCONFIRMED`), `disputeObligation` (`DISPUTE_UNCONFIRMED`) and
-`compensate` (`COMPENSATION_UNCONFIRMED`). `createObligation` is not: exhausted with
+`AUTHORISATION_UNCONFIRMED`), `settle` (`SETTLEMENT_UNCONFIRMED`), `disputeObligation`
+(`DISPUTE_UNCONFIRMED`) and `compensate` (`COMPENSATION_UNCONFIRMED`). `createObligation` is not: exhausted with
 an empty lookup it still records `FAILED`. economic-service gave no answer proving the
 call changed nothing, so it may have committed; the call is repeated under the same key,
 doubling from one minute to one hour, and nothing settles meanwhile. After restoring
@@ -301,13 +301,13 @@ read of the order or of the obligation (`RECONCILIATION_READ_FAILED`). From then
 each failed send reads the obligation.
 Its effect (`PENDING_SETTLEMENT`, `SETTLED`, or disputed after this saga's own
 authorisation) is the answer and the saga goes on. `REFUNDED`, `CANCELLED` or `FAILED`
-ends the saga (`OBLIGATION_ALREADY_FINAL`), since no late request can move them.
+is an answer too, since no late request can move them; see "Owed work" below.
 Anything else stays in this phase, `HELD` included: an earlier request can still
 commit, so `HELD` proves nothing.
 
 The filing and the refund (FU-117) follow the same rules with their own effects:
 `DISPUTED` with this dispute's words for the filing, `REFUNDED` for the refund. Every
-other terminal status (`SETTLED` included) ends the saga the same way. While an
+other terminal status (`SETTLED` included) is the same kind of answer. While an
 authorisation the saga moved on from is still in doubt, even their first attempt's
 refusal does not end it. A filing is sent until answered even once the order has left
 that dispute, because filed unseen it would leave the obligation `DISPUTED` with nothing
@@ -334,6 +334,41 @@ Protocol 5 is forward-only like the others, with its own marker: a protocol-4 hi
 carrying `economic-call-durable-wait-v1` from an authorisation may have ended at a
 filing or refund, and replays that end. A protocol-4 saga still running when this build
 deploys takes the new wait at its next such call.
+
+### Owed work (FU-117, protocol 6)
+
+The saga no longer ends with financial work outstanding on a refused read, lookup or
+local step. It stays and reports rounds on the same alert, under the operation it owes:
+
+| Phase                                                        | What it means                                                                                                                                                                                          | What ends it                                                                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `SETTLEMENT_NOT_RECORDED`                                    | `markSettling`, `markSettlementFailed`, `markObligationDisputed` or `markCompleted` was refused; the log names the step                                                                                | the step answering; fix the order's refusal, then send the signal above                          |
+| `CANCELLATION_NOT_RECORDED`                                  | `markCancelled` was refused after the refund, so availability and `ORDER_CANCELLED` are still to come                                                                                                  | the same                                                                                         |
+| `COMPENSATION_UNCONFIRMED`, before any refund                | a cancelled order with no recorded transaction, whose lookup was refused or incomplete                                                                                                                 | the lookup answering                                                                             |
+| `COMPENSATION_UNCONFIRMED`, a round saying "does not show"   | a continued run's lookup came back empty, with no proof its hold is not on its way                                                                                                                     | the obligation being found, or a person who has shown no hold exists correcting the order        |
+| `ORDER_UNREADABLE`                                           | a read of the order was refused past the saga's first read, with no other work owed                                                                                                                    | the read answering                                                                               |
+| `OBLIGATION_NOT_HELD`, `OBLIGATION_MISMATCH` at `CANCELLING` | the lookup found an obligation the saga cannot refund: other terms, or a status such as `SETTLED`, `DISPUTED`, `PENDING_SETTLEMENT` or `CREATED`                                                       | a person reconciling it                                                                          |
+| `OBLIGATION_RECONCILIATION`                                  | the owner's status is terminal and the order cannot follow it: a refund told `SETTLED`, a filing told final with the order still `DISPUTED`, an authorisation told `REFUNDED`, `CANCELLED` or `FAILED` | the order leaving that status (an operator's decision, or a person's correction at `CANCELLING`) |
+
+The owner's status decides, and only for a refund or a filing that can no longer land.
+`REFUNDED`, `CANCELLED` or `FAILED` at a cancellation means no money is left to return,
+so `markCancelled` runs, restoring availability and publishing `ORDER_CANCELLED`.
+`SETTLED`, or a status nobody listed, never cancels the order: read the settlement and
+reconcile by hand. A filing told final mirrors nothing, because there is nothing to release,
+and a release told final ends its wait for the same reason.
+
+A settlement attempt that failed puts everything after it in doubt, across rollovers:
+a filing's or refund's first-attempt refusal then waits for the owner, as above. Five
+failed attempts still end the saga with `SETTLEMENT_EXHAUSTED` for a human
+(`docs/08` § 8.4). A refused `recordReminder` holds nothing up: it is reported, and the
+next window records one. Only a refused first read, with nothing yet sent, still ends
+the saga.
+
+Protocol 6 is forward-only like the others. Every exit above replays its old end from a
+history without `saga-owed-work-durable-v1` (fixtures `pre-fu117r2-*`). One rollback edge:
+a call answered with a final status just as workers stopped has no marker yet, so a
+protocol-5 target passes the gate and reads that answer as success. Before rolling back
+below 6, read the last completed activity of any saga at `CANCELLING`.
 
 ## Continued-as-new visibility gap (FU-046)
 
