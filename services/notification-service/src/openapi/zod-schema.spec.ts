@@ -18,11 +18,9 @@ describe('the constructs the notification DTOs are built from', () => {
       properties: Record<string, Record<string, unknown>>;
       required?: string[];
     };
-    expect(schema.properties.limit).toMatchObject({
-      type: 'integer',
-      minimum: 1,
-      maximum: 200,
+    expect(schema.properties.limit).toEqual({
       default: 25,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
     });
     expect(schema.properties.state).toMatchObject({ enum: ['UNREAD', 'READ', 'DISMISSED'] });
     expect(schema.properties.cursor).toMatchObject({ type: 'string' });

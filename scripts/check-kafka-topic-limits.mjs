@@ -13,7 +13,7 @@
  *
  *   node scripts/check-kafka-topic-limits.mjs [topics.txt]
  */
-import { createRequire } from 'node:module';
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +24,7 @@ import {
 } from './kafka-topic-limits-lib.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const contracts = createRequire(import.meta.url)(resolve(root, 'packages/contracts/dist/index.js'));
+const contracts = loadWorkspaceModule(resolve(root, 'packages/contracts/dist/index.js'));
 const file = resolve(process.argv[2] ?? resolve(root, 'infrastructure/docker/kafka/topics.txt'));
 
 let text;

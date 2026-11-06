@@ -10,7 +10,7 @@ import {
   type RequestContext,
 } from '@rasta/nest-common';
 import { GatewayController } from '../proxy/gateway.controller';
-import { ProxyService, type ProxyOptions } from '../proxy/proxy.service';
+import { ProxyService, READINESS_PATH, type ProxyOptions } from '../proxy/proxy.service';
 import type { RateLimiter, RateLimitRule } from '../proxy/rate-limiter';
 import type { GatewayEnv } from '../config/env';
 import type { ServiceUrls } from '../config/routes';
@@ -733,7 +733,8 @@ describe('an open circuit answers 503 with Retry-After from the breaker’s rema
     const error = await refusedAt(30_000, 10_500); // 19.5 s left
     expect(error.code).toBe('UPSTREAM_UNAVAILABLE');
     expect(error.retryAfterSeconds).toBe(20);
-    expect(upstream.received).toHaveLength(1); // the refusal never reached the service
+    // The refusal never reached the service; the gateway's own readiness check did (FU-113).
+    expect(upstream.received).toEqual(['/v1/users/me', READINESS_PATH]);
   });
 
   it('is at least 1 when under a second remains', async () => {

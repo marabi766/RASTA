@@ -33,10 +33,11 @@
  * it, and the service role cannot set the marker on its own database. `psql`
  * must be on PATH. Nothing here runs a seed that is allowed to write.
  */
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 import { readUrl, tryReadUrl } from '../packages/config/src/url-reader.js';
 import { psqlInvocation } from './psql-prisma-url.mjs';
@@ -120,7 +121,7 @@ async function loadGuard() {
   if (!existsSync(dist)) {
     throw new Error('packages/config is not built: run `pnpm --filter @rasta/config build`');
   }
-  const guard = await import(pathToFileURL(dist).href);
+  const guard = loadWorkspaceModule(dist);
   return {
     probe: guard.DISPOSABLE_DATABASE_PROBE_SQL,
     setting: guard.DISPOSABLE_DATABASE_SETTING,

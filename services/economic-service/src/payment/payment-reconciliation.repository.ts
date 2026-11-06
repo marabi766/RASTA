@@ -437,6 +437,7 @@ export class PaymentReconciliationRepository {
                                     AND pi.failure_reason = 'CAPTURED_REFUND_UNKNOWN'))
                           AND NOT EXISTS (SELECT 1 FROM wallet_hold h
                                            WHERE h.wallet_id = pi.wallet_id AND h.reference = pi.id
+                                             AND h.organization_id = pi.organization_id
                                              AND h.reference_type = 'PAYMENT_REFUND'
                                              AND h.status = 'ACTIVE')
                           FOR UPDATE OF t SKIP LOCKED)
