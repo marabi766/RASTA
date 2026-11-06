@@ -3,7 +3,11 @@ import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { commandKeyHash } from '../shared/command';
 import type { CursorPage } from '../shared/dto';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import {
   COMMAND_NOTE,
   RETURN_SHIPMENT_MOVE_NOTE,
@@ -117,13 +121,13 @@ export class ReturnShipmentController {
   })
   async create(
     @Body(zodPipe(createReturnShipmentSchema)) dto: CreateReturnShipmentDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ReturnShipmentView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(CREATE_RETURN_SHIPMENT_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(CREATE_RETURN_SHIPMENT_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ReturnShipmentView>(
       CREATE_RETURN_SHIPMENT_ENDPOINT,
-      key,
+      request,
       dto,
       201,
       (fence) => this.shipments.dispatch(dto, { fence, keyHash }),
@@ -151,13 +155,13 @@ export class ReturnShipmentController {
   async receive(
     @Param('id') id: string,
     @Body(zodPipe(receiveReturnShipmentSchema)) dto: ReceiveReturnShipmentDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ReturnShipmentView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(RECEIVE_RETURN_SHIPMENT_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(RECEIVE_RETURN_SHIPMENT_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ReturnShipmentView>(
       RECEIVE_RETURN_SHIPMENT_ENDPOINT,
-      key,
+      request,
       { id, ...dto },
       200,
       (fence) => this.shipments.receive(id, dto, { fence, keyHash }),
@@ -186,13 +190,13 @@ export class ReturnShipmentController {
   async inspect(
     @Param('id') id: string,
     @Body(zodPipe(inspectReturnShipmentSchema)) dto: InspectReturnShipmentDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ReturnShipmentView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(INSPECT_RETURN_SHIPMENT_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(INSPECT_RETURN_SHIPMENT_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ReturnShipmentView>(
       INSPECT_RETURN_SHIPMENT_ENDPOINT,
-      key,
+      request,
       { id, ...dto },
       200,
       (fence) => this.shipments.inspect(id, dto, { fence, keyHash }),
@@ -229,13 +233,13 @@ export class ReturnShipmentController {
   async resolve(
     @Param('id') id: string,
     @Body(zodPipe(resolveReturnShipmentSchema)) dto: ResolveReturnShipmentDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ReturnShipmentView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(RESOLVE_RETURN_SHIPMENT_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(RESOLVE_RETURN_SHIPMENT_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ReturnShipmentView>(
       RESOLVE_RETURN_SHIPMENT_ENDPOINT,
-      key,
+      request,
       { id, ...dto },
       200,
       (fence) => this.shipments.resolve(id, dto, { fence, keyHash }),
