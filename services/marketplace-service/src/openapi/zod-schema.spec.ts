@@ -48,7 +48,10 @@ describe('zod to JSON Schema', () => {
         string,
         Record<string, unknown>
       >;
-      expect(props.productId).toMatchObject({ type: 'string', minLength: 1, maxLength: 64 });
+      expect(props.productId).toEqual({
+        type: 'string',
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     });
 
     it('carries the pattern actually enforced, not a re-spelling of it', () => {
@@ -72,7 +75,10 @@ describe('zod to JSON Schema', () => {
         string,
         Record<string, unknown>
       >;
-      expect(props.limit).toMatchObject({ type: 'integer', minimum: 1, maximum: 100 });
+      expect(props.limit).toEqual({
+        default: 25,
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     });
 
     it('records a default rather than hiding it', () => {
