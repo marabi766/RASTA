@@ -49,14 +49,14 @@ const ZOD3: Record<string, unknown> = {
   ],
   // FU-131 rejects exponent syntax before numeric checks.
   'pipe limit 1e999': [
-    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
+    { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
   ],
   'pipe limit nope': [
-    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
+    { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
   ],
   // FU-131 rejects fractional integer text before numeric checks.
   'pipe limit 0.5': [
-    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
+    { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
   ],
   'pipe an id neither seed nor ULID': [
     { path: 'ownerId', message: 'Expected an identifier of the form ORG_<ULID>', code: 'custom' },
