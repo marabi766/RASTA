@@ -368,6 +368,52 @@ test('workspace reader equals pnpm on every supported form (names, *, !exclusion
   assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
 });
 
+// FU-076: pnpm drops any path with a node_modules/bower_components SEGMENT
+// (workspace/find-packages ignore list), whichever form reached it and wherever it sits.
+test('workspace reader drops pnpm-ignored segments at the start, middle and end of every form', (t) => {
+  const { root } = workspaceFixture(t);
+  const ignoredDirectories = [];
+  for (const ignored of ['node_modules', 'bower_components']) {
+    for (const directory of [
+      `${ignored}/member`, // start
+      `apps/${ignored}/inner`, // middle
+      `apps/${ignored}`, // end
+    ]) {
+      manifest(root, directory);
+      ignoredDirectories.push(directory);
+    }
+  }
+  const forms = {
+    literal: ['node_modules/member', 'apps/bower_components/inner', 'apps/node_modules'],
+    literalBower: ['bower_components/member', 'apps/node_modules/inner', 'apps/bower_components'],
+    star: ['*/member', 'apps/*/inner', 'apps/*'],
+  };
+  for (const [form, patterns] of Object.entries(forms)) {
+    for (const pattern of patterns) {
+      declare(root, ['services/*', pattern]);
+      const members = workspaceDirectories(root);
+      assert.deepEqual(members, pnpmMembers(root), `${form}: ${pattern}`);
+      for (const directory of ignoredDirectories) {
+        assert.ok(!members.includes(directory), `${form}: ${pattern} selected ${directory}`);
+      }
+    }
+  }
+  // Negation of an ignored path excludes nothing extra and is not refused.
+  for (const pattern of ['!node_modules/member', '!apps/bower_components/inner', '!apps/*']) {
+    declare(root, ['services/*', 'apps/*', pattern]);
+    assert.deepEqual(workspaceDirectories(root), pnpmMembers(root), pattern);
+  }
+  // Literal patterns that pnpm resolves to nothing still leave an empty answer an error.
+  declare(root, ['node_modules/member', 'apps/bower_components']);
+  assert.deepEqual(pnpmMembers(root), []);
+  assert.throws(() => workspaceDirectories(root), /matched no workspace member/);
+  // `**` stays unimplemented: refused, ignored segment or not.
+  for (const pattern of ['**/node_modules', 'apps/**/bower_components/*', 'node_modules/**']) {
+    declare(root, ['services/*', pattern]);
+    assert.throws(() => workspaceDirectories(root), /unsupported workspace package pattern/);
+  }
+});
+
 test('workspace reader refuses every pattern form it does not implement, alone or mixed with supported ones', (t) => {
   const { root } = workspaceFixture(t);
   const unsupported = [

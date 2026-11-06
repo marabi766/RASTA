@@ -264,7 +264,7 @@ describe('enrichOpenApiDocument', () => {
     );
   });
 
-  it('publishes the receipt note as empty-only, and says why (Q-110)', () => {
+  it('marks the post-trim receipt-note bound as omitted, and says why (Q-110)', () => {
     // A generated client must not offer a field the service refuses whenever it
     // is filled in: maxLength 0 is the contract, the description the reason.
     const document = emptyDocument();
@@ -287,7 +287,10 @@ describe('enrichOpenApiDocument', () => {
     };
     const schema = operation.requestBody.content['application/json'].schema;
 
-    expect(schema.properties.note?.maxLength).toBe(0);
+    expect(schema.properties.note?.maxLength).toBeUndefined();
+    expect(schema.properties.note?.description).toContain(
+      'Constraints after a value-changing step are omitted',
+    );
     expect(schema.properties.note?.description).toContain('Q-110');
     expect(schema.required ?? []).not.toContain('note');
     expect(schema.additionalProperties).toBe(false);

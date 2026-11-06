@@ -1010,7 +1010,8 @@ const OTHER_CAPABILITY = [
   'scripts/verify-migration-reversible-lib.test.mjs',
   'scripts/verify-migration-reversible.mjs',
   'scripts/verify-outbox-claim-migration.mjs',
-  'scripts/verify-seed-guard.mjs',
+  'scripts/workspace-module.mjs', // :20 require(resolved): a module chosen at run time, but the regex above it admits only workspace dist/*.js, src/generated/prisma/*.js and jest.config.js; lists nothing
+  'scripts/zod-coercion-rule.test.mjs', // :298 node:vm + a createRequire handle on @rasta/contracts to run rule fixtures in a fresh context; lists nothing
   'services/contract-service/test/migration-rollback.int-spec.ts',
   'services/document-service/test/instants-timestamptz.int-spec.ts',
   'services/economic-service/src/prisma/test-mutation-scope.spec.ts',

@@ -14,7 +14,7 @@
  * turbo, no jest run. The reasoning is in `test-phases-lib.mjs`.
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { authoredFiles } from './authored-source-inventory.cjs';
@@ -49,7 +49,7 @@ function readServices(root) {
       .filter((entry) => entry.isDirectory())
       .map((entry) => {
         const dir = join(servicesDir, entry.name);
-        const jestConfig = createRequire(import.meta.url)(join(dir, 'jest.config.js'));
+        const jestConfig = loadWorkspaceModule(join(dir, 'jest.config.js'));
         return [
           `services/${entry.name}`,
           {
@@ -74,7 +74,7 @@ export function readTestPhaseInputs(root = repositoryRoot) {
   const rootPackage = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   const identityPackage = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
   const turbo = JSON.parse(stripJsonComments(readFileSync(join(root, 'turbo.json'), 'utf8')));
-  const jestConfig = createRequire(import.meta.url)(join(packageDir, 'jest.config.js'));
+  const jestConfig = loadWorkspaceModule(join(packageDir, 'jest.config.js'));
   return {
     services: readServices(root),
     rootScripts: rootPackage.scripts,

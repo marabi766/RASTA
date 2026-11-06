@@ -19,7 +19,7 @@ export default [
     // Playwright's request fixture, which src/expect.ts wraps in
     // guardRequestContext. The node:test unit tests of the harness are not
     // scenarios: they drive the transports themselves against loopback fakes.
-    files: ['**/*.ts'],
+    files: ['**/*.{ts,tsx,js,mjs,cjs}'],
     ignores: ['src/**/*.test.ts'],
     plugins: { internal: internalPlugin },
     rules: { 'internal/raw-http': ['error', { playwright: true }] },

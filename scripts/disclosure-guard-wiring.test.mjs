@@ -1318,3 +1318,36 @@ test('R1 unsupported cwd selectors and ambiguous Jest script dispatch refuse', (
     assert.equal(commands[0].opaque, true);
   }
 });
+
+// PR #727 r2 F2: commands bash runs while it expands text (an expanding here-document, an
+// arithmetic or a `${…}` operand) are discovered in package scripts, workflows and launched
+// shell files; a launched file is a candidate when a NESTED command launches Jest.
+test('PR #727 r2 F2: expanded substitutions launching Jest are discovered or refused', () => {
+  const shapes = {
+    'expanding here-document': 'cat <<EOF\n$(jest --config alternate.cjs)\nEOF',
+    'expanding <<- here-document': 'cat <<-EOF\n\t`jest --config alternate.cjs`\n\tEOF',
+    arithmetic: 'echo $(( 1 + $(jest --config alternate.cjs) ))',
+    'parameter default': 'echo ${V:-$(jest --config alternate.cjs)}',
+    'plain substitution': 'echo $(jest --config alternate.cjs)',
+  };
+  for (const [shape, run] of Object.entries(shapes)) {
+    for (const [place, commands] of [
+      ['package', launchControl(run, 'package')],
+      ['workflow', launchControl(run)],
+      [
+        'launched file',
+        launchControl('bash scripts/zz-launched.sh', 'workflow', { 'scripts/zz-launched.sh': run }),
+      ],
+    ])
+      assert.ok(
+        commands.some(({ opaque, args }) => opaque || (args ?? []).includes('--config')),
+        `${shape} in ${place}: ${JSON.stringify(commands)}`,
+      );
+  }
+  // Text the tokenizer cannot split is a refusal record, not an exception.
+  const broken = launchControl('cat <<EOF\njest');
+  assert.ok(
+    broken.some(({ opaque }) => opaque),
+    JSON.stringify(broken),
+  );
+});

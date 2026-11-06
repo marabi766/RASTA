@@ -308,9 +308,11 @@ const CANONICAL = new WeakMap<object, unknown>();
  *
  *  - **Validation is the previous release's, on the body as sent**: a body it
  *    refused is refused with its refusal, and nothing is accepted it would
- *    refuse — a 1 201-unit CRLF reason, 801 once LF, is still over the 1 000
- *    limit. Limits counted after LF are a later step (docs/06 § 6.8,
- *    "canonical-only").
+ *    refuse — a CRLF text over its limit as sent is refused even where its
+ *    LF form fits. Limits counted after LF are a later step (docs/06 § 6.8,
+ *    "canonical-only") — except the transaction text bodies, which count LF
+ *    as marketplace-service counts what it forwards (`keptTextWithin`,
+ *    PR-806 r1 F1; their rollback edge is docs/06 § 6.8).
  *  - The body the handler gets — and hashes, wherever it wraps it — is the one
  *    that release validated, so the idempotency store **writes that hash** as
  *    `request_hash`, the one that release computes and compares. When
