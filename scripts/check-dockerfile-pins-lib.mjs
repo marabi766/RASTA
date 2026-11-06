@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 import { LineCounter, parseDocument } from 'yaml';
 import {
+  DECLARERS,
   SHELL_WORD,
   continuedDollar,
+  executionChain,
+  findCommands,
   shellInvocation,
   shellTextProblem,
 } from './ci-shell-text-lib.mjs';
@@ -207,19 +212,53 @@ export const EVALUATED_OUTPUTS = new Map([
 ]);
 
 /**
- * PR #805 r2 F1: `source`/`.` runs a file in the same shell. A CI `.sh` file is read by this
- * check itself; these `.bash` libraries (init-time, not scanned: their `[[ ]]`, `(( ))` and
- * case syntax is outside the tokenizer) are the only other files a script may source, each
- * reviewed to start no container and run no evaluated text (it never mentions docker, eval
- * or a shell -c outside comments).
+ * FU-150 F1: `source`/`.` runs a file in the same shell. A CI `.sh` file is read by this check
+ * itself. Every `.bash` file of infrastructure/ and scripts/ (init-time psql libraries and one
+ * `docker compose exec` helper: their `[[ ]]`, `(( ))` and case syntax is outside the
+ * tokenizer) is listed here with the sha256 of the contents a reviewer read: it starts no
+ * container (no docker, eval, `sh -c` or xargs outside comments). The CLI passes each of them as
+ * kind 'library'; an unlisted one, a changed one, or a source of any other path refuses.
+ * To change a library: edit it, read it again, and paste the sha256 the error prints.
  */
-export const SOURCED_LIBRARIES = new Map(
+const library = (sha256, reason) => ({ sha256, reason });
+const PSQL = 'init-time psql library; starts no container';
+export const SOURCED_LIBRARIES = new Map([
+  [
+    'infrastructure/docker/postgres/lib/disposable-marker.bash',
+    library('f05bc76561ebe1bf28e56795497be0ab39a7d58e9f907c127ba01d41cb1f3895', PSQL),
+  ],
   [
     'infrastructure/docker/postgres/lib/role-passwords.bash',
-    'infrastructure/docker/postgres/lib/disposable-marker.bash',
+    library('465a53878d187075ce8f8900dee4d442749f2780cab16fd6595c38600db3aa3b', PSQL),
+  ],
+  [
+    'infrastructure/docker/postgres/lib/rotate-role-passwords.bash',
+    library('478bf3812e7bb485509a91bc0cd44ca8ffb58daf551260f10499c7a72c1c3bbf', PSQL),
+  ],
+  [
     'infrastructure/docker/postgres/lib/service-privilege-split.bash',
-  ].map((path) => [path, 'init-time psql library; starts no container']),
-);
+    library('d711b13ec42b4f44ef8a3c8d7a31b28c30514408d79f5c7f6ac8eafa8f9dafbb', PSQL),
+  ],
+  [
+    'infrastructure/docker/postgres/lib/session-statement-timeout.bash',
+    library('0574ba71570533df9626ed2d10e4275c244d1e1ccd48b4c30040adb907faa49f', PSQL),
+  ],
+  [
+    'infrastructure/docker/postgres/lib/session-timezone.bash',
+    library('dc57131fb86ca11f980e18db6e39fc5a5feb5e7416cd70d39a53396cf2d9be63', PSQL),
+  ],
+  [
+    'infrastructure/docker/postgres/lib/supplier-privilege-split.bash',
+    library('dab2e70cab47909974c888a225e6dc57e8dc952255926c793e410597370c4d1a', PSQL),
+  ],
+  [
+    'scripts/postgres-exec.bash',
+    library(
+      'c52673c73019f71323c49d8953f263dfd27a06ac2e5f3e23342791cd4e4b8cec',
+      '`docker compose exec` in the already running compose postgres service; starts no image',
+    ),
+  ],
+]);
 
 /** The compose file the checker validates; a `docker compose -f` naming any other fails closed. */
 export const COMPOSE_FILES = ['docker-compose.yml'];
@@ -701,12 +740,34 @@ export function validateInfraImagePins(files, policy = {}) {
   const evaluated = { allowed: policy.evaluatedOutputs ?? EVALUATED_OUTPUTS, used: new Set() };
   // FU-092: a script a shell is told to run is read only if it is one of these files.
   const shellFiles = new Set(files.filter(({ kind }) => kind === 'shell').map(({ name }) => name));
-  const sourced = new Set([
-    ...shellFiles,
-    ...(policy.sourcedLibraries ?? SOURCED_LIBRARIES).keys(),
-  ]);
-  const shared = { composeFiles, evaluated, shellFiles, sourced };
   const errors = [];
+  // FU-150 F1: a library is sourceable only when this run read it and its contents are the
+  // reviewed ones; nothing is approved by its path or its name.
+  const libraries = policy.sourcedLibraries ?? SOURCED_LIBRARIES;
+  const read = files.filter(({ kind }) => kind === 'library');
+  const verified = new Set();
+  for (const { name, text } of read) {
+    const entry = libraries.get(name);
+    // Hashed as decoded text: bytes that are not UTF-8 would decode alike, so they are refused.
+    const unreadable = shellTextProblem(text) ?? (text.includes('\uFFFD') ? 'invalid UTF-8' : null);
+    if (unreadable) {
+      errors.push(`${name}: cannot be read: ${unreadable}`);
+      continue;
+    }
+    const sha256 = createHash('sha256').update(text).digest('hex');
+    if (!entry) errors.push(`${name}: a .bash file no reviewed list names (SOURCED_LIBRARIES)`);
+    else if (entry.sha256 !== sha256)
+      errors.push(
+        `${name}: contents changed (sha256 ${sha256}); read it again, then update SOURCED_LIBRARIES`,
+      );
+    else verified.add(name);
+  }
+  if (read.length > 0)
+    for (const name of libraries.keys())
+      if (!read.some((file) => file.name === name))
+        errors.push(`SOURCED_LIBRARIES lists ${name}, which was not found`);
+  const sourced = new Set([...shellFiles, ...verified]);
+  const shared = { composeFiles, evaluated, shellFiles, sourced };
   const images = [];
   const usedTagless = new Set();
 
@@ -714,10 +775,10 @@ export function validateInfraImagePins(files, policy = {}) {
     try {
       if (file.kind === 'compose') composeImages(file, images, errors);
       else if (file.kind === 'workflow') workflowImages(file, images, errors, shared);
-      else
+      else if (file.kind !== 'library')
         shellImages(
           file.text,
-          { file: file.name, lineOf: (n) => n + 1, env: new Map(), ...shared },
+          { file: file.name, lineOf: (n) => n + 1, env: new Map(), self: file.name, ...shared },
           images,
           errors,
         );
@@ -986,12 +1047,36 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     );
     return;
   }
+  // FU-150 F1: the splitter ends a command at the `&` of `2>&1` and `>&2`; the fd that follows is
+  // that redirection's target, not the first word of a command of its own (`2>&1 $c run`).
+  for (const [index, command] of parsed.commands.entries())
+    if (command.sep === '&' && /[<>]$/.test(parsed.commands[index - 1]?.words.at(-1)?.value ?? ''))
+      command.words = command.words.slice(1);
+  // Inside a `case … esac` body a command of one word is a pattern (`*`, `*-service`, `#*`), which
+  // names no program: its glob characters are not a computed program. A `$` is never excused.
+  let caseDepth = 0;
+  const patterns = parsed.commands.map(({ words }) => {
+    if (words[0]?.value === 'esac') caseDepth = Math.max(0, caseDepth - 1);
+    const pattern =
+      caseDepth > 0 && words.length === 1 && !words[0].opaque && !words[0].value.includes('$');
+    if (words[0]?.value === 'case') caseDepth += 1;
+    return pattern;
+  });
+  const isPattern = (index) => patterns[index];
   const vars = new Map();
   const outputs = new Map(); // variable -> the one command substitution it was assigned from
   // Every place a name is written to (`x=`, `x+=`, `read x`, `for x in`): not after `$`/`{`.
   // `${NAME:=x}` / `${NAME=x}` assign too (FU-092).
+  // FU-150 F2: also the name attached to an option (`printf -vc`, `read -ac`).
   const writes = (name) =>
-    (src.match(new RegExp(`(?<![\\w$\\{])${name}(?![\\w])|\\$\\{${name}:?=`, 'g')) ?? []).length;
+    (
+      src.match(
+        new RegExp(
+          `(?<![\\w$\\{])${name}(?![\\w])|(?<=(?:^|[\\s;&|(])-[A-Za-z]*)${name}(?![\\w])|\\$\\{${name}:?=`,
+          'g',
+        ),
+      ) ?? []
+    ).length;
   const restore = (value) => value.replace(/__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
   // How many assignment-only commands of this script assign a variable one `$(…)`.
   const assignedFrom = new Map();
@@ -1008,7 +1093,10 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   // proved inside a compound command or function body (`if`, loops, `{ }`: it may not run),
   // or where a sourced file or a computed-name write (`printf -v "$(…)"`, `read "$n"`,
   // `declare -n`) could have set the variable.
-  const provenanceBroken = parsed.commands.some(({ words }) => dynamicWriter(words));
+  // FU-150 F2: and an arithmetic assignment whose target name is computed (`(( $n = 5 ))`).
+  const provenanceBroken =
+    parsed.commands.some(({ words }, index) => !isPattern(index) && dynamicWriter(words)) ||
+    /\(\([^)]*[$`][^)]*(?<![=!<>])=(?!=)/.test(src);
   let open = 0;
   const nesting = parsed.commands.map(({ words }) => {
     const first = words[headIndex(words)]?.value;
@@ -1084,14 +1172,15 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     const problem = (text) => errors.push(`${where}: ${text}`);
     const at = words.findIndex(({ value }) => /(^|\/)docker(-compose)?$/.test(value));
     // PR #805 r2 F1: stages that turn text into commands keep what they carry or refuse it.
-    const staged = parsed.arrays.has(command.group)
-      ? {}
-      : textStage(command.words, command.input, ctx.sourced);
+    const staged =
+      parsed.arrays.has(command.group) || isPattern(position)
+        ? {}
+        : textStage(command.words, command.input, { files: ctx.sourced, self: ctx.self });
     if (staged.problem) problem(staged.problem);
     for (const script of staged.scripts ?? [])
       shellImages(
         script,
-        { ...ctx, lineOf: (n) => ctx.lineOf(command.startLine + n) },
+        { ...ctx, self: undefined, lineOf: (n) => ctx.lineOf(command.startLine + n) },
         images,
         errors,
         state,
@@ -1122,7 +1211,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       else if (read.script !== undefined)
         shellImages(
           read.script,
-          { ...ctx, lineOf: (n) => ctx.lineOf(command.startLine + n) },
+          { ...ctx, self: undefined, lineOf: (n) => ctx.lineOf(command.startLine + n) },
           images,
           errors,
           state,
@@ -1212,7 +1301,13 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     }
   }
   for (const { script: inner, line } of parsed.nested) {
-    shellImages(inner, { ...ctx, lineOf: (n) => ctx.lineOf(line + n) }, images, errors, state);
+    shellImages(
+      inner,
+      { ...ctx, self: undefined, lineOf: (n) => ctx.lineOf(line + n) },
+      images,
+      errors,
+      state,
+    );
   }
 }
 
@@ -1229,56 +1324,53 @@ const TAKES_TEXT = new Set(
 );
 /** Programs that substitute into the command they run (`xargs -I{}`, `find -exec … {}`). */
 const REWRITERS = new Set(['xargs', 'find', 'parallel']);
-/** Words that are followed by the command they run. */
-const COMMAND_PREFIXES = new Set(
-  'builtin command exec time ! nohup env sudo doas nice ionice setsid stdbuf timeout'.split(' '),
-);
 const computedWord = (word) => Boolean(word.opaque || word.value.includes('$'));
-/** `a=b`, `a+=b`, `a[$i]=b`, and the declarers in front of them: no program runs. */
-const ASSIGN_LIKE = /^(?:[A-Za-z_][A-Za-z0-9_]*|\$\{?[A-Za-z0-9_]+\}?)(?:\[[^\]]*\])?\+?=/;
-/** The program is named by a computed LAST path component (`$cmd`, `$(…)`, `a/${b}`): `${D}/x.sh` is a file. */
-const computedProgram = (word) =>
-  word.opaque ||
-  word.value
-    .replace(/\$\{[^}]*\}/g, '$')
-    .split('/')
-    .at(-1)
-    .includes('$');
 /**
  * PR #805 r2 F1: what the stages between a command line and the commands it runs do. A stage
  * that rewrites, generates or hands over text is read (`{ scripts }`) or refused (`{ problem }`);
  * none is "nothing relevant".
  */
 function textStage(words, input, sourced) {
-  const start = words.findIndex(({ value }) => !ASSIGN_LIKE.test(value) && !DECLARERS.has(value));
-  if (start < 0) return {};
-  // Stages: the chain of words that each run the next (`time nohup source x`), and every word
-  // naming a program that takes text anywhere in the command (`env -u X flock l -c '…'` hides
-  // flock behind an option operand). Each is read once.
-  const chain = new Set();
-  let at = start;
-  for (;;) {
-    chain.add(at);
-    if (!COMMAND_PREFIXES.has(words[at].value)) break;
-    at += 1;
-    while (
-      at < words.length - 1 &&
-      (ASSIGN_LIKE.test(words[at].value) || /^(?:-.*|\d+[smhd]?)$/.test(words[at].value))
-    )
-      at += 1;
-    if (at >= words.length) break;
-  }
+  // FU-150 F1: the shared execution boundary names the words that run the next one (control
+  // words, wrappers with their options, xargs operands) and refuses a computed program.
+  const { chain: list, problem } = executionChain(words);
+  if (problem) return { problem };
+  if (list.length === 0) return {};
+  const chain = new Set(list);
   const scripts = [];
   for (const [index, word] of words.entries()) {
     const name = word.value.split('/').at(-1);
-    if (index < start || !(chain.has(index) || TAKES_TEXT.has(name))) continue;
-    if (chain.has(index) && computedProgram(word))
-      return { problem: `runs the command word ${word.value}, which this check cannot read` };
+    if (index < list[0] || !(chain.has(index) || TAKES_TEXT.has(name))) continue;
     const stage = wordStage(name, words.slice(index + 1), input, sourced);
     if (stage.problem) return stage;
     scripts.push(...(stage.scripts ?? []));
+    // `find … -exec CMD … ;`: each operand command line is read like a line of its own.
+    if (name === 'find')
+      for (const operands of findCommands(words.slice(index + 1))) {
+        const inner = textStage(operands, {}, sourced);
+        if (inner.problem) return inner;
+        scripts.push(...(inner.scripts ?? []));
+      }
   }
   return { scripts };
+}
+
+/**
+ * FU-150 F1: the repository path a `source` operand names, or undefined. A literal is itself
+ * (normalised); the one computed form read is `$(dirname "$0")/<tail>` or `$(dirname
+ * "${BASH_SOURCE[0]}")/<tail>` in a top-level script (`self`, its own path), which is that
+ * script's directory plus the tail. No other prefix, no suffix match, no variable.
+ */
+function sourcedPath(word, self) {
+  if (!word) return undefined;
+  const exact = (path) => (/[\s$`*?[\]{}~\\]/.test(path) ? undefined : posix.normalize(path));
+  if (!computedWord(word)) return exact(word.value);
+  const tail = /^\$\(…\)(\/[^$]*)$/.exec(word.value)?.[1];
+  const inner = word.scripts?.length === 1 ? word.scripts[0].trim() : '';
+  const own = /^dirname\s+"(?:\$0|\$BASH_SOURCE|\$\{BASH_SOURCE(?:\[0\])?\})"$/.test(inner);
+  return self !== undefined && tail !== undefined && own
+    ? exact(posix.join(posix.dirname(self), tail))
+    : undefined;
 }
 
 /** The stage the program `name` is, given the words after it. */
@@ -1293,18 +1385,12 @@ function wordStage(name, args, input, sourced) {
       : { scripts: [handler.value] };
   }
   if (name === 'source' || name === '.') {
-    const file = args[0]?.value.replace(/^\.\//, '');
-    // `$(dirname "$0")/lib/x.bash`: a computed directory in front of a literal path that is the
-    // tail of a file this check reads or SOURCED_LIBRARIES lists (the sibling-script idiom).
-    const tail = /^(?:\$\(…\)|\$\{[^}]*\}|\$\w+)(\/[^$]*)$/.exec(file ?? '')?.[1];
-    const known =
-      file !== undefined &&
-      (tail === undefined
-        ? !computedWord(args[0]) && sourced.has(file)
-        : [...sourced].some((path) => path.endsWith(tail)));
-    return known
+    const target = sourcedPath(args[0], sourced.self);
+    return target !== undefined && sourced.files.has(target)
       ? {}
-      : { problem: `${name} runs ${file ?? 'nothing'}, a script this check does not read` };
+      : {
+          problem: `${name} runs ${args[0]?.value ?? 'nothing'}, a script this check does not read (only the exact path of a CI .sh file or a hash-pinned library)`,
+        };
   }
   if (name === 'env' && args.some(({ value }) => /^(?:-[A-Za-z]*S|--split-string)/.test(value)))
     return { problem: 'env -S splits a string into a command this check does not read' };
@@ -1368,7 +1454,6 @@ function shellInput([command, ...args], input, outputs, { evaluated, shellFiles 
   };
 }
 
-const DECLARERS = new Set(['export', 'local', 'readonly', 'declare']);
 const withoutDeclarers = (words) => words.filter(({ value }) => !DECLARERS.has(value));
 /** An assignment-only command (`a=1`, `export a=$(x)`): it runs no program. */
 const assignmentOnly = (words) => {
@@ -1400,7 +1485,11 @@ function headIndex(words) {
 
 /** A command that can write a variable whose NAME this check cannot read. */
 function dynamicWriter(all) {
-  const at = headIndex(all);
+  // FU-150 F2: the command word is found past control words (`then printf -v …`, `{ read …`),
+  // prefixes and wrapper options by the shared execution boundary; unreadable ⇒ a possible write.
+  const { chain, problem } = executionChain(all, { builtins: true });
+  if (problem) return true;
+  const at = chain.at(-1) ?? -1;
   if (at < 0 || at >= all.length) return false;
   const [command, ...rest] = all.slice(at);
   if (!NAME_WRITERS.has(command.value)) return false;
