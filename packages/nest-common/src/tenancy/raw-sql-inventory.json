@@ -2436,6 +2436,13 @@
     "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database"
   },
   {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 116,
+    "hash": "d373004300b71097952e1d4769f2dd7b977aef99fc3941fc6cb81c82acd899e6",
+    "occurrence": 0,
+    "decision": "platform-wide: the open records of unconfirmed saga calls, for a platform reader never served to a party; identifiers and times only, each row carries its tenant, no amounts"
+  },
+  {
     "file": "services/notification-service/src/notification/notification.repository.ts",
     "line": 159,
     "hash": "fb249fe3dac5b48761658d7b5fd36538feab40572abb5c8babba21f5db3b29c1",
