@@ -77,6 +77,8 @@ const transactionSchema = z.object({
   counterpartyOrganizationId: z.string().nullable(),
   transactionType: z.string(),
   status: z.string(),
+  /** Whether HELD is proven (`presentTransactionStatus`). Absent from an older service: not proven. */
+  heldProven: z.boolean().optional(),
   grossAmountMinor: minorUnits,
   commissionAmountMinor: minorUnits,
   netAmountMinor: minorUnits,

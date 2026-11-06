@@ -1087,13 +1087,20 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "a42868e01ac1f252041c961b16859c1710d1c584871cfc1f0daeaf1a2c2afe30",
+    "hash": "ed2545bc7bd76a4ae872a1e450bec42f5b4a3433dbd8061ecbc1d6909b473590",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and, by transaction id, that transaction's own settlement authority and hold decision (transaction_settlement_authorised, transaction_settlement_barred), which settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
-    "line": 239,
+    "line": 203,
+    "hash": "78c330b495bfc4d4672e18d2604ecf6ca98faeb994017dd290e8036a9bd4a044",
+    "occurrence": 0,
+    "decision": "platform-wide: by the ids of rows the service has already read for this caller, payer or payee (get asserts visibility first, list is scoped to its party); answers only which of those ids the database proves HELD (transaction_held_proven)"
+  },
+  {
+    "file": "services/economic-service/src/transaction/transaction.repository.ts",
+    "line": 267,
     "hash": "5b01e9caa3c32263dfb553de989235d5ef626132c72e414837d9919e0543078f",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"

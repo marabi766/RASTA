@@ -67,6 +67,9 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_frozen'],
   ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_no_truncate'],
   ['settlement_reversal', 'trg_settlement_reversal_not_quarantined'],
+  // Who decided a row standing on another's hold, and why (FU-138).
+  ['transaction_hold_decision', 'trg_transaction_hold_decision_guard'],
+  ['transaction_hold_decision', 'trg_transaction_hold_decision_no_truncate'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
