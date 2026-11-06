@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
   DEFAULT_RFQ_CANCELLATION_CODES,
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
   RESERVED_RFQ_CANCELLATION_CODES,
   RFQ_CANCELLATION_CODE_PATTERN,
 } from '@rasta/contracts';
@@ -15,7 +16,7 @@ import {
   outboxPurgeEnvSchema,
   serviceUrlSchema,
 } from '@rasta/config';
-import { procurementOperationBudgets } from './operation-budgets';
+import { procurementOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-provider';
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
@@ -29,6 +30,12 @@ const KEK_CURRENT_NOT_IN_KEKS = fixed(
 const RESERVED_CANCELLATION_CODE = fixed(
   'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
     'arrives with evaluation (plan PR 10), which checks it',
+);
+const REPLAY_WINDOW_DOES_NOT_FIT = fixed(
+  'PROCUREMENT_IDEMPOTENCY_TTL_HOURS · 3600 − B − PROCUREMENT_CLOCK_SKEW_SECONDS must be at least ' +
+    `${PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS} s (PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS), with ` +
+    'B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + 7 s: otherwise a portal window its own boot check ' +
+    'accepts could be refused by the replay fence',
 );
 const KEKS_MALFORMED = fixed(
   'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
@@ -207,6 +214,9 @@ function roleList(name: string, options: { min: number }) {
  *                                      How long a completed command's response is replayed, and how
  *                                      long an in-flight claim holds its key before a retry may
  *                                      take it over (docs/06 § 6.8).
+ *   PROCUREMENT_CLOCK_SKEW_SECONDS     The clock-offset bound the replay fence rests on (FU-156):
+ *                                      TTL · 3600 − (2 · skew + 7) − skew must be at least
+ *                                      PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS, or the boot fails.
  *   PROCUREMENT_WINDOW_SWEEP_* / PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE
  *                                      The sweeper that ends windows on time (ADR-070 § 2, plan
  *                                      PR 2) and the bound on the demands one transaction moves
@@ -425,6 +435,17 @@ export const procurementEnvSchema = baseEnvSchema
       .prefault(120),
 
     /**
+     * The largest offset of any replica's clock (and the database's) from true time, in seconds
+     * (FU-156, PM decision D-125 — construction's `CONSTRUCTION_CLOCK_SKEW_SECONDS`). The replay
+     * fence (`shared/idempotency.ts`) compares this replica's clock with a deadline the caller fixed
+     * and keeps the response for another replica to find, so its budget is
+     * `B = 2 · skew + margin`: a deadline must end `B` before the retention, and a completed
+     * response is kept at least `B` past it. Beyond this offset the guarantee is void — alarm on a
+     * clock offset above half of it. At its largest (300) B is 607 s.
+     */
+    PROCUREMENT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
+
+    /**
      * The sweeper that ends windows past `closes_at` (ADR-070 § 2, plan PR 2; the shape of
      * construction's tender close sweeper, ADR-065 § 3). A sweep every `INTERVAL_MS` claims at most
      * `BATCH_SIZE` windows — due OPEN ones, and ended ones whose demands are still following them —
@@ -472,6 +493,18 @@ export const procurementEnvSchema = baseEnvSchema
       .prefault(2000),
   })
   .superRefine((env, ctx) => {
+    // The replay fence refuses a deadline later than claim + TTL − B (shared/idempotency.ts). The
+    // portal's window is capped by the same constant (PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS), so the
+    // service must accept a window of that size on its slowest legal clock:
+    //   TTL − B − skew ≥ K        (B = 2 · skew + margin)
+    // Otherwise an honest client could meet the refusal: fail the boot instead.
+    if (replayWindowRoomSeconds(env) < PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PROCUREMENT_IDEMPOTENCY_TTL_HOURS'],
+        message: REPLAY_WINDOW_DOES_NOT_FIT,
+      });
+    }
     try {
       parseKekEntries(env.PROCUREMENT_RFQ_KEKS);
     } catch {
@@ -491,6 +524,21 @@ export const procurementEnvSchema = baseEnvSchema
 export const PROCUREMENT_ENV_MESSAGES = seal();
 
 export type ProcurementEnv = z.infer<typeof procurementEnvSchema>;
+
+/**
+ * The longest replay window (seconds, the portal's skew allowance included) this service can accept
+ * on its slowest legal clock: `TTL − B − skew`. The boot check holds it at or above
+ * `PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS`.
+ */
+export function replayWindowRoomSeconds(
+  env: Pick<ProcurementEnv, 'PROCUREMENT_IDEMPOTENCY_TTL_HOURS' | 'PROCUREMENT_CLOCK_SKEW_SECONDS'>,
+): number {
+  return (
+    env.PROCUREMENT_IDEMPOTENCY_TTL_HOURS * 3600 -
+    replayFenceBudgetMs(env.PROCUREMENT_CLOCK_SKEW_SECONDS) / 1000 -
+    env.PROCUREMENT_CLOCK_SKEW_SECONDS
+  );
+}
 
 /**
  * Loads and validates the environment, once, at startup.

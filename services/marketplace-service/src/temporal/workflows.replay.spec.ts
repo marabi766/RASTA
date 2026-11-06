@@ -64,16 +64,20 @@ describe('orderSaga replays histories recorded before D-083', () => {
  * test, as the real SDK's shape of them.
  */
 describe('orderSaga replays histories on both sides of the release wait', () => {
-  it.each(['pre-fu080-release-refused', 'fu080-release-wait'])(
-    'the %s history replays without divergence',
-    async (name) => {
-      await expect(
-        Worker.runReplayHistory(
-          { workflowsPath: require.resolve('./workflows') },
-          fixture(name),
-          name,
-        ),
-      ).resolves.toBeUndefined();
-    },
-  );
+  it.each([
+    'pre-fu080-release-refused',
+    'fu080-release-wait',
+    // FU-103, the same pair: before it, authorisation exhausted ended the run
+    // (`7ac5e936`), and the new code must end the same way; with it, the wait.
+    'pre-fu103-authorise-exhausted',
+    'fu103-authorise-wait',
+  ])('the %s history replays without divergence', async (name) => {
+    await expect(
+      Worker.runReplayHistory(
+        { workflowsPath: require.resolve('./workflows') },
+        fixture(name),
+        name,
+      ),
+    ).resolves.toBeUndefined();
+  });
 });
