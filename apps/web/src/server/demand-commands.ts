@@ -60,7 +60,9 @@ const DOCUMENTED_CODES: ReadonlySet<string> = new Set(Object.values(ERROR_CODES)
 /**
  * Whether a failed write is **proven** not to have written anything: a `4xx`
  * carrying one of the platform's documented codes, a refusal made before any
- * state changed (procurement-service refuses before its transaction commits).
+ * the request was written (procurement-service refuses before the demand is
+ * written; `AGGREGATION_DEMAND_LIMIT_REACHED` may still commit the window's
+ * EXTEND end, never the demand, and releases the key, so a retry is safe).
  * Everything else — a `5xx` (a post-commit read can fail; the gateway's `503`
  * can follow an upstream reset after the commit), a timeout, a reset, a `4xx`
  * without a documented code (a proxy's page proves nothing) — is unconfirmed.

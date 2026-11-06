@@ -131,14 +131,13 @@ export function parseDemandForm(values: DemandFormValues): ParsedDemandForm {
 export type DemandNotice = 'submitted';
 export const DEMAND_NOTICES: readonly DemandNotice[] = ['submitted'];
 export const DEMAND_NOTICE_TEXT: Readonly<Record<DemandNotice, string>> = {
-  submitted:
-    'درخواست نیاز ثبت شد و به پنجره تجمیع باز همین کالا پیوست. تا وقتی پنجره باز است می‌توانید آن را پس بگیرید.',
+  submitted: 'درخواست نیاز ثبت شد و به پنجره تجمیع باز همین کالا پیوست.',
 };
 
 /** What a submission does, and as truthfully what it does not (the controller's own description). */
 export const DEMAND_SUBMIT_CONSEQUENCE =
   'نیاز برای سازمان فعال شما ثبت می‌شود و به پنجره تجمیع باز همین کالا می‌پیوندد، یا با نخستین نیاز پنجره تازه‌ای باز می‌کند. ' +
-  'شناسه کالا در بازار بررسی نمی‌شود؛ آن را درست بنویسید. ویرایش ممکن نیست: برای تغییر، نیاز را پس بگیرید و دوباره ثبت کنید. ' +
+  'شناسه کالا در بازار بررسی نمی‌شود؛ آن را درست بنویسید. ویرایش ممکن نیست. ' +
   'یادداشت فقط برای سازمان شما خوانده می‌شود و در هیچ رویدادی منتشر نمی‌شود.';
 
 /**
@@ -150,7 +149,7 @@ export const DEMAND_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
   AGGREGATION_QUANTITY_LIMIT_EXCEEDED:
     'با این مقدار، جمع پنجره تجمیع این کالا از بیشترین مقداری که یک سفارش می‌تواند داشته باشد می‌گذرد. چیزی ثبت نشد؛ مقدار کمتری بنویسید.',
   AGGREGATION_DEMAND_LIMIT_REACHED:
-    'پنجره تجمیع این کالا به سقف شمار نیازها رسیده است و چیزی ثبت نشد. پس از بسته شدن این پنجره دوباره ثبت کنید.',
+    'پنجره تجمیع این کالا به سقف شمار نیازها رسیده است و این نیاز ثبت نشد. پس از بسته شدن این پنجره دوباره ثبت کنید.',
 };
 
 /** 409 IDEMPOTENCY_KEY_REUSED: this form's key was already used for another request. */

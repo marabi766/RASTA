@@ -70,6 +70,12 @@ const OVERSIGHT_ROLE = 'AUDITOR';
 const PLATFORM_ROLE = 'SYSTEM_ADMIN';
 
 /**
+ * The smallest `WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS`: procurement-service has no
+ * replay fence, so the margin also absorbs an unbounded wait inside the service.
+ */
+const PROCUREMENT_MIN_REPLAY_MARGIN_SECONDS = 5 * 60;
+
+/**
  * A comma-separated role list, trimmed, empty elements dropped, never naming the
  * oversight role — nor any other role in `alsoRefused`.
  */
@@ -509,14 +515,16 @@ const schema = z.object({
   /**
    * How much earlier than that retention the portal stops re-sending a demand
    * command, in seconds. procurement-service has no replay fence of its own
-   * (no `Idempotency-Replay-Deadline`), so this margin is the whole budget: it
-   * must cover two clock skews and one request (`MIN_REPLAY_MARGIN_MS`), and the
-   * schema refuses less.
+   * (no `Idempotency-Replay-Deadline`), so this margin is the whole budget: two
+   * clock skews and one request (`MIN_REPLAY_MARGIN_MS`), plus however long the
+   * request waits inside the service before it reads its clock for the key
+   * (guards, a database connection), which nothing bounds. So the floor is five
+   * minutes, well above that budget, and the schema refuses less.
    */
   WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: z.coerce
     .number()
     .int()
-    .min(MIN_REPLAY_MARGIN_MS / 1000)
+    .min(Math.max(MIN_REPLAY_MARGIN_MS / 1000, PROCUREMENT_MIN_REPLAY_MARGIN_SECONDS))
     .max(MAX_REPLAY_MARGIN_SECONDS)
     .prefault(10 * 60),
 

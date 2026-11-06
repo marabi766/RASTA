@@ -110,7 +110,10 @@ const PURPOSES: Readonly<Record<string, PurposePolicy>> = {
   'supplier-write': { retry: false, deadline: 'NONE' },
   // procurement-service answers a repeated Idempotency-Key with the first result while it keeps the
   // key (`PROCUREMENT_IDEMPOTENCY_TTL_HOURS`, counted from the stored answer): resent within the
-  // deadline `server/demand-replay.ts` signs, never after.
+  // deadline `server/demand-replay.ts` signs, never after. EXCEPTION to D-065 above: procurement-service
+  // has NO replay fence (no `Idempotency-Replay-Deadline`), so for this purpose the portal's deadline and
+  // its margin (`WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS`, at least 5 min) ARE the guarantee, under the
+  // stated clock budget. A service-side fence is proposed as a follow-up.
   'procurement-demand': { retry: true, deadline: 'REQUIRED' },
 };
 

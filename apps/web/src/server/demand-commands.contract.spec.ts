@@ -72,8 +72,12 @@ describe('procurement-service’s demand contract', () => {
     }
     // The margin may never be less than the clock budget: the service has no replay fence.
     expect(() =>
-      loadWebServerEnv({ ...base, WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: '74' }),
+      loadWebServerEnv({ ...base, WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: '299' }),
     ).toThrow();
+    expect(
+      loadWebServerEnv({ ...base, WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: '300' })
+        .WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS,
+    ).toBe(300);
   });
 
   it('the mirrored retention has the service’s bounds', () => {

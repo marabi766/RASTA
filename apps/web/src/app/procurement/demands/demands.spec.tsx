@@ -110,6 +110,17 @@ describe('the list', () => {
     expect(next).toContain('status=LAPSED');
   });
 
+  it('an empty later page does not say that this organization never registered one', () => {
+    const { container } = render(
+      <DemandsScreen
+        result={{ kind: 'OK', data: { items: [], nextCursor: null } }}
+        query={{ ...QUERY, cursor: 'C2' }}
+      />,
+    );
+    expect(container.textContent).not.toContain('هنوز نیازی برای این سازمان ثبت نشده است');
+    expect(container.textContent).toContain('فهرست را از ابتدا ببینید');
+  });
+
   it('a refusal is "not available to your role", not an empty list', () => {
     render(<DemandsScreen result={{ kind: 'FORBIDDEN' }} query={QUERY} />);
     expect(screen.queryByText('نیازی نیست')).toBeNull();
