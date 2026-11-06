@@ -18,12 +18,16 @@ import { circuitShedRefusalsTotal, circuitStateGauge } from './circuit.metrics';
  *              HALF_OPEN and is its probe.
  *   HALF_OPEN  exactly ONE request — the probe — is in flight. Every other
  *              request is refused fast, `Retry-After` = 1 s. The probe's
- *              success closes the circuit; its failure or timeout excludes its
- *              caller from the next probe, and opens the circuit again for a
+ *              success closes the circuit. Any other end of it — a failure, a
+ *              timeout, a refusal, its caller leaving — is one its caller could
+ *              have chosen, so it decides nothing: the gateway's own readiness
+ *              check does (see "What a caller cannot choose"). The probe's
+ *              failure or timeout also excludes its caller from the next probe,
+ *              and while the service is not ready the circuit opens again for a
  *              fresh cooldown once `organizationsToOpen` distinct organizations
  *              (and people) have
  *              failed a probe (see "Who failed"); a probe that proves nothing
- *              before it was sent (`release`) frees the slot for the next
+ *              (`release`) frees the slot for the next
  *              request and leaves the circuit exactly as it was. A probe whose
  *              caller left after it was sent (`abandoned`) keeps the slot until
  *              its own upstream deadline has passed on this breaker's clock —
@@ -87,13 +91,41 @@ import { circuitShedRefusalsTotal, circuitStateGauge } from './circuit.metrics';
  *    cooldown in which only someone else can probe. Re-opening takes K probes,
  *    one at a time.
  *
+ * **What a caller cannot choose (FU-113).** Which route, which input, how slow,
+ * whether to stay: whatever one caller's request ends in, the caller could
+ * have chosen it, and several colluding callers under distinct organizations
+ * and people satisfy every count above. So no count of callers' outcomes moves
+ * the circuit toward OPEN by itself. The gateway's own readiness check of the
+ * service — `GET /health/ready`, sent by the gateway with no caller's identity,
+ * input or deadline in it (`checkReady`) — decides, at most one at a time:
+ *
+ *  - A failure run that would open the circuit opens it only if the service is
+ *    not ready. If it is, the run is spent and the circuit stays CLOSED; those
+ *    organizations still shed themselves.
+ *  - A probe that ends in anything but success hands the decision to the
+ *    check: ready closes the circuit; not ready leaves the rules above (and a
+ *    re-opening still needs it not ready). While the check runs, every request
+ *    is refused as while a probe is in flight.
+ *  - Anything but a complete 2xx in time is "not ready": fail closed, toward a
+ *    failing service opening. No caller's input reaches the check.
+ *
+ * So while the service's readiness answers 2xx — under whatever load callers
+ * put on it — colluding callers can neither open the circuit nor keep it from
+ * closing for longer than one probe of their own. Limits: readiness is not the
+ * API (a service whose readiness checks only its database can fail every route
+ * and stay CLOSED, its organizations shedding themselves; one with a stopped
+ * consumer is not ready and falls back to the counts above); load heavy
+ * enough to make readiness miss its deadline opens it, as it would have
+ * opened before; and a probe's 2xx still closes a service that is not ready.
+ *
  * Only callers with a failure or a shed are remembered, at most
  * `MAX_TRACKED_CALLERS` per service, least recently touched forgotten first.
  * Forgetting one can only delay opening or lift a shed; it can never open anything.
  *
- * Classification is the caller's (ProxyService.forward), made once the
- * response body is complete: 2xx–4xx `success` (a 4xx is the service
- * answering, not the service failing), 5xx / malformed / truncated / upstream
+ * Classification is the caller's (ProxyService.forward, `answerOutcome`), made
+ * once the response body is complete: 2xx–3xx `success`, the only affirmative
+ * recovery evidence; a 4xx `release` — a refusal of this one request, evidence
+ * neither way (FU-109); 5xx / malformed / truncated / upstream
  * timeout / network error `failure`, client cancellation and gateway-local
  * faults before the request was sent (token issuance, a transport refusal)
  * `release`, client cancellation after it was sent `abandoned` — unless a 5xx
@@ -101,9 +133,9 @@ import { circuitShedRefusalsTotal, circuitStateGauge } from './circuit.metrics';
  * error that proves nothing either way is `abandoned` too: this breaker is shared
  * by every tenant, so what one caller can provoke must not count. A request the
  * gateway refuses outright never gets a permit. An expected per-request
- * refusal exempted from counting (#381's identity refusals) is a `release` too,
- * once its body is complete: it frees the probe slot without changing the
- * failure state.
+ * refusal exempted from counting — identity's complete, valid 503
+ * `KEYCLOAK_WRITE_SETTLING` and `KEYCLOAK_UNAVAILABLE` (FU-110) — is a `release`
+ * too: it frees the probe slot without changing the failure state.
  */
 
 export type CircuitStateName = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
@@ -131,6 +163,13 @@ export interface CircuitBreakerOptions {
   now: () => number;
   /** Distinct organizations a failure run needs to open the circuit; {@link DEFAULT_ORGANIZATIONS_TO_OPEN} if unset. */
   organizationsToOpen?: number;
+  /**
+   * The gateway's own readiness check of `service` (FU-113): true only when it
+   * is ready. Anything else — false, a throw, a rejection, a non-boolean — is
+   * "not ready". Required: without it nothing could tell a failing service
+   * from colluding callers.
+   */
+  checkReady: (service: ServiceName) => boolean | Promise<boolean>;
 }
 
 /** Callers remembered per service. The ids come from signed tokens; the bound does not rely on it. */
@@ -205,6 +244,8 @@ interface Circuit {
   excluded: Map<string, number>;
   /** Callers with a standing failure or a shed, least recently touched first. */
   callers: Map<Caller, CallerFailures>;
+  /** The readiness check in flight, and the generation that sent it; null if none. */
+  checking: { generation: number; done: Promise<void> } | null;
 }
 
 interface CallerFailures {
@@ -283,6 +324,10 @@ export class CircuitBreakers {
       );
     }
     if (circuit.state === 'OPEN') this.transition(service, circuit, 'HALF_OPEN');
+    // The gateway's own check holds the slot while it runs.
+    if (circuit.checking?.generation === circuit.generation) {
+      throw refusal(service, 'circuit-half-open', HALF_OPEN_RETRY_AFTER_SECONDS);
+    }
 
     if (circuit.probe) {
       const heldUntil = circuit.probe.heldUntil;
@@ -321,8 +366,13 @@ export class CircuitBreakers {
     (permit as Permit).deadlineAt = this.options.now() + deadlineMs;
   }
 
-  /** Applies what one request proved. Stale, repeated or foreign permits change nothing. */
-  settle(permit: CircuitPermit, outcome: CircuitOutcome): void {
+  /**
+   * Applies what one request proved. Stale, repeated or foreign permits change
+   * nothing. Returns, when this outcome sent the gateway's readiness check or
+   * found one in flight, a promise settled once the check has decided; it never
+   * rejects.
+   */
+  settle(permit: CircuitPermit, outcome: CircuitOutcome): void | Promise<void> {
     const own = permit as Permit;
     if (own.settled) return;
     own.settled = true;
@@ -343,18 +393,20 @@ export class CircuitBreakers {
         own.heldUntil = own.deadlineAt ?? now + this.options.resetAfterMs;
         const until = this.exclusionEnd(own, own.heldUntil, this.options.resetAfterMs);
         this.exclude(circuit, own, until);
-        return;
+      } else {
+        circuit.probe = null;
+        if (outcome === 'success') {
+          circuit.failures = 0;
+          this.transition(own.service, circuit, 'CLOSED');
+          return;
+        }
+        if (outcome === 'failure') {
+          this.addFailure(own, circuit);
+          this.exclude(circuit, own, this.exclusionEnd(own, this.options.now(), 0));
+        }
       }
-      circuit.probe = null;
-      if (outcome === 'success') {
-        circuit.failures = 0;
-        this.transition(own.service, circuit, 'CLOSED');
-      } else if (outcome === 'failure') {
-        this.addFailure(own, circuit);
-        this.exclude(circuit, own, this.exclusionEnd(own, this.options.now(), 0));
-        if (this.enoughOrganizationsFailing(circuit)) this.open(own.service, circuit);
-      }
-      return;
+      // Its caller could have chosen this end: the gateway's own check decides.
+      return this.check(own.service, circuit);
     }
 
     // A non-probe permit is current only while its circuit is CLOSED: every
@@ -375,7 +427,9 @@ export class CircuitBreakers {
         current.failures >= this.options.failureThreshold &&
         this.enoughOrganizationsFailing(current)
       ) {
-        this.open(own.service, current);
+        // Callers could have provoked every one of these: it opens only if the
+        // gateway's own check finds the service not ready.
+        return this.check(own.service, current);
       }
     }
   }
@@ -424,6 +478,7 @@ export class CircuitBreakers {
       clearedSeq: 0,
       excluded: new Map(),
       callers: new Map(),
+      checking: null,
     };
     this.circuits.set(service, circuit);
     circuitStateGauge.set({ service }, STATE_VALUE.CLOSED);
@@ -515,6 +570,49 @@ export class CircuitBreakers {
       if (organizations >= needed && people.size >= needed) return true;
     }
     return false;
+  }
+
+  /**
+   * Sends the gateway's readiness check of `service`, unless this generation
+   * has one in flight, and applies its answer while the generation is current.
+   * Ready: CLOSED stays CLOSED with the failure run sent before the check spent,
+   * HALF_OPEN closes. Not ready: CLOSED opens (its run already met every count),
+   * HALF_OPEN re-opens once enough organizations have failed a probe.
+   */
+  private check(service: ServiceName, circuit: Circuit): void | Promise<void> {
+    if (circuit.checking?.generation === circuit.generation) return circuit.checking.done;
+    const generation = circuit.generation;
+    const sentAtSeq = circuit.failureSeq;
+    const decide = (ready: unknown) => {
+      if (circuit.checking?.generation === generation) circuit.checking = null;
+      if (circuit.generation !== generation) return;
+      if (ready === true) {
+        this.logger.log(`Circuit for ${service}: the service is ready`);
+        if (circuit.state === 'CLOSED') {
+          circuit.clearedSeq = Math.max(circuit.clearedSeq, sentAtSeq);
+          circuit.failures = Math.min(circuit.failures, circuit.failureSeq - sentAtSeq);
+        } else {
+          circuit.failures = 0;
+          this.transition(service, circuit, 'CLOSED');
+        }
+      } else if (circuit.state === 'CLOSED' || this.enoughOrganizationsFailing(circuit)) {
+        this.open(service, circuit);
+      }
+    };
+    let answer: unknown;
+    try {
+      answer = this.options.checkReady(service);
+    } catch {
+      answer = false;
+    }
+    if (!(answer instanceof Promise)) return decide(answer);
+    const done = answer
+      .then(decide, () => decide(false))
+      .catch((error: unknown) => {
+        this.logger.error(`Circuit for ${service}: applying the readiness check failed: ${error}`);
+      });
+    circuit.checking = { generation, done };
+    return done;
   }
 
   private open(service: ServiceName, circuit: Circuit): void {

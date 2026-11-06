@@ -14,10 +14,7 @@ const SCRIPT_FILE = /\.(?:sh|bash|mjs|cjs|js|ts)$/;
 
 /** Deliberately a token pre-check, not an interpreter. False positives need a reviewed registry row. */
 export function launcherCandidate(source, path) {
-  if (/\.(?:sh|bash)$/.test(path))
-    return tokenizeShell(source).commands.some(({ words }) =>
-      /\bjest\b|\b(?:pnpm|npm)\b[\s\S]*\btest\b/.test(words.map(({ value }) => value).join(' ')),
-    );
+  if (/\.(?:sh|bash)$/.test(path)) return shellCandidate(source, 0);
   const ts = require('typescript');
   const identifiers = [];
   const literals = [];
@@ -47,6 +44,26 @@ export function launcherCandidate(source, path) {
   );
 }
 
+/**
+ * FU-077 r2 F2: every command of a shell file, nested ones included (substitutions, also in
+ * `${…}`, `$((…))` and expanding here-documents, and here-documents fed to a shell). Text the
+ * tokenizer cannot split is a candidate, so it reaches the registry and refuses.
+ */
+function shellCandidate(source, depth) {
+  let parsed;
+  try {
+    parsed = tokenizeShell(source);
+  } catch {
+    return true;
+  }
+  if (depth > 30) return true;
+  return (
+    parsed.commands.some(({ words }) =>
+      /\bjest\b|\b(?:pnpm|npm)\b[\s\S]*\btest\b/.test(words.map(({ value }) => value).join(' ')),
+    ) || parsed.nested.some(({ script }) => shellCandidate(script, depth + 1))
+  );
+}
+
 /** Discover launches; unsupported configuration forwarding or file launchers are refusal records. */
 export function jestCommands(paths, read) {
   const yaml = require('yaml');
@@ -64,13 +81,24 @@ export function jestCommands(paths, read) {
       refuse(name, 'recursive launcher');
       return;
     }
-    const parsed = tokenizeShell(subshells(script));
+    let parsed;
+    try {
+      parsed = tokenizeShell(subshells(script));
+    } catch {
+      refuse(name, 'shell text the tokenizer cannot split');
+      return;
+    }
     let cwd = directory;
+    // FU-077 r2 F2: a nested script outside every command's lines (an expanding here-document
+    // body) is still read, after the commands.
+    const unread = new Set(parsed.nested);
     for (const command of parsed.commands) {
       for (const nested of parsed.nested.filter(
         ({ line }) => line >= command.startLine && line <= command.endLine,
-      ))
+      )) {
+        unread.delete(nested);
         inspect(nested.script, name, cwd, [...stack, 'substitution']);
+      }
       const words = command.words.map(({ value }) => value);
       const opaque =
         inheritedOpaque || command.words.some(({ value, opaque }) => opaque || value.includes('$'));
@@ -302,6 +330,7 @@ export function jestCommands(paths, read) {
       )
         refuse(name, 'unsupported shell/inline configuration launcher');
     }
+    for (const nested of unread) inspect(nested.script, name, cwd, [...stack, 'substitution']);
   };
   for (const { path, pkg, directory } of packages)
     for (const [name, script] of Object.entries(pkg.scripts ?? {}))

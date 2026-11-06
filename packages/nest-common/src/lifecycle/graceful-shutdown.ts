@@ -109,6 +109,12 @@ const consoleLogger: ShutdownLogger = {
 
 /** A source can be installed on once: a second install would be a second path. */
 const installedOn = new WeakSet<object>();
+// Keep the default source's identity stable without exposing the process capability.
+const processSignals: ShutdownSignalSource = {
+  on: (signal, listener) => {
+    process.on(signal, listener);
+  },
+};
 
 type Outcome = { kind: 'done' } | { kind: 'failed'; error: unknown } | { kind: 'timeout' };
 
@@ -153,7 +159,7 @@ export function installGracefulShutdown(
     logger = consoleLogger,
     signals = DEFAULT_SHUTDOWN_SIGNALS,
     exit = (code: number): void => process.exit(code),
-    signalSource = process,
+    signalSource = processSignals,
   } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
   const afterCloseTimeoutMs = options.afterCloseTimeoutMs ?? DEFAULT_AFTER_CLOSE_TIMEOUT_MS;

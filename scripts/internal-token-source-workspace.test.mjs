@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { isTestOnlyPath } from './test-only-path.mjs';
 import { sourceProblems } from './testing-dev-only-source.mjs';
 import { repoPath } from './internal-token-source-rule.mjs';
+import { workspaceDirectories } from './workspace-roots-lib.mjs';
 
 /**
  * The internal-token source boundary's lint layer in real workspaces (PR #423
@@ -718,13 +719,11 @@ test('D-088: process.getBuiltinModule(module) and a constructor read on a functi
 
 function lintWorkspaces() {
   const workspaces = [];
-  for (const group of ['apps', 'packages', 'services', 'tests']) {
-    for (const name of fs.readdirSync(path.join(ROOT, group))) {
-      const manifest = path.join(ROOT, group, name, 'package.json');
-      if (!fs.existsSync(manifest)) continue;
-      const lint = JSON.parse(fs.readFileSync(manifest, 'utf8')).scripts?.lint;
-      if (lint) workspaces.push({ workspace: `${group}/${name}`, lint });
-    }
+  // Membership is pnpm-workspace.yaml's (fails closed), not a list of four roots.
+  for (const workspace of workspaceDirectories(ROOT)) {
+    const manifest = path.join(ROOT, workspace, 'package.json');
+    const lint = JSON.parse(fs.readFileSync(manifest, 'utf8')).scripts?.lint;
+    if (lint) workspaces.push({ workspace, lint });
   }
   return workspaces;
 }

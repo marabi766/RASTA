@@ -26,7 +26,8 @@
  * check. Its grammar is CLOSED, everything outside it is refused: printable ASCII only,
  * simple commands joined by a newline, `;` or `&&`, each one leading KNOWN_ENV assignments
  * and then words of literals, quotes, plain `$NAME`/`${NAME}` and `$( )`/backticks read by
- * the same grammar. The command word must be node, pnpm or an INERT_COMMANDS entry. So no
+ * the same grammar. The command word must be node, pnpm, turbo or an INERT_SHAPES entry used
+ * in its listed argument shape. So no
  * arithmetic exists (`((`, `$((`, `$[`, `let`, `[[`, subscripts and unknown assignments are
  * outside it) and no control flow: the first top-level command really runs. The execution
  * context has one policy too: see contextProblems.
@@ -35,6 +36,10 @@
  * exist: the job budget rule (ci-integration-split-lib.mjs) adds step limits to the
  * job's setup allowance, and 35 limits do not fit in the job.
  */
+import { parseCommands } from './ci-shell-text-lib.mjs';
+
+/** The shared tokenizer lives in ci-shell-text-lib.mjs (FU-077); re-exported for existing callers. */
+export { parseCommands };
 export const MAX_FILE_BUDGET_MS = 540_000;
 /**
  * FU-111: the former `quality` job is five parallel `quality-*` jobs and an aggregate
@@ -59,8 +64,30 @@ export const EXEMPT_SCRIPTS = {
     'lint-scripts-registration.test.mjs pins its command shape (an option after --test throws)',
 };
 
-/** Commands that never run a root script or `node --test` by themselves. */
-const INERT_COMMANDS = new Set(['echo', 'true', 'turbo', 'eslint', 'prettier', 'tsc']);
+const operand = (value) => !value.startsWith('-');
+/**
+ * FU-077 R5: a command other than node, pnpm and turbo is inert - runs no root script and
+ * no `node --test` - only in one of these argument shapes, the ones this repository uses.
+ * Any other argument refuses, since many options load code the guard does not read
+ * (eslint -c/--rulesdir/--format, prettier --plugin/--config, jest --testRunner,
+ * tsc --build of another project). Words are compared one argv entry at a time.
+ */
+const INERT_SHAPES = {
+  echo: () => true, // prints its words; a substitution in them is read as a command of its own
+  true: (args) => args.length === 0,
+  eslint: (args) => args.length > 0 && args.every(operand),
+  prettier: (args) => args.length > 1 && args[0] === '--check' && args.slice(1).every(operand),
+  tsc: (args) =>
+    args[0] === '-p' &&
+    operand(args[1] ?? '-') &&
+    (args.length === 2 || (args.length === 3 && args[2] === '--noEmit')),
+  jest: (args) => {
+    const rest = [...args];
+    if (rest[0] === '--selectProjects' && operand(rest[1] ?? '-')) rest.splice(0, 2);
+    return rest.length === 0 || (rest.length === 1 && rest[0] === '--passWithNoTests');
+  },
+  prisma: (args) => args.length === 1 && args[0] === 'generate',
+};
 /**
  * The only names a shell assignment or a YAML `env` of this job may set. Any other can
  * change what a command means (NODE_OPTIONS, BASH_ENV, PATH, npm_config_script_shell, an
@@ -78,183 +105,15 @@ const NODE_PLAIN_OPTIONS = new Set(['--test', '--no-warnings', '--enable-source-
 const NODE_VALUE_OPTIONS = /^--test-concurrency=/;
 const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:_.-]*$/;
 const BUDGET = /^[1-9][0-9]{0,8}$/;
-const MAX_DEPTH = 4;
-/** The shell reads CR, other control characters and non-ASCII blanks as word characters. */
-const UNREADABLE_TEXT = /[^\t\n\x20-\x7e]/;
-
-/** `${NAME}`, `${1}`, `${@}`: the only parameter expansions that cannot run or hide a command. */
-const PLAIN_EXPANSION = /^\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?!$-])\}/;
-
-/**
- * Tokenize shell text into commands {words, depth} of words {value, dynamic}. `dynamic` marks
- * a word the shell computes ($var, globs, braces); command substitutions are parsed by the
- * SAME scanner, in place (quotes, escapes and comments decide where one ends), and
- * their commands are returned with the others. `problems` lists everything the scanner
- * does not fully understand - it refuses, it never skips: a parameter expansion with an
- * operator (`${X:-$(cmd)}`, `${{ expr }}`), `$((`, `$[`, `$'..'`, `$".."`, a here-document,
- * a redirection, and a backslash or a comment inside a command substitution (where the
- * end of the substitution is no longer decided by plain bracket matching).
- * Text after a refused construct is still scanned, so commands after it are still seen.
- */
-export function parseCommands(text) {
-  const out = { commands: [], problems: [] };
-  if (UNREADABLE_TEXT.test(String(text)))
-    out.problems.push('a carriage return, control or non-ASCII character');
-  scan(String(text), 0, 0, 'top', out);
-  return out;
-}
-
-/** Scans `text` from `from`; `mode` is top level, `$( )` or a backtick body. Returns the index it stopped at. */
-function scan(text, from, depth, mode, out) {
-  const { commands, problems } = out;
-  const refuse = (reason) => {
-    if (!problems.includes(reason)) problems.push(reason);
-  };
-  const inside = mode !== 'top';
-  let words = [];
-  let word = null;
-  const endWord = () => {
-    if (word) words.push(word);
-    word = null;
-  };
-  const endCommand = () => {
-    endWord();
-    if (words.length) commands.push({ words, depth });
-    words = [];
-  };
-  const add = (char) => {
-    word ??= { value: '', dynamic: false };
-    word.value += char;
-  };
-  const markDynamic = () => {
-    add('');
-    word.dynamic = true;
-    word.cut ??= word.value.length; // the literal part before the first computed character
-  };
-  const nested = (start, nestedMode) => {
-    // `start` indexes the first character after the opening bracket; returns where it stopped.
-    markDynamic();
-    if (depth >= MAX_DEPTH) {
-      refuse('command substitutions nested too deeply');
-      return text.length;
-    }
-    if (nestedMode === 'paren') {
-      const end = scan(text, start, depth + 1, 'paren', out);
-      if (end >= text.length) refuse('unterminated command substitution');
-      return end;
-    }
-    let end = start;
-    while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1;
-    if (end >= text.length) {
-      refuse('unterminated command substitution');
-      end = text.length;
-    }
-    // The body is cut out first, then read as a command line of its own.
-    scan(text.slice(start, end), 0, depth + 1, 'tick', out);
-    return end;
-  };
-  const dollar = (at) => {
-    // `at` indexes the `$`; returns the index of the last character of the expansion.
-    const rest = text.slice(at + 1);
-    if (rest.startsWith('((') || rest.startsWith('[')) {
-      refuse('an arithmetic expansion');
-      markDynamic();
-      return rest.startsWith('[') ? at + 1 : at; // its content is still scanned
-    }
-    if (rest.startsWith('(')) return nested(at + 2, 'paren');
-    if (rest.startsWith('{')) {
-      markDynamic();
-      const plain = PLAIN_EXPANSION.exec(rest);
-      if (plain) return at + plain[0].length;
-      refuse('a parameter expansion with an operator, subscript or nested text');
-      return at + 1; // what follows is still scanned
-    }
-    if (rest.startsWith("'") || rest.startsWith('"')) {
-      refuse('ANSI-C or locale quoting');
-      markDynamic();
-      return at;
-    }
-    markDynamic();
-    return at + (/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])/.exec(rest)?.[0].length ?? 0);
-  };
-  for (let at = from; at < text.length; at++) {
-    const char = text[at];
-    if (char === '\\') {
-      if (inside) refuse('a backslash inside a command substitution');
-      if (text[at + 1] === '\n') {
-        // Bash deletes it before it reads tokens, so inside a word it can join `$` and `(`.
-        if (word) refuse('a line continuation inside a word');
-        at++;
-      } else if (at + 1 < text.length) add(text[++at]);
-      else refuse('a backslash at the end of the text');
-    } else if (char === "'") {
-      const end = text.indexOf("'", at + 1);
-      if (end < 0) {
-        refuse('unterminated quote');
-        break;
-      }
-      add('');
-      for (const c of text.slice(at + 1, end)) add(c);
-      at = end;
-    } else if (char === '"') {
-      add('');
-      let closed = false;
-      for (at++; at < text.length; at++) {
-        if (text[at] === '"') {
-          closed = true;
-          break;
-        }
-        if (text[at] === '\\') {
-          if (inside) refuse('a backslash inside a command substitution');
-          if (text[at + 1] === '\n') refuse('a line continuation inside a word');
-          else if ('"\\$`'.includes(text[at + 1] ?? 'x')) add(text[++at]);
-          else add('\\');
-        } else if (text[at] === '$') at = dollar(at);
-        else if (text[at] === '`') at = nested(at + 1, 'tick');
-        else add(text[at]);
-      }
-      if (!closed) refuse('unterminated quote');
-    } else if (char === '$') {
-      at = dollar(at);
-    } else if (char === '`') {
-      at = nested(at + 1, 'tick');
-    } else if (char === '#' && !word) {
-      if (inside) refuse('a comment inside a command substitution');
-      else while (at + 1 < text.length && text[at + 1] !== '\n') at++;
-    } else if (char === '<' || char === '>') {
-      refuse(text.startsWith('<<', at) ? 'a here-document' : 'redirection');
-    } else if (char === '(') {
-      refuse('a subshell or an arithmetic command');
-      endCommand();
-    } else if (char === ')') {
-      endCommand();
-      if (mode === 'paren') return at;
-      refuse('an unbalanced closing parenthesis');
-    } else if (char === '&' && text[at + 1] === '&') {
-      at++;
-      endCommand();
-    } else if (char === '|' || char === '&') {
-      refuse('a pipeline, an || list or a background command');
-      endCommand();
-    } else if (char === '\n' || char === ';') {
-      endCommand();
-    } else if (char === ' ' || char === '\t') {
-      endWord();
-    } else {
-      if ('*?[~{}'.includes(char)) markDynamic();
-      add(char);
-    }
-  }
-  endCommand();
-  return text.length;
-}
-
 const clip = (words) =>
   words
     .map((entry) => entry.value)
     .join(' ')
     .slice(0, 80);
 const literal = (entries) => entries.every((entry) => !entry.dynamic);
+const sameWords = (words, expected) =>
+  words.length === expected.length &&
+  words.every((word, index) => !word.dynamic && word.value === expected[index]);
 
 function nodeCommand(args, found, unconditional) {
   const options = { test: false, timeouts: [], imports: [] };
@@ -295,7 +154,9 @@ function pnpmCommand(args, scripts, packages, found) {
   if (!literal(args)) return found.problems.push(`a computed pnpm argument (${text})`);
   const values = args.map((entry) => entry.value);
   for (const name of INSTALL_SCRIPTS) if (Object.hasOwn(scripts, name)) found.follows.add(name);
-  if (values.join(' ') === 'install --frozen-lockfile') return;
+  // FU-077 R4: argv boundaries are kept: `pnpm "install --frozen-lockfile"` is ONE word, which
+  // pnpm runs as a script of that name, not as an install.
+  if (values.length === 2 && values[0] === 'install' && values[1] === '--frozen-lockfile') return;
   const filtered = values[0] === '--filter';
   const rest = filtered ? values.slice(2) : values;
   const name = rest[0] === 'run' ? rest[1] : filtered && rest[0] === 'build' ? 'build' : undefined;
@@ -308,21 +169,70 @@ function pnpmCommand(args, scripts, packages, found) {
     return found.problems.push(`an unknown script ${name} (${text})`);
   for (const script of [`pre${name}`, name, `post${name}`]) {
     if (!Object.hasOwn(target, script)) continue;
-    if (!filtered) {
-      found.follows.add(script);
-      continue;
-    }
-    // A package script may not call pnpm again: no root or package scripts are passed on.
-    const inner = analyse(target[script], {}, {});
-    found.nodeTests.push(...inner.nodeTests);
-    found.timeouts.push(...inner.timeouts);
-    found.problems.push(...inner.problems.map((reason) => `${values[1]} ${script}: ${reason}`));
+    if (filtered) packageScript(found, values[1], script, target[script]);
+    else found.follows.add(script);
   }
 }
 
+/** One workspace package script, read once per command line. */
+function packageScript(found, pkg, name, text) {
+  const key = `${pkg} ${name}`;
+  if (found.read.has(key)) return;
+  found.read.add(key);
+  if (typeof text !== 'string') return found.problems.push(`${key} is not text`);
+  // A package script may not call pnpm or turbo again: no root scripts, packages or task graph.
+  const inner = analyse(text, {}, {});
+  found.nodeTests.push(...inner.nodeTests);
+  found.timeouts.push(...inner.timeouts.map((entry) => `${key}: ${entry}`));
+  found.problems.push(...inner.problems.map((reason) => `${key}: ${reason}`));
+}
+
+/**
+ * FU-077 R5: turbo runs package scripts, so it is never inert. Only `turbo run <task>`
+ * (optionally `--concurrency=<n>`) is read: the task and every task it runs in the task
+ * graph (`turbo` from turboTaskGraph: dependsOn and with edges), in every read package.
+ */
+function turboCommand(args, packages, turbo, found) {
+  const text = clip([{ value: 'turbo' }, ...args]);
+  const values = args.map((entry) => entry.value);
+  const [verb, task, ...rest] = values;
+  if (
+    !literal(args) ||
+    verb !== 'run' ||
+    !SCRIPT_NAME.test(task ?? '') ||
+    rest.length > 1 ||
+    !rest.every((value) => /^--concurrency=[1-9][0-9]?$/.test(value))
+  )
+    return found.problems.push(`a turbo form that is not "turbo run <task>" (${text})`);
+  if (!isMap(turbo)) return found.problems.push(`a turbo task graph that was not read (${text})`);
+  // A `pkg#task` (or a root `//#task`) entry runs a script outside this model: refused.
+  const scoped = Object.entries(turbo).find(
+    ([name, depends]) =>
+      name.includes('#') ||
+      !Array.isArray(depends) ||
+      depends.some((entry) => String(entry).includes('#')),
+  );
+  if (scoped) return found.problems.push(`a turbo task ${scoped[0]} that is not read (${text})`);
+  const tasks = new Set();
+  for (const queue = [task]; queue.length;) {
+    const name = queue.pop();
+    if (tasks.has(name)) continue;
+    if (!Array.isArray(turbo[name]))
+      return found.problems.push(
+        `a turbo task ${name} that the task graph does not hold (${text})`,
+      );
+    tasks.add(name);
+    queue.push(...turbo[name].map((entry) => String(entry).replace(/^\^/, '')));
+  }
+  for (const [pkg, own] of Object.entries(packages))
+    for (const name of tasks)
+      for (const script of [`pre${name}`, name, `post${name}`])
+        if (Object.hasOwn(own, script)) packageScript(found, pkg, script, own[script]);
+}
+
 /** What one command line runs: node --test commands, root scripts followed, unprovable parts. */
-export function analyse(text, scripts, packages = {}) {
-  const found = { nodeTests: [], timeouts: [], follows: new Set(), problems: [] };
+export function analyse(text, scripts, packages = {}, turbo = undefined) {
+  const found = { nodeTests: [], timeouts: [], follows: new Set(), problems: [], read: new Set() };
   const parsed = parseCommands(String(text));
   found.problems.push(...parsed.problems);
   for (const [index, { words: written, depth }] of parsed.commands.entries()) {
@@ -342,8 +252,16 @@ export function analyse(text, scripts, packages = {}) {
     else if (command.value === 'node')
       nodeCommand(args, found, index === 0 && depth === 0 && words === written);
     else if (command.value === 'pnpm') pnpmCommand(args, scripts, packages, found);
-    else if (!INERT_COMMANDS.has(command.value))
+    else if (command.value === 'turbo') turboCommand(args, packages, turbo, found);
+    else if (!Object.hasOwn(INERT_SHAPES, command.value))
       found.problems.push(`the command ${command.value} (${clip(words)})`);
+    else if (
+      (command.value !== 'echo' && !literal(args)) ||
+      !INERT_SHAPES[command.value](args.map((entry) => entry.value))
+    )
+      found.problems.push(
+        `an argument shape of ${command.value} that is not read (${clip(words)})`,
+      );
   }
   return found;
 }
@@ -372,8 +290,8 @@ export function runsNodeTest(text, scripts) {
   );
 }
 
-function textProblems(label, text, scripts, packages, problems) {
-  const found = analyse(text, scripts, packages);
+function textProblems(label, text, scripts, packages, turbo, problems) {
+  const found = analyse(text, scripts, packages, turbo);
   for (const text of found.timeouts)
     problems.push(
       `${label} runs node --test without exactly one --test-timeout=<ms> of at most ${MAX_FILE_BUDGET_MS} before the files: ${text}`,
@@ -441,9 +359,128 @@ function envProblems(name, env) {
     .map((key) => `${name} sets ${key}, which may change what its commands mean`);
 }
 
-/** `packages`: the scripts of each workspace package a `--filter` may name; unread ones are refused. */
-export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
+// FU-077 r2 F1: the turbo task graph, read from every configuration with every edge kept.
+const TURBO_ROOT_KEYS = new Set(
+  '$schema ui globalDependencies globalEnv globalPassThroughEnv tasks remoteCache envMode daemon cacheDir concurrency dangerouslyDisablePackageManagerCheck noUpdateNotifier'.split(
+    ' ',
+  ),
+);
+const TURBO_PACKAGE_KEYS = new Set(['$schema', 'extends', 'tasks']);
+/** Task keys that add no task: `dependsOn` and `with` (tasks run alongside) are the edges. */
+const TURBO_TASK_KEYS = new Set(
+  'dependsOn with env passThroughEnv outputs cache inputs outputLogs persistent interactive interruptible'.split(
+    ' ',
+  ),
+);
+const TURBO_EDGES = ['dependsOn', 'with'];
+/** Every name turbo reads a configuration from, in the root and in each package. */
+export const TURBO_CONFIG_NAMES = ['turbo.json', 'turbo.jsonc'];
+
+/** JSON with comments, as turbo reads turbo.json and turbo.jsonc: comments outside strings dropped. */
+function parseJsonc(text) {
+  let out = '';
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at];
+    if (char === '"') {
+      const start = at;
+      for (at++; at < text.length && text[at] !== '"'; at++) if (text[at] === '\\') at++;
+      out += text.slice(start, at + 1);
+    } else if (char === '/' && text[at + 1] === '/') {
+      while (at < text.length && text[at] !== '\n') at++;
+      out += '\n';
+    } else if (char === '/' && text[at + 1] === '*') {
+      const end = text.indexOf('*/', at + 2);
+      if (end < 0) throw new Error('an unterminated comment');
+      at = end + 1;
+      out += ' ';
+    } else out += char;
+  }
+  return JSON.parse(out);
+}
+
+/**
+ * `configs`: { directory, files: { 'turbo.json'?: text, 'turbo.jsonc'?: text } } for the root
+ * (directory '.') and EVERY workspace package. Returns { turbo: task -> every task it runs
+ * (dependsOn and with, `^` dropped), problems }; with a problem `turbo` is undefined, so a turbo
+ * command refuses. Refused: unreadable JSON, both extensions in one directory, a root without a
+ * configuration, an unknown key at the top or in a task (it may add work this model does not
+ * read), a package `extends` other than ["//"], an edge list that is not strings, and a
+ * `$TURBO_EXTENDS$`-style microsyntax edge.
+ */
+export function turboTaskGraph(configs) {
   const problems = [];
+  const turbo = {};
+  if (!configs.some(({ directory, files }) => directory === '.' && Object.keys(files).length))
+    problems.push('the root has no turbo.json');
+  for (const { directory, files } of configs) {
+    const names = Object.keys(files);
+    if (names.length > 1) problems.push(`${directory} has both ${names.join(' and ')}`);
+    for (const [file, text] of Object.entries(files)) {
+      const where = `${directory}/${file}`;
+      let config;
+      try {
+        config = parseJsonc(String(text));
+      } catch (error) {
+        problems.push(`${where} cannot be read (${error.message})`);
+        continue;
+      }
+      if (!isMap(config)) {
+        problems.push(`${where} is not an object`);
+        continue;
+      }
+      const known = directory === '.' ? TURBO_ROOT_KEYS : TURBO_PACKAGE_KEYS;
+      for (const key of Object.keys(config))
+        if (!known.has(key)) problems.push(`${where} sets ${key}, which this check does not read`);
+      if (
+        directory !== '.' &&
+        (!Array.isArray(config.extends) ||
+          config.extends.length !== 1 ||
+          config.extends[0] !== '//')
+      )
+        problems.push(`${where} extends something other than ["//"]`);
+      if (!isMap(config.tasks ?? {})) {
+        problems.push(`${where} has tasks that are not an object`);
+        continue;
+      }
+      for (const [name, task] of Object.entries(config.tasks ?? {})) {
+        if (!isMap(task)) {
+          problems.push(`${where} task ${name} is not an object`);
+          continue;
+        }
+        for (const key of Object.keys(task))
+          if (!TURBO_TASK_KEYS.has(key))
+            problems.push(`${where} task ${name} sets ${key}, which this check does not read`);
+        const edges = new Set(turbo[name] ?? []);
+        for (const key of TURBO_EDGES) {
+          const list = task[key] ?? [];
+          if (!Array.isArray(list) || !list.every((entry) => typeof entry === 'string')) {
+            problems.push(`${where} task ${name} has a ${key} that is not a list of task names`);
+            continue;
+          }
+          for (const entry of list) {
+            if (entry.includes('$'))
+              problems.push(`${where} task ${name} ${key} ${entry} is not a task name`);
+            edges.add(entry);
+          }
+        }
+        turbo[name] = [...edges];
+      }
+    }
+  }
+  return problems.length ? { turbo: undefined, problems } : { turbo, problems };
+}
+
+/**
+ * `packages`: the scripts of EVERY workspace package (a `--filter` on an unread one refuses).
+ * `workspace`: { turbo, problems } from turboTaskGraph (task -> every task it runs, from
+ * every turbo.json and turbo.jsonc); without it a turbo command refuses, so omitting it opens
+ * nothing.
+ */
+export function nodeTestTimeoutProblems(doc, scripts, packages = {}, workspace = {}) {
+  const problems = [];
+  const { turbo } = workspace;
+  for (const reason of workspace.problems ?? [])
+    problems.push(`the turbo task graph cannot be read: ${reason}`);
   const ids = Object.keys(isMap(doc?.jobs) ? doc.jobs : {}).filter((id) =>
     id.startsWith(QUALITY_JOB_PREFIX),
   );
@@ -466,7 +503,8 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
         continue;
       }
       queue.push(
-        ...textProblems(`step "${step.name}"`, step.run, scripts, packages, problems).follows,
+        ...textProblems(`step "${step.name}"`, step.run, scripts, packages, turbo, problems)
+          .follows,
       );
     }
   }
@@ -479,7 +517,8 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
     if (typeof scripts[name] !== 'string') problems.push(`script ${name} is not text`);
     else if (!Object.hasOwn(EXEMPT_SCRIPTS, name))
       queue.push(
-        ...textProblems(`script ${name}`, scripts[name], scripts, packages, problems).follows,
+        ...textProblems(`script ${name}`, scripts[name], scripts, packages, turbo, problems)
+          .follows,
       );
   }
   for (const [name, reason] of Object.entries(EXEMPT_SCRIPTS))
@@ -503,7 +542,8 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
   if (
     unitRun?.problems.length !== 0 ||
     unitRun.commands.length !== 1 ||
-    only.words.map((word) => word.value).join('\n') !== `pnpm\nrun\n${UNIT_STEP.script}` ||
+    // argv entries compared one by one (FU-077 R4): a quoted newline does not join words
+    !sameWords(only.words, ['pnpm', 'run', UNIT_STEP.script]) ||
     unit.if !== undefined ||
     unit['continue-on-error'] !== undefined
   )
@@ -513,13 +553,14 @@ export function nodeTestTimeoutProblems(doc, scripts, packages = {}) {
   // The preload is an argument of the one node --test command, before its files, and that
   // command is the first one of the script, so it really runs.
   // Read by the same parser as every other command: a construct it refuses is not a preload.
-  const watched = analyse(scripts[UNIT_STEP.script] ?? '', scripts, packages);
+  const watched = analyse(scripts[UNIT_STEP.script] ?? '', scripts, packages, turbo);
   const tests = watched.nodeTests;
   if (
     watched.problems.length > 0 ||
     tests.length !== 1 ||
     !tests[0].unconditional ||
-    tests[0].imports.join('\n') !== `${UNIT_STEP.preload} ${UNIT_STEP.watchdog}`
+    tests[0].imports.length !== 1 ||
+    tests[0].imports[0] !== `${UNIT_STEP.preload} ${UNIT_STEP.watchdog}`
   )
     problems.push(
       `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (${UNIT_STEP.preload} ${UNIT_STEP.watchdog}, which the runner loads too) and nothing else, before its files`,
