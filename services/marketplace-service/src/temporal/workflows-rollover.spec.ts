@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { TestWorkflowEnvironment, MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { ApplicationFailure, Context } from '@temporalio/activity';
-import { REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
+import { FINAL_ANSWER_CONTRACT, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
 import { temporalStep, type OrderActivities, type SagaOrderView } from './activities';
 import {
   orderSaga,
@@ -426,7 +426,7 @@ describe('history rollover on real Temporal', () => {
         for (let i = 0; i < 100 && disputes.length < 2; i++)
           await new Promise((resolve) => setTimeout(resolve, 10));
         expect(resolutions).toEqual([
-          [INPUT.orderId, 'TXN_ROLL', 'DSP_OLD', 'old decision', 'ECON_OLD'],
+          [INPUT.orderId, 'TXN_ROLL', 'DSP_OLD', 'old decision', 'ECON_OLD', FINAL_ANSWER_CONTRACT],
         ]);
         expect(disputes).toEqual(['DSP_OLD', 'DSP_NEW']);
         await env.sleep('1 hour');
@@ -524,6 +524,7 @@ describe('history rollover on real Temporal', () => {
               'DSP_RELEASE',
               'decided',
               'ECON_RELEASE',
+              FINAL_ANSWER_CONTRACT,
             ]),
           ]),
         );
@@ -808,7 +809,9 @@ describe('history rollover on real Temporal', () => {
         await latest.signal('retryDisputeRelease');
         await eventually(() => filed.length > 0);
         // With the authorisation still in doubt, the filing goes as in doubt too.
-        expect(filed).toEqual([[INPUT.orderId, 'TXN_MOVED', 'DSP_MOVED', 'broken', true]]);
+        expect(filed).toEqual([
+          [INPUT.orderId, 'TXN_MOVED', 'DSP_MOVED', 'broken', true, FINAL_ANSWER_CONTRACT],
+        ]);
         // Rolled over in the dispute's wait, the next run knows the call is still
         // in doubt, and that it left the wait.
         await atRest(taskQueue);
@@ -905,7 +908,7 @@ describe('history rollover on real Temporal', () => {
         await handle.signal('disputeResolved', 'SETTLE');
         await eventually(() => rounds.length > 0);
         expect(rounds[0]).toBe(4);
-        expect(sent[0]).toEqual([INPUT.orderId, 'TXN_LEFT', true]);
+        expect(sent[0]).toEqual([INPUT.orderId, 'TXN_LEFT', true, FINAL_ANSWER_CONTRACT]);
         expect((await handle.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
         await atRest(taskQueue);
       } finally {
@@ -922,7 +925,7 @@ describe('history rollover on real Temporal', () => {
       state: { status: 'CANCELLING', economicTransactionId: null, cancellationReason: 'why' },
       carried: { transactionId: 'TXN_CARRIED' },
       phase: 'COMPENSATION_UNCONFIRMED',
-      sent: [INPUT.orderId, 'TXN_CARRIED', 'why', true],
+      sent: [INPUT.orderId, 'TXN_CARRIED', 'why', true, FINAL_ANSWER_CONTRACT],
       done: 'CANCELLED',
     },
     {
@@ -935,7 +938,7 @@ describe('history rollover on real Temporal', () => {
       },
       carried: { transactionId: 'TXN_CARRIED', disputeId: 'DSP_CARRIED', reason: 'its words' },
       phase: 'DISPUTE_UNCONFIRMED',
-      sent: [INPUT.orderId, 'TXN_CARRIED', 'DSP_CARRIED', 'its words', true],
+      sent: [INPUT.orderId, 'TXN_CARRIED', 'DSP_CARRIED', 'its words', true, FINAL_ANSWER_CONTRACT],
       done: 'CANCELLED',
     },
   ] as const)('$name, resumed in its wait (FU-117)', (site) => {
@@ -1265,9 +1268,13 @@ describe('history rollover on real Temporal', () => {
         });
         expect((await latest.query<SagaStatus>('status')).phase).toBe(site.phase);
         // The same words, so the same key, across the runs.
-        const words = sent.map((args) => JSON.stringify(args.filter((arg) => arg !== true)));
-        expect(new Set(words)).toEqual(new Set([JSON.stringify(site.words)]));
-        expect(sent.at(-1)?.at(-1)).toBe(true);
+        const words = sent.map((args) =>
+          JSON.stringify(args.filter((arg) => typeof arg !== 'boolean')),
+        );
+        expect(new Set(words)).toEqual(
+          new Set([JSON.stringify([...site.words, FINAL_ANSWER_CONTRACT])]),
+        );
+        expect(sent.at(-1)?.at(-2)).toBe(true);
 
         await atRest(taskQueue);
         state.status = 'CANCELLING';
@@ -1279,7 +1286,7 @@ describe('history rollover on real Temporal', () => {
         if (site.operation === 'compensate') expect(lookups).toBe(1);
         // What the filing answered is what the release names.
         else expect(released[0]?.slice(0, 3)).toEqual([INPUT.orderId, 'TXN_FOUND', 'DSP_R']);
-        if (site.operation !== 'compensate') expect(released[0]?.at(-1)).toBe('ECON_R');
+        if (site.operation !== 'compensate') expect(released[0]?.[4]).toBe('ECON_R');
         for (const runId of [first, second]) {
           await Worker.runReplayHistory(
             { workflowsPath: require.resolve('./workflows') },
@@ -1352,7 +1359,7 @@ describe('history rollover on real Temporal', () => {
       readable = true;
       await handle.signal('retryDisputeRelease');
       expect(await handle.result()).toBe('CANCELLED');
-      expect(sent).toEqual([[INPUT.orderId, 'TXN_READ', 'why', true]]);
+      expect(sent).toEqual([[INPUT.orderId, 'TXN_READ', 'why', true, FINAL_ANSWER_CONTRACT]]);
     });
   });
 

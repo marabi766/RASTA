@@ -31,6 +31,14 @@ export {
 } from './common/text';
 
 export { withMaxKeys } from './common/bounds';
+export {
+  TRANSACTION_TEXT_BOUNDS,
+  boundsForAll,
+  isWithin,
+  keptTextWithin,
+  textWithin,
+  type TextBounds,
+} from './common/transaction-text';
 export { parsableUrl } from './common/parsable-url';
 export {
   isoDateTime,

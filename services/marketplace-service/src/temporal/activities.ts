@@ -22,7 +22,12 @@ import {
   type TransactionDetailView,
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
-import { PROVEN_REFUSALS, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
+import {
+  FINAL_ANSWER_CONTRACT,
+  OWNER_STATE_IS_FINAL,
+  PROVEN_REFUSALS,
+  REFUSED_ON_FIRST_ATTEMPT,
+} from './economic-refusal';
 import {
   economicCallsUnconfirmedTotal,
   releasesUnconfirmedTotal,
@@ -209,12 +214,16 @@ const PAST_ANY_CALL = [
   'FAILED',
 ];
 
-/** `transaction` as an {@link ObligationFinal} step answer when in one of `statuses`, else null. */
-function finalIn(
+/**
+ * `transaction` as an {@link ObligationFinal} step answer when past any call, else null.
+ * Null too for a caller that did not declare the answer (`FINAL_ANSWER_CONTRACT`): an
+ * older workflow reads any answer as the call's effect, and it keeps the refusal.
+ */
+function finalFor(
+  contract: string | undefined,
   transaction: TransactionDetailView,
-  statuses: readonly string[],
 ): { result: ObligationFinal } | null {
-  return statuses.includes(transaction.status)
+  return contract === FINAL_ANSWER_CONTRACT && PAST_ANY_CALL.includes(transaction.status)
     ? {
         result: {
           final: true,
@@ -315,7 +324,7 @@ export function createActivities(deps: ActivityDependencies) {
    * on the first attempt of this scheduling. In doubt — a retry, or a round after
    * an unconfirmed attempt — a failed send asks the obligation, because a code
    * then says nothing of the attempts before it: its effect or a terminal status
-   * is the answer (`finalIn`), and anything else stays unknown.
+   * is the answer (`finalFor`), and anything else stays unknown.
    */
   async function economicStep<T>(
     orderId: string,
@@ -327,6 +336,8 @@ export function createActivities(deps: ActivityDependencies) {
       answer: (transaction: TransactionDetailView) => { result: T } | null;
       confirmed?: {
         inDoubt: boolean;
+        /** Terminal, for a caller that cannot take an {@link ObligationFinal}: a marked failure. */
+        isFinal?: (transaction: TransactionDetailView) => boolean;
         /**
          * What must hold before asking at all. Its refusal is never reconciled: the
          * obligation's state cannot stand in for a condition of this order's.
@@ -366,7 +377,17 @@ export function createActivities(deps: ActivityDependencies) {
                 throw reconciliationReadFailed(activity, failure);
               });
             const answer = transaction ? applied.answer(transaction) : null;
-            if (!answer) throw unanswered(refusal);
+            if (!answer) {
+              if (inDoubt && transaction && confirmed?.isFinal?.(transaction)) {
+                throw ApplicationFailure.create({
+                  message: `The obligation is ${transaction.status}: terminal, and nothing further can move it`,
+                  type: 'OBLIGATION_ALREADY_FINAL',
+                  nonRetryable: true,
+                  details: [OWNER_STATE_IS_FINAL],
+                });
+              }
+              throw unanswered(refusal);
+            }
             logger.warn(
               `Saga step ${activity} of order ${order.id} was refused, and the transaction's state ` +
                 `(${transaction?.status}) answers it; answering from economic-service's record`,
@@ -547,6 +568,7 @@ export function createActivities(deps: ActivityDependencies) {
       orderId: string,
       transactionId: string,
       inDoubt = false,
+      contract?: string,
     ): Promise<AuthorisationResult> {
       return economicStep<AuthorisationResult>(
         orderId,
@@ -574,10 +596,13 @@ export function createActivities(deps: ActivityDependencies) {
             const disputed = disputedSinceAuthorised(transaction, orderId);
             if (disputed) return { result: disputed };
             // SETTLED is the effect, above. DISPUTED and HELD can still move.
-            return finalIn(transaction, PAST_ANY_CALL);
+            return finalFor(contract, transaction);
           },
           confirmed: {
             inDoubt,
+            ...(contract === FINAL_ANSWER_CONTRACT
+              ? {}
+              : { isFinal: ({ status }) => ['REFUNDED', 'CANCELLED', 'FAILED'].includes(status) }),
             // The buyer's receipt is what authorises settlement; without it on
             // the row, nothing is asked of economic-service. An order an older
             // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
@@ -693,6 +718,7 @@ export function createActivities(deps: ActivityDependencies) {
       transactionId: string,
       reason: string,
       inDoubt = false,
+      contract?: string,
     ): Promise<ObligationFinal | void> {
       return economicStep<ObligationFinal | void>(
         orderId,
@@ -713,8 +739,8 @@ export function createActivities(deps: ActivityDependencies) {
           answer: (transaction) =>
             transaction.status === 'REFUNDED'
               ? { result: undefined }
-              : finalIn(transaction, PAST_ANY_CALL),
-          confirmed: { inDoubt },
+              : finalFor(contract, transaction),
+          ...(contract === FINAL_ANSWER_CONTRACT ? { confirmed: { inDoubt } } : {}),
         },
       );
     },
@@ -739,6 +765,7 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       reason: string,
       inDoubt = false,
+      contract?: string,
     ): Promise<string | ObligationFinal | null> {
       return economicStep<string | ObligationFinal | null>(
         orderId,
@@ -764,8 +791,8 @@ export function createActivities(deps: ActivityDependencies) {
           answer: (transaction) =>
             transaction.status === 'DISPUTED' && sameText(transaction.disputeReason, reason)
               ? { result: transaction.disputeId ?? null }
-              : finalIn(transaction, PAST_ANY_CALL),
-          confirmed: { inDoubt },
+              : finalFor(contract, transaction),
+          ...(contract === FINAL_ANSWER_CONTRACT ? { confirmed: { inDoubt } } : {}),
         },
       );
     },
@@ -787,6 +814,7 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       resolution: string,
       economicDisputeId?: string,
+      contract?: string,
     ): Promise<ObligationFinal | void> {
       return economicStep<ObligationFinal | void>(
         orderId,
@@ -825,7 +853,7 @@ export function createActivities(deps: ActivityDependencies) {
               economicDisputeId === undefined
                 ? sameText(resolutionOf(transaction), resolution)
                 : transaction.disputeId === economicDisputeId;
-            return released && ours ? { result: undefined } : finalIn(transaction, PAST_ANY_CALL);
+            return released && ours ? { result: undefined } : finalFor(contract, transaction);
           },
         },
       );
@@ -925,7 +953,8 @@ function refusedForState(error: unknown): boolean {
  * as sent; once it keeps it with LF line endings (FU-115), this reader still
  * finds its own dispute and resolution — which is why this release, reading
  * both, must be every running worker and the rollback floor before that
- * writer ships (docs/06 § 6.8). This service keeps what the person sent.
+ * writer ships (docs/06 § 6.8). This service keeps the four transaction texts
+ * with LF line endings (PR-806 r1 F1); a text stored before that may hold CRLF.
  */
 function sameText(kept: string | null | undefined, sent: string): boolean {
   const lf = (text: string) => text.replace(/\r\n?/g, '\n');

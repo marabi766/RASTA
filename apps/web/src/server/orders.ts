@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { legacyParse } from '@rasta/contracts';
+import { isWithin, legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
@@ -272,30 +272,45 @@ const COMMAND_SCHEMAS = {
       ),
   }),
 
-  RESOLVE_DISPUTE: z.object({
-    // The dispute the page showed (`openDisputeId`), never looked up at submit
-    // time: a decision drawn for one dispute must not decide another raised
-    // since. Missing — a page drawn from a service that did not send it — is
-    // refused here rather than posted unnamed.
-    disputeId: z.string().regex(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/, DISPUTE_FORM_STALE),
-    outcome: z.enum(DISPUTE_OUTCOMES, { error: formMessage('نتیجه را انتخاب کنید') }),
-    resolution: z
-      .string()
-      .trim()
-      .min(
-        LIMITS.resolution.min,
-        formMessage(`شرح تصمیم را دست‌کم در ${digits(LIMITS.resolution.min)} نویسه بنویسید`),
-      )
-      .max(
-        LIMITS.resolution.max,
-        formMessage(`شرح نباید بیش از ${digits(LIMITS.resolution.max)} نویسه باشد`),
-      ),
-    // Required, never defaulted: ADR-052 rule 14 forbids reading
-    // responsibility out of the outcome or out of free text.
-    responsibility: z.enum(RESPONSIBILITIES, {
-      error: formMessage('مسئول را صریحاً مشخص کنید'),
+  RESOLVE_DISPUTE: z
+    .object({
+      // The dispute the page showed (`openDisputeId`), never looked up at submit
+      // time: a decision drawn for one dispute must not decide another raised
+      // since. Missing — a page drawn from a service that did not send it — is
+      // refused here rather than posted unnamed.
+      disputeId: z.string().regex(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/, DISPUTE_FORM_STALE),
+      outcome: z.enum(DISPUTE_OUTCOMES, { error: formMessage('نتیجه را انتخاب کنید') }),
+      resolution: z
+        .string()
+        .trim()
+        .min(
+          LIMITS.resolution.min,
+          formMessage(`شرح تصمیم را دست‌کم در ${digits(LIMITS.resolution.min)} نویسه بنویسید`),
+        )
+        .max(
+          LIMITS.resolution.max,
+          formMessage(`شرح نباید بیش از ${digits(LIMITS.resolution.max)} نویسه باشد`),
+        ),
+      // Required, never defaulted: ADR-052 rule 14 forbids reading
+      // responsibility out of the outcome or out of free text.
+      responsibility: z.enum(RESPONSIBILITIES, {
+        error: formMessage('مسئول را صریحاً مشخص کنید'),
+      }),
+    })
+    // A REFUND resolution is also the refund's reason, which is shorter
+    // (`REFUND_RESOLUTION_BOUNDS`, FU-134): said here, before the post.
+    .superRefine((values, context) => {
+      if (values.outcome !== 'REFUND' || isWithin(values.resolution, LIMITS.refundResolution)) {
+        return;
+      }
+      context.addIssue({
+        code: 'custom',
+        path: ['resolution'],
+        message: formMessage(
+          `شرح تصمیم بازگشت وجه نباید بیش از ${digits(LIMITS.refundResolution.max)} نویسه باشد`,
+        ),
+      });
     }),
-  }),
 
   CANCEL: z.object({
     reason: z

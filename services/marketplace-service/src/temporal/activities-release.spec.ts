@@ -4,10 +4,16 @@ import { economicCallsUnconfirmedTotal, releasesUnconfirmedTotal } from '../obse
 import { ActivityFailure } from '@temporalio/client';
 import { RastaError } from '@rasta/nest-common';
 import { ApplicationFailure } from '@temporalio/activity';
-import { REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
+import {
+  FINAL_ANSWER_CONTRACT,
+  OWNER_STATE_IS_FINAL,
+  REFUSED_ON_FIRST_ATTEMPT,
+} from './economic-refusal';
 import { outcomeUnknown } from './workflows';
 import type { EconomicClient } from '../economic/economic.client';
 import type { OrderService } from '../order/order.service';
+
+type Activities = ReturnType<typeof createActivities>;
 
 /** The report of an unconfirmed release (FU-080): what the alert and the operator read. */
 it('counts each round from a series that starts at zero, and logs the order', async () => {
@@ -229,10 +235,9 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     'in doubt, %s is terminal without the effect: the owner’s answer',
     async (status) => {
       const { activities } = over(refused, obligation(status), () => 2);
-      await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toMatchObject({
-        final: true,
-        status,
-      });
+      await expect(
+        activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
+      ).resolves.toMatchObject({ final: true, status });
     },
   );
 
@@ -246,11 +251,9 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       obligation('REFUNDED'),
       () => 1,
     );
-    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toEqual({
-      final: true,
-      status: 'REFUNDED',
-      funds: 'RETURNED',
-    });
+    await expect(
+      activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
+    ).resolves.toEqual({ final: true, status: 'REFUNDED', funds: 'RETURNED' });
   });
 
   it.each([
@@ -266,7 +269,14 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         throw refuse('INVALID_STATE_TRANSITION');
       }, obligation(status));
       await expect(
-        activities.resolveObligationDispute('ORD', 'TXN', 'DSP', 'decided', 'ECON'),
+        activities.resolveObligationDispute(
+          'ORD',
+          'TXN',
+          'DSP',
+          'decided',
+          'ECON',
+          FINAL_ANSWER_CONTRACT,
+        ),
       ).resolves.toEqual({ final: true, status, funds });
     },
   );
@@ -278,7 +288,14 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         throw refuse('INVALID_STATE_TRANSITION');
       }, obligation(status));
       const caught = await failure(
-        activities.resolveObligationDispute('ORD', 'TXN', 'DSP', 'decided', 'ECON'),
+        activities.resolveObligationDispute(
+          'ORD',
+          'TXN',
+          'DSP',
+          'decided',
+          'ECON',
+          FINAL_ANSWER_CONTRACT,
+        ),
       );
       expect(caught.type).toBe('INVALID_STATE_TRANSITION');
     },
@@ -294,11 +311,9 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         obligation(status),
         () => 1,
       );
-      await expect(activities.compensate('ORD', 'TXN', 'why')).resolves.toEqual({
-        final: true,
-        status,
-        funds: 'UNPROVEN',
-      });
+      await expect(
+        activities.compensate('ORD', 'TXN', 'why', false, FINAL_ANSWER_CONTRACT),
+      ).resolves.toEqual({ final: true, status, funds: 'UNPROVEN' });
     },
   );
 
@@ -383,25 +398,122 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     try {
       const send = jest.fn();
       const { activities } = over(send, obligation('HELD'), () => 1);
-      await expect(activities.compensate('ORD', 'TXN', 'why', true)).resolves.toBeUndefined();
+      await expect(
+        activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT),
+      ).resolves.toBeUndefined();
       expect(send).toHaveBeenCalledTimes(1);
     } finally {
       closed.status = was;
     }
   });
 
+  // Review of #796 r2, F5: an older workflow reads any answer as the call's own effect,
+  // and a paid-out order would be cancelled under it. What did not declare the contract
+  // keeps the refusal; a contract it cannot name is not a declaration.
+  describe.each([
+    [
+      'compensate',
+      (a: Activities, contract?: string) =>
+        a.compensate('ORD', 'TXN', 'why', true, contract as string),
+    ],
+    [
+      'disputeObligation',
+      (a: Activities, contract?: string) =>
+        a.disputeObligation('ORD', 'TXN', 'DSP', 'why', true, contract as string),
+    ],
+    [
+      'resolveObligationDispute',
+      (a: Activities, contract?: string) =>
+        a.resolveObligationDispute('ORD', 'TXN', 'DSP', 'decided', 'ECON', contract as string),
+    ],
+  ] as const)('%s for a caller below the contract', (_name, call) => {
+    const stateRefused = () => {
+      throw refuse('INVALID_STATE_TRANSITION');
+    };
+
+    describe.each([
+      ['undeclared', undefined],
+      ['an unknown contract', 'obligation-final-v0'],
+    ])('%s', (_how, contract) => {
+      it.each(['SETTLED', 'PARTIALLY_REVERSED', 'REVERSED', 'CANCELLED', 'FAILED'])(
+        '%s stays the refusal it was, unmarked',
+        async (status) => {
+          const { activities } = over(stateRefused, obligation(status), () => 2);
+          const caught = await failure(call(activities, contract));
+          expect(caught.type).toBe('INVALID_STATE_TRANSITION');
+          expect(caught.details ?? []).toEqual([]);
+        },
+      );
+    });
+
+    it('declared, the same obligation is the answer', async () => {
+      const { activities } = over(stateRefused, obligation('SETTLED'), () => 2);
+      await expect(call(activities, FINAL_ANSWER_CONTRACT)).resolves.toEqual({
+        final: true,
+        status: 'SETTLED',
+        funds: 'PAID_OUT',
+      });
+    });
+  });
+
+  it.each([
+    ['undeclared', undefined],
+    ['an unknown contract', 'obligation-final-v0'],
+  ])(
+    'authoriseSettlement %s, in doubt: the failure it can read, not an answer',
+    async (_how, c) => {
+      for (const status of ['REFUNDED', 'CANCELLED', 'FAILED']) {
+        const { activities } = over(refused, obligation(status), () => 2);
+        const caught = await failure(
+          activities.authoriseSettlement('ORD', 'TXN', true, c as string),
+        );
+        expect(caught.type).toBe('OBLIGATION_ALREADY_FINAL');
+        expect(caught.nonRetryable).toBe(true);
+        expect(caught.details).toEqual([OWNER_STATE_IS_FINAL]);
+      }
+      for (const status of ['PARTIALLY_REVERSED', 'REVERSED']) {
+        const { activities } = over(refused, obligation(status), () => 2);
+        expect(
+          (await failure(activities.authoriseSettlement('ORD', 'TXN', true, c as string))).type,
+        ).toBe('FORBIDDEN');
+      }
+    },
+  );
+
+  it('authoriseSettlement undeclared on a first attempt keeps its own mark, as before', async () => {
+    const { activities, reads } = over(refused, obligation('REFUNDED'), () => 1);
+    const caught = await failure(activities.authoriseSettlement('ORD', 'TXN'));
+    expect(caught.type).toBe('FORBIDDEN');
+    expect(caught.details).toEqual([REFUSED_ON_FIRST_ATTEMPT]);
+    expect(reads()).toBe(0);
+  });
+
+  it.each([
+    ['compensate', (a: Activities) => a.compensate('ORD', 'TXN', 'why')],
+    ['disputeObligation', (a: Activities) => a.disputeObligation('ORD', 'TXN', 'DSP', 'why')],
+  ] as const)(
+    '%s undeclared is not behind the wait: no mark, and only a state refusal asks',
+    async (_name, call) => {
+      const { activities, reads } = over(refused, obligation('HELD'), () => 2);
+      const caught = await failure(call(activities));
+      expect(caught.type).toBe('FORBIDDEN');
+      expect(caught.details ?? []).toEqual([]);
+      expect(reads()).toBe(0);
+    },
+  );
+
   describe.each([
     [
       'compensate',
       (a: ReturnType<typeof createActivities>, inDoubt?: boolean) =>
-        a.compensate('ORD', 'TXN', 'why', inDoubt),
+        a.compensate('ORD', 'TXN', 'why', inDoubt, FINAL_ANSWER_CONTRACT),
       { status: 'REFUNDED' },
       ['SETTLED', 'CANCELLED', 'FAILED'],
     ],
     [
       'disputeObligation',
       (a: ReturnType<typeof createActivities>, inDoubt?: boolean) =>
-        a.disputeObligation('ORD', 'TXN', 'DSP', 'why', inDoubt),
+        a.disputeObligation('ORD', 'TXN', 'DSP', 'why', inDoubt, FINAL_ANSWER_CONTRACT),
       { status: 'DISPUTED', disputeReason: 'why', disputeId: 'E' },
       ['SETTLED', 'REFUNDED', 'CANCELLED', 'FAILED'],
     ],

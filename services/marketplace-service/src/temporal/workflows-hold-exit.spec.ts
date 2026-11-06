@@ -12,7 +12,11 @@ import {
   type SagaStatus,
 } from './workflows';
 import type { OrderActivities } from './activities';
-import { doubtOutlivesKeyMs, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
+import {
+  FINAL_ANSWER_CONTRACT,
+  doubtOutlivesKeyMs,
+  REFUSED_ON_FIRST_ATTEMPT,
+} from './economic-refusal';
 
 /**
  * Review of #812: after one 5xx, a refusal that persists kept the saga waiting for
@@ -614,7 +618,13 @@ describe('a hold refused after a lost answer (#812)', () => {
       expect(result).toBe('FAILED');
       expect(s.state.status).toBe('FAILED');
       expect(s.sent.compensate).toEqual([
-        [INPUT.orderId, TXN, 'A hold arrived after the saga gave up on it', true],
+        [
+          INPUT.orderId,
+          TXN,
+          'A hold arrived after the saga gave up on it',
+          true,
+          FINAL_ANSWER_CONTRACT,
+        ],
       ]);
       expect(s.calls).not.toContain('markFundsHeld');
       expect(s.calls.lastIndexOf('createObligation')).toBeLessThan(s.calls.indexOf('markFailed'));

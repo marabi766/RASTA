@@ -25,6 +25,7 @@ import type {
 } from './activities';
 import {
   doubtOutlivesKeyMs,
+  FINAL_ANSWER_CONTRACT,
   OWNER_STATE_IS_FINAL,
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
@@ -348,7 +349,8 @@ export const HOLD_WAIT_PATCH = 'economic-hold-call-durable-wait-v1';
 /**
  * Owed work surviving every exit (FU-117). Asked only where a history without it
  * ended the run, or where a settlement has just gone unconfirmed, so each of those
- * histories replays its end and its doubt-free filing.
+ * histories replays its end and its doubt-free filing; and right before scheduling
+ * any call that may answer `ObligationFinal` (`finalAnswers`).
  */
 export const OWED_WORK_PATCH = 'saga-owed-work-durable-v1';
 
@@ -565,6 +567,15 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     return outstanding;
   };
 
+  /**
+   * Declares that this workflow reads `ObligationFinal`. Asked as the last thing before
+   * scheduling: the marker commits in the same task as the command, so no such answer
+   * exists for a workflow a build below protocol 6 could still pick up. Replaying a
+   * history without the marker, it declares nothing, and nothing compares the arguments.
+   */
+  const finalAnswers = (): typeof FINAL_ANSWER_CONTRACT | undefined =>
+    patched(OWED_WORK_PATCH) ? FINAL_ANSWER_CONTRACT : undefined;
+
   /** What is owed so far, a failed settlement included. */
   const owedSoFar = (): OutstandingWork | undefined => {
     if (settleFailed && !outstanding && patched(OWED_WORK_PATCH)) owe('settle');
@@ -711,15 +722,14 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     const disputeId = mirroredDispute;
     const economicDisputeId = mirroredEconomicDispute;
     const release = (): Promise<unknown> =>
-      economicDisputeId === undefined
-        ? resolveObligationDispute(orderId, transactionId, disputeId, resolution)
-        : resolveObligationDispute(
-            orderId,
-            transactionId,
-            disputeId,
-            resolution,
-            economicDisputeId,
-          );
+      resolveObligationDispute(
+        orderId,
+        transactionId,
+        disputeId,
+        resolution,
+        economicDisputeId,
+        finalAnswers(),
+      );
     let waited = false;
     try {
       await release();
@@ -807,7 +817,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * An economic call that ends the saga only on proof it changed nothing
    * (`outcomeUnknown`); on anything else it waits for confirmation. `later` is
    * what each round sends, for a call that may no longer be wanted by then. A
-   * call answered first time adds no command. `unconfirmed` stays set on the way
+   * call answered first time adds no command of its own. `unconfirmed` stays set on the way
    * out: the caller knows whether what came back was an answer about the call.
    */
   async function confirmedCall<T>(
@@ -847,7 +857,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * nothing goes on until economic-service answers it. An unconfirmed
    * authorisation the saga moved on from counts as doubt here too, so a code alone
    * does not end the saga on the way. `waited` tells the caller its order is old
-   * news. A call answered first time adds no command.
+   * news. A call answered first time adds no command of its own.
    */
   async function siblingCall<T>(
     carried: Omit<UnconfirmedSibling, 'rounds'>,
@@ -904,9 +914,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     const { answer, waited } = await siblingCall(
       { operation: 'disputeObligation', transactionId, disputeId, reason },
       (inDoubt) =>
-        inDoubt
-          ? disputeObligation(orderId, transactionId, disputeId, reason, true)
-          : disputeObligation(orderId, transactionId, disputeId, reason),
+        disputeObligation(orderId, transactionId, disputeId, reason, inDoubt, finalAnswers()),
     );
     if (isFinal(answer)) return { waited, final: answer };
     mirroredDispute = disputeId;
@@ -1175,7 +1183,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       if (transactionId) {
         const { answer } = await siblingCall<ObligationFinal | void>(
           { operation: 'compensate', transactionId },
-          () => compensate(orderId, transactionId, LATE_HOLD_REFUND_REASON, true),
+          () => compensate(orderId, transactionId, LATE_HOLD_REFUND_REASON, true, finalAnswers()),
         );
         if (isFinal(answer) && !leftNothingToRefund(answer.funds)) {
           await staysForReconciliation('compensate', answer, (now) => now.status === closed);
@@ -1294,14 +1302,12 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     // that answer on it can dispute or refund the obligation authorised or not,
     // and a dispute settled back brings the saga here again, under the same key.
     const send = (): Promise<AuthorisationResult> =>
-      owedSoFar()
-        ? authoriseSettlement(orderId, transactionId, true)
-        : authoriseSettlement(orderId, transactionId);
+      authoriseSettlement(orderId, transactionId, owedSoFar() !== undefined, finalAnswers());
     const askAgain = async (): Promise<AuthorisationResult | 'MOVED'> => {
       nudged = false;
       const now = await readOnce();
       if (now.status === 'RECEIPT_CONFIRMED' || now.status === 'SETTLING') {
-        return authoriseSettlement(orderId, transactionId, true);
+        return authoriseSettlement(orderId, transactionId, true, finalAnswers());
       }
       await askEconomic(orderId);
       return 'MOVED';
@@ -1571,10 +1577,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         if (transactionId) {
           const { answer } = await siblingCall<ObligationFinal | void>(
             { operation: 'compensate', transactionId },
-            (inDoubt) =>
-              inDoubt
-                ? compensate(orderId, transactionId, reason, true)
-                : compensate(orderId, transactionId, reason),
+            (inDoubt) => compensate(orderId, transactionId, reason, inDoubt, finalAnswers()),
           );
           if (isFinal(answer) && !leftNothingToRefund(answer.funds)) {
             await staysForReconciliation(

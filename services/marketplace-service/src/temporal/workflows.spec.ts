@@ -2020,12 +2020,12 @@ describe('the order saga', () => {
           expect(calls).toContain(after);
           // The same words, so the same idempotency key, on every round.
           const sameWords = economic.sent.map((args) =>
-            JSON.stringify(args.filter((arg) => arg !== true)),
+            JSON.stringify(args.filter((arg) => typeof arg !== 'boolean')),
           );
           expect(new Set(sameWords).size).toBe(1);
           // In doubt from the second scheduling on, never before it.
-          expect(economic.sent[0]?.at(-1)).not.toBe(true);
-          expect(economic.sent.at(-1)?.at(-1)).toBe(true);
+          expect(economic.sent[0]?.at(-2)).toBe(false);
+          expect(economic.sent.at(-1)?.at(-2)).toBe(true);
           const handle = seen as WorkflowHandle;
           const ids = await patchIds(handle);
           expect(ids).toContain(SIBLING_MARKER);
@@ -2109,7 +2109,7 @@ describe('the order saga', () => {
               await until(() => rounds.length > before, 'a round of it');
               await atRest(ctx.handle);
               expect(economic.sent.length).toBeGreaterThan(0);
-              expect(economic.sent[0]?.at(-1)).toBe(true);
+              expect(economic.sent[0]?.at(-2)).toBe(true);
             },
             { keepRunning: true, input: NO_RECHECK },
           );
@@ -2210,9 +2210,9 @@ describe('the order saga', () => {
         expect(calls.lastIndexOf('disputeObligation')).toBeLessThan(release);
         expect(release).toBeLessThan(calls.indexOf('compensate'));
         // What the filing answered is what the release names.
-        expect(released[0]?.at(-1)).toBe('E');
+        expect(released[0]?.[4]).toBe('E');
         // Answered, the filing's doubt is gone: the refund goes as a first send.
-        expect(refunded[0]).toHaveLength(3);
+        expect(refunded[0]?.[3]).toBe(false);
       });
 
       describe('the hold', () => {

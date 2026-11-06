@@ -1,3 +1,4 @@
+import { operatorDecisionSchema } from '../payment/dto';
 import { VersioningType, type INestApplication, type Type } from '@nestjs/common';
 import { MODULE_METADATA } from '@nestjs/common/constants';
 import { NestFactory } from '@nestjs/core';
@@ -27,6 +28,21 @@ describe('published security equals the guard decision (FU-075)', () => {
     document = publishOperationSecurity(enrichOpenApiDocument(built), app);
   });
   afterAll(() => app.close());
+
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(
+      JSON.stringify(
+        document.paths['/v1/payment-intents/{id}/reconciliation/requeue']!.post!.requestBody,
+      ),
+    );
+    expect(body.content['application/json'].schema.properties.reason).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = operatorDecisionSchema.shape.reason;
+    expect(field.safeParse(' ' + 'a'.repeat(500) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
+  });
 
   it('documents bearer, internal token, both or none exactly where the guard admits them', () => {
     const expected = new Map<string, string[]>();

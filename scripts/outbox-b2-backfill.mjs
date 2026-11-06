@@ -132,12 +132,12 @@ import {
   verificationMismatches,
 } from './outbox-b2-lib.mjs';
 import { prismaPort } from './outbox-b2-prisma-port.mjs';
-import { createRequire } from 'node:module';
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { join } from 'node:path';
 import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
 // The same owner-credential rule every service entry point runs (D-045).
-const { assertNoMigratorCredentials } = createRequire(import.meta.url)(
+const { assertNoMigratorCredentials } = loadWorkspaceModule(
   join(import.meta.dirname, '..', 'packages', 'config', 'dist', 'index.js'),
 );
 
