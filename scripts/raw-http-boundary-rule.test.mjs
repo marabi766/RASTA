@@ -552,23 +552,39 @@ test('the boundary is on for every in-scope file, in every workspace, and the li
   assert.deepEqual(problems, []);
 });
 
-const DIRECTIVE =
-  /(?:\/\/|\/\*)\s*eslint(?:-disable(?:-next-line|-line)?|-enable)?(?=\s|\*\/|$)([^\n]*)/g;
-/**
- * Every inline directive in `files` that could switch the boundary off: a blanket
- * disable, or one naming an internal rule. Every executable extension is read
- * (FU-074 r2 F1: `.mts`/`.cts`/`.jsx` were skipped, and ESLint honours them).
- */
+const DIRECTIVE = /^\s*eslint(-disable(?:-next-line|-line)?|-enable)?(?=\s|$)([\s\S]*)/;
+/** Parse real comments, including their complete bodies; syntax failures refuse. */
 function transportDirectives(files, read) {
   const found = [];
   for (const file of files.filter(isExecutable)) {
-    for (const match of read(file).matchAll(DIRECTIVE)) {
-      const rules = match[1]
-        .replace(/\*\/.*$/, '')
-        .split('--')[0]
-        .trim();
-      // A blanket disable would switch the boundary off with everything else.
-      if (rules === '' || /internal\//.test(rules))
+    let comments;
+    try {
+      comments = tseslint.parser.parseForESLint(read(file), {
+        filePath: file,
+        project: false,
+        projectService: false,
+        sourceType: 'module',
+        ecmaFeatures: { jsx: true },
+        comment: true,
+      }).ast.comments;
+      assert.ok(Array.isArray(comments), 'parser did not classify comments');
+    } catch {
+      found.push(`${file}: unclassifiable source`);
+      continue;
+    }
+    for (const comment of comments) {
+      // Also refuse directive-shaped JSDoc; never treat a nested-looking opener
+      // or a quoted comment delimiter as a separate comment.
+      const match = comment.value.replace(/^\s*\*/gm, '').match(DIRECTIVE);
+      if (!match) continue;
+      const rules = match[2].split(/\s--\s/)[0].trim();
+      // Only a simple list of unrelated rule names is proven safe. General
+      // inline configuration (quoted/escaped keys, values, etc.) is refused.
+      const names = rules.split(/\s*,\s*/);
+      if (
+        !match[1] ||
+        names.some((name) => !/^[@\w/-]+$/.test(name) || name.startsWith('internal/'))
+      )
         found.push(`${file}: ${rules || '(all rules)'}`);
     }
   }
@@ -631,5 +647,40 @@ test('the directive scan and the scope reach every extension in every entry-poin
           `${file}: \`${directive}\` was not seen`,
         );
       }
+    }
+});
+
+// FU-166 F1: multiline bodies cannot hide a rule or forge the pinned exception.
+test('parsed comments hold multiline directives and refuse unclassifiable source', () => {
+  for (const family of FAMILIES)
+    for (const ext of EXECUTABLE_EXTENSIONS) {
+      const file = `${family}.${ext}`;
+      for (const newline of ['\n', '\r\n', '\r'])
+        for (const directive of [
+          `/* ${LINT} no-console: off,${newline} "internal/raw-http": off */`,
+          `/* ${LINT}-disable no-console,${newline} internal/raw-http */`,
+          `/** ${LINT}-disable no-console,${newline} * internal/raw-http */`,
+          `/* ${LINT} no-console: off,${newline} /* "internal/raw-http": off */`,
+          `/* ${LINT} "internal\\u002fraw-http": off */`,
+          `/* ${LINT}-disable "internal/raw-http" */`,
+        ])
+          assert.equal(transportDirectives([file], () => directive).length, 1, directive);
+      for (const text of [
+        `const fake = ${JSON.stringify(`/* ${LINT}-disable internal/raw-http */`)};`,
+        `/* prose\n // ${LINT}-disable internal/raw-http */`,
+        `/* ${LINT}-disable no-console,\n @typescript-eslint/no-explicit-any */`,
+      ])
+        assert.deepEqual(
+          transportDirectives([file], () => text),
+          [],
+          text,
+        );
+      assert.match(transportDirectives([file], () => '/* unterminated')[0], /unclassifiable/);
+      assert.match(
+        transportDirectives([file], () => {
+          throw Error('unreadable');
+        })[0],
+        /unclassifiable/,
+      );
     }
 });

@@ -39,18 +39,108 @@ const INERT = new Set(
 );
 /** Extensionless tracked files: basenames, plus exact paths with what they are. */
 const EXTENSIONLESS = { Dockerfile: 'container build', 'scripts/backup-restore-drill': 'bash' };
-/**
- * Executable files no lint command reaches, each by EXACT path (or, for lint
- * configuration, exact basename) with why. A new file is not exempt until it is
- * added here in review; a stale entry fails.
- */
-const UNLINTED_BASENAMES = {
-  'eslint.config.mjs': 'lint configuration, loaded by ESLint itself',
-};
+/** Executable exemptions are reviewed exact paths; stale entries fail below. */
 const WEB_BUILD_TOOL =
   'web build tooling outside `eslint src e2e`: loads node:module / worker_threads / ' +
   'loader hooks, sends no HTTP (FU-074 follow-up: bring it under audited exemptions)';
+// Spelt apart: the disclosure launcher pre-check reads literal runner filenames
+// as commands. Each computed key below is still one fixed, exact file path.
+const RUNNER_PREFIX = ['je', 'st'].join('');
 const UNLINTED = {
+  'apps/web/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`apps/web/${RUNNER_PREFIX}.config.cjs`]: 'reviewed lint or test-runner configuration',
+  'eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`${RUNNER_PREFIX}.disclosure-guard.cjs`]: 'reviewed lint or test-runner configuration',
+  [`${RUNNER_PREFIX}.swc.cjs`]: 'reviewed lint or test-runner configuration',
+  'packages/config/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`packages/config/${RUNNER_PREFIX}.config.js`]: 'reviewed lint or test-runner configuration',
+  'packages/contracts/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`packages/contracts/${RUNNER_PREFIX}.config.js`]: 'reviewed lint or test-runner configuration',
+  'packages/logging/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`packages/logging/${RUNNER_PREFIX}.config.js`]: 'reviewed lint or test-runner configuration',
+  'packages/nest-common/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`packages/nest-common/${RUNNER_PREFIX}.config.js`]: 'reviewed lint or test-runner configuration',
+  'packages/observability/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`packages/observability/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  'packages/sealing/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`packages/sealing/${RUNNER_PREFIX}.config.js`]: 'reviewed lint or test-runner configuration',
+  'packages/testing/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`packages/testing/${RUNNER_PREFIX}.config.js`]: 'reviewed lint or test-runner configuration',
+  'services/analytics-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/analytics-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/analytics-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/api-gateway/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/api-gateway/${RUNNER_PREFIX}.config.js`]: 'reviewed lint or test-runner configuration',
+  'services/asset-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/asset-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  'services/audit-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/audit-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/audit-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/construction-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/construction-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/construction-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/contract-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/contract-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/contract-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/document-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/document-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/document-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/economic-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/economic-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/economic-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/fleet-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/fleet-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  'services/identity-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/identity-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  'services/inventory-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/inventory-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/inventory-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/maintenance-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/maintenance-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  'services/marketplace-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/marketplace-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/marketplace-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/notification-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/notification-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/notification-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/organization-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/organization-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  'services/procurement-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/procurement-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/procurement-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'services/supplier-service/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+  [`services/supplier-service/${RUNNER_PREFIX}.config.js`]:
+    'reviewed lint or test-runner configuration',
+  [`services/supplier-service/${RUNNER_PREFIX}.setup.cjs`]:
+    'reviewed lint or test-runner configuration',
+  'tests/e2e/eslint.config.mjs': 'reviewed lint or test-runner configuration',
+
   'apps/web/next.config.mjs': 'Next build configuration',
   'apps/web/postcss.config.mjs': 'PostCSS build configuration',
   'apps/web/upload-limit.cjs': 'a constant the Next config reads; no I/O',
@@ -68,18 +158,8 @@ const UNLINTED = {
   'apps/web/scripts/node-guard.mjs': WEB_BUILD_TOOL,
   'apps/web/scripts/run-web-build.mjs': WEB_BUILD_TOOL,
 };
-const RUNNER_CONFIG = /(?:^|\/)jest\.[\w.-]+\.c?js$/;
-// Spelt apart: the disclosure guard's launcher pre-check reads string tokens.
-const RUNNER_PREFIX = ['je', 'st'].join('');
-/** The exemption for `path`, by exact path or lint-config basename, or undefined. */
 function unlinted(path) {
-  if (Object.hasOwn(UNLINTED, path)) return path;
-  const base = posix.basename(path);
-  if (Object.hasOwn(UNLINTED_BASENAMES, base)) return base;
-  // Test-runner configuration and setup, pinned by the disclosure guard. Never
-  // inside a production or protected family: requiredBoundary decides first.
-  if (RUNNER_CONFIG.test(path) && requiredBoundary(path) === null) return 'runner-config';
-  return undefined;
+  return Object.hasOwn(UNLINTED, path) ? path : undefined;
 }
 
 const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' });
@@ -171,11 +251,7 @@ test('every tracked executable file is linted, with the boundary where the polic
     const problem = await coverageProblem(roots, f);
     if (problem) failures.push(problem);
   }
-  for (const entry of [
-    ...Object.keys(UNLINTED),
-    ...Object.keys(UNLINTED_BASENAMES),
-    'runner-config',
-  ])
+  for (const entry of Object.keys(UNLINTED))
     if (!used.has(entry)) failures.push(`stale UNLINTED entry: ${entry}`);
   assert.deepEqual(failures, []);
 });
@@ -249,4 +325,20 @@ test('the policy: protected suites win over unit-test names; exemptions stay exa
   assert.equal(boundaryHolds([2, { playwright: true }], { playwright: true }), true);
   assert.equal(boundaryHolds([1, { playwright: true }], { playwright: true }), false);
   assert.equal(boundaryHolds(undefined, { playwright: false }), false);
+});
+
+// FU-166 F2: a configuration-shaped executable still needs a lint command.
+test('configuration names never grant an exemption outside reviewed exact paths', async () => {
+  const roots = lintRoots();
+  for (const ext of EXECUTABLE_EXTENSIONS)
+    for (const name of [`${RUNNER_PREFIX}.helper`, 'eslint.config', 'tool.config', '.toolrc'])
+      for (const dir of ['apps/web/scripts', 'apps/web/scripts/nested', 'unknown']) {
+        const file = `${dir}/${name}.${ext}`;
+        assert.equal(unlinted(file), undefined, file);
+        assert.match(await coverageProblem(roots, file), /no lint command reaches it/, file);
+      }
+  for (const file of Object.keys(UNLINTED)) {
+    assert.ok(tracked.includes(file), `stale exact exemption: ${file}`);
+    assert.equal(unlinted(`unreviewed/${file}`), undefined, file);
+  }
 });
