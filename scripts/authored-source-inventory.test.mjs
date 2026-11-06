@@ -1190,7 +1190,6 @@ const OTHER_CAPABILITY = [
   'scripts/check-grafana-dashboard-lib.mjs',
   'scripts/check-tenant-index-order-lib.mjs',
   'scripts/check-test-phases.mjs',
-  'scripts/ci-integration-split-lib.mjs',
   'scripts/ci-trivy-db-lib.mjs',
   'scripts/ci-trivy-db.test.mjs',
   'scripts/container-scope.mjs',
@@ -1200,19 +1199,15 @@ const OTHER_CAPABILITY = [
   'scripts/db-pool-config.pg.test.mjs',
   'scripts/db-session-utc.pg.test.mjs',
   'scripts/disclosure-guard-wiring.test.mjs',
-  'scripts/exchange-deadline-rule.test.mjs',
-  'scripts/internal-token-source-workspace.test.mjs',
   'scripts/kafka-outbox-tables.mjs',
   'scripts/lint-scripts-registration.test.mjs',
   'scripts/outbox-purge-turbo-env.test.mjs',
-  'scripts/outbox-test-clock.test.mjs',
   'scripts/replay-dlq.broker.test.mjs',
   'scripts/service-boot-guard.test.mjs',
   'scripts/service-dev-loader.test.mjs',
   'scripts/service-env-turbo.test.mjs',
   'scripts/service-telemetry-order.test.mjs',
   'scripts/supplier-privilege-split.pg.test.mjs',
-  'scripts/turbo-env-lib.mjs',
   'scripts/verify-audit-correction-command-lib.test.mjs',
   'scripts/verify-audit-correction-command-migration.mjs',
   'scripts/verify-migration-reversible-lib.test.mjs',
@@ -1238,6 +1233,7 @@ const LOADS_BY_BUILT_PATH = [
   'scripts/check-kafka-topic-limits.mjs',
   'scripts/create-topics.broker.test.mjs',
   'scripts/dead-letter-escape.broker.test.mjs',
+  'scripts/internal-token-source-workspace.test.mjs', // :617,:888 import(path.join(ROOT, 'eslint.config.mjs'))
   'scripts/kafka-acl-generate.mjs',
   'scripts/kafka-topic-limits-lib.test.mjs',
   'scripts/outbox-b2-backfill.mjs',
@@ -1260,10 +1256,20 @@ const PASSES_GLOBALS_ON = [
   'packages/config/src/command-failure.js',
   'packages/nest-common/src/lifecycle/graceful-shutdown.ts',
   'packages/testing/src/disclosure-guard.ts',
+  'scripts/exchange-deadline-rule.test.mjs', // :2054 `Math.constructor(...)` on a builtin, as test data
   'scripts/raw-http-boundary-rule.test.mjs',
   'scripts/test-stall-watchdog-worker.mjs',
   'scripts/test-stall-watchdog.mjs',
   'services/document-service/test/outbox-durable-claim.int-spec.ts',
+];
+// Must list DIRECTORIES, which authoredFiles() (git's file list) cannot answer: pnpm workspace globs
+// (`apps/*`, `services/*`, ...) name directories, and the reader has to see one with no manifest,
+// a symlink or a foreign manifest to refuse it (an inventory of files would not show it). Each
+// lists only the one level below a declared workspace group (never `src/generated`); the reader
+// also runs on fixture roots outside the repository, where git has nothing to ask. Exact paths, no globs.
+const WORKSPACE_DIRECTORY_LISTING = [
+  'scripts/ci-integration-split.test.mjs', // :276 independent oracle: group directories that hold a package.json
+  'scripts/workspace-roots-lib.mjs', // :72 expands a `*` segment of pnpm-workspace.yaml (FU-028, #682)
 ];
 const LISTING_ALLOWED = new Set([
   ...NO_GENERATED_TREE,
@@ -1271,6 +1277,7 @@ const LISTING_ALLOWED = new Set([
   ...OTHER_CAPABILITY,
   ...LOADS_BY_BUILT_PATH,
   ...PASSES_GLOBALS_ON,
+  ...WORKSPACE_DIRECTORY_LISTING,
 ]);
 
 const trackedSources = () =>
@@ -1306,7 +1313,8 @@ test('a directory-listing capability outside the inventory is refused unless the
       COVERS_GENERATED_ON_PURPOSE.length +
       OTHER_CAPABILITY.length +
       LOADS_BY_BUILT_PATH.length +
-      PASSES_GLOBALS_ON.length,
+      PASSES_GLOBALS_ON.length +
+      WORKSPACE_DIRECTORY_LISTING.length,
     'a file is listed twice',
   );
   // The walker #741 delegates to (scripts/testing-dev-only-source.mjs) is seen like any other.
@@ -1336,7 +1344,7 @@ const CONVERTED = {
   'scripts/db-pool-config.pg.test.mjs': 2,
   'scripts/service-boot-guard.test.mjs': 2,
   'scripts/check-test-phases.mjs': 2,
-  'scripts/outbox-test-clock.test.mjs': 2,
+  'scripts/outbox-test-clock.test.mjs': 0, // members from workspaceDirectories(), files via authoredFiles()
   'scripts/verify-migration-reversible-lib.test.mjs': 8,
   'packages/contracts/src/common/legacy-refusal-boundary.spec.ts': 3,
   'packages/contracts/src/common/zod-compat-patch.spec.ts': 2,

@@ -172,6 +172,15 @@ describe(`${MIGRATION} after a cross-tenant settlement`, () => {
       mustRun(['migrate', 'deploy', '--schema', 'prisma/schema.prisma'], { url });
       const db = new PrismaClient({ datasources: { db: { url } } });
       clients.push(db);
+      // This suite's rows are bare, journal-less settlements: what is under test is
+      // one column. In this scratch schema only, the proof of a settlement's creation
+      // (FU-097, `settlement-creation-proof.int-spec.ts`) steps aside.
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this scratch schema.
+      await db.$executeRawUnsafe('DROP TRIGGER "trg_settlement_creation_proven" ON "settlement"');
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await db.$executeRawUnsafe(
+        'ALTER TABLE "settlement" DROP CONSTRAINT "settlement_journal_id_fkey"',
+      );
       return { url, db };
     }
 

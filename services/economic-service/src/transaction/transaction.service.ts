@@ -575,7 +575,20 @@ export class TransactionService {
         const [locked] = await this.walletRepository.lock(tx, [wallet.id]);
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
-        const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
+        const hold = await this.walletRepository.findActiveHold(tx, {
+          walletId: wallet.id,
+          organizationId: transaction.organizationId,
+          reference: transactionId,
+          referenceType: 'TRANSACTION',
+        });
+        // The payer's own hold exists and is not on this wallet: REFUNDED would
+        // strand its escrow, so nothing moves until a person has looked.
+        if (transaction.fundsHeld && !hold) {
+          throw RastaError.businessRule('The held funds are not on this transaction’s wallet', {
+            transactionId,
+            walletId: wallet.id,
+          });
+        }
 
         // The wallet lock was the last lock this refund takes: ask the
         // hierarchy again, so a union administrator's authority is the one
@@ -597,6 +610,7 @@ export class TransactionService {
               this.wallets.refundHold(tx, {
                 wallet: locked,
                 holdId: hold.id,
+                referenceType: 'TRANSACTION',
                 transactionId,
                 note: reason,
                 resolvedBy: actor,

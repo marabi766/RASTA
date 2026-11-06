@@ -1089,10 +1089,11 @@ export class PaymentService {
     reason: string,
   ): Promise<RefundResultView> {
     if (wallet.status !== 'ACTIVE') throw refundWalletNotActive(row.id, wallet);
-    const hold = await this.refundHoldOf(tx, wallet.id, row.id);
+    const hold = await this.refundHoldOf(tx, wallet, row.id);
     const returned = await this.wallets.refundHold(tx, {
       wallet,
       holdId: hold.id,
+      referenceType: REFUND_HOLD_REFERENCE_TYPE,
       transactionId: topUpTransactionOf(row),
       note: `Returned for the refund of payment ${row.id}`,
       resolvedBy: actor,
@@ -1190,9 +1191,14 @@ export class PaymentService {
   }
 
   /** The active hold a refund of this intent placed. */
-  private async refundHoldOf(tx: ExtendedPrismaClient, walletId: string, intentId: string) {
-    const hold = await this.walletRepository.findActiveHold(tx, walletId, intentId);
-    if (!hold || hold.referenceType !== REFUND_HOLD_REFERENCE_TYPE) {
+  private async refundHoldOf(tx: ExtendedPrismaClient, wallet: LockedWallet, intentId: string) {
+    const hold = await this.walletRepository.findActiveHold(tx, {
+      walletId: wallet.id,
+      organizationId: wallet.organizationId,
+      reference: intentId,
+      referenceType: REFUND_HOLD_REFERENCE_TYPE,
+    });
+    if (!hold) {
       throw RastaError.internal(`The refund hold of payment intent ${intentId} is missing`);
     }
     return hold;
@@ -1253,13 +1259,19 @@ export class PaymentService {
     actor: string,
     because: 'DECLINED' | 'NOT_REACHED' = 'DECLINED',
   ): Promise<void> {
-    const hold = await this.walletRepository.findActiveHold(tx, wallet.id, intent.id);
+    const hold = await this.walletRepository.findActiveHold(tx, {
+      walletId: wallet.id,
+      organizationId: wallet.organizationId,
+      reference: intent.id,
+      referenceType: REFUND_HOLD_REFERENCE_TYPE,
+    });
     let returned = false;
-    if (hold && hold.referenceType === REFUND_HOLD_REFERENCE_TYPE) {
+    if (hold) {
       returned =
         (await this.wallets.refundHold(tx, {
           wallet,
           holdId: hold.id,
+          referenceType: REFUND_HOLD_REFERENCE_TYPE,
           transactionId: topUpTransactionOf(intent),
           note:
             because === 'DECLINED'
