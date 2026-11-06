@@ -99,7 +99,7 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
   economic-service در دسترس نیست)، اول همان را رفع کن؛ استقرار منتظر می‌ماند. Workflow را برای گذشتن از Gate هرگز
   `terminate` یا `reset` نکن: وجه در Hold می‌ماند و مسیر جبرانی ندارد ([`docs/24`](../24-open-questions.md) Q-118).
 - **Protocol ناسازگار یا نشانهٔ ناشناس (کد ۱).** `requires saga protocol N` یعنی Image هدف Protocol لازم را اعلام نکرده است:
-  Image سازگار بیاور یا اصلاحی روبه‌جلو منتشر کن. `unknown compatibility marker`، `unknown continuation state` یا `invalid start input`
+  Image سازگار بیاور یا اصلاحی روبه‌جلو منتشر کن. `unknown compatibility marker`، `unknown continuation state`، `invalid start input`، `unknown activity result`، `unreadable activity result` یا `an activity result without its scheduling`
   یعنی این Gate آن تاریخچه را نمی‌شناسد: Gate را از جدیدترین انتشار اجرا کن. Manifest را برای گذشتن از Gate هرگز دستی تغییر نده.
 - **بررسی ممکن نشد (کد ۱).** دسترسی را درست کن (CLI، نشانی، TLS، Namespace) و گام ۳ را تکرار کن. راه «با این حال مستقر کن»
   نیست و یادداشت استثنا جای Gate را نمی‌گیرد.
@@ -274,8 +274,9 @@ with the funds still held. Terminating the saga belongs to that recorded decisio
 never to silencing the alert or passing the gate. A waiting saga does not block the
 gate, but its call in flight is a pending activity: with workers stopped it stays
 pending, so follow the gate's pending-activity case above. One rollback edge: a
-release whose last attempt failed just as workers stopped has no marker yet, so a
-protocol-2 target passes the gate and then ends that saga as before this wait.
+release an older build scheduled, whose last attempt failed just as workers stopped, has
+no marker yet, so a protocol-2 target passes the gate and then ends that saga as before
+this wait. One a protocol-6 build scheduled carries the protocol-6 marker from the start.
 
 ## Unconfirmed economic call (FU-103)
 
@@ -325,10 +326,10 @@ Each round of an authorisation reads the order first, and a party's signal start
 early; a filing's or refund's round does neither, and only the signal above starts one.
 Once a dispute is raised or decided the authorisation stops being sent, but the saga stays
 in this phase until economic-service answers a read of the obligation; only then
-does it file the dispute or refund. One rollback edge, as for the release: a call
-whose last attempt failed just as workers stopped has no marker yet, so a target one protocol
-below it (3 for an authorisation, 4 for a filing or refund) passes the gate and ends
-that saga as before this wait.
+does it file the dispute or refund. One rollback edge, as for the release: a call an older
+build scheduled, whose last attempt failed just as workers stopped, has no marker yet, so a
+target one protocol below it (3 for an authorisation, 4 for a filing or refund) passes the
+gate and ends that saga as before this wait.
 
 Protocol 5 is forward-only like the others, with its own marker: a protocol-4 history
 carrying `economic-call-durable-wait-v1` from an authorisation may have ended at a
@@ -365,10 +366,25 @@ next window records one. Only a refused first read, with nothing yet sent, still
 the saga.
 
 Protocol 6 is forward-only like the others. Every exit above replays its old end from a
-history without `saga-owed-work-durable-v1` (fixtures `pre-fu117r2-*`). One rollback edge:
-a call answered with a final status just as workers stopped has no marker yet, so a
-protocol-5 target passes the gate and reads that answer as success. Before rolling back
-below 6, read the last completed activity of any saga at `CANCELLING`.
+history without `saga-owed-work-durable-v1` (fixtures `pre-fu117r2-*`). A refund, filing,
+authorisation or release can answer with a final status, which a workflow below protocol 6
+would read as the call's own effect (`markCancelled` on a paid-out order), so nothing
+reaches such a workflow, by two fences (PR-796 r2 F5):
+
+- A live workflow asks the marker right before scheduling one of these calls and declares
+  that it reads the answer (`FINAL_ANSWER_CONTRACT`), so the marker commits with the
+  command. Any run that has sent one of them on this build needs protocol 6. A call that
+  declared nothing gets the refusal it got before this release: the activity's original
+  refusal, or for an authorisation in doubt the marked `OBLIGATION_ALREADY_FINAL`.
+- The gate also reads every activity result recorded in each saga's current run: a final
+  answer requires protocol 6 with or without a marker. For those four calls, a result in
+  no known shape blocks every target. An activity it does not list blocks every target too,
+  and any other call's result may not carry a final answer; those calls' results did not
+  change, so the gate does not pin their shapes.
+
+The requirement is per run. A run continued past an answer it has dealt with needs protocol
+6 only if it carries that work (`outstandingWork`); otherwise it holds no such answer, and
+on an older build it sends the older calls and gets the older refusals.
 
 ## Continued-as-new visibility gap (FU-046)
 

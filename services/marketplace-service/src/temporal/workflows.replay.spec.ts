@@ -99,6 +99,10 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     'fu117r2-filing-final-then-cancel',
     'fu117r2-settled-reconciliation',
     'fu117r2-settle-doubt-filing',
+    // #796 r2 F5: what this build records. The marker commits with the call that may
+    // answer final (above, it followed the answer, as no history in service does).
+    'fu117r3-declared-filing-release-refund',
+    'fu117r3-declared-authorise-final',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(

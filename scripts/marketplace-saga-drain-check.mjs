@@ -16,7 +16,8 @@
  *   4. all orderSaga runs closed as ContinuedAsNew since the recorded stop
  *      time are enumerated (count/list/count); their CURRENT runs are described
  *      by workflow id alone, and any unlisted running successor blocks;
- *   5. inspected histories are compatible with the declared target build.
+ *   5. inspected histories, their markers and their recorded activity results, are
+ *      compatible with the declared target build.
  * This is an observation after workers stop, not proof that workflows have
  * completed or that funds cannot move when workers resume.
  * Exit 1: a poller or a pending activity was found, or anything could not
@@ -224,6 +225,61 @@ function resumeProtocol(resume) {
   }
   return required;
 }
+// Every activity the saga schedules, and what its recorded result requires of the build
+// that reads it. An old workflow takes any answer of these calls as the call's own effect,
+// so the result itself is evidence, before any marker: a `compensate` that answered "paid
+// out" would cancel the order under it (PR-796 r2 F5). For those calls, a result in none
+// of the shapes listed could mean anything and refuses every target, as does any result of
+// a call not listed: the test suite scans `createActivities`, so a new activity fails CI
+// until it is listed. The other calls' results did not change, and their shapes are not
+// pinned: a change to one needs its own entry and protocol here.
+const FINAL_ANSWER_PROTOCOL = PATCH_PROTOCOL.get('saga-owed-work-durable-v1');
+const isFinalAnswer = (value) =>
+  isRecord(value) &&
+  value.final === true &&
+  typeof value.status === 'string' &&
+  typeof value.funds === 'string' &&
+  Object.keys(value).length === 3;
+const isDisputedAnswer = (value) =>
+  isRecord(value) &&
+  value.disputed === true &&
+  typeof value.reason === 'string' &&
+  Object.keys(value).every((field) => ['disputed', 'reason', 'economicDisputeId'].includes(field));
+// The four calls that may answer `ObligationFinal`: true for their answers before it.
+const FINAL_ANSWER_CALLS = new Map([
+  ['compensate', (value) => value === undefined],
+  ['resolveObligationDispute', (value) => value === undefined],
+  [
+    'disputeObligation',
+    (value) => value === undefined || value === null || typeof value === 'string',
+  ],
+  ['authoriseSettlement', (value) => value === undefined || isDisputedAnswer(value)],
+]);
+// None of these has ever given a final answer, and one that does is refused.
+const OTHER_CALLS = new Set([
+  'createObligation',
+  'findObligation',
+  'readOrder',
+  'markFundsHeld',
+  'markFailed',
+  'markSettling',
+  'settle',
+  'markObligationDisputed',
+  'markSettlementFailed',
+  'markCompleted',
+  'noteReleaseUnconfirmed',
+  'noteEconomicCallUnconfirmed',
+  'markCancelled',
+  'recordReminder',
+]);
+function resultProtocol(activity, value) {
+  const earlier = FINAL_ANSWER_CALLS.get(activity);
+  if (earlier?.(value)) return 0;
+  if (earlier && isFinalAnswer(value)) return FINAL_ANSWER_PROTOCOL;
+  if (OTHER_CALLS.has(activity) && !(isRecord(value) && Object.hasOwn(value, 'final'))) return 0;
+  throw new Unverifiable('workflow history: unknown activity result');
+}
+
 function jsonPayload(payload) {
   try {
     if (payload?.metadata?.encoding !== 'anNvbi9wbGFpbg==' || typeof payload.data !== 'string') {
@@ -235,6 +291,40 @@ function jsonPayload(payload) {
   } catch {
     throw new Unverifiable('workflow history: compatibility payload cannot be read');
   }
+}
+
+/** What an activity returned; nothing for a void one, which the SDK records as `binary/null`. */
+function resultOf(completed) {
+  const payloads = completed?.result?.payloads;
+  if (!Array.isArray(payloads) || payloads.length !== 1) {
+    throw new Unverifiable('workflow history: unreadable activity result');
+  }
+  const [payload] = payloads;
+  if (payload?.metadata?.encoding === 'YmluYXJ5L251bGw=' && !payload.data) return undefined;
+  return jsonPayload(payload);
+}
+
+function activityResultProtocol(events) {
+  const scheduled = new Map();
+  let required = 0;
+  for (const event of events) {
+    const name = event.activityTaskScheduledEventAttributes?.activityType?.name;
+    if (event.eventType === 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED' && typeof name === 'string') {
+      scheduled.set(event.eventId, name);
+    }
+    if (
+      event.eventType !== 'EVENT_TYPE_ACTIVITY_TASK_COMPLETED' &&
+      !Object.hasOwn(event, 'activityTaskCompletedEventAttributes')
+    )
+      continue;
+    const completed = event.activityTaskCompletedEventAttributes;
+    const activity = scheduled.get(completed?.scheduledEventId);
+    if (event.eventType !== 'EVENT_TYPE_ACTIVITY_TASK_COMPLETED' || activity === undefined) {
+      throw new Unverifiable('workflow history: an activity result without its scheduling');
+    }
+    required = Math.max(required, resultProtocol(activity, resultOf(completed)));
+  }
+  return required;
 }
 
 function requiredProtocol(history, historyLength, taskQueue) {
@@ -284,7 +374,7 @@ function requiredProtocol(history, historyLength, taskQueue) {
     }
     required = Math.max(required, protocol);
   }
-  return required;
+  return Math.max(required, activityResultProtocol(events));
 }
 
 function check() {

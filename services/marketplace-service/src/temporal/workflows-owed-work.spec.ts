@@ -11,7 +11,7 @@ import {
   type SagaStatus,
 } from './workflows';
 import { createActivities, type OrderActivities } from './activities';
-import { REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
+import { FINAL_ANSWER_CONTRACT, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
 import type { EconomicClient } from '../economic/economic.client';
 import type { OrderService } from '../order/order.service';
 
@@ -546,7 +546,7 @@ describe('work the saga owes (#796 r1)', () => {
     it('a settlement that never failed sends the authorisation as new', async () => {
       const s = saga(receipt);
       await expect(drive(s, (handle) => handle.result())).resolves.toBe('COMPLETED');
-      expect(s.sent.authoriseSettlement?.[0]?.[2]).toBeUndefined();
+      expect(s.sent.authoriseSettlement?.[0]?.[2]).toBe(false);
       expect(s.rounds).toEqual([]);
     });
 
@@ -1060,6 +1060,118 @@ describe('work the saga owes (#796 r1)', () => {
       );
       expect(result).toBe('CANCELLED');
       expect(s.calls).not.toContain('compensate');
+    });
+  });
+
+  // Review of #796 r2, F5: a final answer never reaches a history a build below protocol
+  // 6 could still pick up, whenever the workers stop after it.
+  describe('F5: the marker commits with the call that may answer final', () => {
+    type History = Awaited<ReturnType<WorkflowHandle['fetchHistory']>>;
+    const scheduledIn = (history: History, activity: string) =>
+      (history.events ?? []).filter(
+        (event) => event.activityTaskScheduledEventAttributes?.activityType?.name === activity,
+      );
+    /** The event of this marker: not any marker, the saga records earlier ones. */
+    const owedMarker = (history: History) =>
+      (history.events ?? []).find((event) => {
+        const data =
+          event.markerRecordedEventAttributes?.details?.['patch-data']?.payloads?.[0]?.data;
+        return data && Buffer.from(data).toString().includes('saga-owed-work-durable-v1');
+      });
+    const declaredBefore = (s: Saga, history: History, activity: string) => {
+      const sent = s.sent[activity] ?? [];
+      expect(sent.length).toBeGreaterThan(0);
+      for (const args of sent) expect(args.at(-1)).toBe(FINAL_ANSWER_CONTRACT);
+      expect(markersOf(history)).toContain('saga-owed-work-durable-v1');
+      expect(Number(owedMarker(history)?.eventId)).toBeLessThan(
+        Number(scheduledIn(history, activity)[0]?.eventId),
+      );
+    };
+
+    it('compensate, on its first call, in the task that schedules it', async () => {
+      const s = saga(cancelling());
+      const history = await drive(s, async (handle) => {
+        await handle.result();
+        return handle.fetchHistory();
+      });
+      declaredBefore(s, history, 'compensate');
+      // Not merely earlier: a task's commands commit together, or not at all.
+      expect(
+        scheduledIn(history, 'compensate')[0]?.activityTaskScheduledEventAttributes
+          ?.workflowTaskCompletedEventId,
+      ).toEqual(owedMarker(history)?.markerRecordedEventAttributes?.workflowTaskCompletedEventId);
+    });
+
+    it('authoriseSettlement, in doubt or not', async () => {
+      const s = saga(receipt);
+      const history = await drive(s, async (handle) => {
+        await handle.result();
+        return handle.fetchHistory();
+      });
+      declaredBefore(s, history, 'authoriseSettlement');
+      expect(s.sent.authoriseSettlement?.[0]?.[2]).toBe(false);
+    });
+
+    it('the filing and the release, with and without an identity', async () => {
+      for (const identity of ['ECON_1', null]) {
+        const s = saga(disputed, () => ({ disputeObligation: () => identity }));
+        const history = await drive(s, async (handle) => {
+          await eventually(() => s.calls.includes('disputeObligation'), 'the filing');
+          await atRest(handle);
+          s.state.status = 'CANCELLING';
+          s.state.cancellationReason = 'decided for the buyer';
+          await handle.signal('disputeResolved', 'REFUND');
+          await handle.result();
+          return handle.fetchHistory();
+        });
+        declaredBefore(s, history, 'disputeObligation');
+        declaredBefore(s, history, 'resolveObligationDispute');
+        declaredBefore(s, history, 'compensate');
+        // No identity from the filing: the release names none, and still declares.
+        expect(s.sent.resolveObligationDispute?.[0]?.[4]).toBe(identity ?? undefined);
+      }
+    });
+
+    it('an authorisation in doubt goes on declaring, each round', async () => {
+      let answered = false;
+      const s = saga(receipt, () => ({
+        authoriseSettlement: () => {
+          if (!answered) throw down();
+          return undefined;
+        },
+      }));
+      await drive(s, async (handle) => {
+        await stays(s, handle, 'AUTHORISATION_UNCONFIRMED');
+        await retry(handle, () => {
+          answered = true;
+        });
+        await handle.result();
+      });
+      expect(s.sent.authoriseSettlement?.length).toBeGreaterThan(1);
+      for (const args of s.sent.authoriseSettlement ?? []) {
+        expect(args.at(-1)).toBe(FINAL_ANSWER_CONTRACT);
+      }
+      expect(s.sent.authoriseSettlement?.at(-1)?.[2]).toBe(true);
+    });
+
+    it('a refund in doubt goes on declaring, each round', async () => {
+      let answered = false;
+      const s = saga(cancelling(), () => ({
+        compensate: () => {
+          if (!answered) throw down();
+          return undefined;
+        },
+      }));
+      await drive(s, async (handle) => {
+        await stays(s, handle, 'COMPENSATION_UNCONFIRMED');
+        await retry(handle, () => {
+          answered = true;
+        });
+        await handle.result();
+      });
+      expect(s.sent.compensate?.length).toBeGreaterThan(1);
+      for (const args of s.sent.compensate ?? []) expect(args.at(-1)).toBe(FINAL_ANSWER_CONTRACT);
+      expect(s.sent.compensate?.at(-1)?.[3]).toBe(true);
     });
   });
 });
