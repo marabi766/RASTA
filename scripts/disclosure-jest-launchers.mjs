@@ -1,12 +1,25 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/verify-migration-reversible-lib.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
+    sha256: {
+      'scripts/verify-migration-reversible-lib.test.mjs':
+        'def875018903ff377cd99173ceeaf4f5676905ed91d313da44c9be225fd83423',
+      'scripts/verify-migration-reversible-lib.mjs':
+        '0f9e617bfb2d7ba482a3aa7b2439ba8326c42283fa40675843a9466889289f8d',
+      'scripts/psql-prisma-url.mjs':
+        '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
+    },
+  },
   'scripts/prepush-scope.test.mjs': {
     kind: 'non-jest',
     reaches:
       'Git fixture commands and Node environment probe; Turbo selection is mocked or --dry=json and missing-binary refusal never enters its JS launcher. No Jest or task execution.',
     sha256: {
       'scripts/prepush-scope.test.mjs':
-        '4f9d1329d3d25f39f4c558cbee2e1162098fc9514ce04e7f11e0f8f12552f07e',
+        '0b4a445f1f742b33b051723952b7d8ee74bd76648ef1e3c80e5a2a63aaf7028a',
       'scripts/prepush-scope-lib.mjs':
         'a7cb60ff2283945e9eee8a7bc9b83cbe05cdb680af0ea74e54afc561f3e66e13',
     },
@@ -154,11 +167,11 @@ export const JEST_LAUNCHERS = {
       'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
     sha256: {
       'scripts/ci-shell-text-lib.mjs':
-        'd857a0774e7f6d3e8dd4e4782b6b413054e83894cb63cabecedca2101a6c4bc6',
+        '040fb4931fa106a05672a47e953616f92cb838901b5d765546ee1fe6e3cfd869',
       'scripts/ci-node-test-timeouts-lib.mjs':
-        'f646c46e18809a7dd896328381832243d936de4f7c212863625b702ff442b715',
+        '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '28c469954835b53ebe9f428578ec7cdf18d59d70b9431b396ae23c0461bfe541',
+        '5bc35b029d5ab3da138660bd09a79e5dd4837a6595e043f528b2bcf8557f78aa',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
@@ -182,7 +195,7 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-integration-split.test.mjs':
         'b7ec47c1b0fb9cb494b4f5348a1e70d571cd08f26965fc8a90ff8f3ad3464a64',
       'scripts/ci-integration-split-lib.mjs':
-        'c1749b54c13c707abffe5cc684a763fd9db540c81c452b95f944d70e1dfd7d70',
+        '6338e0e7e1675c6595d9d43108ea224bca891a968407e946cd8fed8f76261d4e',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
@@ -207,6 +220,52 @@ export const JEST_LAUNCHERS = {
     sha256: {
       'scripts/lint-scripts-registration.test.mjs':
         'e611dc8ccaf8232cfbe179cb4b8f3f5d4443b50424f4cffd0deba6e0c89284a0',
+    },
+  },
+  'scripts/testing-dev-only.mjs': {
+    kind: 'non-jest',
+    inertArguments: true, // `image "$IMAGE"` / `tree <dir> <file>`: arguments name an image or a path
+    reaches:
+      'Spawns pnpm list --prod, docker image save/inspect and tar helpers through one run(command, args) wrapper whose callers pass literal commands; never Jest or a test script.',
+    sha256: {
+      'scripts/testing-dev-only.mjs':
+        '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
+    },
+  },
+  'scripts/supplier-privilege-split.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql, the Prisma CLI (migrate deploy) and bash on the supplier split script against a scratch PostgreSQL; the commands are literal at every call. No Jest.',
+    sha256: {
+      'scripts/supplier-privilege-split.pg.test.mjs':
+        'c12ce177b3d1263e274d14dc58d64c75878bdce15dd941d7a7d7aceb30a77f69',
+    },
+  },
+  'scripts/service-privilege-split-end-state.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql and bash against a scratch PostgreSQL (one injected spawn wrapper only rewrites a psql connection string); no Jest or test-script launch.',
+    sha256: {
+      'scripts/service-privilege-split-end-state.pg.test.mjs':
+        'e9cd41fc43710c141b72cdf1e7a54d693a5626937c30656860f4c67cda43f115',
+    },
+  },
+  'scripts/check-db-runtime-privileges.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql, bash scripts and the Prisma CLI (migrate deploy) against a scratch PostgreSQL; the commands are literal at every call. No Jest.',
+    sha256: {
+      'scripts/check-db-runtime-privileges.pg.test.mjs':
+        '10a179c9d24669bca20775371ea987f94567f4ecbafb3ff3d87607bd391ce956',
+    },
+  },
+  'scripts/backup-restore-drill.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql, pg_dump and pg_restore through command(name, args); every caller passes one of those literals. No Jest or test-script launch.',
+    sha256: {
+      'scripts/backup-restore-drill.pg.test.mjs':
+        '83c8c84247384bd7f0c255a2d9e95c6bff2ff59c4095afece86490bd676b4b59',
     },
   },
 };

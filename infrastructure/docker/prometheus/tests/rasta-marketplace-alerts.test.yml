@@ -17,7 +17,7 @@ tests:
               severity: critical
             exp_annotations:
               summary: Order saga starts are waiting
-              description: A start intent has waited over five minutes, or no replica can measure the backlog. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+              description: A start intent has waited over five minutes, or no replica can measure the backlog. Check Temporal connectivity, the economic-service release and namespace retention before reconciling ambiguous legacy starts.
               runbook: docs/runbooks/marketplace-saga-deploy.md
       - eval_time: 4m
         alertname: RastaMarketplaceSagaStartBacklogAging

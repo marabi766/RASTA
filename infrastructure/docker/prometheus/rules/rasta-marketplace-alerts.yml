@@ -12,7 +12,7 @@ groups:
           severity: critical
         annotations:
           summary: Order saga starts are waiting
-          description: A start intent has waited over five minutes, or no replica can measure the backlog. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+          description: A start intent has waited over five minutes, or no replica can measure the backlog. Check Temporal connectivity, the economic-service release and namespace retention before reconciling ambiguous legacy starts.
           runbook: docs/runbooks/marketplace-saga-deploy.md
   # FU-104. `rasta_marketplace_saga_worker_up` is 1 only while the SDK says
   # RUNNING and Temporal lists the worker's own identity as a poller of both
