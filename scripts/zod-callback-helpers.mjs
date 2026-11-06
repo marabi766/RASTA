@@ -50,17 +50,52 @@ const helpers = [
     ['decodeAuditCursor'],
     'predicate',
   ],
+  // Pure string canonicaliser: folds keyboard variants and returns `string | null`. It reads only its
+  // first argument as text and the `caseFold` flag; it never converts to a number, date or money.
+  // `exact`: only the bare or `.ts` spelling of an import, or the function declared in that very
+  // file, carries the allowance; a sibling `.mjs`/`.tsx`/`.js` of the same stem never does. The
+  // result is not a string proof (it may be null), so callers must still handle `null`.
+  [
+    'packages/nest-common/src/text/canonical-unique-text',
+    'packages/nest-common/src/text/canonical-unique-text.ts',
+    ['canonicalUniqueText'],
+    'canonicalizer',
+    { exact: true },
+  ],
+  // Pure string canonicaliser: NFKC, Arabic ي/ك/digits folded, tatweel removed, blanks collapsed and
+  // trimmed. String in, string out; it never converts to a number, date or money (audit L3-10).
+  [
+    'services/asset-service/src/asset/identifier',
+    'services/asset-service/src/asset/identifier.ts',
+    ['canonicalIdentifier'],
+    'string',
+    { exact: true },
+  ],
+  // `z.string().trim().regex(...)`: a string schema that refuses bidi controls. Its output is a
+  // string, so a chain through `.pipe(plainText())` keeps the string proof. It is a schema factory,
+  // never a callback, and never a string value. Reached through the contracts barrel, pinned below.
+  ['@rasta/contracts', 'packages/contracts/src/common/text.ts', ['plainText'], 'string-schema'],
   // The ISO adapter validates syntax/finite instants and only appends issues; it never rewrites payload.value.
   ['@rasta/contracts', 'packages/contracts/src/common/iso-datetime.ts', ['isoDateTime'], 'check'],
 ];
 // Published-parent and reviewed fixed-message formatter versions.
 const pins = {
+  'services/asset-service/src/asset/identifier.ts':
+    '58f1d8ee057dabf0cd0eae309aece7226d87a59cbf0e7efedae501d66b9f5dcb',
+  'packages/nest-common/src/text/canonical-unique-text.ts':
+    '5eb97cc83fd4f3dd9a9e39c88513aa5673f22ab2d8a978cd8000d78144b89ee9',
   'apps/web/src/lib/repair-order-fields.ts':
     'b80e6b6a0fccce159661427e3c1e0dce973c93e1837ea632d7b47533a9944b13',
-  'packages/contracts/src/common/iso-datetime.ts':
+  'packages/contracts/src/common/iso-datetime.ts': [
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
-  'packages/contracts/src/index.ts':
+    '0575a17e05a4e9808cd0948bf5aa0f14b3e1abf68782907fedab9fc3cba158de',
+  ],
+  'packages/contracts/src/common/text.ts':
+    'ff9708d0c86b5121a653c9e9aef3bf86d34a85ece0a499e219e8d8819ca5d30e',
+  'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
+    '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',
+  ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
   'apps/web/src/lib/format/codepoints.ts':
@@ -78,8 +113,8 @@ const pins = {
   'apps/web/src/lib/format/text.ts':
     'df06651d9fa1d3d0c03f2543b27a97caef2a2e4e35e0b8d4b7f521e472355d9c',
   'apps/web/src/lib/order-fields.ts': [
-    '943ca0863d6421c7dccfd33cc212507cb4a9f9ebf3fbda566b9de0139c9631f1',
     '952fd53124d672d01c43152b669108fe8487849ea708ab067c8da64be98b91cf',
+    '61ab1f3188c8e27fcd5fadd3b517a8ec69c5dcf8f636ff80fe3e2164dc88dd55',
   ],
   'apps/web/src/server/drivers.ts': [
     'c404487bde658fd99190401956f83270e1473fb6a738fc9c6e9acf896ad2c740',
@@ -93,9 +128,21 @@ const pins = {
     '61320e503117b4535f008253df76539e8ec2d29159cb9d5fdcb59e56753b814b',
 };
 export const CALLBACK_HELPER_SOURCES = Object.freeze(Object.keys(pins));
-export function verifiedCallbackHelper(root, modulePath, name) {
+// `binding` describes how the call site names the helper: the final segment of the import
+// specifier (or of the declaring file's own path) and the scope definition type. An `exact` entry
+// accepts only the bare or `.ts` module name, so `./x.mjs`, `./x/`, `./x/.` and `./x/index` never
+// inherit it, and only an import or a function declaration, never a variable.
+export function verifiedCallbackHelper(root, modulePath, name, binding = {}) {
   const helper = helpers.find(([path, , names]) => path === modulePath && names.includes(name));
   if (!helper) return undefined;
+  if (helper[4]?.exact) {
+    const base = modulePath.split('/').pop();
+    if (
+      ![base, `${base}.ts`].includes(binding.spelling) ||
+      !['ImportBinding', 'FunctionName'].includes(binding.definition)
+    )
+      return undefined;
+  }
   try {
     const files = [
       helper[1],

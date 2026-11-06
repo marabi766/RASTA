@@ -17,6 +17,7 @@ import {
   waitFor,
   wire,
   type Wiring,
+  resolveOpenDispute,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
@@ -207,7 +208,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
       }),
     );
     await asOperator(() =>
-      wiring.orders.resolveDispute(order.id, {
+      resolveOpenDispute(wiring, order.id, {
         outcome: 'SETTLE',
         resolution: 'the supplier evidenced correct delivery over the broker suite',
         responsibility: 'BUYER',

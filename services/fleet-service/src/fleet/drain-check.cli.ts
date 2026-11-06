@@ -1,9 +1,12 @@
 import { Kafka } from 'kafkajs';
-import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure, markRefusal } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { kafkaClientConfig, kafkaConnection } from '@rasta/nest-common';
 import { ASSET_SYNC_GROUP, ASSET_SYNC_TOPICS, loadFleetEnv, SERVICE_NAME } from '../config/env';
 import { INSURANCE_EVENT_TOPICS, checkConsumerGroupDrained } from './drain-check.command';
+
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
 
 /**
  * `pnpm --filter @rasta/fleet-service insurance:drain-check`
@@ -23,7 +26,7 @@ import { INSURANCE_EVENT_TOPICS, checkConsumerGroupDrained } from './drain-check
  * counts only.
  */
 async function main(): Promise<number> {
-  if (process.argv.length > 2) throw new Error('insurance:drain-check takes no arguments');
+  if (process.argv.length > 2) throw usage('insurance:drain-check takes no arguments');
 
   assertNoMigratorCredentials(process.env);
   const env = loadFleetEnv();

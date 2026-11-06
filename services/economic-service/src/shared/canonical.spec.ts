@@ -4,17 +4,41 @@ import { zodPipe } from '@rasta/nest-common';
 import {
   canonicalAmountMinor,
   canonicalBody,
+  canonicalBodyPipe,
   canonicalDecimal,
   canonicalFieldsOf,
+  canonicalForm,
   canonicalInstant,
   canonicalPipe,
   canonicalText,
   canonicalWithin,
+  isCanonicalBodyPipe,
   withCanonicalForm,
 } from './canonical';
-import { hashRequestBody } from './idempotency';
-import { NUMERIC_COMPARISONS, canonicalCondition, createRewardRuleSchema } from '../reward/dto';
+import { hashRequestBody, targeted } from './idempotency';
+import {
+  NUMERIC_COMPARISONS,
+  canonicalCondition,
+  createParticipationRuleSchema,
+  createRecognitionRuleSchema,
+  createRewardRuleSchema,
+} from '../reward/dto';
+import {
+  cancelTransactionSchema,
+  createTransactionSchema,
+  disputeTransactionSchema,
+  refundTransactionSchema,
+  resolveDisputeSchema,
+  settleTransactionSchema,
+} from '../transaction/dto';
+import {
+  operatorDecisionSchema,
+  proposeResolutionSchema,
+  refundPaymentSchema,
+  topUpSchema,
+} from '../payment/dto';
 import { conditionMet } from '../reward/rule-engine';
+import { PARTICIPATION_FACTS } from '../reward/participation';
 
 describe('canonical request values (checklist #16)', () => {
   /** What zod records for `isoDateTime()`: `Z` only, any fraction. */
@@ -340,6 +364,358 @@ describe('canonical request values (checklist #16)', () => {
       amount: { kind: 'amountMinor' },
       note: { kind: 'text' },
       when: { kind: 'instant', options: ZULU },
+      nested: { kind: 'object', fields: { amount: { kind: 'amountMinor' } } },
     });
+  });
+});
+
+describe('every idempotent command’s body (task 129)', () => {
+  const ZULU = { offset: false, local: false, precision: null };
+  const pipeOf = (schema: z.ZodType) => (body: unknown) =>
+    canonicalBodyPipe(schema).transform(body, { type: 'body' }) as Record<string, unknown>;
+  /** What the idempotency hash sees of a body: its canonical form, else the body. */
+  const hashedOf = (schema: z.ZodType) => (body: unknown) => {
+    const dto = pipeOf(schema)(body);
+    return (canonicalForm(dto) ?? dto) as Record<string, unknown>;
+  };
+  const topUp = topUpSchema.omit({ idempotencyKey: true }).partial({ instrument: true });
+  /** What the release before canonicalization did with a body: `zodPipe(schema)`. */
+  const previousRelease = (schema: z.ZodType, body: unknown) =>
+    zodPipe(schema).transform(body, { type: 'body' }) as Record<string, unknown>;
+  const refusalOf = (run: () => unknown): unknown => {
+    try {
+      run();
+      return undefined;
+    } catch (error) {
+      return { error: String(error), details: (error as { details?: unknown }).details };
+    }
+  };
+
+  it('finds a refined amount — the top-up’s positive one — not only the schema itself', () => {
+    expect(canonicalFieldsOf(topUp)).toEqual({
+      amountMinor: { kind: 'amountMinor' },
+      instrument: { kind: 'form', canonicalize: expect.any(Function) },
+    });
+    expect(hashedOf(topUp)({ amountMinor: '01000' })).toEqual({ amountMinor: '1000' });
+    // Still refused as it was: zero is not positive, however it is spelt.
+    expect(() => pipeOf(topUp)({ amountMinor: '000' })).toThrow();
+    // A look-alike pattern is not the amount schema.
+    expect(canonicalFieldsOf(z.object({ code: z.string().regex(/^\d{1,30}$/) }))).toEqual({});
+  });
+
+  it('finds the transaction’s amount, its instant and its identifiers', () => {
+    expect(canonicalFieldsOf(createTransactionSchema)).toEqual({
+      grossAmountMinor: { kind: 'amountMinor' },
+      occurredAt: { kind: 'instant', options: ZULU },
+      sourceType: { kind: 'form', canonicalize: expect.any(Function) },
+      sourceReference: { kind: 'form', canonicalize: expect.any(Function) },
+      idempotencyKey: { kind: 'form', canonicalize: expect.any(Function) },
+    });
+  });
+
+  it('leaves an identifier exactly as sent: a line ending in a name is part of the name', () => {
+    const body = {
+      transactionType: 'LOGISTICS',
+      grossAmountMinor: '0700',
+      sourceType: 'FREIGHT',
+      sourceReference: 'REF\r\n7',
+    };
+    expect(hashedOf(createTransactionSchema)(body)).toMatchObject({
+      grossAmountMinor: '700',
+      sourceReference: 'REF\r\n7',
+    });
+    expect(hashedOf(topUp)({ amountMinor: '1', instrument: 'fail:\r\nX' })).toMatchObject({
+      instrument: 'fail:\r\nX',
+    });
+    expect(hashedOf(settleTransactionSchema)({ transactionId: 'TXN\r\n1' })).toEqual({
+      transactionId: 'TXN\r\n1',
+    });
+  });
+
+  it('walks nested objects and arrays: every level and badge name, never a badge code', () => {
+    const body = {
+      expectedCurrentVersion: 0,
+      basis: 'REWARD_POINTS_CUMULATIVE',
+      levels: [
+        { name: 'one\r\ntwo', threshold: 0 },
+        { name: 'three', threshold: 5 },
+      ],
+      badges: [{ code: 'SAMPLE_ONE', name: 'four\rfive', threshold: 1 }],
+      label: 'six\r\nseven',
+    };
+    const canonical = hashedOf(createRecognitionRuleSchema)(body);
+    expect(canonical).toEqual({
+      ...body,
+      levels: [
+        { name: 'one\ntwo', threshold: 0 },
+        { name: 'three', threshold: 5 },
+      ],
+      badges: [{ code: 'SAMPLE_ONE', name: 'four\nfive', threshold: 1 }],
+      label: 'six\nseven',
+    });
+    // The request's own arrays and objects are left as they were.
+    expect(body.levels[0]!.name).toBe('one\r\ntwo');
+    // Two names that differ only in line endings are one name once LF; the
+    // previous release accepted them as two, so they are kept as sent
+    // (Codex PR-747 r1, F2; below).
+    const apart = {
+      ...body,
+      levels: [
+        { name: 'a\r\nb', threshold: 0 },
+        { name: 'a\nb', threshold: 1 },
+      ],
+    };
+    expect(hashedOf(createRecognitionRuleSchema)(apart)).toEqual(
+      previousRelease(createRecognitionRuleSchema, apart),
+    );
+  });
+
+  it('normalizes the text of every other command', () => {
+    for (const [schema, field] of [
+      [disputeTransactionSchema, 'reason'],
+      [resolveDisputeSchema, 'resolution'],
+      [cancelTransactionSchema, 'reason'],
+      [refundPaymentSchema, 'reason'],
+      [operatorDecisionSchema, 'reason'],
+      [createParticipationRuleSchema, 'label'],
+    ] as const) {
+      expect([field, canonicalFieldsOf(schema)[field]]).toEqual([field, { kind: 'text' }]);
+    }
+    expect(canonicalFieldsOf(proposeResolutionSchema)).toEqual({ reason: { kind: 'text' } });
+  });
+
+  // Executed and stored as sent (Codex PR-747 r3, F4): what a command writes —
+  // a dispute's reason, a resolution, a level name — is what the previous
+  // release wrote, so a reader that compares it exactly (marketplace before
+  // #747, recovering a step after its stored answer expired) still finds it.
+  // Every idempotent command's schema, with every kind of field spelt as no
+  // canonical form spells it.
+  it('hands every command exactly the body the previous release executed', () => {
+    const corpus: Array<[z.ZodType, unknown]> = [
+      [topUp, { amountMinor: '0001000', instrument: ' fail:\r\nX ' }],
+      [
+        createTransactionSchema,
+        {
+          transactionType: 'LOGISTICS',
+          grossAmountMinor: '0700',
+          occurredAt: '2026-11-05T12:00:00Z',
+          sourceType: 'FREIGHT',
+          sourceReference: 'REF\r\n7',
+          idempotencyKey: 'key-0001\r',
+        },
+      ],
+      [disputeTransactionSchema, { reason: '  line one\r\nline two\r ' }],
+      [resolveDisputeSchema, { resolution: 'decided\rfor the supplier', disputeId: 'TXD_1' }],
+      [refundTransactionSchema, { reason: 'line one\r\nline two' }],
+      [cancelTransactionSchema, { reason: 'line one\r\nline two' }],
+      [settleTransactionSchema, { transactionId: 'TXN_1' }],
+      [refundPaymentSchema, { reason: 'line one\r\nline two' }],
+      [operatorDecisionSchema, { reason: 'line one\r\nline two' }],
+      [
+        proposeResolutionSchema,
+        { providerOutcome: 'DECLINED', evidenceReference: 'TICKET-1', reason: 'a\r\nb c d e f' },
+      ],
+      [
+        createRecognitionRuleSchema,
+        {
+          expectedCurrentVersion: 0,
+          basis: 'REWARD_POINTS_CUMULATIVE',
+          levels: [{ name: 'one\r\ntwo', threshold: 0 }],
+          badges: [{ code: 'SAMPLE_ONE', name: 'four\rfive', threshold: 1 }],
+          label: 'six\r\nseven',
+        },
+      ],
+      [
+        createParticipationRuleSchema,
+        {
+          expectedCurrentVersion: 0,
+          windowDays: 30,
+          contributions: [{ triggerEvent: PARTICIPATION_FACTS[0], weight: 1 }],
+          label: 'six\r\nseven',
+        },
+      ],
+    ];
+    let canonicalized = 0;
+    for (const [schema, body] of corpus) {
+      const before = refusalOf(() => previousRelease(schema, body));
+      if (before !== undefined) {
+        // Refused alike (below); nothing executed to compare.
+        expect({ body, now: refusalOf(() => pipeOf(schema)(body)) }).toEqual({ body, now: before });
+        continue;
+      }
+      const dto = pipeOf(schema)(body);
+      expect({ body, executed: dto }).toEqual({ body, executed: previousRelease(schema, body) });
+      if (canonicalForm(dto) !== undefined) canonicalized += 1;
+    }
+    // The corpus is spelt to be canonicalized: most of it has a canonical
+    // form the hash sees, and none of that form is what is executed.
+    expect(canonicalized).toBe(corpus.length - 1);
+  });
+
+  describe('the canonical form, for the idempotency hash only', () => {
+    it('is kept only when canonicalization changed something', () => {
+      const changed = pipeOf(disputeTransactionSchema)({ reason: 'line one\r\nline two' });
+      expect(changed).toEqual({ reason: 'line one\r\nline two' });
+      expect(canonicalForm(changed)).toEqual({ reason: 'line one\nline two' });
+      const unchanged = pipeOf(disputeTransactionSchema)({ reason: 'line one\nline two' });
+      expect(canonicalForm(unchanged)).toBeUndefined();
+    });
+
+    it('beside the body exactly as the previous release validated it — trimmed, defaulted', () => {
+      const body = { transactionType: 'LOGISTICS', grossAmountMinor: '0700' };
+      const dto = pipeOf(createTransactionSchema)(body);
+      expect(dto).toEqual(zodPipe(createTransactionSchema).transform(body, { type: 'body' }));
+      expect(canonicalForm(dto)).toEqual({ ...dto, grossAmountMinor: '700' });
+    });
+
+    it('never exists where the previous release refused the body: it is refused (PR-747 r2, F3)', () => {
+      // 1 201 UTF-16 units as sent, over the limit; 801 once LF. Accepted
+      // here, it would be refused on a retry the previous release answers.
+      const reason = `${'a\r\n'.repeat(400)}x`;
+      expect(reason).toHaveLength(1201);
+      expect(canonicalBody({ reason }, canonicalFieldsOf(disputeTransactionSchema))).toEqual({
+        reason: expect.stringMatching(/^[^\r]{801}$/),
+      });
+      expect(refusalOf(() => pipeOf(disputeTransactionSchema)({ reason }))).toEqual(
+        refusalOf(() => previousRelease(disputeTransactionSchema, { reason })),
+      );
+      expect(refusalOf(() => pipeOf(disputeTransactionSchema)({ reason }))).toBeDefined();
+    });
+
+    it('is found inside any wrapper of plain objects and arrays, however deep (PR-747 r1, F1)', () => {
+      const dto = pipeOf(operatorDecisionSchema)({ reason: 'line one\r\nline two' });
+      const by = { userId: 'USR_1', issuer: 'https://issuer', subject: 'sub-1' };
+      // The reconciliation's shape: the target around the actor binding around the body.
+      expect(canonicalForm(targeted('PI_1/RES_1', { by, body: dto }))).toEqual({
+        id: 'PI_1/RES_1',
+        body: { by, body: { reason: 'line one\nline two' } },
+      });
+      expect(canonicalForm([{ wrapped: [dto] }, 'x'])).toEqual([
+        { wrapped: [{ reason: 'line one\nline two' }] },
+        'x',
+      ]);
+      // A wrapper with no body of the pipe in it has no canonical form;
+      // neither does a copy of one — a copy is not the body the pipe
+      // validated, and is hashed only as it is (fewer replays, never another).
+      expect(canonicalForm({ by, body: { reason: 'line one\r\nline two' } })).toBeUndefined();
+      expect(canonicalForm({ by, body: { ...dto } })).toBeUndefined();
+      // Never walked into: an instance that is not a plain object.
+      class Holder {
+        constructor(readonly body: unknown) {}
+      }
+      expect(canonicalForm({ held: new Holder(dto) })).toBeUndefined();
+    });
+
+    it('travels with the target id (`targeted`)', () => {
+      const dto = pipeOf(disputeTransactionSchema)({ reason: 'line one\r\nline two' });
+      expect(canonicalForm(targeted('TXN_1', dto))).toEqual({
+        id: 'TXN_1',
+        body: { reason: 'line one\nline two' },
+      });
+      expect(canonicalForm(targeted('TXN_1', { reason: 'plain body' }))).toBeUndefined();
+      expect(canonicalForm(targeted('TXN_1'))).toBeUndefined();
+    });
+  });
+
+  describe('a body whose canonical form the schema refuses (Codex PR-747 r1, F2)', () => {
+    // Ten UTF-16 units as sent, the minimum; nine once LF.
+    const short = '1234\r\n5678';
+
+    it.each([
+      ['a dispute', disputeTransactionSchema, { reason: short }],
+      // Trimmed by its schema: the answer is the parsed body, never the raw one.
+      ['a padded dispute', disputeTransactionSchema, { reason: `  ${short}  ` }],
+      ['a dispute resolution', resolveDisputeSchema, { resolution: short }],
+      [
+        'a recognition version with two level names apart only by their line endings',
+        createRecognitionRuleSchema,
+        {
+          expectedCurrentVersion: 0,
+          basis: 'REWARD_POINTS_CUMULATIVE',
+          levels: [
+            { name: 'first\r\nsecond', threshold: 0 },
+            { name: 'first\nsecond', threshold: 5 },
+          ],
+          badges: [],
+        },
+      ],
+    ] as const)('%s: answered exactly as the previous release answered it', (_, schema, body) => {
+      expect(schema.safeParse(canonicalBody(body, canonicalFieldsOf(schema))).success).toBe(false);
+      const dto = pipeOf(schema)(body);
+      expect(dto).toEqual(previousRelease(schema, body));
+      // Hashed as sent — what the previous release stored — with nothing else
+      // to compare: no other spelling of it is canonical either.
+      expect(canonicalForm(dto)).toBeUndefined();
+      expect(hashRequestBody(targeted('TXN_1', dto))).toBe(
+        hashRequestBody(targeted('TXN_1', previousRelease(schema, body))),
+      );
+    });
+
+    it('a body the previous release refused is refused, with its refusal', () => {
+      const body = { reason: '123\r\n456' };
+      expect(() => previousRelease(disputeTransactionSchema, body)).toThrow();
+      expect(refusalOf(() => pipeOf(disputeTransactionSchema)(body))).toEqual(
+        refusalOf(() => previousRelease(disputeTransactionSchema, body)),
+      );
+    });
+
+    // Both directions (Codex PR-747 r2, F3): a retry can reach either release
+    // during a rolling update or a rollback, so neither may refuse what the
+    // other accepts. Limits counted after LF wait for canonical-only (docs/06).
+    it('refuses exactly what the previous release refused, with its refusal', () => {
+      const texts = [
+        '',
+        short,
+        '123\r\n456',
+        'abcd\r\n'.repeat(200),
+        `${'a\r\n'.repeat(400)}x`,
+        'abcd\r'.repeat(200),
+        'abcd\r'.repeat(201),
+        'a\rb',
+        'within\r\nevery limit',
+      ];
+      const corpus: Array<[z.ZodType, unknown]> = [
+        ...texts.map((reason) => [disputeTransactionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map(
+          (resolution) => [resolveDisputeSchema, { resolution }] as [z.ZodType, unknown],
+        ),
+        ...texts.map((reason) => [refundTransactionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map((reason) => [cancelTransactionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map((reason) => [refundPaymentSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map((reason) => [operatorDecisionSchema, { reason }] as [z.ZodType, unknown]),
+        ...texts.map(
+          (reason) =>
+            [
+              proposeResolutionSchema,
+              { providerOutcome: 'DECLINED', evidenceReference: 'TICKET-1', reason },
+            ] as [z.ZodType, unknown],
+        ),
+        ...['000', '0001000', '01', '1'].map(
+          (amountMinor) => [topUp, { amountMinor }] as [z.ZodType, unknown],
+        ),
+      ];
+      let refused = 0;
+      for (const [schema, body] of corpus) {
+        const before = refusalOf(() => previousRelease(schema, body));
+        if (before !== undefined) refused += 1;
+        expect({ body, now: refusalOf(() => pipeOf(schema)(body)) }).toEqual({ body, now: before });
+      }
+      // The corpus holds both: bodies refused as sent (over and under a limit,
+      // in CRLF and CR) and bodies accepted.
+      expect(refused).toBeGreaterThanOrEqual(corpus.length / 3);
+      expect(refused).toBeLessThan(corpus.length);
+    });
+  });
+
+  it('marks its pipes, and only its pipes, for the route guard', () => {
+    expect(isCanonicalBodyPipe(canonicalBodyPipe(disputeTransactionSchema))).toBe(true);
+    expect(isCanonicalBodyPipe(canonicalPipe(createRewardRuleSchema))).toBe(false);
+    expect(isCanonicalBodyPipe(zodPipe(disputeTransactionSchema))).toBe(false);
+    expect(() => canonicalBodyPipe(z.string())).toThrow('object schema');
+  });
+
+  it('returns a body nothing changed as the very same object', () => {
+    const body = { reason: 'nothing to change' };
+    expect(canonicalBody(body, canonicalFieldsOf(disputeTransactionSchema))).toBe(body);
   });
 });

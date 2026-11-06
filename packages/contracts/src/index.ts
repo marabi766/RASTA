@@ -32,7 +32,13 @@ export {
 
 export { withMaxKeys } from './common/bounds';
 export { parsableUrl } from './common/parsable-url';
-export { isoDateTime, legacyDatetimeRegex, type IsoDateTimeOptions } from './common/iso-datetime';
+export {
+  isoDateTime,
+  legacyDatetimeRegex,
+  publishedIsoDateTimeZone,
+  type IsoDateTimeOptions,
+  type IsoDateTimeZone,
+} from './common/iso-datetime';
 export {
   LEGACY_PARSED_TYPES,
   LegacyContextError,

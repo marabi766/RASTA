@@ -54,6 +54,7 @@ import {
   SUPPLIER_DEAD_LETTER_TOPIC,
 } from './performance/performance.consumer';
 import { ENV, LOGGER } from './tokens';
+import { StrictQueryParserInstaller } from './http/strict-query-parser';
 import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
 
 /**
@@ -91,6 +92,9 @@ import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
   controllers: [SupplierController, HealthController, MetricsController],
   providers: [
     { provide: ENV, useFactory: () => loadSupplierEnv() },
+
+    // Query strings over the segment bound are a 400, never truncated (PR 699 F1).
+    StrictQueryParserInstaller,
 
     {
       provide: LOGGER,

@@ -326,6 +326,23 @@ describe('ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b)', () => {
     expect(orderDisputeResolvedPayload.safeParse(withoutResponsibility).success).toBe(false);
   });
 
+  it.each([
+    'FUNDS_HELD',
+    'CONFIRMED',
+    'AWAITING_RECEIPT_CONFIRMATION',
+    'RECEIPT_CONFIRMED',
+    'CANCELLING',
+  ])('carries where the decision left the order: %s (D-083)', (orderStatus) => {
+    expect(orderDisputeResolvedPayload.safeParse({ ...base, orderStatus }).success).toBe(true);
+  });
+
+  it.each(['DISPUTED', 'SETTLING', 'COMPLETED', 'PENDING'])(
+    'refuses %s as where a decision left the order',
+    (orderStatus) => {
+      expect(orderDisputeResolvedPayload.safeParse({ ...base, orderStatus }).success).toBe(false);
+    },
+  );
+
   it('refuses an outcome outside SETTLE or REFUND', () => {
     expect(
       orderDisputeResolvedPayload.safeParse({ ...base, outcome: 'SPLIT_THE_DIFFERENCE' }).success,

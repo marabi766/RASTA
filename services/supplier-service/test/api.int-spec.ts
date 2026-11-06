@@ -355,6 +355,110 @@ describe('supplier HTTP API', () => {
     });
   });
 
+  describe('GET /v1/suppliers?organizationId= — batch read (FU-019)', () => {
+    it("returns exactly the asked organizations' directory entries, across tenants", async () => {
+      const response = await http()
+        .get(
+          `/v1/suppliers?organizationId=${supplierOrg}&organizationId=${otherSupplierOrg}&limit=200`,
+        )
+        .set('authorization', `Bearer ${procurementUser(buyerOrg)}`)
+        .expect(200);
+
+      const ids = response.body.items.map((item: { id: string }) => item.id).sort();
+      expect(ids).toEqual([supplierId, otherSupplierId].sort());
+      expect(response.body.hasMore).toBe(false);
+    });
+
+    it("never reveals another organization's private record through the filter", async () => {
+      const response = await http()
+        .get(`/v1/suppliers?organizationId=${supplierOrg}`)
+        .set('authorization', `Bearer ${procurementUser(buyerOrg)}`)
+        .expect(200);
+
+      const raw = JSON.stringify(response.body);
+      expect(raw).not.toContain('DOC-API-0001');
+      expect(raw).not.toContain('پروانه کسب');
+      expect(raw).not.toContain('مدارک بررسی شد');
+      expect(raw).not.toContain('USR-APITEST');
+      expect(Object.keys(response.body.items[0]).sort()).toEqual(
+        [
+          'capabilities',
+          'displayName',
+          'id',
+          'organizationId',
+          'qualifiedFor',
+          'registeredAt',
+          'status',
+        ].sort(),
+      );
+    });
+
+    it('answers an organization with no profile with an empty page, deduplicating', async () => {
+      const response = await http()
+        .get(`/v1/suppliers?organizationId=${buyerOrg}&organizationId=${buyerOrg}`)
+        .set('authorization', `Bearer ${procurementUser(buyerOrg)}`)
+        .expect(200);
+      expect(response.body.items).toEqual([]);
+    });
+
+    it('accepts 200 repeated ids and refuses 201, and an invalid id, with 400', async () => {
+      const ids = Array.from({ length: 199 }, (_, i) => `ORG-BATCH-${i}`);
+      const query = (list: string[]) => list.map((id) => `organizationId=${id}`).join('&');
+
+      const ok = await http()
+        .get(`/v1/suppliers?${query([supplierOrg, ...ids])}`)
+        .set('authorization', `Bearer ${procurementUser(buyerOrg)}`)
+        .expect(200);
+      expect(ok.body.items.map((item: { id: string }) => item.id)).toEqual([supplierId]);
+
+      await http()
+        .get(`/v1/suppliers?${query([supplierOrg, otherSupplierOrg, ...ids])}`)
+        .set('authorization', `Bearer ${procurementUser(buyerOrg)}`)
+        .expect(400);
+      await http()
+        .get(`/v1/suppliers?organizationId=not-an-org`)
+        .set('authorization', `Bearer ${procurementUser(buyerOrg)}`)
+        .expect(400);
+      await http()
+        .get(`/v1/suppliers?organizationId=`)
+        .set('authorization', `Bearer ${procurementUser(buyerOrg)}`)
+        .expect(400);
+    });
+
+    it('refuses a query string too long to parse whole, never answering it unfiltered (PR 699 F1)', async () => {
+      const get = (query: string) =>
+        http()
+          .get(`/v1/suppliers?${query}`)
+          .set('authorization', `Bearer ${procurementUser(buyerOrg)}`);
+
+      // 1000 empty segments then the filter: Express's default parser dropped
+      // the filter and answered the whole directory.
+      const hidden = await get('&'.repeat(1000) + `organizationId=${supplierOrg}`).expect(400);
+      expect(hidden.body.code).toBe('VALIDATION_FAILED');
+      expect(JSON.stringify(hidden.body)).not.toContain(otherSupplierId);
+
+      // 800 empties then 201 ids: the default parser kept 200 and accepted them.
+      const ids = Array.from({ length: 201 }, (_, i) => `organizationId=ORG-BATCH-${i}`);
+      await get('&'.repeat(800) + ids.join('&')).expect(400);
+
+      // A malformed value after the padding — still under the bound — reaches
+      // validation instead of being discarded.
+      await get('&'.repeat(990) + `organizationId=${supplierOrg}&organizationId=bad`).expect(400);
+      await get('&'.repeat(990) + `organizationId[]=${supplierOrg}`).expect(400);
+
+      // The same padding with a valid id is parsed whole and filtered.
+      const padded = await get('&'.repeat(990) + `organizationId=${supplierOrg}`).expect(200);
+      expect(padded.body.items.map((item: { id: string }) => item.id)).toEqual([supplierId]);
+    });
+
+    it('keeps the role gate: a role that cannot browse cannot narrow either', async () => {
+      await http()
+        .get(`/v1/suppliers?organizationId=${supplierOrg}`)
+        .set('authorization', `Bearer ${auditorActor(buyerOrg)}`)
+        .expect(403);
+    });
+  });
+
   // -------------------------------------------------------------------------
   // 3. GET /v1/suppliers/qualified
   // -------------------------------------------------------------------------

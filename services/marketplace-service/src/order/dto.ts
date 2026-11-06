@@ -118,11 +118,29 @@ export type RaiseDisputeDto = z.infer<typeof raiseDisputeSchema>;
 export const resolveDisputeSchema = z
   .object({
     /**
+     * The dispute this decision is about: the order's open dispute as the
+     * operator saw it (`openDisputeId` on the order). Refused `409 CONFLICT`,
+     * `details[].code` `DISPUTE_DECISION_STALE`, unless the order still holds
+     * exactly that dispute — a decision about one dispute never decides another
+     * raised since.
+     */
+    disputeId: z
+      .string()
+      .regex(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/, 'disputeId must be a dispute identifier'),
+    /**
      * What happens to the money.
      *
-     * `SETTLE` returns the order to the settlement path; `REFUND` cancels it
-     * and returns the held funds. There is no third option, because a dispute
-     * that is neither settled nor refunded leaves the money held forever.
+     * `SETTLE` lifts the dispute and resumes the order where the dispute found
+     * it (D-083). It does not settle, and it does not confirm receipt: a dispute
+     * raised after the buyer confirmed receipt returns the order to
+     * `RECEIPT_CONFIRMED`, and the saga settles it; one raised before returns it
+     * to `FUNDS_HELD`, `CONFIRMED` or `AWAITING_RECEIPT_CONFIRMATION`, and
+     * settlement still waits for the supplier's delivery and the buyer's
+     * confirmation — reminders only, never automatic (ADR-043). A dispute whose
+     * origin is not recorded is refused SETTLE (`DISPUTE_ORIGIN_UNKNOWN`).
+     * `REFUND` cancels the order and returns the held funds. There is no third
+     * option, because a dispute that is neither settled nor refunded leaves the
+     * money held forever.
      */
     outcome: z.enum(['SETTLE', 'REFUND']),
     resolution: plainText().min(10).max(1000),
@@ -204,6 +222,12 @@ export interface OrderView {
   lines: OrderLineView[];
   economicTransactionId: string | null;
   economicSettlementId: string | null;
+  /**
+   * The dispute the order holds now, or null. What an operator's decision
+   * names (`resolveDisputeSchema.disputeId`), so the decision is about the
+   * dispute the operator saw.
+   */
+  openDisputeId: string | null;
   /**
    * Whether the supplier's qualification could be checked (ADR-041).
    *

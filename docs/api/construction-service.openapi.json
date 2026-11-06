@@ -2512,6 +2512,8 @@
                     "completedAt": {
                       "type": "string",
                       "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                       "nullable": true
                     },
                     "completedBy": {
@@ -2545,7 +2547,7 @@
             }
           },
           "403": {
-            "description": "Every user token and every service except contract-service is refused. A missing signed tenant or a conflicting organization header is SERVICE_TENANT_CONTEXT_INVALID.",
+            "description": "Every user token is refused. A service token is accepted only from contract-service; any other service is refused. An X-Organization-Id that differs from the signed tenant is SERVICE_TENANT_CONTEXT_INVALID. A service token signed for no tenant is SERVICE_TENANT_CONTEXT_INVALID as well.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7792,7 +7794,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8146,7 +8150,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8209,7 +8215,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8565,12 +8573,14 @@
                   "bidOpeningAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "Start of the bidding window, inclusive. UTC."
+                    "pattern": "Z$",
+                    "description": "Start of the bidding window, inclusive. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   },
                   "bidClosingAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC."
+                    "pattern": "Z$",
+                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   }
                 },
                 "required": ["title", "scopeOfWork"],
@@ -9283,13 +9293,15 @@
                   "bidOpeningAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "Start of the bidding window, inclusive. UTC.",
+                    "pattern": "Z$",
+                    "description": "Start of the bidding window, inclusive. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                     "nullable": true
                   },
                   "bidClosingAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC.",
+                    "pattern": "Z$",
+                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                     "nullable": true
                   }
                 },
@@ -9667,7 +9679,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -9741,7 +9755,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11181,7 +11197,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11267,7 +11285,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11485,7 +11505,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12183,7 +12205,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12467,7 +12491,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12540,7 +12566,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12937,7 +12965,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13162,7 +13192,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13417,7 +13449,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13490,7 +13524,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13710,7 +13746,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13889,7 +13927,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13979,7 +14019,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14146,7 +14188,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14230,7 +14274,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14374,7 +14420,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14448,7 +14496,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14501,7 +14551,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14541,7 +14593,8 @@
                   "proposedAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET /tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn."
+                    "pattern": "Z$",
+                    "description": "The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET /tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   }
                 },
                 "required": ["proposedAt"],
@@ -14731,7 +14784,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14909,7 +14964,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14987,7 +15044,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15199,7 +15258,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15272,7 +15333,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15508,7 +15571,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15598,7 +15663,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15818,7 +15885,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15891,7 +15960,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16278,7 +16349,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16341,7 +16414,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16685,7 +16760,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16780,7 +16857,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16878,7 +16957,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -17072,7 +17153,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator. Approval gates of a tender (CON-002 PR 11): deciding a tender approval as the person who made the request (separation of duties through the shared helper; the same person under two user ids or another issuer is one person); on an award approval, a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST — also on reading it), and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (APPROVER_IS_EVALUATOR). Refusals on the caller’s own tender are audited in the tender approval log. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: CONFLICT_OF_INTEREST)",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator. Approval gates of a tender (CON-002 PR 11): deciding a tender approval as the person who made the request (separation of duties through the shared helper; the same person under two user ids or another issuer is one person); on an award approval, a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST — also on reading it), and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (APPROVER_IS_EVALUATOR). Refusals on the caller’s own tender are audited in the tender approval log. On this route, unlike the rest, service tokens are not all refused: A service token is accepted only from contract-service; any other service is refused. An X-Organization-Id that differs from the signed tenant is SERVICE_TENANT_CONTEXT_INVALID. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: CONFLICT_OF_INTEREST)",
             "content": {
               "application/json": {
                 "schema": {
@@ -17112,7 +17193,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -17170,6 +17253,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "internalToken": []
           }
         ]
       }
@@ -17477,7 +17563,9 @@
           },
           "timestamp": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "pattern": "Z$",
+            "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
           },
           "path": {
             "type": "string"
