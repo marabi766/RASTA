@@ -9,6 +9,8 @@ import {
   type OutboxRow,
 } from './outbox';
 
+// TIMESTAMP(3) rounds to nearest. Floor the UTC clock and the full deadline
+// so even fractional intervals cannot extend the duration from that clock.
 /**
  * The SQL behind every service's outbox store.
  *
@@ -379,7 +381,8 @@ export async function claimPendingSql(
      UPDATE outbox_message AS o
         SET claim_token      = $1,
             claim_owner      = $2,
-            claim_expires_at = now() + make_interval(secs => $3::double precision),
+            claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', now() AT TIME ZONE 'UTC')
+                + make_interval(secs => $3::double precision)),
             claim_count      = o.claim_count + 1
        FROM due
       WHERE o.id = due.id
@@ -487,10 +490,10 @@ export async function markFailedSql(
     `UPDATE outbox_message
         SET attempts         = attempts + 1,
             last_error       = $3,
-            next_attempt_at  = now() + make_interval(secs => least(
+            next_attempt_at  = date_trunc('milliseconds', date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + make_interval(secs => least(
               power(2, least(attempts, 10)) * $4::double precision,
               $5::double precision
-            )),
+            ))),
             claim_token      = NULL,
             claim_owner      = NULL,
             claim_expires_at = NULL
@@ -629,7 +632,8 @@ export async function renewSql(
     await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
     const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
       `UPDATE outbox_message
-          SET claim_expires_at = now() + make_interval(secs => $3::double precision)
+          SET claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', now() AT TIME ZONE 'UTC')
+                + make_interval(secs => $3::double precision))
         WHERE id = ANY($1::text[])
           AND claim_token = $2
           AND published_at IS NULL
