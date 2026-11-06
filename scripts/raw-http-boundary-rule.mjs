@@ -277,19 +277,13 @@ export default {
       if (parent.type === 'BinaryExpression' && parent.operator === 'in' && parent.right === node)
         return;
       if (parent.type === 'MemberExpression' && parent.object === node) {
-        const call = parent.property;
         if (
           parent.computed &&
-          call.type === 'CallExpression' &&
-          call.callee.type === 'MemberExpression' &&
-          staticKey(call.callee) === 'for' &&
-          call.callee.object.type === 'Identifier' &&
-          call.callee.object.name === 'Symbol'
-        ) {
-          let scope = context.sourceCode.getScope(call.callee.object);
-          while (scope && !scope.set.has('Symbol')) scope = scope.upper;
-          if (!scope?.set.get('Symbol')?.defs.some((definition) => !erased(definition))) return;
-        }
+          registryKey(parent.property) &&
+          cleanIntrinsics(node) &&
+          slotUse(parent)
+        )
+          return;
         const key = staticKey(parent);
         if (key === undefined) return report(parent, `${identifier.name}[computed]`);
         if (
@@ -328,24 +322,160 @@ export default {
       node?.type === 'Identifier' &&
       node.name === name &&
       !variableFor(node)?.defs.some((definition) => !erased(definition));
-    // Only a native Symbol.for call, optionally held in immutable local bindings,
-    // proves a registry key. Strings, parameters and shadowed Symbol are unknown.
+    // Refuse aliases, writes, reflection and indirect uses anywhere in this file.
+    // Ordering is irrelevant: a patch after registration can run before a later read.
+    const cleanIntrinsics = (node) => {
+      for (const name of ['Symbol', 'Object']) {
+        let scope = context.sourceCode.getScope(node);
+        while (scope && !scope.set.has(name)) scope = scope.upper;
+        if (scope?.set.get(name)?.defs.some((definition) => !erased(definition))) return false;
+      }
+      return context.sourceCode.scopeManager.scopes.every((scope) =>
+        scope.references.every(({ identifier }) => {
+          if (inTypePosition(identifier)) return true;
+          if (identifier.name === 'WeakMap' && nativeObject(identifier, 'WeakMap')) {
+            const parent = identifier.parent;
+            return (
+              (parent.type === 'NewExpression' &&
+                parent.callee === identifier &&
+                parent.arguments.length === 0) ||
+              (parent.type === 'BinaryExpression' &&
+                parent.operator === 'instanceof' &&
+                parent.right === identifier)
+            );
+          }
+          if (['Symbol', 'Object'].includes(identifier.name)) {
+            if (!nativeObject(identifier, identifier.name)) return true;
+            const member = identifier.parent;
+            return (
+              member.type === 'MemberExpression' &&
+              member.object === identifier &&
+              (identifier.name === 'Symbol'
+                ? ['for', 'keyFor'].includes(staticKey(member))
+                : [
+                    'keys',
+                    'values',
+                    'entries',
+                    'fromEntries',
+                    'hasOwn',
+                    'is',
+                    'freeze',
+                    'seal',
+                    'isFrozen',
+                    'isSealed',
+                    'isExtensible',
+                    'preventExtensions',
+                    'create',
+                    'assign',
+                    'defineProperty',
+                    'defineProperties',
+                    'getOwnPropertyDescriptor',
+                    'getOwnPropertyDescriptors',
+                    'getOwnPropertyNames',
+                    'getOwnPropertySymbols',
+                    'getPrototypeOf',
+                    'setPrototypeOf',
+                  ].includes(staticKey(member))) &&
+              member.parent.type === 'CallExpression' &&
+              member.parent.callee === member
+            );
+          }
+          if (GLOBAL_OBJECTS.has(identifier.name)) {
+            const member = identifier.parent;
+            if (
+              member.type === 'MemberExpression' &&
+              ((staticKey(member) === undefined && !registryKey(member.property)) ||
+                ['Symbol', 'Object', 'WeakMap'].includes(staticKey(member)))
+            )
+              return false;
+          }
+          return true;
+        }),
+      );
+    };
+    const constInitializer = (node, seen) => {
+      const variable = variableFor(node);
+      if (!variable || seen.has(variable) || variable.defs.length !== 1) return;
+      const definition = variable.defs[0];
+      if (
+        definition.parent?.kind !== 'const' ||
+        definition.node.id !== definition.name ||
+        variable.references.some((reference) => reference.isWrite() && !reference.init)
+      )
+        return;
+      seen.add(variable);
+      return definition.node.init;
+    };
+    // Literal Symbol.for strings only, optionally through immutable local keys.
     const registryKey = (input, seen = new Set()) => {
       const node = unwrap(input);
-      if (node?.type === 'Identifier') {
-        const variable = variableFor(node);
-        if (!variable || seen.has(variable) || variable.defs.length !== 1) return false;
-        const definition = variable.defs[0];
-        if (definition.parent?.kind !== 'const' || definition.node.id !== definition.name)
-          return false;
-        seen.add(variable);
-        return registryKey(definition.node.init, seen);
-      }
+      if (node?.type === 'Identifier') return registryKey(constInitializer(node, seen), seen);
       return (
         node?.type === 'CallExpression' &&
+        node.arguments.length === 1 &&
+        node.arguments[0].type === 'Literal' &&
+        typeof node.arguments[0].value === 'string' &&
         node.callee.type === 'MemberExpression' &&
         nativeObject(node.callee.object, 'Symbol') &&
         staticKey(node.callee) === 'for'
+      );
+    };
+    // No unknown/callable values. WeakMap() is the existing refusal registry;
+    // arbitrary constructors, factories, methods, accessors and spreads refuse.
+    const plainValue = (input, seen = new Set()) => {
+      const node = unwrap(input);
+      if (node?.type === 'Identifier') return plainValue(constInitializer(node, seen), seen);
+      if (node?.type === 'Literal') return true;
+      if (node?.type === 'ArrayExpression')
+        return node.elements.every((entry) => entry === null || plainValue(entry, new Set(seen)));
+      if (node?.type === 'ObjectExpression')
+        return node.properties.every(
+          (property) =>
+            property.type === 'Property' &&
+            property.kind === 'init' &&
+            !property.method &&
+            !property.computed &&
+            (property.key.name ?? property.key.value) !== '__proto__' &&
+            plainValue(property.value, new Set(seen)),
+        );
+      return (
+        node?.type === 'NewExpression' &&
+        nativeObject(node.callee, 'WeakMap') &&
+        node.arguments.length === 0
+      );
+    };
+    const slotUse = (member) => {
+      let node = member;
+      while (TS_WRAPPERS.has(node.parent?.type)) node = node.parent;
+      const parent = node.parent;
+      if (parent.type === 'AssignmentExpression' && parent.left === node)
+        return parent.operator === '=' && plainValue(parent.right);
+      return (
+        !(parent.type === 'CallExpression' && parent.callee === node) &&
+        !(parent.type === 'TaggedTemplateExpression' && parent.tag === node) &&
+        !(parent.type === 'UnaryExpression' && parent.operator === 'delete') &&
+        ![
+          'UpdateExpression',
+          'Property',
+          'ArrayPattern',
+          'AssignmentPattern',
+          'RestElement',
+          'ForOfStatement',
+          'ForInStatement',
+        ].includes(parent.type)
+      );
+    };
+    const plainDescriptor = (input) => {
+      const node = unwrap(input);
+      return (
+        node?.type === 'ObjectExpression' &&
+        node.properties.length === 1 &&
+        node.properties[0].type === 'Property' &&
+        node.properties[0].kind === 'init' &&
+        !node.properties[0].method &&
+        !node.properties[0].computed &&
+        (node.properties[0].key.name ?? node.properties[0].key.value) === 'value' &&
+        plainValue(node.properties[0].value)
       );
     };
     const checkProcessObject = (identifier) => {
@@ -366,7 +496,8 @@ export default {
         parent.type === 'VariableDeclarator' &&
         parent.init === node &&
         parent.id.type === 'Identifier' &&
-        parent.parent.kind === 'const'
+        parent.parent.kind === 'const' &&
+        parent.parent.parent.type !== 'ExportNamedDeclaration'
       ) {
         for (const variable of context.sourceCode.getDeclaredVariables(parent))
           for (const reference of variable.references)
@@ -378,7 +509,9 @@ export default {
         parent.type === 'MemberExpression' &&
         parent.object === node &&
         parent.computed &&
-        registryKey(parent.property)
+        registryKey(parent.property) &&
+        cleanIntrinsics(node) &&
+        slotUse(parent)
       )
         return;
       if (
@@ -387,7 +520,10 @@ export default {
         parent.callee.type === 'MemberExpression' &&
         nativeObject(parent.callee.object, 'Object') &&
         staticKey(parent.callee) === 'defineProperty' &&
-        registryKey(parent.arguments[1])
+        parent.arguments.length === 3 &&
+        registryKey(parent.arguments[1]) &&
+        cleanIntrinsics(node) &&
+        plainDescriptor(parent.arguments[2])
       ) {
         // defineProperty returns its target: retaining that result exposes process.
         checkListenerCall(parent.callee);
@@ -423,7 +559,8 @@ export default {
         parent.type === 'VariableDeclarator' &&
         parent.init === node &&
         parent.id.type === 'Identifier' &&
-        parent.parent.kind === 'const'
+        parent.parent.kind === 'const' &&
+        parent.parent.parent.type !== 'ExportNamedDeclaration'
       ) {
         for (const variable of context.sourceCode.getDeclaredVariables(parent))
           for (const reference of variable.references)
