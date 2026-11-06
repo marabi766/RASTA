@@ -3,6 +3,7 @@
  */
 import ts from 'typescript';
 import { z } from 'zod';
+import { TRANSACTION_TEXT_BOUNDS } from '@rasta/contracts';
 
 import {
   DISPUTE_COMMAND_FIELDS,
@@ -177,6 +178,15 @@ const OPTIONAL_UNSENT: Readonly<Record<DisputeCommand, Readonly<Record<string, s
   RESOLVE_DISPUTE: {},
 };
 
+/** Which `TRANSACTION_TEXT_BOUNDS` entry bounds each field the portal sends. */
+const BOUNDS_ENTRY = {
+  reason: 'disputeReason',
+  resolution: 'disputeResolution',
+} as const satisfies Record<
+  (typeof DISPUTE_COMMAND_FIELDS)[DisputeCommand],
+  keyof typeof TRANSACTION_TEXT_BOUNDS
+>;
+
 describe('the bodies', () => {
   it.each(DISPUTE_COMMAND_TABLE)(
     '$command: strict, with the field the portal sends, its limits, its identity, and only listed optional extras',
@@ -194,8 +204,13 @@ describe('the bodies', () => {
       for (const declaration of [...Object.values(sent), ...Object.values(extras)]) {
         expect(schema).toContain(declaration);
       }
-      const { min, max } = DISPUTE_FIELD_LIMITS[field];
-      expect(schema).toContain(`${field}:z.string().trim().min(${min}).max(${max})`);
+      // Both sides read one table (FU-134): the service's field is bounded by
+      // its entry, and the portal's limits are that entry.
+      const entry = BOUNDS_ENTRY[field];
+      expect(schema).toContain(
+        `${field}:keptTextWithin(z.string().trim(),TRANSACTION_TEXT_BOUNDS.${entry})`,
+      );
+      expect(DISPUTE_FIELD_LIMITS[field]).toEqual(TRANSACTION_TEXT_BOUNDS[entry]);
     },
   );
 

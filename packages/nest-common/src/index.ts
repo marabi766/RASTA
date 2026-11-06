@@ -63,6 +63,11 @@ export {
   upstreamExchange,
 } from './http/exchange-deadline';
 export type { ExchangeOptions } from './http/exchange-deadline';
+export {
+  MAX_QUERY_SEGMENTS,
+  StrictQueryParserInstaller,
+  strictQueryParser,
+} from './http/strict-query-parser';
 export { InternalHttpClient, InternalTokenService } from './http/internal-http-client';
 export type { InternalGrant, InternalSender } from './http/internal-http-client';
 export {
