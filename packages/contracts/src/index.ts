@@ -37,7 +37,6 @@ export {
   isWithin,
   keptTextWithin,
   textWithin,
-  withLfLineEndings,
   type TextBounds,
 } from './common/transaction-text';
 export { parsableUrl } from './common/parsable-url';
