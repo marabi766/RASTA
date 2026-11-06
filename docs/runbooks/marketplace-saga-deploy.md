@@ -211,7 +211,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 7); an absent field means protocol **0**, the strictest legacy
+support (this build: 8); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue. An incompatible
@@ -223,9 +223,9 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**, `saga-owed-work-durable-v1` **6**, `economic-hold-call-durable-wait-v1` **7**. A marker the gate does not list blocks every target until the gate learns
+**5**, `saga-owed-work-durable-v1` **6**, `economic-hold-call-durable-wait-v1` **7**, `economic-hold-refusal-exit-v1` **8**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
-(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 7; any unlisted field blocks; so does an
+(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 7, `lateHoldWatch`: 8; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
 history requires.
 
@@ -320,11 +320,36 @@ release them. Under this wait the order stays `PENDING`, or `CANCELLING` if the 
 cancels. The saga goes on sending even then, because only an answered key fences a late
 request off; if the send is then answered, the saga refunds it. An obligation found that
 is not `HELD` or not on the order's terms stops the saga as it always did
-(`OBLIGATION_NOT_HELD`, `OBLIGATION_TERMS_MISMATCH`). A refusal that persists in this
-wait, an empty wallet say, keeps the saga here: **do not terminate or cancel it** to clear
-the alert, since a hold that lands later would have nothing to release it. Check the
-obligation at economic-service and escalate. There is no operator path to `FAILED`
-from this wait yet. With economic-service down, a lookup that cannot answer counts as a round.
+(`OBLIGATION_NOT_HELD`, `OBLIGATION_TERMS_MISMATCH`). With economic-service down, a lookup that cannot answer
+counts as a round.
+
+A refusal that persists, an empty wallet say, ends this wait only in time (protocol 8).
+Once the last request not answered by a marked refusal is older than
+`ECONOMIC_IDEMPOTENCY_TTL_HOURS` plus a quarter of it (30 h at the default), a marked
+refusal with an empty lookup after it counts as proof: the order closes, `FAILED` or
+`CANCELLED` if the buyer cancelled, which returns its stock, and the saga sends nothing
+more. A 5xx, a timeout or an unmarked code starts that age again, so a flapping service
+keeps the saga here with the alert on. For one more such period the phase is
+`LATE_HOLD_WATCH`: the saga asks at most hourly and refunds any hold that landed, and the
+order stays closed; a failed lookup or refund counts as a `compensate` round, and a
+status no refund can reach stays in `OBLIGATION_RECONCILIATION`. marketplace-service reads
+the same variable as economic-service, so give both the same value; nothing compares the
+two at start, and a saga keeps the value it started with. A saga started before that field
+has no retention in its input and never takes this exit. A closed order cannot move, so
+reconciliation on one does not clear by itself: once the obligation is settled by hand,
+terminate that saga. **Do not terminate or
+cancel a saga in this wait** to clear the alert, since a hold that lands later would have
+nothing to release it: check the obligation at economic-service and escalate.
+
+**Operator check: a hold on a closed order.** The watch ends, and sagas closed by an
+older build never had one, so after an incident in this wait compare the two services
+(separate databases, no join): `SELECT id, source_reference FROM "transaction" WHERE
+source_type = 'ORDER' AND status = 'HELD';` at economic-service, then `SELECT id, status
+FROM "order" WHERE id = ANY($1) AND status IN ('FAILED', 'CANCELLED');` at
+marketplace-service with those `source_reference` values. Any row is money held for an
+order that has ended, including the accepted cutover edge of a protocol-5 saga past its
+decision that closed as cancelled on an empty lookup: refund that obligation under the
+platform's refund procedure and record why. No code runs this check.
 
 A wait that will not clear shows why in the log line's code: fix the route or
 configuration and signal. For a real refusal at `HELD` (a persistent
@@ -353,6 +378,11 @@ the gate refuses a lower target for a saga in that wait: that build has no such 
 ends the same history in `FAILED`, and refuses a resumed run at `PENDING`. A saga
 a lower protocol started takes the wait if its hold is still unanswered when this build deploys; a
 history in which a lower protocol already recorded `FAILED` replays that end.
+
+Protocol 8 is the exit from that wait, with its own marker and its own resume field
+(`lateHoldWatch`), so that the gate refuses a lower target for a saga that gave its hold up:
+that build would send the hold again, or close without the watch. A history that went on
+waiting past the limit replays that wait, and takes the exit at its next refused round.
 
 ### Owed work (FU-117, protocol 6)
 

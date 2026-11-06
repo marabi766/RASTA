@@ -56,6 +56,7 @@ function env(overrides: Partial<MarketplaceEnv> = {}): MarketplaceEnv {
     MARKETPLACE_RECEIPT_WINDOW_DAYS: 3,
     MARKETPLACE_REMINDER_INTERVAL_DAYS: 2,
     MARKETPLACE_SAGA_RECHECK_HOURS: 24,
+    ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
     ...overrides,
     // JUSTIFIED-ANY: only the Temporal-related settings are read by this class,
     // and building the whole environment here would couple a test about
@@ -151,6 +152,7 @@ describe('starting a saga', () => {
         MARKETPLACE_RECEIPT_WINDOW_DAYS: 5,
         MARKETPLACE_REMINDER_INTERVAL_DAYS: 4,
         MARKETPLACE_SAGA_RECHECK_HOURS: 6,
+        ECONOMIC_IDEMPOTENCY_TTL_HOURS: 48,
       }),
       store,
     ).deliver('ORD_8');
@@ -165,6 +167,7 @@ describe('starting a saga', () => {
       receiptWindowDays: 5,
       reminderIntervalDays: 4,
       recheckIntervalHours: 6,
+      economicKeyRetentionHours: 48,
     });
   });
 

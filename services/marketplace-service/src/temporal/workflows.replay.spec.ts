@@ -102,6 +102,13 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     'fu117r2-filing-final-then-cancel',
     'fu117r2-settled-reconciliation',
     'fu117r2-settle-doubt-filing',
+    // #812 r1: the build before the exit went on waiting past the limit, its input
+    // already carrying the retention (the rollout's overlap), and must replay that wait.
+    // With it, the order closed, and the watch to its end or to a late hold's refund.
+    'pre-fu117r3-hold-refused-past-window',
+    'fu117r3-hold-exit-failed',
+    'fu117r3-hold-exit-cancelled',
+    'fu117r3-late-hold-refunded',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(

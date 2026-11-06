@@ -182,6 +182,7 @@ const PATCH_PROTOCOL = new Map([
   ['economic-sibling-call-durable-wait-v1', 5],
   ['saga-owed-work-durable-v1', 6],
   ['economic-hold-call-durable-wait-v1', 7],
+  ['economic-hold-refusal-exit-v1', 8],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is
@@ -189,8 +190,9 @@ const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // `releaseRounds` means it rolled over inside the release wait of protocol 3,
 // `unconfirmedCall` inside the same wait of an authorisation, protocol 4,
 // `siblingCall` inside that of a dispute filing or a refund, protocol 5,
-// `outstandingWork` with work owed outside any call's wait, protocol 6, and
-// `holdCall` inside the wait of the hold, protocol 7.
+// `outstandingWork` with work owed outside any call's wait, protocol 6,
+// `holdCall` inside the wait of the hold, protocol 7, and `lateHoldWatch` after
+// giving that hold up, protocol 8.
 const RESUME_PROTOCOL = new Map([
   ['status', 1],
   ['mirroredDispute', 1],
@@ -204,6 +206,7 @@ const RESUME_PROTOCOL = new Map([
   ['siblingCall', 5],
   ['outstandingWork', 6],
   ['holdCall', 7],
+  ['lateHoldWatch', 8],
 ]);
 // Every field a saga has ever been started with; any other could mean anything.
 const INPUT_FIELDS = new Set([
@@ -213,6 +216,7 @@ const INPUT_FIELDS = new Set([
   'reminderIntervalDays',
   'recheckIntervalHours',
   'historyEventThreshold',
+  'economicKeyRetentionHours',
   'resume',
 ]);
 function resumeProtocol(resume) {

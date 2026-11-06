@@ -76,7 +76,6 @@
     "ECONOMIC_BALANCE_AUDIT_BATCH_SIZE": ["dev", "test", "test:integration"],
     "ECONOMIC_BALANCE_AUDIT_ENABLED": ["dev", "test", "test:integration"],
     "ECONOMIC_BALANCE_AUDIT_INTERVAL_SECONDS": ["dev", "test", "test:integration"],
-    "ECONOMIC_IDEMPOTENCY_TTL_HOURS": ["dev", "test", "test:integration"],
     "ECONOMIC_MOCK_PAYMENT_LATENCY_MS": ["dev", "test", "test:integration"],
     "ECONOMIC_PAYMENT_PROVIDER": ["dev", "test", "test:integration"],
     "ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS": ["dev", "test", "test:integration"],

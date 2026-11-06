@@ -70,6 +70,7 @@ describe('MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS', () => {
     const env = withIdempotency({});
     expect(env.MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(60);
     expect(env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS).toBe(24);
+    expect(env.ECONOMIC_IDEMPOTENCY_TTL_HOURS).toBe(24);
   });
 
   it.each(['30', '120', '3599'])('accepts %p', (value) => {

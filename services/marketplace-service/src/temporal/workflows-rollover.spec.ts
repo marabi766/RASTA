@@ -1076,7 +1076,10 @@ describe('history rollover on real Temporal', () => {
         const started = history.events?.[0]?.workflowExecutionStartedEventAttributes;
         const data = started?.input?.payloads?.[0]?.data as Uint8Array;
         const { resume } = JSON.parse(Buffer.from(data).toString()) as OrderSagaInput;
-        expect(resume?.holdCall).toEqual({ rounds: expect.any(Number) });
+        expect(resume?.holdCall).toEqual({
+          rounds: expect.any(Number),
+          doubtAt: expect.any(Number),
+        });
         expect(resume?.waitingIn).toBe('PENDING');
         expect(resume).not.toHaveProperty('siblingCall');
         expect((await latest.query<SagaStatus>('status')).phase).toBe('HOLD_UNCONFIRMED');

@@ -5,6 +5,7 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  economicIdempotencyTtlHoursSchema,
   fixedEnvMessages,
   kafkaEnvSchema,
   kafkaSaslConfigured,
@@ -172,6 +173,12 @@ export const marketplaceEnvSchema = baseEnvSchema
      * day keeps a year-long wait to a few hundred history events.
      */
     MARKETPLACE_SAGA_RECHECK_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
+
+    /**
+     * economic-service's setting, read here too: a hold in doubt is not given up on
+     * until the doubt has outlived these keys (`doubtOutlivesKeyMs`).
+     */
+    ECONOMIC_IDEMPOTENCY_TTL_HOURS: economicIdempotencyTtlHoursSchema,
 
     /** Retention for stored `Idempotency-Key` responses (docs/06 § 6.8). */
     MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),

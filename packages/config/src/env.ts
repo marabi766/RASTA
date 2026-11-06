@@ -684,6 +684,18 @@ export function idempotencyClaimOperationBudget(
   };
 }
 
+/**
+ * How long economic-service honours a stored idempotency key, in hours (docs/06 § 6.8).
+ * One definition for the service that keeps the keys and for the saga that has to
+ * outlast them, under one variable, so the two cannot be given different defaults.
+ */
+export const economicIdempotencyTtlHoursSchema = z.coerce
+  .number()
+  .int()
+  .min(1)
+  .max(168)
+  .prefault(24);
+
 /** What a service hands `loadEnv` besides its schema. */
 export interface LoadEnvOptions<T> {
   /**

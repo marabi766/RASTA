@@ -374,6 +374,22 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     });
   });
 
+  // A pin for the late hold's refund (`watchForLateHold`): the order has ended, and no
+  // status guard may be added here, as nothing else would ever refund it.
+  it.each(['FAILED', 'CANCELLED'])('a refund goes out for an order already %s', async (status) => {
+    const closed = order as unknown as { status: string };
+    const was = closed.status;
+    closed.status = status;
+    try {
+      const send = jest.fn();
+      const { activities } = over(send, obligation('HELD'), () => 1);
+      await expect(activities.compensate('ORD', 'TXN', 'why', true)).resolves.toBeUndefined();
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      closed.status = was;
+    }
+  });
+
   describe.each([
     [
       'compensate',
@@ -464,6 +480,46 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       expect(caught.type).toBe(code);
       expect(caught.details ?? []).toEqual([]);
     });
+
+    it.each(['FAILED', 'CANCELLED'])(
+      'an attempt running on past a saga that closed the order %s sends nothing, and proves nothing',
+      async (status) => {
+        const closed = order as unknown as { status?: string };
+        closed.status = status;
+        try {
+          const send = jest.fn();
+          const { activities } = over(send, noTransaction, () => 1);
+          const caught = await failure(activities.createObligation('ORD'));
+          expect(caught.type).toBe('ORDER_ALREADY_CLOSED');
+          expect(caught.details ?? []).toEqual([]);
+          expect(send).not.toHaveBeenCalled();
+        } finally {
+          delete closed.status;
+        }
+      },
+    );
+
+    it.each(['PENDING', 'CANCELLING'])(
+      'at %s the send still goes: it is the fence',
+      async (status) => {
+        const closed = order as unknown as { status?: string };
+        closed.status = status;
+        try {
+          const send = jest.fn(() => ({ id: 'TXN' }));
+          const { activities } = over(
+            send,
+            () => ({ status: 'HELD' }),
+            () => 1,
+          );
+          await expect(activities.createObligation('ORD')).resolves.toEqual({
+            transactionId: 'TXN',
+          });
+          expect(send).toHaveBeenCalledTimes(1);
+        } finally {
+          delete closed.status;
+        }
+      },
+    );
 
     it('no attempt known: no proof', async () => {
       const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction);

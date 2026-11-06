@@ -402,6 +402,14 @@ export function createActivities(deps: ActivityDependencies) {
           // obligation exists; do not create a second one.
           return { transactionId: order.economicTransactionId };
         }
+        // An attempt that outlived its worker's timeout, running on past the end of the
+        // saga's wait: nobody would read its answer. Not proof: the saga learns nothing.
+        if (order.status === 'FAILED' || order.status === 'CANCELLED') {
+          throw ApplicationFailure.nonRetryable(
+            `Order ${order.id} is ${order.status}; no hold is placed for it`,
+            'ORDER_ALREADY_CLOSED',
+          );
+        }
 
         const transaction = await deps.economic
           .createObligation({

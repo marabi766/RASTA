@@ -39,6 +39,19 @@ export const PROVEN_REFUSALS: ReadonlySet<string> = new Set([
   'BUSINESS_LINE_REQUIRED',
 ]);
 
+/**
+ * How long a hold's doubt must last before a marked refusal can end it: the retention
+ * of economic-service's keys (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`), and a quarter of that
+ * again as the margin, so that one setting moves both. Null for anything that is not a
+ * retention: no age proves anything then.
+ */
+export function doubtOutlivesKeyMs(retentionHours: unknown): number | null {
+  if (typeof retentionHours !== 'number' || !(retentionHours > 0) || retentionHours === Infinity) {
+    return null;
+  }
+  return (retentionHours + retentionHours / 4) * 60 * 60 * 1000;
+}
+
 /** In a failure's details: this step's own refusal, by a guard or the send, on its first attempt. */
 export const REFUSED_ON_FIRST_ATTEMPT = 'REFUSED_ON_FIRST_ATTEMPT';
 

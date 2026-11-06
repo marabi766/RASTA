@@ -5,6 +5,7 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  economicIdempotencyTtlHoursSchema,
   EnvValidationError,
   fixedEnvMessages,
   kafkaEnvSchema,
@@ -286,7 +287,7 @@ export const economicEnvSchema = baseEnvSchema
       .prefault(3000),
 
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
-    ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
+    ECONOMIC_IDEMPOTENCY_TTL_HOURS: economicIdempotencyTtlHoursSchema,
 
     /**
      * Whether this instance runs the ledger/wallet reconciliation.
