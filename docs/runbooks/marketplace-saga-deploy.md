@@ -143,7 +143,10 @@ that shortens retention after deleting older history also requires operator revi
 `rasta_marketplace_saga_start_backlog` and
 `rasta_marketplace_saga_start_backlog_age_seconds` expose counts/age only.
 `RastaMarketplaceSagaStartBacklogAging` fires after age exceeds five minutes for
-two minutes. Local Prometheus loads the rule; external notification routing remains
+two minutes. An older economic-service causes it too: no saga starts until
+`GET /v1/transactions/capabilities` says yes (outcome `economic_not_ready` on
+`rasta_marketplace_saga_start_deliveries_total`), and those orders stay unclaimed and
+start by themselves after the upgrade (ADR-040). Local Prometheus loads the rule; external notification routing remains
 a deployment responsibility. Starter shutdown aborts active RPCs, joins database
 work and stops polling before Prisma disconnects.
 

@@ -34,6 +34,7 @@ it('a cancelled order recovered after missed start completes once without creati
       MARKETPLACE_TEMPORAL_TASK_QUEUE: queue,
     },
     store,
+    { provesHeldFunds: async () => true },
   );
   const createObligation = jest.fn();
   const findObligations = jest.fn(async () => []);

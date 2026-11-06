@@ -97,6 +97,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           organizationId: org.buyer,
           transactionType: 'MARKETPLACE_ORDER',
           status: 'HELD',
+          heldProven: true,
           sourceReference: input.orderId,
         };
       },
@@ -152,6 +153,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       id: `TXN_${ulid()}`,
       orderId: '',
       status: 'HELD',
+      heldProven: true,
       commissionAmountMinor: '0',
       netAmountMinor: '0',
       disputedAt: null as string | null,
@@ -261,6 +263,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           counterpartyOrganizationId: org.supplier,
           transactionType: 'MARKETPLACE_ORDER',
           status: obligation.status,
+          heldProven: obligation.heldProven,
           grossAmountMinor: '500000',
           commissionAmountMinor: obligation.commissionAmountMinor,
           netAmountMinor: obligation.netAmountMinor,

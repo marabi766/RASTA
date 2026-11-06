@@ -1087,13 +1087,20 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "a42868e01ac1f252041c961b16859c1710d1c584871cfc1f0daeaf1a2c2afe30",
+    "hash": "ed2545bc7bd76a4ae872a1e450bec42f5b4a3433dbd8061ecbc1d6909b473590",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (transaction_holds: purpose TRANSACTION, the payer's, on the payer's wallet), the authority fact a dispute resolution decides from (D-083), and, by transaction id, that transaction's own settlement authority and hold decision (transaction_settlement_authorised, transaction_settlement_barred), which settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
-    "line": 239,
+    "line": 203,
+    "hash": "78c330b495bfc4d4672e18d2604ecf6ca98faeb994017dd290e8036a9bd4a044",
+    "occurrence": 0,
+    "decision": "platform-wide: by the ids of rows the service has already read for this caller, payer or payee (get asserts visibility first, list is scoped to its party); answers only which of those ids the database proves HELD (transaction_held_proven)"
+  },
+  {
+    "file": "services/economic-service/src/transaction/transaction.repository.ts",
+    "line": 267,
     "hash": "5b01e9caa3c32263dfb553de989235d5ef626132c72e414837d9919e0543078f",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
@@ -1562,8 +1569,8 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 446,
-    "hash": "d8fcade0b7f7c68f5287fac4f2e919f0ef43a29a90436183041e870c0e2e6107",
+    "line": 447,
+    "hash": "8abfe25ec7a4fb5a1bc2ced60e22a000786c904f80e4430b38e3acfa2c7251d6",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"
   },
@@ -1576,8 +1583,8 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 624,
-    "hash": "64c7685c987a3149b095f7c7d8e838cd694d441c9b28861c2cfd3c8600464f30",
+    "line": 625,
+    "hash": "c5078e8323eebc67d71cbb9d1e97774ce595f08662fd60fdc41da4227f101342",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"
   },
@@ -1590,8 +1597,8 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 681,
-    "hash": "3fb49ea44db928c8c71fd69d70eaa46323079890db0dcb639163d120b9085a84",
+    "line": 682,
+    "hash": "4f437986c33c043c79be7c3d58d83d9ced51217cac7d649e478c9fd6008f14ff",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"
   },
@@ -1744,8 +1751,8 @@
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 297,
-    "hash": "95bca129cc2b990b82175237a7aecfdf0729a3ab2ce34f02db0995631f49e447",
+    "line": 299,
+    "hash": "3218d024127ee9a416e3daa24f2ba4bbc46995d332969fe676257159cf101b4a",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
   },
@@ -1758,8 +1765,8 @@
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 377,
-    "hash": "ee502c3b95b5a677267c4030908a96a9e2ba216959d362a500964f4a987f39ba",
+    "line": 380,
+    "hash": "2ec44d5a44dde7c2c628532040cca113688250a3fe8f46263b41ea066eb4ae36",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
   },
@@ -1772,8 +1779,8 @@
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 434,
-    "hash": "b7ecdb2683b50d0f078fa6616838abb110d03d0165323d10a44d259798ad8d10",
+    "line": 437,
+    "hash": "7263343ee68e210611dbb0ebfe6f16c93d69402d92901c853243b14f3c2794e4",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
   },
