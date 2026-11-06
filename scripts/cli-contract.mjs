@@ -417,6 +417,8 @@ export const CLI_CONTRACT = Object.freeze({
   // fetch|check|pack|unpack; directories and the archive file (path); the
   // producer key of `check` (trivy-db-<run>-<attempt>).
   'scripts/ci-trivy-db.mjs': { positionals: ['enum', 'path', 'identifier'] },
+  // Shared inventory passes Git -z and compares an ESLint directive kind; it reads no argv.
+  'scripts/source-inventory.mjs': { other: ['-disable-next-line', '-z'] },
   'scripts/container-scope-proof.mjs': {
     other: ['--test', '--test-name-pattern', '--test-reporter'],
   },
