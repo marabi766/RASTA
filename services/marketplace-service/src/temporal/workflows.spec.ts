@@ -1359,7 +1359,31 @@ describe('the order saga', () => {
         );
     const phaseIs = (handle: WorkflowHandle, phase: string): Promise<void> =>
       eventually(async () => (await handle.query<SagaStatus, []>('status')).phase === phase, phase);
-    /** The receipt is confirmed and the saga at rest in the wait, a round reported. */
+    /**
+     * The saga is blocked in a backoff: past the workflow tasks, the last
+     * thing in its history is the timer it armed. Not {@link atRest}: the test
+     * server also records a workflow task with no command while the round's
+     * report is still running, and the saga then had a round in flight that
+     * the test took for over (FU-174).
+     */
+    const backingOff = (handle: WorkflowHandle): Promise<void> =>
+      eventually(async () => {
+        const last = ((await handle.fetchHistory()).events ?? [])
+          .filter(
+            (e) =>
+              !e.workflowTaskScheduledEventAttributes &&
+              !e.workflowTaskStartedEventAttributes &&
+              !e.workflowTaskCompletedEventAttributes,
+          )
+          .at(-1);
+        return Boolean(last?.timerStartedEventAttributes);
+      }, 'the backoff to be armed');
+    /**
+     * The receipt is confirmed and the saga waiting out a backoff, a round
+     * reported. Not necessarily the first: the receipt's signal can land while
+     * the read that already saw it runs, and that nudge ends the first backoff
+     * at once (FU-174). Waiting for the timer is what makes the rounds settled.
+     */
     const toWait = async (
       { party, held, handle }: { party: Party; held: () => Promise<void>; handle: WorkflowHandle },
       rounds: () => number,
@@ -1370,7 +1394,7 @@ describe('the order saga', () => {
       await party.confirmReceipt();
       await phaseIs(handle, 'AUTHORISATION_UNCONFIRMED');
       await until(() => rounds() > 0, 'the round to be reported');
-      await atRest(handle);
+      await backingOff(handle);
     };
 
     it('exhausted: the saga stays, settles nothing, and goes on once confirmed', async () => {
