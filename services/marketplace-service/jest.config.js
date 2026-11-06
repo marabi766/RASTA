@@ -63,6 +63,10 @@ module.exports = {
   // server. It is deliberately **not** excluded: an exclusion would raise the
   // number by hiding a tooling limit, and would also hide the workflow itself
   // if its tests were ever deleted. The threshold is met with the file left in.
+  //
+  // `test:coverage` skips the workflow's own specs (`src/temporal/workflows*`):
+  // what they run is that bundle, so they add nothing the report can see and
+  // most of the 8 minutes the CI step has. The Unit tests job runs them in full.
   coverageThreshold: {
     global: { branches: 75, functions: 75, lines: 75, statements: 75 },
   },
