@@ -240,10 +240,54 @@ describe('what comes back', () => {
         })) as unknown as typeof fetch,
     );
 
-    // No problem body to map, so it is an outage to the person rather than a
-    // silent success or a crash.
-    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 400 });
+    // No problem body: nothing proves the platform refused it (a proxy's page
+    // says nothing about the service), so it is unconfirmed — never a silent
+    // success, a crash, or "nothing changed" (PR-830 r1 F1).
+    expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
   });
+});
+
+describe('a 4xx this portal cannot prove was a refusal (PR-830 r1 F1)', () => {
+  const answer = (status: number, body?: unknown) =>
+    call((async () =>
+      body === undefined
+        ? new Response(null, { status })
+        : jsonResponse(status, body)) as unknown as typeof fetch);
+
+  it.each([
+    ['404 without a body (code=null)', 404, undefined],
+    ['403 without a body', 403, undefined],
+    ['401 without a body', 401, undefined],
+    ['429 without a body', 429, undefined],
+    ['400 with an undocumented code', 400, { code: 'SOMETHING_NEW', message: 'x' }],
+    ['409 with an undocumented code', 409, { code: 'SOMETHING_NEW', message: 'x' }],
+    ['422 with an undocumented code', 422, { code: 'SOMETHING_NEW', message: 'x' }],
+    [
+      '404 with a documented code of another status',
+      404,
+      { code: 'VALIDATION_FAILED', message: 'x' },
+    ],
+    ['403 with a documented code of another status', 403, { code: 'NOT_FOUND', message: 'x' }],
+    ['409 with a code that is an inherited property name', 409, { code: 'toString', message: 'x' }],
+  ])('%s is UNKNOWN_OUTCOME, never a refusal', async (_label, status, body) => {
+    expect((await answer(status, body)).kind).toBe('UNKNOWN_OUTCOME');
+  });
+
+  it.each([
+    [403, 'INSUFFICIENT_ROLE', 'FORBIDDEN'],
+    [404, 'NOT_FOUND', 'NOT_FOUND'],
+    [400, 'VALIDATION_FAILED', 'INVALID'],
+    [409, 'OPTIMISTIC_LOCK_FAILED', 'INVALID'],
+    [422, 'BUSINESS_RULE_VIOLATION', 'INVALID'],
+    [429, 'RATE_LIMIT_EXCEEDED', 'UNAVAILABLE'],
+  ])(
+    '%s %s, documented under its own status, is the refusal it says (%s)',
+    async (status, code, kind) => {
+      const result = await answer(status, { code, message: 'x' });
+      expect(result.kind).toBe(kind);
+      if (result.kind === 'UNAVAILABLE') expect(result).toMatchObject({ status, code });
+    },
+  );
 });
 
 describe('mapProblemToFields — a fallback keyed by error code', () => {

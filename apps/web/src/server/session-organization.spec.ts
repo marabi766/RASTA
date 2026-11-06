@@ -295,10 +295,10 @@ describe('nothing outside the boundary reads the stored copy', () => {
     expect(/x-organization-id/i.test("headers: { 'X-Organization-Id': org }")).toBe(true);
   });
 
-  it('the 31 pages read the organization through the helper', () => {
+  it('the 33 pages read the organization through the helper', () => {
     const pages = sources(join(SRC, 'app')).filter((path) => path.endsWith('page.tsx'));
     const shells = pages.filter((path) => readFileSync(path, 'utf8').includes('<AppShell'));
-    expect(shells).toHaveLength(31);
+    expect(shells).toHaveLength(33);
     for (const path of shells) {
       const text = readFileSync(path, 'utf8');
       expect({ path, scoped: /<AppShell\s+key=\{actingScope\(session\)\}/.test(text) }).toEqual({
