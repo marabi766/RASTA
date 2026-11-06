@@ -1229,6 +1229,8 @@ describe('history rollover on real Temporal', () => {
           await atRest(taskQueue);
           const seen = await env.client.workflow.getHandle(taskQueue).query<SagaStatus>('status');
           expect(seen.phase).toBe('AWAITING_CONFIRMATION');
+          // At rest can mean the task that scheduled the reminder has just completed.
+          await eventually(() => reminders === remindersBeforeDeadline);
         });
         expect(reminders).toBe(remindersBeforeDeadline);
 
