@@ -1104,6 +1104,8 @@ const CONVERTED = {
   'scripts/marketplace-saga-drain-check.test.mjs': 0,
   'scripts/ci-temporal-cache.test.mjs': 0, // FU-112 r-sync: the source walk is authoredFiles()
   'apps/web/src/app/procurement/demands/demands.spec.tsx': 0, // FU-112 r-sync: the screens' sources via authoredFiles()
+  'scripts/check-dockerfile-pins.test.mjs': 0, // FU-112 r-sync 2 (#832): .bash libraries via authoredFiles()
+  'scripts/cors-published-headers.test.mjs': 0, // FU-112 r-sync 2 (#860): OpenAPI documents and service entry points via authoredFiles()
 };
 test('the allow-list refuses an unlisted file and a listed file that no longer lists', () => {
   const allowed = new Set(['old.mjs', 'gone.mjs']);
