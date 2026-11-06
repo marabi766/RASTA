@@ -1287,22 +1287,31 @@ test('psql gets libpq’s own URL parameters, and none of Prisma’s', () => {
   }
 });
 
-test('a startup option reaches libpq percent-encoded, never with `+` for its space (L7-37)', () => {
-  // libpq decodes %XX in a URI and nothing else: `-c+TimeZone=UTC` is refused
-  // by the server as an unknown parameter `+TimeZone`.
+test('a startup option reaches psql through PGOPTIONS, never on its command line (L7-37, FU-104)', () => {
   const given = 'postgresql://u@db.example/rasta_x?schema=public&options=-c%20TimeZone%3DUTC';
-  assert.equal(
-    libpqInvocation(given).target,
-    'postgresql://u@db.example/rasta_x?options=-c%20TimeZone%3DUTC',
-  );
+  const moved = {
+    target: 'postgresql://u@db.example/rasta_x',
+    env: { PGOPTIONS: '-c TimeZone=UTC' },
+  };
+  assert.deepEqual(libpqInvocation(given), moved);
   // …including after a `URLSearchParams` edit upstream has already written `+`.
   const edited = new URL(given);
   edited.searchParams.set('schema', 'scratch');
   assert.match(edited.toString(), /options=-c\+TimeZone/);
-  assert.equal(
-    libpqInvocation(edited.toString()).target,
-    'postgresql://u@db.example/rasta_x?options=-c%20TimeZone%3DUTC',
-  );
+  assert.deepEqual(libpqInvocation(edited.toString()), moved);
+  // Each setting the repository's own URLs carry; a setting's name is not case-sensitive.
+  for (const option of [
+    '-c timezone=Asia/Tehran -c search_path=a,b',
+    '-c statement_timeout=15000 -c lock_timeout=5s -c idle_in_transaction_session_timeout=1min',
+    '-c default_transaction_read_only=on -c rasta.migration_statement_timeout=15min',
+    '-c STATEMENT_TIMEOUT=1',
+  ]) {
+    const url = `postgresql://u:p@db.example/app?options=${encodeURIComponent(option)}`;
+    assert.deepEqual(libpqInvocation(url), {
+      target: 'postgresql://u@db.example/app',
+      env: { PGPASSWORD: 'p', PGOPTIONS: option },
+    });
+  }
 });
 
 test('psql gets the password in its environment, never in its argv', () => {
@@ -1462,7 +1471,104 @@ test("psql-prisma-url passes the conversion to psql, and psql's exit code back",
   }
 });
 
-test('no document hands a database URL straight to psql (FU-128, FU-104)', () => {
+/** The command against a `psql` that records its argv and PGOPTIONS, and never connects. */
+function recordingPsqlCommand(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'psql-forwarding-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const seen = join(dir, 'seen');
+  writeFileSync(
+    join(dir, 'psql'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" > '${seen}'\nprintf 'PGOPTIONS=%s\\n' "$PGOPTIONS" >> '${seen}'\nexit 0\n`,
+    { mode: 0o755 },
+  );
+  return {
+    seen,
+    run: (args, url = 'postgresql://u:URL_SECRET@db.example/app') =>
+      spawnSync('node', [PSQL_PRISMA_URL, 'DATABASE_URL_X', ...args], {
+        encoding: 'utf8',
+        input: '',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          PGOPTIONS: '',
+          PGSERVICE: '',
+          DATABASE_URL_X: url,
+        },
+      }),
+  };
+}
+
+const CLI_URI = 'postgresql://u:CLI_SECRET@elsewhere.example/app';
+
+test('psql-prisma-url passes on nothing that could name a connection or hold a credential', (t) => {
+  const { seen, run } = recordingPsqlCommand(t);
+  for (const [label, args] of [
+    // PR-769-r4 F1's three probes.
+    ['short -d', ['-d', CLI_URI]],
+    ['long -d', [`--dbname=${CLI_URI}`]],
+    ['positional', [CLI_URI]],
+    // The other spellings getopt accepts for them: a check on those three would miss these.
+    ['long -d, apart', ['--dbname', CLI_URI]],
+    ['-d, attached', [`-d${CLI_URI}`]],
+    ['-d in a cluster', ['-Xd', CLI_URI]],
+    ['abbreviated long -d', [`--dbn=${CLI_URI}`]],
+    ['positional after a switch', ['-X', CLI_URI]],
+    ['positional after --', ['--', CLI_URI]],
+    ['positional after a script', ['-f', '-', CLI_URI]],
+    ['a key-value string', ['host=elsewhere.example password=CLI_SECRET']],
+    ['a service', ['service=CLI_SECRET']],
+    ['-h', ['-h', CLI_URI]],
+    ['-p', ['-p', 'CLI_SECRET']],
+    ['-U', ['-U', CLI_URI]],
+    // What else takes a value: psql connects from these too, or the value is the secret.
+    ['-c with \\connect', ['-c', `\\connect ${CLI_URI}`]],
+    ['-c with a password', ['-c', "ALTER ROLE r PASSWORD 'CLI_SECRET'"]],
+    ['-v', ['-v', `target=${CLI_URI}`]],
+    ['-v with a known name', ['-v', 'ON_ERROR_STOP=CLI_SECRET']],
+    ['-f a URL', ['-f', CLI_URI]],
+    ['--file a key-value string', ['--file', 'password=CLI_SECRET']],
+    ['-f swallowing an option', ['-f', `--dbname=${CLI_URI}`]],
+    ['-o', ['-o', 'CLI_SECRET']],
+    // A flag whose value is missing takes the next argument, or the next one psql is given.
+    ['-v alone', ['-v']],
+    ['-f alone', ['-f']],
+    ['the empty string', ['']],
+  ]) {
+    const refused = run(args);
+    assert.equal(refused.status, 2, label);
+    assert.match(refused.stderr, /its value is not repeated/, label);
+    assert.doesNotMatch(`${refused.stdout}${refused.stderr}`, SECRET_IN, label);
+    assert.equal(existsSync(seen), false, `${label}: psql was started`);
+  }
+  // PR-769-r4 F1's fourth probe, through the command.
+  const probe = run(
+    ['-X'],
+    'postgresql://u@db.example/app?options=-c%20app.password%3DOPTION_SECRET',
+  );
+  assert.equal(probe.status, 2);
+  assert.doesNotMatch(`${probe.stdout}${probe.stderr}`, SECRET_IN);
+  assert.equal(existsSync(seen), false);
+});
+
+test('psql-prisma-url passes on the flags that can hold nothing, and no URL option', (t) => {
+  const { seen, run } = recordingPsqlCommand(t);
+  const forwarded =
+    '-X --no-psqlrc -q --quiet -At --tuples-only --no-align -1 --single-transaction -v ON_ERROR_STOP=1 --set ON_ERROR_STOP=1 -f services/x/migrations/2026_x/down.sql --file -'.split(
+      ' ',
+    );
+  const ran = run(
+    forwarded,
+    'postgresql://u:URL_SECRET@db.example/app?schema=audit&options=-c%20TimeZone%3DUTC',
+  );
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.deepEqual(readFileSync(seen, 'utf8').trim().split('\n'), [
+    'postgresql://u@db.example/app',
+    ...forwarded,
+    'PGOPTIONS=-c TimeZone=UTC -c search_path=audit',
+  ]);
+});
+
+test('no document hands a database URL straight to psql (FU-128, FU-104)', (t) => {
   const documents = readdirSync(join(ROOT, 'docs'), { recursive: true })
     .map(String)
     .filter((name) => name.endsWith('.md'))
@@ -1477,13 +1583,25 @@ test('no document hands a database URL straight to psql (FU-128, FU-104)', () =>
       .filter((file) => existsSync(file));
   });
   assert.ok(downFiles.length > 10, 'the walk found the down.sql files');
+  const { seen, run } = recordingPsqlCommand(t);
+  let commands = 0;
   for (const file of [...documents, ...downFiles]) {
+    const text = readFileSync(file, 'utf8');
     assert.doesNotMatch(
-      readFileSync(file, 'utf8'),
+      text,
       /\b(?:psql|pg_dump|pg_restore|psql-prisma-url\.mjs)\s[^\n]*\$\{?\w*URL/,
       file,
     );
+    // Each command it gives must be one the command passes on.
+    const joined = text.replace(/\\\n(?:--)?\s*/g, ' ');
+    for (const [, args] of joined.matchAll(/psql-prisma-url\.mjs DATABASE_URL_\w+([^\n|`]*)/g)) {
+      commands += 1;
+      const ran = run(args.trim().split(/\s+/).filter(Boolean));
+      assert.equal(ran.status, 0, `${file}:${args}: ${ran.stderr}`);
+      rmSync(seen);
+    }
   }
+  assert.ok(commands >= 8, `the walk found ${commands} commands`);
   for (const [name, variable] of [
     ['marketplace-receipt-evidence.md', 'DATABASE_URL_MARKETPLACE_MIGRATOR'],
     ['marketplace-saga-deploy.md', 'DATABASE_URL_MARKETPLACE_MIGRATOR'],
@@ -1535,6 +1653,24 @@ const CREDENTIAL_LEAKS = [
   ['password file', 'postgresql://u@db.example/app?passfile=PASSFILE_SECRET'],
   ['unknown', 'postgresql://u@db.example/app?whatever=UNKNOWN_SECRET'],
   ['a key-value string', 'host=db.example password=KV_SECRET'],
+  // PR-769-r4 F1's probe, then what it would take to get past a check on that one spelling.
+  ...[
+    '-c%20app.password%3DOPTION_SECRET',
+    'OPTION_SECRET',
+    '--app.pw%3DOPTION_SECRET',
+    '-capp.pw%3DOPTION_SECRET',
+    '-c%20TimeZone%3DUTC%20-c%20app.pw%3DOPTION_SECRET',
+    '-c%20lock_timeout%3D1%20OPTION_SECRET',
+    '-c%20TimeZone%3Dpw%3DOPTION_SECRET',
+    '-c%20TimeZone%3D%5COPTION_SECRET',
+    '-c%20TimeZone%3DUTC&options=-c%20app.pw%3DOPTION_SECRET',
+  ].map((options) => [`options=${options}`, `postgresql://u@db.example/app?options=${options}`]),
+  // On a parameter that does stay on the command line, nothing may read as a setting.
+  [
+    'a setting, plain name',
+    'postgresql://u@db.example/app?application_name=-c%20a.pw%3DAPP_SECRET',
+  ],
+  ['a key-value, plain name', 'postgresql://u@db.example/app?user=u%20password%3DUSER_SECRET'],
 ];
 
 const SECRET_IN = /[A-Z]+_SECRET/;
@@ -1628,7 +1764,7 @@ test('a URL the boundary accepts reaches psql with its password in the environme
     ['postgresql://db.example/app?p%61ssword=A_SECRET', 'postgresql://db.example/app', 'A_SECRET'],
     [
       'postgres:///app?host=%2Fvar%2Frun%2Fpostgresql&options=-c%20TimeZone%3DUTC',
-      'postgres:///app?host=%2Fvar%2Frun%2Fpostgresql&options=-c%20TimeZone%3DUTC',
+      'postgres:///app?host=%2Fvar%2Frun%2Fpostgresql',
       undefined,
     ],
     // No password: nothing is set, so an inherited one still applies.
@@ -1642,6 +1778,7 @@ test('a URL the boundary accepts reaches psql with its password in the environme
       assert.equal(args[0], target);
       assert.doesNotMatch(args.join(' '), SECRET_IN);
       assert.equal(env.PGPASSWORD, password ?? process.env.PGPASSWORD);
+      assert.equal(env.PGOPTIONS, /options=/.test(url) ? '-c TimeZone=UTC' : undefined);
     }
   }
 });
@@ -1709,8 +1846,12 @@ test(
       const psql = (env, sql) =>
         spawnSync(
           'node',
-          [PSQL_PRISMA_URL, 'DATABASE_URL_X', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql],
-          { encoding: 'utf8', env: { ...process.env, DATABASE_URL_X: prismaUrl, ...env } },
+          [PSQL_PRISMA_URL, 'DATABASE_URL_X', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-f', '-'],
+          {
+            encoding: 'utf8',
+            input: sql,
+            env: { ...process.env, DATABASE_URL_X: prismaUrl, ...env },
+          },
         );
 
       // What this replaces: psql takes neither the URL nor, cut, the schema.
@@ -1729,7 +1870,8 @@ test(
       assert.match(readOnly.stderr, /read-only transaction/);
 
       const failed = psql({ PGOPTIONS: '' }, 'SELECT * FROM no_such_table');
-      assert.equal(failed.status, 1, failed.stderr);
+      assert.notEqual(failed.status, 0, failed.stderr);
+      assert.match(failed.stderr, /no_such_table/);
     } finally {
       assert.equal(dropAsOwner(scratch).ok, true);
     }

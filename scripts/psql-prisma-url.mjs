@@ -12,9 +12,11 @@
 // psql refuses a Prisma URL (`invalid URI query parameter: "schema"`), and cutting the
 // query off leaves the schema behind: the same statement then runs on whatever
 // another schema holds. The command takes the NAME of the variable, so that the URL
-// and its password stay off this process's argv too. Everything after the name goes
-// to psql; psql's exit code is this one's. The schema travels in `PGOPTIONS`, so the
-// connection must reach PostgreSQL directly: PgBouncer discards it (FU-144).
+// and its password stay off this process's argv too. What follows the name goes to
+// psql only if it is one of the few arguments that can name no connection and hold no
+// credential (`passedOnToPsql`); psql's exit code is this one's. SQL comes from a file
+// or stdin. The schema travels in `PGOPTIONS`, so the connection must reach PostgreSQL
+// directly: PgBouncer discards it (FU-144).
 // -----------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
@@ -42,6 +44,10 @@ export const UNUSABLE_PRISMA_SCHEMA =
 /** What it refuses a URL with that could still override `PGOPTIONS` or the schema. */
 export const UNUSABLE_PRISMA_OPTIONS =
   'the database URL names a service or repeats options, so what psql is told could be overridden; its value is not repeated';
+
+/** What the command refuses an argument for psql with: a fixed text, as it may be a credential. */
+export const UNSAFE_PSQL_ARGUMENT =
+  'an argument for psql is not one this command passes on: the connection comes only from the named URL, and SQL from a file or stdin; its value is not repeated';
 
 /**
  * The only URL shape whose credentials `new URL` and libpq find in the same place. A password with a raw
@@ -88,7 +94,6 @@ const PLAIN_LIBPQ_PARAMETERS = [
   'keepalives_interval',
   'krbsrvname',
   'load_balance_hosts',
-  'options',
   'port',
   'require_auth',
   'requirepeer',
@@ -109,8 +114,25 @@ const PLAIN_LIBPQ_PARAMETERS = [
   'user',
 ];
 
-/** A kept value, decoded: `u:123?sslmode=s3cret%40db%2Fapp` must not pass on an allowed name. */
-const PLAIN_PARAMETER_VALUE = /^[\w.,:/~= -]*$/;
+/**
+ * A kept value, decoded: `u:123?sslmode=s3cret%40db%2Fapp` must not pass on an allowed
+ * name, and with no space or `=` neither can `application_name=-c a.password=s3cret`.
+ */
+const PLAIN_PARAMETER_VALUE = /^[\w.,:/~-]*$/;
+
+/** The one form of `options` that reaches `PGOPTIONS`: `-c name=value`, each value plain. */
+const STARTUP_OPTIONS = /^-c [\w.]+=[\w.,:/+-]*(?: -c [\w.]+=[\w.,:/+-]*)*$/;
+
+/** The settings it may name, lowercase as PostgreSQL folds them: `app.password` can hold anything. */
+const PLAIN_STARTUP_SETTINGS = [
+  'default_transaction_read_only',
+  'idle_in_transaction_session_timeout',
+  'lock_timeout',
+  'rasta.migration_statement_timeout',
+  'search_path',
+  'statement_timeout',
+  'timezone',
+];
 
 /** In a decoded password: cannot reach the environment (NUL), or was never valid UTF-8. */
 const UNUSABLE_PASSWORD_CHARACTER = /[\p{Cc}\uFFFD]/u;
@@ -125,8 +147,7 @@ const AMBIGUOUS_QUERY_ESCAPE = /\+|%(?![0-9A-Fa-f]{2})/;
  * `target` with `params` as its query, each name and value percent-encoded.
  *
  * Not `URLSearchParams`: it writes a space as `+`, which libpq's URI parser
- * does not decode — `options=-c TimeZone=UTC` (L7-37) would reach the server
- * as `-c+TimeZone=UTC` and the connection be refused. Prisma reads either.
+ * does not decode.
  */
 function withLibpqQuery(target, params) {
   const query = params
@@ -145,15 +166,31 @@ function decodedUserinfo(part) {
   }
 }
 
+/** The URL's one `options` as `PGOPTIONS`, or nothing; refused unless proven free of a credential. */
+function startupOptionsEnv(given) {
+  // libpq keeps only the last: what is checked must be what would have been read.
+  if (given.length > 1) throw new UnreadableUrlError(UNUSABLE_PRISMA_OPTIONS);
+  if (given.length === 0) return {};
+  const [options] = given;
+  const named = STARTUP_OPTIONS.test(options)
+    ? options.split(' ').filter((word) => word !== '-c')
+    : [''];
+  if (!named.every((set) => PLAIN_STARTUP_SETTINGS.includes(set.split('=')[0].toLowerCase()))) {
+    throw new UnreadableUrlError(UNSAFE_DATABASE_PARAMETER);
+  }
+  return { PGOPTIONS: options };
+}
+
 /**
  * How to hand `url` to psql without any credential on the command line, where any
  * local user can read it (`ps`, `/proc/<pid>/cmdline`) for as long as the process
  * runs (D-045 follow-up). `target` is the libpq URL with the password removed — from
  * the userinfo or from a `password=` parameter — and `env` carries it as `PGPASSWORD`,
- * which libpq reads when the URL has none. Spread `env` over the child's environment;
- * it is empty when the URL has no password, so an inherited `PGPASSWORD` or `.pgpass`
- * still applies. Whatever cannot be proven free of a credential is refused, with a
- * fixed text.
+ * which libpq reads when the URL has none, and the URL's `options` as `PGOPTIONS`,
+ * replacing an inherited one just as the URL's would have overridden it. Spread `env`
+ * over the child's environment; it is empty when the URL has neither, so an inherited
+ * `PGPASSWORD` or `.pgpass` still applies. Whatever cannot be proven free of a
+ * credential is refused, with a fixed text.
  */
 export function libpqInvocation(url) {
   if (typeof url !== 'string' || !UNAMBIGUOUS_DATABASE_URL.test(url)) {
@@ -166,9 +203,12 @@ export function libpqInvocation(url) {
     throw new UnreadableUrlError(UNSAFE_DATABASE_PARAMETER);
   }
   const kept = [];
+  const options = [];
   for (const [name, value] of params) {
     if (name === 'password') {
       passwords.push(value);
+    } else if (name === 'options') {
+      options.push(value);
     } else if (
       PLAIN_LIBPQ_PARAMETERS.includes(name) &&
       PLAIN_PARAMETER_VALUE.test(value) &&
@@ -187,10 +227,11 @@ export function libpqInvocation(url) {
   ) {
     throw new UnreadableUrlError(UNSAFE_DATABASE_PARAMETER);
   }
+  const startup = startupOptionsEnv(options);
   target.password = '';
   return {
     target: withLibpqQuery(target, kept),
-    env: passwords[0] ? { PGPASSWORD: passwords[0] } : {},
+    env: { ...(passwords[0] ? { PGPASSWORD: passwords[0] } : {}), ...startup },
   };
 }
 
@@ -198,36 +239,57 @@ export function libpqInvocation(url) {
  * {@link libpqInvocation} that also lands where Prisma would (FU-128): `?schema=`,
  * `public` when absent as for Prisma, becomes `search_path`.
  *
- * All through `PGOPTIONS`, never the URL's `options`: libpq lets that override
- * `PGOPTIONS`, which would silently drop what the operator set there, such as
- * `default_transaction_read_only=on`. So the URL's own `options` move over, the
- * operator's come after them and win, and the schema comes last: the URL decides it.
- * A service file's `options` would override `PGOPTIONS` too, so `service` is refused.
+ * All through `PGOPTIONS`: the URL's own `options` come first, what the operator set
+ * there, such as `default_transaction_read_only=on`, comes after them and wins, and the
+ * schema comes last: the URL decides it. A service file's `options` would override
+ * `PGOPTIONS`, so `service` is refused.
  */
 export function psqlInvocation(url, inheritedOptions) {
   const { target, env } = libpqInvocation(url);
-  const schemas = readUrl(url, { refusal: UNREADABLE_DATABASE_URL }).searchParams.getAll('schema');
+  const { searchParams } = readUrl(url, { refusal: UNREADABLE_DATABASE_URL });
+  const schemas = searchParams.getAll('schema');
   const schema = schemas.length === 0 ? 'public' : schemas[0];
   if (schemas.length > 1 || !/^[a-z_][a-z0-9_]*$/.test(schema)) {
     throw new Error(UNUSABLE_PRISMA_SCHEMA);
   }
-  const parsed = readUrl(target, { refusal: UNREADABLE_DATABASE_URL });
-  const urlOptions = parsed.searchParams.getAll('options');
-  if (parsed.searchParams.has('service') || urlOptions.length > 1) {
-    throw new Error(UNUSABLE_PRISMA_OPTIONS);
+  if (searchParams.has('service')) throw new Error(UNUSABLE_PRISMA_OPTIONS);
+  const options = [env.PGOPTIONS, inheritedOptions, `-c search_path=${schema}`].filter(Boolean);
+  return { target, env: { ...env, PGOPTIONS: options.join(' ') } };
+}
+
+/** The value-less flags the command passes on, exact: getopt would also take `--dbn` for `--dbname`. */
+const PASSED_ON_SWITCH =
+  /^(?:-[XqtA1]+|--no-psqlrc|--quiet|--tuples-only|--no-align|--single-transaction)$/;
+
+/** `-f`'s value: stdin, or a path with nothing a URL, a key-value string or an option needs. */
+const SCRIPT_PATH = /^(?:-|[\w./][\w./-]*)$/;
+
+/**
+ * Whether psql can be given `args` beside the validated URL. An allowlist: psql takes a
+ * connection from `-d`, `-h`, `-p`, `-U`, any positional argument, or `\connect` in a `-c`,
+ * and `-c` or `-v` can hold anything, in spellings no list would finish (`-Xd`, `--dbn=`).
+ */
+function passedOnToPsql(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    if (PASSED_ON_SWITCH.test(args[i])) continue;
+    const flag = args[i];
+    i += 1;
+    if (['-v', '--set'].includes(flag) && args[i] === 'ON_ERROR_STOP=1') continue;
+    if (['-f', '--file'].includes(flag) && SCRIPT_PATH.test(args[i] ?? '')) continue;
+    return false;
   }
-  const kept = [...parsed.searchParams].filter(([name]) => name !== 'options');
-  const options = [...urlOptions, inheritedOptions, `-c search_path=${schema}`].filter(Boolean);
-  return {
-    target: withLibpqQuery(parsed, kept),
-    env: { ...env, PGOPTIONS: options.join(' ') },
-  };
+  return true;
 }
 
 function main() {
   const [name, ...args] = process.argv.slice(2);
   if (!/^DATABASE_URL_[A-Z0-9_]+$/.test(name ?? '') || !process.env[name]) {
     console.error('the first argument must name a set DATABASE_URL_* variable, never hold a URL');
+    return 2;
+  }
+
+  if (!passedOnToPsql(args)) {
+    console.error(UNSAFE_PSQL_ARGUMENT);
     return 2;
   }
 

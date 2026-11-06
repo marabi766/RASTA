@@ -4701,7 +4701,7 @@ export function downFileMode(sql) {
  * the commands it runs; psql has no such parameter, and an unqualified name in
  * a down would otherwise resolve against `public`. A separate `-c`, run before
  * the file in the same session, rather than `PGOPTIONS`, which a URL's own
- * `options` parameter would silently override.
+ * `options` parameter would replace.
  */
 export function psqlFileRunner(url, schema) {
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {
