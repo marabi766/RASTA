@@ -10,3 +10,15 @@ groups:
           summary: Order saga starts are waiting
           description: A start intent has waited over five minutes. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
           runbook: docs/runbooks/marketplace-saga-deploy.md
+  - name: rasta-marketplace-saga-release
+    rules:
+      # A saga on a running worker adds a round at least hourly, so two hours
+      # never misses one. Rounds need a worker: this clears if none is running.
+      - alert: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        expr: sum(increase(rasta_marketplace_saga_release_unconfirmed_total[2h])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A decided dispute's release is unconfirmed
+          description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. The saga keeps trying; the log names the order.
+          runbook: docs/runbooks/marketplace-saga-deploy.md

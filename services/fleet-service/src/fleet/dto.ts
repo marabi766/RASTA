@@ -83,7 +83,8 @@ export function canonicalQuantity(value: string): string {
  * value cannot tell apart is not told apart here either.
  */
 export function canonicalInstant(value: string): string {
-  return new Date(value).toISOString();
+  if (typeof value === 'string') return new Date(value).toISOString();
+  throw new TypeError('Expected a validated timestamp');
 }
 
 /**
