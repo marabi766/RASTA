@@ -1025,6 +1025,7 @@ const OTHER_CAPABILITY = [
 // also runs on fixture roots outside the repository, where git has nothing to ask. Exact paths, no globs.
 const WORKSPACE_DIRECTORY_LISTING = [
   'scripts/ci-integration-split.test.mjs', // :276 independent oracle: group directories that hold a package.json
+  'scripts/check-unit-step-concurrency.test.mjs', // :65 workspaceInputProblems: the root and each `dir/*` directory's entry names go to pnpmInputProblems (a pnpm hook or foreign manifest must be seen, FU-092, #805)
   'scripts/workspace-roots-lib.mjs', // :72 expands a `*` segment of pnpm-workspace.yaml (FU-028, #682)
 ];
 const LISTING_ALLOWED = new Set([
@@ -1101,6 +1102,8 @@ const CONVERTED = {
   'services/procurement-service/src/shared/body-parser.spec.ts': 0,
   'packages/testing/src/key-readers.ts': 0,
   'scripts/marketplace-saga-drain-check.test.mjs': 0,
+  'scripts/ci-temporal-cache.test.mjs': 0, // FU-112 r-sync: the source walk is authoredFiles()
+  'apps/web/src/app/procurement/demands/demands.spec.tsx': 0, // FU-112 r-sync: the screens' sources via authoredFiles()
 };
 test('the allow-list refuses an unlisted file and a listed file that no longer lists', () => {
   const allowed = new Set(['old.mjs', 'gone.mjs']);
