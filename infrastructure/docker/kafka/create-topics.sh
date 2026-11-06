@@ -125,7 +125,7 @@ if [ -n "${KAFKA_PROVISION_PROFILE:-}" ]; then
 fi
 
 # shellcheck source=topic-limits.sh
-source "$(dirname "$0")/topic-limits.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/topic-limits.sh"
 
 fail() {
   echo "==> $*" >&2

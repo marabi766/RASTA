@@ -77,6 +77,7 @@ const NO_EXEMPTIONS = {
   digestVariants: new Map(),
   tagless: new Map(),
   evaluatedOutputs: new Map(),
+  executedPrograms: new Map(),
 };
 const compose = (text) => ({ name: 'docker-compose.yml', kind: 'compose', text });
 const workflowYaml = (text) => ({ name: '.github/workflows/ci.yml', kind: 'workflow', text });
@@ -1017,12 +1018,11 @@ test('FU-150 F1: source resolves the exact path of a verified library', () => {
     sourceErrors(sourcing(`"$(dirname "\${BASH_SOURCE[0]}")/lib/role-passwords.bash"`)),
     [],
   );
-  assert.deepEqual(sourceErrors(sourcing('"$(dirname "$0")/lib/role-passwords.bash"')), []);
   // `..` is normalised: the path that results is the exact one
   assert.deepEqual(
     sourceErrors(
       sourcing(
-        '"$(dirname "$0")/../postgres/lib/role-passwords.bash"',
+        '"$(dirname "${BASH_SOURCE[0]}")/../postgres/lib/role-passwords.bash"',
         'infrastructure/docker/other/init.sh',
       ),
     ),
@@ -1037,8 +1037,10 @@ test('FU-150 F1: source resolves the exact path of a verified library', () => {
     [`"$HOME/${LIB}"`, undefined],
     // a suffix of the listed path is not the path
     [`evil/${LIB}`, 'scripts/x.sh'],
-    ['"$(dirname "$0")/lib/role-passwords.bash"', 'scripts/x.sh'],
-    ['"$(dirname "$0")/../postgres/lib/role-passwords.bash"', 'scripts/x.sh'],
+    ['"$(dirname "${BASH_SOURCE[0]}")/lib/role-passwords.bash"', 'scripts/x.sh'],
+    ['"$(dirname "${BASH_SOURCE[0]}")/../postgres/lib/role-passwords.bash"', 'scripts/x.sh'],
+    // FU-159 F3: `$0` is the sourcing shell's name once another script sources this one
+    ['"$(dirname "$0")/lib/role-passwords.bash"', undefined],
     ['"$(pwd)/lib/role-passwords.bash"', undefined],
     ['"$(dirname "$1")/lib/role-passwords.bash"', undefined],
     ['"$(cd x; dirname "$0")/lib/role-passwords.bash"', undefined],
@@ -1180,4 +1182,329 @@ test('FU-150 F2: writers after control words, in functions and with attached opt
     `${producer}\nn="$(printf '\\143')"\n(( n=5 ))\neval "\${c}"`,
   ])
     assert.deepEqual(evaluate(body), [], body);
+});
+
+// =============================================================================
+// FU-159: the execution boundary fails CLOSED. Every probe of the PR #832 round-1 review is a row
+// here; each was approved (no error, no image) on 711852a3.
+// =============================================================================
+const R = 'run alpine:latest';
+const refusedBoth = (script, policy = bare, extra = []) => {
+  for (const kind of ['shell', 'workflow']) {
+    const { errors, images } = validateInfraImagePins([...extra, asInput(kind, script)], policy);
+    assert.ok(
+      errors.length > 0 || images.some(({ ref }) => ref === 'alpine:latest'),
+      `${kind}: ${script}`,
+    );
+  }
+};
+test('FU-159 F1: case patterns are parsed apart from case bodies', () => {
+  refusedBoth('case x in x) {docker,run,alpine:latest};; esac');
+  refusedBoth(`c=docker\ncase x in\n  a | b) $c ${R};;\nesac`);
+  refusedBoth('case x in (x) {docker,run,alpine:latest};; esac');
+  // the patterns themselves, however they look, are not commands
+  for (const body of [
+    'case "$x" in\n  *-service | other) true ;;\n  #*) true ;;\n  [a-z]*) true ;;\n  {a,b}) true ;;\n  $y) true ;;\nesac',
+    'case x in x) case y in y) true;; esac;; z) true;; esac',
+  ])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+  // a quoted `case` is a command, not the keyword: nothing after it is a pattern
+  refusedBoth(`"case" x in\n docker ${R}\n)`);
+  assert.deepEqual(
+    tokenizeShell('"case" x in y').commands.map((c) => Boolean(c.pattern)),
+    [false],
+  );
+  assert.ok(outcome('shell', 'case x in x) true').errors.length > 0, 'a case with no esac');
+  assert.deepEqual(
+    tokenizeShell('case x in a|b) echo hi;; esac').commands.map((c) => Boolean(c.pattern)),
+    [false, true, false, false],
+  );
+});
+test('FU-159 F1: only a genuine NAME= token is an assignment', () => {
+  for (const body of [
+    "c='docker run alpine:latest echo'\n$c=x",
+    "c='docker run alpine:latest echo'\n${c}=x",
+    `c=docker\nenv $c=x ${R}`,
+  ])
+    refusedBoth(body);
+  for (const body of ['a=1', 'a+=1 true', 'a[1]=1', 'export a=1 b=2', 'env A=1 true'])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+});
+test('FU-159 F1: after `--` the wrapper still takes its positional operands', () => {
+  for (const wrapper of ['timeout -- 5', 'chroot -- /', 'flock -- /tmp/l', 'timeout -s TERM -- 5'])
+    refusedBoth(`c=docker\n${wrapper} $c ${R}`);
+  for (const body of ['timeout -- 5 sleep 1', 'chroot -- / true', 'env -- A=1 true'])
+    assert.deepEqual(
+      outcome('shell', body).errors.filter((e) => !/chroot/.test(e)),
+      [],
+      body,
+    );
+});
+test('FU-159 F1: xargs input and unquoted operands cannot choose the program', () => {
+  for (const wrapper of ['env', 'nice', 'timeout 5', 'stdbuf -o L']) {
+    refusedBoth(`printf 'docker ${R}\\n' | xargs ${wrapper}`);
+    for (const replace of ['-I {}', '-i', '--replace', '-I X', '-IX', '--replace=X'])
+      refusedBoth(
+        `printf 'doc%s' ker | xargs ${replace} ${wrapper} ${replace.endsWith('X') ? 'X' : '{}'} ${R}`,
+      );
+  }
+  refusedBoth("printf 'doc%s' ker | xargs -I CMD env CMD run alpine:latest");
+  // the replace string may be the name of a harmless program: it is still replaced
+  refusedBoth(`printf 'doc%s' ker | xargs -I echo env echo ${R}`);
+  refusedBoth("printf 'doc%s' ker | xargs taskset 1");
+  refusedBoth("printf 'doc%s' ker | xargs frob");
+  for (const wrapper of ['env -u $x', 'sudo -u $x', 'nice -n $x', 'timeout $x', 'timeout -s $x 5'])
+    refusedBoth(`x='A docker'\n${wrapper} echo ${R}`);
+  for (const body of [
+    'xargs -n1 -I{} echo {}',
+    'xargs -0 rm -f',
+    'xargs',
+    'env -u "$x" true',
+    'timeout "$t" true',
+  ])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+});
+test('FU-159 F1: an unknown program that may delegate, given an argument it cannot read, refuses', () => {
+  for (const wrapper of [
+    'taskset 1',
+    'chrt 1',
+    'unshare -m',
+    'nsenter -t 1',
+    'strace',
+    'gosu root',
+    'su-exec root',
+    'eatmydata',
+    'busybox',
+    'setpriv --reuid=1',
+    'setarch x86_64',
+    'runcon ctx',
+    'numactl -N0',
+    'chpst -u x',
+    'tini --',
+    'dumb-init',
+    'bwrap --bind / /',
+  ])
+    refusedBoth(`c=docker\n${wrapper} $c ${R}`);
+  // literal operands of an unknown program, a function, a builtin or a data program stay readable
+  for (const body of [
+    'taskset 1 sleep 1',
+    'f() { echo "$1"; }; f "$a"',
+    'echo "$a"',
+    'sed "s/$a/b/" f',
+    'curl -fsS "$url"',
+  ])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+});
+test('FU-159 F1: an executable this run did not read refuses', () => {
+  const read = { kind: 'shell', name: 'tools/ok.sh', text: 'true' };
+  for (const body of [
+    './tools/evil.sh',
+    './tools/evil.bash',
+    '"${UNTRUSTED}/evil.sh"',
+    'taskset 1 ./tools/evil.sh',
+    'echo x | xargs ./tools/evil.sh',
+    'find . -exec ./tools/evil.sh {} \\;',
+    './env true',
+    'env ./tools/evil.sh',
+    '/home/x/evil.sh',
+  ])
+    refusedBoth(body, bare, [read]);
+  assert.deepEqual(
+    validateInfraImagePins([read, asInput('shell', './tools/ok.sh')], bare).errors,
+    [],
+  );
+  assert.deepEqual(
+    validateInfraImagePins([read, asInput('shell', 'env -u X ./tools/ok.sh')], bare).errors,
+    [],
+  );
+  // a computed path is not the file, however it ends or normalises
+  for (const body of ['"${ROOT}/tools/ok.sh"', '"$x/../tools/ok.sh"', '${x}/../tools/ok.sh'])
+    refusedBoth(body, bare, [read]);
+  // EXECUTED_PROGRAMS: exact script and word; a word nothing runs is stale
+  const policy = {
+    ...bare,
+    executedPrograms: new Map([
+      ['scripts/x.sh', { words: ['${ROOT}/tools/ok.sh'], reason: 'ROOT is the root' }],
+    ]),
+  };
+  assert.deepEqual(
+    validateInfraImagePins([read, asInput('shell', '"${ROOT}/tools/ok.sh"')], policy).errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins([read, asInput('shell', 'true')], policy).errors.some((e) =>
+      /nothing runs any more/.test(e),
+    ),
+  );
+  assert.ok(
+    validateInfraImagePins(
+      [read, { ...asInput('shell', '"${ROOT}/tools/ok.sh"'), name: 'scripts/y.sh' }],
+      policy,
+    ).errors.some((e) => /does not read/.test(e)),
+  );
+});
+
+const P159 = (name) => `${name}="$(bash infra/creds.sh)"`;
+const creds159 = (body) =>
+  validateInfraImagePins([credsFile, asInput('shell', body)], creds150).errors;
+const evalRefused = (body) =>
+  assert.ok(
+    creds159(body).some((e) => /^scripts\/x\.sh:\d+: eval runs text/.test(e)),
+    body,
+  );
+test('FU-159 F2: writes are read from canonical words, however the name is spelled', () => {
+  const spell = {
+    plain: (n) => n,
+    'quote inside': (n) => `${n.slice(0, 4)}""${n.slice(4)}`,
+    escape: (n) => `${n.slice(0, 4)}\\${n.slice(4)}`,
+    quoted: (n) => `"${n}"`,
+    single: (n) => `'${n}'`,
+    continued: (n) => `${n.slice(0, 4)}\\\n${n.slice(4)}`,
+  };
+  const text = "'docker run alpine:latest'";
+  const writers = {
+    'printf -v': (n) => `printf -v ${n} '%s' ${text}`,
+    'printf -vNAME': (n) => `printf -v${n} '%s' ${text}`,
+    read: (n) => `read ${n} <<<${text}`,
+    'IFS= read -a': (n) => `IFS= read -a ${n} <<<${text}`,
+    mapfile: (n) => `mapfile ${n} <<<${text}`,
+    readarray: (n) => `readarray ${n} <<<${text}`,
+    typeset: (n) => `typeset ${n}=${text}`,
+    'declare --': (n) => `declare -- ${n}=${text}`,
+    'export --': (n) => `export -- ${n}=${text}`,
+    'readonly --': (n) => `readonly -- ${n}=${text}`,
+  };
+  for (const write of Object.values(writers))
+    for (const name of Object.values(spell))
+      evalRefused(`${P159('commands')}\n${write(name('commands'))}\neval "$commands"`);
+});
+test('FU-159 F2: implicit targets, loop variables, eval/trap text and arithmetic invalidate provenance', () => {
+  for (const [name, writer] of [
+    ['REPLY', 'read <<<x'],
+    ['REPLY', 'select i in a; do break; done <<<1'],
+    ['MAPFILE', 'mapfile <<<x'],
+    ['MAPFILE', 'readarray <<<x'],
+    ['OPTARG', 'getopts a: o -a docker'],
+    ['OPTIND', 'getopts a: o -a docker'],
+    ['commands', 'for comm\\\nands in x; do :; done'],
+    ['commands', 'for "commands" in x; do :; done'],
+    ['commands', `eval 'printf -v comm""ands %s x'`],
+    ['commands', `eval 'commands=x'`],
+    ['commands', `trap 'printf -v comm""ands %s x' EXIT`],
+    ['commands', `trap 'commands=x' EXIT`],
+    ['commands', "printf '%n' commands"],
+    ['c', 'n="$(printf \'\\143\')"\nprintf \'%n\' "$n"'],
+    ['commands', 'let "comm""ands=5"'],
+    ['commands', 'unset comm""ands'],
+    ['commands', 'echo $(( commands = 5 ))'],
+    ['commands', '(( commands = 5 ))'],
+    ['commands', ': ${commands:=x}'],
+    // an eval or handler whose text is computed may write anything (exempted, so only the
+    // trusted eval below can refuse)
+    ['commands', 'q=x\neval "$q" # image-pin-exempt: r\ntrue'],
+    ['commands', 'q=x\ntrap "$q" EXIT # image-pin-exempt: r\ntrue'],
+    ['commands', 'q=x\neval "printf -v $q %s x" # image-pin-exempt: r\ntrue'],
+    // the name is built from a substitution: no text of the script says which variable it is
+    ['c', 'q="$(printf \'\\143\')"\ntrap "printf -v $q %s x" EXIT # image-pin-exempt: r\ntrue'],
+    // a variable that is NOT an approved producer's output is not a trusted eval
+    ['commands', 'd="$(bash infra/other.sh)"\neval "$d" # image-pin-exempt: r\ntrue'],
+  ])
+    evalRefused(`${P159(name)}\n${writer}\neval "$${name}"`);
+  // harmless writers of other names, in every spelling, leave the producer trusted
+  for (const body of [
+    `${P159('commands')}\nprintf -v other '%s' x\nread line <<<x\neval "$commands"`,
+    `${P159('commands')}\nprintf -v ot""her '%s' x\neval "$commands"`,
+    `${P159('commands')}\nfor i in 1 2; do :; done\neval "$commands"`,
+    `${P159('commands')}\neval 'other=1'\ntrap 'echo bye' EXIT\neval "$commands"`,
+    `${P159('commands')}\n( eval "\${commands}" && true & )`,
+  ])
+    assert.deepEqual(creds159(body), [], body);
+});
+
+// FU-159 F3: a relative file is the file only while the directory is the one the script started in.
+test('FU-159 F3: a directory change refuses the approval of a source or a script that follows', () => {
+  const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  const other = { kind: 'shell', name: 'scripts/other.sh', text: 'true' };
+  const errors = (body) =>
+    validateInfraImagePins(
+      [
+        library(),
+        other,
+        {
+          kind: 'shell',
+          name: 'infrastructure/docker/postgres/init.sh',
+          text: body.replace('LIB', lib),
+        },
+      ],
+      withLibrary,
+    ).errors;
+  for (const body of [
+    'cd /tmp\nsource LIB',
+    'pushd /tmp\n. LIB',
+    'popd\nsource LIB',
+    "eval 'cd /tmp'\nsource LIB",
+    'f() { cd /tmp; }\nsource LIB\nf',
+    'for i in 1 2; do source LIB; cd /tmp; done',
+    "trap 'cd /tmp' EXIT\nsource LIB",
+    "trap 'source LIB' EXIT\ncd /tmp",
+    'cd /tmp\nx="$(bash scripts/other.sh)"',
+    'cd /tmp\nx="$(source LIB)"',
+    'cd /tmp\nbash scripts/other.sh',
+    'cd /tmp\nscripts/other.sh',
+    'env -C /tmp bash scripts/other.sh',
+    'env --chdir=/tmp bash scripts/other.sh',
+    'sudo -D /tmp bash scripts/other.sh',
+    'sudo --chdir=/tmp scripts/other.sh',
+    'chroot / bash scripts/other.sh',
+    'env -C /tmp scripts/other.sh',
+  ])
+    assert.ok(
+      errors(body).some((e) => /does not read/.test(e)),
+      body,
+    );
+  for (const body of [
+    'source LIB\ncd /tmp',
+    '( cd /tmp )\nsource LIB',
+    'x="$(cd /tmp && pwd)"\nsource LIB',
+    'bash scripts/other.sh\ncd /tmp',
+    'env -u X scripts/other.sh',
+  ])
+    assert.deepEqual(errors(body), [], body);
+});
+
+test('FU-159 F1: a function is a definition read from tokens; a string or comment that imitates one is not', () => {
+  assert.deepEqual(
+    [...tokenizeShell('f() { :; }\nfunction g { :; }\nh ( ) { :; }\nk=(a b)').functions].sort(),
+    ['f', 'g', 'h'],
+  );
+  assert.deepEqual([...tokenizeShell(`echo ';taskset() {'\n# chrt() {\nx "$(y)"`).functions], []);
+  assert.deepEqual([...tokenizeShell('taskset ( true )').functions], []);
+  refusedBoth(`echo ';taskset() {'\n# taskset() {\nc=docker\ntaskset 1 $c ${R}`);
+  // a function of the file, or of a file it sources, is its own program
+  assert.deepEqual(outcome('shell', 'taskset() { "$@"; }\nc=true\ntaskset 1 $c').errors.length, 1);
+  assert.deepEqual(outcome('shell', 'f() { echo "$1"; }\nf "$a"').errors, []);
+});
+test('FU-159 F2: coproc and `exec {fd}>` name variables they write', () => {
+  evalRefused(`${P159('commands')}\ncoproc commands { :; }\neval "$commands"`);
+  evalRefused(`${P159('commands')}\nexec {commands}>/dev/null\neval "$commands"`);
+  evalRefused(`${P159('COPROC')}\ncoproc { :; }\neval "$COPROC"`);
+});
+test('FU-159 F3: a sourced file that changes directory moves the shell that sources it', () => {
+  const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  const files = (mover) => [
+    library(),
+    { kind: 'shell', name: 'scripts/other.sh', text: 'true' },
+    { kind: 'shell', name: 'scripts/mover.sh', text: mover },
+    {
+      kind: 'shell',
+      name: 'infrastructure/docker/postgres/init.sh',
+      text: `source scripts/mover.sh\nsource ${lib}\n`,
+    },
+  ];
+  assert.ok(
+    validateInfraImagePins(files('cd /tmp\n'), withLibrary).errors.some((e) =>
+      /does not read/.test(e),
+    ),
+  );
+  assert.deepEqual(validateInfraImagePins(files('true\n'), withLibrary).errors, []);
 });
