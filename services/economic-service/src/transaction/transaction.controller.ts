@@ -4,6 +4,7 @@ import { AllowService, RastaError, Roles, getContext, zodPipe } from '@rasta/nes
 import { mayRecordSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 import { TransactionService, type TransactionDetail } from './transaction.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { canonicalBodyPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import {
@@ -146,7 +147,7 @@ export class TransactionController {
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(createTransactionSchema)) dto: CreateTransactionDto,
+    @Body(canonicalBodyPipe(createTransactionSchema)) dto: CreateTransactionDto,
   ) {
     assertNotAuditor();
     // With the schema's rule, and like it before any replay: a source type
@@ -221,7 +222,7 @@ export class TransactionController {
   async dispute(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(disputeTransactionSchema)) dto: DisputeTransactionDto,
+    @Body(canonicalBodyPipe(disputeTransactionSchema)) dto: DisputeTransactionDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
@@ -264,7 +265,7 @@ export class TransactionController {
   async resolveDispute(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(resolveDisputeSchema)) dto: ResolveDisputeDto,
+    @Body(canonicalBodyPipe(resolveDisputeSchema)) dto: ResolveDisputeDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
@@ -303,7 +304,7 @@ export class TransactionController {
   async refund(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(refundTransactionSchema)) dto: RefundTransactionDto,
+    @Body(canonicalBodyPipe(refundTransactionSchema)) dto: RefundTransactionDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
@@ -336,7 +337,7 @@ export class TransactionController {
   async cancel(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(cancelTransactionSchema)) dto: CancelTransactionDto,
+    @Body(canonicalBodyPipe(cancelTransactionSchema)) dto: CancelTransactionDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);

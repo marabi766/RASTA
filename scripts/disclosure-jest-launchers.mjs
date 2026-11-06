@@ -82,7 +82,7 @@ export const JEST_LAUNCHERS = {
       'scripts/integration-partitions.mjs':
         'd593876d547a32a50cc030ccf345f9d153c529eeae54d1dbf11138aef5ac3f7c',
       'scripts/test-phases.test.mjs':
-        'f9343feabd3e2fc1977ac04edff8b135a2011ce9dafb3c52792d23680c52bacd',
+        '2b51ab3aed7f785f404179fd467422cc6dd16b7858e6c2af4447200e5fbc046b',
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
@@ -156,9 +156,9 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-shell-text-lib.mjs':
         '1a77e1657d6872da20ffea85c055833033a229dfcb6293901b6a3a7bfce22235',
       'scripts/ci-node-test-timeouts-lib.mjs':
-        'a4dd9baaf8f73400e3dd9bd83b7efbf43959a574fec2549aa0582b47af225870',
+        '3c0bf6a07bd0e4db045e6298f10e7102f6e138b9ec9def0ca19b617981838d40',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '0d5d448c26cbdbc1cd166b883523c7a1225b6126b46b1c9cd7fcbb6c614171e2',
+        'adb766706adf0d5523ff15a7e5ae98d60b59d2701c1aa92a90c62be69cdbc991',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
@@ -180,11 +180,11 @@ export const JEST_LAUNCHERS = {
       'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
     sha256: {
       'scripts/testing-dev-only.test.mjs':
-        '7e5223788548f0e6b7fc16366fbd39e735bc8b53c33a215116f4676f7d3b27c6',
+        '8d315c9824364fdbbd6795dc2cb86c0171cb7e65c60599fa299331934aa07c2d',
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
-        '579f4d5a3b4539ca9304b5742fb23b7c826c1f83c085509c0911976775873ab3',
+        '8dde8b52864b7b218461e7a822e0b5cf38bcb106d2ed1a90a9fc39031fdb278b',
     },
   },
   'scripts/lint-scripts-registration.test.mjs': {
@@ -193,7 +193,7 @@ export const JEST_LAUNCHERS = {
       'Spawns git fixture commands and Turbo lint --dry=json snapshots; test runner names are registration fixtures, never executed.',
     sha256: {
       'scripts/lint-scripts-registration.test.mjs':
-        '90f8b760685f446aa47d26ea57690220b35c87e73c38b02825098d6e1ff3e7a6',
+        'e611dc8ccaf8232cfbe179cb4b8f3f5d4443b50424f4cffd0deba6e0c89284a0',
     },
   },
 };
