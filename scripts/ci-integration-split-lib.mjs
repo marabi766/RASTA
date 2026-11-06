@@ -344,7 +344,8 @@ export const STEP_INVENTORY = Object.freeze({
     'pnpm run test:backup-restore-drill-pg',
   ),
   'Economic coverage gate': coverageGate('economic'),
-  'Marketplace coverage gate': coverageGate('marketplace'),
+  // 14 = ceil(528 s x 1.5 / 60): 528 s in run 42167134325, past the 8 it had (FU-117).
+  'Marketplace coverage gate': coverageGate('marketplace', {}, 14),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
   'Supplier coverage gate': coverageGate('supplier'),
   // 11 = ceil(429 s x 1.5 / 60): the slowest of the last 20 green runs took 429 s.

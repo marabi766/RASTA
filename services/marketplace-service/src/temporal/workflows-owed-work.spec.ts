@@ -923,6 +923,8 @@ describe('work the saga owes (#796 r1)', () => {
       await drive(
         s,
         async (handle, id) => {
+          // After the first run has asked, or its own call would look like the next run's.
+          await reported(s);
           const asked = s.calls.filter((c) => c === 'compensate').length;
           const latest = await rolled(handle, id);
           await eventually(
