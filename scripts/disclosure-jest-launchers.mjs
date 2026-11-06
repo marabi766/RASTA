@@ -6,7 +6,7 @@ export const JEST_LAUNCHERS = {
       'Git fixture commands and Node environment probe; Turbo selection is mocked or --dry=json and missing-binary refusal never enters its JS launcher. No Jest or task execution.',
     sha256: {
       'scripts/prepush-scope.test.mjs':
-        '4f9d1329d3d25f39f4c558cbee2e1162098fc9514ce04e7f11e0f8f12552f07e',
+        '0b4a445f1f742b33b051723952b7d8ee74bd76648ef1e3c80e5a2a63aaf7028a',
       'scripts/prepush-scope-lib.mjs':
         'a7cb60ff2283945e9eee8a7bc9b83cbe05cdb680af0ea74e54afc561f3e66e13',
     },
@@ -154,7 +154,7 @@ export const JEST_LAUNCHERS = {
       'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed. Workspace manifests are listed through authoredFiles() (read-only git ls-files).',
     sha256: {
       'scripts/ci-shell-text-lib.mjs':
-        '4a94c816f06f674bb5994fc49709f476694d27c44f72ef014632e85263ab5513',
+        '040fb4931fa106a05672a47e953616f92cb838901b5d765546ee1fe6e3cfd869',
       'scripts/ci-node-test-timeouts-lib.mjs':
         '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':

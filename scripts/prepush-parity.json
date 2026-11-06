@@ -126,6 +126,7 @@
         "test:config-disclosure": "sha256:6b7f178cdaf617baa2ede7c47871d7ee70276f92dd2057bc14aab270db507b9b",
         "test:construction-turbo-env": "sha256:2595d4238f449017d98b15d78fcfaebedcc28dd692455d6606bd141ae564b960",
         "test:container-scope": "sha256:af1c1ae712e75c398e423f2c7928d1221c6c2acaa6465850705e40f5e7ef426a",
+        "test:cors-published-headers": "sha256:aca16f083fdc61b1d0c4591c89d43de033bcc4e1632e09d495c037c042f25fff",
         "test:credential-fetch": "sha256:0e9b4f6c0c02c9e1be9d0c09765329988de317d3fb2c11e589bc39e06cd8b7d5",
         "test:database-turbo-env": "sha256:a36c76b95d62cb7c564c3efb3b7f39c7c5d37d7eecf833bcfe9db5dfb4aa404a",
         "test:db-pool-config": "sha256:3d6653f9bdf1c9751c282d0dc5971c6078ae864224717dbee44fff1b284ef48e",
@@ -291,6 +292,14 @@
       "ci": {
         "name": "Every HTTP service installs the strict query parser (FU-072)",
         "run": "pnpm run test:strict-query-parser-wiring"
+      },
+      "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
+        "name": "Every ingress CORS policy carries every published header (FU-172)",
+        "run": "pnpm run test:cors-published-headers"
       },
       "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
     },

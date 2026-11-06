@@ -318,6 +318,9 @@ export function completedExpiryMs(
  *     lock wait it made) the DATABASE clock `T` is read ({@link DatabaseClock}), and `T > H` throws
  *     `REPLAY_WINDOW_CLOSED`, rolling the claim back — a request suspended between the check above
  *     and the insert cannot be admitted late;
+ *   - a stored response is replayed only after the same decision on a FRESH database clock, read
+ *     after every wait the replay made (the duplicate insert, the read, the guard) — never on the
+ *     reading `C` taken before them (FU-172): `T > H` → `REPLAY_WINDOW_CLOSED`, nothing returned;
  *   - a completed response is kept until `max(completion + TTL, H + B)` ({@link completedExpiryMs}).
  *
  * Why an accepted `H` can never run twice: every clock (replicas', the database's) is within `s` of
@@ -359,6 +362,10 @@ export class IdempotencyStore {
     if (claim.kind === 'REPLAY') {
       const stored = claim.body as T;
       await stillVisible(stored);
+      // The last word on the deadline, as for a new claim — after every wait this replay made (the
+      // duplicate insert, the read of the stored row, the guard), on a fresh database clock
+      // (FU-172, PR-844 r1 F1). Nothing was written, so refusing here changes nothing.
+      await this.assertWindowOpen(this.prisma.client, endpoint, replayDeadlineMs);
       return { result: stored, executed: false };
     }
 
@@ -462,6 +469,23 @@ export class IdempotencyStore {
       this.logLostClaim('complete', endpoint);
       throw claimLost(endpoint);
     }
+  }
+
+  /**
+   * THE deadline decision (FU-172): the one place `H` is judged against the clock that decides, for a
+   * new claim's admission (inside its transaction, after the insert) and for a stored response's
+   * replay (after the read and every wait before it) alike. The database clock is read fresh here —
+   * never a reading taken before a wait — and `T > H` is `REPLAY_WINDOW_CLOSED`; equality is allowed.
+   * No deadline, no fence. A clock that cannot be read throws ({@link DatabaseClock}): refused.
+   */
+  private async assertWindowOpen(
+    client: ExtendedPrismaClient,
+    endpoint: string,
+    replayDeadlineMs: number | undefined,
+  ): Promise<void> {
+    if (replayDeadlineMs === undefined) return;
+    const databaseNow = await this.clock.now(client);
+    if (!(databaseNow.getTime() <= replayDeadlineMs)) throw windowClosed(endpoint);
   }
 
   /** B, the replay fence's budget ({@link replayFenceBudgetMs}). */
@@ -571,10 +595,7 @@ export class IdempotencyStore {
         });
         // Admission, on the database clock, after the insert and any lock wait it made: a request
         // suspended between the check above and here is refused, and throwing rolls the claim back.
-        if (replayDeadlineMs !== undefined) {
-          const databaseNow = await this.clock.now(tx);
-          if (databaseNow.getTime() > replayDeadlineMs) throw windowClosed(endpoint);
-        }
+        await this.assertWindowOpen(tx, endpoint, replayDeadlineMs);
       });
       return { kind: 'PROCEED', token, claimedAt: now };
     } catch (error) {

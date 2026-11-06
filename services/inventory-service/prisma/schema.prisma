@@ -419,7 +419,8 @@ model IdempotencyKey {
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   /// While IN_PROGRESS: the claim's lease, after which a retry may take the key over under a
-  /// new token. Once COMPLETED: INVENTORY_IDEMPOTENCY_TTL_HOURS after the response.
+  /// new token. Once COMPLETED: INVENTORY_IDEMPOTENCY_TTL_HOURS after the response, and at least
+  /// B past a replay deadline (shared/idempotency.ts).
   expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
 
   @@id([organizationId, endpoint, key])

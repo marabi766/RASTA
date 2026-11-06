@@ -115,6 +115,12 @@ describe('reading one transaction', () => {
     );
   });
 
+  // #824 r1, F2: dropped here, every HELD read as proven escrow.
+  it.each([[true], [false]])('keeps heldProven %s as the API sent it', async (heldProven) => {
+    const result = await read({ ...WIRE, heldProven });
+    expect(result).toMatchObject({ kind: 'OK', data: { heldProven } });
+  });
+
   it('keeps money a decimal string, digit for digit, past 2^53', async () => {
     const result = await read(WIRE);
     expect(result.kind).toBe('OK');
@@ -131,7 +137,8 @@ describe('reading one transaction', () => {
     expect(data).not.toHaveProperty('commission');
   });
 
-  const REQUIRED = Object.keys(TRANSACTION_SCHEMA.shape);
+  // heldProven alone may be absent, from an older service: it then proves nothing (`labels.ts`).
+  const REQUIRED = Object.keys(TRANSACTION_SCHEMA.shape).filter((field) => field !== 'heldProven');
 
   it.each(REQUIRED)(
     'answers MALFORMED when the required field `%s` is omitted, never a default',

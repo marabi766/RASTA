@@ -631,6 +631,27 @@ describe('Retry-After from the owning service reaches the caller', () => {
     }
   });
 
+  it('answers a browser’s preflight for a keyed command with its replay deadline (PR-844 r1 F2)', async () => {
+    const gateway = await startGateway({ upstream, context: userContext, corsOrigins: [origin] });
+    try {
+      const response = await gateway.send(
+        '/v1/warehouses',
+        {
+          origin,
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': 'idempotency-key,idempotency-replay-deadline',
+        },
+        'OPTIONS',
+      );
+      expect(response.status).toBe(204);
+      expect(String(response.headers['access-control-allow-headers']).split(',')).toEqual(
+        expect.arrayContaining(['idempotency-key', 'idempotency-replay-deadline']),
+      );
+    } finally {
+      await gateway.close();
+    }
+  });
+
   it('never repeats a service’s CORS headers — without a gateway policy there are none', async () => {
     // No `GATEWAY_CORS_ORIGINS`: the gateway grants no origin, so a service's
     // wildcard must not grant one on its behalf.

@@ -33,8 +33,8 @@ const workflows = readdirSync(join(root, '.github', 'workflows'))
   .map((file) => read(join('.github', 'workflows', file), 'workflow'));
 const scripts = ['infrastructure', 'scripts'].flatMap((dir) =>
   readdirSync(join(root, dir), { recursive: true })
-    .filter((file) => file.endsWith('.sh'))
-    .map((file) => read(join(dir, file), 'shell')),
+    .filter((file) => /\.(?:sh|bash)$/.test(file))
+    .map((file) => read(join(dir, file), file.endsWith('.bash') ? 'library' : 'shell')),
 );
 if (workflows.length === 0) {
   console.error('infra image pins: found no workflows — refusing to pass an empty check');
