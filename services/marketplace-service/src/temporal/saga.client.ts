@@ -7,6 +7,7 @@ import {
   WorkflowNotFoundError,
 } from '@temporalio/client';
 import { getOrganizationId, type OutboxStopOptions } from '@rasta/nest-common';
+import { EconomicClient } from '../economic/economic.client';
 import { SagaStartStore, type StartClaim } from './saga-start.store';
 import {
   sagaStartBacklogAge,
@@ -44,6 +45,7 @@ export class OrderSagaClient implements OnModuleDestroy {
   constructor(
     @Inject(ENV) private readonly env: MarketplaceEnv,
     private readonly store: SagaStartStore,
+    @Inject(EconomicClient) private readonly economic: Pick<EconomicClient, 'provesHeldFunds'>,
   ) {}
 
   startPolling(): void {
@@ -57,6 +59,7 @@ export class OrderSagaClient implements OnModuleDestroy {
   async start(orderId: string): Promise<void> {
     if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) return;
     await this.track(async () => {
+      if (!(await this.economicReady())) return;
       const claims = await this.store.claim({ id: orderId, organizationId: getOrganizationId() });
       await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
     });
@@ -67,7 +70,10 @@ export class OrderSagaClient implements OnModuleDestroy {
     if (this.stopped) return Promise.resolve();
     if (this.ticking) return this.ticking;
     this.ticking = this.track(async () => {
-      const claims = this.env.MARKETPLACE_TEMPORAL_ENABLED ? await this.store.claim() : [];
+      const claims =
+        this.env.MARKETPLACE_TEMPORAL_ENABLED && (await this.economicReady())
+          ? await this.store.claim()
+          : [];
       await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
       if (this.stopped) return;
       const backlog = await this.store.backlog();
@@ -93,6 +99,21 @@ export class OrderSagaClient implements OnModuleDestroy {
       });
     this.active.add(task);
     return task;
+  }
+
+  /**
+   * The prerequisite of any order's work: against an economic-service that cannot prove a
+   * hold, a saga would place one and then wait on it (FU-138; ADR-040). Asked before the
+   * claim, which starts the clock on a possibly started workflow: an order held back here
+   * was provably not started, however long this lasts. The backlog metrics show the wait.
+   */
+  private async economicReady(): Promise<boolean> {
+    const ready = await this.economic.provesHeldFunds();
+    if (!ready) {
+      sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'economic_not_ready' });
+      this.logger.error('economic-service does not prove held funds; no order saga starts');
+    }
+    return ready && !this.stopped;
   }
 
   private async dispatch(claim: StartClaim): Promise<void> {
