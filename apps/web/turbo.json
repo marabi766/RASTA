@@ -50,6 +50,7 @@
         "$TURBO_ROOT$/services/inventory-service/src/**",
         "$TURBO_ROOT$/services/maintenance-service/src/**",
         "$TURBO_ROOT$/services/marketplace-service/src/**",
+        "$TURBO_ROOT$/services/procurement-service/src/**",
         "$TURBO_ROOT$/services/supplier-service/src/**"
       ]
     },
@@ -81,6 +82,7 @@
         "$TURBO_ROOT$/services/inventory-service/src/**",
         "$TURBO_ROOT$/services/maintenance-service/src/**",
         "$TURBO_ROOT$/services/marketplace-service/src/**",
+        "$TURBO_ROOT$/services/procurement-service/src/**",
         "$TURBO_ROOT$/services/supplier-service/src/**"
       ]
     }

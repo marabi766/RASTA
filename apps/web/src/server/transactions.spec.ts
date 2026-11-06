@@ -478,7 +478,9 @@ describe('issuing a command', () => {
   it('never echoes service text for a code it has no sentence for (a bidi control)', async () => {
     const result = await send(
       jest.fn(async () =>
-        problem(422, 'SOMETHING_NEW', 'raw ‮ text', [{ path: 'elsewhere', message: 'bad ‮ x' }]),
+        problem(422, 'BUSINESS_RULE_VIOLATION', 'raw ‮ text', [
+          { path: 'elsewhere', message: 'bad ‮ x' },
+        ]),
       ),
     );
     expect(result.kind).toBe('INVALID');

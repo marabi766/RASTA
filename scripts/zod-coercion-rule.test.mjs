@@ -931,3 +931,155 @@ for (const code of [
   `const meta=z.number().meta(); meta.clone({coerce:true});`,
 ])
   it(`F1 keeps containers distinct from data: ${code}`, () => assert.deepEqual(messages(code), []));
+
+for (const write of [
+  `({coerce:opts.coerce}={coerce:true});`,
+  `[opts.coerce]=[true];`,
+  `({coerce:opts.coerce=true}={});`,
+  `[opts.coerce=true]=[];`,
+  `for(opts.coerce of [true]){}`,
+  `for(opts.coerce in {true:1}){}`,
+  `for({coerce:opts.coerce} of [{coerce:true}]){}`,
+  `for([opts.coerce] of [[true]]){}`,
+  `for({x:opts.coerce=true} of [{}]){}`,
+  `for([opts.coerce] in {true:1}){}`,
+  `({opts}={opts:{coerce:true}});`,
+  `[opts]=[{coerce:true}];`,
+  `({opts={coerce:true}}={});`,
+  `for(opts of [{coerce:true}]){}`,
+  `opts.__proto__={coerce:true};`,
+])
+  it(`F2 write target: ${write}`, () =>
+    assert.ok(messages(`let opts={}; ${write} z.number(opts);`).length));
+for (const write of [
+  `allowed={includes:Number};`,
+  `allowed.includes=Number;`,
+  `allowed.includes=v=>Number(v);`,
+  `({includes:allowed.includes}={includes:Number});`,
+  `for(allowed.includes of [Number]){}`,
+  `const alias=allowed; alias.includes=Number;`,
+  `Object.assign(allowed,{includes:Number});`,
+  `const alias=allowed; mutate(alias);`,
+])
+  it(`F2 mutable helper: ${write}`, () =>
+    assert.ok(
+      messages(`let allowed=[]; ${write} z.preprocess(v=>allowed.includes(v),z.number());`).length,
+    ));
+for (const pattern of ['{opts}', '{opts={coerce:true}}', '[opts={coerce:true}]'])
+  it(`F2 binding pattern: ${pattern}`, () =>
+    assert.ok(messages(`const ${pattern}={}; z.number(opts);`).length));
+it('F2 immutable array helper', () =>
+  assert.deepEqual(
+    messages(`const allowed=[]; z.preprocess(v=>allowed.includes(v),z.boolean());`),
+    [],
+  ));
+
+for (const code of [
+  `let n; ({n=z.number()}={}); n.clone({coerce:true});`,
+  `let n; [n=z.number()]=[]; n.clone({coerce:true});`,
+  `const {n=z.number()}={}; n.clone({coerce:true});`,
+  `const [n=z.number()]=[]; n.clone({coerce:true});`,
+  `let f; [f]=[z.number]; f({coerce:true});`,
+  `let f; ({f=z.number}={}); f({coerce:true});`,
+  `let n; for(n of [z.number()]){} n.clone({coerce:true});`,
+  `for(const n of [z.number()]){n.clone({coerce:true});}`,
+  `for(const [n] of [[z.number()]]){n.clone({coerce:true});}`,
+  `for(const {n=z.number()} of [{}]){n.clone({coerce:true});}`,
+  `let n; for({n} of [{n:z.number()}]){} n.clone({coerce:true});`,
+  `for(const n of z.union([z.number(),z.string()]).options){n.clone({coerce:true});}`,
+  `const allowed=[]; allowed.reverse=Number; z.preprocess(v=>allowed.reverse(v),z.number());`,
+])
+  it(`F2 binding provenance: ${code}`, () =>
+    assert.ok(messages(code).some((m) => m.ruleId === 'boundary/coercion')));
+
+for (const code of [
+  `let n=z.number(); n.clone({coerce:true}); n={x:z.number()};`,
+  `let n=z.number(); n={x:z.number()}; n.x.clone({coerce:true});`,
+  `let n={x:z.number()}; n=z.number(); n.clone({coerce:true});`,
+  `const allowed=/x/; allowed.test=Number; z.preprocess(v=>allowed.test(v),z.number());`,
+  `const allowed=new Date(); allowed.getTime=Number; z.preprocess(v=>allowed.getTime(v),z.number());`,
+])
+  it(`F2 safety alternatives: ${code}`, () =>
+    assert.ok(messages(code).some((m) => m.ruleId === 'boundary/coercion')));
+
+for (const code of [
+  `const cases=[[z.number(),true],[z.string(),3]];for(const [schema,input] of cases){schema.safeParse(input,{reportInput:true});}`,
+  `z.string().transform(v=>{const at=new Date(v);if(Number.isNaN(at.getTime()))return undefined;return at;});`,
+])
+  it(`F2 preserves local proofs: ${code}`, () => assert.deepEqual(messages(code), []));
+it('F2 refuses a returned receiver reused across callbacks', () =>
+  assert.ok(
+    messages(`const at=new Date();z.preprocess(v=>{at.getTime(v);return at;},z.number());`).length,
+  ));
+
+for (const code of [
+  `const allowed=[]; allowed.includes=Number; const alias=allowed; z.preprocess(v=>alias.includes(v),z.number());`,
+  `const allowed=[]; allowed.includes=Number; const has=(a,x)=>a.includes(x); z.preprocess(v=>has(allowed,v),z.number());`,
+  `const allowed=[]; allowed.includes=Number; const alias=allowed; const next=alias; z.preprocess(v=>next.includes(v),z.number());`,
+])
+  it(`F2 includes receiver provenance: ${code}`, () =>
+    assert.ok(
+      messages(code).some(
+        ({ ruleId, messageId }) => ruleId === 'boundary/coercion' && messageId === 'preprocess',
+      ),
+    ));
+
+for (const slot of [
+  ...['number', ...formats].map((name) => (value) => `z.${name}(${value});`),
+  (value) => `z.int(${value});`,
+  (value) => `z.number().clone(${value});`,
+  (value) => `z.clone(z.number(),${value});`,
+  (value) => `z.core._int(z.ZodNumberFormat,${value});`,
+  (value) => `z.hash('sha256',${value});`,
+  (value) => `z.stringFormat('custom',/x/,${value});`,
+  (value) => `z.core._hash(z.ZodCustomStringFormat,'sha256',${value});`,
+  (value) => `z.core._stringFormat(z.ZodCustomStringFormat,'custom',/x/,${value});`,
+  (value) => `z.ZodNumber.create(${value});`,
+  (value) => `z.string(${value}).transform(Number);`,
+])
+  for (const value of [
+    'undefined',
+    'void 0',
+    'void false',
+    'absence',
+    'alias',
+    '{...undefined}',
+    '{...absence}',
+    '{...void 0}',
+  ])
+    it(`F4 optional absence: ${slot(value)}`, () =>
+      assert.deepEqual(
+        messages(`const absence=undefined; const alias=absence; ${slot(value)}`),
+        [],
+      ));
+for (const code of [
+  `for(const options of [{coerce:true}]){z.number(options);}`,
+  `for(const options of [{coerce:true}]){const absence=options;z.number().clone(absence);}`,
+  `const undefined={}; z.number(undefined);`,
+  `const undefined=void 0; z.number(undefined);`,
+  `const undefined=void 0; const absence=undefined; z.number({...absence});`,
+  `function f(undefined){z.number(undefined);}`,
+  `const undefined={coerce:true}; z.int(undefined);`,
+  `function f(undefined){const absence=undefined; z.number().clone(absence);}`,
+  `function f(undefined){z.number({...undefined});}`,
+  `let absence=undefined; absence={coerce:true}; z.number(absence);`,
+])
+  it(`F4 shadowed or mutable absence: ${code}`, () => assert.ok(messages(code).length));
+
+for (const expression of [
+  'z.number(undefined)',
+  'z.int(undefined)',
+  'z.number(void 0)',
+  'z.number().clone(undefined)',
+  'z.number(absence)',
+  'z.number({...undefined})',
+])
+  it(`F4 executable absence: ${expression}`, () => {
+    assert.deepEqual(messages(`const absence=undefined; ${expression};`), []);
+    const result = runInNewContext(
+      `const absence=undefined; const s=${expression}; [s.parse(42),s.safeParse(true).success];`,
+      { z: contractsRequire('zod') },
+    );
+    assert.equal(result[0], 42);
+    assert.equal(result[1], false);
+  });

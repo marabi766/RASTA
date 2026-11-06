@@ -696,16 +696,23 @@ describe('what every answer becomes', () => {
     });
   });
 
-  it('an unknown refusal is one fixed sentence; a 5xx and a 504 are unconfirmed', async () => {
+  it('an unnamed documented refusal is one fixed sentence; an undocumented code, a 5xx and a 504 are unconfirmed', async () => {
     expect(
       await send(
         open,
-        jest.fn(async () => problem(422, 'SOMETHING_NEW')),
+        jest.fn(async () => problem(409, 'ALREADY_EXISTS')),
       ),
     ).toMatchObject({
       kind: 'INVALID',
       message: OWNER_REFUSAL_FALLBACK,
     });
+    // PR-830 r1 F1: a code the platform does not document proves nothing.
+    expect(
+      await send(
+        open,
+        jest.fn(async () => problem(422, 'SOMETHING_NEW')),
+      ),
+    ).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
     expect(
       await send(
         open,
