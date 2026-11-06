@@ -42,6 +42,8 @@ export interface FileHits {
   b: Record<string, number[]>;
 }
 export type CoverageData = Record<string, FileHits>;
+/** Where Istanbul keeps its counters, and where Jest reads them when the file ends. */
+type CoverageGlobal = { __coverage__?: CoverageData };
 
 /** Adds the counters of `from` to `into`. Both must come from the same compiled code. */
 export function addHits(into: FileHits, from: FileHits): void {
@@ -98,10 +100,9 @@ export function useJestCompilerOptions<Config extends { module?: { rules?: unkno
 }
 
 export function installWorkflowCoverage(): void {
-  const global_ = globalThis as unknown as { __coverage__?: CoverageData };
   // The package does nothing unless the global exists, and a spec that loads no
   // instrumented module before its first Worker would otherwise go unmeasured.
-  global_.__coverage__ ??= {};
+  (globalThis as unknown as CoverageGlobal).__coverage__ ??= {};
 
   const coverage = new WorkflowCoverage();
   const held: CoverageData = {};
@@ -181,6 +182,6 @@ export function installWorkflowCoverage(): void {
           'the measurement is broken, not the workflow.',
       );
     }
-    foldDelivery(global_.__coverage__ ?? (global_.__coverage__ = {}), held);
+    foldDelivery(((globalThis as unknown as CoverageGlobal).__coverage__ ??= {}), held);
   });
 }

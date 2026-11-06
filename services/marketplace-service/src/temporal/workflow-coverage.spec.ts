@@ -21,29 +21,29 @@ describe('workflow bundle coverage (FU-157)', () => {
     const configFile = join(__dirname, '..', '..', 'jest.config.js');
     const SETUP = 'temporal-workflow-coverage.setup.ts';
 
-    const setupFilesFor = (argv: string[]): string[][] => {
-      const previous = process.argv;
-      process.argv = ['node', 'jest', ...argv];
+    const setupFilesFor = (script: string | undefined): string[][] => {
+      const previous = process.env.npm_lifecycle_event;
+      if (script === undefined) delete process.env.npm_lifecycle_event;
+      else process.env.npm_lifecycle_event = script;
       try {
         let config!: { projects: { setupFilesAfterEnv: string[] }[] };
         jest.isolateModules(() => (config = jest.requireActual(configFile)));
         return config.projects.map((project) => project.setupFilesAfterEnv);
       } finally {
-        process.argv = previous;
+        if (previous === undefined) delete process.env.npm_lifecycle_event;
+        else process.env.npm_lifecycle_event = previous;
       }
     };
 
-    it('measures the bundle in every project when coverage is on', () => {
-      for (const argv of [['--coverage'], ['--coverage=true'], ['--collectCoverage']]) {
-        for (const files of setupFilesFor(argv)) {
-          expect(files.some((file) => file.endsWith(SETUP))).toBe(true);
-        }
+    it('measures the bundle in every project under the gate command', () => {
+      for (const files of setupFilesFor('test:coverage')) {
+        expect(files.some((file) => file.endsWith(SETUP))).toBe(true);
       }
     });
 
     it('costs a plain test run nothing', () => {
-      for (const argv of [[], ['--coverage=false'], ['--no-coverage']]) {
-        for (const files of setupFilesFor(argv)) {
+      for (const script of [undefined, 'test', 'test:unit', 'test:integration']) {
+        for (const files of setupFilesFor(script)) {
           expect(files.some((file) => file.endsWith(SETUP))).toBe(false);
         }
       }

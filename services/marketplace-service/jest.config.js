@@ -19,11 +19,10 @@ const collectCoverageFrom = [
   '!src/main.ts',
 ];
 
-// Measures workflow code inside Temporal's bundle (see the threshold below). Only
-// when coverage is on: instrumenting has a cost a plain test run should not pay.
-const measuresCoverage = process.argv.some((arg) =>
-  /^--(coverage|collectCoverage)(=true)?$/.test(arg),
-);
+// Measures workflow code inside Temporal's bundle (see the threshold below), for the
+// gate's own command only: instrumenting has a cost a plain test run should not pay,
+// and a bare `jest --coverage` without it can only report a lower number.
+const measuresCoverage = process.env.npm_lifecycle_event === 'test:coverage';
 const setupFilesAfterEnv = [
   disclosureGuard,
   ...(measuresCoverage ? [require.resolve('./test/temporal-workflow-coverage.setup.ts')] : []),
