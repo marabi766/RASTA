@@ -92,35 +92,3 @@ export function canReachSettlement(status: OrderStatus): boolean {
 export const DISPUTE_ORIGINS = (Object.keys(ORDER_TRANSITIONS) as OrderStatus[]).filter((status) =>
   canTransition(status, 'DISPUTED'),
 );
-
-/**
- * Who the order waits on, per status (#770 r2 F3). A `Record`, so a new status
- * does not compile until somebody decides this for it.
- *
- * - `SAGA`: nothing but the saga moves the order on, and its next step is a
- *   call to economic-service or the record of one — the hold (PENDING), the
- *   authorisation and settlement (RECEIPT_CONFIRMED, SETTLING) or the refund
- *   (CANCELLING). An order left here, by an outage, a saga that stopped
- *   (settlement exhausted, an obligation it would not adopt) or a dead worker,
- *   is money whose outcome nobody has confirmed.
- * - `PARTY`: a supplier, buyer or operator decides next; waiting is the design
- *   (ADR-043), and `rasta_marketplace_orders_overdue` is its signal.
- * - `TERMINAL`: no edge out.
- */
-export const SAGA_CUSTODY: Readonly<Record<OrderStatus, 'SAGA' | 'PARTY' | 'TERMINAL'>> = {
-  PENDING: 'SAGA',
-  FUNDS_HELD: 'PARTY',
-  CONFIRMED: 'PARTY',
-  AWAITING_RECEIPT_CONFIRMATION: 'PARTY',
-  RECEIPT_CONFIRMED: 'SAGA',
-  SETTLING: 'SAGA',
-  DISPUTED: 'PARTY',
-  CANCELLING: 'SAGA',
-  COMPLETED: 'TERMINAL',
-  CANCELLED: 'TERMINAL',
-  FAILED: 'TERMINAL',
-};
-
-export const SAGA_CUSTODY_STATUSES = (Object.keys(SAGA_CUSTODY) as OrderStatus[]).filter(
-  (status) => SAGA_CUSTODY[status] === 'SAGA',
-);

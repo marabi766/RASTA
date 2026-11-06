@@ -2395,52 +2395,31 @@
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 30,
+    "line": 29,
     "hash": "1d4d038793204dded7071b1a6ebc4d2698e73caf564b9848cdb3cdffcb2ec165",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local statement timeout bounds starter database work; no tenant data result"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 40,
+    "line": 39,
     "hash": "5b5d369d47528a345a11f2ec672fbb37edb89a6cdfcc7fad946f334f75e59e87",
     "occurrence": 0,
     "decision": "platform-wide: bounded durable-start queue claims across buyers; persisted organization and fresh lease token fence every later acknowledgment"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 65,
+    "line": 64,
     "hash": "f412a749f1d872b5102f9df8030ee8cf08a24009e1ee13d8bee06843c6fd4925",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 109,
-    "hash": "351de64a0c6f7422a93c28d3db651ce4a0c71c93de02ddecf6272ae0c205eeae",
+    "line": 79,
+    "hash": "367ddc1e04369ec30fa59919457805f81c3c9474de5ce970a1e9da8394f28091",
     "occurrence": 0,
-    "decision": "platform-wide: transaction-local lock timeout bounds the wait for the saga monitor reference row; no tenant data result"
-  },
-  {
-    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 110,
-    "hash": "906795894ffe4847938838ac71b9a2eb7fca0463e81c9725a434f5c7e8be143c",
-    "occurrence": 0,
-    "decision": "platform-wide: advances the single-row saga_monitor_clock reference to GREATEST(itself, clock_timestamp()) (#792 r1 F2); platform table with no tenant, identifier or amount"
-  },
-  {
-    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 124,
-    "hash": "f11e4af927c5fc54a56148032f12b985d4ff2cae9d3d7bc68bdaa97aa76f59d5",
-    "occurrence": 0,
-    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database; aged in UTC against the forward-only saga_monitor_clock reference, and refuses when that row is missing"
-  },
-  {
-    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 167,
-    "hash": "6334dc98d6e41bc68c7d21486825a58c45bdd54b683eba60b6e629f61b63a634",
-    "occurrence": 0,
-    "decision": "platform-wide: saga unresolved-financial-episode gauge exposes per-reason count, oldest age and overdue count only (#770 r2 F3, #792 r1 F1/F2); refuses without the saga_monitor_clock row; every child lookup joins on its row's organization and order; no tenant labels, identifiers or amounts leave the database"
+    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
