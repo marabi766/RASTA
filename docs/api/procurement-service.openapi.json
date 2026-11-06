@@ -16,6 +16,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -90,7 +100,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -120,7 +130,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -367,7 +377,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -574,6 +584,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -648,7 +668,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -688,7 +708,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -983,7 +1003,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1238,6 +1258,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -1360,7 +1390,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1400,7 +1430,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1541,6 +1571,16 @@
               "type": "string",
               "minLength": 8,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
             }
           }
         ],
@@ -1690,7 +1730,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1730,7 +1770,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -2157,7 +2197,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2438,6 +2478,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -2586,7 +2636,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2626,7 +2676,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -2744,6 +2794,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -2892,7 +2952,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2932,7 +2992,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3079,6 +3139,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -3136,7 +3206,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3176,7 +3246,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3385,6 +3455,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -3442,7 +3522,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3482,7 +3562,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3710,6 +3790,16 @@
               "minLength": 8,
               "maxLength": 255
             }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
+            }
           }
         ],
         "responses": {
@@ -3758,7 +3848,7 @@
             }
           },
           "400": {
-            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3788,7 +3878,7 @@
             }
           },
           "409": {
-            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
+            "description": "On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.",
             "headers": {
               "Retry-After": {
                 "required": false,
