@@ -106,6 +106,9 @@ jobs:
       - name: Every HTTP service installs the strict query parser (FU-072)
         run: pnpm run test:strict-query-parser-wiring
 
+      - name: Every ingress CORS policy carries every published header (FU-172)
+        run: pnpm run test:cors-published-headers
+
       - name: Local PostgreSQL defaults contract
         # `.env.example` must point host-side PostgreSQL at 127.0.0.1, not
         # `localhost`, which can try ::1 first against an IPv4-only listener
