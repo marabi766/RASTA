@@ -1,5 +1,18 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/verify-migration-reversible-lib.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
+    sha256: {
+      'scripts/verify-migration-reversible-lib.test.mjs':
+        'def875018903ff377cd99173ceeaf4f5676905ed91d313da44c9be225fd83423',
+      'scripts/verify-migration-reversible-lib.mjs':
+        '0f9e617bfb2d7ba482a3aa7b2439ba8326c42283fa40675843a9466889289f8d',
+      'scripts/psql-prisma-url.mjs':
+        '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
+    },
+  },
   'scripts/prepush-scope.test.mjs': {
     kind: 'non-jest',
     reaches:
