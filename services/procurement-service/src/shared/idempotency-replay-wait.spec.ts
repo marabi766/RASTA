@@ -41,7 +41,9 @@ async function replay(wait: Wait, afterWait: (deadline: number) => number, withD
   const writes: string[] = [];
   const clockReadings: number[] = [];
 
-  let store: IdempotencyStore;
+  // Built below; the fakes reach it lazily (the stored row is hashed by the store itself).
+  const built: { store?: IdempotencyStore } = {};
+  const self = (): IdempotencyStore => built.store!;
   const delegate = {
     create: jest.fn(async () => {
       waited('insert');
@@ -50,7 +52,7 @@ async function replay(wait: Wait, afterWait: (deadline: number) => number, withD
     findFirst: jest.fn(async () => {
       waited('read');
       return {
-        requestHash: store.hash(BODY),
+        requestHash: self().hash(BODY),
         state: 'COMPLETED',
         responseStatus: 201,
         responseBody: STORED,
@@ -84,7 +86,8 @@ async function replay(wait: Wait, afterWait: (deadline: number) => number, withD
       return new Date(databaseNow);
     },
   };
-  store = new IdempotencyStore(prisma, ENV, clock);
+  const store = new IdempotencyStore(prisma, ENV, clock);
+  built.store = store;
 
   const work = jest.fn();
   const stillVisible = jest.fn(async () => waited('guard'));

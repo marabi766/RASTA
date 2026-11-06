@@ -46,8 +46,8 @@ function inTenant<T>(fn: () => Promise<T>): Promise<T> {
 
 /**
  * A replay of a completed response with deadline `deadline`, whose `wait` ends with the database
- * clock at `afterWait`. `requestDeadline` is the header this retry sends (the stored one is
- * `deadline`); `storedDeadline` what the row carries.
+ * clock at `afterWait`. `headers.request`: this retry sends `deadline` as its header;
+ * `headers.stored`: the row carries it as its stored deadline.
  */
 async function replay(
   wait: Wait,
@@ -56,9 +56,11 @@ async function replay(
 ) {
   const deadline = Date.now() + 60_000;
   const writes: string[] = [];
-  let store: FakeClockStore;
+  // Built below; the fakes reach it lazily (the stored row is hashed by the store itself).
+  const built: { store?: FakeClockStore } = {};
+  const self = (): FakeClockStore => built.store!;
   const waited = (at: Wait) => {
-    if (at === wait) store.databaseNow = afterWait(deadline);
+    if (at === wait) self().databaseNow = afterWait(deadline);
   };
   const delegate = {
     create: jest.fn(async () => {
@@ -68,7 +70,7 @@ async function replay(
     findUnique: jest.fn(async () => {
       waited('read');
       return {
-        requestHash: store.hash(BODY),
+        requestHash: self().hash(BODY),
         claimToken: 'original',
         state: 'COMPLETED',
         expiresAt: new Date(Date.now() + 3_600_000),
@@ -90,7 +92,8 @@ async function replay(
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 24,
     CONSTRUCTION_CLOCK_SKEW_SECONDS: 30,
   } as ConstructionEnv;
-  store = new FakeClockStore(prisma, env);
+  const store = new FakeClockStore(prisma, env);
+  built.store = store;
 
   const work = jest.fn();
   const outcome = await inTenant(() =>
