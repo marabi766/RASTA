@@ -393,6 +393,12 @@ test('the inventory of this repository is exactly what git tracks (plus untracke
 //  globals:     `process`, `module`, `require`, the global object and `eval` / `Function` are reachable
 //               only through the members listed below; `.constructor` only to read its name.
 //  names:       the NAME of a listing API anywhere (identifier, key, string) is refused as before.
+//  scope:       a name is the global only if no enclosing scope declares it (a parameter named `process`
+//               is its own binding); handles are kept per BINDING as a set of kinds and may never conflict.
+//  copy:        `cp` / `cpSync` call `options.filter` with every source path: only the call forms with no
+//               options or literal non-callback options pass (PR #801 r1 F3).
+//  matchers:    `expect.any(Function)`, `.constructor` in an assertion, a spy on the global object: only
+//               when `expect` / `assert` / the spy owner is the runner's or the runtime's own binding.
 const LISTERS = new Set([
   'readdir',
   'readdirsync',
@@ -407,13 +413,16 @@ const LISTERS = new Set([
 ]);
 const FS_MODULE = /^(?:fs|fs\/promises|fs-extra|graceful-fs)$/;
 const LISTING_PACKAGE =
-  /^(?:glob|fast-glob|globby|tinyglobby|readdirp|fdir|klaw|node-dir|recursive-readdir|walk|walkdir|dir-walker|scandir|@nodelib\/fs\.walk|@nodelib\/fs\.scandir)(?:\/.*)?$/;
-const REFLECTIVE_MODULE = /^(?:vm|worker_threads|repl|inspector|data:.*|https?:.*)$/;
+  /^(?:glob|fast-glob|globby|tinyglobby|readdirp|fdir|klaw|node-dir|recursive-readdir|walk|walkdir|dir-walker|scandir|@nodelib\/fs\.walk|@nodelib\/fs\.scandir)(?:\/.*)?$/s;
+// code from text, a debugger or another thread: a module family with any sub-path (`inspector/promises`),
+// and a URL scheme by its prefix in any case and whatever follows it (`data:` with a newline in it)
+const REFLECTIVE_MODULE =
+  /^(?:(?:vm|worker_threads|repl|inspector|cluster)(?:\/.*)?$|(?:data|https?):)/is;
 // members of an fs module that cannot list a directory
 const SAFE_FS = new Set(
   (
     'access accessSync appendFile appendFileSync chmod chmodSync chown chownSync close closeSync constants ' +
-    'copyFile copyFileSync cp cpSync createReadStream createWriteStream exists existsSync fchmod fchmodSync fchown ' +
+    'copyFile copyFileSync createReadStream createWriteStream exists existsSync fchmod fchmodSync fchown ' +
     'fchownSync fdatasync fdatasyncSync fstat fstatSync fsync fsyncSync ftruncate ftruncateSync futimes ' +
     'futimesSync lchmod lchmodSync lchown lchownSync link linkSync lstat lstatSync lutimes lutimesSync ' +
     'mkdir mkdirSync mkdtemp mkdtempSync open openSync read readFile readFileSync readSync readlink ' +
@@ -425,6 +434,9 @@ const SAFE_FS = new Set(
     'writeJson writeJsonSync outputFile outputFileSync outputJson outputJsonSync remove removeSync move moveSync'
   ).split(' '),
 );
+// `cp` / `cpSync` call `options.filter` with every source path of a recursive copy: a directory reader
+// (PR #801 r1 F3). They are safe only in the call forms `safeCopy` proves (no options, literal options).
+const COPY = new Set(['cp', 'cpSync']);
 const FS_CHAIN = new Set(['promises', 'default']); // an fs module again
 const SAFE_MODULE = new Set([
   'createRequire',
@@ -459,7 +471,7 @@ const SPY_CALLEE =
 const ASSERTION =
   /^(?:expect|toBe|toEqual|toStrictEqual|equal|strictEqual|notStrictEqual|deepEqual|deepStrictEqual)$/;
 
-function listingCapabilities(file, text) {
+function listingCapabilities(file, text, { rounds } = {}) {
   const kindOfFile = /\.[cm]?jsx?$/.test(file)
     ? ts.ScriptKind.JS
     : file.endsWith('.tsx')
@@ -467,6 +479,7 @@ function listingCapabilities(file, text) {
       : ts.ScriptKind.TS;
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kindOfFile);
   if (source.parseDiagnostics?.length) return [`${file}: does not parse`];
+  const NONE = new Set();
   const found = [];
   const note = (node, what) =>
     found.push(`${file}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${what}`);
@@ -521,35 +534,160 @@ function listingCapabilities(file, text) {
         ts.isBreakOrContinueStatement(p))
     );
   };
-  // `import process from 'node:process'` is the global `process` under another declaration
-  const processImport = (n) => {
-    if (!ts.isImportClause(n) && !ts.isNamespaceImport(n)) return false;
-    let decl = n;
-    while (decl && !ts.isImportDeclaration(decl)) decl = decl.parent;
-    return decl !== undefined && bare(decl.moduleSpecifier.text ?? '') === 'process';
+  // ---- scopes: which declaration a name refers to (PR #801 r1 F1: a file-wide `declared` set let a parameter
+  // named `process` mask the global one). A claim of shadowing is made only for declarations that really
+  // enclose the reference; whatever this does not model (a function expression's own name) stays global.
+  const scopeOf = new WeakMap();
+  const declsOf = (scope) => {
+    let names = scopeOf.get(scope);
+    if (names) return names;
+    scopeOf.set(scope, (names = new Map()));
+    const add = (id) => id && ts.isIdentifier(id) && !names.has(id.text) && names.set(id.text, id);
+    const bind = (name) => {
+      if (name && ts.isIdentifier(name)) add(name);
+      else if (name) for (const e of name.elements) if (!ts.isOmittedExpression(e)) bind(e.name);
+    };
+    // `declare const process: ...` describes the real global, it does not shadow it
+    const ambient = (st) => st.modifiers?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword);
+    const lexical = (statements) => {
+      for (const st of statements) {
+        if (ambient(st)) continue;
+        if (ts.isVariableStatement(st)) {
+          if (st.declarationList.flags & ts.NodeFlags.BlockScoped)
+            for (const d of st.declarationList.declarations) bind(d.name);
+        } else if (ts.isImportEqualsDeclaration(st)) add(st.name);
+        else if (ts.isImportDeclaration(st) && st.importClause) {
+          const { name, namedBindings } = st.importClause;
+          add(name);
+          if (namedBindings && ts.isNamespaceImport(namedBindings)) add(namedBindings.name);
+          else if (namedBindings) for (const e of namedBindings.elements) add(e.name);
+        } else if (st.name) add(st.name); // function, class, enum, namespace
+      }
+    };
+    const hoisted = (node) =>
+      ts.forEachChild(node, (c) => {
+        if (ts.isFunctionLike(c) || ts.isClassLike(c)) return undefined;
+        if (
+          ts.isVariableDeclarationList(c) &&
+          !(c.flags & ts.NodeFlags.BlockScoped) &&
+          !ambient(c.parent)
+        )
+          for (const d of c.declarations) bind(d.name);
+        hoisted(c);
+        return undefined;
+      });
+    if (ts.isSourceFile(scope)) {
+      lexical(scope.statements);
+      hoisted(scope);
+    } else if (ts.isBlock(scope) || ts.isModuleBlock(scope)) lexical(scope.statements);
+    else if (ts.isCaseBlock(scope)) for (const c of scope.clauses) lexical(c.statements);
+    else if (ts.isCatchClause(scope)) bind(scope.variableDeclaration?.name);
+    else if (ts.isForStatement(scope) || ts.isForInStatement(scope) || ts.isForOfStatement(scope)) {
+      const init = scope.initializer;
+      if (init && ts.isVariableDeclarationList(init) && init.flags & ts.NodeFlags.BlockScoped)
+        for (const d of init.declarations) bind(d.name);
+    } else if (ts.isClassStaticBlockDeclaration(scope)) {
+      lexical(scope.body.statements);
+      hoisted(scope);
+    } else if (ts.isFunctionLike(scope)) {
+      for (const prm of scope.parameters ?? []) bind(prm.name);
+      if (scope.body) hoisted(scope.body);
+    }
+    return names;
   };
-  const declared = new Set();
-  for (const n of all)
-    if (
-      (ts.isVariableDeclaration(n) ||
-        ts.isBindingElement(n) ||
-        ts.isParameter(n) ||
-        ts.isFunctionDeclaration(n) ||
-        ts.isClassDeclaration(n) ||
-        ts.isImportClause(n) ||
-        ts.isImportSpecifier(n) ||
-        ts.isNamespaceImport(n) ||
-        ts.isImportEqualsDeclaration(n)) &&
-      n.name &&
-      ts.isIdentifier(n.name) &&
-      !processImport(n)
-    )
-      declared.add(n.name.text);
+  const isScope = (n) =>
+    ts.isSourceFile(n) ||
+    ts.isBlock(n) ||
+    ts.isModuleBlock(n) ||
+    ts.isCaseBlock(n) ||
+    ts.isCatchClause(n) ||
+    ts.isForStatement(n) ||
+    ts.isForInStatement(n) ||
+    ts.isForOfStatement(n) ||
+    ts.isClassStaticBlockDeclaration(n) ||
+    ts.isFunctionLike(n);
+  /** The identifier that declares the binding `id` names, or undefined for a global. */
+  const resolve = (id) => {
+    for (let s = id.parent; s; s = s.parent) {
+      const d = isScope(s) ? declsOf(s).get(id.text) : undefined;
+      if (d) return d;
+    }
+    return undefined;
+  };
+  // `import process from 'node:process'` / `import process = require('process')` IS the global `process`:
+  // only under that name (another name is refused where it is imported, below)
+  const processImports = new Set();
+  for (const n of all) {
+    const decl = ts.isImportEqualsDeclaration(n)
+      ? ts.isExternalModuleReference(n.moduleReference) && n.moduleReference.expression
+      : ts.isImportDeclaration(n) && n.moduleSpecifier;
+    if (!decl || bare(decl.text ?? '') !== 'process') continue;
+    const clause = ts.isImportDeclaration(n) ? n.importClause : undefined;
+    for (const id of ts.isImportEqualsDeclaration(n)
+      ? [n.name]
+      : [
+          clause?.name,
+          clause?.namedBindings && ts.isNamespaceImport(clause.namedBindings)
+            ? clause.namedBindings.name
+            : undefined,
+        ])
+      if (id?.text === 'process') processImports.add(id);
+  }
+  /** `id` (an identifier named like a global) really is that global, not a binding of the file. */
+  const isGlobal = (id) => {
+    const d = resolve(id);
+    return d === undefined || (id.text === 'process' && processImports.has(d));
+  };
+  /** `expect`, `jest`, `vi`, `assert`, `Object` as the runner/runtime provides them, not a local look-alike. */
+  const GENUINE = {
+    expect: /^(?:@jest\/globals|vitest|@playwright\/test|expect)$/,
+    ['j' + 'est']: /^@j\u0065st\/globals$/, // spelled apart: see the launcher note on SPY below
+    vi: /^vitest$/,
+    assert: /^(?:node:)?assert(?:\/strict)?$/,
+    Object: /^$/,
+  };
+  const genuine = (id) => {
+    if (!ts.isIdentifier(id) || !Object.hasOwn(GENUINE, id.text)) return false;
+    const d = resolve(id);
+    if (!d) return true;
+    let decl = d.parent;
+    while (decl && !ts.isImportDeclaration(decl) && !ts.isImportEqualsDeclaration(decl))
+      decl =
+        ts.isImportClause(decl) ||
+        ts.isImportSpecifier(decl) ||
+        ts.isNamedImports(decl) ||
+        ts.isNamespaceImport(decl)
+          ? decl.parent
+          : undefined;
+    const spec = !decl
+      ? undefined
+      : ts.isImportDeclaration(decl)
+        ? decl.moduleSpecifier.text
+        : ts.isExternalModuleReference(decl.moduleReference)
+          ? literal(decl.moduleReference.expression)
+          : undefined;
+    return spec !== undefined && GENUINE[id.text].test(spec);
+  };
+  /** the root identifier of `expect(x).not.toBe`, `expect.any`, `assert.strict.equal`, `vi.spyOn` */
+  const rootOf = (e) => {
+    for (;;) {
+      e = unwrap(e);
+      if (ts.isCallExpression(e)) e = e.expression;
+      else if (isMember(e) && /^(?:not|resolves|rejects|strict)$/.test(memberName(e) ?? ''))
+        e = e.expression;
+      else return e;
+    }
+  };
 
   // ---- provenance: bindings that PROVABLY hold an fs module / node:module / a require function ----
-  const handles = new Map(); // binding name -> 'fs' | 'module'
+  // Keyed by the DECLARING identifier (a binding, not a spelling: a shadowing `h` is another binding) and
+  // holding a SET of kinds that only grows, so the fixed point below always exists. A binding that may hold
+  // two kinds is refused where it is declared (PR #801 r1 F2: overwriting one kind with the other looped).
+  const handles = new Map(); // binding -> { kinds: Set<'fs' | 'module'>, node }
+  const keyOf = (id) => resolve(id) ?? `global ${id.text}`;
   const requirers = new Set(['require']);
   const factories = new Set(); // createRequire and its (imported or destructured) bindings
+  const copiers = new Set(); // bindings of a bare `cp` / `cpSync` (imported or destructured): only safe calls
   const factoryCall = (n) => {
     n = unwrap(n);
     return (
@@ -564,23 +702,30 @@ function listingCapabilities(file, text) {
     (n.expression.kind === ts.SyntaxKind.ImportKeyword ||
       (ts.isIdentifier(unwrap(n.expression)) && requirers.has(unwrap(n.expression).text)) ||
       factoryCall(n.expression));
-  /** 'fs' | 'module' when `n` provably is such a module; undefined when it is not (or not provable). */
-  const kind = (n) => {
+  /** The kinds ('fs' | 'module') `n` provably is; an empty set when it is not (or not provable). */
+  const kinds = (n) => {
     n = unwrap(n);
-    if (!n) return undefined;
-    if (ts.isIdentifier(n)) return handles.get(n.text);
-    if (ts.isCallExpression(n))
-      return loaderCall(n) && n.arguments.length >= 1 && literal(n.arguments[0]) !== undefined
-        ? moduleKind(literal(n.arguments[0]))
-        : undefined;
+    if (!n) return NONE;
+    if (ts.isIdentifier(n)) return handles.get(keyOf(n))?.kinds ?? NONE;
+    if (ts.isCallExpression(n)) {
+      const k =
+        loaderCall(n) && n.arguments.length >= 1 && literal(n.arguments[0]) !== undefined
+          ? moduleKind(literal(n.arguments[0]))
+          : undefined;
+      return k ? new Set([k]) : NONE;
+    }
     if (isMember(n))
-      return kind(n.expression) === 'fs' && FS_CHAIN.has(memberName(n)) ? 'fs' : undefined;
-    return undefined;
+      return kinds(n.expression).has('fs') && FS_CHAIN.has(memberName(n)) ? new Set(['fs']) : NONE;
+    return NONE;
   };
   let grew = true;
   const bind = (target, k) => {
-    if (ts.isIdentifier(target) && handles.get(target.text) !== k) {
-      handles.set(target.text, k);
+    if (!ts.isIdentifier(target)) return;
+    const key = keyOf(target);
+    const held = handles.get(key) ?? { kinds: new Set(), node: target };
+    handles.set(key, held);
+    if (!held.kinds.has(k)) {
+      held.kinds.add(k);
       grew = true;
     }
   };
@@ -602,22 +747,39 @@ function listingCapabilities(file, text) {
       else if (k === 'fs' && FS_CHAIN.has(name)) {
         if (ts.isIdentifier(el.name)) bind(el.name, 'fs');
         else destructure(el.name, 'fs');
+      } else if (k === 'fs' && COPY.has(name)) {
+        if (ts.isIdentifier(el.name)) copiers.add(resolve(el.name) ?? el.name);
+        else note(el, `member ${name} destructured further`);
       } else if (k === 'fs' && SAFE_FS.has(name)) {
         if (!ts.isIdentifier(el.name)) note(el, `member ${name} destructured further`);
-      } else if (k === 'module' && name === 'createRequire') addFactory(el.name);
-      else if (!(k === 'module' && SAFE_MODULE.has(name)))
+      } else if (k === 'module' && name === 'createRequire') {
+        if (ts.isIdentifier(el.name)) addFactory(el.name);
+        else note(el, 'createRequire destructured further');
+      } else if (!(k === 'module' && SAFE_MODULE.has(name)))
         note(el, `member ${name} of a loaded module is not in the proven set`);
     }
   };
   const flow = (target, value) => {
-    const k = kind(value);
-    if (k) return ts.isIdentifier(target) ? bind(target, k) : destructure(target, k);
+    const ks = kinds(value);
+    if (ks.size) {
+      for (const k of ks) {
+        if (ts.isIdentifier(target)) bind(target, k);
+        else destructure(target, k);
+      }
+      return undefined;
+    }
     if (factoryCall(value) && ts.isIdentifier(target) && !requirers.has(target.text)) {
       requirers.add(target.text);
       grew = true;
     }
   };
-  while (grew) {
+  // Termination guard: kinds and loaders only ever GROW, so this stops by itself; the cap makes a bug
+  // in that argument a refusal, not a hang.
+  for (let round = 0; grew; round++) {
+    if (round > (rounds ?? all.length * 4 + 16)) {
+      note(source, 'the provenance analysis did not converge');
+      break;
+    }
     grew = false;
     for (const n of all) {
       if (ts.isImportDeclaration(n) && n.importClause && !n.importClause.isTypeOnly) {
@@ -644,16 +806,18 @@ function listingCapabilities(file, text) {
           for (const s of namedBindings.elements) {
             const member = (s.propertyName ?? s.name).text;
             if (k === 'fs' && FS_CHAIN.has(member)) bind(s.name, 'fs');
+            else if (k === 'fs' && COPY.has(member)) copiers.add(resolve(s.name) ?? s.name);
             else if (k === 'module' && member === 'createRequire') addFactory(s.name);
             else if (!(k === 'fs' ? SAFE_FS : SAFE_MODULE).has(member))
               note(s, `import of ${member} is not in the proven set`);
           }
       } else if (ts.isImportEqualsDeclaration(n)) {
         const ref = n.moduleReference;
-        const k = ts.isExternalModuleReference(ref)
-          ? literal(ref.expression) !== undefined && moduleKind(literal(ref.expression))
-          : ts.isIdentifier(ref) && handles.get(ref.text);
-        if (k) bind(n.name, k);
+        const direct =
+          ts.isExternalModuleReference(ref) && literal(ref.expression) !== undefined
+            ? moduleKind(literal(ref.expression))
+            : undefined;
+        for (const k of direct ? [direct] : ts.isIdentifier(ref) ? kinds(ref) : []) bind(n.name, k);
       } else if (ts.isVariableDeclaration(n) && n.initializer) flow(n.name, n.initializer);
       else if (
         ts.isBinaryExpression(n) &&
@@ -664,19 +828,97 @@ function listingCapabilities(file, text) {
     }
   }
 
+  // one binding that may hold two kinds, or one NAME bound to different kinds in different scopes
+  // (`const h = require('fs'); function f() { const h = require('module'); }`): refused, never guessed
+  const byName = new Map();
+  for (const { kinds: held, node } of handles.values()) {
+    const union = byName.get(node.text) ?? new Set();
+    byName.set(node.text, union);
+    for (const k of held) union.add(k);
+    if (union.size > 1)
+      note(node, `the name ${node.text} may hold both an fs module and node:module`);
+  }
+
   // ---- every node: it is either outside the capability, or one of the proven shapes ----
   const callee = (u) => u.parent && ts.isCallExpression(u.parent) && u.parent.expression === u;
+  const onlyCompared = (member) => {
+    const q = outer(member).parent;
+    return ts.isBinaryExpression(q) && COMPARISON.has(q.operatorToken.kind);
+  };
   /** `u` is the target of a spy / property definition naming a member that is safe for `owner`. */
   const spied = (u, owner) => {
     const p = u.parent;
     const key =
       p && ts.isCallExpression(p) && p.arguments[0] === u ? literal(p.arguments[1]) : undefined;
+    const c = key !== undefined ? unwrap(p.expression) : undefined;
     return (
-      key !== undefined &&
-      SPY_CALLEE.test(p.expression.getText().replace(/\s+/g, '')) &&
+      c !== undefined &&
+      isMember(c) &&
+      genuine(unwrap(c.expression)) && // the real runner's / Object's own method, not a function so named
+      SPY_CALLEE.test(`${unwrap(c.expression).text}.${memberName(c)}`) &&
       !INTERNALS.test(key) &&
-      (owner === 'process' ? PROCESS_OK.has(key) : !GLOBAL_ROOTS.has(key))
+      (owner === 'process'
+        ? PROCESS_OK.has(key)
+        : !GLOBAL_ROOTS.has(key) && !GLOBAL_OBJECT.test(key)) // `getOwnPropertyDescriptor(globalThis, 'global').value`
     );
+  };
+  /** `u` is an argument of the real `expect.any(..)` / `expect(..).toBeInstanceOf(..)` matcher. */
+  const matcherArg = (u) => {
+    const p = u.parent;
+    const c =
+      p && ts.isCallExpression(p) && p.arguments.includes(u) ? unwrap(p.expression) : undefined;
+    return (
+      c !== undefined &&
+      isMember(c) &&
+      /^(?:any|toBeInstanceOf)$/.test(memberName(c) ?? '') &&
+      genuine(rootOf(c.expression)) &&
+      rootOf(c.expression).text === 'expect'
+    );
+  };
+  /** `u` is an argument of the real `expect(..)` / `expect(..).toBe(..)` / `assert.equal(..)` and the like. */
+  const assertionArg = (u) => {
+    const p = u.parent;
+    const c =
+      p && ts.isCallExpression(p) && p.arguments.includes(u) ? unwrap(p.expression) : undefined;
+    if (c === undefined) return false;
+    if (ts.isIdentifier(c)) return c.text === 'expect' && genuine(c);
+    const root =
+      isMember(c) && ASSERTION.test(memberName(c) ?? '') ? rootOf(c.expression) : undefined;
+    return root !== undefined && /^(?:expect|assert)$/.test(root.text ?? '') && genuine(root);
+  };
+  const plain = (v) => {
+    v = unwrap(v);
+    return (
+      ts.isStringLiteral(v) ||
+      ts.isNoSubstitutionTemplateLiteral(v) ||
+      ts.isNumericLiteral(v) ||
+      v.kind === ts.SyntaxKind.TrueKeyword ||
+      v.kind === ts.SyntaxKind.FalseKeyword ||
+      v.kind === ts.SyntaxKind.NullKeyword
+    );
+  };
+  /** `fs.cp(src, dest[, options][, done])` whose options are literal data: no `filter` callback sees a path. */
+  const safeCopy = (member) => {
+    const u = outer(member);
+    const call = u.parent;
+    if (!(call && ts.isCallExpression(call) && call.expression === u)) return false;
+    const args = call.arguments;
+    if (args.length < 2 || args.length > 4 || args.some((a) => ts.isSpreadElement(a))) return false;
+    return args.slice(2).every((a) => {
+      a = unwrap(a);
+      return (
+        ts.isFunctionExpression(a) ||
+        ts.isArrowFunction(a) || // the completion callback receives an error, never a path
+        (ts.isObjectLiteralExpression(a) &&
+          a.properties.every(
+            (pr) =>
+              ts.isPropertyAssignment(pr) &&
+              (ts.isIdentifier(pr.name) || ts.isStringLiteral(pr.name)) &&
+              pr.name.text !== 'filter' &&
+              plain(pr.initializer),
+          ))
+      );
+    });
   };
   for (const n of all) {
     if (n.kind === ts.SyntaxKind.EndOfFileToken) continue;
@@ -723,6 +965,39 @@ function listingCapabilities(file, text) {
               note(e, `re-exports ${(e.propertyName ?? e.name).text} of ${spec}`);
       }
     }
+    // the process module is the global `process`, followed only under that name (PR #801 r1 F1)
+    if (
+      ts.isImportDeclaration(n) &&
+      n.importClause &&
+      bare(n.moduleSpecifier.text ?? '') === 'process'
+    ) {
+      const { name, namedBindings } = n.importClause;
+      for (const id of [
+        name,
+        namedBindings && ts.isNamespaceImport(namedBindings) ? namedBindings.name : undefined,
+      ])
+        if (id && id.text !== 'process' && !n.importClause.isTypeOnly)
+          note(id, `process imported as ${id.text}: only the name process is followed`);
+    }
+    if (
+      ts.isExportDeclaration(n) &&
+      !n.isTypeOnly &&
+      bare(n.moduleSpecifier?.text ?? '') === 'process'
+    ) {
+      if (!n.exportClause || ts.isNamespaceExport(n.exportClause))
+        note(n, 're-exports process whole');
+      else
+        for (const e of n.exportClause.elements)
+          if (!PROCESS_OK.has((e.propertyName ?? e.name).text))
+            note(e, `re-exports process.${(e.propertyName ?? e.name).text}`);
+    }
+    if (
+      ts.isImportEqualsDeclaration(n) &&
+      ts.isExternalModuleReference(n.moduleReference) &&
+      bare(literal(n.moduleReference.expression) ?? '') === 'process' &&
+      n.name.text !== 'process'
+    )
+      note(n, `process imported as ${n.name.text}: only the name process is followed`);
     if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) {
       const spec = literal(n.moduleReference.expression);
       if (spec === undefined) note(n, 'a dynamic import-equals: the module it loads is unproven');
@@ -731,10 +1006,10 @@ function listingCapabilities(file, text) {
     }
     // 3. a module or a handle that is used: only the proven contexts
     const isExpr = !wrapper(n) && !slot(n) && !ts.isTypeNode(n);
-    if (isExpr && kind(n)) {
+    if (isExpr && kinds(n).size) {
       const u = outer(n);
       const p = u.parent;
-      const k = kind(n);
+      const k = kinds(n).has('fs') ? 'fs' : 'module'; // both: refused where declared, above
       const m = isMember(p) && p.expression === u ? memberName(p) : undefined;
       const chain = k === 'fs' && FS_CHAIN.has(m); // judged at the link itself
       const ok =
@@ -743,6 +1018,7 @@ function listingCapabilities(file, text) {
         ts.isTypeQueryNode(p) ||
         chain ||
         (k === 'fs' && SAFE_FS.has(m)) ||
+        (k === 'fs' && COPY.has(m) && safeCopy(p)) ||
         (ts.isVariableDeclaration(p) &&
           p.initializer === u &&
           (ts.isIdentifier(p.name) || ts.isObjectBindingPattern(p.name))) ||
@@ -761,6 +1037,13 @@ function listingCapabilities(file, text) {
             : `a loaded ${k} module is passed on or used where the guard cannot follow it`,
         );
     }
+    if (
+      ts.isIdentifier(n) &&
+      !slot(n) &&
+      copiers.has(resolve(n)) &&
+      !(callee(outer(n)) && safeCopy(n))
+    )
+      note(n, `${n.text} (a copy) used where the guard cannot prove its options carry no filter`);
     // loaders: require / created require / createRequire only called with a literal
     if (ts.isIdentifier(n) && !slot(n) && (requirers.has(n.text) || factories.has(n.text))) {
       const u = outer(n);
@@ -768,7 +1051,8 @@ function listingCapabilities(file, text) {
       const isRequire = requirers.has(n.text);
       if (!(
         callee(u) ||
-        (isRequire && (m === 'resolve' || m === 'main')) ||
+        (isRequire && m === 'resolve') ||
+        (isRequire && m === 'main' && onlyCompared(u.parent)) || // `require.main === module`, never `.main.require`
         ts.isTypeOfExpression(u.parent) ||
         ts.isTypeQueryNode(u.parent) ||
         ts.isImportSpecifier(u.parent)
@@ -815,15 +1099,26 @@ function listingCapabilities(file, text) {
           p.right === n &&
           p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) ||
         (isMember(p) && p.name === n) ||
-        (ts.isCallExpression(p) && /^(?:any|toBeInstanceOf)$/.test(memberName(p.expression) ?? ''));
+        matcherArg(n);
       if (!harmless) note(n, `builds code from text, or aliases it (${n.text})`);
     }
-    if (isExpr && ts.isIdentifier(n) && GLOBAL_OBJECT.test(n.text) && !declared.has(n.text)) {
+    // other runtimes' directory readers are reached through a global of their own (PR #801 r1: computed names)
+    if (
+      isExpr &&
+      ts.isIdentifier(n) &&
+      /^(?:Deno|Bun)$/.test(n.text) &&
+      isGlobal(n) &&
+      !ts.isTypeOfExpression(n.parent)
+    )
+      note(n, `uses the ${n.text} runtime object`);
+    if (isExpr && ts.isIdentifier(n) && GLOBAL_OBJECT.test(n.text) && isGlobal(n)) {
       const u = outer(n);
       const p = u.parent;
       const m = isMember(p) && p.expression === u ? memberName(p) : undefined;
       if (m !== undefined && GLOBAL_ROOTS.has(m)) {
         // `globalThis.process` is `process`: judged below as a root reference
+      } else if (m !== undefined && (GLOBAL_OBJECT.test(m) || INTERNALS.test(m))) {
+        note(n, `the global object reached again through ${m}`); // `globalThis.globalThis.process`
       } else if (!(
         m !== undefined ||
         ts.isTypeOfExpression(p) ||
@@ -833,12 +1128,12 @@ function listingCapabilities(file, text) {
         note(n, `the global object ${n.text} used where the guard cannot follow it`);
     }
     const root =
-      ts.isIdentifier(n) && GLOBAL_ROOTS.has(n.text) && !declared.has(n.text) && !slot(n)
+      ts.isIdentifier(n) && GLOBAL_ROOTS.has(n.text) && isGlobal(n) && !slot(n)
         ? n.text
         : isMember(n) &&
             ts.isIdentifier(unwrap(n.expression)) &&
             GLOBAL_OBJECT.test(unwrap(n.expression).text) &&
-            !declared.has(unwrap(n.expression).text) &&
+            isGlobal(unwrap(n.expression)) &&
             GLOBAL_ROOTS.has(memberName(n) ?? '')
           ? memberName(n)
           : undefined;
@@ -872,12 +1167,23 @@ function listingCapabilities(file, text) {
         (ts.isBinaryExpression(p) &&
           (COMPARISON.has(p.operatorToken.kind) ||
             p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword)) ||
-        (ts.isCallExpression(p) &&
-          p.arguments.includes(u) &&
-          ASSERTION.test(memberName(p.expression) ?? p.expression.getText()))
+        assertionArg(u)
       ))
         note(n, '.constructor used where it may reach the Function constructor');
     }
+    // `const { constructor: F } = fn` / `({ constructor: F } = fn)` / `{ a: { constructor } }` read it too
+    if (
+      (ts.isIdentifier(n) || ts.isStringLiteralLike(n)) &&
+      n.text === 'constructor' &&
+      ((ts.isBindingElement(n.parent) && (n.parent.propertyName === n || n.parent.name === n)) ||
+        ((ts.isPropertyAssignment(n.parent) || ts.isShorthandPropertyAssignment(n.parent)) &&
+          n.parent.name === n &&
+          ts.isObjectLiteralExpression(n.parent.parent)))
+    )
+      note(
+        n,
+        'a pattern or an object literal keyed constructor: it may read the Function constructor',
+      );
   }
   return [...new Set(found)];
 }
@@ -1048,6 +1354,102 @@ const ESCAPED_LATER = {
     "const p = require('node:process'); p.binding('fs')['read' + 'dir'](d);",
   'process module imported by name': "import { binding } from 'node:process'; binding('fs');",
 };
+// PR #801 r1 (F1, F3): shapes that returned `[]` on all eight extensions before this round (the reviewer's
+// 21 escape shapes, each in the variants of its family). Every one is now a finding.
+const ESCAPED_801 = {
+  'process default import renamed':
+    "import p from 'node:process'; p['getBuiltin' + 'Module']('fs')['read' + 'dirSync']('.');",
+  'process namespace import renamed': "import * as p from 'node:process'; p[k]('fs')[k](d);",
+  'process import-equals renamed': "import p = require('node:process'); p[k]('fs')[k](d);",
+  'process re-exported as default': "export { default as p } from 'node:process';",
+  'process re-exported whole': "export * from 'node:process';",
+  'process re-exported as a namespace': "export * as p from 'node:process';",
+  'parameter named process masks the global':
+    "function f(process) { return 1; } process[k]('fs')[k](d);",
+  'catch binding named process masks the global':
+    "try { x(); } catch (process) { y(); } process[k]('fs')[k](d);",
+  'parameter named globalThis masks the global':
+    "function f(globalThis) { return 1; } globalThis.process[k]('fs')[k](d);",
+  'block-local globalThis masks the global':
+    "{ const globalThis = 1; } globalThis.process[k]('fs')[k](d);",
+  'declare const process names the real global':
+    "declare const process: any; process[k]('fs')[k](d);",
+  'declare var globalThis names the real global':
+    "declare var globalThis: any; globalThis.process[k]('fs')[k](d);",
+  'globalThis.globalThis': "globalThis.globalThis.process[k]('fs')[k](d);",
+  'globalThis.global': "globalThis.global.process[k]('fs')[k](d);",
+  'global.globalThis': "global.globalThis.process[k]('fs')[k](d);",
+  'global read from a property descriptor':
+    "Object.getOwnPropertyDescriptor(globalThis, 'globalThis').value.process[k]('fs')[k](d);",
+  'require.main.require': "require.main.require('node:fs')[k](d);",
+  'constructor destructured':
+    "const { constructor: F } = () => {}; F('return process')()[k]('fs');",
+  'constructor destructured, nested':
+    "const { a: { constructor: F } } = { a: () => {} }; F('return process')();",
+  'constructor assignment pattern':
+    "let F; ({ constructor: F } = () => {}); F('return process')();",
+  'constructor shorthand pattern':
+    "let constructor; ({ constructor } = () => {}); constructor('return process')();",
+  'constructor through a nested createRequire pattern':
+    "const { createRequire: { constructor: F } } = require('node:module'); F('return process')();",
+  'a local object named any receives Function':
+    "const o = { any: (F) => F('return process')() }; o.any(Function);",
+  'a local object named toBeInstanceOf receives Function':
+    "const o = { toBeInstanceOf: (F) => F('return process')() }; o.toBeInstanceOf(Function);",
+  'a local expect receives Function':
+    "const expect = { any: (F) => F('return process')() }; expect.any(Function);",
+  ...Object.fromEntries(
+    [
+      'expect',
+      'toBe',
+      'toEqual',
+      'toStrictEqual',
+      'equal',
+      'strictEqual',
+      'notStrictEqual',
+      'deepEqual',
+      'deepStrictEqual',
+    ].map((name) => [
+      `a local ${name} receives .constructor`,
+      `const o = { ${name}: (F) => F('return process')() }; o.${name}((() => {}).constructor);`,
+    ]),
+  ),
+  'a local spyOn receives the global object':
+    "const vi = { spyOn: (g) => g.process[k]('fs')[k](d) }; vi.spyOn(globalThis, 'x');",
+  'a local defineProperty receives the global object':
+    "const Object = { defineProperty: (g) => g.process[k]('fs') }; Object.defineProperty(globalThis, 'x', {});",
+  'inspector/promises imported': "import ins from 'node:inspector/promises'; ins.x();",
+  'inspector/promises imported dynamically': "await import('node:inspector/promises');",
+  'inspector/promises required': "require('node:inspector/promises');",
+  'data: specifier with an escaped newline':
+    'import(\'data:text/javascript,\\nimport fs from "node:fs"; fs.x\');',
+  'DATA: scheme in capitals': "import('DATA:text/javascript,x');",
+  'Deno, computed listing name': "Deno['read' + 'Dir'](d);",
+  'Bun, computed glob name': "new Bun['Gl' + 'ob']('**').scanSync(d);",
+  // F3: `cp` / `cpSync` call `filter` with every source path of a recursive copy
+  'cpSync with a filter callback':
+    "import fs from 'node:fs'; fs.cpSync('scripts', '/proc/self/fd', { recursive: true, filter: (p) => (seen.push(p), p === 'scripts') });",
+  'cp with a filter callback':
+    "import fs from 'node:fs'; fs.cp(a, b, { recursive: true, filter }, done);",
+  'promises.cp with a filter':
+    "import fs from 'node:fs'; await fs.promises.cp(a, b, { recursive: true, filter: f });",
+  'cpSync with options held in a variable': "import fs from 'node:fs'; fs.cpSync(a, b, opts);",
+  'cpSync with spread options': "import fs from 'node:fs'; fs.cpSync(a, b, { ...o });",
+  'cpSync with a computed option key':
+    "import fs from 'node:fs'; fs.cpSync(a, b, { ['fil' + 'ter']: f });",
+  'cpSync with a spread argument': "import fs from 'node:fs'; fs.cpSync(...args);",
+  'cpSync imported by name':
+    "import { cpSync } from 'node:fs'; cpSync(a, b, { recursive: true, filter: f });",
+  'cp imported from fs/promises':
+    "import { cp } from 'node:fs/promises'; await cp(a, b, { recursive: true, filter: f });",
+  'cpSync destructured from a required fs':
+    "const { cpSync } = require('node:fs'); cpSync(a, b, { filter: f });",
+  'cpSync of a required fs': "require('node:fs').cpSync(a, b, { filter: f });",
+  'cp of a dynamically imported fs': "(await import('node:fs')).promises.cp(a, b, { filter: f });",
+  'a bare cpSync passed on': "import { cpSync } from 'node:fs'; use(cpSync);",
+  'a bare cpSync aliased':
+    "import { cpSync } from 'node:fs'; const c = cpSync; c(a, b, { filter: f });",
+};
 // The spy receiver is assembled so this file carries no `jest` token: the disclosure-guard wiring
 // treats a script that imports child_process and mentions `jest` as an unregistered Jest launcher
 // (scripts/disclosure-jest-launches.mjs launcherCandidate). This file only runs git.
@@ -1077,6 +1479,30 @@ const ACCEPTED = {
     'expect(e.constructor).toBe(E); e.constructor.name; x.constructor === Y;',
   'matchers and process members':
     "expect(f).toBeInstanceOf(Function); x instanceof Function; process.env[k]; g[Symbol.for('k')];",
+  // PR #801 r1: what the closed analysis proves and therefore keeps accepting
+  'cpSync, no options': "import fs from 'node:fs'; fs.cpSync(a, b);",
+  'cpSync, literal options':
+    "import fs from 'node:fs'; fs.cpSync(a, b, { recursive: true, force: false, errorOnExist: true });",
+  'promises.cp, literal options':
+    "import fs from 'node:fs'; await fs.promises.cp(a, b, { recursive: true });",
+  'cp with a completion callback':
+    "import fs from 'node:fs'; fs.cp(a, b, { recursive: true }, (e) => done(e));",
+  'a named cpSync called with literal options':
+    "import { cpSync } from 'node:fs'; cpSync(a, b, { recursive: true, dereference: true });",
+  'a parameter named process is its own binding':
+    'function f(process) { return process.foo(); } f(process.env);',
+  'parameters named self and window': 'function f(self, window) { return self.x + window.y; }',
+  'a parameter named globalThis is its own binding':
+    'function f(globalThis) { return globalThis.process.anything; }',
+  'the real matchers':
+    'expect(x).toEqual(expect.any(Function)); expect(f).toBeInstanceOf(Function);',
+  'matchers imported from the runner': `import { expect } from '@${SPY}/globals'; expect(f).not.toBeInstanceOf(Function);`,
+  'require.main only compared':
+    'if (require.main === module) { run(); } if (require.main !== module) { x(); }',
+  'the real assertions on a constructor':
+    "import assert from 'node:assert/strict'; assert.equal(e.constructor, E); expect(e.constructor).toBe(E);",
+  'a class constructor and a key that only contains the word':
+    'class A { constructor(x) { this.x = x; } } const o = { constructorName: 1 };',
 };
 /** Files with a capability that are not allow-listed, and allow-listed files that no longer have one. */
 function unlisted(found, allowed) {
@@ -1097,7 +1523,10 @@ const wrong = (table, verdict) =>
 
 test('the detector refuses every way to reach a directory listing and accepts plain file reads', () => {
   assert.deepEqual(
-    wrong({ ...REFUSED, ...ESCAPED_BEFORE, ...ESCAPED_LATER }, (found) => found.length > 0),
+    wrong(
+      { ...REFUSED, ...ESCAPED_BEFORE, ...ESCAPED_LATER, ...ESCAPED_801 },
+      (found) => found.length > 0,
+    ),
     [],
     'not refused',
   );
@@ -1109,6 +1538,53 @@ test('the detector refuses every way to reach a directory listing and accepts pl
   assert.notEqual(
     listingCapabilities('x.ts', 'const x: number = readdirSync(d).length;').length,
     0,
+  );
+});
+
+// PR #801 r1 F2: the analysis must TERMINATE. The hang shapes run in a child process under a timeout, so a
+// regression is a failed assertion, not a stuck run; the child evaluates the very text of the detector above.
+test('the detector terminates on conflicting provenance and refuses it (PR #801 r1 F2)', () => {
+  const hangs = {
+    'a binding reassigned to another kind': "let h = require('fs'); h = require('module');",
+    'a name bound to different kinds in two scopes':
+      "const h = require('fs'); function f() { const h = require('module'); }",
+    'a use of the shadowing binding':
+      "const h = require('fs'); function f() { const h = require('module'); h[k](d); }",
+    'a chain of reassignments':
+      "let a = require('fs'); let b = a; a = require('module'); b = a; a = b;",
+  };
+  const text = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  const detector = text.slice(
+    text.indexOf('const LIST' + 'ERS = '),
+    text.indexOf('const REF' + 'USED = '),
+  );
+  const probe =
+    `import ts from 'typescript';\n${detector}\nconst out = {};\n` +
+    `for (const [name, code] of Object.entries(${JSON.stringify(hangs)}))\n` +
+    `  out[name] = ${JSON.stringify(EXTENSIONS)}.map((e) => listingCapabilities('x.' + e, code).length);\n` +
+    'console.log(JSON.stringify(out));';
+  let out;
+  try {
+    out = execFileSync(process.execPath, ['--input-type=module', '-e', probe], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
+    });
+  } catch (error) {
+    assert.fail(
+      `the detector did not finish on conflicting provenance (${error.code ?? error.message})`,
+    );
+  }
+  for (const [name, counts] of Object.entries(JSON.parse(out)))
+    assert.ok(
+      counts.length === EXTENSIONS.length && counts.every((count) => count > 0),
+      `${name}: refused in every extension`,
+    );
+  // the iteration cap is a refusal too: no fixed point within the budget is a finding, never a hang or []
+  assert.match(
+    listingCapabilities('x.js', "const h = require('fs');", { rounds: 0 }).join('\n'),
+    /did not converge/,
   );
 });
 
