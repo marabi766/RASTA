@@ -349,14 +349,14 @@ async function atRest(handle: WorkflowHandle): Promise<void> {
 
 /**
  * The saga has nothing in flight at all: every activity it scheduled has been
- * answered, and the last event of its history is the timer it armed — no
- * workflow task scheduled or started. A test that stops a worker and goes on
- * with another must stop it from here (FU-147). Not a phase query: it replays
- * the events it was sent, answered or not, so it reports the phase of a
- * workflow task the worker is still running (the history ended in
- * WorkflowTaskStarted in 25 of 25 local runs when the old test took that
- * phase for rest). Not {@link atRest} either, which a workflow task with no
- * command satisfies while an activity is still running.
+ * answered, and the last event of its history is the timer it armed or a
+ * workflow task that has been answered — none scheduled or started. A test
+ * that stops a worker and goes on with another must stop it from here
+ * (FU-147). Not a phase query: it replays the events it was sent, answered or
+ * not, so it reports the phase of a workflow task the worker is still running
+ * (the history ended in WorkflowTaskStarted in 25 of 25 local runs when the
+ * old test took that phase for rest). Not {@link atRest} alone either, which a
+ * workflow task with no command satisfies while an activity is still running.
  */
 async function quiet(handle: WorkflowHandle): Promise<void> {
   await eventually(async () => {
@@ -371,7 +371,15 @@ async function quiet(handle: WorkflowHandle): Promise<void> {
         e.activityTaskCanceledEventAttributes;
       if (answered) open.delete(Number(answered.scheduledEventId));
     }
-    return open.size === 0 && Boolean(events.at(-1)?.timerStartedEventAttributes);
+    const last = events.at(-1);
+    return (
+      open.size === 0 &&
+      Boolean(
+        last?.timerStartedEventAttributes ??
+        last?.timerCanceledEventAttributes ??
+        last?.workflowTaskCompletedEventAttributes,
+      )
+    );
   }, 'the saga to have nothing in flight');
 }
 
@@ -2968,9 +2976,7 @@ describe('a saga the previous release started, replayed and then run live (#625 
         patchActivationCallback: () => false,
       });
       // Stopped from a history with nothing in flight, not from the phase the
-      // saga reported: that was read off a workflow task still running, and
-      // the next worker's wake-up then depended on how that task ended
-      // (FU-147).
+      // saga reported: that is read off a workflow task still running (FU-147).
       await old.runUntil(
         within(
           STEP_DEADLINE_MS,
@@ -3027,11 +3033,22 @@ describe('a saga the previous release started, replayed and then run live (#625 
     CONFIRMED: 'AWAITING_FULFILMENT',
     AWAITING_RECEIPT_CONFIRMATION: 'AWAITING_RECEIPT_CONFIRMATION',
   };
-  const phaseIs = (handle: WorkflowHandle, phase: string) =>
-    eventually(
+  /**
+   * The previous release's worker caches nothing (`maxCachedWorkflows: 0`), so
+   * every query it answers is a full replay of its own. Polled while the saga
+   * is still working, the queries kept it running workflow tasks that carried
+   * no command (340 events in one local run) and it did not come to rest; and
+   * with the polling made continuous, the next release's first wake-up was
+   * never answered in about one case in a hundred (FU-147). So ask only once
+   * the saga has nothing in flight, which takes one query, not a poll.
+   */
+  const phaseIs = async (handle: WorkflowHandle, phase: string): Promise<void> => {
+    await quiet(handle);
+    await eventually(
       async () => (await handle.query<SagaStatus, []>('status')).phase === phase,
       `the saga to wait in ${phase}`,
     );
+  };
 
   /** `resolveObligationDispute`, recording which dispute it decided and with what words. */
   function deciding(order: FakeOrder) {
