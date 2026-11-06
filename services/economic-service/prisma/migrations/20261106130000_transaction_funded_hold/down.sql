@@ -1,8 +1,10 @@
 -- Reverse of `migration.sql` (20261106130000_transaction_funded_hold).
 --
 -- Gives 20261106120000's four bodies back, byte for byte, and drops the rest. `held_at` goes with
--- them: it is derived, and nothing but this migration's functions reads it. Roll the release back
--- first: its `WalletRepository.isHoldFunded` asks a function that goes here.
+-- them, and nothing but this migration's functions reads it. Applying this migration again restamps
+-- only what its backfill can tell: a row HELD in the past with no hold stays unstamped, the limit
+-- `migration.sql` describes. Roll the release back first: its `WalletRepository.isHoldFunded` asks a
+-- function that goes here.
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
@@ -111,10 +113,13 @@ BEGIN
   RETURN subject.status;
 END; $$ LANGUAGE plpgsql;
 
+DROP TRIGGER "trg_wallet_hold_terms_fixed" ON "wallet_hold";
+DROP FUNCTION enforce_wallet_hold_terms_fixed();
+DROP TRIGGER "trg_wallet_hold_inserted_only_funded" ON "wallet_hold";
 DROP TRIGGER "trg_wallet_hold_resolved_only_funded" ON "wallet_hold";
 DROP FUNCTION enforce_wallet_hold_resolved_only_funded();
 DROP FUNCTION wallet_hold_funded(TEXT);
-DROP INDEX "wallet_hold_placed_journal_id_idx";
+DROP INDEX "wallet_hold_placed_journal_id_key";
 DROP TRIGGER "trg_transaction_held_at" ON "transaction";
 DROP FUNCTION stamp_transaction_held_at();
 ALTER TABLE "transaction" DROP COLUMN "held_at";

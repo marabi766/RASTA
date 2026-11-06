@@ -316,6 +316,13 @@ export class WalletService {
           { walletId: input.wallet.id, reference: input.reference },
         );
       }
+      // The new hold below would be in the wallet's currency, so a replay must be.
+      if (existing.currency !== input.wallet.currency) {
+        throw RastaError.businessRule(
+          'A hold already exists for this reference in another currency',
+          { walletId: input.wallet.id, reference: input.reference },
+        );
+      }
       // A retry trusts only a hold that holds something: a payment refund goes
       // on to ask the provider on this answer, and could not then record it.
       if (!(await this.repository.isHoldFunded(tx, existing.id))) {

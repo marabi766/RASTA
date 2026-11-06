@@ -1,9 +1,11 @@
 import { runUnscoped } from '@rasta/nest-common';
+import { PrismaClient } from '../src/generated/prisma';
 import {
   asActor,
   cleanup,
   fundWallet,
   newPrisma,
+  ownerDatabaseUrl,
   readBalances,
   tenants,
   wire,
@@ -199,12 +201,26 @@ describe('settlement atomicity (real database)', () => {
     const payer = `${org.a}-MISMATCH`;
     const transaction = await readyToSettle(payer, '1000000');
 
-    await runUnscoped('the mismatch test corrupts a hold deliberately', () =>
-      prisma.client.$executeRawUnsafe(
-        `UPDATE wallet_hold SET amount_minor = 999999 WHERE reference = $1`,
-        transaction.id,
+    const corrupt = `UPDATE wallet_hold SET amount_minor = 999999 WHERE reference = '${transaction.id}'`;
+    await expect(
+      runUnscoped('the runtime role tries to corrupt a hold', () =>
+        prisma.client.$executeRawUnsafe(corrupt),
       ),
-    );
+    ).rejects.toThrow(/never change/);
+    // A row from before `trg_wallet_hold_terms_fixed`.
+    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE wallet_hold DISABLE TRIGGER trg_wallet_hold_terms_fixed',
+      );
+      await tx.$executeRawUnsafe(corrupt);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE wallet_hold ENABLE TRIGGER trg_wallet_hold_terms_fixed',
+      );
+    });
+    await owner.$disconnect();
 
     await expect(
       asActor({ organizationId: payer }, () =>

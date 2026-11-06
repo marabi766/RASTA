@@ -360,8 +360,10 @@ model WalletHold {
   referenceType String @map("reference_type")
 
   /// The journal that moved the funds into escrow, and the one that resolved
-  /// them. Both are the audit trail for "where did this money go".
-  placedJournalId   String? @map("placed_journal_id")
+  /// them. Both are the audit trail for "where did this money go". A journal
+  /// funds one hold, for good; amount, currency and this pointer never change
+  /// (`trg_wallet_hold_terms_fixed`).
+  placedJournalId   String? @unique @map("placed_journal_id")
   resolvedJournalId String? @map("resolved_journal_id")
 
   placedAt DateTime @map("placed_at")
@@ -375,8 +377,6 @@ model WalletHold {
 
   @@index([organizationId, status])
   @@index([reference])
-  /// `wallet_hold_funded` asks who else names a journal.
-  @@index([placedJournalId])
   @@map("wallet_hold")
 }
 

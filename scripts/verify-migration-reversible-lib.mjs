@@ -2788,6 +2788,8 @@ export const EXPECTED = {
       // Money moves only against a funded hold of its own (FU-163, FU-164).
       'trg_transaction_held_at',
       'trg_wallet_hold_resolved_only_funded',
+      'trg_wallet_hold_inserted_only_funded',
+      'trg_wallet_hold_terms_fixed',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2840,6 +2842,7 @@ export const EXPECTED = {
       'wallet_hold_funded',
       'stamp_transaction_held_at',
       'enforce_wallet_hold_resolved_only_funded',
+      'enforce_wallet_hold_terms_fixed',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',
