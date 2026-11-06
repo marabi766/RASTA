@@ -108,7 +108,8 @@
         "$TURBO_ROOT$/apps/web/src/lib/format/index.ts",
         "$TURBO_ROOT$/apps/web/src/lib/format/money.ts",
         "$TURBO_ROOT$/apps/web/src/lib/format/text.ts",
-        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
+        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs",
+        "$TURBO_ROOT$/scripts/lint-extensions.mjs"
       ],
       "outputs": []
     },
