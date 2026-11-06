@@ -12,9 +12,11 @@ in logs, rather than Turbo's buffered per-package log delivery times. Unit time
 ends at the integration start; integration time ends at the step completion and
 includes the exclusive identity stress phase. Rounding and shell/pnpm startup
 explain the small difference from the API's whole-second step duration.
-Setup is the sum of **all steps without an explicit timeout**, including container
-initialization, broker startup, post actions and teardown; it excludes the six
-limited security steps. Do not use the old monolithic job's other test steps as
+Setup is the **whole job duration minus the six explicitly limited steps**.
+It includes container initialization, broker startup, post actions, teardown and
+the 2–5 seconds between the job timestamps and its step timestamps. Summing only
+unbounded step durations understates setup by that bookkeeping interval.
+Do not use the old monolithic job's other test steps as
 "setup". Quantiles are nearest-rank, rank ceil(0.95 * 20) = 19.
 
 | Metric (seconds)                      |  Median |     p95 | Maximum |
@@ -22,37 +24,37 @@ limited security steps. Do not use the old monolithic job's other test steps as
 | Whole old isolation step              |     520 |     572 |     588 |
 | Duplicate unit command                | 207.257 | 230.901 | 236.040 |
 | Integration command, including stress | 309.756 | 348.708 | 351.259 |
-| Unbounded setup steps                 |   302.5 |     320 |     323 |
+| Setup including job bookkeeping       |     306 |     324 |     328 |
 
 The new isolation cap is 480 s: 37.7% over p95 and 36.7% over the observed maximum.
-Setup allowance is 420 s: 31.3% over p95 and 30.0% over maximum
-(`ceil(1.3 * 323 / 60) = 7` minutes). Job budget: 8 + 8 + 5 + 3 * 2 + 7 = 34 min.
+Setup allowance is 480 s: 48.1% over p95 and 46.3% over maximum
+(`ceil(1.3 * 328 / 60) = 8` minutes). Job budget: 8 + 8 + 5 + 3 * 2 + 8 = 35 min.
 These are observational limits, not an assertion that future runs cannot exceed them.
 
 ## Successful main sample
 
 | Run                                                                        | Head      |  Unit s | Integration s | Whole step s | Setup s |
 | -------------------------------------------------------------------------- | --------- | ------: | ------------: | -----------: | ------: |
-| [42091919570](https://github.com/marabi766/RASTA/actions/runs/42091919570) | 727bf274e | 159.369 |       249.874 |          410 |     266 |
-| [42100832490](https://github.com/marabi766/RASTA/actions/runs/42100832490) | 8c1aca939 | 161.891 |       263.032 |          426 |     271 |
-| [42111105730](https://github.com/marabi766/RASTA/actions/runs/42111105730) | a8e2c7670 | 136.491 |       209.444 |          347 |     238 |
-| [42119705227](https://github.com/marabi766/RASTA/actions/runs/42119705227) | 4f4597c2d | 204.465 |       307.470 |          513 |     298 |
-| [42125381899](https://github.com/marabi766/RASTA/actions/runs/42125381899) | 5c0ddc77d | 196.330 |       291.708 |          489 |     300 |
-| [42132263175](https://github.com/marabi766/RASTA/actions/runs/42132263175) | 6a86f6510 | 210.049 |       317.051 |          528 |     306 |
-| [42147345839](https://github.com/marabi766/RASTA/actions/runs/42147345839) | f7942ed4b | 124.150 |       204.486 |          329 |     224 |
-| [42162604734](https://github.com/marabi766/RASTA/actions/runs/42162604734) | 404ca40b2 | 222.049 |       348.708 |          572 |     323 |
-| [42169365733](https://github.com/marabi766/RASTA/actions/runs/42169365733) | 4ee799c6b | 163.983 |       278.582 |          444 |     277 |
-| [42176049944](https://github.com/marabi766/RASTA/actions/runs/42176049944) | c72dea5b6 | 225.945 |       318.776 |          546 |     313 |
-| [42195109616](https://github.com/marabi766/RASTA/actions/runs/42195109616) | 923a2d065 | 213.669 |       312.041 |          527 |     314 |
-| [42202098189](https://github.com/marabi766/RASTA/actions/runs/42202098189) | 10b645eaf | 172.892 |       256.763 |          431 |     257 |
-| [42211260281](https://github.com/marabi766/RASTA/actions/runs/42211260281) | b0943837c | 236.040 |       351.259 |          588 |     318 |
-| [42224269254](https://github.com/marabi766/RASTA/actions/runs/42224269254) | a6afef6da | 226.308 |       336.887 |          564 |     314 |
-| [42235909934](https://github.com/marabi766/RASTA/actions/runs/42235909934) | 2ea19ba46 | 177.540 |       299.068 |          478 |     282 |
-| [42255340666](https://github.com/marabi766/RASTA/actions/runs/42255340666) | 453371f85 | 230.901 |       329.021 |          561 |     320 |
-| [42262683328](https://github.com/marabi766/RASTA/actions/runs/42262683328) | 787242925 | 228.310 |       320.500 |          550 |     308 |
-| [42275833624](https://github.com/marabi766/RASTA/actions/runs/42275833624) | 4926256ad | 145.785 |       227.868 |          375 |     264 |
-| [42286179671](https://github.com/marabi766/RASTA/actions/runs/42286179671) | 17e8b2143 | 227.266 |       344.006 |          572 |     305 |
-| [42295730635](https://github.com/marabi766/RASTA/actions/runs/42295730635) | 3dc724eae | 222.500 |       343.191 |          567 |     313 |
+| [42091919570](https://github.com/marabi766/RASTA/actions/runs/42091919570) | 727bf274e | 159.369 |       249.874 |          410 |     271 |
+| [42100832490](https://github.com/marabi766/RASTA/actions/runs/42100832490) | 8c1aca939 | 161.891 |       263.032 |          426 |     275 |
+| [42111105730](https://github.com/marabi766/RASTA/actions/runs/42111105730) | a8e2c7670 | 136.491 |       209.444 |          347 |     242 |
+| [42119705227](https://github.com/marabi766/RASTA/actions/runs/42119705227) | 4f4597c2d | 204.465 |       307.470 |          513 |     300 |
+| [42125381899](https://github.com/marabi766/RASTA/actions/runs/42125381899) | 5c0ddc77d | 196.330 |       291.708 |          489 |     303 |
+| [42132263175](https://github.com/marabi766/RASTA/actions/runs/42132263175) | 6a86f6510 | 210.049 |       317.051 |          528 |     309 |
+| [42147345839](https://github.com/marabi766/RASTA/actions/runs/42147345839) | f7942ed4b | 124.150 |       204.486 |          329 |     226 |
+| [42162604734](https://github.com/marabi766/RASTA/actions/runs/42162604734) | 404ca40b2 | 222.049 |       348.708 |          572 |     328 |
+| [42169365733](https://github.com/marabi766/RASTA/actions/runs/42169365733) | 4ee799c6b | 163.983 |       278.582 |          444 |     282 |
+| [42176049944](https://github.com/marabi766/RASTA/actions/runs/42176049944) | c72dea5b6 | 225.945 |       318.776 |          546 |     315 |
+| [42195109616](https://github.com/marabi766/RASTA/actions/runs/42195109616) | 923a2d065 | 213.669 |       312.041 |          527 |     319 |
+| [42202098189](https://github.com/marabi766/RASTA/actions/runs/42202098189) | 10b645eaf | 172.892 |       256.763 |          431 |     259 |
+| [42211260281](https://github.com/marabi766/RASTA/actions/runs/42211260281) | b0943837c | 236.040 |       351.259 |          588 |     321 |
+| [42224269254](https://github.com/marabi766/RASTA/actions/runs/42224269254) | a6afef6da | 226.308 |       336.887 |          564 |     317 |
+| [42235909934](https://github.com/marabi766/RASTA/actions/runs/42235909934) | 2ea19ba46 | 177.540 |       299.068 |          478 |     284 |
+| [42255340666](https://github.com/marabi766/RASTA/actions/runs/42255340666) | 453371f85 | 230.901 |       329.021 |          561 |     324 |
+| [42262683328](https://github.com/marabi766/RASTA/actions/runs/42262683328) | 787242925 | 228.310 |       320.500 |          550 |     311 |
+| [42275833624](https://github.com/marabi766/RASTA/actions/runs/42275833624) | 4926256ad | 145.785 |       227.868 |          375 |     268 |
+| [42286179671](https://github.com/marabi766/RASTA/actions/runs/42286179671) | 17e8b2143 | 227.266 |       344.006 |          572 |     309 |
+| [42295730635](https://github.com/marabi766/RASTA/actions/runs/42295730635) | 3dc724eae | 222.500 |       343.191 |          567 |     318 |
 
 ## Exclusions, failures and censoring
 
@@ -152,7 +154,7 @@ Concrete additions between f33e613c0 and 3dc724eae explain the increased work:
   343 → 332 s. Later main still takes only 320 s on Nov 4, 329 s on Nov 6,
   and 335 s after #875/#831. Same-spec timing variation remains. No hardware
   cause is asserted without CPU data. In the 20-run window, setup and whole-step
-  durations have Pearson correlation 0.967, consistent with broader performance
+  durations have Pearson correlation 0.962, consistent with broader performance
   variation rather than an isolation-only retry. Container startup is outside this step;
   the stress phase already existed in the baseline (34.503 s then, 12.021 s
   in 42295730635). Successful logs show one unit workspace phase, one

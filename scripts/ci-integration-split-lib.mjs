@@ -428,8 +428,8 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-economic': 8,
   'integration-contract': 8,
   // FU-185, Nov 5-6 main window 42091919570..42295730635 (20 successes):
-  // unbounded steps p95/max 320/323 s; ceil(1.3 * 323 / 60) = 7.
-  'integration-security': 7,
+  // unbounded steps plus bookkeeping p95/max 324/328 s; ceil(1.3 * 328 / 60) = 8.
+  'integration-security': 8,
   'integration-coverage-critical': 8,
   'integration-coverage': 8,
   'integration-backup-drill': 3,
