@@ -7,9 +7,11 @@ import {
   continuedDollar,
   executionChain,
   findCommands,
+  outputRedirects,
   redirectWidth,
   shellInvocation,
   SYSTEM_PATH,
+  WRAPPER_NAMES,
   unsplit,
   shellTextProblem,
 } from './ci-shell-text-lib.mjs';
@@ -221,18 +223,25 @@ export const EVALUATED_OUTPUTS = new Map([
  * tokenizer) is listed here with the sha256 of the contents a reviewer read: it starts no
  * container (no docker, eval, `sh -c` or xargs outside comments). The CLI passes each of them as
  * kind 'library'; an unlisted one, a changed one, or a source of any other path refuses.
+ * `functions` are the names a script that sources the library may call as shell functions: the
+ * ones the library defines (or sources) unconditionally at its top level and never unsets.
  * To change a library: edit it, read it again, and paste the sha256 the error prints.
  */
-const library = (sha256, reason) => ({ sha256, reason });
+const library = (sha256, reason, functions = []) => ({ sha256, reason, functions });
 const PSQL = 'init-time psql library; starts no container';
 export const SOURCED_LIBRARIES = new Map([
   [
     'infrastructure/docker/postgres/lib/disposable-marker.bash',
-    library('f05bc76561ebe1bf28e56795497be0ab39a7d58e9f907c127ba01d41cb1f3895', PSQL),
+    library('f05bc76561ebe1bf28e56795497be0ab39a7d58e9f907c127ba01d41cb1f3895', PSQL, [
+      'mark_disposable_database',
+    ]),
   ],
   [
     'infrastructure/docker/postgres/lib/role-passwords.bash',
-    library('465a53878d187075ce8f8900dee4d442749f2780cab16fd6595c38600db3aa3b', PSQL),
+    library('465a53878d187075ce8f8900dee4d442749f2780cab16fd6595c38600db3aa3b', PSQL, [
+      'privilege_split_grants_mode',
+      'resolve_role_passwords',
+    ]),
   ],
   [
     'infrastructure/docker/postgres/lib/rotate-role-passwords.bash',
@@ -240,7 +249,10 @@ export const SOURCED_LIBRARIES = new Map([
   ],
   [
     'infrastructure/docker/postgres/lib/service-privilege-split.bash',
-    library('d711b13ec42b4f44ef8a3c8d7a31b28c30514408d79f5c7f6ac8eafa8f9dafbb', PSQL),
+    library('d711b13ec42b4f44ef8a3c8d7a31b28c30514408d79f5c7f6ac8eafa8f9dafbb', PSQL, [
+      'split_service_privileges',
+      'split_audit_database_privileges',
+    ]),
   ],
   [
     'infrastructure/docker/postgres/lib/session-statement-timeout.bash',
@@ -266,7 +278,9 @@ export const SOURCED_LIBRARIES = new Map([
 /**
  * FU-159 F1: files a CI script executes by a path this check cannot resolve to a CI script it
  * reads (`${VAR}/x.sh`, an absolute path inside a container). Per script: the exact words, and why
- * running that file starts no unpinned image. A word nothing uses any more is refused.
+ * running that file starts no unpinned image. A word nothing uses any more is refused. A variable
+ * in a word must be `readonly` at the top level of the script before the command (FU-159 r2 F4):
+ * bash refuses every later write to it, so no search for the writes can miss one.
  */
 export const EXECUTED_PROGRAMS = new Map([
   [
@@ -278,7 +292,7 @@ export const EXECUTED_PROGRAMS = new Map([
         '${KAFKA_BIN}/kafka-consumer-groups.sh',
       ],
       reason:
-        'runs inside the pinned broker image; KAFKA_BIN is that image’s Apache Kafka bin directory',
+        'runs inside the pinned broker image; KAFKA_BIN is that image’s Apache Kafka bin directory, declared `readonly` before the first use so no later write can change it',
     },
   ],
   [
@@ -293,7 +307,97 @@ export const EXECUTED_PROGRAMS = new Map([
     {
       words: ['${ROOT}/scripts/ci-pull-image.sh'],
       reason:
-        'ROOT is the repository root (line "ROOT=" below the script’s own directory); scripts/ci-pull-image.sh is a CI script this check reads',
+        'ROOT is the repository root (the script’s own directory, two levels up), made readonly right after it is set so no later write can change it; scripts/ci-pull-image.sh is a CI script this check reads',
+    },
+  ],
+]);
+
+/**
+ * FU-159 r2 F1: programs a script runs that are neither in DATA_PROGRAMS nor modeled by this check.
+ * Per script: the exact program names (no path), and why running them there starts no unpinned
+ * image. This is a REVIEWED exception, not a proof: each of these can run an operand, a script text
+ * or a file the shell check does not read. A name nothing uses any more is refused.
+ */
+const TOOLING =
+  'the repository’s own Node/pnpm/Go tooling and tests (their sources are reviewed in their own PRs and ' +
+  'start no image by a name this check could read); not a proof, a reviewed exception';
+export const REVIEWED_PROGRAMS = new Map([
+  [
+    '.github/workflows/ci.yml',
+    {
+      programs: ['node', 'pnpm', 'go', 'psql', 'openssl'],
+      paths: ['$RUNNER_TEMP/trivy-db-check-bin'], // the `go build -o` directory of the trivy-db job
+      reason: `${TOOLING}; psql and openssl take SQL / key material from the job’s own services`,
+    },
+  ],
+  [
+    '.github/workflows/backup-drill-monthly.yml',
+    {
+      programs: ['node', 'pnpm'],
+      writes: ['${dir}/stdout.json', '${dir}/stderr.log', '${dir}/exit-code'],
+      reason: `${TOOLING}; the writes go into the step’s own \`mkdir -m 700\` directory under RUNNER_TEMP, where no file of this run lives`,
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/ci-up.sh',
+    {
+      programs: ['node', 'openssl'],
+      writes: ['${GITHUB_ENV}', '${directory}/${variable}'],
+      reason:
+        'node runs scripts/kafka-acl.mjs (Kafka ACLs over the wire); openssl x509 reads the generated CA; neither starts an image. The writes are the runner’s env file and one secret file per principal in the secrets directories, never a script',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/tls.sh',
+    {
+      programs: ['keytool', 'openssl'],
+      reason: 'generate the development CA and broker keystores in the working directory; no image',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/create-topics.sh',
+    {
+      programs: ['awk', 'sed', 'sort'],
+      writes: ['${admin_properties}'],
+      reason:
+        'literal text filters over `kafka-topics` output (awk / sed program is a quoted literal, sort has no --compress-program); run inside the pinned broker image. The write is its own mktemp file',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/topic-limits.sh',
+    {
+      programs: ['awk'],
+      reason: 'one literal awk program over topic limits; run inside the pinned broker image',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/broker-entrypoint.sh',
+    {
+      programs: ['sed'],
+      writes: ['${format}'],
+      reason:
+        'JAAS escaping: a literal `s///` script; runs inside the pinned broker image. The write is its own mktemp file',
+    },
+  ],
+  [
+    'scripts/ci-pull-image.sh',
+    {
+      programs: ['sed'],
+      reason: 'a literal `s///` script over a reference printed by docker pull',
+    },
+  ],
+  [
+    'infrastructure/docker/postgres/00-init-databases.sh',
+    {
+      programs: ['psql'],
+      reason: 'init-time SQL over the local socket of the already running postgres',
+    },
+  ],
+  [
+    'scripts/backup-restore-drill',
+    {
+      programs: ['node'],
+      reason: 'runs its sibling scripts/backup-restore-drill.mjs, the drill implementation',
     },
   ],
 ]);
@@ -491,8 +595,12 @@ export function tokenizeShell(src) {
   const parents = [-1]; // parents[group]: the group it was opened in
   const arrays = new Set(); // the groups that are array literals
   const functions = new Set(); // names defined as `name() …` or `function name`
+  // FU-159 r2 F2: where each definition stands: `index` is the command that holds the name (`name`
+  // of `name() …`, or the whole `function name …` command); an unquoted keyword and name only.
+  const definitions = [];
   const opened = new Map(); // group -> the word before its ( and how many commands came before
   let pending = '';
+  let pendingUsed = false; // a command already took this separator as its own
   let cmdSep = '';
   // PR #805 r2 F2: the operator in front of a `( … )` group (`a &⏎( b )`: b is in a list `a` is part of).
   let lead = '';
@@ -506,6 +614,7 @@ export function tokenizeShell(src) {
     if (startLine === null) {
       startLine = line;
       cmdSep = pending;
+      pendingUsed = true;
       cmdLead = pending === '(' ? lead : '';
     }
   };
@@ -524,7 +633,10 @@ export function tokenizeShell(src) {
     } else if (word) {
       if (words.length === 0 && keyword('case')) cases.push('subject');
       else if (words.length === 0 && keyword('esac')) cases.pop();
-      else if (words.length === 1 && words[0].value === 'function') functions.add(word.value);
+      else if (words.length === 1 && words[0].value === 'function' && !words[0].quoted) {
+        functions.add(word.value);
+        if (!word.quoted) definitions.push({ name: word.value, index: commands.length });
+      }
       const opens = cases.at(-1) === 'subject' && words.length === 2 && keyword('in');
       words.push(word);
       word = null;
@@ -608,7 +720,8 @@ export function tokenizeShell(src) {
     if (c === '\n') {
       endCommand();
       // `a &&<newline> b` still continues the list, and `a &<newline>` still backgrounded a.
-      if (!['&&', '||', '|', '|&', '&', '('].includes(pending)) pending = '\n';
+      // a pipeline's last stage took its `|`: the next line starts a list of its own
+      if (pendingUsed || !['&&', '||', '|', '|&', '&', '('].includes(pending)) pending = '\n';
       line += 1;
       i += 1;
       while (heredocs.length > 0) {
@@ -637,10 +750,16 @@ export function tokenizeShell(src) {
           throw new ShellSyntaxError(
             `an expanding here-document read by a shell contains an expansion (line ${bodyLine})`,
           );
-        if (feedsShell) nested.push({ script: body.join('\n'), line: bodyLine });
+        // the command that owns the here-document is where its body (and what it runs) belongs
+        const holder = commands.findIndex((c) => c.words === owner);
+        if (feedsShell)
+          nested.push({ script: body.join('\n'), line: bodyLine, shell: true, holder });
         // FU-077 r2 F2: an unquoted delimiter expands the body, running its substitutions;
         // FU-092: also when a shell then reads the expanded body (`bash <<EOF` with `$(…)`).
-        if (expands) nested.push(...substitutionsIn(body.join('\n'), bodyLine));
+        if (expands)
+          nested.push(
+            ...substitutionsIn(body.join('\n'), bodyLine).map((found) => ({ ...found, holder })),
+          );
       }
       continue;
     }
@@ -671,12 +790,29 @@ export function tokenizeShell(src) {
         continue;
       }
     }
+    // an inner `esac` right before `;;` ends the inner case first: that `;;` belongs to the outer one
+    if (c === ';' && cases.at(-1) === 'pattern' && words.length === 0 && keyword('esac'))
+      pushWord();
     if (c === ';' && /^;;&?|^;&/.test(src.slice(i, i + 3)) && cases.at(-1) === 'body') {
       endCommand();
       const op = /^;;&?|^;&/.exec(src.slice(i, i + 3))[0];
       cases[cases.length - 1] = 'pattern';
       pending = op;
+      pendingUsed = false;
       i += op.length;
+      continue;
+    }
+    // `>&2`, `2>&1`, `<&3`: the `&` belongs to the redirection, it does not background anything
+    // and `>|` is the clobbering redirection, not a pipe
+    if (
+      (c === '&' || c === '|') &&
+      word &&
+      !word.quoted &&
+      (c === '&' ? /[<>]$/ : />$/).test(word.value) &&
+      src[i + 1] !== c
+    ) {
+      word.value += c;
+      i += 1;
       continue;
     }
     if (c === ';' || c === '&' || c === '|') {
@@ -684,6 +820,7 @@ export function tokenizeShell(src) {
       const pipe = c === '|' && src[i + 1] !== '|';
       const length = src[i + 1] === c || (c === '|' && src[i + 1] === '&') ? 2 : 1;
       pending = src.slice(i, i + length);
+      pendingUsed = false;
       i += length;
       if (pipe) input = { pipe: true };
       continue;
@@ -693,23 +830,34 @@ export function tokenizeShell(src) {
       const array = c === '(' && !pending.startsWith('(') && Boolean(word?.value.endsWith('='));
       // FU-159: `name ( )` with nothing inside defines a function (read from the tokens, never
       // from the raw text, where a string or a comment can imitate it).
-      const named =
-        word && words.length === 0 ? word.value : words.length === 1 ? words[0].value : null;
+      const nameWord = word
+        ? words.length === 0
+          ? word
+          : null
+        : words.length === 1
+          ? words[0]
+          : null;
+      const named = nameWord ? nameWord.value : null;
+      const plain = nameWord !== null && !nameWord.quoted && named !== 'function';
       endCommand();
       if (c === '(') {
         groups.push(group);
         parents[nextGroup] = group;
         if (array) arrays.add(nextGroup);
         if (!array && named !== null && pending !== '(')
-          opened.set(nextGroup, { name: named, count: commands.length });
+          opened.set(nextGroup, { name: named, count: commands.length, plain });
         group = nextGroup++;
       } else {
         const open = opened.get(group);
-        if (open && commands.length === open.count) functions.add(open.name);
+        if (open && commands.length === open.count) {
+          functions.add(open.name);
+          if (open.plain) definitions.push({ name: open.name, index: open.count - 1 });
+        }
         group = groups.pop() ?? 0;
       }
       if (c === '(' && pending !== '(') lead = pending;
       pending = c;
+      pendingUsed = false;
       i += 1;
       continue;
     }
@@ -814,7 +962,7 @@ export function tokenizeShell(src) {
   endCommand();
   if (cases.length > 0) throw new ShellSyntaxError('a case with no esac');
   if (heredocs.length > 0) throw new ShellSyntaxError('here-document is never closed');
-  return { commands, nested, parents, arrays, functions };
+  return { commands, nested, parents, arrays, functions, definitions };
 }
 
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
@@ -849,9 +997,47 @@ export function validateInfraImagePins(files, policy = {}) {
   const executedPrograms = policy.executedPrograms ?? EXECUTED_PROGRAMS;
   const executedUsed = new Set();
   const executed = {
-    allows: (file, word) => {
+    // FU-159 r2 F4: every variable of the word must be read-only by then (`readonly NAME=…`)
+    allows: (file, word, readonly = new Set()) => {
       if (!executedPrograms.get(file)?.words.includes(word)) return false;
+      if (
+        [...word.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].some(([, name]) => !readonly.has(name))
+      )
+        return false;
       executedUsed.add(`${file} ${word}`);
+      return true;
+    },
+  };
+  // FU-159 r2 F1: a program outside every table runs only where a reviewed entry names it.
+  const reviewedPrograms = policy.reviewedPrograms ?? REVIEWED_PROGRAMS;
+  const reviewedUsed = new Set();
+  const reviewed = {
+    allows: (file, name) => {
+      if (!reviewedPrograms.get(file)?.programs.includes(name)) return false;
+      reviewedUsed.add(`${file} ${name}`);
+      return true;
+    },
+    // a program a reviewed entry names (its text operands are what the reviewer read)
+    has: (file, name) => Boolean(reviewedPrograms.get(file)?.programs.includes(name)),
+    // a redirect / copy target this check cannot read, named by its exact word in a reviewed entry
+    writes: (file, word) => {
+      if (!reviewedPrograms.get(file)?.writes?.includes(word)) return false;
+      reviewedUsed.add(`${file} WRITE ${word}`);
+      return true;
+    },
+    // `echo <one listed path> >> "$GITHUB_PATH"`: the only way a reviewed entry changes PATH
+    pathEntry: (file, words) => {
+      const at = executionChain(words).chain.at(-1);
+      const operands = [];
+      for (let k = at + 1; k < words.length; k++) {
+        const width = redirectWidth(words, k);
+        if (width > 0) k += width - 1;
+        else operands.push(words[k]);
+      }
+      const path = operands[0]?.value;
+      if (words[at]?.value !== 'echo' || operands.length !== 1) return false;
+      if (!reviewedPrograms.get(file)?.paths?.includes(path)) return false;
+      reviewedUsed.add(`${file} PATH ${path}`);
       return true;
     },
   };
@@ -888,16 +1074,20 @@ export function validateInfraImagePins(files, policy = {}) {
     composeFiles,
     evaluated,
     executed,
+    reviewed,
     shellFiles,
     sourced,
     // FU-159 F3: false only for a file whose own text, and that of every file it sources, never changes directory
-    sourceMoves: (path) =>
-      !texts.has(path) ||
-      [...sourceClosure(path, texts)].some((file) => DIRECTORY_WORD.test(texts.get(file))),
+    sourceMoves: (path) => !texts.has(path) || fileScope(path, shared).moves,
+    texts: undefined,
+    libraries,
+    verified,
+    memo: new Map(),
   };
   const texts = new Map(
     files.filter(({ kind }) => kind === 'shell' || kind === 'library').map((f) => [f.name, f.text]),
   );
+  shared.texts = texts;
   const images = [];
   const usedTagless = new Set();
 
@@ -913,7 +1103,6 @@ export function validateInfraImagePins(files, policy = {}) {
             lineOf: (n) => n + 1,
             env: new Map(),
             self: file.name,
-            functions: visibleFunctions(file.name, texts),
             ...shared,
           },
           images,
@@ -973,6 +1162,28 @@ export function validateInfraImagePins(files, policy = {}) {
     if (!reason || !evaluated.used.has(path))
       errors.push(`EVALUATED_OUTPUTS lists ${path}, which nothing evaluates any more`);
   }
+  for (const [file, { writes = [], reason }] of reviewedPrograms)
+    for (const word of writes)
+      if (
+        files.some((f) => f.name === file) &&
+        (!reason || !reviewedUsed.has(`${file} WRITE ${word}`))
+      )
+        errors.push(
+          `REVIEWED_PROGRAMS lists the write ${word} in ${file}, which nothing writes any more`,
+        );
+  for (const [file, { paths = [], reason }] of reviewedPrograms)
+    for (const path of paths)
+      if (
+        files.some((f) => f.name === file) &&
+        (!reason || !reviewedUsed.has(`${file} PATH ${path}`))
+      )
+        errors.push(
+          `REVIEWED_PROGRAMS lists the PATH entry ${path} in ${file}, which nothing adds any more`,
+        );
+  for (const [file, { programs, reason }] of reviewedPrograms)
+    for (const name of programs)
+      if (files.some((f) => f.name === file) && (!reason || !reviewedUsed.has(`${file} ${name}`)))
+        errors.push(`REVIEWED_PROGRAMS lists ${name} in ${file}, which nothing runs any more`);
   for (const [file, { words, reason }] of executedPrograms)
     for (const word of words)
       if (
@@ -1169,7 +1380,9 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   const expressions = [];
   const src = script.replace(GH_EXPRESSION, (match) => {
     expressions.push(match);
-    return `__GHEXPR${expressions.length - 1}__`;
+    // FU-159 r2 F1: GitHub pastes the value in before the shell parses: it is text of unknown words
+    // and may name a program, so it is read as an expansion (`$NAME`), never as a literal word.
+    return `$__GHEXPR${expressions.length - 1}__`;
   });
   const exempt = new Map();
   src.split('\n').forEach((text, index) => {
@@ -1204,7 +1417,9 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     const path = word && sourcedPath(word, ctx.self);
     return path !== undefined && ctx.sourceMoves?.(path) === false;
   });
-  const functions = new Set([...(ctx.functions ?? []), ...parsed.functions]);
+  const layout = layoutOf(parsed.commands);
+  const { nesting } = layout;
+  const inGroup = (group, ancestor) => groupWithin(parsed, group, ancestor);
   // A `cd` in a ( ) group leaves the commands outside it where they were. Inside a compound
   // command or function body (`nesting`) the order is not the text order; `later` is text that
   // runs at another time (a trap handler).
@@ -1219,6 +1434,70 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
             at < position && inGroup(parsed.commands[position].group, parsed.commands[at].group),
         )));
   const moved = movedAt();
+  // FU-159 r2 F2: the names that are certainly shell functions where each command runs
+  const imports = topLevelSources(
+    parsed,
+    layout,
+    ctx.self ?? '',
+    (path, index) => ctx.self !== undefined && (ctx.sourced?.has(path) ?? false) && !movedAt(index),
+  ).map(({ index, path }) => ({
+    index,
+    names: fileScope(path, ctx).exported,
+    unsets: fileScope(path, ctx).unsets,
+  }));
+  const table = functionTable(parsed, layout, imports, ctx.functions ?? new Set());
+  const callableAt = (position) => table.callable(position);
+  // FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path is proved only by `readonly NAME=…` run at
+  // the top level before the command: bash refuses every later write to it (`NAME=`, `read`, `printf -v`,
+  // `unset`, `local`, `declare -n`), so no write analysis has to find them all.
+  const readonlyDecls = [];
+  for (const [index, command] of parsed.commands.entries()) {
+    const { chain, problem, bypass } = executionChain(command.words);
+    const at = chain.at(-1);
+    const program = command.words[at]?.value;
+    const rest = command.words.slice(at + 1);
+    const flagged =
+      program === 'readonly' ||
+      (['declare', 'typeset'].includes(program) && rest.some((w) => /^-[A-Za-z]*r/.test(w.value)));
+    if (
+      command.pattern ||
+      problem ||
+      bypass ||
+      !flagged ||
+      layout.outer[index] !== 0 ||
+      command.group !== 0 ||
+      !LIST_STARTS.has(command.sep)
+    )
+      continue;
+    // `readonly NAME=v`, or `NAME=v` as the command right before `readonly NAME` (nothing between)
+    const before = parsed.commands[index - 1];
+    for (const word of rest) {
+      const name = /^([A-Za-z_][A-Za-z0-9_]*)(=|$)/.exec(word.value);
+      if (!name) continue;
+      const adjacent =
+        name[2] === '' &&
+        before !== undefined &&
+        before.group === 0 &&
+        layout.outer[index - 1] === 0 &&
+        assignmentOnly(before.words) &&
+        before.words.some((w) => w.value.startsWith(`${name[1]}=`));
+      if (name[2] === '=' || adjacent) readonlyDecls.push({ name: name[1], index });
+    }
+  }
+  const readonlyAt = (position) =>
+    new Set([
+      ...(ctx.readonly ?? []),
+      ...readonlyDecls.filter(({ index }) => index < table.timeOf(position)).map((d) => d.name),
+    ]);
+  /** what `at` says about every command that holds `line`: only what ALL of them agree on */
+  const agreeAtLine = (line, at) => {
+    const holders = parsed.commands.flatMap((c, k) =>
+      c.startLine <= line && line <= c.endLine ? [k] : [],
+    );
+    const sets = holders.map(at);
+    return new Set([...(sets[0] ?? [])].filter((name) => sets.every((set) => set.has(name))));
+  };
+  const callableAtLine = (line) => agreeAtLine(line, callableAt);
   const movedAtLine = (line) => {
     const holders = parsed.commands.flatMap((c, k) =>
       c.startLine <= line && line <= c.endLine ? [k] : [],
@@ -1239,7 +1518,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         ),
       ) ?? []
     ).length;
-  const restore = (value) => value.replace(/__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
+  const restore = (value) => value.replace(/\$__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
   // How many assignment-only commands of this script assign a variable one `$(…)`.
   const assignedFrom = new Map();
   for (const { words } of parsed.commands) {
@@ -1259,19 +1538,6 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   const provenanceBroken =
     parsed.commands.some(({ words }, index) => !isPattern(index) && dynamicWriter(words)) ||
     /\(\([^)]*[$`][^)]*(?<![=!<>])=(?!=)/.test(src);
-  let open = 0;
-  const nesting = parsed.commands.map(({ words }) => {
-    const first = words[headIndex(words)]?.value;
-    if (CLOSERS.has(first)) open = Math.max(0, open - 1);
-    const at = open;
-    if (OPENERS.has(first)) open += 1;
-    return at;
-  });
-  /** `group` is `ancestor` or a subshell opened inside it: it inherits the variables set there. */
-  const inGroup = (group, ancestor) => {
-    for (let g = group; g >= 0; g = parsed.parents[g]) if (g === ancestor) return true;
-    return false;
-  };
   /**
    * The command at `position` runs whenever the command at `later` runs. A `&&` list that is
    * backgrounded or piped runs in a subshell: `later` must then be in that same list.
@@ -1297,12 +1563,49 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     return false;
   };
 
+  // the `name` of a `name() …` definition is the definition, not a call of it
+  const definitionNames = new Set(
+    parsed.definitions
+      .filter(({ index }) => parsed.commands[index].words[0].value !== 'function')
+      .map(({ index }) => index),
+  );
+  const unknownWrites = []; // writes whose target this check cannot read
   for (const [position, command] of parsed.commands.entries()) {
+    if (definitionNames.has(position)) continue;
     const where = `${ctx.file}:${ctx.lineOf(command.startLine)}`;
     let words = command.words;
     // PR #805 r2 F1: a variable a shell evaluates at startup is text this check does not read.
     if (words.some(({ value }) => STARTUP_TEXT.test(value)))
       errors.push(`${where}: sets a variable a shell evaluates at startup (BASH_ENV, ENV ...)`);
+    // FU-159 r2 F1: text that is a command substitution once an ARITHMETIC evaluator reads it
+    // (`let 'x[$(cmd)]=1'`, `declare -i`, `[[ $x -eq 1 ]]` with such a value, `$((x))`): in data it is
+    // refused, wherever it stands but in the text this check reads as a script (eval, trap, a shell's
+    // -c body, a docker container command).
+    if (!readsText(words, ctx) && words.some((w) => !w.opaque && /\$\(|`/.test(w.value)))
+      errors.push(
+        `${where}: a word holds the text $( or a backtick inside quotes; an arithmetic evaluation (let, [[ ]], (( )), declare -i) would run it as a command substitution`,
+      );
+    // FU-159 r2 F4: PATH decides which file every command name is; a command found there is not the
+    // program this check read the name of. `hash` is handled with the other stages (wordStage).
+    if (words.some(({ value }) => LOOKUP_TEXT.test(value)))
+      errors.push(`${where}: names PATH or CDPATH, which decide which file a command word runs`);
+    for (const target of outputRedirects(words))
+      if (/GITHUB_PATH/.test(target.value) && !ctx.reviewed.pathEntry(ctx.file, words))
+        errors.push(
+          `${where}: appends to GITHUB_PATH, which changes the program every later step finds (REVIEWED_PROGRAMS paths)`,
+        );
+    // FU-159 r2 F4: a write that can replace a file this run sources or executes
+    const written = writeTargets(words);
+    for (const target of written) {
+      // an absolute path outside the scratch directories may be the checkout under another spelling
+      if (unreadArgument(target) || ABSOLUTE_ELSEWHERE.test(posix.normalize(target.value))) {
+        if (!ctx.reviewed.writes(ctx.file, target.value))
+          unknownWrites.push(`${where} (${target.value})`);
+      } else if (ctx.sourced?.has(posix.normalize(target.value)))
+        errors.push(
+          `${where}: writes ${posix.normalize(target.value)}, a file this run sources or executes (its contents are the ones this check read)`,
+        );
+    }
     // Assignments before a command, or alone (a variable for later commands).
     let index = 0;
     while (
@@ -1342,8 +1645,10 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
             self: ctx.self,
             shellFiles: ctx.shellFiles,
             moved: movedAt(position),
-            functions,
+            callable: callableAt(position),
+            readonly: readonlyAt(position),
             executed: ctx.executed,
+            reviewed: ctx.reviewed,
             file: ctx.file,
           });
     if (staged.problem) problem(staged.problem);
@@ -1353,7 +1658,8 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         {
           ...ctx,
           moved: movedAt(position, true),
-          functions,
+          functions: sameShell(command.words) ? callableAt(position) : new Set(),
+          readonly: sameShell(command.words) ? readonlyAt(position) : new Set(),
           self: undefined,
           lineOf: (n) => ctx.lineOf(command.startLine + n),
         },
@@ -1393,7 +1699,8 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
           {
             ...ctx,
             moved: movedAt(position),
-            functions,
+            functions: sameShell(command.words) ? callableAt(position) : new Set(),
+            readonly: sameShell(command.words) ? readonlyAt(position) : new Set(),
             self: undefined,
             lineOf: (n) => ctx.lineOf(command.startLine + n),
           },
@@ -1485,14 +1792,26 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       );
     }
   }
-  for (const { script: inner, line } of parsed.nested) {
+  // FU-159 r2 F4: a write to a path this check cannot read may replace a file the same script runs
+  if (unknownWrites.length > 0 && runsFile(parsed.commands))
+    for (const where of unknownWrites)
+      errors.push(
+        `${where}: writes to a path this check cannot read in a script that also sources or runs a file (the write may replace that file; REVIEWED_PROGRAMS writes)`,
+      );
+  for (const { script: inner, line, shell, holder } of parsed.nested) {
+    const at = holder !== undefined && holder >= 0 ? holder : undefined;
     shellImages(
       inner,
       {
         ...ctx,
         // the directory at the commands that hold it (a substitution has no position of its own)
-        moved: movedAtLine(line),
-        functions,
+        moved: at === undefined ? movedAtLine(line) : movedAt(at),
+        functions: shell ? new Set() : at === undefined ? callableAtLine(line) : callableAt(at),
+        readonly: shell
+          ? new Set()
+          : at === undefined
+            ? agreeAtLine(line, readonlyAt)
+            : readonlyAt(at),
         self: undefined,
         lineOf: (n) => ctx.lineOf(line + n),
       },
@@ -1504,18 +1823,17 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
 }
 
 // PR #805 r2 F1: variables whose value a shell runs at startup or between commands.
+const ABSOLUTE_ELSEWHERE = /^\/(?!(?:dev|tmp|proc\/self)(?:\/|$))/;
+const LOOKUP_TEXT = /^(?:PATH|CDPATH)(?:\+?=.*)?$/;
 const STARTUP_TEXT = /^(?:BASH_ENV|ENV|PROMPT_COMMAND|PS0|PS1|PS4|SHELLOPTS|BASHOPTS)(?:\+?=.*)?$/;
-/** Programs that run an operand string as a command line, or read commands from standard input. */
-const STRING_RUNNERS = new Set('flock su runuser sg script ssh watch at batch parallel'.split(' '));
-const STRING_WRAPPERS = new Set(['sudo', 'doas']);
-/** Names that take text wherever they stand in a command (not `source` and `.`: those are arguments too). */
-const TAKES_TEXT = new Set(
-  ['alias trap env xargs find', ...[...STRING_RUNNERS, ...STRING_WRAPPERS]].flatMap((names) =>
-    names.split(' '),
-  ),
-);
+/**
+ * Names that take text wherever they stand in a command (not `source` and `.`: those are arguments too).
+ * FU-159 r2 F1: `su`, `ssh`, `watch`, `parallel`, `script`, `at`, `sg`, `runuser` ... run a string or an
+ * argv this check does not rebuild: they are in no table, so they refuse like any unknown program.
+ */
+const TAKES_TEXT = new Set('alias trap env xargs find'.split(' '));
 /** Programs that substitute into the command they run (`xargs -I{}`, `find -exec … {}`). */
-const REWRITERS = new Set(['xargs', 'find', 'parallel']);
+const REWRITERS = new Set(['xargs', 'find']);
 const computedWord = (word) => Boolean(word.opaque || word.value.includes('$'));
 /**
  * PR #805 r2 F1: what the stages between a command line and the commands it runs do. A stage
@@ -1525,13 +1843,13 @@ const computedWord = (word) => Boolean(word.opaque || word.value.includes('$'));
 function textStage(words, input, env) {
   // FU-150 F1: the shared execution boundary names the words that run the next one (control
   // words, wrappers with their options, xargs operands) and refuses a computed program.
-  const { chain: list, problem, moves, inputs } = executionChain(words);
+  const { chain: list, problem, moves, inputs, bypass } = executionChain(words);
   if (problem) return { problem };
   if (list.length === 0) return {};
   // FU-159 F3: `env -C dir`, `sudo -D dir` and `chroot` run what follows from another directory.
   const here = { ...env, moved: env.moved || moves };
   const final = list.at(-1);
-  const unproven = programProblem(words[final], words.slice(final + 1), inputs, here);
+  const unproven = programProblem(words[final], inputs, bypass, here);
   if (unproven) return { problem: unproven };
   const chain = new Set(list);
   const scripts = [];
@@ -1541,10 +1859,15 @@ function textStage(words, input, env) {
     const stage = wordStage(name, words.slice(index + 1), input, here);
     if (stage.problem) return stage;
     scripts.push(...(stage.scripts ?? []));
-    // `find … -exec CMD … ;`: each operand command line is read like a line of its own.
+    // `find … -exec CMD … ;`: each operand command line is read like a line of its own. find runs
+    // external programs, never a shell function; `-execdir` runs them from each match's directory.
     if (name === 'find')
       for (const operands of findCommands(words.slice(index + 1))) {
-        const inner = textStage(operands, {}, here);
+        const inner = textStage(
+          [...operands],
+          {},
+          { ...here, callable: new Set(), moved: here.moved || operands.dir },
+        );
         if (inner.problem) return inner;
         scripts.push(...(inner.scripts ?? []));
       }
@@ -1559,103 +1882,390 @@ function textStage(words, input, env) {
 const BUILTINS = new Set(
   (
     ': [ [[ ]] ]] test echo printf read cd pushd popd pwd exit return break continue shift set unset ' +
-    'export local declare typeset readonly let getopts mapfile readarray wait umask ulimit true false ' +
+    'export local declare typeset readonly getopts mapfile readarray wait umask ulimit true false ' +
     'type hash for in do done while until if then else elif fi case esac select function { } ! ( ) ' +
     'eval source . trap alias docker docker-compose exec command builtin'
   ).split(' '),
 );
 /**
- * FU-159 F1: installed programs whose arguments are DATA: a path, a pattern, a text, a URL. A
- * program NOT in this table, in `WRAPPERS` or in a stage above, may run its operands as a command
- * (`taskset 1 $c`, `setpriv … $c`, `gosu u $c`): with an argument this check cannot read it is
- * refused. One row per reason; add a program here only after reading what it does with argv.
+ * FU-159 r2 F1: the ONE table of installed programs PROVEN to run none of their operands or files as a
+ * command. Anything not here, not a builtin, not a modeled dispatcher (`WRAPPERS`, the string runners,
+ * the shells, `xargs` / `find`), not a function of the script and not a reviewed per-script entry
+ * (`REVIEWED_PROGRAMS`) is refused: an unknown program is not assumed harmless because its
+ * arguments look like text. One row per reason; add a program here only after reading what it does
+ * with every option (GNU `sort --compress-program`, `tar --to-command`, `sed e`, `awk system()`,
+ * `find -exec`, `make`, `git` hooks and the interpreters are NOT here).
  */
 const DATA_PROGRAMS = new Set(
   Object.values({
-    'file utilities and text filters: arguments are paths, modes or patterns':
-      'cat cp mv rm mkdir mktemp chmod chown ls ln touch tee tail head sort uniq wc cut tr sed grep awk dirname basename seq date sleep pwd cmp diff',
-    'network and database clients: arguments are URLs, hosts, SQL or options':
-      'curl psql keytool openssl mc',
-    'language runtimes and toolchains: an argument is a file, a package or a script text, whose own spawns are outside the shell boundary':
-      'node go',
-    '`find -exec` operands are read by findCommands; `xargs` is a wrapper': 'find',
+    'file and directory utilities: operands are paths, modes or owners, read or written, never run':
+      'cat cp mv rm mkdir mktemp chmod chown ls ln touch tee',
+    'filters and printers: operands are patterns, field lists or counts':
+      'grep head tail wc cut tr uniq',
+    'path, number, time and delay printers: no operand is a command':
+      'dirname basename pwd seq date sleep',
+    'HTTP client: an operand is a URL, an option a header, a path or a request; curl has no way to run a program':
+      'curl',
   }).flatMap((names) => names.split(' ')),
 );
 /** An argument whose value this check cannot read: an expansion, a pattern, a substitution. */
 const unreadArgument = (word) => unsplit(word) || word.value.includes('$');
 /** A path to a file (not a bare program name, not an installed program by absolute path). */
 const filePath = (value) => value.includes('/') && !SYSTEM_PATH.test(value);
-/** An argument that names a script file: a relative or absolute path, or a `.sh`/`.bash` name. */
-const scriptLike = (value) => /^\.{0,2}\//.test(value) || /\.(?:sh|bash)$/.test(value);
 
 /**
- * FU-159 F1: the program that finally runs (the end of the execution chain) is either proved to
- * run no operand as a command, or its file is a CI script this check reads, or it is refused:
- * an executable that is not read (`./x.sh`, `"$VAR/x.sh"`), a program that may delegate with an
- * argument that is not literal (or whose arguments are `xargs` input), a file passed to one.
+ * FU-159 r2 F1: DEFAULT DENY. The program that finally runs (the end of the execution chain) is
+ * allowed only if it is (a) a builtin or a word of the grammar, (b) in DATA_PROGRAMS, (c) a modeled
+ * dispatcher whose operands this check reads (a shell, a string runner, `xargs`, `find`, a wrapper
+ * with nothing left to run), (d) a shell function that is certainly one here and not called through
+ * a wrapper, or a path, (e) listed for this script in REVIEWED_PROGRAMS. A path runs a FILE: it passes
+ * only as a CI script of this run by its exact path, or an EXECUTED_PROGRAMS entry.
  */
-function programProblem(program, args, inputs, env) {
+function programProblem(program, inputs, bypass, env) {
   const { value } = program;
-  const operands = [];
-  for (let at = 0; at < args.length; at++) {
-    const redirect = redirectWidth(args, at);
-    if (redirect > 0) at += redirect - 1;
-    else operands.push(args[at]);
-  }
   if (filePath(value)) {
-    const fixed = env.executed.allows(env.file, value);
+    const fixed = env.executed.allows(env.file, value, env.readonly);
     const path = posix.normalize(value);
     if (fixed || (!unreadArgument(program) && !env.moved && env.shellFiles.has(path))) return null;
     return `runs ${value}, a file this check does not read (a CI .sh file by its exact path, from a directory this script has not left, or an EXECUTED_PROGRAMS entry)`;
   }
   const name = value.split('/').at(-1);
-  if (
-    BUILTINS.has(name) ||
-    DATA_PROGRAMS.has(name) ||
-    STRING_RUNNERS.has(name) ||
-    SHELL_WORD.test(name) ||
-    REWRITERS.has(name) ||
-    env.functions.has(name)
-  )
+  if (BUILTINS.has(name) || DATA_PROGRAMS.has(name) || SHELL_WORD.test(name) || REWRITERS.has(name))
     return null;
-  const unread = operands.find(
-    (word) =>
-      unreadArgument(word) ||
-      (scriptLike(word.value) && !env.shellFiles.has(posix.normalize(word.value))),
-  );
-  if (!inputs && !unread) return null;
-  return `runs ${name}, a program that may run its operands as a command, with ${inputs ? 'arguments from xargs input' : `the argument ${unread.value}`} (WRAPPERS or DATA_PROGRAMS, after reading what it does with argv)`;
+  // a wrapper that is the last word has nothing to run, unless xargs hands it its operands
+  if (WRAPPER_NAMES.has(name) && !inputs) return null;
+  if (value === name && !bypass && env.callable.has(name)) return null;
+  if (env.reviewed.allows(env.file, name)) return null;
+  return `runs ${name}, a program this check does not model and has not proven to run no operand as a command (DATA_PROGRAMS, or a reviewed REVIEWED_PROGRAMS entry for this script)`;
 }
 
-const FUNCTION_DEFINITION = /(?:^|[\n;&|(){]\s*)(?:function\s+)?([A-Za-z_][\w:.+-]*)\s*\(\s*\)/g;
-const definedFunctions = (text) => [...text.matchAll(FUNCTION_DEFINITION)].map(([, name]) => name);
-const SOURCE_LINE =
-  /(?:^|[\n;&|(){]\s*)(?:source|\.)\s+"?(?:\$\(dirname "\$\{?BASH_SOURCE(?:\[0\])?\}?"\)\/)?([^"\s$]+)"?/g;
-/** The files `name` sources, directly or not, and itself (read from `source`/`.` lines of the text). */
-function sourceClosure(name, texts, seen = new Set()) {
-  if (seen.has(name) || !texts.has(name)) return seen;
-  seen.add(name);
-  for (const [, tail] of texts.get(name).matchAll(SOURCE_LINE))
-    for (const path of [posix.normalize(tail), posix.join(posix.dirname(name), tail)])
-      sourceClosure(posix.normalize(path), texts, seen);
-  return seen;
+/**
+ * FU-159 r2 F2: `{ nesting, outer }` per command. `outer` is how many compound commands (`if`, a
+ * `{ }` group, a function body, a loop) hold it; `nesting` is the same, plus one for a command that
+ * stands in the SAME command as the opener (`{ source x`, `if f`): it is inside, not at the level.
+ */
+function layoutOf(commands) {
+  let open = 0;
+  const nesting = [];
+  const outer = [];
+  for (const { words } of commands) {
+    const head = headIndex(words);
+    const first = words[head]?.value;
+    if (CLOSERS.has(first)) open = Math.max(0, open - 1);
+    outer.push(open);
+    let here = open;
+    if (OPENERS.has(first)) {
+      open += 1;
+      const final = executionChain(words).chain.at(-1);
+      if (final > head && !OPENERS.has(words[final]?.value)) here = open;
+    }
+    nesting.push(here);
+  }
+  return { nesting, outer };
 }
-/** The function names a file can call: its own and those of every file it sources, transitively. */
-function visibleFunctions(name, texts) {
-  const names = new Set();
-  for (const file of sourceClosure(name, texts)) {
-    try {
-      // a .sh file is read by tokens; a hash-pinned .bash library (which the tokenizer cannot read) by text
-      const defined = file.endsWith('.bash')
-        ? definedFunctions(texts.get(file))
-        : [...tokenizeShell(texts.get(file)).functions];
-      for (const fn of defined) names.add(fn);
-    } catch {
-      // an unreadable file defines nothing here; it is refused where it is read
+
+/** `group` is `ancestor` or a subshell opened inside it: it inherits the variables set there. */
+function groupWithin(parsed, group, ancestor) {
+  for (let g = group; g >= 0; g = parsed.parents[g]) if (g === ancestor) return true;
+  return false;
+}
+
+/** The names `unset` removes in these commands (also in literal `eval` / `trap` text), or `all`. */
+function unsetTargets(commands, depth = 0, out = { names: new Set(), all: false }) {
+  for (const { words, pattern } of commands) {
+    if (pattern) continue;
+    const { chain } = executionChain(words);
+    const at = chain.at(-1);
+    const rest = words.slice(at + 1);
+    const program = words[at]?.value;
+    const text = (script) => {
+      let inner = null;
+      try {
+        inner = depth < 4 ? tokenizeShell(script) : null;
+      } catch {
+        // unreadable text: it could unset anything
+      }
+      if (inner) unsetTargets(inner.commands, depth + 1, out);
+      else out.all = true;
+    };
+    if (program === 'unset') {
+      for (const word of rest) {
+        if (computedWord(word)) out.all = true;
+        else if (!word.value.startsWith('-')) out.names.add(word.value);
+      }
+    } else if (program === 'eval') {
+      if (rest.some(computedWord)) out.all = true;
+      else text(rest.map(({ value }) => value).join(' '));
+    } else if (program === 'trap') {
+      const handler = rest.find(({ value }) => !value.startsWith('-') || value === '-');
+      if (handler && handler.value !== '-' && handler.value !== '') {
+        if (computedWord(handler)) out.all = true;
+        else text(handler.value);
+      }
     }
   }
-  return names;
+  return out;
 }
+
+const nameOfWord = (word) => word.value.split('/').at(-1);
+
+/** A command whose text operands this check reads as scripts, or runs inside a container. */
+function readsText(words, ctx) {
+  const { chain } = executionChain(words);
+  const name = words[chain.at(-1)]?.value ?? '';
+  return (
+    SHELL_WORD.test(name) ||
+    ctx.reviewed.has(ctx.file, name) ||
+    ['eval', 'trap', 'docker', 'docker-compose'].includes(name) ||
+    words.some((w) => /(?:^|\/)docker(?:-compose)?$/.test(w.value))
+  );
+}
+
+/** The words a command line writes to: redirections, and what `cp` / `mv` / `ln` / `tee` / `touch` / `curl -o` name. */
+function writeTargets(words) {
+  const targets = outputRedirects(words);
+  const { chain } = executionChain(words);
+  const at = chain.at(-1);
+  const name = (words[at]?.value ?? '').split('/').at(-1);
+  const operands = [];
+  for (let k = at + 1; k < words.length; k++) {
+    const width = redirectWidth(words, k);
+    if (width > 0) k += width - 1;
+    else operands.push(words[k]);
+  }
+  // `time -o FILE` (also `--output`) writes its report to a file
+  for (const index of chain) {
+    if (nameOfWord(words[index]) !== 'time') continue;
+    for (let k = index + 1; k < words.length && !chain.includes(k); k++) {
+      const attached = /^(?:-[A-Za-z]*o|--output=)(.+)$/.exec(words[k].value);
+      if (attached && !words[k].value.startsWith('--output=')) targets.push({ value: attached[1] });
+      else if (attached) targets.push({ value: attached[1] });
+      else if (/^(?:-[A-Za-z]*o|--output)$/.test(words[k].value))
+        targets.push(words[k + 1] ?? { value: '$unknown', opaque: true });
+    }
+  }
+  if (['cp', 'mv', 'ln', 'tee', 'touch'].includes(name))
+    targets.push(...operands.filter(({ value }) => !value.startsWith('-')));
+  if (name === 'curl')
+    for (const [k, { value }] of operands.entries()) {
+      if (/^-[A-Za-z]*[OJ]|^--(?:remote-name|remote-header-name)/.test(value))
+        targets.push({ value: '$unknown', opaque: true });
+      const file = /^--(?:output|dump-header|cookie-jar|trace|trace-ascii|stderr)=(.*)$/.exec(
+        value,
+      );
+      if (file) targets.push({ value: file[1] });
+      else if (
+        /^(?:-[A-Za-z]*[oDc]|--(?:output|dump-header|cookie-jar|trace|trace-ascii|stderr))$/.test(
+          value,
+        )
+      )
+        targets.push(operands[k + 1] ?? { value: '$unknown', opaque: true });
+    }
+  return targets;
+}
+
+/** True when the script sources a file, runs a path, or hands a script file to a shell. */
+function runsFile(commands) {
+  return commands.some(({ words, pattern }) => {
+    if (pattern) return false;
+    const { chain, problem } = executionChain(words);
+    const word = words[chain.at(-1)];
+    if (problem || !word) return false;
+    if (word.value === 'source' || word.value === '.' || filePath(word.value)) return true;
+    return (
+      SHELL_WORD.test(word.value) &&
+      shellInvocation(words.slice(chain.at(-1) + 1), word.value).file !== undefined
+    );
+  });
+}
+
+/** `eval` and `trap` run their text in THIS shell, so its functions are there; nothing else does. */
+const sameShell = (words) => {
+  const { chain, bypass } = executionChain(words);
+  return !bypass && ['eval', 'trap'].includes(words[chain.at(-1)]?.value);
+};
+
+/** The name a command calls when no wrapper stands in front of it (so a shell function can answer). */
+function calledName(words) {
+  const { chain, problem, bypass } = executionChain(words);
+  const word = words[chain.at(-1)];
+  return problem || bypass || !word || computedWord(word) || word.value.includes('/')
+    ? null
+    : word.value;
+}
+
+/**
+ * FU-159 r2 F2: which command names are CERTAINLY shell functions where a command runs. A name is a
+ * function there only if (1) it is defined exactly once in the shell, by an unquoted `name() …` or
+ * `function name …` at the file's top level that always runs (not in a branch, loop, list or
+ * background), or by a library or script this shell sources the same way; (2) that definition (or
+ * source) comes BEFORE the command - a call inside a function body counts from the first time that
+ * function runs; (3) nothing in the shell or its sources unsets it. The caller also requires that no
+ * wrapper (`command`, `env`, a path) stands in front of the call.
+ * `imports` are the unconditional top-level `source`s: `{ index, names, unsets }`.
+ */
+function functionTable(parsed, layout, imports, inherited = new Set()) {
+  const { commands, definitions } = parsed;
+  const { nesting, outer } = layout;
+  const total = new Map();
+  for (const name of [
+    ...definitions.map((d) => d.name),
+    ...imports.flatMap((i) => [...i.names]),
+    ...inherited,
+  ])
+    total.set(name, (total.get(name) ?? 0) + 1);
+  const unsets = unsetTargets(commands);
+  for (const imported of imports) {
+    for (const name of imported.unsets.names) unsets.names.add(name);
+    unsets.all ||= imported.unsets.all;
+  }
+  const owner = new Array(commands.length).fill(-1); // the definition whose body holds the command
+  const closes = [];
+  for (const [di, { index: d }] of definitions.entries()) {
+    const form = commands[d].words[0]?.value === 'function';
+    const open = form ? d : d + 1;
+    let end = open + 1;
+    const group = commands[open]?.group;
+    const subshell = !form && commands[open]?.sep === '(' && group !== commands[d].group;
+    if (subshell)
+      while (end < commands.length && groupWithin(parsed, commands[end].group, group)) end++;
+    else while (end < commands.length && outer[end] > outer[d]) end++;
+    for (let k = open; k < end; k++)
+      if (k > open || subshell || nesting[k] > outer[k]) owner[k] = di;
+    closes[di] = subshell ? end : end + 1; // the command after the whole definition
+  }
+  const valid = new Map(); // name -> the command that defines it
+  for (const [di, { name, index: d }] of definitions.entries()) {
+    const c = commands[d];
+    if (
+      total.get(name) === 1 &&
+      outer[d] === 0 &&
+      c.group === 0 &&
+      LIST_STARTS.has(c.sep) &&
+      !['&', '|', '|&'].includes(commands[closes[di]]?.sep) &&
+      !unsets.all &&
+      !unsets.names.has(name)
+    )
+      valid.set(name, d);
+  }
+  const run = new Map(); // function name -> the first time (a command index) it can run
+  const timeOf = (k) =>
+    owner[k] < 0 ? k : (run.get(definitions[owner[k]].name) ?? definitions[owner[k]].index);
+  const named = new Set(definitions.map((d) => d.index)); // the `name` of `name() …` is no call
+  const calls = commands.map(({ words, pattern }, k) =>
+    pattern || (named.has(k) && words[0].value !== 'function') ? null : calledName(words),
+  );
+  for (let again = true, guard = 0; again && guard < 64; guard++) {
+    again = false;
+    for (const [k, name] of calls.entries()) {
+      if (name === null) continue;
+      const time = timeOf(k);
+      if (time < (run.get(name) ?? Infinity)) {
+        run.set(name, time);
+        again = true;
+      }
+    }
+  }
+  const certain = (name) => total.get(name) === 1 && !unsets.all && !unsets.names.has(name);
+  return {
+    unsets,
+    timeOf,
+    /** the names callable by the command at `position` (a command index) */
+    callable(position) {
+      const time = timeOf(position);
+      const names = new Set();
+      for (const [name, d] of valid) if (d < time) names.add(name);
+      for (const { index, names: from } of imports)
+        if (index < time) for (const name of from) if (certain(name)) names.add(name);
+      for (const name of inherited) if (certain(name)) names.add(name);
+      return names;
+    },
+    /** what a shell that sources this one gets: every definition that is certain by the end */
+    exported() {
+      const names = new Set(valid.keys());
+      for (const { names: from } of imports)
+        for (const name of from) if (certain(name)) names.add(name);
+      return names;
+    },
+  };
+}
+
+/** The top-level `source`/`.` commands of a script whose one path is resolved: `[{ index, path }]`. */
+function topLevelSources(parsed, layout, self, usable) {
+  const found = [];
+  for (const [index, command] of parsed.commands.entries()) {
+    if (command.pattern) continue;
+    const { chain, problem, bypass } = executionChain(command.words);
+    const at = chain.at(-1);
+    const program = command.words[at]?.value;
+    if (problem || bypass || (program !== 'source' && program !== '.')) continue;
+    const path = sourcedPath(command.words[at + 1], self);
+    if (
+      path !== undefined &&
+      layout.outer[index] === 0 &&
+      command.group === 0 &&
+      LIST_STARTS.has(command.sep) &&
+      usable(path, index)
+    )
+      found.push({ index, path });
+  }
+  return found;
+}
+
+/**
+ * What sourcing a file does to the shell that sources it: `moves` (it can change the directory,
+ * from the tokens of the file and of the files it sources, or a library whose pool has a directory
+ * word), the function names it leaves and the names it unsets. Memoised; a cycle promises nothing.
+ */
+const unknownUnsets = () => ({ names: new Set(), all: true });
+function fileScope(path, shared) {
+  if (shared.memo.has(path)) return shared.memo.get(path);
+  shared.memo.set(path, { moves: true, exported: new Set(), unsets: unknownUnsets() });
+  let scope;
+  if (path.endsWith('.bash')) {
+    // a hash-pinned library: its text was read by a reviewer, not by the tokenizer
+    const pinned = shared.verified.has(path);
+    scope = {
+      moves:
+        !pinned ||
+        [...shared.libraries.keys()].some((name) =>
+          DIRECTORY_WORD.test(shared.texts.get(name) ?? ''),
+        ),
+      exported: new Set(pinned ? shared.libraries.get(path).functions : []),
+      unsets: { names: new Set(), all: false },
+    };
+  } else {
+    try {
+      const parsed = tokenizeShell(shared.texts.get(path));
+      const layout = layoutOf(parsed.commands);
+      const moves =
+        directoryChanges(parsed.commands, (word) => {
+          const target = word && sourcedPath(word, path);
+          return (
+            target !== undefined &&
+            shared.texts.has(target) &&
+            fileScope(target, shared).moves === false
+          );
+        }).length > 0;
+      const imports = moves
+        ? []
+        : topLevelSources(parsed, layout, path, (target) => shared.texts.has(target)).map(
+            ({ index, path: target }) => ({
+              index,
+              names: fileScope(target, shared).exported,
+              unsets: fileScope(target, shared).unsets,
+            }),
+          );
+      const table = functionTable(parsed, layout, imports);
+      scope = { moves, exported: table.exported(), unsets: table.unsets };
+    } catch {
+      scope = { moves: true, exported: new Set(), unsets: unknownUnsets() };
+    }
+  }
+  shared.memo.set(path, scope);
+  return scope;
+}
+
 /** A word of the text that changes directory, anywhere (a comment too: this errs toward refusing). */
 const DIRECTORY_WORD = /(?<![\w$./-])(?:cd|pushd|popd|chroot)(?![\w./-])/;
 /**
@@ -1704,8 +2314,16 @@ function sourcedPath(word, self) {
 
 /** The stage the program `name` is, given the words after it. */
 function wordStage(name, args, input, sourced) {
-  const standardInput = input.pipe || input.hereString || input.hereDocument;
   if (name === 'alias') return { problem: 'alias defines text a later command runs' };
+  // FU-159 r2 F1: `declare -i x=…` evaluates the value as an arithmetic expression, which runs `$(…)`
+  if (
+    ['declare', 'typeset', 'local', 'export', 'readonly'].includes(name) &&
+    args.some(({ value }) => /^-[A-Za-z]*i/.test(value))
+  )
+    return { problem: `${name} -i evaluates its value as arithmetic, which can run a command` };
+  // FU-159 r2 F4: `hash -p FILE NAME` makes NAME run FILE whatever PATH says
+  if (name === 'hash' && args.some(({ value }) => value !== '-r'))
+    return { problem: 'hash binds a command name to a file this check did not read' };
   if (
     (name === 'mapfile' || name === 'readarray') &&
     args.some(({ value }) => /^-[A-Za-z]*C/.test(value))
@@ -1730,19 +2348,7 @@ function wordStage(name, args, input, sourced) {
     return { problem: 'env -S splits a string into a command this check does not read' };
   if (REWRITERS.has(name) && args.some(({ value }) => SHELL_WORD.test(value) || value === 'eval'))
     return { problem: `${name} rewrites the text a shell runs` };
-  const runner = STRING_RUNNERS.has(name);
-  if (!runner && !STRING_WRAPPERS.has(name)) return {};
-  if (runner && standardInput)
-    return {
-      problem: `${name} reads commands from standard input, which this check does not read`,
-    };
-  const scripts = [];
-  for (const word of args) {
-    if (computedWord(word) && runner)
-      return { problem: `${name} runs a command string this check cannot read` };
-    if (!computedWord(word) && /\s/.test(word.value)) scripts.push(word.value);
-  }
-  return { scripts };
+  return {};
 }
 
 /**

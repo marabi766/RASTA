@@ -325,13 +325,13 @@ const WRAPPERS = {
     cd: 'D',
     lcd: 'chdir',
     v: 'ughpCDRTrtU',
-    b: 'AbEeHiKklnPSsVvB',
+    b: 'AbEHKklnPSVvB', // not -e (an editor), -i / -s (a shell): they run what no operand names
     lv: 'user group host prompt chdir chroot role type other-user close-from command-timeout',
-    lb: 'askpass background preserve-env login shell set-home non-interactive stdin reset-timestamp remove-timestamp list validate version',
+    lb: 'askpass background preserve-env set-home non-interactive stdin reset-timestamp remove-timestamp list validate version',
   },
   doas: { v: 'uC', b: 'nL' },
   flock: {
-    v: 'wEc',
+    v: 'wE', // not -c: its operand is a command line run by `sh -c`
     b: 'sxeunoF',
     lv: 'timeout conflict-exit-code',
     lb: 'shared exclusive unlock nonblock nb close no-fork verbose',
@@ -346,6 +346,8 @@ const WRAPPERS = {
     lb: 'null open-tty interactive no-run-if-empty verbose exit show-limits eof replace',
   },
 };
+/** The programs that run the command they are given (modeled by `executionChain`). */
+export const WRAPPER_NAMES = new Set(Object.keys(WRAPPERS));
 const words = (text) => text?.split(' ') ?? [];
 /**
  * A redirection word (`>f`, `2>f`, `>>`, `<`, `&>f`, `>&2`): bash applies it and passes no operand,
@@ -356,6 +358,27 @@ export const redirectWidth = (list, at) => {
   const match = REDIRECT.exec(list[at].value);
   return match ? (match[1] === '' ? 2 : 1) : 0;
 };
+/**
+ * FU-159 r2 F4: the files a command line WRITES by redirection (`>f`, `2>>f`, `&>f`, `>|f`, `<>f`,
+ * `>&f`, with the target attached or the next word): `{ word }` is the target word. A duplicated
+ * descriptor (`>&2`, `2>&-`) writes no file.
+ */
+export function outputRedirects(list) {
+  const found = [];
+  for (let at = 0; at < list.length; at++) {
+    const match = /^(?:\d+|&)?(<>|>>|>\||>)(.*)$/.exec(list[at].value);
+    if (!match) continue;
+    // `>& f` (stdout and stderr to f) takes the next word like a bare `>`
+    const bare = match[2] === '' || match[2] === '&';
+    let target = bare ? list[at + 1] : { ...list[at], value: match[2] };
+    if (bare) at += 1;
+    if (target && /^&(?:\d+|-)$/.test(target.value)) continue;
+    if (target?.value.startsWith('&')) target = { ...target, value: target.value.slice(1) };
+    if (target) found.push(target);
+  }
+  return found;
+}
+
 const nameOf = (word) => word.value.split('/').at(-1);
 /** An installed program by absolute path (`/usr/bin/env`): its name says what it is. Any other path is a FILE. */
 export const SYSTEM_PATH = /^\/(?:usr\/(?:local\/)?)?s?bin\/[^/]+$/;
@@ -386,7 +409,7 @@ export const unsplit = (word) =>
  * `timeout`'s duration) must be ONE word: an unquoted expansion would shift the program (FU-159).
  * After `--` the positional operands are still consumed.
  */
-function afterOptions(name, spec, list, from) {
+function afterOptions(name, spec, list, from, replace = []) {
   let at = from;
   let positional = spec.n ?? 0;
   let moves = Boolean(spec.moves);
@@ -422,6 +445,7 @@ function afterOptions(name, spec, list, from) {
     if (bad) return bad;
     if (value.startsWith('--')) {
       const [long, attached] = [value.slice(2).split('=')[0], value.includes('=')];
+      if (name === 'xargs' && long === 'replace') replace.push(value.split('=')[1] ?? '{}');
       if (words(spec.lv).includes(long)) {
         if (words(spec.lcd).includes(long)) moves = true;
         if (!attached) {
@@ -439,32 +463,26 @@ function afterOptions(name, spec, list, from) {
       if (spec.stops?.includes(letter)) return { at: -1, moves };
       if (spec.cd?.includes(letter)) moves = true;
       if (spec.v?.includes(letter)) {
+        // xargs -I S: the replace string is this option's value, however the cluster is spelled
+        if (name === 'xargs' && letter === 'I') replace.push(rest ? value.slice(index + 2) : '');
         if (!rest) {
           at++; // `-u root`; an attached value (`-uroot`) ends the cluster
           const operand = read(at);
           if (operand) return operand;
+          if (name === 'xargs' && letter === 'I')
+            replace[replace.length - 1] = list[at]?.value ?? '';
         }
         break;
       }
-      if (spec.o?.includes(letter)) break;
+      if (spec.o?.includes(letter)) {
+        if (name === 'xargs' && letter === 'i') replace.push(value.slice(index + 2) || '{}');
+        break;
+      }
       if (!spec.b?.includes(letter))
         return { problem: `${name} option ${value} is not one this check reads` };
     }
   }
   return positional > 0 ? { at: list.length, moves } : { at, moves };
-}
-
-/** The strings `xargs` replaces by each input item (`-I S`, `-IS`, `-i[S]`, `--replace[=S]`). */
-function replaceStrings(options) {
-  const found = [];
-  for (const [index, { value }] of options.entries()) {
-    const long = /^--replace(?:=(.*))?$/.exec(value);
-    const short = /^-([Ii])(.*)$/.exec(value);
-    if (long) found.push(long[1] ?? '{}');
-    else if (short)
-      found.push(short[2] || (short[1] === 'I' ? (options[index + 1]?.value ?? '') : '{}'));
-  }
-  return found.filter(Boolean);
 }
 
 /**
@@ -481,19 +499,22 @@ export function executionChain(list) {
   const chain = [];
   let at = 0;
   let moves = false;
-  let xargs = null; // { at, replace }
+  let bypass = false; // a wrapper that runs an EXTERNAL program of the name, never a shell function
+  const xargs = []; // every xargs of the chain: { from, replace }; an inner one does not hide an outer one
   const done = (extra = {}) => {
     const last = chain.at(-1);
     const hit =
-      xargs &&
       last !== undefined &&
-      list
-        .slice(xargs.from, last + 1)
-        .some(({ value }) => xargs.replace.some((text) => value.includes(text)));
+      xargs.some(({ from, replace }) =>
+        list
+          .slice(from, last + 1)
+          .some(({ value }) => replace.some((text) => value.includes(text))),
+      );
     return {
       chain,
       moves,
-      inputs: Boolean(xargs),
+      bypass,
+      inputs: xargs.length > 0,
       ...(hit ? { problem: 'xargs substitutes its input into the program position' } : {}),
       ...extra,
     };
@@ -523,28 +544,32 @@ export function executionChain(list) {
     const named = !word.value.includes('/') || SYSTEM_PATH.test(word.value);
     const spec = named && Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : undefined;
     if (!spec) return done();
-    const next = afterOptions(name, spec, list, at + 1);
+    const replace = [];
+    const next = afterOptions(name, spec, list, at + 1, replace);
     if (next.problem) return done({ problem: next.problem });
     moves ||= next.moves;
+    if (name !== '!') bypass = true;
     if (name === 'xargs')
-      xargs = {
-        from: next.at < 0 ? list.length : next.at,
-        replace: replaceStrings(list.slice(at + 1, Math.max(next.at, at + 1))),
-      };
+      xargs.push({ from: next.at < 0 ? list.length : next.at, replace: replace.filter(Boolean) });
     if (next.at < 0) return done();
     at = next.at;
   }
   return done({ problem: 'nests wrappers deeper than this check reads' });
 }
 
-/** The operand command lines of `find -exec|-execdir|-ok|-okdir … ;|+` (each ends at `;` or `+`). */
+/**
+ * The operand command lines of `find -exec|-execdir|-ok|-okdir … ;|+` (each ends at `;` or `+`).
+ * `dir` is set on the `-execdir` / `-okdir` ones: they run from the directory of each match, so a
+ * relative program path names another file there (FU-159 r2 F4).
+ */
 export function findCommands(args) {
   const lists = [];
   for (let at = 0; at < args.length; at++) {
-    if (!/^-(?:exec|execdir|ok|okdir)$/.test(args[at].value)) continue;
+    const option = /^-(exec|execdir|ok|okdir)$/.exec(args[at].value);
+    if (!option) continue;
     let end = at + 1;
     while (end < args.length && !['+', ';'].includes(args[end].value)) end++;
-    lists.push(args.slice(at + 1, end));
+    lists.push(Object.assign(args.slice(at + 1, end), { dir: option[1].endsWith('dir') }));
     at = end;
   }
   return lists;

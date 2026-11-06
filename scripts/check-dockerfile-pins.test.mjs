@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { stringify } from 'yaml';
 import {
   DIGEST_VARIANTS,
+  REVIEWED_PROGRAMS,
   SOURCED_LIBRARIES,
   TAGLESS,
   tokenizeShell,
@@ -78,6 +79,7 @@ const NO_EXEMPTIONS = {
   tagless: new Map(),
   evaluatedOutputs: new Map(),
   executedPrograms: new Map(),
+  reviewedPrograms: new Map(),
 };
 const compose = (text) => ({ name: 'docker-compose.yml', kind: 'compose', text });
 const workflowYaml = (text) => ({ name: '.github/workflows/ci.yml', kind: 'workflow', text });
@@ -455,7 +457,13 @@ const SHAPES = {
   'pipeline into sh': (v) => `echo 'docker ${v} alpine:latest' | sh`,
   'env-prefixed quoted here-document': (v) => `env bash <<'EOF'\ndocker ${v} alpine:latest\nEOF`,
 };
-const bare = { evaluatedOutputs: new Map(), digestVariants: new Map(), tagless: new Map() };
+const bare = {
+  evaluatedOutputs: new Map(),
+  digestVariants: new Map(),
+  tagless: new Map(),
+  executedPrograms: new Map(),
+  reviewedPrograms: new Map(),
+};
 const asInput = (kind, body) =>
   kind === 'shell'
     ? { kind, name: 'scripts/x.sh', text: body }
@@ -802,21 +810,26 @@ test('PR #805 r2 F1: a workflow env that a shell evaluates at startup refuses', 
     );
   }
 });
-test('PR #805 r2 F1: string runners keep the command string they carry', () => {
+test('PR #805 r2 F1: text a program runs is read where this check models it, refused elsewhere', () => {
+  // FU-159 r2: a string runner is no longer "modeled by its strings": it is a program in no table
   for (const script of [
-    `flock /tmp/l -c 'docker run alpine:latest'`,
     `su -c 'docker run alpine:latest' nobody`,
     `script -qc 'docker run alpine:latest' /dev/null`,
     `ssh host 'docker run alpine:latest'`,
     `watch -n1 'docker run alpine:latest'`,
-    `trap 'docker run alpine:latest' EXIT`,
+    `flock /tmp/l -c 'docker run alpine:latest'`,
   ])
-    assert.ok(outcome('shell', script).found, script);
+    assert.ok(
+      outcome('shell', script).errors.some((e) =>
+        /does not model|not one this check reads/.test(e),
+      ),
+      script,
+    );
+  // a trap handler is read as the script it is
+  assert.ok(outcome('shell', `trap 'docker run alpine:latest' EXIT`).found);
 });
 test('PR #805 r2 F1: the harmless controls stay readable', () => {
   for (const body of [
-    "flock /tmp/l -c 'echo hi'",
-    "ssh host 'uptime'",
     "trap 'echo bye' EXIT",
     'trap - EXIT\ntrap -l',
     'bash <<EOF\necho hi\nEOF',
@@ -1264,37 +1277,6 @@ test('FU-159 F1: xargs input and unquoted operands cannot choose the program', (
   ])
     assert.deepEqual(outcome('shell', body).errors, [], body);
 });
-test('FU-159 F1: an unknown program that may delegate, given an argument it cannot read, refuses', () => {
-  for (const wrapper of [
-    'taskset 1',
-    'chrt 1',
-    'unshare -m',
-    'nsenter -t 1',
-    'strace',
-    'gosu root',
-    'su-exec root',
-    'eatmydata',
-    'busybox',
-    'setpriv --reuid=1',
-    'setarch x86_64',
-    'runcon ctx',
-    'numactl -N0',
-    'chpst -u x',
-    'tini --',
-    'dumb-init',
-    'bwrap --bind / /',
-  ])
-    refusedBoth(`c=docker\n${wrapper} $c ${R}`);
-  // literal operands of an unknown program, a function, a builtin or a data program stay readable
-  for (const body of [
-    'taskset 1 sleep 1',
-    'f() { echo "$1"; }; f "$a"',
-    'echo "$a"',
-    'sed "s/$a/b/" f',
-    'curl -fsS "$url"',
-  ])
-    assert.deepEqual(outcome('shell', body).errors, [], body);
-});
 test('FU-159 F1: an executable this run did not read refuses', () => {
   const read = { kind: 'shell', name: 'tools/ok.sh', text: 'true' };
   for (const body of [
@@ -1328,7 +1310,10 @@ test('FU-159 F1: an executable this run did not read refuses', () => {
     ]),
   };
   assert.deepEqual(
-    validateInfraImagePins([read, asInput('shell', '"${ROOT}/tools/ok.sh"')], policy).errors,
+    validateInfraImagePins(
+      [read, asInput('shell', 'readonly ROOT=/r\n"${ROOT}/tools/ok.sh"')],
+      policy,
+    ).errors,
     [],
   );
   assert.ok(
@@ -1425,4 +1410,595 @@ test('FU-159 F3: a sourced file that changes directory moves the shell that sour
     ),
   );
   assert.deepEqual(validateInfraImagePins(files('true\n'), withLibrary).errors, []);
+});
+
+// =============================================================================
+// FU-159 round 2 (PR #874 review r1): DEFAULT DENY. The probes of the review, each of which was
+// approved on aa45dd88, are rows here. Where a probe could be refused for another reason, the row
+// names the reason that has to refuse it (`why`), so disabling one mechanism fails its own test.
+// =============================================================================
+const asWorkflow = (body) =>
+  workflowYaml(
+    stringify({
+      jobs: { a: { 'runs-on': 'x', env: { CMD: 'docker' }, steps: [{ run: body }] } },
+    }),
+  );
+/** every error of `body` run as a CI script and as a workflow step */
+const errorsBoth = (body, policy = bare, extra = []) =>
+  ['shell', 'workflow'].map(
+    (kind) =>
+      validateInfraImagePins(
+        [...extra, kind === 'shell' ? asInput('shell', body) : asWorkflow(body)],
+        policy,
+      ).errors,
+  );
+const refusesWhy = (body, why, policy = bare, extra = []) => {
+  for (const errors of errorsBoth(body, policy, extra))
+    assert.ok(
+      errors.some((e) => why.test(e)),
+      `${JSON.stringify(body)} should be refused (${why}); got ${JSON.stringify(errors)}`,
+    );
+};
+const acceptsBoth = (body, policy = bare, extra = []) => {
+  for (const errors of errorsBoth(body, policy, extra)) assert.deepEqual(errors, [], body);
+};
+const refusesShell = (body, why, policy = bare, extra = []) => {
+  const { errors } = validateInfraImagePins([...extra, asInput('shell', body)], policy);
+  assert.ok(
+    errors.some((e) => why.test(e)),
+    `${JSON.stringify(body)} should be refused (${why}); got ${JSON.stringify(errors)}`,
+  );
+};
+/** a CI script only: a workflow step has no path of its own to source from or be listed by */
+const acceptsShell = (body, policy = bare, extra = []) =>
+  assert.deepEqual(
+    validateInfraImagePins([...extra, asInput('shell', body)], policy).errors,
+    [],
+    body,
+  );
+const NOT_MODELED = /a program this check does not model/;
+const scriptFile = (name, text = 'true') => ({ kind: 'shell', name, text });
+
+test('FU-159 r2 F1: a program in no table refuses, whatever its arguments look like', () => {
+  // the review’s probes
+  refusesWhy('taskset 1 tools/unchecked', NOT_MODELED);
+  refusesWhy(`node -e 'require("child_process").execSync("doc"+"ker ${R}")'`, NOT_MODELED);
+  // wrappers the table does not model, with literal executable operands
+  for (const wrapper of [
+    'taskset 1',
+    'chrt 1',
+    'unshare -m',
+    'nsenter -t 1',
+    'strace',
+    'gosu root',
+    'su-exec root',
+    'eatmydata',
+    'busybox',
+    'setpriv --reuid=1',
+    'setarch x86_64',
+    'runcon ctx',
+    'numactl -N0',
+    'chpst -u x',
+    'tini --',
+    'dumb-init',
+    'bwrap --bind / /',
+  ])
+    refusesWhy(`${wrapper} tools/unchecked`, NOT_MODELED);
+  // interpreters with code strings or unread files, and options that run a program
+  for (const program of [
+    'python3 -c "import os"',
+    'perl -e 1',
+    'ruby -e 1',
+    'make -f tools/Makefile',
+    "sed -n '1e docker run' f",
+    'awk \'BEGIN{system("x")}\'',
+    "psql -c '\\! docker run'",
+    'psql -f tools/x.sql',
+    'node tools/x.js',
+    'go run tools/x.go',
+    'sort --compress-program=tools/x f',
+    'tar -cf a --to-command tools/x b',
+  ])
+    refusesWhy(program, NOT_MODELED);
+  // a relative path without ./ is a file, not a name
+  refusesWhy('tools/unchecked', /a file this check does not read/);
+  // the tables stay usable: builtins, data programs, wrappers around them
+  acceptsBoth('echo "$a" | grep -q x && cat f | tail -n 1 > /dev/null');
+  acceptsBoth('timeout 5 sleep 1; env -u X date; nice -n 1 mkdir -p d; command -v git');
+  acceptsBoth('curl -fsS "$url" -o /dev/null');
+  // a reviewed entry names the script and the program, and goes stale when nothing runs it
+  const reviewedPolicy = (programs) => ({
+    ...bare,
+    reviewedPrograms: new Map([['scripts/x.sh', { programs, reason: 'r' }]]),
+  });
+  assert.deepEqual(
+    validateInfraImagePins([asInput('shell', 'node tools/x.js')], reviewedPolicy(['node'])).errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins([asInput('shell', 'true')], reviewedPolicy(['node'])).errors.some((e) =>
+      /REVIEWED_PROGRAMS lists node in scripts\/x\.sh, which nothing runs/.test(e),
+    ),
+  );
+  // by name only: a path is a file, and the entry does not reach another script
+  refusesWhy('./node tools/x.js', /a file this check does not read/, reviewedPolicy(['node']));
+  refusesWhy('timeout 5 node x.js', NOT_MODELED, {
+    ...bare,
+    reviewedPrograms: new Map([['scripts/y.sh', { programs: ['node'], reason: 'r' }]]),
+  });
+});
+
+test('FU-159 r2 F1: xargs replacement is read by one option parser at every nesting level', () => {
+  const feed = "printf 'doc%s' ker |";
+  // clustered options, however they are spelled
+  for (const options of ['-I', '-rI', '-tI', '-pI', '-0I', '-rtI', '-r0I'])
+    refusesWhy(`${feed} xargs ${options} echo env echo ${R}`, /xargs substitutes its input/);
+  // `-i` and `--replace` without a string replace `{}`
+  for (const options of ['-iZ', '-riZ', '--replace=Z'])
+    refusesWhy(`${feed} xargs ${options} env Z ${R}`, /xargs substitutes its input/);
+  // `-IS` and `--replace=S` carry the string with the option
+  refusesWhy(`${feed} xargs -Iecho env echo ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs -rIecho env echo ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs --replace=echo env echo ${R}`, /xargs substitutes its input/);
+  // an inner xargs does not hide the outer replacement context
+  refusesWhy(`${feed} xargs -I% xargs -r env % ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs -rI% xargs -I@ env % ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs -I% xargs -I@ env @ ${R}`, /xargs substitutes its input/);
+  // the replace string away from the program position is only an argument
+  acceptsBoth('printf "a\\nb" | xargs -rI% echo %');
+  acceptsBoth('printf "a\\nb" | xargs -n 1 echo');
+  // the program an xargs hands its input to must be in a table
+  refusesWhy('printf x | xargs taskset 1', NOT_MODELED);
+  refusesWhy('printf x | xargs env', NOT_MODELED);
+});
+
+test('FU-159 r2 F1: a GitHub expression is text of unknown words, never a literal word', () => {
+  // in the command position, as a wrapper operand, an option value, an eval or -c body
+  for (const body of [
+    `\${{ env.CMD }} ${R}`,
+    `timeout \${{ env.CMD }} docker ${R}`,
+    `sudo -u \${{ env.CMD }} true`,
+    `nice -n \${{ env.CMD }} true`,
+    `env \${{ env.CMD }} ${R}`,
+    `eval "\${{ env.CMD }} ${R}"`,
+    'eval ${{ env.CMD }}',
+    `bash -c "\${{ env.CMD }} ${R}"`,
+  ]) {
+    const errors = errorsBoth(body)[1];
+    assert.ok(errors.length > 0, `workflow: ${body}`);
+  }
+  // an expression among data stays readable, and an image word still resolves through it
+  assert.deepEqual(errorsBoth('echo "${{ github.sha }}" >> /dev/null')[1], []);
+  const images = validateInfraImagePins([asWorkflow(`docker pull \${{ env.CMD }}`)], bare).errors;
+  assert.ok(images.some((e) => /not pinned/.test(e)));
+});
+
+test('FU-159 r2 F2: a function exempts a call only if it is certainly the function there', () => {
+  // the control: a function defined once at the top level, before its calls
+  acceptsBoth('f() { echo hi; }\nf\ng() { f; }\ng');
+  acceptsBoth('g() { f; }\nf() { :; }\ng'); // a call in a body counts from the first time g runs
+  acceptsBoth('function f { :; }\nf');
+  acceptsBoth('f() ( :; )\nf');
+  // unset (also in eval and trap text, or by a computed name) ends the exemption
+  for (const body of [
+    'f() { :; }\nunset -f f\nf',
+    'f() { :; }\nunset f\nf',
+    "f() { :; }\neval 'unset -f f'\nf",
+    "f() { :; }\ntrap 'unset -f f' EXIT\nf",
+    'f() { :; }\nunset -f "$n"\nf',
+  ])
+    refusesWhy(body, NOT_MODELED);
+  // a definition after the call, in a branch, in a list, in the background, in a body, in a subshell
+  for (const body of [
+    'f\nf() { :; }',
+    'if false; then f() { :; }; fi\nf',
+    'true && f() { :; }\nf',
+    'f() { :; } &\nf',
+    'g() { f() { :; }; }\ng\nf',
+    '( f() { :; } )\nf',
+    'f() { :; }\nf() { echo hi; }\nf',
+    // in a group, a loop, a branch or a case arm of its own lines: the body may never run
+    '{\n  f() { :; }\n}\nf',
+    'if true; then\n  f() { :; }\nfi\nf',
+    'while false; do\n  f() { :; }\ndone\nf',
+    'case x in\n  x) f() { :; };;\nesac\nf',
+    'echo hi | cat\nf() { :; } | cat\nf',
+  ])
+    refusesWhy(body, NOT_MODELED);
+  // a call that goes around the function lookup runs the external program
+  for (const call of ['command f', 'env f', 'nohup f', '/usr/bin/f', 'timeout 5 f', 'builtin f'])
+    refusesWhy(`f() { :; }\n${call}`, NOT_MODELED);
+  // a child shell does not have the parent's functions
+  refusesWhy("f() { :; }\nbash <<'EOF'\nf\nEOF", NOT_MODELED);
+  refusesWhy("f() { :; }\nbash -c 'f'", NOT_MODELED);
+  // the same shell does: a substitution, eval and trap text
+  acceptsBoth('f() { :; }\nx="$(f)"\neval f\ntrap f EXIT');
+  // a quoted keyword and a name inside a string are no definition
+  refusesWhy('"function" f { :; }\nf', NOT_MODELED);
+  refusesWhy('function "f" { :; }\nf', NOT_MODELED);
+  refusesWhy('"function" f || :\nf', NOT_MODELED);
+  refusesWhy("echo 'f() { :; }'\nf", NOT_MODELED);
+  refusesWhy('echo f() { :; }\nf', NOT_MODELED);
+});
+
+test('FU-159 r2 F2: functions of a sourced file come from the parsed source command, one path', () => {
+  const defs = scriptFile('scripts/defs.sh', 'fn() { :; }');
+  acceptsShell('source scripts/defs.sh\nfn', bare, [defs]);
+  acceptsShell('. scripts/defs.sh\nfn', bare, [defs]);
+  // a workflow step has no file of its own: it imports nothing, though the same text passes as a script
+  assert.ok(
+    errorsBoth('source scripts/defs.sh\nfn', bare, [defs])[1].some((e) => NOT_MODELED.test(e)),
+  );
+  // a call before the source, a source in a branch, after a directory change, by a string or comment
+  for (const body of [
+    'fn\nsource scripts/defs.sh',
+    'if true; then source scripts/defs.sh; fi\nfn',
+    'true && source scripts/defs.sh\nfn',
+    'cd /x\nsource scripts/defs.sh\nfn',
+    "echo 'x\nsource scripts/defs.sh'\nfn",
+    '# source scripts/defs.sh\nfn',
+    'echo source scripts/defs.sh\nfn',
+    'command source scripts/defs.sh\nfn',
+  ])
+    refusesWhy(body, NOT_MODELED, bare, [defs]);
+  // ONE resolved path: `source lib.sh` is ./lib.sh, never scripts/lib.sh as well
+  refusesWhy('source lib.sh\nfn', NOT_MODELED, bare, [scriptFile('scripts/lib.sh', 'fn() { :; }')]);
+  // a source that unsets or redefines
+  for (const text of [
+    'fn() { :; }\nunset -f fn',
+    'fn() { :; }\nunset fn',
+    'fn() { :; }\nfn() { x; }',
+  ])
+    refusesWhy('source scripts/defs.sh\nfn', NOT_MODELED, bare, [
+      scriptFile('scripts/defs.sh', text),
+    ]);
+  // a source whose unset name is computed may have removed any function
+  refusesShell('fn() { :; }\nsource scripts/b.sh\nfn', NOT_MODELED, bare, [
+    scriptFile('scripts/b.sh', 'unset -f "$name"'),
+  ]);
+  // a source that unsets a name another file defined takes it from the file that defined it
+  refusesShell('fn() { :; }\nsource scripts/b.sh\nfn', NOT_MODELED, bare, [
+    scriptFile('scripts/b.sh', 'unset -f fn'),
+  ]);
+  refusesShell('source scripts/defs.sh\nsource scripts/b.sh\nfn', NOT_MODELED, bare, [
+    defs,
+    scriptFile('scripts/b.sh', 'unset fn'),
+  ]);
+  refusesShell('source scripts/b.sh\nfn', NOT_MODELED, bare, [
+    scriptFile('scripts/b.sh', 'source scripts/defs.sh\nunset -f "$name"'),
+    defs,
+  ]);
+  // a hash-pinned library gives only the names its entry lists
+  const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  const entry = (functions) => ({
+    ...bare,
+    sourcedLibraries: new Map([
+      [lib, { sha256: createHash('sha256').update('x\n').digest('hex'), reason: 'r', functions }],
+    ]),
+  });
+  const libFile = { kind: 'library', name: lib, text: 'x\n' };
+  const call = (name) => ({ kind: 'shell', name: 'scripts/y.sh', text: `source ${lib}\n${name}` });
+  assert.deepEqual(validateInfraImagePins([libFile, call('listed')], entry(['listed'])).errors, []);
+  assert.ok(
+    validateInfraImagePins([libFile, call('other')], entry(['listed'])).errors.some((e) =>
+      NOT_MODELED.test(e),
+    ),
+  );
+});
+
+test('FU-159 r2 F4: a function body is not ordered by the text: a directory change refuses its sources', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const body of [
+    'f() { source scripts/lib.sh; }\ncd /x\nf',
+    'f() { . scripts/lib.sh; }\ncd /x\nf',
+    'f() { bash scripts/lib.sh; }\ncd /x\nf',
+    'f() { scripts/lib.sh; }\ncd /x\nf',
+    'f() { source scripts/lib.sh; }; cd /x; f',
+    'function f { source scripts/lib.sh; }\ncd /x\nf',
+    'f() { cd /x; scripts/lib.sh; }\nf',
+    'if true; then cd /x; fi\nif true; then bash scripts/lib.sh; fi',
+  ])
+    refusesWhy(body, /does not read/, bare, [lib]);
+  acceptsBoth('f() { source scripts/lib.sh; }\nf', bare, [lib]);
+  acceptsBoth('(cd /x; true)\nsource scripts/lib.sh', bare, [lib]);
+});
+
+test('FU-159 r2 F4: what a sourced file does is read from its tokens, not its raw text', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const mover of [
+    'c""d /x',
+    'c\\d /x',
+    'c\\\nd /x',
+    "'cd' /x",
+    'pushd /x',
+    'chroot /x true',
+    'env -C /x true',
+  ])
+    refusesWhy('source scripts/mv.sh\nsource scripts/lib.sh', /does not read/, bare, [
+      lib,
+      scriptFile('scripts/mv.sh', mover),
+    ]);
+  // through a quoted source, and through a source of a source
+  refusesWhy('"source" scripts/mv.sh\nsource scripts/lib.sh', /does not read/, bare, [
+    lib,
+    scriptFile('scripts/mv.sh', 'cd /x'),
+  ]);
+  refusesWhy('source scripts/a.sh\nsource scripts/lib.sh', /does not read/, bare, [
+    lib,
+    scriptFile('scripts/a.sh', 'source scripts/b.sh'),
+    scriptFile('scripts/b.sh', 'c""d /x'),
+  ]);
+  // a source that cannot be resolved may move
+  refusesWhy('source scripts/a.sh\nsource scripts/lib.sh', /does not read/, bare, [
+    lib,
+    scriptFile('scripts/a.sh', 'source "$x"'),
+  ]);
+  // words that only mention `cd` do not move anything
+  acceptsShell('source scripts/mv.sh\nsource scripts/lib.sh', bare, [
+    lib,
+    scriptFile('scripts/mv.sh', '# cd /y\nprintf "%s" cd'),
+  ]);
+});
+
+test('FU-159 r2 F4: find -execdir and -okdir run from another directory', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  refusesWhy('find . -execdir scripts/lib.sh {} \\;', /does not read/, bare, [lib]);
+  refusesWhy('find . -okdir ./scripts/lib.sh {} \\;', /does not read/, bare, [lib]);
+  refusesWhy('find . -execdir env scripts/lib.sh {} \\;', /does not read/, bare, [lib]);
+  acceptsBoth('find . -exec scripts/lib.sh {} \\;', bare, [lib]);
+  acceptsBoth('find . -execdir cat {} \\;');
+});
+
+test('FU-159 r2 F4: a write that can replace a file the script sources or runs refuses', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  const replaced = /writes scripts\/lib\.sh, a file this run sources or executes/;
+  for (const writer of [
+    'printf x > scripts/lib.sh',
+    'printf x >> ./scripts/lib.sh',
+    'printf x >scripts/lib.sh',
+    'printf x 2> scripts/lib.sh',
+    'printf x &> scripts/lib.sh',
+    'printf x >| scripts/lib.sh',
+    'printf x >& scripts/lib.sh',
+    'cp tools/evil.sh scripts/lib.sh',
+    'mv tools/evil.sh scripts/lib.sh',
+    'ln -sf tools/evil.sh scripts/lib.sh',
+    'echo x | tee scripts/lib.sh',
+    'echo x | tee -a scripts/lib.sh',
+    'touch scripts/lib.sh',
+    'curl -o scripts/lib.sh https://x/y',
+    'curl -sSLo scripts/lib.sh https://x/y',
+    'curl --output=scripts/lib.sh https://x/y',
+    'curl --output scripts/lib.sh https://x/y',
+    'curl -c scripts/lib.sh https://x/y',
+    'curl --cookie-jar scripts/lib.sh https://x/y',
+    'curl -D scripts/lib.sh https://x/y',
+  ])
+    for (const runner of ['bash scripts/lib.sh', 'source scripts/lib.sh', 'scripts/lib.sh'])
+      refusesWhy(`${writer}\n${runner}`, replaced, bare, [lib]);
+  // a target this check cannot read, in a script that runs a file, needs a reviewed entry
+  refusesWhy(
+    'printf x > "$t"\nbash scripts/lib.sh',
+    /writes to a path this check cannot read/,
+    bare,
+    [lib],
+  );
+  refusesWhy(
+    'cp a "${d}/b"\nbash scripts/lib.sh',
+    /writes to a path this check cannot read/,
+    bare,
+    [lib],
+  );
+  refusesWhy(
+    'curl -O https://x/y\nbash scripts/lib.sh',
+    /writes to a path this check cannot read/,
+    bare,
+    [lib],
+  );
+  const entry = {
+    ...bare,
+    reviewedPrograms: new Map([['scripts/x.sh', { programs: [], writes: ['$t'], reason: 'r' }]]),
+  };
+  assert.deepEqual(
+    validateInfraImagePins([lib, asInput('shell', 'printf x > "$t"\nbash scripts/lib.sh')], entry)
+      .errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins([lib, asInput('shell', 'bash scripts/lib.sh')], entry).errors.some((e) =>
+      /lists the write \$t/.test(e),
+    ),
+  );
+  // an absolute path may be this checkout under another spelling: unreadable, like a computed one
+  for (const target of ['/home/runner/work/r/r/scripts/lib.sh', '/etc/x', '//work/lib.sh'])
+    refusesWhy(
+      `printf x > ${target}\nbash scripts/lib.sh`,
+      /writes to a path this check cannot read/,
+      bare,
+      [lib],
+    );
+  acceptsBoth('printf x > /tmp/x\nprintf x > /dev/null\nbash scripts/lib.sh', bare, [lib]);
+  // harmless writes: other literal files, descriptors, and computed targets where nothing runs a file
+  acceptsBoth(
+    'printf x > out.txt\nprintf x >&2\necho y 2>&1\nbash scripts/lib.sh >/dev/null 2>&1',
+    bare,
+    [lib],
+  );
+  acceptsBoth('printf x > "$t"\ncp a "$b"');
+});
+
+test('FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path must be read-only before the command', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  const policy = {
+    ...bare,
+    executedPrograms: new Map([
+      ['scripts/x.sh', { words: ['${ROOT}/scripts/lib.sh'], reason: 'r' }],
+    ]),
+  };
+  const run = '"${ROOT}/scripts/lib.sh"';
+  const frozen = /EXECUTED_PROGRAMS|a file this check does not read/;
+  for (const body of [
+    `ROOT=/tmp\n${run}`,
+    `ROOT=/a\n${run}\nROOT=/tmp`,
+    `read ROOT <<< /tmp\n${run}`,
+    `printf -v ROOT %s /tmp\n${run}`,
+    `f() { ROOT=/tmp; ${run}; }\nf`,
+    run,
+    `${run}\nreadonly ROOT=/a`,
+    `if true; then readonly ROOT=/a; fi\n${run}`,
+    `true && readonly ROOT=/a\n${run}`,
+    `( readonly ROOT=/a )\n${run}`,
+    `ROOT=/a\necho hi\nreadonly ROOT\n${run}`,
+    `export ROOT=/a\n${run}`,
+  ])
+    refusesWhy(body, frozen, policy, [lib]);
+  acceptsShell(`readonly ROOT=/a\n${run}`, policy, [lib]);
+  acceptsShell(`declare -r ROOT=/a\n${run}`, policy, [lib]);
+  acceptsShell(`ROOT=/a\nreadonly ROOT\n${run}`, policy, [lib]);
+  acceptsShell(`readonly ROOT=/a\nf() { ${run}; }\nf`, policy, [lib]);
+  acceptsShell(`readonly ROOT=/a\nx="$(${run})"`, policy, [lib]);
+});
+
+test('FU-159 r2 F4: PATH, CDPATH and hash decide which file a command name is', () => {
+  for (const body of [
+    'hash -p tools/unchecked cat\ncat',
+    'PATH=tools:$PATH\ncat',
+    'export PATH="tools:$PATH"\ncat',
+    'env PATH=tools cat',
+    'read PATH <<< tools\ncat',
+    'unset PATH\ncat',
+    'CDPATH=x\ncat',
+    'declare -x PATH=tools\ncat',
+    'echo "PATH=tools" >> "$GITHUB_ENV"',
+  ])
+    refusesWhy(body, /names PATH or CDPATH|hash binds/);
+  refusesWhy('echo tools >> "$GITHUB_PATH"', /appends to GITHUB_PATH/);
+  refusesWhy('printf "%s\\n" tools >> "$GITHUB_PATH"', /appends to GITHUB_PATH/);
+  acceptsBoth('hash -r\necho "$PATH" > /dev/null\necho "A=b" >> "$GITHUB_ENV"');
+  // a reviewed entry names the one directory a job may append
+  const entry = {
+    ...bare,
+    reviewedPrograms: new Map([
+      ['scripts/x.sh', { programs: [], paths: ['$RUNNER_TEMP/bin'], reason: 'r' }],
+    ]),
+  };
+  assert.deepEqual(
+    validateInfraImagePins([asInput('shell', 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"')], entry)
+      .errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins(
+      [asInput('shell', 'echo "$RUNNER_TEMP/other" >> "$GITHUB_PATH"')],
+      entry,
+    ).errors.some((e) => /appends to GITHUB_PATH/.test(e)),
+  );
+});
+
+test('FU-159 r2 F4: the real tree is read with the reviewed tables (no stale entry, no exception left over)', () => {
+  // every REVIEWED_PROGRAMS / EXECUTED_PROGRAMS entry is used by the CLI run (its stale check)
+  for (const [file, entry] of REVIEWED_PROGRAMS) {
+    assert.ok(entry.reason.length > 20, file);
+    assert.ok(
+      entry.programs.length + (entry.writes ?? []).length + (entry.paths ?? []).length > 0,
+      file,
+    );
+  }
+});
+
+test('FU-159 r2 F1: a dispatcher whose argv this check does not rebuild is a program in no table', () => {
+  for (const call of [
+    'watch tools/unchecked',
+    'watch taskset 1 x',
+    'parallel tools/unchecked ::: x',
+    'parallel {} run alpine:latest ::: docker',
+    'su -c tools/unchecked',
+    'script -qc tools/unchecked /dev/null',
+    'at -f tools/unchecked now',
+    'runuser -u x tools/unchecked',
+    'sg grp tools/unchecked',
+    'ssh host tools/unchecked',
+    'ssh host taskset 1 x',
+  ])
+    refusesWhy(call, NOT_MODELED);
+  // flock -c hands its operand to `sh -c`
+  refusesWhy("flock l -c 'tools/unchecked'", /flock option -c is not one this check reads/);
+  // the wrapper forms whose argv IS rebuilt stay readable
+  acceptsBoth('flock /tmp/l sleep 1; sudo -u x true; doas true; setsid -w true');
+  // sudo -i / -s / -e run a shell or an editor no operand names
+  for (const option of ['-i', '-s', '-e', '--login', '--shell'])
+    refusesWhy(`sudo ${option} true`, /sudo option .* is not one this check reads/);
+});
+
+test('FU-159 r2 F1: text that an arithmetic evaluation would run as a command substitution refuses', () => {
+  refusesWhy('let x=1', NOT_MODELED);
+  const payload = "'a[$(tools/unchecked)]'";
+  for (const body of [
+    `let ${payload}`,
+    `[[ ${payload} -eq 1 ]]`,
+    `test ${payload} -eq 1`,
+    `x=${payload}; echo $((x))`,
+    `declare -i x=${payload}`,
+    `typeset -i x`,
+    `local -i x`,
+    `export -i x=1`,
+    'echo "\\$(tools/unchecked)"',
+    "echo `echo hi` '`x`'",
+  ])
+    refusesWhy(body, /holds the text \$\( or a backtick|evaluates its value as arithmetic/);
+  // an awk program of a reviewed entry may use `$(NF-1)`
+  assert.deepEqual(
+    validateInfraImagePins([asInput('shell', "awk '{ print $(NF-1) }' f")], {
+      ...bare,
+      reviewedPrograms: new Map([['scripts/x.sh', { programs: ['awk'], reason: 'r' }]]),
+    }).errors,
+    [],
+  );
+  // a substitution that is a command of its own is read as one
+  acceptsBoth('x="$(date)"\necho "$((x + 1))"');
+});
+
+test('FU-159 r2 F4: time -o writes its report to a file', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const timer of [
+    'time -o scripts/lib.sh',
+    'time -oscripts/lib.sh',
+    'time --output=scripts/lib.sh',
+    'time --output scripts/lib.sh',
+  ])
+    refusesWhy(`${timer} true\nbash scripts/lib.sh`, /writes scripts\/lib\.sh/, bare, [lib]);
+});
+
+test('FU-159 r2 F2: the splitter keeps a definition at the top level (descriptors, pipelines, nested case)', () => {
+  // `>&2` is a redirection, not a background `&`; a pipeline's last stage does not pipe the next line
+  acceptsBoth('f() { echo x >&2; }\nf');
+  acceptsBoth('f() { echo x 2>&1; }\nf');
+  acceptsBoth('echo a | cat\nf() { :; }\nf');
+  acceptsBoth('echo a || true\nf() { :; }\nf');
+  // an inner `esac` before `;;` ends the inner case: the outer pattern list continues
+  assert.deepEqual(
+    tokenizeShell('case x in x) case y in y) true;; esac;; z) true;; esac').commands.map(
+      (c) => `${c.words.map((w) => w.value).join(' ')}${c.pattern ? ' (pattern)' : ''}`,
+    ),
+    [
+      'case x in',
+      'x (pattern)',
+      'case y in',
+      'y (pattern)',
+      'true',
+      'esac',
+      'z (pattern)',
+      'true',
+      'esac',
+    ],
+  );
+  // `>&2` stays in its command; `>|` is the clobbering redirection, `|` alone a pipe
+  assert.deepEqual(
+    tokenizeShell('echo x >&2').commands.map((c) => c.words.map((w) => w.value)),
+    [['echo', 'x', '>&2']],
+  );
+  assert.deepEqual(
+    tokenizeShell('printf x >| f').commands.map((c) => c.words.map((w) => w.value)),
+    [['printf', 'x', '>|', 'f']],
+  );
 });
