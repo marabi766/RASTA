@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { InternalTokenService, RastaError, runWithContext } from '@rasta/nest-common';
 import { registry } from '@rasta/observability';
 import { GatewayHealthController } from '../app.module';
-import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
+import { SERVICE_NAMES, type ServiceName, type ServiceUrls } from '../config/routes';
 import {
   CircuitBreakers,
   HALF_OPEN_RETRY_AFTER_SECONDS,
@@ -25,10 +25,24 @@ import type { RateLimiter } from './rate-limiter';
 const THRESHOLD = 3;
 const RESET_MS = 30_000;
 
+/**
+ * Every request from an organization of its own: an outage many tenants see, the
+ * only kind that opens a circuit. Who failed is circuit-organizations.spec.ts.
+ */
+class ManyOrganizations extends CircuitBreakers {
+  private caller = 0;
+
+  override admit(service: ServiceName): CircuitPermit {
+    this.caller += 1;
+    return super.admit(service, `ORG_${this.caller}`, `PERSON_${this.caller}`);
+  }
+}
+
 function breakers() {
   let clock = 1_000;
-  const circuits = new CircuitBreakers({
+  const circuits = new ManyOrganizations({
     failureThreshold: THRESHOLD,
+    organizationsToOpen: 1,
     resetAfterMs: RESET_MS,
     now: () => clock,
   });
@@ -334,6 +348,7 @@ describe('forward settles its permit on every exit path', () => {
   const context = {
     correlationId: 'req-exit',
     requestId: 'req-exit',
+    organizationId: 'ORG_EXIT',
     roles: [],
     organizationIds: [],
     authType: 'USER' as const,
@@ -350,6 +365,7 @@ describe('forward settles its permit on every exit path', () => {
     const proxy = new ProxyService(urls, tokens as InternalTokenService, {
       timeoutMs: 2000,
       failureThreshold: 1,
+      organizationsToOpen: 1,
       resetAfterMs: 1000,
       now: () => clock,
     });

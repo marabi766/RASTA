@@ -46,13 +46,19 @@ import { AuditRepository } from './audit.repository';
 /** The only caller this route answers. */
 export const AUDIT_TARGET_LOOKUP_CALLER = 'identity-service';
 
+// The ISO check runs first; keep a runtime string proof beside the conversion.
+function validatedDate(value: unknown): Date {
+  if (typeof value === 'string') return new Date(value);
+  throw new TypeError('Expected a validated timestamp');
+}
+
 export const auditTargetLookupQuerySchema = z
   .object({
     /** The target's own `occurredAt`, exactly as the read API published it. */
     occurredAt: z
       .string()
       .check(isoDateTime({ offset: true }))
-      .transform((value) => new Date(value)),
+      .transform((value) => validatedDate(value)),
   })
   .strict();
 

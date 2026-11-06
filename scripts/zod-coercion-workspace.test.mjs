@@ -41,6 +41,21 @@ for (const config of ['eslint.config.mjs', 'apps/web/eslint.config.mjs']) {
           [`${prelude} schema.number({ coerce: true }); ${jsx}`, 1],
           [`${prelude} schema.preprocess(v => BigInt(v), schema.bigint()); ${jsx}`, 1],
           [`${prelude} schema.number(); ${jsx}`, 0],
+          [`${prelude} schema.unknown().transform(Number); ${jsx}`, 1],
+          [`${prelude} schema.transform(Number); ${jsx}`, 1],
+          [`${prelude} const f=async v=>Number(v); schema.unknown().transform(f); ${jsx}`, 1],
+          [`${prelude} schema.unknown().pipe(schema.transform(Number)); ${jsx}`, 1],
+          [`${prelude} new schema.ZodTransform({type:'transform',transform:Number}); ${jsx}`, 1],
+          [`${prelude} schema.unknown().overwrite(Number); ${jsx}`, 1],
+          [
+            `${prelude} schema.codec(schema.unknown(),schema.number(),{decode:Number,encode:v=>v}); ${jsx}`,
+            1,
+          ],
+          [
+            `${prelude} schema.codec(schema.number(),schema.unknown(),{decode:v=>v,encode:Number}); ${jsx}`,
+            1,
+          ],
+          [`${prelude} schema.unknown().transform((v,n=Number(v))=>n); ${jsx}`, 1],
           [`${prelude} schema.int(getOptions()); ${jsx}`, 1],
           [`${prelude} schema.number().clone(getOptions()); ${jsx}`, 1],
           [

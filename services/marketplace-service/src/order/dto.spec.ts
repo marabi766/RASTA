@@ -157,7 +157,11 @@ describe('a cancellation names no cause — the service fixes it (ADR-052 § 1-c
 });
 
 describe('resolving a dispute requires a structured attribution (ADR-052 §§ 1-b, 4)', () => {
-  const valid = { outcome: 'SETTLE' as const, resolution: 'the evidence favours the supplier' };
+  const valid = {
+    disputeId: 'DSP_01JAAAAAAAAAAAAAAAAAAAAAAA',
+    outcome: 'SETTLE' as const,
+    resolution: 'the evidence favours the supplier',
+  };
 
   it.each(['SUPPLIER', 'BUYER', 'PLATFORM', 'UNDETERMINED'])('accepts %s', (responsibility) => {
     expect(resolveDisputeSchema.safeParse({ ...valid, responsibility }).success).toBe(true);
@@ -176,6 +180,28 @@ describe('resolving a dispute requires a structured attribution (ADR-052 §§ 1-
     // state responsibility explicitly, every time — it is not inferred from
     // `resolution`'s free text and not defaulted from `outcome`.
     expect(resolveDisputeSchema.safeParse(valid).success).toBe(false);
+  });
+});
+
+describe('a dispute decision names the dispute it decides (D-083)', () => {
+  const valid = {
+    disputeId: 'DSP_01JAAAAAAAAAAAAAAAAAAAAAAA',
+    outcome: 'REFUND' as const,
+    resolution: 'the evidence favours the buyer',
+    responsibility: 'SUPPLIER' as const,
+  };
+
+  it('accepts a dispute identifier', () => {
+    expect(resolveDisputeSchema.safeParse(valid).success).toBe(true);
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['blank', ''],
+    ['another kind of identifier', 'ORD_01JAAAAAAAAAAAAAAAAAAAAAAA'],
+    ['not a ULID', 'DSP_1'],
+  ])('refuses one that is %s', (_name, disputeId) => {
+    expect(resolveDisputeSchema.safeParse({ ...valid, disputeId }).success).toBe(false);
   });
 });
 
