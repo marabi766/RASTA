@@ -182,6 +182,22 @@ const reviewedClockTemplates: readonly {
   template: string;
   expressions: string | null;
 }[] = [
+  // FU-170: isolated deadline probes; table choice and fixed expired instant are bound.
+  {
+    file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',
+    template: '839883e807959e56cdcc4ee570f559e0835dd07d09ff903d3f5cf74c73f15ab0',
+    expressions: '532a533aa4069a91216782695f0b14d52859438f1d924ff10eefa68cd9d973f6',
+  },
+  {
+    file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',
+    template: '9194d4843602b1832a93f4858d85f0dffb15dd86f496204dcfff261b0cc64e9f',
+    expressions: '532a533aa4069a91216782695f0b14d52859438f1d924ff10eefa68cd9d973f6',
+  },
+  {
+    file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',
+    template: 'de8c0d38026744a9384a318239c46db089f76337aad9de353212df23c301299f',
+    expressions: '1705fbd3ce99d0a823cf817491d6672115ff9de37793aa8bcff93d8d82cd7cde',
+  },
   // FK-only parent copies: explicit tenant/id source, database-clock retry parked 24 hours.
   {
     file: 'services/marketplace-service/test/scalar-fk.int-spec.ts',
