@@ -1234,7 +1234,7 @@ export class OrderService {
     operation: SagaActivity,
     subject: string,
     command: SagaStep,
-  ): Promise<number> {
+  ): Promise<{ generation: number; started: boolean }> {
     return this.repository.openSagaCall(this.prisma.client, order, operation, subject, command);
   }
 

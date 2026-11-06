@@ -31,8 +31,7 @@ An **episode** is one of:
   by that attempt's own answer. A buyer's dispute and an operator's decision do not close one: they pause settlement and
   confirm nothing about a command already sent (#792 r2 F2). A confirmed refund also closes the authorisation and
   settlement rows of the same obligation (`REFUNDED` is terminal); a lookup that finds the order's own obligation closes
-  its hold row, an empty one never does (a late commit is invisible to it); a refusal that proves nothing was held
-  (`INSUFFICIENT_BALANCE`, `BUSINESS_RULE_VIOLATION`, `VALIDATION_FAILED` under their own status) closes it too.
+  its hold row, an empty one never does (a late commit is invisible to it); a refusal that proves nothing was held (`INSUFFICIENT_BALANCE`, `BUSINESS_RULE_VIOLATION`, `VALIDATION_FAILED` under their own status) closes it too, but only on the send that began its episode: economic-service frees the key on a refusal, so an earlier unanswered send could still claim it and commit.
 - each row names the **scheduled command** that owns it (`command`, `command_scheduled_at`: the saga step key and when
   Temporal scheduled it, #836 r1 R1). Only the owner or a command scheduled later opens it again; an attempt of an older
   command is refused before it calls (`SAGA_CALL_SUPERSEDED`, non-retryable: the saga has moved past it), so its
@@ -186,8 +185,7 @@ receipt_confirmed_at IS NOT NULL AND status IN ('RECEIPT_CONFIRMED', 'SETTLING',
 - Rows opened before #836 name no command: the first command to open one takes it, as every opening did before.
 - Command order is Temporal's scheduling time of each activity (`scheduledTimestampMs`). Two commands of one operation
   on one subject are never scheduled in the same millisecond (the saga awaits each); a tie, or a Temporal clock that ran
-  back between them, refuses the later one (`SAGA_CALL_SUPERSEDED`) before it calls: the saga takes it as a failed step
-  and the row stays the earlier command's — fail closed, never an episode cleared.
+  back between them, refuses the later one (`SAGA_CALL_SUPERSEDED`, non-retryable) before it calls; the row stays the earlier command's (fail closed, never an episode cleared). A refused settlement counts as a failed attempt and a refused release waits for its next round; a refused hold goes to the lookup; a refused authorisation, refund or dispute fails the workflow with the funds held and the row open: check the Temporal cluster's clock, then restart the saga.
 - A saga that replayed past its resume point without `DISPUTE_RESUME_PATCH` releases only at its next wake-up as
   `RECEIPT_CONFIRMED`/`CANCELLING`; until then its row stays open and counts as `DISPUTE_RELEASE`.
 - The probe uses `DescribeTaskQueue` without enhanced mode; if Temporal ever lists only one partition's pollers, a live

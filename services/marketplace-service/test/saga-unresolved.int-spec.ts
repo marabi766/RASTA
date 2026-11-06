@@ -686,6 +686,8 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   // last, not to the latest database opening. Every recorded operation, through
   // the activities themselves: what the review executed.
   describe('a call record is bound to its scheduled command (#836 r1 R1)', () => {
+    /** A statement writing the record (this release's opening, or 12f8f78e's upsert). */
+    const WRITES_CALL_RECORD = String.raw`^\s*(insert\s+into|update)\s+("public"\.)?"?saga_unconfirmed_call`;
     let step: SagaStep = sagaStep();
     let answering = true;
     const lost = () => new Error('economic-service did not answer (socket hang up)');
@@ -874,6 +876,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
         let release: () => void = () => undefined;
         const gate = new Promise<void>((resolve) => (release = resolve));
         let locked: () => void = () => undefined;
+        let holderPid = 0;
         const holding = new Promise<void>((resolve) => (locked = resolve));
         const holder = runUnscoped('a late confirmation holding the call record', () =>
           prisma.client.$transaction(
@@ -881,6 +884,8 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
               await tx.$queryRaw`SELECT 1 FROM saga_unconfirmed_call
                 WHERE order_id = ${orderId} AND operation = ${operation} AND subject = ${subject}
                 FOR UPDATE`;
+              const [me] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+              holderPid = me!.pid;
               locked();
               await gate;
               // The earlier command's own answer, confirming its own generation.
@@ -904,8 +909,8 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
               () =>
                 prisma.client.$queryRaw<{ n: number }[]>`
                 SELECT count(*)::int AS n FROM pg_stat_activity
-                 WHERE wait_event_type = 'Lock' AND query LIKE '%saga_unconfirmed_call%'
-                   AND query NOT LIKE '%pg_stat_activity%'`,
+                 WHERE wait_event_type = 'Lock' AND pid <> ${holderPid}
+                   AND query ~* ${WRITES_CALL_RECORD}`,
             );
             waited = (row?.n ?? 0) > 0;
             if (!waited) await new Promise((settle) => setTimeout(settle, 20));
@@ -932,6 +937,8 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   describe('the hold-creation intent (#836 r1 R2a)', () => {
     let creating: () => Promise<{ id: string }> = async () => ({ id: `TXN_${ulid()}` });
     let found: (orderId: string) => unknown[] = () => [];
+    /** One scheduled command for every call while set; else a new one per call. */
+    let retrying: SagaStep | undefined;
     const hold: OrderActivities = createActivities({
       orders: wiring.orders,
       economic: {
@@ -940,7 +947,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
         readObligation: async () => ({ status: 'HELD' }),
         findObligations: async ({ orderId }: { orderId: string }) => found(orderId),
       } as unknown as EconomicClient,
-      currentStep: sagaStep,
+      currentStep: () => retrying ?? sagaStep(),
     });
     const lost = () => new Error('economic-service did not answer (socket hang up)');
     const refused = (code: string, status: number) =>
@@ -1012,6 +1019,30 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       await expect(hold.findObligation(orderId)).resolves.toMatchObject({ mismatch: true });
       expect(await intentOpen(orderId)).toBe(true);
       found = () => [];
+      await runUnscoped(
+        'the suite closes the intent it opened',
+        () =>
+          prisma.client.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
+          WHERE order_id = ${orderId}`,
+      );
+    });
+
+    it('a refusal of a retry leaves the intent open: the first send may still claim the freed key', async () => {
+      const orderId = await place();
+      retrying = sagaStep();
+      try {
+        creating = async () => {
+          throw lost();
+        };
+        await expect(hold.createObligation(orderId)).rejects.toThrow(/did not answer/);
+        creating = async () => {
+          throw refused('INSUFFICIENT_BALANCE', 422);
+        };
+        await expect(hold.createObligation(orderId)).rejects.toThrow();
+        expect(await intentOpen(orderId)).toBe(true);
+      } finally {
+        retrying = undefined;
+      }
       await runUnscoped(
         'the suite closes the intent it opened',
         () =>

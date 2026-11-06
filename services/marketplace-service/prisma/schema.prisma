@@ -450,6 +450,9 @@ model SagaUnconfirmedCall {
   command            String?
   commandScheduledAt DateTime? @map("command_scheduled_at") @db.Timestamptz(3)
 
+  /// The generation that began the open episode; null on a row from before #836.
+  episodeGeneration Int? @map("episode_generation")
+
   openedAt    DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
   confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(3)
 

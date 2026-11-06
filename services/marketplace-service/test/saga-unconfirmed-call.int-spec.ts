@@ -17,8 +17,10 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
   /** The one scheduled command the record-level cases open and confirm as. */
   const COMMAND = sagaStep();
   type Order = { id: string; organizationId: string };
-  const openCall = (order: Order, operation: string, subject: string, by: SagaStep = COMMAND) =>
+  const opening = (order: Order, operation: string, subject: string, by: SagaStep = COMMAND) =>
     wiring.orders.openSagaCall(order, operation as typeof OPERATION, subject, by);
+  const openCall = async (order: Order, operation: string, subject: string, by?: SagaStep) =>
+    (await opening(order, operation, subject, by)).generation;
   const confirmCall = (
     order: Order,
     operation: string,
@@ -185,6 +187,22 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
     expect(await open(order)).toEqual([]);
   });
 
+  it('says whether the opening began its episode: no earlier send in it unanswered (#836 r1 R2a)', async () => {
+    const order = await place(org.buyer, org.supplier);
+    const first = await opening(order, OPERATION, 'DSP_E');
+    expect(first.started).toBe(true);
+    // Another attempt, or a later command, while it is open: an earlier send is unanswered.
+    expect((await opening(order, OPERATION, 'DSP_E')).started).toBe(false);
+    const later = sagaStep();
+    const taken = await opening(order, OPERATION, 'DSP_E', later);
+    expect(taken.started).toBe(false);
+    await confirmCall(order, OPERATION, 'DSP_E', taken.generation, later);
+    // Answered: the next opening begins a new episode.
+    const again = await opening(order, OPERATION, 'DSP_E', later);
+    expect(again.started).toBe(true);
+    await confirmCall(order, OPERATION, 'DSP_E', again.generation, later);
+  });
+
   it('a record opened before commands were recorded is taken by the first command (#836 r1 R1)', async () => {
     const order = await place(org.buyer, org.supplier);
     await runUnscoped('the test writes a record as the previous release did', () =>
@@ -197,8 +215,10 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
         },
       }),
     );
-    const generation = await openCall(order, OPERATION, 'DSP_P', COMMAND);
-    expect(generation).toBe(2);
+    const taken = await opening(order, OPERATION, 'DSP_P', COMMAND);
+    // Taken, but never as a beginning: what it was opened for is not known.
+    expect(taken).toEqual({ generation: 2, started: false });
+    const generation = taken.generation;
     await confirmCall(order, OPERATION, 'DSP_P', generation);
     expect(await open(order)).toEqual([]);
   });

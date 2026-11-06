@@ -284,9 +284,12 @@ export class OrderRepository {
    * - `opened_at` is when the episode began: kept while the record stays open,
    *   however many attempts or commands follow, so unconfirmed money never
    *   grows younger; restarted only when a confirmed record is opened again,
-   *   a new call (#792 r2 F2).
+   *   a new call (#792 r2 F2). `episode_generation` is the generation that
+   *   began it, so `started` says no earlier send in this episode is
+   *   unanswered (NULL on a record from before this release: never started).
    *
-   * @returns the generation this attempt confirms with.
+   * @returns the generation this attempt confirms with, and whether this
+   * opening began the episode.
    */
   async openSagaCall(
     client: ExtendedPrismaClient,
@@ -294,28 +297,31 @@ export class OrderRepository {
     operation: SagaActivity,
     subject: string,
     command: SagaStep,
-  ): Promise<number> {
+  ): Promise<{ generation: number; started: boolean }> {
     const scheduledAt = command.scheduledAt.toISOString();
     const [opened] = await runUnscoped(
       'a saga step records its call on the order it drives, under its tenant',
-      () => client.$queryRaw<{ generation: number }[]>`
+      () => client.$queryRaw<{ generation: number; started: boolean }[]>`
         INSERT INTO saga_unconfirmed_call AS c
-          (organization_id, order_id, operation, subject, command, command_scheduled_at)
+          (organization_id, order_id, operation, subject, command, command_scheduled_at,
+            episode_generation)
         VALUES (${order.organizationId}, ${order.id}, ${operation}, ${subject}, ${command.key},
-          ${scheduledAt}::timestamptz)
+          ${scheduledAt}::timestamptz, 1)
         ON CONFLICT (organization_id, order_id, operation, subject) DO UPDATE SET
           opened_at = CASE WHEN c.confirmed_at IS NULL THEN c.opened_at ELSE CURRENT_TIMESTAMP END,
+          episode_generation = CASE WHEN c.confirmed_at IS NULL THEN c.episode_generation
+            ELSE c.generation + 1 END,
           confirmed_at = NULL,
           generation = c.generation + 1,
           command = EXCLUDED.command,
           command_scheduled_at = EXCLUDED.command_scheduled_at
         WHERE c.command IS NULL OR c.command = EXCLUDED.command
           OR c.command_scheduled_at < EXCLUDED.command_scheduled_at
-        RETURNING generation
+        RETURNING generation, COALESCE(episode_generation = generation, false) AS started
       `,
     );
     if (!opened) throw new SagaCallSuperseded(order.id, operation, command.key);
-    return opened.generation;
+    return opened;
   }
 
   /**
@@ -440,15 +446,6 @@ export class OrderRepository {
 }
 
 /**
- * One scheduled saga activity, the same on every Temporal retry of it (D-053).
- *
- * `key` is `<workflowId>/<runId>/<activityId>`. The activity id is the
- * workflow's own sequence for the call (legacy numeric or `saga-step-N`).
- * A second settlement attempt or reminder is a different step, while a retry
- * is not. Restarts and resets get a new run id. Continue-As-New is safe because
- * checkpoints occur only with no activity in flight; no step spans two runs.
- */
-/**
  * A scheduled command opened a call record another command scheduled later owns
  * (#836 r1 R1): the saga has moved past it. Thrown before it calls
  * economic-service, so it changes nothing there or here.
@@ -463,6 +460,15 @@ export class SagaCallSuperseded extends Error {
   }
 }
 
+/**
+ * One scheduled saga activity, the same on every Temporal retry of it (D-053).
+ *
+ * `key` is `<workflowId>/<runId>/<activityId>`. The activity id is the
+ * workflow's own sequence for the call (legacy numeric or `saga-step-N`).
+ * A second settlement attempt or reminder is a different step, while a retry
+ * is not. Restarts and resets get a new run id. Continue-As-New is safe because
+ * checkpoints occur only with no activity in flight; no step spans two runs.
+ */
 export interface SagaStep {
   key: string;
   /**

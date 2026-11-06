@@ -48,7 +48,7 @@ describe('resolveObligationDispute on record', () => {
         options.recorded ? (log.push('answered from the record'), undefined) : call(),
       openSagaCall: async (...args: unknown[]) => {
         log.push(`open ${JSON.stringify(args)}`);
-        return 7;
+        return { generation: 7, started: true };
       },
       confirmSagaCall: async (...args: unknown[]) =>
         void log.push(`confirm ${JSON.stringify(args)}`),
@@ -76,7 +76,7 @@ describe('resolveObligationDispute on record', () => {
   // By the scheduled command that runs (#836 r1 R1).
   const args = JSON.stringify([...call, STEP]);
   // With the command and the generation its own opening was given.
-  const confirmArgs = JSON.stringify([...call, { command: STEP, generation: 7 }]);
+  const confirmArgs = JSON.stringify([...call, { command: STEP, generation: 7, started: true }]);
 
   it('opens before the call and confirms after it, under the buying tenant', async () => {
     const { log, release } = build({ resolveDispute: async () => ({}) });

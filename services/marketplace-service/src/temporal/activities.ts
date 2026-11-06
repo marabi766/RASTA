@@ -159,6 +159,8 @@ type RecordedCall =
 interface Opening {
   command: SagaStep;
   generation: number;
+  /** This opening began the episode: no earlier send in it is unanswered. */
+  started: boolean;
 }
 
 /** What `authoriseSettlement` answers. Undefined: authorised. */
@@ -251,21 +253,15 @@ export function createActivities(deps: ActivityDependencies) {
     subject: string,
   ): Promise<Opening> => {
     const command = currentStep();
-    return asSystemFor(orderId, async (order) => {
-      try {
-        const generation = await deps.orders.openSagaCall(
-          { id: order.id, organizationId: order.buyerOrganizationId },
-          operation,
-          subject,
-          command,
-        );
-        return { command, generation };
-      } catch (error) {
-        if (!(error instanceof SagaCallSuperseded)) throw error;
-        logger.warn(error.message);
-        throw ApplicationFailure.nonRetryable(error.message, 'SAGA_CALL_SUPERSEDED');
-      }
-    });
+    return asSystemFor(orderId, async (order) => ({
+      command,
+      ...(await deps.orders.openSagaCall(
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        operation,
+        subject,
+        command,
+      )),
+    }));
   };
   const confirmCall = (
     orderId: string,
@@ -378,7 +374,10 @@ export function createActivities(deps: ActivityDependencies) {
           });
           return { transactionId: transaction.id };
         } catch (refusal) {
-          if (heldNothing(refusal)) {
+          // Only for the send that began the episode: economic-service frees
+          // the key on a refusal, so an earlier send of this episode still on
+          // its way could claim it and commit after this one was refused.
+          if (opening.started && heldNothing(refusal)) {
             await deps.orders.confirmSagaCall(
               { id: order.id, organizationId: order.buyerOrganizationId },
               'createObligation',
@@ -861,14 +860,6 @@ function systemContext(organizationId: string | undefined, correlationId: string
 }
 
 /**
- * Converts a platform error into one Temporal can classify.
- *
- * The `type` is the platform error code, which is what the workflow's
- * `nonRetryableErrorTypes` matches on: a business-rule refusal must not be
- * retried, because the second attempt gets the same answer and only reports
- * the failure later.
- */
-/**
  * economic-service refused the create outright, so it holds nothing under the
  * order's key (#836 r1 R2): its own error body, a code it gives only before
  * any effect, under that code's own status. economic-service claims the key in
@@ -959,7 +950,19 @@ function disputedSinceAuthorised(
     : null;
 }
 
+/**
+ * Converts a platform error into one Temporal can classify.
+ *
+ * The `type` is the platform error code, which is what the workflow's
+ * `nonRetryableErrorTypes` matches on: a business-rule refusal must not be
+ * retried, because the second attempt gets the same answer and only reports
+ * the failure later.
+ */
 function asTemporalFailure(error: unknown): Error {
+  // For good, wherever a record is opened: the saga has moved past this command.
+  if (error instanceof SagaCallSuperseded) {
+    return ApplicationFailure.nonRetryable(error.message, 'SAGA_CALL_SUPERSEDED');
+  }
   if (!isRastaError(error)) {
     return error instanceof Error ? error : new Error('The financial service call failed');
   }
