@@ -101,6 +101,8 @@ const pins = {
     '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
     // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171): one constant beside the other two.
     'e4b6a416c08652a1f8c448f99fb26920c41e802c5ec866437a5b50dbe41ed6de',
+    // + MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS (FU-171): one constant beside the other three.
+    '9d1d7f86bb038ebcadd9c1226b3b7ab445fe64f67cbdb7563a0dfe26cba210c2',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
