@@ -11,8 +11,11 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "Page size. Defaults to 25; above 200 is refused. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
-              "default": 25
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25,
+              "description": "Page size. Defaults to 25; above 200 is refused."
             }
           },
           {

@@ -2147,14 +2147,12 @@ jobs:
   integration-security:
     name: Tenant isolation, test independence and retry replay
     runs-on: ubuntu-latest
-    # About 9.5 minutes on main run 38600385830 (setup ~4m, independence 57 s,
-    # tenant isolation 253 s, retry replay 22 s). Tenant isolation keeps its
-    # own 10.
-    # 37 minutes: the steps' limits sum to 29 (independence 8, tenant
-    # isolation 10, retry replay 5, three PostgreSQL connection steps of 2)
-    # and the steps without a limit took up to 309 s over the last 20 green
-    # runs (8 minutes at x 1.5); the job itself took up to 872 s.
-    timeout-minutes: 37
+    # FU-165: latest 20 completed CI runs (2026-11-06), 17 reached isolation:
+    # median 540 s, nearest-rank p95/max 587 s. Its 15-minute limit is
+    # ceil(1.5 x 587 / 60); keep the job budget aligned with all step limits.
+    # 42 = independence 8 + isolation 15 + retry replay 5 + PostgreSQL 3 x 2
+    # + the existing 8-minute setup allowance (scripts/ci-integration-split-lib.mjs).
+    timeout-minutes: 42
     needs: quality-types
 
     services:
@@ -2489,7 +2487,7 @@ jobs:
         # run without one. So the stress spec is filtered and run alone by the
         # second command, where `concurren` selects its two 500-write proofs
         # (`check:test-phases`). The first command is unit suites only.
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"

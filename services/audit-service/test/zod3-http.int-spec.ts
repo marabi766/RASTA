@@ -18,13 +18,12 @@ import { orgId, queryWindow } from './fixtures';
  */
 
 /** Recorded under zod 3 on main 745d0434 (r2 F1 cases: 5c88ae21); never written by a test run. */
+// FU-131 intentionally corrects the four query-text cases marked below.
 const ZOD3: Record<string, unknown> = {
+  // FU-131: malformed numeric text is refused before bounds/refinements.
   'SYSTEM_ADMIN limit=1e999': {
     code: 'VALIDATION_FAILED',
-    details: [
-      { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-      { path: 'limit', message: 'Number must be less than or equal to 200', code: 'too_big' },
-    ],
+    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
   },
   'SYSTEM_ADMIN limit=nope': {
     code: 'VALIDATION_FAILED',
@@ -52,39 +51,20 @@ const ZOD3: Record<string, unknown> = {
       { path: '(root)', message: 'Unrecognized key(s) in object (1)', code: 'unrecognized_keys' },
     ],
   },
+  // FU-131: malformed numeric text is refused before bounds/refinements.
   'SYSTEM_ADMIN limit=0.5, a resource id without its type, a bad cursor': {
     code: 'VALIDATION_FAILED',
-    details: [
-      { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-      { path: 'limit', message: 'Number must be greater than or equal to 1', code: 'too_small' },
-      {
-        path: 'resourceType',
-        message: '`resourceId` may only be used together with `resourceType`',
-        code: 'custom',
-      },
-      { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
-    ],
+    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
   },
+  // FU-131: malformed numeric text is refused before bounds/refinements.
   'SYSTEM_ADMIN the same, window reversed': {
     code: 'VALIDATION_FAILED',
-    details: [
-      { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-      { path: 'limit', message: 'Number must be greater than or equal to 1', code: 'too_small' },
-      { path: 'to', message: '`to` must not be earlier than `from`', code: 'custom' },
-      {
-        path: 'resourceType',
-        message: '`resourceId` may only be used together with `resourceType`',
-        code: 'custom',
-      },
-      { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
-    ],
+    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
   },
+  // FU-131: malformed numeric text is refused before bounds/refinements.
   'UNION_ADMIN limit=1e999': {
     code: 'VALIDATION_FAILED',
-    details: [
-      { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-      { path: 'limit', message: 'Number must be less than or equal to 200', code: 'too_big' },
-    ],
+    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
   },
 };
 
