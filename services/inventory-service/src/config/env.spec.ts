@@ -1,6 +1,7 @@
 import { envEnumProbes } from '@rasta/config';
-import { corsOrigins, inventoryEnvSchema, loadInventoryEnv } from './env';
-import { inventoryOperationBudgets } from './operation-budgets';
+import { INVENTORY_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import { corsOrigins, inventoryEnvSchema, loadInventoryEnv, replayWindowRoomSeconds } from './env';
+import { inventoryOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
   KAFKA_BROKERS: 'localhost:9092',
@@ -12,6 +13,39 @@ const base: NodeJS.ProcessEnv = {
 };
 
 const load = (overrides: NodeJS.ProcessEnv = {}) => loadInventoryEnv({ ...base, ...overrides });
+
+describe('the replay fence budget (FU-171, PM decision D-133)', () => {
+  it('defaults to a 30 s skew: B = 2 · 30 s + 7 s', () => {
+    expect(load().INVENTORY_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(replayFenceBudgetMs(30)).toBe(67_000);
+  });
+
+  it.each([['-1'], ['301'], ['1.5']])('refuses a skew of %s at startup', (skew) => {
+    expect(() => load({ INVENTORY_CLOCK_SKEW_SECONDS: skew })).toThrow();
+  });
+
+  it('holds TTL − B − skew at or above INVENTORY_MAX_REPLAY_WINDOW_SECONDS, at the edge', () => {
+    // 1 h: 3 600 − (2s + 7) − s ≥ 3 300  ⇔  s ≤ 97.
+    expect(
+      replayWindowRoomSeconds({
+        INVENTORY_IDEMPOTENCY_TTL_HOURS: 1,
+        INVENTORY_CLOCK_SKEW_SECONDS: 97,
+      }),
+    ).toBe(INVENTORY_MAX_REPLAY_WINDOW_SECONDS + 2);
+    expect(
+      load({ INVENTORY_IDEMPOTENCY_TTL_HOURS: '1', INVENTORY_CLOCK_SKEW_SECONDS: '97' })
+        .INVENTORY_CLOCK_SKEW_SECONDS,
+    ).toBe(97);
+    expect(() =>
+      load({ INVENTORY_IDEMPOTENCY_TTL_HOURS: '1', INVENTORY_CLOCK_SKEW_SECONDS: '98' }),
+    ).toThrow(/INVENTORY_MAX_REPLAY_WINDOW_SECONDS/);
+    // A longer retention leaves room for the largest skew.
+    expect(
+      load({ INVENTORY_IDEMPOTENCY_TTL_HOURS: '2', INVENTORY_CLOCK_SKEW_SECONDS: '300' })
+        .INVENTORY_CLOCK_SKEW_SECONDS,
+    ).toBe(300);
+  });
+});
 
 describe('the provisional defaults (Q-102, Q-103)', () => {
   const env = load();

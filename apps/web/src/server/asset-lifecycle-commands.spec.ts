@@ -18,7 +18,6 @@ import {
   sealAssetLifecycleBaseline,
 } from './asset-lifecycle-commands';
 import { signPayload } from './signed-payload';
-import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 import {
   canActivateFrom,
@@ -410,7 +409,7 @@ describe('writing', () => {
       },
     );
 
-    it('says a transition it does not know by its platform code, and an unknown code by the generic Persian sentence', async () => {
+    it('says a transition it does not know by its platform code; an undocumented code is unconfirmed (PR-830 r1 F1)', async () => {
       const call = (impl: typeof fetch) => activateAsset(SESSION, ASSET, 1, 's', impl);
       expect(
         await call(
@@ -425,7 +424,7 @@ describe('writing', () => {
         await call(
           recording(409, { code: 'SOME_NEW_CODE', message: 'An asset cannot be frobbed' }).impl,
         ),
-      ).toMatchObject({ kind: 'INVALID', message: GENERIC_REFUSAL_MESSAGE });
+      ).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
     });
 
     it('puts a field problem from the service on the field it names', async () => {
@@ -450,12 +449,14 @@ describe('writing', () => {
 
   it('reports 403 as FORBIDDEN and 404 as the platform’s non-disclosure', async () => {
     const call = (impl: typeof fetch) => activateAsset(SESSION, ASSET, 1, 's', impl);
-    expect(await call(recording(403, { code: 'FORBIDDEN' }).impl)).toMatchObject({
+    expect(await call(recording(403, { code: 'FORBIDDEN', message: 'no' }).impl)).toMatchObject({
       kind: 'FORBIDDEN',
     });
-    expect(await call(recording(404, { code: 'NOT_FOUND' }).impl)).toMatchObject({
+    expect(await call(recording(404, { code: 'NOT_FOUND', message: 'no' }).impl)).toMatchObject({
       kind: 'NOT_FOUND',
     });
+    // Not the platform's error (no message): proves nothing (PR-830 r1 F1).
+    expect((await call(recording(404, { code: 'NOT_FOUND' }).impl)).kind).toBe('UNKNOWN_OUTCOME');
   });
 
   it('never claims nothing happened when the gateway timed out after forwarding', async () => {

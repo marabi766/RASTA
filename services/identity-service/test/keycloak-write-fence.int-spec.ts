@@ -2156,15 +2156,15 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
   // -------------------------------------------------------------------------
 
   describe('the durable backoffs cannot overflow (#402 r2 F4)', () => {
-    const backoffAt = new Date('2100-01-01T00:00:00.000Z');
+    const backoffAt = new Date('2100-01-01T00:00:00.123Z');
 
     // FU-155: freeze a sub-millisecond database instant. TIMESTAMP(3) rounds
-    // .000927 up to .001, so the original SQL and assertions deterministically
-    // measure 960.000073 > 960, with no clock movement. Only the clock source
+    // .123927 up to .124, so the original SQL measures 960.001 > 960 against
+    // the floored anchor, with no clock movement. Only the clock source
     // is replaced; production’s truncation and cap/counter expressions run in PG.
     const onClock = (query: unknown): TemplateStringsArray => {
       if (!Array.isArray(query)) throw new Error('expected a tagged SQL backoff query');
-      const instant = "TIMESTAMPTZ '2100-01-01T00:00:00.000927Z'";
+      const instant = "TIMESTAMPTZ '2100-01-01T00:00:00.123927Z'";
       const parts = query.map((part: string) => part.replaceAll('clock_timestamp()', instant));
       return Object.assign(parts, { raw: parts });
     };

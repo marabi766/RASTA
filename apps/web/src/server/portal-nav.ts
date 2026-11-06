@@ -3,6 +3,7 @@ import { canReadSettlements } from '@/app/portal-nav';
 import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
+import { canUseDemands } from './demand-commands';
 import { canReadReturns } from './returns';
 import type { WebSession } from './session';
 import { sessionRoles } from './session-organization';
@@ -216,5 +217,6 @@ export function portalNavForSession(
     canReadInventory: canReadInventory(roles, env),
     canReadSuppliers: canReadSuppliers(roles),
     canReadReturns: canReadReturns(read),
+    canReadDemands: canUseDemands(read, env),
   });
 }
