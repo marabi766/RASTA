@@ -98,6 +98,9 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
   Activity ـِ خودش را به پایان برساند، صبر کن، و از گام ۲ تکرار کن. اگر آن Activity زیر نسخهٔ قدیمی هم تمام نمی‌شود (مثلاً
   economic-service در دسترس نیست)، اول همان را رفع کن؛ استقرار منتظر می‌ماند. Workflow را برای گذشتن از Gate هرگز
   `terminate` یا `reset` نکن: وجه در Hold می‌ماند و مسیر جبرانی ندارد ([`docs/24`](../24-open-questions.md) Q-118).
+- **Protocol ناسازگار یا نشانهٔ ناشناس (کد ۱).** `requires saga protocol N` یعنی Image هدف Protocol لازم را اعلام نکرده است:
+  Image سازگار بیاور یا اصلاحی روبه‌جلو منتشر کن. `unknown compatibility marker`، `unknown continuation state` یا `invalid start input`
+  یعنی این Gate آن تاریخچه را نمی‌شناسد: Gate را از جدیدترین انتشار اجرا کن. Manifest را برای گذشتن از Gate هرگز دستی تغییر نده.
 - **بررسی ممکن نشد (کد ۱).** دسترسی را درست کن (CLI، نشانی، TLS، Namespace) و گام ۳ را تکرار کن. راه «با این حال مستقر کن»
   نیست و یادداشت استثنا جای Gate را نمی‌گیرد.
 
@@ -194,9 +197,10 @@ After adoption of `order-saga-durable-rollover-v1`, the minimum compatible worke
 protocol is **1**. Draining activities does not make a downgrade safe. The gate
 reads complete durable histories for the executions it inspects with `workflow show
 --output json --no-json-shorthand-payloads` (the pinned CLI supports this flag;
-[CLI reference](https://docs.temporal.io/cli/workflow#show)). It requires protocol 1
+[CLI reference](https://docs.temporal.io/cli/workflow#show)). It requires at least protocol 1
 for either a recorded `core_patch` rollover marker or a start input carrying
-`resume`, including a continued run before its first workflow task/activity.
+`resume`, including a continued run before its first workflow task/activity;
+later markers and `resume` fields require more (below).
 Durable history proves protocol requirements for a discovered run; it does not
 discover runs or establish visibility completeness. It adds no workflow commands.
 
@@ -207,7 +211,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 1); an absent field means protocol **0**, the strictest legacy
+support (this build: 3); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue. An incompatible
@@ -216,10 +220,61 @@ unsupported payload encodings and incomplete histories (event sequence/length
 checked against describe) also block. Never add protocol 1 to an old build to
 bypass the gate: it must preserve both continuation state and patched commands.
 
+Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
+`dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
+**3**. A marker the gate does not list blocks every target until the gate learns
+it; a continuation's `resume` fields prove the same before its first marker
+(`reminderDue`: 2, `releaseRounds`: 3; any unlisted field blocks; so does an
+unlisted start input field). A target must declare at least what any inspected
+history requires.
+
+A build of #625 alone declares 1 although it writes the protocol-2 marker. Once a
+saga holds that marker, the gate refuses that image as a target, rollback or
+redeploy, even though it could replay the history: go forward to a build declaring
+2 instead, and never edit its manifest. Rolling back from it, run the gate from a
+build that has this table, not from #625's own checkout, whose gate reads a
+continuation's `reminderDue` as protocol 1.
+
 Use this gate for **every** deployment, including rollback. Once a running saga
-requires protocol 1, restore only a compatible image or ship a forward fix. Never
+requires a protocol, restore only a compatible image or ship a forward fix. Never
 reset/terminate a saga to downgrade. Keep the stopped-worker/no-new-start window
 above; a history change during inspection requires another drain/check.
+
+## Unconfirmed dispute release (FU-080)
+
+`RastaMarketplaceSagaDisputeReleaseUnconfirmed` fires from the first round of
+`rasta_marketplace_saga_release_unconfirmed_total` until two hours after the last.
+It counts rounds, not stuck sagas, and rounds need a running worker: with workers
+stopped or failed it clears while the funds are still held. A resolved alert is
+not a confirmed release; the saga's status query is. A decided dispute's
+resolution has not been confirmed by economic-service: the obligation stays
+DISPUTED and its funds held. The saga does not end. It waits in phase
+`RELEASE_UNCONFIRMED` (`workflow query --name status`) and calls again with the
+same idempotency key, doubling from one minute to one hour between rounds, so a
+release that did commit is recognized and never repeated. Nothing is authorised,
+settled or refunded for that order until it is confirmed, even if the buyer has
+confirmed receipt; the saga then reads the order again and carries on.
+
+The log line names the order and the last failure's code and words: read them
+before deciding anything. `rasta_marketplace_economic_calls_total` does not
+separate an outage from a refusal: its `REFUSED` counts every non-2xx answer, a
+5xx or an in-flight conflict included. After restoring economic-service, try now
+instead of waiting for the next round:
+
+```bash
+temporal workflow signal "${C[@]}" --workflow-id order-<orderId> --name retryDisputeRelease
+```
+
+A refusal that names the dispute can persist: economic-service holds a dispute
+other than the one decided here, and the release must not clear it. Deciding that
+dispute there does
+not make this release confirmable: the order then needs a person's reconciliation,
+with the funds still held. Terminating the saga belongs to that recorded decision,
+never to silencing the alert or passing the gate. A waiting saga does not block the
+gate, but its call in flight is a pending activity: with workers stopped it stays
+pending, so follow the gate's pending-activity case above. One rollback edge: a
+release whose last attempt failed just as workers stopped has no marker yet, so a
+protocol-2 target passes the gate and then ends that saga as before this wait.
 
 ## Continued-as-new visibility gap (FU-046)
 

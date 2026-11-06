@@ -85,6 +85,12 @@ const orderSchema = z.object({
   failureReason: z.string().nullable().prefault(null),
   createdAt: renderableDate,
   /**
+   * The dispute the order holds now (D-083) — what an operator's decision
+   * form names. Null when there is none, or from a service that does not send
+   * it, and then the decision form refuses before sending.
+   */
+  openDisputeId: z.string().nullable().prefault(null),
+  /**
    * The commands *this viewer* may issue now, computed by marketplace-service
    * (`order-actions.ts`). Anything the portal does not recognise is dropped
    * rather than rendered as a button it cannot build a form for — and a
@@ -183,9 +189,18 @@ export function orderCommandFormValues(form: FormData): OrderCommandFormValues {
     responsibility: text('responsibility'),
     rating: toLatinDigits(text('rating')),
     comment: text('comment'),
+    disputeId: text('disputeId'),
     acknowledge: text('acknowledge'),
   };
 }
+
+/**
+ * What an operator reads when the decision form names no dispute the page
+ * knew of. Plain words: nothing was sent, and the page must be reloaded.
+ */
+export const DISPUTE_FORM_STALE = formMessage(
+  'این فرم به اختلاف مشخصی وصل نیست، پس چیزی ارسال نشد. صفحه را تازه کنید و دوباره تصمیم بگیرید.',
+);
 
 /**
  * What the buyer reads when a receipt confirmation arrives with a note. Plain
@@ -258,6 +273,11 @@ const COMMAND_SCHEMAS = {
   }),
 
   RESOLVE_DISPUTE: z.object({
+    // The dispute the page showed (`openDisputeId`), never looked up at submit
+    // time: a decision drawn for one dispute must not decide another raised
+    // since. Missing — a page drawn from a service that did not send it — is
+    // refused here rather than posted unnamed.
+    disputeId: z.string().regex(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/, DISPUTE_FORM_STALE),
     outcome: z.enum(DISPUTE_OUTCOMES, { error: formMessage('نتیجه را انتخاب کنید') }),
     resolution: z
       .string()
@@ -382,8 +402,16 @@ export const ORDER_COMMAND_FIELD_MAPPING: FieldMapping<OrderCommandField> = {
     responsibility: 'responsibility',
     rating: 'rating',
     comment: 'comment',
+    disputeId: 'disputeId',
   },
   messages: {
+    // D-083: the operator's decision names the dispute the page showed.
+    'This decision is about a dispute the order no longer holds; reload the order':
+      'این تصمیم دربارهٔ اختلافی است که دیگر روی سفارش باز نیست؛ چیزی تغییر نکرد. صفحه را تازه کنید.',
+    'Where this dispute found the order is not recorded; it can be refunded, not settled':
+      'مرحله‌ای که اختلاف در آن ثبت شد معلوم نیست؛ این اختلاف را فقط با بازگشت وجه می‌توان بست.',
+    'The order holds no confirmed receipt to return to; it can be refunded, not settled':
+      'تأیید دریافتی برای این سفارش ثبت نشده است؛ این اختلاف را فقط با بازگشت وجه می‌توان بست.',
     // Q-110: the service's refusal of a receipt note, if a post ever got past
     // the portal's own check above. The ticket number is the service's, not
     // the reader's.

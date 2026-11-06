@@ -148,7 +148,7 @@ describe('the Keycloak projection CLI runs only as the runtime role (D-045)', ()
       const run = await runCli(mode, owner, keycloakUrl);
 
       expect(run.code).toBe(2);
-      expect(run.output).toMatch(/command failed \(code unknown\); diagnostics withheld/);
+      expect(run.output).toMatch(/command refused \(code owner-credential\); diagnostics withheld/);
       expect(run.output).not.toContain(PREFLIGHT_MARKER);
       // Closed diagnostics: no URL or password survives.
       expect(run.output).not.toContain(owner);
@@ -173,7 +173,7 @@ describe('the Keycloak projection CLI runs only as the runtime role (D-045)', ()
       }
 
       expect(run.code).toBe(2);
-      expect(run.output).toMatch(/command failed \(code unknown\); diagnostics withheld/);
+      expect(run.output).toMatch(/command refused \(code runtime-role\); diagnostics withheld/);
       expect(run.output).toContain(PREFLIGHT_MARKER);
       expect(run.output).not.toContain(databaseUrl());
       expect(requests).toBe(0);

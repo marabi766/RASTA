@@ -22,3 +22,27 @@ tests:
       - eval_time: 4m
         alertname: RastaMarketplaceSagaStartBacklogAging
         exp_alerts: []
+  - interval: 1h
+    input_series:
+      # Hourly rounds on one replica, then the release is confirmed.
+      - series: 'rasta_marketplace_saga_release_unconfirmed_total{service="marketplace-service",instance="replica-1"}'
+        values: '0 0 1 2 3 3 3 3 3'
+      # Another replica restarts after that: a reset is not a round.
+      - series: 'rasta_marketplace_saga_release_unconfirmed_total{service="marketplace-service",instance="replica-2"}'
+        values: '4 4 4 4 4 4 4 0 0'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []
+      - eval_time: 4h
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: A decided dispute's release is unconfirmed
+              description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. The saga keeps trying; the log names the order.
+              runbook: docs/runbooks/marketplace-saga-deploy.md
+      - eval_time: 8h
+        alertname: RastaMarketplaceSagaDisputeReleaseUnconfirmed
+        exp_alerts: []

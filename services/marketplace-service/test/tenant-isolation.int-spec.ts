@@ -10,6 +10,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  resolveOpenDispute,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
@@ -185,7 +186,7 @@ describe('tenant isolation (real database)', () => {
 
       await expect(
         asBuyer(() =>
-          wiring.orders.resolveDispute(order.id, {
+          resolveOpenDispute(wiring, order.id, {
             outcome: 'REFUND',
             resolution: 'I have decided in my own favour',
             responsibility: 'SUPPLIER',

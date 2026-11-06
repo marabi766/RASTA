@@ -26,9 +26,11 @@ import type { JournalType } from '../generated/prisma';
  * `REVERSAL` is the only one, and `LedgerService.reverse` refuses it (a
  * reversal is never itself reversed).
  *
- * The three without an operation are docs/24 Q-76: what reversing a
- * settlement, or clawing back a reward, means for the records that own them
- * is a product decision nobody has made, and none is invented here.
+ * The rest are docs/24 Q-76. A refund is final, and so is a settlement
+ * reversal: an owned journal the ledger must never undo alone, which is why
+ * `SETTLEMENT_REVERSAL` names its correction rather than being `null`, which
+ * would let this endpoint post the undo. The settlement's own operation and the
+ * reward clawback are not built yet.
  */
 export const CORRECTION_OF: { readonly [T in JournalType]: string | null } = {
   WALLET_TOP_UP:
@@ -36,11 +38,15 @@ export const CORRECTION_OF: { readonly [T in JournalType]: string | null } = {
   // Only while the hold is still ACTIVE and the transaction may still be
   // refunded: `JournalReversalService.holdCorrection` narrows it per journal.
   FUNDS_HELD: 'a hold is returned by refunding its transaction: POST /v1/transactions/{id}/refund',
-  FUNDS_REFUNDED: 'a refund is final; no operation undoes one yet (docs/24 Q-76)',
+  FUNDS_REFUNDED:
+    'a refund is final; correct a wrong refund with a new forward transaction (docs/24 Q-76)',
+  // Until RLG-002-3 opens the route, which this text will then name.
   SETTLEMENT:
     'no operation reverses a settlement yet; what that means for the order, transaction, ' +
     'settlement and commission is open (docs/24 Q-76)',
   REWARD_GRANT: 'no operation claws back a reward yet (docs/24 Q-76)',
+  SETTLEMENT_REVERSAL:
+    'a settlement reversal is final; correct a wrong one with a new forward transaction (docs/24 Q-76)',
   REVERSAL: null,
 };
 
