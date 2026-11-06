@@ -1,4 +1,5 @@
-import { MockActivityEnvironment, TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from './temporal-environment';
+import { MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -385,7 +386,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     'restarts two terminal chains under one workflow id without stale effects or collisions (reorder=%s)',
     async (reorder) => {
       const { orderId } = await receiptConfirmed();
-      const env = await TestWorkflowEnvironment.createTimeSkipping();
+      const env = await createTemporalTestEnvironment();
       try {
         const taskQueue = key('restart-steps');
         const workflowId = `order-${orderId}`;

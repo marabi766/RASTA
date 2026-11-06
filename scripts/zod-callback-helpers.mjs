@@ -86,13 +86,19 @@ const pins = {
     '5eb97cc83fd4f3dd9a9e39c88513aa5673f22ab2d8a978cd8000d78144b89ee9',
   'apps/web/src/lib/repair-order-fields.ts':
     'b80e6b6a0fccce159661427e3c1e0dce973c93e1837ea632d7b47533a9944b13',
-  'packages/contracts/src/common/iso-datetime.ts':
+  'packages/contracts/src/common/iso-datetime.ts': [
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
+    '0575a17e05a4e9808cd0948bf5aa0f14b3e1abf68782907fedab9fc3cba158de',
+  ],
   'packages/contracts/src/common/text.ts':
     '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
     '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',
+    // + the transaction-text exports (FU-134, PR #806): `plainText` still re-exported from text.ts.
+    'd470201ab822d732e8c10f0b6db953e4a5daacf94e47ae77afd0b75b64313822',
+    // + PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (FU-156): one constant beside the project-create one.
+    '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
@@ -113,6 +119,8 @@ const pins = {
   'apps/web/src/lib/order-fields.ts': [
     '952fd53124d672d01c43152b669108fe8487849ea708ab067c8da64be98b91cf',
     '61ab1f3188c8e27fcd5fadd3b517a8ec69c5dcf8f636ff80fe3e2164dc88dd55',
+    // + limits from TRANSACTION_TEXT_BOUNDS (FU-134, PR #806); `isOrderCommand` unchanged.
+    'b7d5f55a96f188adb1af73dc11ad1fa628d7d1e32b5a5cf6d3f2cef508eb5c9f',
   ],
   'apps/web/src/server/drivers.ts': [
     'c404487bde658fd99190401956f83270e1473fb6a738fc9c6e9acf896ad2c740',

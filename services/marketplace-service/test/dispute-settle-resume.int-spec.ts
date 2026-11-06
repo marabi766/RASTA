@@ -1,4 +1,5 @@
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from './temporal-environment';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import type { WorkflowHandle } from '@temporalio/client';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
@@ -180,12 +181,7 @@ describe('a pre-receipt dispute settled by an operator resumes the order (D-083,
   beforeAll(async () => {
     prisma = newPrisma();
     wiring = wire(prisma);
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
+    env = await createTemporalTestEnvironment();
   }, 300_000);
 
   afterAll(async () => {

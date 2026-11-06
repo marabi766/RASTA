@@ -1,8 +1,8 @@
-import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { installTemporalRuntimeLogger } from '../src/temporal/runtime-logger';
 import { createActivities } from '../src/temporal/activities';
 import type { EconomicClient } from '../src/economic/economic.client';
+import { createTemporalTestEnvironment } from './temporal-environment';
 import { asActor, cleanup, key, newPrisma, publishOffer, tenants, wire, testEnv } from './helpers';
 
 /**
@@ -11,12 +11,7 @@ import { asActor, cleanup, key, newPrisma, publishOffer, tenants, wire, testEnv 
  */
 it('an order whose hold exists waits out an older economic-service, then adopts it', async () => {
   installTemporalRuntimeLogger(testEnv());
-  const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-  const temporal = await TestWorkflowEnvironment.createTimeSkipping(
-    downloadDir
-      ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-      : undefined,
-  );
+  const temporal = await createTemporalTestEnvironment();
   const prisma = newPrisma();
   const wiring = wire(prisma);
   const org = tenants();
