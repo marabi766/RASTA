@@ -942,6 +942,8 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
     let found: (orderId: string) => unknown[] = () => [];
     /** One scheduled command for every call while set; else a new one per call. */
     let retrying: SagaStep | undefined;
+    /** Temporal's attempt of the scheduling (undefined: no Temporal context). */
+    let attempt: number | undefined = 1;
     const hold: OrderActivities = createActivities({
       orders: wiring.orders,
       economic: {
@@ -951,6 +953,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
         findObligations: async ({ orderId }: { orderId: string }) => found(orderId),
       } as unknown as EconomicClient,
       currentStep: () => retrying ?? sagaStep(),
+      currentAttempt: () => attempt as number,
     });
     const lost = () => new Error('economic-service did not answer (socket hang up)');
     const refused = (code: string, status: number) =>
@@ -1054,6 +1057,33 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       );
     });
 
+    // #836 r2 N1 (D-135): a record that began on a retry proves no earlier send.
+    // An older worker's attempt 1 sent the create without opening a record, then
+    // this worker's attempt 2 opened a fresh one and was refused for balance:
+    // the first send, delayed before its claim, can still claim the freed key.
+    it('a refusal on a retry whose record began there leaves the intent open (an unrecorded earlier send)', async () => {
+      for (const unrecorded of [2, 3, undefined]) {
+        const orderId = await place();
+        attempt = unrecorded;
+        try {
+          creating = async () => {
+            throw refused('INSUFFICIENT_BALANCE', 422);
+          };
+          await expect(hold.createObligation(orderId)).rejects.toThrow();
+          expect([unrecorded, await intentOpen(orderId)]).toEqual([unrecorded, true]);
+        } finally {
+          attempt = 1;
+        }
+      }
+      await runUnscoped(
+        'the suite closes the intents it opened',
+        () =>
+          prisma.client.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
+          WHERE organization_id = ${org.buyer} AND operation = 'createObligation'
+            AND confirmed_at IS NULL`,
+      );
+    });
+
     it("ends with the create's own answer, or a refusal that proves nothing was held", async () => {
       const answered = await place();
       creating = async () => ({ id: `TXN_${ulid()}` });
@@ -1086,6 +1116,106 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
           prisma.client.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
           WHERE organization_id = ${org.buyer} AND operation = 'createObligation'
             AND confirmed_at IS NULL`,
+      );
+    });
+  });
+
+  // #836 r2 N1, D-135: until economic-service fences a late claim (D-132), nothing
+  // proves an unanswered call will not still commit: a request delayed before
+  // its claim can claim the key at any time, and retention starts at the claim.
+  // So for all five recorded operations, no path closes a record on absence (an
+  // empty lookup, a read finding nothing), a terminal order or age past
+  // retention: every one stays open and alerting.
+  describe('absence, a terminal order and age close no record (#836 r2 N1, D-135)', () => {
+    let send: () => Error = () => new Error('economic-service did not answer (socket hang up)');
+    const fail = async () => {
+      throw send();
+    };
+    // Every send unanswered or refused for state, every read finding nothing,
+    // every attempt a retry: so each activity asks and gets absence back.
+    const absent: OrderActivities = createActivities({
+      orders: wiring.orders,
+      economic: {
+        ...economic,
+        createObligation: fail,
+        authoriseSettlement: fail,
+        settle: fail,
+        refund: fail,
+        resolveDispute: fail,
+        readObligation: async () => null,
+        findObligations: async () => [],
+      } as unknown as EconomicClient,
+      currentStep: sagaStep,
+      currentAttempt: () => 2,
+    });
+    const open = async (orderId: string) =>
+      runUnscoped(
+        'the suite reads the call records of an order it wrote',
+        () =>
+          prisma.client.$queryRaw<{ operation: string; open: boolean }[]>`
+          SELECT operation, confirmed_at IS NULL AS open FROM saga_unconfirmed_call
+          WHERE order_id = ${orderId} ORDER BY operation`,
+      );
+
+    it('every operation stays open through empty reads, a FAILED order and two days past retention', async () => {
+      const before = await read();
+      const created = await place();
+      const { orderId: received, transactionId: authorised } = await held();
+      await asSupplier(() => wiring.orders.confirm(received));
+      await asSupplier(() => wiring.orders.fulfill(received, { trackingReference: 'TRK-N1' }));
+      await asBuyer(() => wiring.orders.confirmReceipt(received, {}));
+      const refunding = await held();
+      const releasing = await decided();
+
+      const round = async () => {
+        await expect(absent.createObligation(created)).rejects.toThrow();
+        await expect(absent.findObligation(created)).resolves.toBeNull();
+        await expect(absent.authoriseSettlement(received, authorised)).rejects.toThrow();
+        await expect(absent.settle(received, authorised)).rejects.toThrow();
+        await expect(
+          absent.compensate(refunding.orderId, refunding.transactionId, 'order cancelled'),
+        ).rejects.toThrow();
+        await expect(
+          absent.resolveObligationDispute(
+            releasing.orderId,
+            releasing.transactionId,
+            releasing.disputeId,
+            settle.resolution,
+          ),
+        ).rejects.toThrow();
+      };
+      await round();
+      await absent.markFailed(created, 'hold not placed');
+      // Past economic-service's retention (ECONOMIC_IDEMPOTENCY_TTL_HOURS, 24 h)
+      // plus a day's margin, the step 7 #836 r2 N1 found unsafe.
+      for (const orderId of [created, received, refunding.orderId, releasing.orderId]) {
+        await age(orderId, 2);
+      }
+      // A refusal for state is what makes an activity read; the read finds nothing.
+      send = () =>
+        new RastaError('INVALID_STATE_TRANSITION' as never, 'refused', {
+          internalContext: { operation: 'x', status: 409 },
+        });
+      await round();
+
+      expect(await open(created)).toEqual([{ operation: 'createObligation', open: true }]);
+      expect(await open(received)).toEqual([
+        { operation: 'authoriseSettlement', open: true },
+        { operation: 'settle', open: true },
+      ]);
+      expect(await open(refunding.orderId)).toEqual([{ operation: 'compensate', open: true }]);
+      expect(await open(releasing.orderId)).toEqual([
+        { operation: 'resolveObligationDispute', open: true },
+      ]);
+      const after = await read();
+      expect(after.UNCONFIRMED_CALL!.overdue).toBe(before.UNCONFIRMED_CALL!.overdue + 4);
+      expect(after.DISPUTE_RELEASE!.overdue).toBe(before.DISPUTE_RELEASE!.overdue + 1);
+
+      await runUnscoped(
+        'the suite closes the records it opened',
+        () =>
+          prisma.client.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
+          WHERE order_id IN (${created}, ${received}, ${refunding.orderId}, ${releasing.orderId})`,
       );
     });
   });

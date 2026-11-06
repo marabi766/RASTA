@@ -427,8 +427,10 @@ export function createActivities(deps: ActivityDependencies) {
       // The hold's intent, keyed by the order, before anything is sent (#836 r1
       // R2): a create that times out may commit after the saga stopped looking,
       // so only its own answer, a refusal proving it held nothing, or a lookup
-      // that finds the obligation (`findObligation`) ends it. An empty lookup
-      // never does: a commit still in flight is invisible to it.
+      // that finds the obligation (`findObligation`) ends it. An empty lookup,
+      // the order's terminal status or the record's age never does: a create
+      // delayed before its claim can still commit, and economic-service's
+      // retention starts at the claim (#836 r2 N1, D-135; the fence is FU-161).
       const opening = await openCall(orderId, 'createObligation', orderId);
       const held = await economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
@@ -447,7 +449,12 @@ export function createActivities(deps: ActivityDependencies) {
           // Only for the send that began the episode: economic-service frees
           // the key on a refusal, so an earlier send of this episode still on
           // its way could claim it and commit after this one was refused.
-          if (opening.started && heldNothing(refusal)) {
+          // And only on the scheduling's first attempt (#836 r2 N1, D-135): a
+          // record that began here proves no earlier send only of attempts
+          // that record one, and an older worker's attempt sent unrecorded. A
+          // missing record, like an empty lookup or an old row, is absence,
+          // which never closes anything; unknown (no Temporal context) is not 1.
+          if (opening.started && currentAttempt() === 1 && heldNothing(refusal)) {
             await deps.orders.confirmSagaCall(
               { id: order.id, organizationId: order.buyerOrganizationId },
               'createObligation',

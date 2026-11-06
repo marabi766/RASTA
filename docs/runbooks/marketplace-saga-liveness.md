@@ -145,15 +145,23 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
 6. `UNCONFIRMED_CALL` (`authoriseSettlement`, `settle`, `compensate`; `subject` is the obligation): read the obligation
    at economic-service. Authorised (`PENDING_SETTLEMENT` or `SETTLED`) answers an authorisation; `SETTLED` with its
    settlement answers a settlement (record it on the order before closing: the money moved); `REFUNDED` answers all
-   three. Anything else is still unanswered: the saga's next attempt, or a person's decision (`docs/08` § 8.4), ends it.
-   Close a row only with an answer, the same way and with the `generation` you read.
+   three. Anything else is still unanswered, and so is an obligation not found or a row however old: it stays open until
+   the saga's next attempt gets an answer, or a person's decision (`docs/08` § 8.4) takes effect at economic-service and
+   its state shows it. Close a row only on an answer economic-service shows, never on absence, the order's status or
+   age (D-135); the same way and with the `generation` you read.
 7. `UNCONFIRMED_CALL` `createObligation` (`subject` is the order) on an order `FAILED` or `CANCELLED`: the hold was
-   sent, never answered, and a lookup found nothing — economic-service may have committed it since (its transaction
-   runs up to 60 s, the call's deadline is 10 s). Look up the order's obligation at economic-service. None, and the
-   create's idempotency key past its retention (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`) plus a margin: nothing was held, close
-   the row. Found `HELD`: the buyer's money is held for an order that ended: refund it by hand (§ 8.4) before closing.
-   Until the workflow's own exits wait for that proof (#812), every such order is this step; once they do, they close
-   the row themselves (FU-161).
+   sent, never answered, and a lookup found nothing. **Never close this row by hand** (D-135). Nothing available today
+   proves the create will not still commit: a request delayed before it claims its key can claim it at any later time,
+   and economic-service starts the key's retention (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`) at that claim, so no timeout,
+   empty lookup, terminal status or waiting margin is proof. Instead:
+   - Look up the order's obligation at economic-service (read-only), each time the alert is reviewed.
+   - Found on the order's own terms and `HELD`: the buyer's money is held for an order that ended. Refund it by hand
+     (`docs/08` § 8.4) and record it in the change record.
+   - Anything else (its own in another status, a row on other terms, nothing): record the lookup and escalate to
+     engineering with the order.
+   - The row stays open, and the alert keeps firing for it, by design (fail closed). Closing it needs economic-service's
+     claim-time fence (D-132, #812): a create past its deadline is refused at the claim. Closing after that fence is
+     FU-161; until it is on main, no step closes this row.
 
 ## Known limits
 
@@ -181,7 +189,11 @@ receipt_confirmed_at IS NOT NULL AND status IN ('RECEIPT_CONFIRMED', 'SETTLING',
 - A refusal before anything is sent (an order with no recorded receipt) also leaves its authorisation row open: fail
   closed, the operator reconciles it. So does every refusal of an authorisation, settlement or refund, and a create
   refused `NOT_FOUND`, `FORBIDDEN`, `TENANT_MISMATCH` or `CONFLICT` (economic-service's replay guard answers the first
-  three for a key that did commit).
+  three for a key that did commit), and a create refused on any attempt but the first of its scheduling: an older
+  worker's attempt sent without a record, so a record that began on a retry proves no earlier send (#836 r2 N1). In a
+  rolling deploy a buyer refused for balance on a retry is therefore step 7, never closed by hand. A saga **reset** to
+  before its hold is a new scheduling at attempt 1, which cannot see a send of an older worker: while workers older
+  than #836 run, never reset a saga before its hold.
 - Rows opened before #836 name no command: the first command to open one takes it, as every opening did before.
 - Command order is Temporal's scheduling time of each activity (`scheduledTimestampMs`). Two commands of one operation
   on one subject are never scheduled in the same millisecond (the saga awaits each); a tie, or a Temporal clock that ran
