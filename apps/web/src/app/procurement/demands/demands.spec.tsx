@@ -376,3 +376,13 @@ describe('Persian orthography of everything the demand screens say', () => {
     }
   });
 });
+
+describe('the navigation entry', () => {
+  it('is drawn only for a person the demand screens are for', () => {
+    const hrefs = (canReadDemands: boolean) =>
+      nav.portalNavFor({ canReadProjects: false, canReadDemands }).map((item) => item.href);
+    expect(hrefs(true)).toContain('/procurement/demands');
+    expect(hrefs(false)).not.toContain('/procurement/demands');
+    expect(nav.DEMANDS_NAV_ITEM.label).toBe('نیازهای تدارکات');
+  });
+});
