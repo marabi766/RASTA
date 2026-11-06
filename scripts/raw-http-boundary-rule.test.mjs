@@ -1,3 +1,8 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
+import {
+  trackedFiles as inventory,
+  transportDirectives as directives,
+} from './source-inventory.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -12,32 +17,12 @@ import {
   EXECUTABLE_EXTENSIONS,
   boundaryHolds,
   code as anyExtension,
-  isExecutable,
   requiredBoundary,
 } from './lint-extensions.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
-// Never let a hook's repository/index or command-scope config escape into fixtures.
-function fixtureGitEnv() {
-  return {
-    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_NOSYSTEM: '1',
-  };
-}
-
-/** NUL records preserve Git paths verbatim, including names Git normally quotes. */
-function trackedFiles(cwd = ROOT) {
-  const result = spawnSync('git', ['ls-files', '-z'], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: fixtureGitEnv(),
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.ok(result.stdout === '' || result.stdout.endsWith('\0'), 'incomplete Git inventory');
-  return result.stdout.split('\0').filter(Boolean);
-}
+const trackedFiles = (cwd = ROOT) => inventory(cwd);
+const transportDirectives = (files, read) => directives(files, read, PINNED_FILE);
 
 const linter = new Linter({ cwd: ROOT });
 /** Findings of the boundary alone, for `code` as the file `path` (repository-relative). */
@@ -658,49 +643,7 @@ test('the boundary is on for every in-scope file, in every workspace, and the li
 });
 
 const PINNED_FILE = 'apps/web/e2e/action-outcome.ts';
-const PINNED_DIRECTIVE = `${PINNED_FILE}:108:8 Line eslint-disable-next-line: internal/raw-http`;
-
-const DIRECTIVE = /^\s*eslint(-disable(?:-next-line|-line)?|-enable)?(?=\s|$)([\s\S]*)/;
-/** Parse real comments, including their complete bodies; syntax failures refuse. */
-function transportDirectives(files, read) {
-  const found = [];
-  for (const file of files.filter(isExecutable)) {
-    let comments;
-    try {
-      comments = tseslint.parser.parseForESLint(read(file), {
-        filePath: file,
-        project: false,
-        projectService: false,
-        sourceType: 'module',
-        ecmaFeatures: { jsx: true },
-        comment: true,
-      }).ast.comments;
-      assert.ok(Array.isArray(comments), 'parser did not classify comments');
-    } catch {
-      found.push(`${file}: unclassifiable source`);
-      continue;
-    }
-    for (const comment of comments) {
-      // Also refuse directive-shaped JSDoc; never treat a nested-looking opener
-      // or a quoted comment delimiter as a separate comment.
-      const match = comment.value.replace(/^\s*\*/gm, '').match(DIRECTIVE);
-      if (!match) continue;
-      const rules = match[2].split(/\s--\s/)[0].trim();
-      // Only a simple list of unrelated rule names is proven safe. General
-      // inline configuration (quoted/escaped keys, values, etc.) is refused.
-      const names = rules.split(/\s*,\s*/);
-      if (
-        file === PINNED_FILE ||
-        !match[1] ||
-        names.some((name) => !/^[@\w/-]+$/.test(name) || name.startsWith('internal/'))
-      )
-        found.push(
-          `${file}:${comment.loc.start.line}:${comment.loc.start.column} ${comment.type} eslint${match[1] ?? ''}: ${rules || '(all rules)'}`,
-        );
-    }
-  }
-  return found;
-}
+const PINNED_DIRECTIVE = `${PINNED_FILE}:108:8 Line eslint-disable-next-line: internal/raw-http sha256:050831978467575febdbfcef9fb18a1028a85edd554dfc93f168e3c2078e96a9:39edcde81fa4f4957c4f917d4762cc0c1d6283f677c8bf770e42f181dde9af21`;
 
 test('no inline directive switches the transport rules off, except the one pinned browser flow', () => {
   // Every tracked file, not a list of top-level directories.
@@ -735,6 +678,18 @@ for (const [name, mutate] of [
   [
     'same-line directive',
     (source, directive) => source.replace(directive, `// ${LINT}-disable-line internal/raw-http`),
+  ],
+  [
+    'reworded justification',
+    (source) => source.replace('browser form replay', 'unreviewed reason'),
+  ],
+  [
+    'changed suppressed line',
+    (source) =>
+      source.replace(
+        'const response = await fetch(',
+        'void fetch("/extra"); const response = await fetch(',
+      ),
   ],
   ['moved column', (source, directive) => source.replace(directive, ` ${directive}`)],
   [
@@ -878,4 +833,93 @@ test('tracked inventory preserves quoted and multiline filenames for the directi
       findings.some((finding) => finding.startsWith(`${file}:`)),
       file,
     );
+});
+
+// Conservative guard: every Git subprocess in a test must
+// use the shared env. Only explicit read-only inventories of ROOT are exempt.
+function bareFixtureGit(source, file = 'fixture.mjs') {
+  if (!source.includes('child_process')) return [];
+  const ast = tseslint.parser.parseForESLint(source, {
+    filePath: file,
+    sourceType: 'module',
+    loc: true,
+    ecmaFeatures: { jsx: /\.[jt]sx$/.test(file) },
+  }).ast;
+  const commands = new Set();
+  const environments = new Set();
+  const namespaces = new Set();
+  for (const node of ast.body) {
+    if (node.type === 'ImportDeclaration' && node.source.value === './fixture-git-env.mjs')
+      for (const spec of node.specifiers)
+        if (spec.imported?.name === 'fixtureGitEnv') environments.add(spec.local.name);
+    if (node.type !== 'ImportDeclaration' || !/^(node:)?child_process$/.test(node.source.value))
+      continue;
+    for (const spec of node.specifiers) {
+      if (
+        spec.type === 'ImportSpecifier' &&
+        /^(spawn|spawnSync|execFile|execFileSync)$/.test(spec.imported.name)
+      )
+        commands.add(spec.local.name);
+      else if (spec.type !== 'ImportSpecifier') namespaces.add(spec.local.name);
+    }
+  }
+  const problems = [];
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return;
+    const callee = node.callee;
+    if (
+      node.type === 'CallExpression' &&
+      node.arguments[0]?.value === 'git' &&
+      (commands.has(callee.name) ||
+        (callee.type === 'MemberExpression' && namespaces.has(callee.object.name)))
+    ) {
+      const options = node.arguments[2];
+      const plain =
+        options?.type === 'ObjectExpression' &&
+        options.properties.every(
+          (p) => p.type === 'Property' && !p.computed && p.kind === 'init',
+        ) &&
+        new Set(options.properties.map((p) => p.key?.name)).size === options.properties.length;
+      const prop = (name) => options?.properties?.find((p) => p.key?.name === name)?.value;
+      const env = prop('env');
+      const shared =
+        plain &&
+        env?.type === 'CallExpression' &&
+        environments.has(env.callee.name) &&
+        env.arguments.length === 0;
+      const read =
+        plain &&
+        ['ROOT', 'REPO_ROOT'].includes(prop('cwd')?.name) &&
+        ['ls-files', 'status'].includes(node.arguments[1]?.elements?.[0]?.value);
+      if (!shared && !read) problems.push(node.loc.start.line);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === 'object') visit(value);
+    }
+  };
+  visit(ast);
+  return problems;
+}
+
+test('temporary Git spawns require the shared fixture environment', () => {
+  for (const file of trackedFiles().filter((file) =>
+    /\.(?:test|spec|int-spec)\.[cm]?[jt]sx?$/.test(file),
+  ))
+    assert.deepEqual(bareFixtureGit(readFileSync(`${ROOT}${file}`, 'utf8'), file), [], file);
+  for (const command of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
+    const prefix = `import { ${command} as run } from 'node:child_process'; import { fixtureGitEnv } from './fixture-git-env.mjs'; const root = mkdtempSync();`;
+    for (const options of [
+      '{cwd: root}',
+      '{cwd: root, env: process.env}',
+      '{cwd: root, env: {}}',
+      '{cwd: root, env: fixtureGitEnv(), ...overrides}',
+      '{cwd: root, env: fixtureGitEnv(), env: process.env}',
+    ])
+      assert.equal(bareFixtureGit(`${prefix} run('git', ['add', '.'], ${options})`).length, 1);
+    assert.deepEqual(
+      bareFixtureGit(`${prefix} run('git', ['add', '.'], {cwd: root, env: fixtureGitEnv()})`),
+      [],
+    );
+  }
 });

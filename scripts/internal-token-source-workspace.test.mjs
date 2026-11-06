@@ -1,3 +1,4 @@
+import { trackedFiles, transportDirectives } from './source-inventory.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -834,11 +835,7 @@ function unreviewed(reports, read = (file) => fs.readFileSync(path.join(ROOT, fi
  * as each lint script sees them): linted with the rule on, linted with it off,
  * or reached by no lint script.
  */
-function coverage(
-  tracked = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
-    .stdout.split('\n')
-    .filter((file) => /\.[cm]?[jt]sx?$/.test(file)),
-) {
+function coverage(tracked = trackedFiles(ROOT).filter((file) => /\.[cm]?[jt]sx?$/.test(file))) {
   const owners = [{ workspace: '.', targets: ['scripts'] }];
   for (const { workspace, lint } of lintWorkspaces())
     owners.push({ workspace, targets: lintTargets(workspace, lint) });
@@ -1036,23 +1033,29 @@ test('lint:scripts runs this file on its own, after every other script test', ()
   );
 });
 
-test('coverage: no inline directive switches the rule off outside test-only code', () => {
-  // A directive is a comment that starts with one of ESLint's fixed keywords;
-  // a blanket `eslint-disable` (no rule list) switches every rule off.
-  const DIRECTIVE =
-    /\/[/*]\s*(eslint-disable(?:-next-line|-line)?|eslint-enable|eslint)(?=\s|\*\/|$)([^\n]*?)(?:\*\/|$)/gm;
-  const offending = [];
-  const tracked = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
-    .stdout.split('\n')
-    .filter((file) => /\.[cm]?[jt]sx?$/.test(file) && !isTestOnlyPath(file));
-  for (const file of tracked) {
-    const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
-    for (const [, keyword, rest] of text.matchAll(DIRECTIVE)) {
-      const rules = rest.split('--')[0].trim();
-      const blanket = keyword.startsWith('eslint-disable') && rules === '';
-      if (blanket || /internal\//.test(rules)) offending.push(`${file}: ${keyword} ${rules}`);
+test('token directive coverage refuses multiline comments on verbatim Git paths', () => {
+  for (const file of ['scripts/café.mjs', 'scripts/line\nbreak.mjs']) {
+    for (const newline of ['\n', '\r\n', '\r']) {
+      const text = `/* ${'eslint'}-disable no-console,${newline} internal/token-source */`;
+      assert.equal(transportDirectives([file], () => text).length, 1);
     }
+    assert.deepEqual(
+      transportDirectives(
+        [file],
+        () => `const text = "// ${'eslint'}-disable internal/token-source";`,
+      ),
+      [],
+    );
   }
+});
+
+test('coverage: no inline directive switches the rule off outside test-only code', () => {
+  const tracked = trackedFiles(ROOT).filter(
+    (file) => /\.[cm]?[jt]sx?$/.test(file) && !isTestOnlyPath(file),
+  );
+  const offending = transportDirectives(tracked, (file) =>
+    fs.readFileSync(path.join(ROOT, file), 'utf8'),
+  );
   assert.ok(tracked.length > 1000, `only ${tracked.length} production files scanned`);
   assert.deepEqual(offending, []);
 });

@@ -187,13 +187,28 @@ export const JEST_LAUNCHERS = {
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
   },
+  'scripts/raw-http-boundary-rule.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns Node ESLint config/fixture probes and scrubbed Git commands; subprocess API names in the AST guard are inspection fixtures, never Jest launches.',
+    sha256: {
+      'scripts/raw-http-boundary-rule.test.mjs':
+        'f8abb6ffee5969afbc6d01f3e718ef67a0792797f5eacb58aaa5ce0a062aa090',
+      'scripts/source-inventory.mjs':
+        '9a939635b92c323471d8be45d5c34f86c16af9525c61c3a5976e6e23b4e5e61d',
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
+    },
+  },
   'scripts/testing-dev-only.test.mjs': {
     kind: 'non-jest',
     reaches:
       'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
     sha256: {
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/testing-dev-only.test.mjs':
-        '8d315c9824364fdbbd6795dc2cb86c0171cb7e65c60599fa299331934aa07c2d',
+        '70322e435d9e0f736c7189e0c5808388ab6d5f54673b474671172bfa7933f6b9',
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
@@ -205,8 +220,10 @@ export const JEST_LAUNCHERS = {
     reaches:
       'Spawns git fixture commands and Turbo lint --dry=json snapshots; test runner names are registration fixtures, never executed.',
     sha256: {
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/lint-scripts-registration.test.mjs':
-        'e611dc8ccaf8232cfbe179cb4b8f3f5d4443b50424f4cffd0deba6e0c89284a0',
+        '31355969c67278101cb08666e7e60ea3ec5fa2738a8bd71918bfe888f169ac2d',
     },
   },
   'scripts/testing-dev-only.mjs': {
