@@ -25,6 +25,7 @@ import { TransactionService } from '../transaction/transaction.service';
 import { RewardService } from '../reward/reward.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdempotencyStore } from '../shared/idempotency';
+import { canonicalBodyPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor, canActFinanciallyFor } from '../access/access';
 import { OrganizationHierarchy } from '../organization/organization-hierarchy';
@@ -91,7 +92,7 @@ export class SettlementController {
   })
   async settle(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(settleTransactionSchema)) dto: SettleTransactionDto,
+    @Body(canonicalBodyPipe(settleTransactionSchema)) dto: SettleTransactionDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);

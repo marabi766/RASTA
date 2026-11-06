@@ -8,8 +8,18 @@ import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+import { canonicalForm } from './canonical';
 
 export { CLAIM_WAIT_MS };
+
+/**
+ * What a claim writes and compares (`IdempotencyStore.claim`): `requestHash`,
+ * the hash the previous release computes; `canonicalHash`, this release's.
+ */
+interface Fingerprints {
+  readonly requestHash: string;
+  readonly canonicalHash: string;
+}
 
 /**
  * Idempotent financial writes (docs/06 § 6.8).
@@ -129,13 +139,26 @@ export class IdempotencyStore {
     body: unknown,
     fingerprintVersion?: string,
   ): Promise<Claim> {
-    const requestHash = fingerprintVersion
-      ? `${fingerprintVersion}:${this.hash(body)}`
-      : this.hash(body);
+    const fingerprint = (value: unknown) =>
+      fingerprintVersion ? `${fingerprintVersion}:${this.hash(value)}` : this.hash(value);
+    // The request as it was validated and executed — the body as sent,
+    // wherever in `body` it is wrapped — hashed as the previous release
+    // hashes it. **Written** as `requestHash`, the one column that release
+    // compares, so the unchanged retry replays on whichever release it
+    // reaches during a rolling update or a rollback (Codex PR-747 r2, F3); and
+    // compared, so a key that release stored replays here (r1).
+    const requestHash = fingerprint(body);
+    // The same request in canonical form, when canonicalization changed it
+    // (`canonicalBodyPipe`): only hashed, never executed.
+    const canonical = canonicalForm(body);
+    const fingerprints: Fingerprints = {
+      requestHash,
+      canonicalHash: canonical === undefined ? requestHash : fingerprint(canonical),
+    };
     const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash, actorHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, fingerprints, actorHash, deadline);
       if (outcome !== RETRY_CLAIM) return outcome;
     }
     // Every attempt found the key vanishing under it: other requests are
@@ -193,7 +216,7 @@ export class IdempotencyStore {
   private async claimOnce(
     endpoint: string,
     key: string,
-    requestHash: string,
+    { requestHash, canonicalHash }: Fingerprints,
     actorHash: string,
     deadline: number,
   ): Promise<Claim | typeof RETRY_CLAIM> {
@@ -213,6 +236,7 @@ export class IdempotencyStore {
             organizationId,
             endpoint,
             requestHash,
+            canonicalHash,
             actorHash,
             claimToken,
             state: 'IN_PROGRESS',
@@ -248,10 +272,18 @@ export class IdempotencyStore {
     // refused alike and with nothing of the record (review of #287, finding
     // 1). A record from before actors were bound has none; it is answered only
     // through the replay guard, and only until it expires.
-    if (
-      existing.requestHash !== requestHash ||
-      (existing.actorHash !== null && existing.actorHash !== actorHash)
-    ) {
+    //
+    // The same body: the hash the previous release stored or compares, or —
+    // in either column — this one's canonical hash. A record the previous
+    // release wrote has no canonical hash: another spelling of it replays only
+    // when the stored body was itself canonical. The previous release refuses
+    // every other spelling; replaying one here is safe — what is replayed is
+    // what was executed — and its unchanged retry replays on both.
+    const sameBody =
+      existing.requestHash === requestHash ||
+      existing.requestHash === canonicalHash ||
+      existing.canonicalHash === canonicalHash;
+    if (!sameBody || (existing.actorHash !== null && existing.actorHash !== actorHash)) {
       throw RastaError.idempotencyKeyReused();
     }
 

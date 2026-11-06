@@ -4,6 +4,7 @@ import { AllowService, RastaError, Roles, getOrganizationId, zodPipe } from '@ra
 import { WalletService } from './wallet.service';
 import { PaymentService, type TopUpResult } from '../payment/payment.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { canonicalBodyPipe } from '../shared/canonical';
 import { assertNotAuditor, assertWalletVisible } from '../access/access';
 import { toHoldView, toWalletView, type HoldRow, type WalletRow } from '../shared/views';
 import {
@@ -161,7 +162,9 @@ export class WalletController {
   async topUp(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(topUpSchema.omit({ idempotencyKey: true }).partial({ instrument: true })))
+    @Body(
+      canonicalBodyPipe(topUpSchema.omit({ idempotencyKey: true }).partial({ instrument: true })),
+    )
     body: Omit<TopUpDto, 'idempotencyKey'>,
   ) {
     assertNotAuditor();
