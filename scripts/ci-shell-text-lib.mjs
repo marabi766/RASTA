@@ -348,9 +348,18 @@ const redirectWidth = (list, at) => {
   return match ? (match[1] === '' ? 2 : 1) : 0;
 };
 const nameOf = (word) => word.value.split('/').at(-1);
-/** The program is named by a computed LAST path component (`$cmd`, `$(…)`, `a/${b}`): `${D}/x.sh` is a file. */
-export const computedProgram = (word) =>
-  Boolean(word.opaque) || nameOf({ value: word.value.replace(/\$\{[^}]*\}/g, '$') }).includes('$');
+/** Words of the grammar itself that are made of glob and brace characters: not a program name. */
+const PUNCTUATION = new Set(['[', '[[', ']', ']]', '{', '}']);
+/**
+ * The program is named by a computed LAST path component: a substitution or variable (`$cmd`,
+ * `$(…)`, `a/${b}`) or a pattern the shell expands (`{docker,run}`, `docker*`, `doc?er`).
+ * `${D}/x.sh` is a file.
+ */
+export const computedProgram = (word) => {
+  if (word.opaque) return true;
+  const last = nameOf({ value: word.value.replace(/\$\{[^}]*\}/g, '$') });
+  return last.includes('$') || (!PUNCTUATION.has(last) && /[*?[{]/.test(last));
+};
 
 /** The index of the command word after `name`'s options, `-1` for "nothing runs", or a problem. */
 function afterOptions(name, spec, list, from) {
@@ -363,6 +372,7 @@ function afterOptions(name, spec, list, from) {
       break;
     }
     if (ASSIGN_LIKE.test(value)) continue; // env A=b cmd, sudo A=b cmd
+    if (value === '-' && name === 'env') continue; // `env - cmd` is `env -i cmd`
     const redirect = redirectWidth(list, at);
     if (redirect > 0) {
       at += redirect - 1;

@@ -1046,6 +1046,17 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   for (const [index, command] of parsed.commands.entries())
     if (command.sep === '&' && /[<>]$/.test(parsed.commands[index - 1]?.words.at(-1)?.value ?? ''))
       command.words = command.words.slice(1);
+  // Inside a `case … esac` body a command of one word is a pattern (`*`, `*-service`, `#*`), which
+  // names no program: its glob characters are not a computed program. A `$` is never excused.
+  let caseDepth = 0;
+  const patterns = parsed.commands.map(({ words }) => {
+    if (words[0]?.value === 'esac') caseDepth = Math.max(0, caseDepth - 1);
+    const pattern =
+      caseDepth > 0 && words.length === 1 && !words[0].opaque && !words[0].value.includes('$');
+    if (words[0]?.value === 'case') caseDepth += 1;
+    return pattern;
+  });
+  const isPattern = (index) => patterns[index];
   const vars = new Map();
   const outputs = new Map(); // variable -> the one command substitution it was assigned from
   // Every place a name is written to (`x=`, `x+=`, `read x`, `for x in`): not after `$`/`{`.
@@ -1078,7 +1089,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   // `declare -n`) could have set the variable.
   // FU-150 F2: and an arithmetic assignment whose target name is computed (`(( $n = 5 ))`).
   const provenanceBroken =
-    parsed.commands.some(({ words }) => dynamicWriter(words)) ||
+    parsed.commands.some(({ words }, index) => !isPattern(index) && dynamicWriter(words)) ||
     /\(\([^)]*[$`][^)]*(?<![=!<>])=(?!=)/.test(src);
   let open = 0;
   const nesting = parsed.commands.map(({ words }) => {
@@ -1155,9 +1166,10 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     const problem = (text) => errors.push(`${where}: ${text}`);
     const at = words.findIndex(({ value }) => /(^|\/)docker(-compose)?$/.test(value));
     // PR #805 r2 F1: stages that turn text into commands keep what they carry or refuse it.
-    const staged = parsed.arrays.has(command.group)
-      ? {}
-      : textStage(command.words, command.input, { files: ctx.sourced, self: ctx.self });
+    const staged =
+      parsed.arrays.has(command.group) || isPattern(position)
+        ? {}
+        : textStage(command.words, command.input, { files: ctx.sourced, self: ctx.self });
     if (staged.problem) problem(staged.problem);
     for (const script of staged.scripts ?? [])
       shellImages(

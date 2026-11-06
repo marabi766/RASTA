@@ -931,6 +931,13 @@ test('FU-150 F1: nested wrappers, other control words and unknown wrapper option
     '< /dev/null $c run alpine:latest',
     'timeout >/dev/null 5 $c run alpine:latest',
     'flock 2>/dev/null /tmp/l $c run alpine:latest',
+    // a program the shell expands from a pattern
+    '{docker,run} alpine:latest',
+    'docker* run alpine:latest',
+    '/usr/bin/doc?er run alpine:latest',
+    'env - $c run alpine:latest',
+    // a one-word command in a case body that is computed is not a pattern
+    'case x in a)\n  $c\n  ;;\nesac',
     // sourcing and trapping behind a control word or a wrapper
     'if true; then source tools/other.sh; fi',
     'env -u X . tools/other.sh',
@@ -968,6 +975,9 @@ test('FU-150 F1: wrappers and control words that run a literal program stay read
     'timeout 5 >/dev/null true',
     'true 2>&1 | cat',
     '[[ "$a" > "$b" ]] && true',
+    '[ -n x ] && [[ -n y ]] && true',
+    'case "$x" in\n  *-service | other) echo a ;;\n  #*) echo b ;;\n  *) echo c ;;\nesac',
+    'case "$x" in a | b) true ;; esac',
     // an assignment's value is not a command, whatever its last path component is called
     'X=dir/alias true',
     'export Y=dir/trap',
