@@ -62,6 +62,9 @@ it('real Temporal cancellation reaches a financial fetch through heartbeats with
       _name: unknown,
       effect: () => Promise<unknown>,
     ) => effect(),
+    // The hold's intent is recorded before the call (#836 r1 R2a).
+    openSagaCall: async () => 1,
+    confirmSagaCall: async () => undefined,
     markFailed,
   } as unknown as OrderService;
   const env = await TestWorkflowEnvironment.createTimeSkipping();

@@ -2502,6 +2502,7 @@ export const EXPECTED = {
       'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
       'ck_saga_unconfirmed_call_not_blank',
+      'ck_saga_unconfirmed_call_command_whole',
       'ck_saga_monitor_clock_single_row',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',

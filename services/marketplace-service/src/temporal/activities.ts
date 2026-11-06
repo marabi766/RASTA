@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { ApplicationFailure, Context, CancelledFailure } from '@temporalio/activity';
+import { ERROR_STATUS, type ErrorCode } from '@rasta/contracts';
 import {
   createSystemContext,
   isRastaError,
@@ -9,7 +10,7 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { OrderService } from '../order/order.service';
-import type { SagaActivity, SagaStep } from '../order/order.repository';
+import { SagaCallSuperseded, type SagaActivity, type SagaStep } from '../order/order.repository';
 import type { OrderStatus } from '../generated/prisma';
 import {
   fundsOf,
@@ -150,8 +151,15 @@ export interface DisputedObligation {
   economicDisputeId?: string | null;
 }
 
-/** The economic-service calls with a durable record until answered (FU-104, FU-145). */
-type RecordedCall = 'authoriseSettlement' | 'settle' | 'compensate' | 'resolveObligationDispute';
+/** The economic-service calls with a durable record until answered (FU-104, FU-145, #836 r1). */
+type RecordedCall =
+  'createObligation' | 'authoriseSettlement' | 'settle' | 'compensate' | 'resolveObligationDispute';
+
+/** A call record as one attempt of one scheduled command opened it (#836 r1 R1). */
+interface Opening {
+  command: SagaStep;
+  generation: number;
+}
 
 /** What `authoriseSettlement` answers. Undefined: authorised. */
 export type AuthorisationResult = DisputedObligation | undefined;
@@ -231,30 +239,49 @@ export function createActivities(deps: ActivityDependencies) {
    * that attempt's own answer. It outlives the order's status: a dispute raised
    * on an order a failed settlement left RECEIPT_CONFIRMED pauses settlement,
    * and confirms nothing about the command already sent (#792 r2 F2).
+   *
+   * Bound to the scheduled command (#836 r1 R1): an attempt of a command older
+   * than the record's owner is refused here, before it calls, and fails for
+   * good — the saga has moved past it, and its answer, a step record's cached
+   * one included, says nothing about the newer command's call.
    */
-  const openCall = (orderId: string, operation: RecordedCall, subject: string): Promise<number> =>
-    asSystemFor(orderId, (order) =>
-      deps.orders.openSagaCall(
-        { id: order.id, organizationId: order.buyerOrganizationId },
-        operation,
-        subject,
-      ),
-    );
+  const openCall = (
+    orderId: string,
+    operation: RecordedCall,
+    subject: string,
+  ): Promise<Opening> => {
+    const command = currentStep();
+    return asSystemFor(orderId, async (order) => {
+      try {
+        const generation = await deps.orders.openSagaCall(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          operation,
+          subject,
+          command,
+        );
+        return { command, generation };
+      } catch (error) {
+        if (!(error instanceof SagaCallSuperseded)) throw error;
+        logger.warn(error.message);
+        throw ApplicationFailure.nonRetryable(error.message, 'SAGA_CALL_SUPERSEDED');
+      }
+    });
+  };
   const confirmCall = (
     orderId: string,
     operation: RecordedCall,
     subject: string,
-    generation: number,
+    opening: Opening,
   ): Promise<void> =>
     asSystemFor(orderId, (order) =>
       deps.orders.confirmSagaCall(
         { id: order.id, organizationId: order.buyerOrganizationId },
         operation,
         subject,
-        generation,
+        opening,
       ),
     );
-  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
+  const openRelease = (orderId: string, disputeId: string): Promise<Opening> =>
     openCall(orderId, 'resolveObligationDispute', disputeId);
 
   /**
@@ -331,6 +358,12 @@ export function createActivities(deps: ActivityDependencies) {
      * the workflow's recovery (`findObligation`) names the status and stops.
      */
     async createObligation(orderId: string): Promise<HeldResult> {
+      // The hold's intent, keyed by the order, before anything is sent (#836 r1
+      // R2): a create that times out may commit after the saga stopped looking,
+      // so only its own answer, a refusal proving it held nothing, or a lookup
+      // that finds the obligation (`findObligation`) ends it. An empty lookup
+      // never does: a commit still in flight is invisible to it.
+      const opening = await openCall(orderId, 'createObligation', orderId);
       const held = await economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
           // A retry after the call succeeded but the recording did not. The
@@ -338,12 +371,25 @@ export function createActivities(deps: ActivityDependencies) {
           return { transactionId: order.economicTransactionId };
         }
 
-        const transaction = await deps.economic.createObligation({
-          ...obligationTermsOf(order),
-          correlationId: order.correlationId,
-        });
-        return { transactionId: transaction.id };
+        try {
+          const transaction = await deps.economic.createObligation({
+            ...obligationTermsOf(order),
+            correlationId: order.correlationId,
+          });
+          return { transactionId: transaction.id };
+        } catch (refusal) {
+          if (heldNothing(refusal)) {
+            await deps.orders.confirmSagaCall(
+              { id: order.id, organizationId: order.buyerOrganizationId },
+              'createObligation',
+              order.id,
+              opening,
+            );
+          }
+          throw refusal;
+        }
       });
+      await confirmCall(orderId, 'createObligation', orderId, opening);
       await asSystemFor(orderId, async (order) => {
         const now = await deps.economic.readObligation({
           orderId: order.id,
@@ -405,6 +451,14 @@ export function createActivities(deps: ActivityDependencies) {
           const terms = obligationTermsOf(order);
           const own = found.find((transaction) => termsDiffer(terms, transaction).length === 0);
           if (own) {
+            // The order's own obligation exists, whatever its status: no create
+            // for this order is in doubt any more (#836 r1 R2). A row on other
+            // terms, or none, proves nothing of the order's own create.
+            await deps.orders.confirmSagaCallsOn(
+              { id: order.id, organizationId: order.buyerOrganizationId },
+              ['createObligation'],
+              order.id,
+            );
             const funds = fundsOf(own.status);
             if (funds === 'HELD') return { transactionId: own.id };
             logger.error(
@@ -464,7 +518,7 @@ export function createActivities(deps: ActivityDependencies) {
     ): Promise<AuthorisationResult> {
       // Either answer is economic-service's: authorised, or disputed since this
       // order's own authorisation. A refusal or no answer leaves the record open.
-      const generation = await openCall(orderId, 'authoriseSettlement', transactionId);
+      const opening = await openCall(orderId, 'authoriseSettlement', transactionId);
       const authorisation = await economicStep<AuthorisationResult>(
         orderId,
         'authoriseSettlement',
@@ -506,7 +560,7 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
-      await confirmCall(orderId, 'authoriseSettlement', transactionId, generation);
+      await confirmCall(orderId, 'authoriseSettlement', transactionId, opening);
       return authorisation;
     },
 
@@ -526,7 +580,7 @@ export function createActivities(deps: ActivityDependencies) {
     ): Promise<SettledResult | DisputedObligation> {
       // An attempt that gets no answer leaves the record open after the saga
       // gives up (SETTLEMENT_EXHAUSTED), whatever the order's status becomes.
-      const generation = await openCall(orderId, 'settle', transactionId);
+      const opening = await openCall(orderId, 'settle', transactionId);
       const settled = await economicStep<SettledResult | DisputedObligation>(
         orderId,
         'settle',
@@ -565,7 +619,7 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
-      await confirmCall(orderId, 'settle', transactionId, generation);
+      await confirmCall(orderId, 'settle', transactionId, opening);
       return settled;
     },
 
@@ -604,7 +658,7 @@ export function createActivities(deps: ActivityDependencies) {
      * compensation entirely.
      */
     async compensate(orderId: string, transactionId: string, reason: string): Promise<void> {
-      const generation = await openCall(orderId, 'compensate', transactionId);
+      const opening = await openCall(orderId, 'compensate', transactionId);
       await economicStep(
         orderId,
         'compensate',
@@ -625,7 +679,7 @@ export function createActivities(deps: ActivityDependencies) {
             transaction.status === 'REFUNDED' ? { result: undefined } : null,
         },
       );
-      await confirmCall(orderId, 'compensate', transactionId, generation);
+      await confirmCall(orderId, 'compensate', transactionId, opening);
       // REFUNDED is terminal: nothing of this obligation can settle any more, so
       // an authorisation or settlement left unanswered on it is answered now.
       await asSystemFor(orderId, (order) =>
@@ -708,7 +762,7 @@ export function createActivities(deps: ActivityDependencies) {
       resolution: string,
       economicDisputeId?: string,
     ): Promise<void> {
-      const generation = await openRelease(orderId, disputeId);
+      const opening = await openRelease(orderId, disputeId);
       await economicStep(
         orderId,
         'resolveObligationDispute',
@@ -750,7 +804,7 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
-      await confirmCall(orderId, 'resolveObligationDispute', disputeId, generation);
+      await confirmCall(orderId, 'resolveObligationDispute', disputeId, opening);
     },
 
     /**
@@ -814,6 +868,28 @@ function systemContext(organizationId: string | undefined, correlationId: string
  * retried, because the second attempt gets the same answer and only reports
  * the failure later.
  */
+/**
+ * economic-service refused the create outright, so it holds nothing under the
+ * order's key (#836 r1 R2): its own error body, a code it gives only before
+ * any effect, under that code's own status. economic-service claims the key in
+ * a committed row first, so an earlier attempt still in flight makes this one
+ * `CONFLICT`, and an earlier one that committed is replayed, never refused for
+ * its work. Not `NOT_FOUND`, `FORBIDDEN` or `TENANT_MISMATCH`: the replay guard
+ * answers those for a key that did commit, to a caller who lost access since
+ * (economic-service `shared/idempotency.ts`). Anything else — no answer, a
+ * conflict, a reused key, an unknown code or status — leaves the intent open.
+ */
+function heldNothing(error: unknown): boolean {
+  if (!isRastaError(error) || !CREATE_REFUSALS.has(error.code)) return false;
+  return error.internalContext?.status === ERROR_STATUS[error.code];
+}
+
+const CREATE_REFUSALS = new Set<ErrorCode>([
+  'INSUFFICIENT_BALANCE',
+  'BUSINESS_RULE_VIOLATION',
+  'VALIDATION_FAILED',
+]);
+
 /**
  * economic-service refused the command for the transaction's current state —
  * the refusal its state machine gives (`nextStatus`), and the only one a

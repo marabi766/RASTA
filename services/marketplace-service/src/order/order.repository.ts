@@ -265,15 +265,26 @@ export class OrderRepository {
   }
 
   /**
-   * A saga call to economic-service is about to be made (FU-104). Every attempt
-   * opens it again, whatever an earlier one confirmed: only this attempt's outcome
-   * says anything about the funds now (#769 r1 F3). A false open row from a late attempt
-   * is an operator's to close; a closed row over a held dispute is silent.
+   * A saga call to economic-service is about to be made (FU-104), by the
+   * scheduled command `command` (#836 r1 R1). One statement, under the row's
+   * lock, decides the whole opening, so a confirmation racing it lands wholly
+   * before (the episode restarts) or after (it confirms an earlier generation,
+   * which closes nothing):
    *
-   * The row's `opened_at` is when its episode began: kept while the row stays
-   * open, however many attempts follow, so a retry never makes unconfirmed money
-   * younger; restarted only when a confirmed call is made again, a new command
-   * (#792 r2 F2).
+   * - the record names the command that owns it and when Temporal scheduled it.
+   *   The owner, or a command scheduled strictly later, opens it: a new
+   *   generation, which only this opening's own answer confirms. Every attempt
+   *   opens it again, whatever an earlier one confirmed: only this attempt's
+   *   outcome says anything about the funds now (#769 r1 F3);
+   * - any other command, scheduled earlier or not provably later, is refused
+   *   (`SagaCallSuperseded`) before it calls: the saga has moved past it, so its
+   *   answer — a step record's cached one included — must not end the episode
+   *   of a newer command (#836 r1 R1). A record no command owns yet (opened
+   *   before this release) is taken by the first command that opens it;
+   * - `opened_at` is when the episode began: kept while the record stays open,
+   *   however many attempts or commands follow, so unconfirmed money never
+   *   grows younger; restarted only when a confirmed record is opened again,
+   *   a new call (#792 r2 F2).
    *
    * @returns the generation this attempt confirms with.
    */
@@ -282,36 +293,42 @@ export class OrderRepository {
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
+    command: SagaStep,
   ): Promise<number> {
-    const key = { organizationId: order.organizationId, orderId: order.id, operation, subject };
-    const { generation } = await runUnscoped(
+    const scheduledAt = command.scheduledAt.toISOString();
+    const [opened] = await runUnscoped(
       'a saga step records its call on the order it drives, under its tenant',
-      async () => {
-        await client.sagaUnconfirmedCall.updateMany({
-          where: { ...key, confirmedAt: { not: null } },
-          data: { openedAt: new Date() },
-        });
-        return client.sagaUnconfirmedCall.upsert({
-          where: { organizationId_orderId_operation_subject: key },
-          create: key,
-          update: { confirmedAt: null, generation: { increment: 1 } },
-          select: { generation: true },
-        });
-      },
+      () => client.$queryRaw<{ generation: number }[]>`
+        INSERT INTO saga_unconfirmed_call AS c
+          (organization_id, order_id, operation, subject, command, command_scheduled_at)
+        VALUES (${order.organizationId}, ${order.id}, ${operation}, ${subject}, ${command.key},
+          ${scheduledAt}::timestamptz)
+        ON CONFLICT (organization_id, order_id, operation, subject) DO UPDATE SET
+          opened_at = CASE WHEN c.confirmed_at IS NULL THEN c.opened_at ELSE CURRENT_TIMESTAMP END,
+          confirmed_at = NULL,
+          generation = c.generation + 1,
+          command = EXCLUDED.command,
+          command_scheduled_at = EXCLUDED.command_scheduled_at
+        WHERE c.command IS NULL OR c.command = EXCLUDED.command
+          OR c.command_scheduled_at < EXCLUDED.command_scheduled_at
+        RETURNING generation
+      `,
     );
-    return generation;
+    if (!opened) throw new SagaCallSuperseded(order.id, operation, command.key);
+    return opened.generation;
   }
 
   /**
-   * economic-service has confirmed that call (FU-104). Only the opening's own: an
-   * attempt overtaken by a newer one says nothing about the newer one's outcome.
+   * economic-service has answered that call (FU-104): only the opening's own
+   * generation, of the command that opened it. An attempt overtaken by a newer
+   * opening says nothing about the newer one's outcome.
    */
   async confirmSagaCall(
     client: ExtendedPrismaClient,
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
-    generation: number,
+    opening: { command: SagaStep; generation: number },
   ): Promise<void> {
     await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
       client.sagaUnconfirmedCall.updateMany({
@@ -320,7 +337,8 @@ export class OrderRepository {
           orderId: order.id,
           operation,
           subject,
-          generation,
+          command: opening.command.key,
+          generation: opening.generation,
           confirmedAt: null,
         },
         data: { confirmedAt: new Date() },
@@ -329,9 +347,11 @@ export class OrderRepository {
   }
 
   /**
-   * economic-service has refunded the obligation `subject` (#792 r2 F2): REFUNDED
-   * is terminal there, so no call of `operations` on it can still have moved
-   * money. Closes every open row of theirs on it, whatever its generation.
+   * economic-service has shown a state of `subject` no call of `operations` can
+   * change any more, so none of them is in doubt, whichever command made it:
+   * the obligation REFUNDED, which is terminal (#792 r2 F2), or the order's own
+   * obligation found, which a create's late commit cannot duplicate (#836 r1
+   * R2). Closes every open row of theirs on it, whatever its generation or owner.
    */
   async confirmSagaCallsOn(
     client: ExtendedPrismaClient,
@@ -428,6 +448,21 @@ export class OrderRepository {
  * is not. Restarts and resets get a new run id. Continue-As-New is safe because
  * checkpoints occur only with no activity in flight; no step spans two runs.
  */
+/**
+ * A scheduled command opened a call record another command scheduled later owns
+ * (#836 r1 R1): the saga has moved past it. Thrown before it calls
+ * economic-service, so it changes nothing there or here.
+ */
+export class SagaCallSuperseded extends Error {
+  constructor(orderId: string, operation: string, command: string) {
+    super(
+      `Saga command ${command} may not make ${operation} of order ${orderId}: ` +
+        'a command scheduled later owns its call record',
+    );
+    this.name = 'SagaCallSuperseded';
+  }
+}
+
 export interface SagaStep {
   key: string;
   /**

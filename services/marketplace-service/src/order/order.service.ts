@@ -1001,6 +1001,7 @@ export class OrderService {
           { id: order.id, organizationId: order.organizationId },
           'resolveObligationDispute',
           disputeId,
+          saga,
         );
         await runUnscoped(
           'the saga records the dispute on an order on behalf of neither party',
@@ -1232,8 +1233,9 @@ export class OrderService {
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
+    command: SagaStep,
   ): Promise<number> {
-    return this.repository.openSagaCall(this.prisma.client, order, operation, subject);
+    return this.repository.openSagaCall(this.prisma.client, order, operation, subject, command);
   }
 
   /** See `OrderRepository.confirmSagaCall`. */
@@ -1241,15 +1243,9 @@ export class OrderService {
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
-    generation: number,
+    opening: { command: SagaStep; generation: number },
   ): Promise<void> {
-    return this.repository.confirmSagaCall(
-      this.prisma.client,
-      order,
-      operation,
-      subject,
-      generation,
-    );
+    return this.repository.confirmSagaCall(this.prisma.client, order, operation, subject, opening);
   }
 
   /** See `OrderRepository.confirmSagaCallsOn`. */

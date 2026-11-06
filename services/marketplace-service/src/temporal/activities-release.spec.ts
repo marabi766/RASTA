@@ -35,6 +35,7 @@ it('counts each round from a series that starts at zero, and logs the order', as
  * The order of the calls is the point, so one log records them all.
  */
 describe('resolveObligationDispute on record', () => {
+  const STEP = { key: 'k', scheduledAt: new Date('2026-11-06T00:00:00.000Z') };
   function build(options: { resolveDispute: () => Promise<unknown>; recorded?: boolean }) {
     const log: string[] = [];
     const orders = {
@@ -66,18 +67,16 @@ describe('resolveObligationDispute on record', () => {
     const activities = createActivities({
       orders: orders as unknown as OrderService,
       economic: economic as unknown as EconomicClient,
-      currentStep: () => ({ key: 'k', scheduledAt: new Date() }),
+      currentStep: () => STEP,
     });
     const release = () => activities.resolveObligationDispute('ORD_R', 'TX', 'DSP', 'SETTLE');
     return { log, release, activities };
   }
-  const args = JSON.stringify([
-    { id: 'ORD_R', organizationId: 'ORG_B' },
-    'resolveObligationDispute',
-    'DSP',
-  ]);
-  // With the generation this attempt's own opening was given.
-  const confirmArgs = `${args.slice(0, -1)},7]`;
+  const call = [{ id: 'ORD_R', organizationId: 'ORG_B' }, 'resolveObligationDispute', 'DSP'];
+  // By the scheduled command that runs (#836 r1 R1).
+  const args = JSON.stringify([...call, STEP]);
+  // With the command and the generation its own opening was given.
+  const confirmArgs = JSON.stringify([...call, { command: STEP, generation: 7 }]);
 
   it('opens before the call and confirms after it, under the buying tenant', async () => {
     const { log, release } = build({ resolveDispute: async () => ({}) });

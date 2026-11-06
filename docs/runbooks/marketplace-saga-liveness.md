@@ -25,11 +25,19 @@ An **episode** is one of:
 - an open row of `saga_unconfirmed_call` (#769): a call to economic-service nothing has confirmed. One row per dispute, so
   a second dispute, a lost `saga_step` record or step times written by a clock that ran back cannot hide the first
   dispute's release. Counted whatever the order's status, terminal included. The one row not counted: a dispute still
-  `OPEN` on an order still `DISPUTED` (the operator decides; nothing is due yet). Recorded calls (FU-104, FU-145): the
-  release, and every authorisation (`authoriseSettlement`), settlement (`settle`) and refund (`compensate`), each
-  opened before the call and closed only by that attempt's own answer. A buyer's dispute and an operator's decision do
-  not close one: they pause settlement and confirm nothing about a command already sent (#792 r2 F2). A confirmed
-  refund also closes the authorisation and settlement rows of the same obligation (`REFUNDED` is terminal).
+  `OPEN` on an order still `DISPUTED` (the operator decides; nothing is due yet). Recorded calls (FU-104, FU-145,
+  #836 r1): the hold (`createObligation`, `subject` the order), the release, and every authorisation
+  (`authoriseSettlement`), settlement (`settle`) and refund (`compensate`), each opened before the call and closed only
+  by that attempt's own answer. A buyer's dispute and an operator's decision do not close one: they pause settlement and
+  confirm nothing about a command already sent (#792 r2 F2). A confirmed refund also closes the authorisation and
+  settlement rows of the same obligation (`REFUNDED` is terminal); a lookup that finds the order's own obligation closes
+  its hold row, an empty one never does (a late commit is invisible to it); a refusal that proves nothing was held
+  (`INSUFFICIENT_BALANCE`, `BUSINESS_RULE_VIOLATION`, `VALIDATION_FAILED` under their own status) closes it too.
+- each row names the **scheduled command** that owns it (`command`, `command_scheduled_at`: the saga step key and when
+  Temporal scheduled it, #836 r1 R1). Only the owner or a command scheduled later opens it again; an attempt of an older
+  command is refused before it calls (`SAGA_CALL_SUPERSEDED`, non-retryable: the saga has moved past it), so its
+  answer, a cached one included, cannot end a newer command's episode. The opening is one statement under the row's
+  lock: a confirmation racing it lands wholly before (a new episode, aged from now) or after (it closes nothing).
 - an order in a saga-custody status (`SAGA_CUSTODY` in `state-machine.ts`).
 
 | `reason`            | The episode is …                                                                                          | Aged from                                                                      | The saga owes …                            |
@@ -39,7 +47,7 @@ An **episode** is one of:
 | `SETTLING`          | an order in a settlement attempt                                                                          | the same                                                                       | the settlement's outcome                   |
 | `CANCELLING`        | an order cancelled, or refunded by a dispute decision                                                     | the same; `PENDING → CANCELLING` does not reset it                             | the refund (`compensate`)                  |
 | `DISPUTE_RELEASE`   | an open `resolveObligationDispute` row: a dispute economic-service was told of, its release not confirmed | the dispute's decision; a row whose dispute row is missing, its opening        | the release (`resolveObligationDispute`)   |
-| `UNCONFIRMED_CALL`  | an open `authoriseSettlement`, `settle` or `compensate` row (`subject` is the obligation), or any other   | its first opening while open; a call confirmed and made again, its new opening | that call's outcome                        |
+| `UNCONFIRMED_CALL`  | an open call row: `createObligation`, `authoriseSettlement`, `settle`, `compensate`, or any other         | its first opening while open; a call confirmed and made again, its new opening | that call's outcome                        |
 
 One order can be two episodes at once (a release owed and the settlement after it): each is counted. A sample that
 fails, that does not answer within its own deadline (6 s), or that is older than 26 s by the process's monotonic
@@ -140,6 +148,13 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
    settlement answers a settlement (record it on the order before closing: the money moved); `REFUNDED` answers all
    three. Anything else is still unanswered: the saga's next attempt, or a person's decision (`docs/08` § 8.4), ends it.
    Close a row only with an answer, the same way and with the `generation` you read.
+7. `UNCONFIRMED_CALL` `createObligation` (`subject` is the order) on an order `FAILED` or `CANCELLED`: the hold was
+   sent, never answered, and a lookup found nothing — economic-service may have committed it since (its transaction
+   runs up to 60 s, the call's deadline is 10 s). Look up the order's obligation at economic-service. None, and the
+   create's idempotency key past its retention (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`) plus a margin: nothing was held, close
+   the row. Found `HELD`: the buyer's money is held for an order that ended: refund it by hand (§ 8.4) before closing.
+   Until the workflow's own exits wait for that proof (#812), every such order is this step; once they do, they close
+   the row themselves (FU-161).
 
 ## Known limits
 
@@ -165,7 +180,14 @@ receipt_confirmed_at IS NOT NULL AND status IN ('RECEIPT_CONFIRMED', 'SETTLING',
   reference still for Δ, so an episode not yet over the hour waits up to Δ longer. Keep both on NTP; stamping starts
   with the database's clock is the follow-up. An application clock behind starts episodes early (alerts sooner).
 - A refusal before anything is sent (an order with no recorded receipt) also leaves its authorisation row open: fail
-  closed, the operator reconciles it.
+  closed, the operator reconciles it. So does every refusal of an authorisation, settlement or refund, and a create
+  refused `NOT_FOUND`, `FORBIDDEN`, `TENANT_MISMATCH` or `CONFLICT` (economic-service's replay guard answers the first
+  three for a key that did commit).
+- Rows opened before #836 name no command: the first command to open one takes it, as every opening did before.
+- Command order is Temporal's scheduling time of each activity (`scheduledTimestampMs`). Two commands of one operation
+  on one subject are never scheduled in the same millisecond (the saga awaits each); a tie, or a Temporal clock that ran
+  back between them, refuses the later one (`SAGA_CALL_SUPERSEDED`) before it calls: the saga takes it as a failed step
+  and the row stays the earlier command's — fail closed, never an episode cleared.
 - A saga that replayed past its resume point without `DISPUTE_RESUME_PATCH` releases only at its next wake-up as
   `RECEIPT_CONFIRMED`/`CANCELLING`; until then its row stays open and counts as `DISPUTE_RELEASE`.
 - The probe uses `DescribeTaskQueue` without enhanced mode; if Temporal ever lists only one partition's pollers, a live

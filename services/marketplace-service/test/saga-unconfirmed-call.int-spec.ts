@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SagaStartStore } from '../src/temporal/saga-start.store';
-import { asActor, cleanup, key, newPrisma, publishOffer, tenants, wire } from './helpers';
+import type { SagaStep } from '../src/order/order.repository';
+import { asActor, cleanup, key, newPrisma, publishOffer, sagaStep, tenants, wire } from './helpers';
 
 /** The durable record of unconfirmed economic calls (FU-104), against the real database. */
 describe('saga_unconfirmed_call (PostgreSQL)', () => {
@@ -13,6 +14,22 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
   const org = tenants();
   const other = tenants();
   const OPERATION = 'resolveObligationDispute';
+  /** The one scheduled command the record-level cases open and confirm as. */
+  const COMMAND = sagaStep();
+  type Order = { id: string; organizationId: string };
+  const openCall = (order: Order, operation: string, subject: string, by: SagaStep = COMMAND) =>
+    wiring.orders.openSagaCall(order, operation as typeof OPERATION, subject, by);
+  const confirmCall = (
+    order: Order,
+    operation: string,
+    subject: string,
+    generation: number,
+    by: SagaStep = COMMAND,
+  ) =>
+    wiring.orders.confirmSagaCall(order, operation as typeof OPERATION, subject, {
+      command: by,
+      generation,
+    });
 
   async function place(buyer: string, supplier: string) {
     const { offerId } = await publishOffer(wiring, supplier);
@@ -35,8 +52,8 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
     const first = await place(org.buyer, org.supplier);
     const second = await place(other.buyer, other.supplier);
 
-    const firstCall = await wiring.orders.openSagaCall(first, OPERATION, 'DSP_1');
-    const secondCall = await wiring.orders.openSagaCall(second, OPERATION, 'DSP_2');
+    const firstCall = await openCall(first, OPERATION, 'DSP_1');
+    const secondCall = await openCall(second, OPERATION, 'DSP_2');
     expect(await open(first)).toEqual([
       {
         organizationId: first.organizationId,
@@ -49,17 +66,17 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
     ]);
     expect(await open(second)).toMatchObject([{ organizationId: second.organizationId }]);
 
-    await wiring.orders.confirmSagaCall(first, OPERATION, 'DSP_1', firstCall);
+    await confirmCall(first, OPERATION, 'DSP_1', firstCall);
     expect(await open(first)).toEqual([]);
     expect(await open(second)).toHaveLength(1);
-    await wiring.orders.confirmSagaCall(second, OPERATION, 'DSP_2', secondCall);
+    await confirmCall(second, OPERATION, 'DSP_2', secondCall);
     expect(await open(second)).toEqual([]);
   });
 
   it('lists the oldest first and says when it stopped at the limit', async () => {
     const order = await place(org.buyer, org.supplier);
     for (const subject of ['DSP_L1', 'DSP_L2', 'DSP_L3']) {
-      await wiring.orders.openSagaCall(order, OPERATION, subject);
+      await openCall(order, OPERATION, subject);
     }
     await runUnscoped('the test ages a row, so that the order is not the insert order', () =>
       prisma.client.sagaUnconfirmedCall.update({
@@ -91,25 +108,25 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
     );
 
     for (const call of await open(order)) {
-      await wiring.orders.confirmSagaCall(order, OPERATION, call.subject, call.generation);
+      await confirmCall(order, OPERATION, call.subject, call.generation);
     }
   });
 
   it('a later attempt opens it again; another dispute is its own (#769 r1 F3)', async () => {
     const order = await place(org.buyer, org.supplier);
 
-    const first = await wiring.orders.openSagaCall(order, OPERATION, 'DSP_A');
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_A', first);
+    const first = await openCall(order, OPERATION, 'DSP_A');
+    await confirmCall(order, OPERATION, 'DSP_A', first);
     expect(await open(order)).toEqual([]);
 
-    const second = await wiring.orders.openSagaCall(order, OPERATION, 'DSP_A');
+    const second = await openCall(order, OPERATION, 'DSP_A');
     expect(second).toBeGreaterThan(first);
     expect(await open(order)).toHaveLength(1);
 
-    const another = await wiring.orders.openSagaCall(order, OPERATION, 'DSP_B');
+    const another = await openCall(order, OPERATION, 'DSP_B');
     expect(await open(order)).toHaveLength(2);
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_A', second);
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_B', another);
+    await confirmCall(order, OPERATION, 'DSP_A', second);
+    await confirmCall(order, OPERATION, 'DSP_B', another);
     expect(await open(order)).toEqual([]);
   });
 
@@ -117,57 +134,107 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
     const order = await place(org.buyer, org.supplier);
 
     const generations = await Promise.all(
-      [1, 2, 3, 4].map(() => wiring.orders.openSagaCall(order, OPERATION, 'DSP_G')),
+      [1, 2, 3, 4].map(() => openCall(order, OPERATION, 'DSP_G')),
     );
     expect(new Set(generations).size).toBe(4);
     const newest = Math.max(...generations);
 
     for (const stale of generations.filter((generation) => generation !== newest)) {
-      await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_G', stale);
+      await confirmCall(order, OPERATION, 'DSP_G', stale);
     }
     expect(await open(order)).toMatchObject([{ generation: newest }]);
 
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_G', newest);
+    await confirmCall(order, OPERATION, 'DSP_G', newest);
+    expect(await open(order)).toEqual([]);
+  });
+
+  it('belongs to its scheduled command: an older one is refused and writes nothing (#836 r1 R1)', async () => {
+    const order = await place(org.buyer, org.supplier);
+    const row = () =>
+      runUnscoped('the test reads the record', () =>
+        prisma.client.sagaUnconfirmedCall.findFirstOrThrow({ where: { orderId: order.id } }),
+      );
+    const older = sagaStep();
+    const owner = sagaStep();
+    const first = await openCall(order, OPERATION, 'DSP_O', owner);
+    const opened = await row();
+
+    // Older, or scheduled in the same instant by another command: refused, nothing moves.
+    for (const command of [older, { key: `${owner.key}-other`, scheduledAt: owner.scheduledAt }]) {
+      await expect(openCall(order, OPERATION, 'DSP_O', command)).rejects.toThrow(
+        /a command scheduled later owns/,
+      );
+      expect(await row()).toEqual(opened);
+    }
+    // Another command's confirmation of the owner's generation closes nothing.
+    await confirmCall(order, OPERATION, 'DSP_O', first, older);
+    expect(await open(order)).toHaveLength(1);
+
+    // A later command takes it over, keeping its age while it stays open.
+    const later = sagaStep();
+    const taken = await openCall(order, OPERATION, 'DSP_O', later);
+    expect(await row()).toMatchObject({
+      command: later.key,
+      commandScheduledAt: later.scheduledAt,
+      generation: taken,
+      openedAt: opened.openedAt,
+    });
+    await confirmCall(order, OPERATION, 'DSP_O', first, owner);
+    expect(await open(order)).toHaveLength(1);
+    await confirmCall(order, OPERATION, 'DSP_O', taken, later);
+    expect(await open(order)).toEqual([]);
+  });
+
+  it('a record opened before commands were recorded is taken by the first command (#836 r1 R1)', async () => {
+    const order = await place(org.buyer, org.supplier);
+    await runUnscoped('the test writes a record as the previous release did', () =>
+      prisma.client.sagaUnconfirmedCall.create({
+        data: {
+          organizationId: order.organizationId,
+          orderId: order.id,
+          operation: OPERATION,
+          subject: 'DSP_P',
+        },
+      }),
+    );
+    const generation = await openCall(order, OPERATION, 'DSP_P', COMMAND);
+    expect(generation).toBe(2);
+    await confirmCall(order, OPERATION, 'DSP_P', generation);
     expect(await open(order)).toEqual([]);
   });
 
   it('confirming names the call: another subject, operation, order or tenant stays open', async () => {
     const order = await place(org.buyer, org.supplier);
     const sibling = await place(org.buyer, org.supplier);
-    const call = await wiring.orders.openSagaCall(order, OPERATION, 'DSP_X');
-    const siblingCall = await wiring.orders.openSagaCall(sibling, OPERATION, 'DSP_X');
-    const otherOperation = await wiring.orders.openSagaCall(order, 'disputeObligation', 'DSP_X');
+    const call = await openCall(order, OPERATION, 'DSP_X');
+    const siblingCall = await openCall(sibling, OPERATION, 'DSP_X');
+    const otherOperation = await openCall(order, 'disputeObligation', 'DSP_X');
     expect([call, otherOperation, siblingCall]).toEqual([call, call, call]);
 
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_Y', call);
-    await wiring.orders.confirmSagaCall(
-      { id: order.id, organizationId: other.buyer },
-      OPERATION,
-      'DSP_X',
-      call,
-    );
+    await confirmCall(order, OPERATION, 'DSP_Y', call);
+    await confirmCall({ id: order.id, organizationId: other.buyer }, OPERATION, 'DSP_X', call);
     expect(await open(order)).toHaveLength(2);
 
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_X', call);
+    await confirmCall(order, OPERATION, 'DSP_X', call);
     expect(await open(order)).toMatchObject([{ operation: 'disputeObligation' }]);
     expect(await open(sibling)).toHaveLength(1);
 
-    await wiring.orders.confirmSagaCall(order, 'disputeObligation', 'DSP_X', otherOperation);
-    await wiring.orders.confirmSagaCall(sibling, OPERATION, 'DSP_X', siblingCall);
+    await confirmCall(order, 'disputeObligation', 'DSP_X', otherOperation);
+    await confirmCall(sibling, OPERATION, 'DSP_X', siblingCall);
   });
 
   it('a confirmation repeated leaves the first one standing', async () => {
     const order = await place(org.buyer, org.supplier);
-    const call = await wiring.orders.openSagaCall(order, OPERATION, 'DSP_R');
+    const call = await openCall(order, OPERATION, 'DSP_R');
     const read = () =>
       runUnscoped('the test reads when it was confirmed', () =>
         prisma.client.sagaUnconfirmedCall.findFirstOrThrow({ where: { orderId: order.id } }),
       );
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_R', call);
+    await confirmCall(order, OPERATION, 'DSP_R', call);
     const first = await read();
     await new Promise((resolve) => setTimeout(resolve, 5));
 
-    await wiring.orders.confirmSagaCall(order, OPERATION, 'DSP_R', call);
+    await confirmCall(order, OPERATION, 'DSP_R', call);
 
     expect((await read()).confirmedAt).toEqual(first.confirmedAt);
   });
@@ -176,7 +243,7 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
     const order = await place(org.buyer, org.supplier);
 
     await expect(
-      wiring.orders.openSagaCall({ id: order.id, organizationId: other.buyer }, OPERATION, 'DSP_T'),
+      openCall({ id: order.id, organizationId: other.buyer }, OPERATION, 'DSP_T'),
     ).rejects.toThrow();
     const rows = await runUnscoped('the test reads what the refused write left', () =>
       prisma.client.sagaUnconfirmedCall.count({ where: { orderId: order.id } }),
@@ -365,9 +432,9 @@ describe('saga_unconfirmed_call (PostgreSQL)', () => {
       const closed = await decided('RESOLVED_REFUND', 'CANCELLING');
       const reopened = await decided('RESOLVED_REFUND', 'CANCELLING');
       await run();
-      const generation = await wiring.orders.openSagaCall(closed, OPERATION, closed.disputeId);
-      await wiring.orders.confirmSagaCall(closed, OPERATION, closed.disputeId, generation);
-      const newest = await wiring.orders.openSagaCall(reopened, OPERATION, reopened.disputeId);
+      const generation = await openCall(closed, OPERATION, closed.disputeId);
+      await confirmCall(closed, OPERATION, closed.disputeId, generation);
+      const newest = await openCall(reopened, OPERATION, reopened.disputeId);
 
       await run();
 

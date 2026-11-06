@@ -4,6 +4,8 @@ import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
 import { SagaStartStore } from '../src/temporal/saga-start.store';
 import type { EconomicClient } from '../src/economic/economic.client';
+import type { SagaStep } from '../src/order/order.repository';
+import { RastaError } from '@rasta/nest-common';
 import {
   asActor,
   cleanup,
@@ -357,8 +359,8 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
     await acts.markCancelled(orderId, 'no longer needed');
     const order = { id: orderId, organizationId: org.buyer };
     // A release whose dispute row is gone, on a finished order; another call.
-    await wiring.orders.openSagaCall(order, 'resolveObligationDispute', NO_DISPUTE);
-    await wiring.orders.openSagaCall(order, 'compensate' as never, 'refund');
+    await wiring.orders.openSagaCall(order, 'resolveObligationDispute', NO_DISPUTE, sagaStep());
+    await wiring.orders.openSagaCall(order, 'compensate' as never, 'refund', sagaStep());
     await age(orderId, 7000);
     const after = await read();
     expect(after.DISPUTE_RELEASE!.count).toBe(before.DISPUTE_RELEASE!.count + 1);
@@ -379,7 +381,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
 
     // Still DISPUTED, but a record with no dispute behind it: unknown, so counted.
     const order = { id: orderId, organizationId: org.buyer };
-    await wiring.orders.openSagaCall(order, 'resolveObligationDispute', NO_DISPUTE);
+    await wiring.orders.openSagaCall(order, 'resolveObligationDispute', NO_DISPUTE, sagaStep());
     expect((await read()).DISPUTE_RELEASE!.count).toBe(before.DISPUTE_RELEASE!.count + 1);
 
     // The dispute still open, the order no longer DISPUTED (moved by hand):
@@ -423,6 +425,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       { id: orderId, organizationId: org.buyer },
       'compensate' as never,
       'clock',
+      sagaStep(),
     );
     await unscoped(
       () => prisma.client.$executeRaw`UPDATE saga_unconfirmed_call
@@ -677,6 +680,379 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       await money.compensate(orderId, transactionId, 'no longer needed');
       await money.markCancelled(orderId, 'no longer needed');
       expect((await read()).UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count);
+    });
+  });
+  // #836 r1 R1: a call record belongs to the scheduled command that opened it
+  // last, not to the latest database opening. Every recorded operation, through
+  // the activities themselves: what the review executed.
+  describe('a call record is bound to its scheduled command (#836 r1 R1)', () => {
+    let step: SagaStep = sagaStep();
+    let answering = true;
+    const lost = () => new Error('economic-service did not answer (socket hang up)');
+    const answer = async <T>(value: T): Promise<T> => {
+      if (!answering) throw lost();
+      return value;
+    };
+    const transactionOf = new Map<string, string>();
+    const bound: OrderActivities = createActivities({
+      orders: wiring.orders,
+      economic: {
+        ...economic,
+        createObligation: () => answer({ id: `TXN_${ulid()}` }),
+        readObligation: async () => ({ status: 'HELD' }),
+        authoriseSettlement: () => answer(undefined),
+        settle: () =>
+          answer({
+            settlementId: `STL_${ulid()}`,
+            commissionAmountMinor: '0',
+            netAmountMinor: '0',
+          }),
+        refund: () => answer(undefined),
+        resolveDispute: () => answer(undefined),
+      } as unknown as EconomicClient,
+      currentStep: () => step,
+    });
+    afterEach(() => {
+      answering = true;
+    });
+
+    async function awaitingSettlement(): Promise<{ orderId: string; transactionId: string }> {
+      const { orderId, transactionId } = await held();
+      await asSupplier(() => wiring.orders.confirm(orderId));
+      await asSupplier(() => wiring.orders.fulfill(orderId, { trackingReference: 'TRK-R1' }));
+      await asBuyer(() => wiring.orders.confirmReceipt(orderId, {}));
+      return { orderId, transactionId };
+    }
+
+    /** Each recorded operation: an order it can be made on, its subject, the call. */
+    const operations: {
+      operation: string;
+      setup: () => Promise<{ orderId: string; subject: string }>;
+      call: (orderId: string) => Promise<unknown>;
+    }[] = [
+      {
+        operation: 'createObligation',
+        setup: async () => {
+          const orderId = await place();
+          return { orderId, subject: orderId };
+        },
+        call: (orderId) => bound.createObligation(orderId),
+      },
+      {
+        operation: 'authoriseSettlement',
+        setup: async () => {
+          const { orderId, transactionId } = await awaitingSettlement();
+          transactionOf.set(orderId, transactionId);
+          return { orderId, subject: transactionId };
+        },
+        call: (orderId) => bound.authoriseSettlement(orderId, transactionOf.get(orderId)!),
+      },
+      {
+        operation: 'settle',
+        setup: async () => {
+          const { orderId, transactionId } = await awaitingSettlement();
+          transactionOf.set(orderId, transactionId);
+          return { orderId, subject: transactionId };
+        },
+        call: (orderId) => bound.settle(orderId, transactionOf.get(orderId)!),
+      },
+      {
+        operation: 'compensate',
+        setup: async () => {
+          const { orderId, transactionId } = await held();
+          transactionOf.set(orderId, transactionId);
+          return { orderId, subject: transactionId };
+        },
+        call: (orderId) =>
+          bound.compensate(orderId, transactionOf.get(orderId)!, 'no longer needed'),
+      },
+      {
+        operation: 'resolveObligationDispute',
+        setup: async () => {
+          const { orderId, transactionId, disputeId } = await decided();
+          transactionOf.set(orderId, transactionId);
+          return { orderId, subject: disputeId };
+        },
+        call: async (orderId) => {
+          const disputeId = await disputeOf(orderId);
+          return bound.resolveObligationDispute(
+            orderId,
+            transactionOf.get(orderId)!,
+            disputeId,
+            settle.resolution,
+          );
+        },
+      },
+    ];
+
+    async function disputeOf(orderId: string): Promise<string> {
+      const [row] = await runUnscoped(
+        'the suite reads the dispute it decided',
+        () =>
+          prisma.client.$queryRaw<{ id: string }[]>`
+          SELECT id FROM order_dispute WHERE order_id = ${orderId} ORDER BY raised_at DESC LIMIT 1`,
+      );
+      return row!.id;
+    }
+
+    async function record(orderId: string, operation: string, subject: string) {
+      const [row] = await runUnscoped(
+        'the suite reads the call record it wrote',
+        () =>
+          prisma.client.$queryRaw<{ open: boolean; age: number; generation: number }[]>`
+          SELECT confirmed_at IS NULL AS open, generation,
+            EXTRACT(EPOCH FROM clock_timestamp() - opened_at)::float AS age
+          FROM saga_unconfirmed_call
+          WHERE order_id = ${orderId} AND operation = ${operation} AND subject = ${subject}`,
+      );
+      return row!;
+    }
+
+    it.each(operations)(
+      "$operation: an older command's late attempt, answered from its step record, leaves the newer command's call open",
+      async ({ operation, setup, call }) => {
+        const { orderId, subject } = await setup();
+        // The first scheduled command is answered; its answer is in its step record.
+        const first = sagaStep();
+        step = first;
+        await call(orderId);
+        // A newer command gets no answer.
+        const second = sagaStep();
+        step = second;
+        answering = false;
+        await expect(call(orderId)).rejects.toThrow(/did not answer/);
+        const unanswered = await record(orderId, operation, subject);
+        expect(unanswered.open).toBe(true);
+
+        // The first command's attempt that stalled before opening resumes now. Its
+        // step record holds an answer; it says nothing of the newer call, and is
+        // refused before it calls.
+        step = first;
+        const late = await call(orderId).then(
+          () => 'answered',
+          (error: unknown) => error,
+        );
+        expect(await record(orderId, operation, subject)).toMatchObject({
+          open: true,
+          generation: unanswered.generation,
+        });
+        expect(late).toEqual(
+          expect.objectContaining({
+            message: expect.stringMatching(/a command scheduled later owns/),
+          }),
+        );
+        // For good: retrying an attempt the saga has moved past cannot help.
+        expect(late).toMatchObject({ type: 'SAGA_CALL_SUPERSEDED', nonRetryable: true });
+
+        // Only the newer command's own answer ends it.
+        step = second;
+        answering = true;
+        await call(orderId);
+        expect((await record(orderId, operation, subject)).open).toBe(false);
+      },
+    );
+
+    it.each(operations)(
+      '$operation: a confirmation racing an opening cannot leave the new episode with the old age',
+      async ({ operation, setup, call }) => {
+        const { orderId, subject } = await setup();
+        // An earlier command's call, unanswered for two hours.
+        step = sagaStep();
+        answering = false;
+        await expect(call(orderId)).rejects.toThrow(/did not answer/);
+        const earlier = await record(orderId, operation, subject);
+        await runUnscoped(
+          'the suite ages the call record',
+          () =>
+            prisma.client.$executeRaw`UPDATE saga_unconfirmed_call
+            SET opened_at = opened_at - interval '7200 seconds'
+            WHERE order_id = ${orderId} AND operation = ${operation} AND subject = ${subject}`,
+        );
+
+        // A newer command opens while the earlier one's late answer lands.
+        step = sagaStep();
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let locked: () => void = () => undefined;
+        const holding = new Promise<void>((resolve) => (locked = resolve));
+        const holder = runUnscoped('a late confirmation holding the call record', () =>
+          prisma.client.$transaction(
+            async (tx) => {
+              await tx.$queryRaw`SELECT 1 FROM saga_unconfirmed_call
+                WHERE order_id = ${orderId} AND operation = ${operation} AND subject = ${subject}
+                FOR UPDATE`;
+              locked();
+              await gate;
+              // The earlier command's own answer, confirming its own generation.
+              await tx.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
+                WHERE order_id = ${orderId} AND operation = ${operation} AND subject = ${subject}
+                  AND generation = ${earlier.generation} AND confirmed_at IS NULL`;
+            },
+            { timeout: 30_000 },
+          ),
+        );
+        await holding;
+        const opening = call(orderId).then(
+          () => 'answered',
+          (error: unknown) => error,
+        );
+        let waited = false;
+        try {
+          for (let elapsed = 0; elapsed <= 10_000 && !waited; elapsed += 20) {
+            const [row] = await runUnscoped(
+              'the suite reads lock waits',
+              () =>
+                prisma.client.$queryRaw<{ n: number }[]>`
+                SELECT count(*)::int AS n FROM pg_stat_activity
+                 WHERE wait_event_type = 'Lock' AND query LIKE '%saga_unconfirmed_call%'
+                   AND query NOT LIKE '%pg_stat_activity%'`,
+            );
+            waited = (row?.n ?? 0) > 0;
+            if (!waited) await new Promise((settle) => setTimeout(settle, 20));
+          }
+        } finally {
+          release();
+          await holder;
+        }
+        expect(waited).toBe(true);
+        // The newer command's call gets no answer either: its episode is new.
+        expect(await opening).toEqual(
+          expect.objectContaining({ message: expect.stringMatching(/did not answer/) }),
+        );
+        const newer = await record(orderId, operation, subject);
+        expect(newer.open).toBe(true);
+        expect(newer.age).toBeLessThan(600);
+      },
+    );
+  });
+
+  // #836 r1 R2a: the hold's intent is on record before anything is sent, and an
+  // empty lookup cannot end it: a create still in flight may commit after the
+  // saga failed or cancelled the order (R2b, the workflow's exits, is #812).
+  describe('the hold-creation intent (#836 r1 R2a)', () => {
+    let creating: () => Promise<{ id: string }> = async () => ({ id: `TXN_${ulid()}` });
+    let found: (orderId: string) => unknown[] = () => [];
+    const hold: OrderActivities = createActivities({
+      orders: wiring.orders,
+      economic: {
+        ...economic,
+        createObligation: () => creating(),
+        readObligation: async () => ({ status: 'HELD' }),
+        findObligations: async ({ orderId }: { orderId: string }) => found(orderId),
+      } as unknown as EconomicClient,
+      currentStep: sagaStep,
+    });
+    const lost = () => new Error('economic-service did not answer (socket hang up)');
+    const refused = (code: string, status: number) =>
+      new RastaError(code as never, 'refused', { internalContext: { operation: 'x', status } });
+    const intentOpen = async (orderId: string) => {
+      const [row] = await runUnscoped(
+        'the suite reads the hold intent',
+        () =>
+          prisma.client.$queryRaw<{ open: boolean }[]>`
+          SELECT confirmed_at IS NULL AS open FROM saga_unconfirmed_call
+          WHERE order_id = ${orderId} AND operation = 'createObligation' AND subject = ${orderId}`,
+      );
+      return row?.open ?? null;
+    };
+    /** The order's own obligation as economic-service lists it. */
+    const own = (orderId: string, status = 'HELD') => ({
+      id: `TXN_${ulid()}`,
+      organizationId: org.buyer,
+      counterpartyOrganizationId: org.supplier,
+      grossAmountMinor: '',
+      currency: '',
+      transactionType: 'MARKETPLACE_ORDER',
+      sourceType: 'ORDER',
+      sourceReference: orderId,
+      status,
+    });
+
+    it('a timed-out create stays an alerting episode through an empty lookup and a FAILED order', async () => {
+      const before = await read();
+      const orderId = await place();
+      creating = async () => {
+        throw lost();
+      };
+      await expect(hold.createObligation(orderId)).rejects.toThrow(/did not answer/);
+      expect(await intentOpen(orderId)).toBe(true);
+      // Empty: economic-service's commit is still in flight, invisible to a read.
+      found = () => [];
+      expect(await hold.findObligation(orderId)).toBeNull();
+      await hold.markFailed(orderId, 'hold not placed');
+      expect(await intentOpen(orderId)).toBe(true);
+      await age(orderId, 1);
+      const after = await read();
+      expect(after.UNCONFIRMED_CALL!.count).toBe(before.UNCONFIRMED_CALL!.count + 1);
+      expect(after.UNCONFIRMED_CALL!.overdue).toBe(before.UNCONFIRMED_CALL!.overdue + 1);
+
+      // A lookup that finds the order's own obligation ends it, whatever its status.
+      const order = await runUnscoped('the suite reads the order terms', () =>
+        prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+      );
+      found = (id) => [
+        {
+          ...own(id, 'REFUNDED'),
+          grossAmountMinor: order.totalAmountMinor.toString(),
+          currency: order.currency,
+        },
+      ];
+      await expect(hold.findObligation(orderId)).resolves.toMatchObject({ notHeld: true });
+      expect(await intentOpen(orderId)).toBe(false);
+      found = () => [];
+    });
+
+    it('a lookup that finds only a row on other terms leaves the intent open', async () => {
+      const orderId = await place();
+      creating = async () => {
+        throw lost();
+      };
+      await expect(hold.createObligation(orderId)).rejects.toThrow(/did not answer/);
+      found = (id) => [own(id)];
+      await expect(hold.findObligation(orderId)).resolves.toMatchObject({ mismatch: true });
+      expect(await intentOpen(orderId)).toBe(true);
+      found = () => [];
+      await runUnscoped(
+        'the suite closes the intent it opened',
+        () =>
+          prisma.client.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
+          WHERE order_id = ${orderId}`,
+      );
+    });
+
+    it("ends with the create's own answer, or a refusal that proves nothing was held", async () => {
+      const answered = await place();
+      creating = async () => ({ id: `TXN_${ulid()}` });
+      await hold.createObligation(answered);
+      expect(await intentOpen(answered)).toBe(false);
+
+      for (const [code, status, open] of [
+        ['INSUFFICIENT_BALANCE', 422, false],
+        ['BUSINESS_RULE_VIOLATION', 422, false],
+        ['VALIDATION_FAILED', 400, false],
+        // The replay guard answers these for a key that did commit.
+        ['NOT_FOUND', 404, true],
+        ['FORBIDDEN', 403, true],
+        // A conflict is an attempt still in flight; a reused key may have committed.
+        ['CONFLICT', 409, true],
+        ['IDEMPOTENCY_KEY_REUSED', 409, true],
+        // A known code under another status is not economic-service's refusal.
+        ['INSUFFICIENT_BALANCE', 500, true],
+      ] as const) {
+        const orderId = await place();
+        creating = async () => {
+          throw refused(code, status);
+        };
+        await expect(hold.createObligation(orderId)).rejects.toThrow();
+        expect([code, status, await intentOpen(orderId)]).toEqual([code, status, open]);
+      }
+      await runUnscoped(
+        'the suite closes the intents it opened',
+        () =>
+          prisma.client.$executeRaw`UPDATE saga_unconfirmed_call SET confirmed_at = now()
+          WHERE organization_id = ${org.buyer} AND operation = 'createObligation'
+            AND confirmed_at IS NULL`,
+      );
     });
   });
 });

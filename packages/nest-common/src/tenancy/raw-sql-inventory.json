@@ -2366,6 +2366,13 @@
     "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks; it also reads whether the buyer's receipt is recorded on that same row, which decides where an operator's SETTLE may return the order (D-083)"
   },
   {
+    "file": "services/marketplace-service/src/order/order.repository.ts",
+    "line": 301,
+    "hash": "afcde43bb3520993367d8a4aa5c56c887a53eeb31450afc24c08f2692b71a6fa",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
     "file": "services/marketplace-service/src/prisma/prisma.service.ts",
     "line": 126,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
