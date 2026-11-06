@@ -1,7 +1,14 @@
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import { z } from 'zod';
-import { isoDateTime, parsableUrl, plainText, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import {
+  isoDateTime,
+  parsableUrl,
+  plainText,
+  prefixedIdSchema,
+  seedIdSchema,
+  WITHOUT_BIDI_CONTROL,
+} from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { codePointLength, objectShapeOf, toJsonSchema } from './zod-schema';
 
@@ -408,6 +415,61 @@ describe('toJsonSchema', () => {
       type: 'string',
       description: 'outer',
     });
+  });
+
+  it('publishes the pattern an identifier refinement is tested against (FU-073)', () => {
+    const ulid = '[0-9A-HJKMNP-TV-Z]{26}';
+    expect(toJsonSchema(prefixedIdSchema('AST').optional())).toEqual({
+      type: 'string',
+      pattern: `^AST_${ulid}$`,
+      description: 'AST identifier',
+    });
+    expect(toJsonSchema(seedIdSchema('ORG').describe('owner'))).toEqual({
+      anyOf: [
+        { type: 'string', pattern: `^ORG_${ulid}$`, description: 'ORG identifier' },
+        { type: 'string', pattern: '^ORG-[A-Z0-9-]{1,48}$' },
+      ],
+      description: 'owner',
+    });
+    // A clone keeps the check, so it keeps the pattern; a flagged one is not published.
+    expect(toJsonSchema(prefixedIdSchema('PO').describe('order'))).toMatchObject({
+      pattern: `^PO_${ulid}$`,
+    });
+    const flagged = z.refine<string>((value) => /^a$/i.test(value));
+    Object.defineProperty(flagged, Symbol.for('rasta.openapi.publishedPattern'), { value: /^a$/i });
+    expect(toJsonSchema(z.string().check(flagged))).toEqual({ type: 'string' });
+  });
+
+  it('keeps identifier checks within the ordered raw-constraint prefix (FU-073/FU-120)', () => {
+    const identifier = prefixedIdSchema('AST');
+    const checks = identifier._zod.def.checks ?? [];
+    const pattern = '^AST_[0-9A-HJKMNP-TV-Z]{26}$';
+    const omission =
+      'Constraints after a value-changing step are omitted; validation applies them to the transformed value.';
+    // A known identifier refinement does not hide later bounds or pipe constraints.
+    expect(toJsonSchema(identifier.max(30).pipe(z.string().min(30)))).toMatchObject({
+      pattern,
+      minLength: 30,
+      maxLength: 30,
+    });
+    // Both kinds of barrier withhold only checks that execute after them.
+    const barriers = [
+      z.string().trim(),
+      z.string().check((payload) => {
+        payload.value = payload.value.trim();
+      }),
+    ];
+    for (const barrier of barriers) {
+      expect(toJsonSchema(barrier.check(...checks).max(30))).toEqual({
+        type: 'string',
+        description: omission,
+      });
+      expect(toJsonSchema(identifier.check(...(barrier._zod.def.checks ?? [])).max(30))).toEqual({
+        type: 'string',
+        pattern,
+        description: `AST identifier ${omission}`,
+      });
+    }
   });
 
   it('counts codePointLength in code points, and raises the min/max issues', () => {
