@@ -908,7 +908,8 @@ function refusedForState(error: unknown): boolean {
  * as sent; once it keeps it with LF line endings (FU-115), this reader still
  * finds its own dispute and resolution — which is why this release, reading
  * both, must be every running worker and the rollback floor before that
- * writer ships (docs/06 § 6.8). This service keeps what the person sent.
+ * writer ships (docs/06 § 6.8). This service keeps the four transaction texts
+ * with LF line endings (PR-806 r1 F1); a text stored before that may hold CRLF.
  */
 function sameText(kept: string | null | undefined, sent: string): boolean {
   const lf = (text: string) => text.replace(/\r\n?/g, '\n');

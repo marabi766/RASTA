@@ -5,7 +5,7 @@ import { MockPaymentProvider } from '../src/payment/mock.provider';
 import type { RefundRequest, RefundResult } from '../src/payment/provider';
 import { PrismaClient } from '../src/generated/prisma';
 import { zodPipe } from '@rasta/nest-common';
-import type { z } from 'zod';
+import { z } from 'zod';
 import { hashRequestBody, targeted } from '../src/shared/idempotency';
 import {
   cancelTransactionSchema,
@@ -876,21 +876,45 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
   });
   // ---- Validation, both directions (Codex PR-747 r2, F3) ------------------------
 
-  it('a text over its limit as sent, within it once LF, is refused as the previous release refuses it', async () => {
+  it('a transaction text over its limit as sent, within it once LF, is accepted and kept as sent (PR-806 r1, F1)', async () => {
     const transactionId = await held();
     await post(
       `/v1/transactions/${transactionId}/authorise-settlement`,
       asPayer,
       id('canon-long-auth'),
     ).expect(200);
-    // 1 201 UTF-16 units as sent, over the 1 000 limit; 801 once LF. Accepted
-    // here, its retry would be a 400 on the previous release — and on this one
-    // after a rollback.
+    // 1 201 UTF-16 units as sent, over the 1 000 limit; 801 once LF. Counted on
+    // its LF form (`keptTextWithin`), as marketplace counts what it forwards;
+    // executed and stored as sent (FU-115). The rollback edge — its CRLF retry
+    // answered 400 by the previous release — is docs/06 § 6.8.
     const reason = `${'a\r\n'.repeat(400)}x`;
     expect(reason.replace(/\r\n/g, '\n')).toHaveLength(801);
+    const key = id('canon-long');
+    const path = `/v1/transactions/${transactionId}/dispute`;
+    const accepted = await post(path, asPayer, key, { reason }).expect(200);
+    // The LF spelling under the same key is the same request: replayed.
+    const replayed = await post(path, asPayer, key, {
+      reason: reason.replace(/\r\n/g, '\n'),
+    }).expect(200);
+    expect(replayed.body).toEqual(accepted.body);
+    const detail = await request(http)
+      .get(`/v1/transactions/${transactionId}`)
+      .set('authorization', asPayer)
+      .expect(200);
+    expect(detail.body).toMatchObject({ status: 'DISPUTED', disputeReason: reason });
+  });
+
+  it('a transaction text over its limit however it is counted is refused as the previous release refuses it', async () => {
+    const transactionId = await held();
+    await post(
+      `/v1/transactions/${transactionId}/authorise-settlement`,
+      asPayer,
+      id('canon-over-auth'),
+    ).expect(200);
+    const reason = `${'a\r\n'.repeat(500)}x`; // 1 501 as sent, 1 001 once LF
     let before: unknown;
     try {
-      asSentBefore(disputeTransactionSchema, { reason });
+      asSentBefore(z.object({ reason: z.string().trim().min(10).max(1000) }).strict(), { reason });
     } catch (error) {
       before = error;
     }
@@ -898,7 +922,7 @@ describe('idempotent commands, canonical before they are hashed (real HTTP)', ()
     const refused = await post(
       `/v1/transactions/${transactionId}/dispute`,
       asPayer,
-      id('canon-long'),
+      id('canon-over'),
       { reason },
     ).expect(400);
     expect(refused.body).toMatchObject({

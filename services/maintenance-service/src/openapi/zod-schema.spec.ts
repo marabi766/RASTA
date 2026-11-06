@@ -1,4 +1,3 @@
-import { DISPLAY_TEXT_PATTERN, WITHOUT_CONTROL_CHARACTER } from '@rasta/contracts';
 import { z } from 'zod';
 import { toJsonSchema } from '@rasta/nest-common';
 import {
@@ -52,11 +51,12 @@ describe('zod to JSON Schema', () => {
       const s = toJsonSchema(recordPartSchema);
       const properties = s.properties as Record<string, Record<string, unknown>>;
       for (const field of ['partReference', 'sourceReference']) {
-        expect([field, properties[field]?.pattern]).toEqual([
-          field,
-          WITHOUT_CONTROL_CHARACTER.source,
-        ]);
-        expect(properties[field]).toMatchObject({ type: 'string', minLength: 1, maxLength: 128 });
+        expect(properties[field]).toEqual({
+          type: 'string',
+          description: expect.stringContaining(
+            'Constraints after a value-changing step are omitted',
+          ),
+        });
       }
     });
 
@@ -92,17 +92,18 @@ describe('zod to JSON Schema', () => {
     it('publishes an integer with its bounds', () => {
       const s = toJsonSchema(createScheduleSchema);
       const intervalDays = (s.properties as Record<string, Record<string, unknown>>).intervalDays;
-      expect(intervalDays.type).toBe('integer');
-      expect(intervalDays.minimum).toBe(1);
-      expect(intervalDays.maximum).toBe(3650);
+      expect(intervalDays).toEqual({
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     });
 
     it('publishes a coerced pagination limit with its default', () => {
       const s = toJsonSchema(listRequestsQuerySchema);
       const limit = (s.properties as Record<string, Record<string, unknown>>).limit;
-      expect(limit.type).toBe('integer');
-      expect(limit.default).toBe(25);
-      expect(limit.maximum).toBe(200);
+      expect(limit).toEqual({
+        default: 25,
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     });
   });
 
@@ -152,18 +153,13 @@ describe('zod to JSON Schema', () => {
   });
 });
 
-describe('the published display-text pattern', () => {
-  it('is the shared rule in full: the Bidi_Control lookahead and the Persian punctuation', () => {
-    const properties = toJsonSchema(createRequestSchema).properties as Record<
-      string,
-      { pattern?: string }
-    >;
-    for (const field of ['title', 'description']) {
-      expect(properties[field]?.pattern).toBe(DISPLAY_TEXT_PATTERN.source);
-    }
-    expect(properties.title?.pattern).toContain('\\p{Bidi_Control}');
-    expect(properties.title?.pattern).toContain('\\u060c');
-    // A client validating against the published pattern agrees with the service.
-    expect(new RegExp(properties.title!.pattern!, 'u').test('خرابی، استارت؟')).toBe(true);
+describe('post-trim display-text constraints (FU-120)', () => {
+  it('marks the pattern as omitted rather than asserting it on raw input', () => {
+    const properties = toJsonSchema(createRequestSchema).properties as Record<string, unknown>;
+    expect(properties.title).toMatchObject({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    expect(properties.title).not.toHaveProperty('pattern');
   });
 });

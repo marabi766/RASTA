@@ -17,7 +17,7 @@ import {
 import type { GatewayEnv } from '../config/env';
 import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
 import { GatewayController } from './gateway.controller';
-import { ProxyService, type ProxyOptions } from './proxy.service';
+import { ProxyService, READINESS_PATH, type ProxyOptions } from './proxy.service';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
 
 /**
@@ -65,14 +65,28 @@ function answer(res: ServerResponse, status: number, body: unknown): void {
 
 interface Upstream {
   url: string;
+  /** Every exchange but the gateway's own readiness checks. */
   exchanges: Exchange[];
   behaviour: Behaviour;
+  /** What its `GET /health/ready` answers (FU-113): not ready unless a test says so. */
+  ready: boolean;
+  /** The gateway's readiness checks received. */
+  checks: number;
   close: () => Promise<void>;
 }
 
 async function startUpstream(): Promise<Upstream> {
-  const upstream = { exchanges: [] as Exchange[], behaviour: ok } as Upstream;
+  const upstream = {
+    exchanges: [] as Exchange[],
+    behaviour: ok,
+    ready: false,
+    checks: 0,
+  } as Upstream;
   const server: Server = createServer((req, res) => {
+    if (req.url === READINESS_PATH) {
+      upstream.checks += 1;
+      return answer(res, upstream.ready ? 200 : 503, { ready: upstream.ready });
+    }
     const exchange: Exchange = {
       method: req.method ?? '',
       url: req.url ?? '',
@@ -162,6 +176,7 @@ interface Sent {
 
 interface Gateway {
   proxy: ProxyService;
+  setDeadline: (timeoutMs: number) => void;
   send: (
     path: string,
     options?: { caller?: string; method?: string; headers?: Record<string, string> },
@@ -176,11 +191,13 @@ async function startGateway(
   const urls = Object.fromEntries(
     SERVICE_NAMES.map((name) => [`${name.toUpperCase()}_SERVICE_URL`, upstream.url]),
   ) as unknown as ServiceUrls;
+  // Answering setup requests must not race the short deadline used by held probes.
+  const proxyOptions = { organizationsToOpen: 1, ...options };
   const proxy = new ProxyService(
     urls,
     new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
     // These specs are about recovery. Who may open a circuit: circuit-organizations.spec.ts.
-    { organizationsToOpen: 1, ...options },
+    proxyOptions,
   );
   const controller = new GatewayController(proxy, limiter, PLATFORM_ENV);
   const filter = new AllExceptionsFilter(quietLogger as never);
@@ -243,6 +260,9 @@ async function startGateway(
 
   return {
     proxy,
+    setDeadline: (timeoutMs) => {
+      proxyOptions.timeoutMs = timeoutMs;
+    },
     send,
     close: () =>
       new Promise<void>((resolve) => {
@@ -267,11 +287,17 @@ const QUIET_MS = 150;
 const COOLDOWN_MS = 200;
 const PAST_COOLDOWN_MS = COOLDOWN_MS + 60;
 
+const ANSWERING_DEADLINE_MS = 60_000;
+
 const USERS = '/v1/users/me';
 
 /** Opens identity's circuit with one crash (threshold 1) and waits out the cooldown. */
-async function openThenCool(upstream: Upstream, gateway: Gateway): Promise<void> {
-  upstream.behaviour = crash;
+async function openThenCool(
+  upstream: Upstream,
+  gateway: Gateway,
+  opening: Behaviour = crash,
+): Promise<void> {
+  upstream.behaviour = opening;
   expect((await gateway.send(USERS).answer).status).toBe(503);
   expect(gateway.proxy.circuitStates().identity).toMatchObject({ state: 'OPEN', open: true });
   await sleep(PAST_COOLDOWN_MS);
@@ -357,11 +383,16 @@ describe('HALF_OPEN admits exactly one probe', () => {
 
   it('a probe that times out opens the circuit again', async () => {
     gateway = await startGateway(upstream, {
-      timeoutMs: 300,
+      timeoutMs: ANSWERING_DEADLINE_MS,
       failureThreshold: 1,
       resetAfterMs: COOLDOWN_MS,
     });
-    await openThenCool(upstream, gateway);
+    // A setup 5xx later than the probe's deadline must still be classified as 5xx.
+    await openThenCool(upstream, gateway, (exchange) => {
+      const timer = setTimeout(() => crash(exchange), 400);
+      exchange.res.on('close', () => clearTimeout(timer));
+    });
+    gateway.setDeadline(300);
     upstream.behaviour = hold;
 
     const probe = await gateway.send(USERS).answer;
@@ -370,16 +401,23 @@ describe('HALF_OPEN admits exactly one probe', () => {
     expect(gateway.proxy.circuitStates().identity).toMatchObject({ state: 'OPEN', failures: 2 });
   });
 
-  it('a probe answered 4xx closes the circuit: the service answered', async () => {
+  it('a probe answered 4xx proves nothing: the gateway’s own check decides (FU-109)', async () => {
     gateway = await startGateway(upstream, {
       timeoutMs: 4000,
       failureThreshold: 1,
       resetAfterMs: COOLDOWN_MS,
     });
     await openThenCool(upstream, gateway);
-    upstream.behaviour = ({ res }) => answer(res, 404, { code: 'NOT_FOUND' });
+    upstream.behaviour = ({ res }) => answer(res, 400, { code: 'VALIDATION_FAILED' });
 
-    expect((await gateway.send(USERS).answer).status).toBe(404);
+    // Not ready: the refusal of one request does not close it, and frees the slot.
+    expect((await gateway.send(USERS).answer).status).toBe(400);
+    expect(upstream.checks).toBe(2);
+    expect(gateway.proxy.circuitStates().identity?.state).toBe('HALF_OPEN');
+    // Ready: the gateway's check, not the 400, closes it.
+    upstream.ready = true;
+    expect((await gateway.send(USERS, { caller: 'B' }).answer).status).toBe(400);
+    expect(upstream.checks).toBe(3);
     expect(gateway.proxy.circuitStates().identity).toEqual({
       failures: 0,
       open: false,
@@ -546,11 +584,12 @@ describe('a success counts only once its body is complete', () => {
 
   it('a probe whose body stalls past the deadline opens the circuit again', async () => {
     gateway = await startGateway(upstream, {
-      timeoutMs: 300,
+      timeoutMs: ANSWERING_DEADLINE_MS,
       failureThreshold: 1,
       resetAfterMs: COOLDOWN_MS,
     });
     await openThenCool(upstream, gateway);
+    gateway.setDeadline(300);
     upstream.behaviour = stallBody;
 
     expect(await gateway.send(USERS).answer).toMatchObject({ status: 504 });
@@ -682,6 +721,8 @@ describe('a caller that leaves after the probe was sent cannot buy another probe
     upstream.behaviour = stall5xxBody;
 
     await sendAndLeave(gateway, 1, 50);
+    // The caller has gone; the gateway's own check still decides, after it.
+    await until(() => gateway!.proxy.circuitStates().identity?.open === true, 're-opening');
     expect(gateway.proxy.circuitStates().identity).toEqual({
       failures: 2,
       open: true,
@@ -832,11 +873,12 @@ describe('a financial probe', () => {
 
   it('that times out is answered UPSTREAM_TIMEOUT, sent once with the client’s own key, never resent', async () => {
     gateway = await startGateway(upstream, {
-      timeoutMs: 300,
+      timeoutMs: ANSWERING_DEADLINE_MS,
       failureThreshold: 1,
       resetAfterMs: COOLDOWN_MS,
     });
     await openEconomicThenCool();
+    gateway.setDeadline(300);
     upstream.behaviour = hold;
 
     const probe = gateway.send(TRANSFER, {
