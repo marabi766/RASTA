@@ -100,10 +100,11 @@ function envelope(
 }
 
 /** Recorded under zod 3 on main 745d0434; never written by a test run. */
+// FU-131 intentionally corrects the three query-text cases marked below.
 const ZOD3: Record<string, unknown> = {
+  // FU-131: refuse non-decimal/integer query text before later refinements.
   'list limit=1e999': [
-    { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-    { path: 'limit', message: 'Number must be less than or equal to 200', code: 'too_big' },
+    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
   ],
   'list limit=nope': [
     { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
@@ -131,26 +132,13 @@ const ZOD3: Record<string, unknown> = {
   'list an unknown parameter': [
     { path: '(root)', message: 'Unrecognized key(s) in object (1)', code: 'unrecognized_keys' },
   ],
+  // FU-131: refuse non-decimal/integer query text before later refinements.
   'list limit=0.5, a resource id without its type, a bad cursor': [
-    { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-    { path: 'limit', message: 'Number must be greater than or equal to 1', code: 'too_small' },
-    {
-      path: 'resourceType',
-      message: '`resourceId` may only be used together with `resourceType`',
-      code: 'custom',
-    },
-    { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
+    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
   ],
+  // FU-131: refuse non-decimal/integer query text before later refinements.
   'list the same, window reversed': [
-    { path: 'limit', message: 'Expected integer, received float', code: 'invalid_type' },
-    { path: 'limit', message: 'Number must be greater than or equal to 1', code: 'too_small' },
-    { path: 'to', message: '`to` must not be earlier than `from`', code: 'custom' },
-    {
-      path: 'resourceType',
-      message: '`resourceId` may only be used together with `resourceType`',
-      code: 'custom',
-    },
-    { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
+    { path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' },
   ],
   'list no window': [
     { path: 'from', message: 'Required', code: 'invalid_type' },

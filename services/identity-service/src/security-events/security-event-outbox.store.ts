@@ -303,8 +303,8 @@ export class SecurityEventOutboxStore implements OutboxStore {
           WHERE published_at IS NULL
             -- An open window is still counting. Never publish it (Phase C2).
             AND window_ends_at <= ${DATABASE_NOW_UTC}
-            AND (claim_expires_at IS NULL OR claim_expires_at <= now())
-            AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())
+            AND (claim_expires_at IS NULL OR claim_expires_at <= (now() AT TIME ZONE 'UTC'))
+            AND (next_attempt_at  IS NULL OR next_attempt_at  <= (now() AT TIME ZONE 'UTC'))
           ORDER BY window_ends_at, id
           LIMIT $4
             FOR UPDATE SKIP LOCKED
@@ -472,7 +472,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
          FROM security_event_outbox
         WHERE published_at IS NULL
           AND claim_expires_at IS NOT NULL
-          AND claim_expires_at > now()`,
+          AND claim_expires_at > (now() AT TIME ZONE 'UTC')`,
     );
     return Number(result[0]?.count ?? 0);
   }

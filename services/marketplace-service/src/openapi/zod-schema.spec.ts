@@ -76,8 +76,10 @@ describe('zod to JSON Schema', () => {
         Record<string, unknown>
       >;
       expect(props.limit).toEqual({
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
         default: 25,
-        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
       });
     });
 
