@@ -1073,6 +1073,22 @@ test('FU-150 F1: a library is read by contents: unlisted, changed or unread refu
       /infrastructure\/new\/lib\.bash: a \.bash file no reviewed list names/.test(e),
     ),
   );
+  // text a hash of the decoded characters cannot tell apart refuses, even with the listed hash
+  for (const text of ['x\uFFFD\n', 'x\r\n']) {
+    const listed = {
+      ...withLibrary,
+      sourcedLibraries: new Map([[LIB, { sha256: sha(text), reason: 'x' }]]),
+    };
+    const { errors } = validateInfraImagePins([library(text), script], listed);
+    assert.ok(
+      errors.some((e) => /cannot be read/.test(e)),
+      JSON.stringify(text),
+    );
+    assert.ok(
+      errors.some((e) => /source runs/.test(e)),
+      JSON.stringify(text),
+    );
+  }
   // once libraries are passed, a listed one the run did not find is stale
   const two = {
     ...withLibrary,

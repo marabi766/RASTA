@@ -748,6 +748,12 @@ export function validateInfraImagePins(files, policy = {}) {
   const verified = new Set();
   for (const { name, text } of read) {
     const entry = libraries.get(name);
+    // Hashed as decoded text: bytes that are not UTF-8 would decode alike, so they are refused.
+    const unreadable = shellTextProblem(text) ?? (text.includes('\uFFFD') ? 'invalid UTF-8' : null);
+    if (unreadable) {
+      errors.push(`${name}: cannot be read: ${unreadable}`);
+      continue;
+    }
     const sha256 = createHash('sha256').update(text).digest('hex');
     if (!entry) errors.push(`${name}: a .bash file no reviewed list names (SOURCED_LIBRARIES)`);
     else if (entry.sha256 !== sha256)
