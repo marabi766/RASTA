@@ -906,6 +906,7 @@ export function tokenizeShell(src) {
     if (c === '"') {
       ensureWord();
       word.quoted = true;
+      word.dq = true; // a part of this word is double-quoted (FU-159 r2 F3)
       i += 1;
       let closed = false;
       while (i < src.length) {
@@ -2375,8 +2376,8 @@ function shellInput([command, ...args], input, outputs, { evaluated, shellFiles,
   if (command.value === 'eval') {
     if (args.length > 0 && args.every(literal))
       return { script: args.map(({ value }) => value).join(' ') };
-    const name = args.length === 1 && /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(args[0].value);
-    const source = name && !args[0].opaque ? outputs.get(name[1]) : undefined;
+    const name = args.length === 1 ? evalSubject(args[0]) : undefined;
+    const source = name === undefined ? undefined : outputs.get(name);
     const file = source === undefined ? undefined : evaluatedFile(source);
     if (file !== undefined && evaluated.allowed.has(file)) {
       evaluated.used.add(file);
@@ -2434,22 +2435,25 @@ function headIndex(words) {
   return at;
 }
 
-/** The variables read, select, mapfile and getopts write when no name says which. */
-const IMPLICIT_TARGETS = {
-  coproc: 'COPROC',
-  read: 'REPLY',
-  select: 'REPLY',
-  mapfile: 'MAPFILE',
-  readarray: 'MAPFILE',
-  getopts: 'OPTARG OPTIND',
-};
+/**
+ * FU-159 r2 F3: the only text `eval` may run unread is the value of ONE ordinary variable, quoted: the
+ * word is exactly `"$name"` or `"${name}"`, double-quoted (an unquoted expansion is split by IFS and
+ * globbed; `'$name'` and `\$name` are other texts), and `name` is lower-case. Every name bash writes by
+ * itself is upper-case or `_` (`BASH_REMATCH`, `_`, `IFS`, `REPLY`, `MAPFILE`, `OPTARG`, `OPTIND`, `COPROC`,
+ * `RANDOM`, `LINENO` ...): a lower-case name is written only by a command that names it, which is what
+ * the canonical-word writes (`shellWrites`) count. Returns the name, or undefined.
+ */
+function evalSubject(word) {
+  if (!word || word.split || !word.dq) return undefined;
+  return /^\$(?:\{([a-z][a-z0-9_]*)\}|([a-z][a-z0-9_]*))$/.exec(word.value)?.slice(1).find(Boolean);
+}
 
-/** `eval "$NAME"` where every `NAME=$(…)` of the script is the output of an EVALUATED_OUTPUTS script. */
+/** `eval "$name"` where every `name=$(…)` of the script is the output of an EVALUATED_OUTPUTS script. */
 function trackedEval(words, fromAllowed) {
   const at = executionChain(words).chain.at(-1);
-  if (words[at]?.value !== 'eval' || words.length !== at + 2 || words[at + 1].opaque) return false;
-  const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(words[at + 1].value);
-  return Boolean(name) && fromAllowed.get(name[1]) === true;
+  if (words[at]?.value !== 'eval' || words.length !== at + 2) return false;
+  const name = evalSubject(words[at + 1]);
+  return name !== undefined && fromAllowed.get(name) === true;
 }
 
 /** True when a name-writing builtin has an operand whose NAME this check cannot read. */
@@ -2509,10 +2513,6 @@ function shellWrites(commands, trusted, out = { texts: [], unresolved: false }, 
       const handler = rest.find(({ value }) => !value.startsWith('-') || value === '-');
       // a computed handler is read as the text it is: its computed command word is unresolved
       if (handler && handler.value !== '-' && handler.value !== '') text(handler.value);
-    }
-    for (const index of chain) {
-      const word = words[index].value;
-      if (Object.hasOwn(IMPLICIT_TARGETS, word)) out.texts.push(IMPLICIT_TARGETS[word]);
     }
     if (unresolvedTarget(program, rest)) out.unresolved = true;
   }

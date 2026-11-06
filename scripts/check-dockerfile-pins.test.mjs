@@ -2084,3 +2084,76 @@ test('FU-159 r2 F2: the splitter keeps a definition at the top level (descriptor
     [['printf', 'x', '>|', 'f']],
   );
 });
+
+// =============================================================================
+// FU-159 round 2 F3 (PR #874 review r1): a tracked eval trusts the VALUE of one ordinary variable,
+// quoted, assigned once from the approved producer. Bash writes its own variables (`BASH_REMATCH`,
+// `_`, `IFS`, `REPLY` ...) without naming them, and an unquoted expansion is split and globbed.
+// =============================================================================
+test('FU-159 r2 F3: the review’s probes: BASH_REMATCH, _ and an unquoted expansion under IFS', () => {
+  const producer = (name) => `${name}="$(bash infra/creds.sh)"`;
+  evalRefused(
+    `${producer('BASH_REMATCH')}\n[[ 'do""cker run alpine:latest' =~ .+ ]]\neval "$BASH_REMATCH"`,
+  );
+  evalRefused(`${producer('_')}\necho 'do""cker run alpine:latest'\neval "$_"`);
+  evalRefused(`${producer('commands')}; IFS="'"; eval $commands`);
+  evalRefused(`${producer('commands')}\nIFS="'"\neval \${commands}`);
+});
+
+test('FU-159 r2 F3: a name bash writes by itself is not an ordinary variable', () => {
+  for (const name of [
+    'BASH_REMATCH',
+    'BASH_COMMAND',
+    '_',
+    'IFS',
+    'REPLY',
+    'MAPFILE',
+    'OPTARG',
+    'OPTIND',
+    'COPROC',
+    'RANDOM',
+    'LINENO',
+    'SECONDS',
+    'PIPESTATUS',
+    'OLDPWD',
+    'COMMANDS',
+    'Commands',
+  ])
+    for (const argument of [`"$${name}"`, `"\${${name}}"`])
+      evalRefused(`${P159(name)}\neval ${argument}`);
+});
+
+test('FU-159 r2 F3: only the word "$name" or "${name}" is a tracked eval', () => {
+  for (const argument of [
+    '$commands',
+    '${commands}',
+    "'$commands'",
+    '\\$commands',
+    // an unquoted expansion with a quote glued on is still split
+    '$commands""',
+    '${commands}""',
+    "$commands''",
+    '"$commands"x',
+    '"${commands}x"',
+    '"$commands}"',
+    '"${commands"',
+    '"$commands$commands"',
+    '"${commands:-x}"',
+    '"${commands%x}"',
+    '"$(echo $commands)"',
+    '-- "$commands"',
+    '"$commands" "$commands"',
+    '"$commands" extra',
+  ])
+    evalRefused(`${P159('commands')}\neval ${argument}`);
+  // the quoted forms are the one shape, whatever the quoting is wrapped in
+  for (const body of [
+    `${P159('commands')}\neval "$commands"`,
+    `${P159('commands')}\neval "\${commands}"`,
+    `${P159('commands')}\neval "$commands"''`,
+    `${P159('commands')}\nIFS="'"\neval "$commands"`,
+    `${P159('kafka_credentials')}\neval "\${kafka_credentials}" && true`,
+    `${P159('c2_x')}\n( eval "$c2_x" )`,
+  ])
+    assert.deepEqual(creds159(body), [], body);
+});
