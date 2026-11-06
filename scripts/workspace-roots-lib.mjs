@@ -15,8 +15,14 @@
  * an empty answer is an error, not "no workspaces".
  *
  * The repository root is not a member: pnpm includes it implicitly and it
- * orchestrates, never shards. `node_modules` and dot-directories are never matched
- * by `*` (pnpm's rule); a symlink or an unreadable manifest format is refused.
+ * orchestrates, never shards. A path with a `node_modules` or `bower_components`
+ * SEGMENT anywhere is never a member, whichever segment form reached it (FU-076):
+ * pnpm's findWorkspacePackagesNoCheck (workspace/find-packages) globs with
+ * `ignore` = "any-depth node_modules or bower_components, any-depth below" (the
+ * globs `**` + `/node_modules/` + `**`, likewise bower_components), which drops a
+ * manifest under such a directory at the start, middle or end of the path, literal
+ * or wildcard. Dot-directories are never matched by `*` (tinyglobby `dot: false`);
+ * a symlink or an unreadable manifest format is refused.
  */
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -32,6 +38,9 @@ export const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), 
  * approximated, because a guess returns a shorter membership list without an error.
  */
 const SEGMENT = /^(?:\*|[A-Za-z0-9_-][A-Za-z0-9._-]*)$/;
+
+/** Directory names pnpm's workspace glob ignores as a whole path segment (exact, case-sensitive). */
+const PNPM_IGNORED_SEGMENTS = new Set(['node_modules', 'bower_components']);
 
 /** The only manifest this reader can read; pnpm also discovers the other two. */
 const MANIFEST = 'package.json';
@@ -67,12 +76,11 @@ function directoriesOf(root, pattern) {
   for (const segment of pattern.split('/')) {
     const next = [];
     for (const parent of level) {
-      const names =
+      const names = (
         segment === '*'
-          ? readdirSync(resolve(root, parent)).filter(
-              (name) => name !== 'node_modules' && !name.startsWith('.'),
-            )
-          : [segment];
+          ? readdirSync(resolve(root, parent)).filter((name) => !name.startsWith('.'))
+          : [segment]
+      ).filter((name) => !PNPM_IGNORED_SEGMENTS.has(name));
       for (const name of names) {
         const relative = parent ? `${parent}/${name}` : name;
         const stat = lstatSync(resolve(root, relative), { throwIfNoEntry: false });
