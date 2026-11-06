@@ -22,6 +22,11 @@ import { ProxyService, proxyOptionsOf } from './proxy.service';
 
 const THRESHOLD = 5;
 const COOLDOWN_MS = 30_000;
+// The injected `now` controls only the breaker, not the real HTTP deadline.
+// Give answering routes ample scheduling headroom; only the silent route is short.
+const ANSWERING_DEADLINE_MS = 60_000;
+const SILENT_DEADLINE_MS = 300;
+const DELAYED_5XX_MS = 400;
 
 beforeAll(() => {
   jest.spyOn(Logger.prototype, 'warn').mockImplementation();
@@ -40,18 +45,27 @@ describe('forwarding: who failed decides who is refused', () => {
   let outage: boolean;
   let proxy: ProxyService;
   let clock: number;
+  let responseDelayMs: number;
 
   beforeEach(async () => {
     seen = [];
     outage = false;
     clock = 1_000;
+    responseDelayMs = 0;
     server = createServer((req, res) => {
       seen.push(req.url ?? '');
       if (req.url === '/v1/users/hang') return;
-      res.writeHead(outage || req.url === '/v1/users/poison' ? 500 : 200, {
-        'content-type': 'application/json',
-      });
-      res.end('{}');
+      const answer = () => {
+        res.writeHead(outage || req.url === '/v1/users/poison' ? 500 : 200, {
+          'content-type': 'application/json',
+        });
+        res.end('{}');
+      };
+      if (responseDelayMs === 0) answer();
+      else {
+        const timer = setTimeout(answer, responseDelayMs);
+        res.on('close', () => clearTimeout(timer));
+      }
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const { port } = server.address() as AddressInfo;
@@ -65,7 +79,20 @@ describe('forwarding: who failed decides who is refused', () => {
     proxy = new ProxyService(
       urls,
       new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
-      { timeoutMs: 300, failureThreshold: THRESHOLD, resetAfterMs: COOLDOWN_MS, now: () => clock },
+      {
+        timeoutMs: ANSWERING_DEADLINE_MS,
+        routeDeadlines: [
+          {
+            service: 'identity',
+            method: 'GET',
+            path: /^\/v1\/users\/hang$/,
+            timeoutMs: SILENT_DEADLINE_MS,
+          },
+        ],
+        failureThreshold: THRESHOLD,
+        resetAfterMs: COOLDOWN_MS,
+        now: () => clock,
+      },
     );
   });
 
@@ -122,6 +149,16 @@ describe('forwarding: who failed decides who is refused', () => {
     expect(proxy.circuitStates().identity).toMatchObject({ open: false, state: 'CLOSED' });
     // It shed itself: nothing past its own threshold reached the service.
     expect(seen.filter((url) => url === path)).toHaveLength(THRESHOLD);
+  });
+
+  it('a 5xx later than the old deadline is still an upstream failure', async () => {
+    responseDelayMs = DELAYED_5XX_MS;
+    await expect(forward('ORG_ATTACKER', '/v1/users/poison')).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+    expect(proxy.circuitStates().identity).toMatchObject({ failures: 1, state: 'CLOSED' });
+    responseDelayMs = 0;
+    await expect(forward('ORG_OTHER')).resolves.toMatchObject({ status: 200 });
   });
 
   it('a header cannot make one caller look like many organizations', async () => {
