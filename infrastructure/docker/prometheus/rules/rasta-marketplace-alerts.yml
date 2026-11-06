@@ -41,15 +41,26 @@ groups:
           summary: No order saga worker is polling
           description: No marketplace-service replica reports a saga worker that Temporal lists as polling. Holds, settlements, refunds and dispute releases are not progressing.
           runbook: docs/runbooks/marketplace-saga-liveness.md
-  - name: rasta-marketplace-saga-release
+  # #770 r2 F3, #792 r1 F2. One alert for every unresolved financial episode
+  # (an open saga_unconfirmed_call row, or an order in a saga-custody status)
+  # older than an hour. The replica counts them against saga_monitor_clock,
+  # which never runs back, so a counted episode stays counted until it is
+  # resolved: a database clock set back cannot clear it, and a change of reason
+  # (RECEIPT_CONFIRMED <-> SETTLING, PENDING -> CANCELLING, a release done and the
+  # settlement still owed) is not a new alert, since the reason is no label here.
+  # `absent` carries the same (empty) label set as `max`, so a reporter that dies
+  # or is withdrawn as stale keeps the alert firing with no resolve in between.
+  # The reason is for diagnosis: rasta_marketplace_saga_unresolved_orders{reason}.
+  # Replaces #752's retry-counter alert, which cleared when the retries stopped.
+  - name: rasta-marketplace-saga-uncertainty
     rules:
-      # A saga on a running worker adds a round at least hourly, so two hours
-      # never misses one. Rounds need a worker: this clears if none is running.
-      - alert: RastaMarketplaceSagaDisputeReleaseUnconfirmed
-        expr: sum(increase(rasta_marketplace_saga_release_unconfirmed_total[2h])) > 0
+      - alert: RastaMarketplaceSagaFinancialEpisodeOverdue
+        expr: max(rasta_marketplace_saga_unresolved_overdue) > 0
+          or absent(rasta_marketplace_saga_unresolved_overdue)
+        for: 5m
         labels:
           severity: critical
         annotations:
-          summary: A decided dispute's release is unconfirmed
-          description: economic-service has not confirmed a dispute release, so the obligation stays DISPUTED and its funds held. The saga keeps trying; the log names the order.
-          runbook: docs/runbooks/marketplace-saga-deploy.md
+          summary: An unresolved financial episode is over an hour old
+          description: The saga has owed a hold, settlement, refund or dispute release for over an hour with no confirmed outcome, or no replica can measure it. It clears only when every such episode is resolved.
+          runbook: docs/runbooks/marketplace-saga-liveness.md

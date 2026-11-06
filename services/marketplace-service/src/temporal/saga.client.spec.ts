@@ -462,6 +462,7 @@ describe('starter shutdown', () => {
     const client = new OrderSagaClient(env({ MARKETPLACE_TEMPORAL_ENABLED: false }), {
       claim,
       backlog,
+      unresolved: async () => [],
     } as unknown as SagaStartStore);
     await runWithContext(
       createSystemContext({ organizationId: 'ORG_DISABLED', correlationId: 'disabled-start-test' }),
