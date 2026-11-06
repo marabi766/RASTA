@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { publishedRefinementPattern } from './pattern-refinement';
 import { ID_PREFIXES, type IdPrefix, prefixedIdSchema, seedIdSchema } from './identifiers';
 
 /**
@@ -6,7 +7,7 @@ import { ID_PREFIXES, type IdPrefix, prefixedIdSchema, seedIdSchema } from './id
  *
  * The OpenAPI converter (`@rasta/nest-common` `toJsonSchema`, which this
  * package cannot import) publishes a string's pattern from a `.regex()` check
- * or from a check marked `rasta.openapi.publishedPattern`, and a union as
+ * or from a registered pattern refinement, and a union as
  * `anyOf`; `publishedPatterns` reads a schema by that rule. A schema with no
  * pattern on some branch is published as any string, and fails here.
  */
@@ -17,7 +18,6 @@ type Def = {
   options?: z.ZodType[];
 };
 const defOf = (schema: z.ZodType): Def => (schema as unknown as { _zod: { def: Def } })._zod.def;
-const MARK = Symbol.for('rasta.openapi.publishedPattern');
 
 /** Per published `anyOf` branch, its `pattern` (`undefined`: the branch is any string). */
 function publishedPatterns(schema: z.ZodType): (string | undefined)[] {
@@ -26,8 +26,8 @@ function publishedPatterns(schema: z.ZodType): (string | undefined)[] {
   expect(def.type).toBe('string');
   let pattern: string | undefined;
   for (const check of def.checks ?? []) {
-    const marked = (check as unknown as Record<symbol, unknown>)[MARK];
-    if (marked instanceof RegExp && marked.flags === '') pattern = marked.source;
+    const marked = publishedRefinementPattern(check);
+    if (marked && (marked.flags === '' || marked.flags === 'u')) pattern = marked.source;
     const own = check._zod.def;
     if (own.check === 'string_format' && own.format === 'regex') {
       pattern = (own.pattern as RegExp).source;
@@ -110,7 +110,7 @@ describe.each(PREFIXES)('identifier %s: runtime and published schema agree', (pr
       expect(patterns).not.toContain(undefined);
       const verdicts = samples(prefix).map((value) => {
         const runtime = schema.safeParse(value).success;
-        // A JSON Schema validator may compile `pattern` with or without `u` (ajv adds it).
+        // Identifiers agree in both modes; consumers must use Unicode mode (FU-152).
         return {
           value,
           runtime,

@@ -93,6 +93,8 @@ const pins = {
   'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
     'baa12fdedf9e9bfbbeadd2be36f3b97acc62229af37ce9bc3ccdfea5c3e98cf9',
+    // FU-152 adds only pattern-refinement exports; reviewed helpers keep their sources.
+    '292d4fef2cb013e364ea7dd29ef04b112bf64734394155147d7dee955d91f770',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
