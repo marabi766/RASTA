@@ -940,7 +940,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'integration-contract': 23,
       'integration-security': 37,
       'integration-coverage-critical': 35,
-      'integration-coverage': 80,
+      'integration-coverage': 86,
       'integration-backup-drill': 8,
       'migration-reversibility-chain': 17,
       'migration-guards': 18,

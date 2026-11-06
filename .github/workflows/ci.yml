@@ -2776,13 +2776,14 @@ jobs:
     name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement, analytics)
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
-    # 399 s together, economic the longest at 115 s). Each keeps its own 8.
-    # 80 minutes: nine gates at 8 minutes each is 72, and the steps without a
-    # limit took up to 310 s over the last 20 green runs (8 minutes at
-    # x 1.5). The job itself took up to 1326 s (p50 1224 s) and the slowest
-    # gate, economic, 285 s, so 80 is a ceiling that no healthy run comes
+    # 399 s together, economic the longest at 115 s). Each keeps its own 8, but
+    # marketplace 14: it measures the workflow bundle (FU-157).
+    # 86 minutes: nine gates at 8 minutes each is 72, plus 6 for marketplace's 14,
+    # and the steps without a limit took up to 310 s over the last 20 green runs
+    # (8 minutes at x 1.5). The job itself took up to 1326 s (p50 1224 s) and the
+    # slowest gate, economic, 285 s, so 86 is a ceiling that no healthy run comes
     # near; the gates' own limits are what catch a hang.
-    timeout-minutes: 80
+    timeout-minutes: 86
     needs: quality-types
 
     services:
@@ -3055,7 +3056,7 @@ jobs:
         # number far below the truth and fail a gate that should pass. In band
         # for the same reason every other integration step here is: the suites
         # share one database.
-        timeout-minutes: 8
+        timeout-minutes: 14
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
