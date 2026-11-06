@@ -41,6 +41,9 @@ const defOf = (schema: z.ZodType): any => (schema as any)._zod.def;
 const checkDefs = (def: any): any[] =>
   ((def.checks ?? []) as any[]).map((check) => ({ check, def: check._zod.def }));
 
+/** The anchored pattern a refinement applies, set on the check (`@rasta/contracts` identifiers). */
+const PUBLISHED_PATTERN = Symbol.for('rasta.openapi.publishedPattern');
+
 /** The bounds of each `codePointLength` refinement, by its check. */
 const CODE_POINT_BOUNDS = new WeakMap<object, { minLength: number; maxLength: number }>();
 
@@ -269,7 +272,7 @@ const VALUE_PRESERVING_TYPES = new Set([
  * to preserve the value (objects strip keys, defaults substitute), which fails closed.
  */
 // Unknown/custom checks can assign to Zod's payload.value (.check callbacks).
-// Only built-in checks, and our registered code-point refinement, are proven safe.
+// Built-in checks and registered code-point/identifier refinements are proven safe.
 const VALUE_PRESERVING_CHECKS = new Set([
   'min_length',
   'max_length',
@@ -286,7 +289,9 @@ function rawChecks(def: any): { checks: ReturnType<typeof checkDefs>; changed: b
   const checks = checkDefs(def);
   const barrier = checks.findIndex(
     ({ check, def: definition }) =>
-      !CODE_POINT_BOUNDS.has(check) && !VALUE_PRESERVING_CHECKS.has(definition.check as string),
+      !CODE_POINT_BOUNDS.has(check) &&
+      !(check[PUBLISHED_PATTERN] instanceof RegExp) &&
+      !VALUE_PRESERVING_CHECKS.has(definition.check as string),
   );
   return {
     checks: barrier < 0 ? checks : checks.slice(0, barrier),
@@ -340,6 +345,11 @@ function stringSchema(def: any): JsonSchema {
   for (const { check: instance, def: check } of checks) {
     const bounds = CODE_POINT_BOUNDS.get(instance);
     if (bounds) Object.assign(out, bounds);
+    // Identifier refinements validate without rewriting the value (FU-073).
+    // Publish their pattern only while checks still apply to the raw input.
+    // Flags cannot be represented faithfully by JSON Schema's `pattern`.
+    const published = instance[PUBLISHED_PATTERN];
+    if (published instanceof RegExp && published.flags === '') out.pattern = published.source;
     if (check.check === 'min_length') out.minLength = check.minimum;
     if (check.check === 'max_length') out.maxLength = check.maximum;
     if (check.check !== 'string_format') continue;
