@@ -1514,14 +1514,16 @@ describe('the order saga', () => {
         activities,
         async (ctx) => {
           await toWait(ctx, () => rounds.length);
-          const sent = economic.sent.length;
           await atRest(ctx.handle);
           // Its own signal is what wakes the wait, an hour before the backoff would.
           await ctx.party.dispute('it arrived broken');
           await until(() => calls.includes('findObligation'), 'economic-service to be asked');
           await atRest(ctx.handle);
           await env.sleep('2 hours');
-          expect(economic.sent).toHaveLength(sent);
+          // By order, not by count: a slow run can fit a round in before the dispute.
+          expect(calls.lastIndexOf('authoriseSettlement')).toBeLessThan(
+            calls.indexOf('findObligation'),
+          );
           expect(calls).not.toContain('disputeObligation');
           await atRest(ctx.handle);
           economic.recovered = true;
