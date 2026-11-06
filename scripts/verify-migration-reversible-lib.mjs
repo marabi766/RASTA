@@ -2,7 +2,16 @@ import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.t
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { readUrl } from '../packages/config/src/url-reader.js';
+import { libpqInvocation } from './psql-prisma-url.mjs';
+
+export {
+  UNREADABLE_DATABASE_URL,
+  UNSAFE_DATABASE_PARAMETER,
+  UNUSABLE_PRISMA_OPTIONS,
+  UNUSABLE_PRISMA_SCHEMA,
+  libpqInvocation,
+  psqlInvocation,
+} from './psql-prisma-url.mjs';
 
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
@@ -2928,6 +2937,8 @@ export const EXPECTED = {
       'order_status_history',
       // 20261015120000_saga_step (D-053): replay records of saga activities.
       'saga_step',
+      // 20261105130000_saga_unconfirmed_call (FU-104): the record of unconfirmed economic calls.
+      'saga_unconfirmed_call',
       // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
       'return_request',
       'return_line',
@@ -2973,6 +2984,7 @@ export const EXPECTED = {
       'ck_return_dispatch_release_actors',
       'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
+      'ck_saga_unconfirmed_call_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',
@@ -4866,70 +4878,6 @@ export function sqlstateFrom(stderr) {
 }
 
 /**
- * Query parameters only Prisma understands. Everything else — `sslmode`,
- * `sslrootcert`, `connect_timeout`, `application_name` and the rest of
- * libpq's — is kept, so psql connects exactly as configured.
- */
-const PRISMA_ONLY_PARAMETERS = [
-  'schema',
-  'connection_limit',
-  'pool_timeout',
-  'socket_timeout',
-  'pgbouncer',
-  'statement_cache_size',
-];
-
-/**
- * `target` with `params` as its query, each name and value percent-encoded.
- *
- * Not `URLSearchParams`: it writes a space as `+`, which libpq's URI parser
- * does not decode — `options=-c TimeZone=UTC` (L7-37) would reach the server
- * as `-c+TimeZone=UTC` and the connection be refused. Prisma reads either.
- */
-function withLibpqQuery(target, params) {
-  const query = params
-    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
-    .join('&');
-  target.search = '';
-  return query ? `${target.toString()}?${query}` : target.toString();
-}
-
-/**
- * What every libpq helper below refuses a URL that does not parse with: a fixed
- * text. `new URL`'s own error keeps the whole input on `.input`, which an
- * uncaught throw prints — the password included, since these run before it is
- * taken out (#385 r5).
- */
-export const UNREADABLE_DATABASE_URL =
-  'the database URL cannot be read as a URL, so it is not handed to psql; its value is not repeated';
-
-/** `url` as libpq should see it: Prisma's own parameters removed, libpq's kept. */
-export function libpqUrl(url) {
-  const target = readUrl(url, { refusal: UNREADABLE_DATABASE_URL });
-  const kept = [...target.searchParams].filter(([name]) => !PRISMA_ONLY_PARAMETERS.includes(name));
-  return withLibpqQuery(target, kept);
-}
-
-/**
- * How to hand `url` to psql without putting its password on the command line,
- * where any local user can read it (`ps`, `/proc/<pid>/cmdline`) for as long
- * as the process runs (D-045 follow-up). `target` is the libpq URL with the
- * password removed — from the userinfo and from a `password=` parameter alike
- * — and `env` carries it as `PGPASSWORD`, which libpq reads when the URL has
- * none. Spread `env` over the child's environment; it is empty when the URL
- * has no password, so an inherited `PGPASSWORD` or `.pgpass` still applies.
- */
-export function libpqInvocation(url) {
-  const target = readUrl(libpqUrl(url), { refusal: UNREADABLE_DATABASE_URL });
-  const password = target.password
-    ? decodeURIComponent(target.password)
-    : target.searchParams.get('password');
-  target.password = '';
-  const kept = [...target.searchParams].filter(([name]) => name !== 'password');
-  return { target: withLibpqQuery(target, kept), env: password ? { PGPASSWORD: password } : {} };
-}
-
-/**
  * Runs one SQL script with psql against `url`'s database. Returns
  * `{ ok, stdout, output, sqlstate }`; `stdout` is unaligned tuples only.
  */
@@ -5240,7 +5188,7 @@ export function downFileMode(sql) {
  * the commands it runs; psql has no such parameter, and an unqualified name in
  * a down would otherwise resolve against `public`. A separate `-c`, run before
  * the file in the same session, rather than `PGOPTIONS`, which a URL's own
- * `options` parameter would silently override.
+ * `options` parameter would replace.
  */
 export function psqlFileRunner(url, schema) {
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {
