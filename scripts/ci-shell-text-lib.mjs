@@ -272,3 +272,305 @@ function scan(text, from, depth, mode, out) {
   endCommand();
   return text.length;
 }
+
+// =============================================================================
+// FU-150: the ONE execution-position boundary. Every guard that asks "which program does this
+// command line run?" asks here, so a control word, a wrapper and its options, `xargs` and
+// `find -exec` cannot each hide the program in their own way.
+// =============================================================================
+
+/**
+ * `a=b`, `a+=b`, `a[$i]=b`: no program runs. Only a genuine NAME token is an assignment: bash
+ * expands `$c=x` and `${c}=x` first, then runs the result as a COMMAND (FU-159).
+ */
+export const ASSIGN_LIKE = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/;
+export const DECLARERS = new Set(['export', 'local', 'readonly', 'declare', 'typeset']);
+/** Words after which the next word of the same line is a command again. */
+const CONTROL_WORDS = new Set('if then else elif do while until { coproc function'.split(' '));
+/**
+ * Programs that run the command they are given. Per program: `v` letters of short options that
+ * take a value, `b` letters that do not, `o` letters whose value (if any) is attached, `lv` and
+ * `lb` the same for long options, `n` positional operands before the command, `num` a numeric
+ * option (`nice -5`), `stops` letters after which nothing runs (`command -v x`). `cd`/`lcd` the short
+ * and long options that change the directory the program runs in, `moves` a wrapper that always
+ * does (FU-159 F3). An option not listed refuses.
+ */
+const WRAPPERS = {
+  builtin: {},
+  nohup: {},
+  '!': {},
+  command: { b: 'pvV', stops: 'vV' },
+  exec: { v: 'a', b: 'cl' },
+  env: {
+    cd: 'C',
+    lcd: 'chdir',
+    v: 'uCSa',
+    b: 'i0v',
+    lv: 'unset chdir split-string argv0',
+    lb: 'ignore-environment null debug',
+  },
+  time: { v: 'fo', b: 'pavV', lv: 'format output', lb: 'portability append verbose' },
+  timeout: {
+    v: 'sk',
+    b: 'fpv',
+    lv: 'signal kill-after',
+    lb: 'foreground preserve-status verbose',
+    n: 1,
+  },
+  nice: { v: 'n', num: true, lv: 'adjustment' },
+  ionice: { v: 'cnpPu', b: 't', lv: 'class classdata pid pgid uid', lb: 'ignore' },
+  setsid: { b: 'cfw', lb: 'ctty fork wait' },
+  stdbuf: { v: 'ioe', lv: 'input output error' },
+  sudo: {
+    cd: 'D',
+    lcd: 'chdir',
+    v: 'ughpCDRTrtU',
+    b: 'AbEHKklnPSVvB', // not -e (an editor), -i / -s (a shell): they run what no operand names
+    lv: 'user group host prompt chdir chroot role type other-user close-from command-timeout',
+    lb: 'askpass background preserve-env set-home non-interactive stdin reset-timestamp remove-timestamp list validate version',
+  },
+  doas: { v: 'uC', b: 'nL' },
+  flock: {
+    v: 'wE', // not -c: its operand is a command line run by `sh -c`
+    b: 'sxeunoF',
+    lv: 'timeout conflict-exit-code',
+    lb: 'shared exclusive unlock nonblock nb close no-fork verbose',
+    n: 1,
+  },
+  chroot: { moves: true, lv: 'userspec groups', lb: 'skip-chdir', n: 1 },
+  xargs: {
+    v: 'adEILnPsR',
+    b: '0oprtxv',
+    o: 'eil',
+    lv: 'arg-file delimiter max-args max-lines max-procs max-chars process-slot-var',
+    lb: 'null open-tty interactive no-run-if-empty verbose exit show-limits eof replace',
+  },
+};
+/** The programs that run the command they are given (modeled by `executionChain`). */
+export const WRAPPER_NAMES = new Set(Object.keys(WRAPPERS));
+const words = (text) => text?.split(' ') ?? [];
+/**
+ * A redirection word (`>f`, `2>f`, `>>`, `<`, `&>f`, `>&2`): bash applies it and passes no operand,
+ * wherever it stands in the command line. Alone (`>`, `2>`) it takes the next word as its target.
+ */
+const REDIRECT = /^(?:\d+|&)?(?:<<<|<<-|<<|<>|>>|>\||<|>)(.*)$/;
+export const redirectWidth = (list, at) => {
+  const match = REDIRECT.exec(list[at].value);
+  return match ? (match[1] === '' ? 2 : 1) : 0;
+};
+/**
+ * FU-159 r2 F4: the files a command line WRITES by redirection (`>f`, `2>>f`, `&>f`, `>|f`, `<>f`,
+ * `>&f`, with the target attached or the next word): `{ word }` is the target word. A duplicated
+ * descriptor (`>&2`, `2>&-`) writes no file.
+ */
+export function outputRedirects(list) {
+  const found = [];
+  for (let at = 0; at < list.length; at++) {
+    const match = /^(?:\d+|&)?(<>|>>|>\||>)(.*)$/.exec(list[at].value);
+    if (!match) continue;
+    // `>& f` (stdout and stderr to f) takes the next word like a bare `>`
+    const bare = match[2] === '' || match[2] === '&';
+    let target = bare ? list[at + 1] : { ...list[at], value: match[2] };
+    if (bare) at += 1;
+    if (target && /^&(?:\d+|-)$/.test(target.value)) continue;
+    if (target?.value.startsWith('&')) target = { ...target, value: target.value.slice(1) };
+    if (target) found.push(target);
+  }
+  return found;
+}
+
+const nameOf = (word) => word.value.split('/').at(-1);
+/** An installed program by absolute path (`/usr/bin/env`): its name says what it is. Any other path is a FILE. */
+export const SYSTEM_PATH = /^\/(?:usr\/(?:local\/)?)?s?bin\/[^/]+$/;
+/** Words of the grammar itself that are made of glob and brace characters: not a program name. */
+const PUNCTUATION = new Set(['[', '[[', ']', ']]', '{', '}']);
+/**
+ * The program is named by a computed LAST path component: a substitution or variable (`$cmd`,
+ * `$(…)`, `a/${b}`) or a pattern the shell expands (`{docker,run}`, `docker*`, `doc?er`).
+ * `${D}/x.sh` is a file.
+ */
+export const computedProgram = (word) => {
+  if (word.opaque) return true;
+  const last = nameOf({ value: word.value.replace(/\$\{[^}]*\}/g, '$') });
+  return last.includes('$') || (!PUNCTUATION.has(last) && /[*?[{]/.test(last));
+};
+
+/**
+ * A word whose expansion has an unknown number of words (or none): an unquoted `$x`, `$(…)` or glob.
+ * Quoted expansions are one word. A word read by `parseCommands` has no `split`: `dynamic` stands in.
+ */
+export const unsplit = (word) =>
+  Boolean(word.split ?? (word.opaque || word.dynamic || /[$`*?[]/.test(word.value))) ||
+  /\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(word.value); // `{a,b}` and `{1..3}`; a bare `{}` stays one word
+
+/**
+ * The index of the command word after `name`'s options and operands, `-1` for "nothing runs", or a
+ * problem. Every word consumed here (an option, its value, a positional operand such as
+ * `timeout`'s duration) must be ONE word: an unquoted expansion would shift the program (FU-159).
+ * After `--` the positional operands are still consumed.
+ */
+function afterOptions(name, spec, list, from, replace = []) {
+  let at = from;
+  let positional = spec.n ?? 0;
+  let moves = Boolean(spec.moves);
+  let ended = false;
+  const read = (index) => {
+    if (index < list.length && unsplit(list[index]))
+      return {
+        problem: `${name} operand ${list[index].value} expands to an unknown number of words`,
+      };
+    return null;
+  };
+  for (; at < list.length; at++) {
+    const { value } = list[at];
+    if (!ended && value === '--') {
+      ended = true;
+      continue;
+    }
+    if (!ended && ASSIGN_LIKE.test(value)) continue; // env A=b cmd, sudo A=b cmd
+    if (!ended && value === '-' && name === 'env') continue; // `env - cmd` is `env -i cmd`
+    const redirect = redirectWidth(list, at);
+    if (redirect > 0) {
+      at += redirect - 1;
+      continue;
+    }
+    if (ended || !value.startsWith('-') || value === '-') {
+      if (positional === 0) break;
+      positional--;
+      const bad = read(at);
+      if (bad) return bad;
+      continue;
+    }
+    const bad = read(at);
+    if (bad) return bad;
+    if (value.startsWith('--')) {
+      const [long, attached] = [value.slice(2).split('=')[0], value.includes('=')];
+      if (name === 'xargs' && long === 'replace') replace.push(value.split('=')[1] ?? '{}');
+      if (words(spec.lv).includes(long)) {
+        if (words(spec.lcd).includes(long)) moves = true;
+        if (!attached) {
+          at++;
+          const operand = read(at);
+          if (operand) return operand;
+        }
+      } else if (!words(spec.lb).includes(long))
+        return { problem: `${name} option ${value} is not one this check reads` };
+      continue;
+    }
+    if (spec.num && /^-\d+$/.test(value)) continue;
+    for (const [index, letter] of [...value.slice(1)].entries()) {
+      const rest = index < value.length - 2;
+      if (spec.stops?.includes(letter)) return { at: -1, moves };
+      if (spec.cd?.includes(letter)) moves = true;
+      if (spec.v?.includes(letter)) {
+        // xargs -I S: the replace string is this option's value, however the cluster is spelled
+        if (name === 'xargs' && letter === 'I') replace.push(rest ? value.slice(index + 2) : '');
+        if (!rest) {
+          at++; // `-u root`; an attached value (`-uroot`) ends the cluster
+          const operand = read(at);
+          if (operand) return operand;
+          if (name === 'xargs' && letter === 'I')
+            replace[replace.length - 1] = list[at]?.value ?? '';
+        }
+        break;
+      }
+      if (spec.o?.includes(letter)) {
+        if (name === 'xargs' && letter === 'i') replace.push(value.slice(index + 2) || '{}');
+        break;
+      }
+      if (!spec.b?.includes(letter))
+        return { problem: `${name} option ${value} is not one this check reads` };
+    }
+  }
+  return positional > 0 ? { at: list.length, moves } : { at, moves };
+}
+
+/**
+ * The words of one command line that each run the next (control words, wrappers) and the program
+ * that finally runs: `{ chain }` (indexes), or `{ problem }` when that program is computed or a
+ * wrapper's options cannot be read. A computed program is a refusal, never "some other word".
+ * A declaration builtin (`export`, `declare`, `local`, `readonly`, `typeset`) is the final program:
+ * the words after it are its operands, not commands.
+ * FU-159: `moves` is true when a wrapper changes the directory the program runs in; `inputs` when
+ * `xargs` is in the chain (its input items become arguments, or the program itself when the
+ * operand command is a wrapper that needs one, or where the replace string stands).
+ */
+export function executionChain(list) {
+  const chain = [];
+  let at = 0;
+  let moves = false;
+  let bypass = false; // a wrapper that runs an EXTERNAL program of the name, never a shell function
+  const xargs = []; // every xargs of the chain: { from, replace }; an inner one does not hide an outer one
+  const done = (extra = {}) => {
+    const last = chain.at(-1);
+    const hit =
+      last !== undefined &&
+      xargs.some(({ from, replace }) =>
+        list
+          .slice(from, last + 1)
+          .some(({ value }) => replace.some((text) => value.includes(text))),
+      );
+    return {
+      chain,
+      moves,
+      bypass,
+      inputs: xargs.length > 0,
+      ...(hit ? { problem: 'xargs substitutes its input into the program position' } : {}),
+      ...extra,
+    };
+  };
+  for (let step = 0; step < 64; step++) {
+    for (;;) {
+      const redirect = at < list.length ? redirectWidth(list, at) : 0;
+      if (redirect > 0) at += redirect;
+      else if (at < list.length && ASSIGN_LIKE.test(list[at].value)) at++;
+      else break;
+    }
+    if (at >= list.length) return done();
+    const word = list[at];
+    chain.push(at);
+    if (computedProgram(word))
+      return done({ problem: `runs the command word ${word.value}, which this check cannot read` });
+    if (CONTROL_WORDS.has(word.value)) {
+      // `function f {` and `coproc NAME {`: the name is not a command
+      at +=
+        word.value === 'function' || (word.value === 'coproc' && list[at + 2]?.value === '{')
+          ? 2
+          : 1;
+      continue;
+    }
+    const name = nameOf(word);
+    // `./env` and `tools/nice` are files, not the wrapper of that name (FU-159).
+    const named = !word.value.includes('/') || SYSTEM_PATH.test(word.value);
+    const spec = named && Object.hasOwn(WRAPPERS, name) ? WRAPPERS[name] : undefined;
+    if (!spec) return done();
+    const replace = [];
+    const next = afterOptions(name, spec, list, at + 1, replace);
+    if (next.problem) return done({ problem: next.problem });
+    moves ||= next.moves;
+    if (name !== '!') bypass = true;
+    if (name === 'xargs')
+      xargs.push({ from: next.at < 0 ? list.length : next.at, replace: replace.filter(Boolean) });
+    if (next.at < 0) return done();
+    at = next.at;
+  }
+  return done({ problem: 'nests wrappers deeper than this check reads' });
+}
+
+/**
+ * The operand command lines of `find -exec|-execdir|-ok|-okdir … ;|+` (each ends at `;` or `+`).
+ * `dir` is set on the `-execdir` / `-okdir` ones: they run from the directory of each match, so a
+ * relative program path names another file there (FU-159 r2 F4).
+ */
+export function findCommands(args) {
+  const lists = [];
+  for (let at = 0; at < args.length; at++) {
+    const option = /^-(exec|execdir|ok|okdir)$/.exec(args[at].value);
+    if (!option) continue;
+    let end = at + 1;
+    while (end < args.length && !['+', ';'].includes(args[end].value)) end++;
+    lists.push(Object.assign(args.slice(at + 1, end), { dir: option[1].endsWith('dir') }));
+    at = end;
+  }
+  return lists;
+}

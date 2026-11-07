@@ -1,21 +1,19 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { relative, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
 import { planTestRun } from './test-phases-lib.mjs';
 
 const root = new URL('../', import.meta.url).pathname;
 const read = (path) => readFileSync(resolve(root, path), 'utf8');
+// Git's file list (the inventory), never a walk: generated output is not opened. Repo-relative, '/'-separated.
 const files = (dir) =>
-  readdirSync(resolve(root, dir), { withFileTypes: true }).flatMap((e) =>
-    e.name === 'node_modules' || e.name === 'dist' || e.name.startsWith('.')
-      ? []
-      : e.isDirectory()
-        ? files(`${dir}/${e.name}`)
-        : [`${dir}/${e.name}`],
-  );
+  authoredFiles(resolve(root, dir), {
+    skip: (name) => name === 'node_modules' || name === 'dist' || name.startsWith('.'),
+  }).map((file) => relative(root, file).split(sep).join('/'));
 const sources = [...files('services'), ...files('packages')];
 const temporalPackages = sources
   .filter((p) => /\.[cm]?tsx?$/.test(p) && /\bTestWorkflowEnvironment\b/.test(read(p)))

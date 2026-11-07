@@ -199,6 +199,9 @@ const ASSIGNMENT_END_REASONS: Readonly<Record<string, string>> = {
   REASSIGNED: 'تخصیص مجدد',
 };
 
+/** HELD without economic-service's proof: {@link presentTransactionStatus}. */
+const HELD_UNPROVEN_LABEL = 'وثیقه اثبات‌نشده';
+
 /** `TRANSACTION_STATUSES`, `services/economic-service/src/transaction/dto.ts`. */
 const TRANSACTION_STATUSES: Readonly<Record<string, string>> = {
   CREATED: 'ثبت‌شده',
@@ -373,8 +376,18 @@ export const partSourceLabel = (value: string): string => lookup(PART_SOURCES, v
 export const driverStatusLabel = (value: string): string => lookup(DRIVER_STATUSES, value);
 export const assignmentEndReasonLabel = (value: string): string =>
   lookup(ASSIGNMENT_END_REASONS, value);
-export const transactionStatusLabel = (value: string): string =>
-  lookup(TRANSACTION_STATUSES, value);
+/**
+ * The one way a transaction's status is worded. It takes the row, not the status:
+ * HELD says funds are in escrow, and only economic-service's `heldProven` proves
+ * that (FU-138). `false` or missing reads as what it is, in words that claim no escrow.
+ */
+export const presentTransactionStatus = (transaction: {
+  readonly status: string;
+  readonly heldProven?: boolean;
+}): string =>
+  transaction.status === 'HELD' && transaction.heldProven !== true
+    ? HELD_UNPROVEN_LABEL
+    : lookup(TRANSACTION_STATUSES, transaction.status);
 export const transactionTypeLabel = (value: string): string => lookup(TRANSACTION_TYPES, value);
 export const walletHoldStatusLabel = (value: string): string => lookup(WALLET_HOLD_STATUSES, value);
 export const productKindLabel = (value: string): string => lookup(PRODUCT_KINDS, value);

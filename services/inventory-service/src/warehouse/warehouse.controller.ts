@@ -2,7 +2,11 @@ import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@n
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import type { CursorPage } from '../shared/dto';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import { COMMAND_NOTE, READ_NOTE } from '../shared/notes';
 import {
   createWarehouseSchema,
@@ -65,12 +69,12 @@ export class WarehouseController {
   })
   async create(
     @Body(zodPipe(createWarehouseSchema)) dto: CreateWarehouseDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<WarehouseView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const request = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<WarehouseView>(
       CREATE_WAREHOUSE_ENDPOINT,
-      key,
+      request,
       dto,
       201,
       (fence) => this.warehouses.create(dto, fence),

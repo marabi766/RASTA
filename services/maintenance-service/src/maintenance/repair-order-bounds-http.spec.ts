@@ -26,6 +26,7 @@ describe('the ledger’s bound on an amount a caller states', () => {
   };
   // The store runs the work and hands back what it returned.
   const store = {
+    assertAdmissible: jest.fn(),
     execute: jest.fn(async (...args: unknown[]) => ({
       result: await (args[4] as (fence: unknown) => Promise<unknown>)({}),
       executed: true,

@@ -30,6 +30,8 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
+export { patternRefinement, publishedRefinementPattern } from './common/pattern-refinement';
+
 export { withMaxKeys } from './common/bounds';
 export {
   TRANSACTION_TEXT_BOUNDS,
@@ -94,7 +96,7 @@ export {
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
 
-export { numberInput } from './common/number-input';
+export { numberInput, numberInputInnerSchema } from './common/number-input';
 
 export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
 export type { BusinessLine } from './common/business-line';
@@ -103,6 +105,8 @@ export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 
 export {
+  INVENTORY_MAX_REPLAY_WINDOW_SECONDS,
+  MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS,
   PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
   PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
 } from './common/replay-window';

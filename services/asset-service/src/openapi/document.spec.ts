@@ -80,23 +80,31 @@ describe('the served OpenAPI document', () => {
     expect(JSON.stringify(schema)).not.toContain('string');
   });
 
-  it('publishes every numeric parameter like the same body field (P1, FU-120)', () => {
-    expect(nearbyQuerySchema.parse({ latitude: '', longitude: '', limit: '0x10' })).toMatchObject({
-      latitude: 0,
-      longitude: 0,
-      limit: 16,
-    });
+  it('FU-160 accepts JS exponent serialization for both published coordinates', () => {
+    for (const name of ['latitude', 'longitude'] as const) {
+      expect(parameters[name]?.schema).toMatchObject({ type: 'number' });
+      const input = { latitude: '0', longitude: '0', [name]: String(0.0000001) };
+      const parsed = nearbyQuerySchema.parse(input);
+      expect(parsed[name]).toBe(0.0000001);
+      expect(nearbyQuerySchema.safeParse({ ...input, [name]: '1e9999' }).success).toBe(false);
+    }
+  });
+
+  it('FU-131 publishes numeric transport types and bounds from the inner schema', () => {
+    expect(
+      nearbyQuerySchema.safeParse({ latitude: '', longitude: '', limit: '0x10' }).success,
+    ).toBe(false);
+    const ranges = {
+      latitude: { type: 'number', minimum: -90, maximum: 90 },
+      longitude: { type: 'number', minimum: -180, maximum: 180 },
+      radiusMeters: { type: 'integer', minimum: 1, maximum: 500_000 },
+      limit: { type: 'integer', minimum: 1, maximum: 100 },
+    };
     for (const name of ['latitude', 'longitude', 'radiusMeters', 'limit'] as const) {
       const field = nearbyQuerySchema.shape[name];
       const body = toJsonSchema(z.object({ [name]: field })).properties as Record<string, unknown>;
       expect(parameters[name]?.schema).toEqual(body[name]);
-      expect(parameters[name]?.schema).not.toHaveProperty('type');
-      expect(parameters[name]?.schema).not.toHaveProperty('minimum');
-      expect(parameters[name]?.schema).not.toHaveProperty('maximum');
-      expect(parameters[name]?.schema).toHaveProperty(
-        'description',
-        expect.stringContaining('Constraints after a value-changing step are omitted'),
-      );
+      expect(parameters[name]?.schema).toMatchObject(ranges[name]);
       expect(parameters[name]?.required).toBe(name === 'latitude' || name === 'longitude');
     }
     expect(parameters.radiusMeters?.schema).toHaveProperty('default', 50_000);
@@ -106,7 +114,7 @@ describe('the served OpenAPI document', () => {
     );
     const expirySchema = expiry && 'schema' in expiry ? expiry.schema : undefined;
     expect(expirySchema).toEqual(toJsonSchema(listAssetsQuerySchema.shape.expiringWithinDays));
-    expect(expirySchema).not.toHaveProperty('type');
+    expect(expirySchema).toMatchObject({ type: 'integer', minimum: 1, maximum: 365 });
     expect(parameters.type).toMatchObject({ required: false, schema: { type: 'string' } });
   });
 });

@@ -3,7 +3,11 @@ import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { commandKeyHash } from '../shared/command';
 import type { CursorPage } from '../shared/dto';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import { COMMAND_NOTE, SHIPMENT_MOVE_NOTE, SHIPMENT_READ_NOTE } from '../shared/notes';
 import {
   createShipmentSchema,
@@ -90,13 +94,13 @@ export class ShipmentController {
   })
   async create(
     @Body(zodPipe(createShipmentSchema)) dto: CreateShipmentDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ShipmentView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(CREATE_SHIPMENT_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(CREATE_SHIPMENT_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ShipmentView>(
       CREATE_SHIPMENT_ENDPOINT,
-      key,
+      request,
       dto,
       201,
       (fence) => this.shipments.create(dto, { fence, keyHash }),
@@ -122,13 +126,13 @@ export class ShipmentController {
   async dispatch(
     @Param('id') id: string,
     @Body(zodPipe(moveShipmentSchema)) dto: MoveShipmentDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ShipmentView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(DISPATCH_SHIPMENT_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(DISPATCH_SHIPMENT_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ShipmentView>(
       DISPATCH_SHIPMENT_ENDPOINT,
-      key,
+      request,
       { id, ...dto },
       200,
       (fence) => this.shipments.dispatch(id, dto, { fence, keyHash }),
@@ -156,13 +160,13 @@ export class ShipmentController {
   async deliver(
     @Param('id') id: string,
     @Body(zodPipe(moveShipmentSchema)) dto: MoveShipmentDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ShipmentView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(DELIVER_SHIPMENT_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(DELIVER_SHIPMENT_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ShipmentView>(
       DELIVER_SHIPMENT_ENDPOINT,
-      key,
+      request,
       { id, ...dto },
       200,
       (fence) => this.shipments.deliver(id, dto, { fence, keyHash }),

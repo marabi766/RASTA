@@ -126,6 +126,7 @@
         "test:config-disclosure": "sha256:6b7f178cdaf617baa2ede7c47871d7ee70276f92dd2057bc14aab270db507b9b",
         "test:construction-turbo-env": "sha256:2595d4238f449017d98b15d78fcfaebedcc28dd692455d6606bd141ae564b960",
         "test:container-scope": "sha256:af1c1ae712e75c398e423f2c7928d1221c6c2acaa6465850705e40f5e7ef426a",
+        "test:cors-published-headers": "sha256:aca16f083fdc61b1d0c4591c89d43de033bcc4e1632e09d495c037c042f25fff",
         "test:credential-fetch": "sha256:0e9b4f6c0c02c9e1be9d0c09765329988de317d3fb2c11e589bc39e06cd8b7d5",
         "test:database-turbo-env": "sha256:a36c76b95d62cb7c564c3efb3b7f39c7c5d37d7eecf833bcfe9db5dfb4aa404a",
         "test:db-pool-config": "sha256:3d6653f9bdf1c9751c282d0dc5971c6078ae864224717dbee44fff1b284ef48e",
@@ -178,7 +179,7 @@
         "test:supplier-privilege-split": "sha256:7ec77b5058dd00823f550e753c1717c154c52a3d1ab21491b8eccdde9d59507a",
         "test:telemetry-order": "sha256:02c587218e36a0bbe76ebcffbbfb6786ee4dda8ea4d0184849b678068ce3bb72",
         "test:tenant-index-order": "sha256:72318cabfa2341c559c280f64a4985e95e855bc7231d0717b0fe7871dd3b19ae",
-        "test:test-phases": "sha256:6d7a784a4b037d58d82d8e1e671db86070b397b9b59ade0de87072d5cae20865",
+        "test:test-phases": "sha256:238524cdc498ee379d7cc0589d8ecc477e6279bbe4cf08ae689730f6a1e17f51",
         "test:unit": "sha256:456451fe67ba5565588077f8e5671d80c6ea222a298ab6d29586471b1d56c22e",
         "test:unit-step-concurrency": "sha256:50d40dc0e62702fc1a7e41de07a84164cb9e2b98500bef5f293ebf6acddda7b3",
         "test:unit:ci": "sha256:2ad764cd1368342719b9bc83421fd822e7c48e574653dacb6188e304f6a34909",
@@ -291,6 +292,14 @@
       "ci": {
         "name": "Every HTTP service installs the strict query parser (FU-072)",
         "run": "pnpm run test:strict-query-parser-wiring"
+      },
+      "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
+        "name": "Every ingress CORS policy carries every published header (FU-172)",
+        "run": "pnpm run test:cors-published-headers"
       },
       "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
     },

@@ -94,11 +94,18 @@ const pins = {
     '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
+    'baa12fdedf9e9bfbbeadd2be36f3b97acc62229af37ce9bc3ccdfea5c3e98cf9',
+    // FU-152 adds only pattern-refinement exports; reviewed helpers keep their sources.
+    '292d4fef2cb013e364ea7dd29ef04b112bf64734394155147d7dee955d91f770',
     '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',
     // + the transaction-text exports (FU-134, PR #806): `plainText` still re-exported from text.ts.
     'd470201ab822d732e8c10f0b6db953e4a5daacf94e47ae77afd0b75b64313822',
     // + PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (FU-156): one constant beside the project-create one.
     '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
+    // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171), numberInputInnerSchema (FU-160, #831) and the FU-152 private pattern registry exports (#840): exact union.
+    'ea1656bd023da6f0fddd9d24e1842aa628939bd610f77c5a7ad4f793e277c155',
+    // + MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS (FU-171, #879) on top of that union: exact union.
+    '0d7a692210ab8c4f739096703984e7253fa3019a63f7c99049666348f2835238',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
