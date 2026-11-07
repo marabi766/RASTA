@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
 import {
   numberInputInnerSchema,
+  publishablePattern,
+  unchangedCheck,
   publishedIsoDateTimeZone,
   publishedRefinementPattern,
 } from '@rasta/contracts';
@@ -46,7 +48,10 @@ const checkDefs = (def: any): any[] =>
   ((def.checks ?? []) as any[]).map((check) => ({ check, def: check._zod.def }));
 
 /** The bounds of each `codePointLength` refinement, by its check. */
-const CODE_POINT_BOUNDS = new WeakMap<object, { minLength: number; maxLength: number }>();
+const CODE_POINT_BOUNDS = new WeakMap<
+  object,
+  { bounds: { minLength: number; maxLength: number }; unchanged: () => boolean }
+>();
 
 /**
  * `schema` of `minLength` to `maxLength` characters counted as JSON Schema's `minLength` and
@@ -78,7 +83,10 @@ export function codePointLength(schema: z.ZodString, minLength: number, maxLengt
       });
     }
   });
-  CODE_POINT_BOUNDS.set(check, { minLength, maxLength });
+  CODE_POINT_BOUNDS.set(check, {
+    bounds: { minLength, maxLength },
+    unchanged: unchangedCheck(check),
+  });
   return schema.check(check);
 }
 
@@ -296,9 +304,17 @@ function rawChecks(def: any): { checks: ReturnType<typeof checkDefs>; changed: b
   const checks = checkDefs(def);
   const barrier = checks.findIndex(
     ({ check, def: definition }) =>
-      !CODE_POINT_BOUNDS.has(check) &&
+      !CODE_POINT_BOUNDS.get(check)?.unchanged() &&
       !publishedRefinementPattern(check) &&
-      !VALUE_PRESERVING_CHECKS.has(definition.check as string),
+      !publishedIsoDateTimeZone(check) &&
+      !(
+        Object.getPrototypeOf(definition) === Object.prototype &&
+        z.core.originalZodCheck(check) &&
+        VALUE_PRESERVING_CHECKS.has(definition.check as string) &&
+        (definition.check !== 'string_format' ||
+          (definition.pattern instanceof RegExp &&
+            ['regex', 'email', 'datetime', 'uuid'].includes(definition.format)))
+      ),
   );
   return {
     checks: barrier < 0 ? checks : checks.slice(0, barrier),
@@ -345,7 +361,7 @@ const STRING_FORMATS: Record<string, string> = {
 
 /** Consumers must compile published patterns with `u`; other flags cannot be carried by OpenAPI. */
 function publishPattern(out: JsonSchema, pattern: { source: string; flags: string }): void {
-  if (pattern.flags === '' || pattern.flags === 'u') out.pattern = pattern.source;
+  if (publishablePattern(pattern)) out.pattern = pattern.source;
 }
 
 function stringSchema(def: any): JsonSchema {
@@ -355,8 +371,8 @@ function stringSchema(def: any): JsonSchema {
 
   const { checks, changed } = rawChecks(def);
   for (const { check: instance, def: check } of checks) {
-    const bounds = CODE_POINT_BOUNDS.get(instance);
-    if (bounds) Object.assign(out, bounds);
+    const registered = CODE_POINT_BOUNDS.get(instance);
+    if (registered?.unchanged()) Object.assign(out, registered.bounds);
     // Registered refinements preserve the value; publish only inside the raw prefix.
     const published = publishedRefinementPattern(instance);
     if (published) publishPattern(out, published);
@@ -371,7 +387,7 @@ function stringSchema(def: any): JsonSchema {
     // ±23:59; the UTC-only form takes none), so its accepted zone is published with it (FU-035).
     const zone = publishedIsoDateTimeZone(instance);
     if (zone) {
-      out.pattern = zone.pattern;
+      publishPattern(out, { source: zone.pattern, flags: '' });
       out.description = zone.description;
     }
   }

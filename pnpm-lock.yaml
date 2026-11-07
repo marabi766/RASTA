@@ -31,7 +31,7 @@ overrides:
   body-parser@<2.4.0: 2.4.0
 
 patchedDependencies:
-  zod@4.6.7: 6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2
+  zod@4.6.7: 63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37
 
 importers:
 
@@ -87,7 +87,7 @@ importers:
         version: 1.5.0
       '@hookform/resolvers':
         specifier: ^5.9.1
-        version: 5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))
+        version: 5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37))
       '@radix-ui/react-label':
         specifier: ^2.1.15
         version: 2.1.15(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -132,7 +132,7 @@ importers:
         version: 3.7.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@axe-core/playwright':
         specifier: ^4.13.0
@@ -214,7 +214,7 @@ importers:
         version: link:../contracts
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@swc/core':
         specifier: ^1.10.7
@@ -242,7 +242,7 @@ importers:
     dependencies:
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@swc/core':
         specifier: ^1.10.7
@@ -322,7 +322,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/common':
         specifier: ^11.0.0
@@ -550,7 +550,7 @@ importers:
         version: 7.8.2
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -650,7 +650,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@rasta/testing':
         specifier: workspace:*
@@ -744,7 +744,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -841,7 +841,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -941,7 +941,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1041,7 +1041,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1147,7 +1147,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1244,7 +1244,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1341,7 +1341,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1441,7 +1441,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1541,7 +1541,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1641,7 +1641,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1753,7 +1753,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1856,7 +1856,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1956,7 +1956,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -2056,7 +2056,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -2156,7 +2156,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -8371,7 +8371,7 @@ snapshots:
       protobufjs: 7.6.5
       yargs: 17.7.3
 
-  '@hookform/resolvers@5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))':
+  '@hookform/resolvers@5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37))':
     dependencies:
       '@standard-schema/utils': 0.3.0
       react-hook-form: 7.88.0(react@19.3.0)
@@ -8381,7 +8381,7 @@ snapshots:
       ajv: 8.20.0
       ajv-formats: 2.1.1(ajv@8.20.0)
       effect: 3.21.0
-      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+      zod: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -11456,8 +11456,8 @@ snapshots:
       '@babel/parser': 7.29.8
       eslint: 9.39.5(jiti@2.7.0)(supports-color@8.1.1)
       hermes-parser: 0.25.1
-      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
-      zod-validation-error: 4.0.2(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))
+      zod: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
+      zod-validation-error: 4.0.2(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37))
     transitivePeerDependencies:
       - supports-color
 
@@ -14062,8 +14062,8 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
-  zod-validation-error@4.0.2(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)):
+  zod-validation-error@4.0.2(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)):
     dependencies:
-      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+      zod: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
 
-  zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2): {}
+  zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37): {}

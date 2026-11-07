@@ -112,7 +112,16 @@ less than all validation; it never presents a post-transform check as a raw-inpu
 
 FU-152: only pattern refinements created by the private registry's constructor are trusted as
 value-preserving; attaching a symbol to a check cannot grant trust. Both registered refinements
-and `.regex()` publish a pattern only with no flags or with `u`. Consumers **must compile published
+and `.regex()` use the shared `publishablePattern` predicate (FU-181): `u` patterns or a
+conservative BMP-only no-flag grammar whose Unicode meaning is identical. Unknown syntax is omitted.
+Stateful `g`/`y` refinements throw at construction. Consumers **must compile published
 patterns with the Unicode `u` flag**, including Unicode property escapes. Patterns with any other
 flags are omitted: OpenAPI carries only their source and cannot preserve those flags' semantics.
 Other proven raw-input constraints remain published; runtime validation is unchanged.
+
+FU-181 captures original built-in check runners and definitions inside the pinned Zod patch.
+Converter trust refuses changed runners, forged kind strings and changed definitions. Only named
+value-preserving formats (regex, email, datetime, UUID) cross the raw-input barrier; URL checks
+may rewrite their input and remain barriers. Code-point and ISO zone constructors snapshot their
+own checks too, and zone publication uses the same pattern predicate. Unknown checks omit later
+constraints. Construction snapshots do not register arbitrary caller callbacks.

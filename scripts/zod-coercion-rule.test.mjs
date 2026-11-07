@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { RuleTester } from 'eslint';
 import { describe, it } from 'node:test';
 
@@ -295,7 +296,15 @@ for (const code of [
 ])
   it(`F3 proven helper call: ${code}`, () => assert.deepEqual(messages(code), []));
 
-import { mkdtempSync, mkdirSync, cpSync, appendFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  cpSync,
+  appendFileSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { verifiedCallbackHelper } from './zod-callback-helpers.mjs';
@@ -366,10 +375,42 @@ it('reviewed ISO check refuses contracts barrel drift', () => {
     for (const file of [
       'packages/contracts/src/index.ts',
       'packages/contracts/src/common/iso-datetime.ts',
+      'packages/contracts/src/common/pattern-refinement.ts',
     ])
       cpSync(join(ROOT, file), join(root, file));
     assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), 'check');
     appendFileSync(join(root, 'packages/contracts/src/index.ts'), '\n// changed barrel\n');
+    assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it('FU-181 refuses the stale partial contracts barrel', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-stale-barrel-'));
+  try {
+    for (const file of [
+      'packages/contracts/src/index.ts',
+      'packages/contracts/src/common/iso-datetime.ts',
+      'packages/contracts/src/common/pattern-refinement.ts',
+    ])
+      cpSync(join(ROOT, file), join(root, file));
+    const barrel = join(root, 'packages/contracts/src/index.ts');
+    const stale = readFileSync(barrel, 'utf8')
+      .replace(/export \{[^}]*\} from '\.\/common\/transaction-text';\n/, '')
+      .replace(
+        /export \{[^}]*PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,[^}]*\} from '\.\/common\/replay-window';/,
+        "export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';",
+      )
+      .replace(
+        /export \{[^}]*publishedRefinementPattern,[^}]*\} from '\.\/common\/pattern-refinement';/,
+        "export { patternRefinement, publishedRefinementPattern } from './common/pattern-refinement';",
+      );
+    writeFileSync(barrel, stale);
+    assert.equal(
+      createHash('sha256').update(stale).digest('hex'),
+      '292d4fef2cb013e364ea7dd29ef04b112bf64734394155147d7dee955d91f770',
+    );
     assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });

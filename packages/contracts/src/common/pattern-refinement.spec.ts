@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { patternRefinement, publishedRefinementPattern } from './pattern-refinement';
+import {
+  patternRefinement,
+  publishedRefinementPattern,
+  publishablePattern,
+} from './pattern-refinement';
 
 describe('pattern refinement registry', () => {
   it('registers a value-preserving refine with the legacy custom issue', () => {
@@ -26,7 +30,7 @@ describe('pattern refinement registry', () => {
     }
   });
 
-  it.each(['kind', 'predicate', 'runner', 'when'])('refuses a changed %s', (field) => {
+  it.each(['kind', 'predicate', 'runner', 'when', 'getter'])('refuses a changed %s', (field) => {
     const check = patternRefinement(/^a$/, 'Expected a');
     if (field === 'kind') Object.assign(check._zod.def, { check: 'overwrite' });
     if (field === 'predicate') Object.assign(check._zod.def, { fn: () => true });
@@ -34,6 +38,10 @@ describe('pattern refinement registry', () => {
       check._zod.check = (payload) => {
         payload.value = 'a';
       };
+    if (field === 'getter') {
+      const fn = Object.getOwnPropertyDescriptor(check._zod.def, 'fn')?.value as unknown;
+      Object.defineProperty(check._zod.def, 'fn', { get: () => fn });
+    }
     if (field === 'when') Object.assign(check._zod.def, { when: () => true });
     expect(publishedRefinementPattern(check)).toBeUndefined();
   });
@@ -45,4 +53,23 @@ describe('pattern refinement registry', () => {
     expect(publishedRefinementPattern(check)).toEqual({ source: '^a$', flags: '' });
     expect(z.string().check(check).safeParse('b').success).toBe(false);
   });
+});
+
+// FU-181: one conservative policy for refinements, .regex() and datetime zones.
+describe('publishablePattern', () => {
+  it.each([/^.{1,3}$/, new RegExp('^\\p{L}+$'), /^[^x]{2}$/, new RegExp('^\\a$'), /^[\D]+$/])(
+    'omits ambiguous no-flag semantics: %s',
+    (pattern) => {
+      expect(publishablePattern(pattern)).toBe(false);
+    },
+  );
+  it('keeps literal dots inside a positive BMP character class', () => {
+    expect(publishablePattern(/^[a-z0-9_.-]+$/)).toBe(true);
+  });
+  it.each(['g', 'y', 'gu', 'yu'])(
+    'refuses stateful refinement flags %s at construction',
+    (flags) => {
+      expect(() => patternRefinement(new RegExp('^a$', flags), 'Invalid')).toThrow('Stateful');
+    },
+  );
 });
