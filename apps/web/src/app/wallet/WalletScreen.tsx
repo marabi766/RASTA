@@ -33,6 +33,7 @@ import type {
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { demoModeOf } from '@/lib/demo-mode';
 import { providerNotice } from '@/lib/wallet-fields';
+import type { TopUpFormState } from './form-state';
 import { TopUpForm } from './TopUpForm';
 import { withContext, type InContext } from '@/lib/page-context';
 import { ContextField } from '@/app/ContextField';
@@ -70,6 +71,7 @@ export interface WalletScreenProps {
   readonly query: InContext<TransactionListQuery>;
   readonly csrfToken: string;
   readonly submissionId: string;
+  readonly topUpState?: TopUpFormState;
 }
 
 function hrefWith(
@@ -296,6 +298,7 @@ export function WalletScreen({
   query,
   csrfToken,
   submissionId,
+  topUpState,
 }: WalletScreenProps) {
   const filtered = Boolean(query.status || query.transactionType);
 
@@ -339,6 +342,7 @@ export function WalletScreen({
                   walletId={wallet.data.id}
                   csrfToken={csrfToken}
                   submissionId={submissionId}
+                  initialState={topUpState}
                 />
               </>
             ) : (

@@ -16,6 +16,10 @@ import {
 } from '@/server/wallet';
 
 import { keepUnconfirmed } from '@/server/unconfirmed-retry';
+import { restoreTopUp, topUpScope, topUpSnapshot } from '@/server/top-up-request';
+import { reserveUnresolved, requestDigest, settleUnresolved } from '@/server/unresolved-request';
+import { isProvenRefusal } from '@/server/write';
+
 import type { TopUpFormState } from './form-state';
 
 /**
@@ -46,6 +50,9 @@ async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpForm
   const submissionId = form.get(SUBMISSION_FIELD);
   if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
+  const restored = await restoreTopUp(session, walletId);
+  if (restored.kind !== 'IDLE') return restored;
+
   const values = topUpFormValues(form);
   const parsed = parseTopUpForm(values);
   if (!parsed.ok) {
@@ -63,7 +70,45 @@ async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpForm
     return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
-  const result = await topUpWallet(session, walletId, parsed.request, submissionId);
+  const scope = topUpScope(walletId);
+  const ref = topUpSnapshot(session, walletId, submissionId, parsed.request.amountMinor);
+  if (ref.length > 800) return { kind: 'NOT_CHECKED' };
+  const reserved = await reserveUnresolved(session, scope, {
+    key: submissionId,
+    digest: requestDigest(session, scope.purpose, parsed.request),
+    ref,
+    issuedAt: Date.now(),
+    deadline: null,
+    windowMs: null,
+  });
+  if (reserved.kind !== 'RESERVED')
+    return restoreTopUp(session, walletId).then((state) =>
+      state.kind === 'IDLE' ? { kind: 'NOT_CHECKED' } : state,
+    );
+  let result;
+  try {
+    result = await topUpWallet(session, walletId, parsed.request, submissionId);
+  } catch (error) {
+    await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+    throw error;
+  }
+  const ambiguous =
+    result.kind === 'UNKNOWN_OUTCOME' ||
+    result.kind === 'IN_PROGRESS' ||
+    (result.kind === 'UNAVAILABLE' &&
+      !result.neverSent &&
+      !isProvenRefusal(result.status, result.code));
+  await settleUnresolved(
+    reserved.attempt,
+    result.kind === 'CREATED' ? 'CONFIRMED' : ambiguous ? 'UNRESOLVED' : 'REFUSED',
+  );
+  if (ambiguous)
+    return {
+      kind: 'UNCONFIRMED',
+      correlationId: result.correlationId,
+      submissionId,
+      values: { amountMinor: parsed.request.amountMinor },
+    };
 
   if (result.kind === 'CREATED') {
     // Nothing on the page reads a confirmation flag, so none is carried (PR 405 review 2, F2):

@@ -4,7 +4,7 @@
 
 /**
  * FU-173: every write action keeps an unresolved send unresolved
- * (`server/unconfirmed-retry.ts`). Found, not listed: every `submit*` export of
+ * (`server/unconfirmed-retry.ts`). Found, not listed: every runtime export of
  * every `'use server'` module discovery finds (`test/server-action-discovery.ts`)
  * is called as a retry of an `UNCONFIRMED` send — and of one still `IN_PROGRESS`
  * — with no session, so its first gate refuses and nothing is sent. An action
@@ -13,12 +13,18 @@
  *
  * A module that keeps its unresolved sends by a mechanism of its own is listed
  * in `OWN_MECHANISM` with the file that does it; a new module is in neither
- * list and so is held to the shared rule.
+ * list and so is held to the shared rule. Store-backed modules account for every
+ * static and runtime export by name, including reconciliation exemptions.
  */
 
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { discoverServerActions, runtimeExports } from './test/server-action-discovery';
+import {
+  discoverServerActions,
+  exportedNames,
+  runtimeExports,
+} from './test/server-action-discovery';
 
 jest.mock('next/headers', () => ({
   headers: async () => new Headers(),
@@ -37,15 +43,14 @@ const DISCOVERED = discoverServerActions(REPO_ROOT, join(__dirname, '..'));
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const CASES = DISCOVERED.modules.flatMap((module) =>
-  runtimeExports(module, require(join(REPO_ROOT, module)) as Record<string, unknown>)
-    .filter(({ exported, value }) => exported.startsWith('submit') && typeof value === 'function')
-    .map(({ label, value }) => ({ module, label, action: value as Action })),
+  runtimeExports(module, require(join(REPO_ROOT, module)) as Record<string, unknown>).map(
+    ({ exported, label, value }) => ({ module, exported, label, action: value as Action }),
+  ),
 );
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 /**
- * Modules whose unresolved sends are kept by a mechanism of their own (before
- * FU-173), each with the file that does it. They are not let off the outcome:
+ * Modules whose unresolved sends are kept by a mechanism of their own, each with the file that does it. They are not let off the outcome:
  *
  *   - `PREVIOUS_STATE`: the form's previous state, like the shared rule. Their
  *     states have no `IN_PROGRESS` (the writer's is answered as `UNCONFIRMED`),
@@ -85,11 +90,113 @@ const OWN_MECHANISM: Readonly<
     'server/unresolved-request.ts',
   ],
   'apps/web/src/app/projects/actions.ts': ['SERVER_STORE', 'server/unresolved-request.ts'],
+  'apps/web/src/app/wallet/actions.ts': ['SERVER_STORE', 'server/top-up-request.ts'],
   'apps/web/src/app/suppliers/supplier-actions.ts': [
     'SERVER_STORE',
     'server/supplier-unresolved.ts',
   ],
 };
+
+/** Every SERVER_STORE export has a named role; adding or renaming any export fails closed. */
+const SERVER_STORE: Readonly<
+  Record<
+    string,
+    { writes: readonly string[]; exemptions: Readonly<Record<string, string>>; tests: string }
+  >
+> = {
+  'apps/web/src/app/projects/actions.ts': {
+    writes: ['submitCreateProject'],
+    exemptions: {
+      releaseUnresolvedCreate: 'Explicit reconciliation; compare-and-delete, no domain write.',
+    },
+    tests: 'app/projects/actions.spec.ts',
+  },
+  'apps/web/src/app/procurement/demands/demand-actions.ts': {
+    writes: ['submitDemandRequest'],
+    exemptions: {
+      releaseUnresolvedDemand: 'Explicit reconciliation; compare-and-delete, no domain write.',
+    },
+    tests: 'app/procurement/demands/demand-actions.spec.ts',
+  },
+  'apps/web/src/app/suppliers/supplier-actions.ts': {
+    writes: [
+      'submitRegisterSupplier',
+      'submitQualificationRequest',
+      'submitApproveQualification',
+      'submitRejectQualification',
+      'submitSuspendSupplier',
+      'submitReinstateSupplier',
+    ],
+    exemptions: {
+      reconcileSupplierWrite: 'Explicit reconciliation; compare-and-delete, no domain write.',
+    },
+    tests: 'app/suppliers/supplier-actions.spec.ts',
+  },
+  'apps/web/src/app/wallet/actions.ts': {
+    writes: ['submitTopUp'],
+    exemptions: {},
+    tests: 'app/wallet/actions.spec.ts',
+  },
+};
+
+function checkStoreExports(module: string, names: readonly string[]): void {
+  const entry = SERVER_STORE[module];
+  expect(entry).toBeDefined();
+  const accounted = [...entry.writes, ...Object.keys(entry.exemptions)];
+  expect(new Set(accounted).size).toBe(accounted.length);
+  expect([...names].sort()).toEqual([...accounted].sort());
+  for (const reason of Object.values(entry.exemptions)) expect(reason.trim()).not.toBe('');
+}
+
+it('FU-191: discovers every SERVER_STORE export before classifying its named role', () => {
+  for (const [module, [mechanism]] of Object.entries(OWN_MECHANISM)) {
+    if (mechanism !== 'SERVER_STORE') continue;
+    // Compare labels too: this assertion runs unchanged on #880, whose CASES dropped non-submit exports.
+    const expected = runtimeExports(
+      module,
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require(join(REPO_ROOT, module)) as Record<string, unknown>,
+    );
+    expect(
+      CASES.filter((entry) => entry.module === module)
+        .map(({ label }) => label)
+        .sort(),
+    ).toEqual(expected.map(({ label }) => label).sort());
+  }
+});
+
+it('checks every SERVER_STORE module and every static/runtime export by name', () => {
+  const modules = Object.keys(OWN_MECHANISM).filter(
+    (module) => OWN_MECHANISM[module][0] === 'SERVER_STORE',
+  );
+  expect(Object.keys(SERVER_STORE).sort()).toEqual(modules.sort());
+  for (const module of modules) {
+    checkStoreExports(module, DISCOVERED.exports[module]);
+    checkStoreExports(
+      module,
+      CASES.filter((entry) => entry.module === module).map(({ exported }) => exported),
+    );
+    for (const entry of CASES.filter((entry) => entry.module === module))
+      expect(typeof entry.action).toBe('function');
+    // These suites exercise the store-backed dispatch/refusal paths; this guard checks inventory.
+    expect(existsSync(join(__dirname, SERVER_STORE[module].tests))).toBe(true);
+  }
+});
+
+it.each([
+  'export async function performWrite() {}',
+  'export default async function write() {}',
+  'const x = async () => {}; export { x as submitEscape };',
+  'const x = async () => {}; export { x as performWrite };',
+  'export * from "./other";',
+])('refuses an unaccounted SERVER_STORE export: %s', (addition) => {
+  const module = 'apps/web/src/app/wallet/actions.ts';
+  const names = exportedNames(
+    `'use server'; export async function submitTopUp() {} ${addition}`,
+    'actions.ts',
+  );
+  expect(() => checkStoreExports(module, names)).toThrow();
+});
 
 /**
  * The action's own leading arguments (ids), then the previous state, then the form —

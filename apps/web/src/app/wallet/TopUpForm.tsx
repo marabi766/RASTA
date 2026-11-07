@@ -27,24 +27,26 @@ export function TopUpForm({
   walletId,
   csrfToken,
   submissionId,
+  initialState = IDLE_TOP_UP_FORM,
 }: {
   walletId: string;
   csrfToken: string;
   submissionId: string;
+  initialState?: TopUpFormState;
 }) {
-  const [state, action, pending] = useActionState(
-    submitTopUp.bind(null, walletId),
-    IDLE_TOP_UP_FORM,
-  );
+  const [state, action, pending] = useActionState(submitTopUp.bind(null, walletId), initialState);
 
-  const values = state.kind === 'INVALID' ? state.values : EMPTY_TOP_UP_FORM;
+  const held = state.kind === 'HELD' || state.kind === 'UNCONFIRMED';
+  const locked = held || state.kind === 'NOT_CHECKED';
+  const values =
+    state.kind === 'INVALID' || held ? (state.values ?? EMPTY_TOP_UP_FORM) : EMPTY_TOP_UP_FORM;
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
-  const currentSubmissionId = state.kind === 'INVALID' ? state.submissionId : submissionId;
+  const currentSubmissionId = state.kind === 'INVALID' || held ? state.submissionId : submissionId;
 
   return (
     <form action={action} className="flex flex-col gap-4">
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
-      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId ?? ''} />
 
       <FormBanner state={state} />
 
@@ -52,17 +54,19 @@ export function TopUpForm({
         {(control) => (
           <input
             {...control}
+            key={locked ? `held:${currentSubmissionId}:${values.amountMinor}` : 'editing'}
             name="amountMinor"
             inputMode="decimal"
             autoComplete="off"
             defaultValue={values.amountMinor}
+            readOnly={locked}
             className={controlClassName}
           />
         )}
       </Field>
 
       <div className="flex flex-wrap items-center gap-2 pt-2">
-        <Button type="submit" tone="secondary" disabled={pending}>
+        <Button type="submit" tone="secondary" disabled={pending || locked}>
           {pending ? 'در حال ثبت…' : 'افزایش موجودی نمایشی'}
         </Button>
       </div>
@@ -71,6 +75,14 @@ export function TopUpForm({
 }
 
 function FormBanner({ state }: { state: TopUpFormState }) {
+  if (state.kind === 'HELD' || state.kind === 'NOT_CHECKED') {
+    return (
+      <Alert tone="warning">
+        نتیجهٔ درخواست پیشین مشخص نیست. پیش از افزایش موجودی دوباره، تراکنش‌ها را بررسی کنید.
+      </Alert>
+    );
+  }
+
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
   }

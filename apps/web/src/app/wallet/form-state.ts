@@ -16,6 +16,8 @@ import type { TopUpFormField, TopUpFormValues } from '@/lib/wallet-fields';
  */
 export type TopUpFormState =
   | { readonly kind: 'IDLE' }
+  | { readonly kind: 'NOT_CHECKED' }
+  | { readonly kind: 'HELD'; readonly submissionId: string; readonly values: TopUpFormValues }
   | {
       readonly kind: 'INVALID';
       readonly submissionId: string;
@@ -29,6 +31,6 @@ export type TopUpFormState =
     }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
-  | UnconfirmedWriteState;
+  | (UnconfirmedWriteState & { readonly values?: TopUpFormValues });
 
 export const IDLE_TOP_UP_FORM: TopUpFormState = { kind: 'IDLE' };
