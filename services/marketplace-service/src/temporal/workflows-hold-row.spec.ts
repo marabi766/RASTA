@@ -57,9 +57,37 @@ interface Row {
 }
 type Sent = { holdNotAfter?: string };
 
+/** The hold's call record (#836, FU-145), as `openSagaCall`/`confirmSagaCall` keep it. */
+interface CallRecord {
+  open: boolean;
+  generation: number;
+  /** The row's count of sends at each opening. */
+  openedAtClaims: number[];
+}
+const freshRecord = (): CallRecord => ({ open: false, generation: 0, openedAtClaims: [] });
+
 /** What the three repository methods do in SQL, over one row, by `now`. */
-function ordersOver(row: Row, now: () => Promise<number> | number) {
+function ordersOver(
+  row: Row,
+  now: () => Promise<number> | number,
+  record: CallRecord = freshRecord(),
+) {
   return {
+    openSagaCall: async () => {
+      const started = !record.open;
+      record.open = true;
+      record.generation += 1;
+      record.openedAtClaims.push(row.claims);
+      return { generation: record.generation, started };
+    },
+    confirmSagaCall: async (
+      _o: unknown,
+      _operation: unknown,
+      _subject: unknown,
+      opening: { generation: number },
+    ) => {
+      if (opening.generation === record.generation) record.open = false;
+    },
     describe: async () => ({
       id: INPUT.orderId,
       status: row.status,
@@ -123,11 +151,12 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
       throw refuse(BROKE);
     },
     attempt = 1,
+    record: CallRecord = freshRecord(),
     advertises: () => Promise<boolean> = async () => true,
   ) {
     const sent: Sent[] = [];
     const activities = createActivities({
-      orders: ordersOver(row, () => 0) as unknown as OrderService,
+      orders: ordersOver(row, () => 0, record) as unknown as OrderService,
       economic: {
         createObligation: async (input: Sent) => {
           sent.push(input);
@@ -221,6 +250,231 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     expect(row.closed).toBe(false);
   });
 
+  /**
+   * #836 with #812: the call record opens once the row has counted the send, and closes on
+   * a refusal only where both rules hold: the row's proof (first attempt, first send ever,
+   * the sends now shut) and the record's (it began here; economic-service's own refusal
+   * that held nothing, under its own status).
+   */
+  describe('the call record (#836, FU-145)', () => {
+    /** economic-service's own refusal before any effect, as the client reports it. */
+    const ownRefusal = () =>
+      new RastaError(BROKE as never, 'refused', {
+        internalContext: { operation: 'x', status: 422 },
+      });
+
+    it('the first send there has ever been, refused before any effect: opened after the claim, then confirmed', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(
+        row,
+        () => {
+          expect(record.open).toBe(true);
+          throw ownRefusal();
+        },
+        1,
+        record,
+      );
+      const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(caught).toMatchObject({ type: BROKE, details: [REFUSED_ON_FIRST_ATTEMPT] });
+      expect(row.closed).toBe(true);
+      expect(record).toMatchObject({ open: false, openedAtClaims: [1] });
+    });
+
+    it('a refusal the row proves but that is not economic-service’s own: the record stays open', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(row, undefined, 1, record);
+      await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(row.closed).toBe(true);
+      expect(record.open).toBe(true);
+    });
+
+    it.each([
+      [
+        'a replacement run (an earlier send counted)',
+        { holdNotAfter: EARLIER, claims: 1 },
+        PROPOSED,
+        1,
+      ],
+      ['a later attempt', {}, PROPOSED, 2],
+      ['a round from before the fence', {}, undefined, 1],
+    ] as const)(
+      '%s: economic-service’s own refusal leaves the record open',
+      async (_name, over, proposed, attempt) => {
+        const row = freshRow(over);
+        const record = freshRecord();
+        const { activities } = activity(
+          row,
+          () => {
+            throw ownRefusal();
+          },
+          attempt,
+          record,
+        );
+        const caught = await failure(activities.createObligation(INPUT.orderId, proposed));
+        expect(caught.details ?? []).toEqual([]);
+        expect(record.open).toBe(true);
+      },
+    );
+
+    it('an earlier record still open: this refusal began nothing, and confirms nothing', async () => {
+      const row = freshRow();
+      const record: CallRecord = { open: true, generation: 3, openedAtClaims: [0] };
+      const { activities } = activity(
+        row,
+        () => {
+          throw ownRefusal();
+        },
+        1,
+        record,
+      );
+      await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(record).toMatchObject({ open: true, generation: 4 });
+    });
+
+    it('a deadline refusal leaves the record open: a send claimed before it may still land', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(
+        row,
+        () => {
+          throw new RastaError(HOLD_DEADLINE_PASSED as never, 'past it', {
+            internalContext: { operation: 'x', status: 422 },
+          });
+        },
+        1,
+        record,
+      );
+      const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(caught.type).toBe(HOLD_DEADLINE_PASSED);
+      expect(record.open).toBe(true);
+    });
+
+    it.each([
+      ['its sends closed', { claims: 1, closed: true }],
+      ['the order closed', { status: 'FAILED' }],
+    ] as const)('a row with %s sends nothing and opens no record', async (_name, over) => {
+      const row = freshRow(over);
+      const record = freshRecord();
+      const { activities, sent } = activity(row, undefined, 1, record);
+      await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(sent).toEqual([]);
+      expect(record).toEqual(freshRecord());
+    });
+
+    it('a proven refusal, then an older run: the confirmed record is not reopened', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const refusing = () => {
+        throw ownRefusal();
+      };
+      await failure(
+        activity(row, refusing, 1, record).activities.createObligation(INPUT.orderId, PROPOSED),
+      );
+      expect(record.open).toBe(false);
+      const older = activity(row, refusing, 1, record);
+      const caught = await failure(older.activities.createObligation(INPUT.orderId, EARLIER));
+      expect(caught.type).toBe(HOLD_SENDS_CLOSED);
+      expect(record).toMatchObject({ open: false, generation: 1 });
+    });
+
+    /**
+     * #836 with #948 (FU-233, D-150/D-154): the row is proof only on economic-service's
+     * explicit yes, asked again after the send. Where it is not had then, the refusal is not
+     * proof, so the record is not confirmed, even for economic-service's own refusal on the
+     * first send there has ever been.
+     */
+    it.each([
+      ['its explicit no', async (): Promise<boolean> => false, false],
+      [
+        'no answer',
+        async (): Promise<boolean> => {
+          throw new Error('timed out');
+        },
+        true,
+      ],
+    ] as const)(
+      'the rule after the send is %s: economic-service’s own refusal leaves the record open',
+      async (_name, after, rowClosed) => {
+        const row = freshRow();
+        const record = freshRecord();
+        let asked = 0;
+        const { activities, sent } = activity(
+          row,
+          () => {
+            throw ownRefusal();
+          },
+          1,
+          record,
+          async () => ((asked += 1) === 1 ? true : after()),
+        );
+        const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+        expect(sent).toHaveLength(1);
+        expect(caught.details ?? []).toEqual([]);
+        expect(row.closed).toBe(rowClosed);
+        expect(record).toMatchObject({ open: true, generation: 1, openedAtClaims: [1] });
+      },
+    );
+
+    it('the rule not had before the send: nothing sent, no record opened', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities, sent } = activity(row, undefined, 1, record, async () => false);
+      const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(caught.type).toBe(ECONOMIC_HOLD_RULE_UNCONFIRMED);
+      expect(sent).toEqual([]);
+      expect(record).toEqual(freshRecord());
+    });
+
+    it('a row kept closed with the rule unanswered, then a yes: the next attempt sends nothing and the record stays open', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      let asked = 0;
+      const first = activity(
+        row,
+        () => {
+          throw ownRefusal();
+        },
+        1,
+        record,
+        async () => {
+          if ((asked += 1) > 1) throw new Error('timed out');
+          return true;
+        },
+      );
+      await failure(first.activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(row.closed).toBe(true);
+      const next = activity(row, undefined, 2, record);
+      const ended = await failure(next.activities.createObligation(INPUT.orderId, PROPOSED));
+      expect(next.sent).toEqual([]);
+      expect(ended.type).toBe(HOLD_SENDS_CLOSED);
+      expect(record).toMatchObject({ open: true, generation: 1 });
+    });
+
+    it('answered: the record the send opened is confirmed', async () => {
+      const row = freshRow();
+      const record = freshRecord();
+      const { activities } = activity(row, () => ({ id: 'TXN' }), 1, record);
+      await expect(activities.createObligation(INPUT.orderId, PROPOSED)).resolves.toEqual({
+        transactionId: 'TXN',
+      });
+      expect(record).toMatchObject({ open: false, generation: 1, openedAtClaims: [1] });
+    });
+
+    it('answered without a send (the id already on the order): an earlier open record is confirmed', async () => {
+      const row = freshRow({ economicTransactionId: 'TXN', claims: 1 });
+      const record: CallRecord = { open: true, generation: 1, openedAtClaims: [1] };
+      const { activities, sent } = activity(row, undefined, 2, record);
+      await expect(activities.createObligation(INPUT.orderId, PROPOSED)).resolves.toEqual({
+        transactionId: 'TXN',
+      });
+      expect(sent).toEqual([]);
+      expect(record).toMatchObject({ open: false, generation: 2 });
+      expect(row.claims).toBe(1);
+    });
+  });
+
   it('the row cannot record the proof: no proof, and the retry stays in doubt', async () => {
     const row = freshRow();
     const orders = {
@@ -262,7 +516,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
 
   it.each(UNCONFIRMED)('%s: no hold is sent, nothing counted, no proof', async (_n, advertises) => {
     const row = freshRow();
-    const { activities, sent } = activity(row, undefined, 1, advertises);
+    const { activities, sent } = activity(row, undefined, 1, freshRecord(), advertises);
     const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
     expect(sent).toEqual([]);
     // Not retried within this scheduling (#948 r1, F1): a retry's send would be a later
@@ -274,14 +528,14 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
 
   it.each(UNCONFIRMED)('%s: an empty row does not say no hold can land', async (_n, advertises) => {
     const row = freshRow();
-    const { activities } = activity(row, undefined, 1, advertises);
+    const { activities } = activity(row, undefined, 1, freshRecord(), advertises);
     await expect(activities.noHoldCanLand(INPUT.orderId)).resolves.toBe(false);
     expect(row.closed).toBe(false);
   });
 
   it('a closed order’s row, on economic-service’s explicit no, reads as from before the fence', async () => {
     const row = freshRow({ status: 'CANCELLED', holdNotAfter: EARLIER, claims: 1, closed: true });
-    const { activities } = activity(row, undefined, 1, async () => false);
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => false);
     await expect(activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
       status: 'CANCELLED',
       holdNotAfter: null,
@@ -299,7 +553,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     const row = freshRow({ status: 'FAILED', claims: 1, closed: true });
     let down = true;
     let asked = 0;
-    const { activities } = activity(row, undefined, 1, async () => {
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
       asked += 1;
       if (down) throw new Error('timed out');
       return true;
@@ -320,7 +574,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
   it('a closed order’s row, one blip: asked again within the read, which answers', async () => {
     const row = freshRow({ status: 'FAILED', claims: 1, closed: true });
     let asked = 0;
-    const { activities } = activity(row, undefined, 1, async () => {
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
       if ((asked += 1) === 1) throw new Error('timed out');
       return true;
     });
@@ -338,7 +592,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     ['a closed order whose row proves nothing', freshRow({ status: 'FAILED', claims: 1 })],
   ])('%s: read as it is, without asking', async (_n, row) => {
     let asked = 0;
-    const { activities } = activity(row, undefined, 1, async () => {
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
       asked += 1;
       return false;
     });
@@ -351,7 +605,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
   it('a blip before the send is asked again: the first send still goes on attempt 1, its refusal proof', async () => {
     const row = freshRow();
     let answers = 0;
-    const { activities, sent } = activity(row, undefined, 1, async () => {
+    const { activities, sent } = activity(row, undefined, 1, freshRecord(), async () => {
       if ((answers += 1) === 1) throw new Error('timed out');
       return true;
     });
@@ -373,6 +627,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
         throw refuse(code);
       },
       1,
+      freshRecord(),
       async () => (asked += 1) === 1,
     );
     const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
@@ -388,7 +643,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
   it('its first refusal, the rule unanswered after the send: the row keeps the proof, and the next attempt ends on it without sending', async () => {
     const row = freshRow();
     let asked = 0;
-    const { activities, sent } = activity(row, undefined, 1, async () => {
+    const { activities, sent } = activity(row, undefined, 1, freshRecord(), async () => {
       if ((asked += 1) > 1) throw new Error('timed out');
       return true;
     });
@@ -407,14 +662,14 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
   it('its first refusal, the rule unanswered after the send and then its explicit no: the kept proof decides nothing', async () => {
     const row = freshRow();
     let asked = 0;
-    const { activities } = activity(row, undefined, 1, async () => {
+    const { activities } = activity(row, undefined, 1, freshRecord(), async () => {
       if ((asked += 1) > 1) throw new Error('timed out');
       return true;
     });
     await failure(activities.createObligation(INPUT.orderId, PROPOSED));
     expect(row.closed).toBe(true);
 
-    const refused = activity(row, undefined, 1, async () => false);
+    const refused = activity(row, undefined, 1, freshRecord(), async () => false);
     const caught = await failure(refused.activities.createObligation(INPUT.orderId, PROPOSED));
     expect(refused.sent).toEqual([]);
     expect(caught).toMatchObject({ type: ECONOMIC_HOLD_RULE_UNCONFIRMED });
@@ -426,7 +681,7 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     // The first claim there has been, on attempt 2: only the attempt keeps this from proof.
     const row = freshRow();
     let asked = 0;
-    const { activities } = activity(row, undefined, 2, async () => {
+    const { activities } = activity(row, undefined, 2, freshRecord(), async () => {
       if ((asked += 1) > 1) throw new Error('timed out');
       return true;
     });
