@@ -13,11 +13,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { authoredFiles } from './authored-source-inventory.cjs';
+
+// Lists authored files only: generated output (src/generated) may be regenerating meanwhile.
+const authoredUnder = (url) => {
+  const dir = fileURLToPath(url);
+  return authoredFiles(dir).map((path) => relative(dir, path));
+};
 import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./marketplace-saga-drain-check.mjs', import.meta.url));
@@ -732,6 +739,223 @@ for (const [name, recorded] of Object.entries({
   });
 }
 
+// ---- Recorded activity results are evidence too (PR-796 r2 F5) ------------------
+//
+// A worker that recorded a final answer and stopped before the workflow's next task
+// leaves a history without the marker. An older workflow reads that answer as the
+// call's own effect: `markCancelled` on a paid-out order.
+const encoded = (value) =>
+  value === undefined ? { metadata: { encoding: 'YmluYXJ5L251bGw=' } } : payload(value);
+/** A history of one scheduled activity and its recorded result, as the CLI prints it. */
+const withResult = (activity, result = { payloads: [encoded(undefined)] }) => {
+  const { events } = history();
+  return {
+    events: [
+      ...events,
+      {
+        eventId: '2',
+        eventType: 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED',
+        activityTaskScheduledEventAttributes: { activityType: { name: activity } },
+      },
+      {
+        eventId: '3',
+        eventType: 'EVENT_TYPE_ACTIVITY_TASK_COMPLETED',
+        activityTaskCompletedEventAttributes: { scheduledEventId: '2', result },
+      },
+    ],
+  };
+};
+const showing = (recorded) => {
+  const scenario = drained();
+  scenario['workflow show order-A'].stdout = recorded;
+  scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
+    recorded.events.length,
+  );
+  return scenario;
+};
+const atProtocol = (marketplaceSagaProtocol) => ({
+  target: { name: TARGET_NAME, marketplaceSagaProtocol },
+});
+const FINAL_ANSWER = { final: true, status: 'SETTLED', funds: 'PAID_OUT' };
+const LATEST_KNOWN = 6;
+const producers = {
+  compensate: [undefined],
+  resolveObligationDispute: [undefined],
+  disputeObligation: [undefined, null, 'ECON_DISPUTE'],
+  authoriseSettlement: [
+    undefined,
+    { disputed: true, reason: 'broken' },
+    { disputed: true, reason: 'broken', economicDisputeId: null },
+    { disputed: true, reason: 'broken', economicDisputeId: 'ECON_DISPUTE' },
+  ],
+};
+
+test('the review of #796 r2: a settled refund recorded just before the workers stopped', () => {
+  // The captured history cut right after `compensate` answered, before its marker.
+  const captured = JSON.parse(
+    readFileSync(
+      new URL(
+        '../services/marketplace-service/src/temporal/__fixtures__/order-saga-fu117r2-settled-reconciliation.history.json',
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const events = captured.events.slice(0, 15);
+  assert.equal(events[12].activityTaskScheduledEventAttributes.activityType.name, 'compensate');
+  assert.deepEqual(
+    JSON.parse(
+      Buffer.from(
+        events[14].activityTaskCompletedEventAttributes.result.payloads[0].data,
+        'base64',
+      ).toString(),
+    ),
+    FINAL_ANSWER,
+  );
+  events[0].workflowExecutionStartedEventAttributes.taskQueue.name = 'rasta-order';
+  const scenario = showing({ events });
+  const refused = run(scenario, atProtocol(5));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /requires saga protocol 6; incompatible target build/);
+  assert.equal(run(scenario, atProtocol(6)).status, 0);
+});
+
+for (const [activity, earlier] of Object.entries(producers)) {
+  test(`${activity}: a final answer without the marker needs protocol 6`, () => {
+    const scenario = showing(withResult(activity, { payloads: [payload(FINAL_ANSWER)] }));
+    for (const target of [0, 5]) {
+      const refused = run(scenario, atProtocol(target));
+      assert.equal(refused.status, 1, `target ${target}`);
+      assert.match(refused.stderr, /requires saga protocol 6; incompatible target build/);
+    }
+    assert.equal(run(scenario, atProtocol(6)).status, 0);
+  });
+
+  for (const value of earlier) {
+    test(`${activity}: ${JSON.stringify(value)} needs nothing of its own`, () => {
+      const scenario = showing(withResult(activity, { payloads: [encoded(value)] }));
+      assert.equal(run(scenario, atProtocol(0)).status, 0);
+    });
+  }
+
+  for (const unknown of [
+    { final: false, status: 'SETTLED', funds: 'PAID_OUT' },
+    { final: true, status: 'SETTLED' },
+    { final: true, status: 7, funds: 'PAID_OUT' },
+    { final: true, status: 'SETTLED', funds: 7 },
+    { ...FINAL_ANSWER, extra: 1 },
+    { something: 'else' },
+    [],
+    false,
+    7,
+    ...(activity === 'disputeObligation' ? [] : ['a words answer']),
+    ...(activity === 'authoriseSettlement' ? [] : [{ disputed: true, reason: 'broken' }]),
+    { disputed: true, reason: 'broken', extra: 1 },
+    { disputed: true },
+  ]) {
+    test(`${activity}: an unknown result ${JSON.stringify(unknown)} blocks every target`, () => {
+      const refused = run(
+        showing(withResult(activity, { payloads: [payload(unknown)] })),
+        atProtocol(LATEST_KNOWN),
+      );
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /unknown activity result/);
+    });
+  }
+}
+
+for (const [name, recorded, words] of [
+  ['an activity it does not list', withResult('newActivity'), /unknown activity result/],
+  [
+    'a final answer from a call that never gives one',
+    withResult('settle', { payloads: [payload(FINAL_ANSWER)] }),
+    /unknown activity result/,
+  ],
+  ['two results', withResult('compensate', { payloads: [payload(1), payload(2)] }), /unreadable/],
+  [
+    'a result in another encoding',
+    withResult('compensate', { payloads: [{ metadata: { encoding: 'YmluYXJ5L3BsYWlu' } }] }),
+    /cannot be read/,
+  ],
+  [
+    'a null encoding that carries data',
+    withResult('compensate', {
+      payloads: [{ metadata: { encoding: 'YmluYXJ5L251bGw=' }, data: 'e30=' }],
+    }),
+    /cannot be read/,
+  ],
+  [
+    'a result of no scheduling',
+    (() => {
+      const orphan = withResult('compensate');
+      orphan.events[2].activityTaskCompletedEventAttributes.scheduledEventId = '9';
+      return orphan;
+    })(),
+    /without its scheduling/,
+  ],
+  [
+    'result attributes on another event type',
+    (() => {
+      const odd = withResult('compensate');
+      odd.events[2].eventType = 'EVENT_TYPE_TIMER_FIRED';
+      return odd;
+    })(),
+    /without its scheduling/,
+  ],
+]) {
+  test(`recorded result: ${name} blocks even the latest target`, () => {
+    const refused = run(showing(recorded), atProtocol(LATEST_KNOWN));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, words);
+  });
+}
+
+test('recorded result: a completed event with no result is not taken for a void one', () => {
+  const recorded = withResult('compensate');
+  delete recorded.events[2].activityTaskCompletedEventAttributes.result;
+  const refused = run(showing(recorded), atProtocol(LATEST_KNOWN));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /unreadable activity result/);
+});
+
+test('the gate lists every activity the saga can schedule', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const names = [];
+  const file = ts.createSourceFile('activities.ts', source, ts.ScriptTarget.Latest, true);
+  const visit = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'createActivities') {
+      const returned = node.body.statements.find(ts.isReturnStatement);
+      for (const property of returned.expression.properties) names.push(property.name.text);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(names.length >= 18, names.join());
+  // Absent from the gate's table, a call's result refuses every target.
+  const events = [history().events[0]];
+  for (const name of names) {
+    const [, scheduled, completed] = withResult(name).events;
+    const id = events.length + 1;
+    events.push(
+      { ...scheduled, eventId: String(id) },
+      {
+        ...completed,
+        eventId: String(id + 1),
+        activityTaskCompletedEventAttributes: {
+          ...completed.activityTaskCompletedEventAttributes,
+          scheduledEventId: String(id),
+        },
+      },
+    );
+  }
+  const answered = run(showing({ events }), atProtocol(0));
+  assert.equal(answered.status, 0, answered.stderr);
+});
+
 // ---- Every marker the saga records is known to the gate (FU-079) --------------
 //
 // What a target must declare to run a history carrying each patch id. Adding a
@@ -742,7 +966,9 @@ const PATCHES = {
   'dispute-settle-resumes-order': 2,
   'dispute-release-durable-wait-v1': 3,
   'economic-call-durable-wait-v1': 4,
-  'authorisation-order-fence-v1': 5,
+  'economic-sibling-call-durable-wait-v1': 5,
+  'saga-owed-work-durable-v1': 6,
+  'authorisation-order-fence-v1': 7,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -759,7 +985,7 @@ const scannedFiles = (files) =>
       return file;
     });
 const sagaSources = () =>
-  scannedFiles(readdirSync(SAGA_SOURCE, { recursive: true })).map((file) =>
+  scannedFiles(authoredUnder(SAGA_SOURCE)).map((file) =>
     readFileSync(new URL(file, SAGA_SOURCE), 'utf8'),
   );
 const parsed = (source) => ts.createSourceFile('saga.ts', source, ts.ScriptTarget.Latest, true);
@@ -1042,7 +1268,7 @@ function assertServiceAddsNothing(listing, read) {
 
 test('nothing in the service adds to a scanned interface from outside the scan', () => {
   const service = new URL('../', SAGA_SOURCE);
-  assertServiceAddsNothing(readdirSync(service, { recursive: true }), (file) =>
+  assertServiceAddsNothing(authoredUnder(service), (file) =>
     readFileSync(new URL(file, service), 'utf8'),
   );
   for (const file of ['test/a.spec.ts', 'src/generated/a.ts', 'dev/a.ts']) {
@@ -1202,6 +1428,8 @@ const RESUME_FIELDS = {
   reminderDue: 2,
   releaseRounds: 3,
   unconfirmedCall: 4,
+  siblingCall: 5,
+  outstandingWork: 6,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1346,7 +1574,7 @@ for (const [name, edits, reason = /cannot enumerate the saga (input|resume)/] of
   });
 }
 
-test("a continuation rolled over in a sibling call's wait needs protocol 4", () => {
+test('a continuation rolled over in the wait of an authorisation needs protocol 4', () => {
   const rolled = withHistory(
     history({
       resume: {
@@ -1357,6 +1585,32 @@ test("a continuation rolled over in a sibling call's wait needs protocol 4", () 
   );
   assert.match(run(rolled, targetOf(3)).stderr, /requires saga protocol 4; incompatible/);
   assert.equal(run(rolled, targetOf(4)).status, 0);
+});
+
+test('a continuation rolled over in the wait of a filing or refund needs protocol 5', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        siblingCall: { operation: 'compensate', rounds: 2, transactionId: 'T' },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(4)).stderr, /requires saga protocol 5; incompatible/);
+  assert.equal(run(rolled, targetOf(5)).status, 0);
+});
+
+test('a continuation carrying owed work needs protocol 6', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        outstandingWork: { operation: 'settle', rounds: 1 },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(5)).stderr, /requires saga protocol 6; incompatible/);
+  assert.equal(run(rolled, targetOf(6)).status, 0);
 });
 
 test('a continuation rolled over in the release wait needs protocol 3', () => {
@@ -1370,6 +1624,10 @@ for (const [name, required] of [
   ['pre-fu080-release-refused', 2],
   ['fu080-release-wait', 3],
   ['fu103-authorise-wait', 4],
+  ['fu103-wait-then-refund-exhausted', 4],
+  ['fu103-wait-then-dispute-exhausted', 4],
+  ['fu117-compensate-wait', 5],
+  ['fu117-dispute-wait', 5],
 ]) {
   test(`a real captured history (${name}) requires protocol ${required}`, () => {
     const real = JSON.parse(

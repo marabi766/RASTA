@@ -24,6 +24,7 @@ import {
 } from '../economic/economic.client';
 import { SERVICE_NAME } from '../config/env';
 import {
+  FINAL_ANSWER_CONTRACT,
   OWNER_STATE_IS_FINAL,
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
@@ -171,6 +172,34 @@ export interface DisputedObligation {
 }
 
 /**
+ * The obligation is in a terminal status that is not the call's own effect, so no
+ * attempt can ever have that effect, and no request still in flight can move it.
+ * An answer, not a refusal: the saga decides from it what the order can do.
+ */
+export interface ObligationFinal {
+  final: true;
+  status: string;
+  funds: ObligationFunds;
+}
+
+/** The economic calls whose outcome the saga can owe beside the release (FU-103, FU-117). */
+export const UNCONFIRMED_OPERATIONS = [
+  'readOrder',
+  'authoriseSettlement',
+  'settle',
+  'disputeObligation',
+  'compensate',
+] as const;
+export type UnconfirmedOperation = (typeof UNCONFIRMED_OPERATIONS)[number];
+
+/** What `authoriseSettlement` answers. Undefined: authorised. */
+export type AuthorisationResult =
+  DisputedObligation | ObligationFinal | AuthorisationFenced | undefined;
+
+/** Where the saga may authorise, the same two its read checks. Any other status is fenced. */
+const AUTHORISABLE_STATUSES: readonly OrderStatus[] = ['RECEIPT_CONFIRMED', 'SETTLING'];
+
+/**
  * The authorisation was not sent: the order, read under the lock the send would
  * have held, does not allow it (D-138). The saga follows the order instead, and
  * comes back to authorise only if the order returns to where it can.
@@ -185,21 +214,44 @@ export interface AuthorisationFenced {
   inDoubt: boolean;
 }
 
-/** The economic calls that wait for confirmation beside the release (FU-103). */
-export const UNCONFIRMED_OPERATIONS = ['authoriseSettlement'] as const;
-export type UnconfirmedOperation = (typeof UNCONFIRMED_OPERATIONS)[number];
-
-/** What `authoriseSettlement` answers. Undefined: authorised. */
-export type AuthorisationResult = DisputedObligation | AuthorisationFenced | undefined;
-
-/** Where the saga may authorise, the same two its read checks. Any other status is fenced. */
-const AUTHORISABLE_STATUSES: readonly OrderStatus[] = ['RECEIPT_CONFIRMED', 'SETTLING'];
-
 /**
  * What `markObligationDisputed` answers: the order's status, and the dispute
  * it filed for the one economic-service holds — null when it filed none.
  */
 export type ObligationDisputeTaken = Awaited<ReturnType<OrderService['markObligationDisputed']>>;
+
+/**
+ * The statuses no late request can move for any call the saga waits on. Each call's
+ * own effect is its answer first. A reversal starts from SETTLED and goes only further.
+ */
+const PAST_ANY_CALL = [
+  'SETTLED',
+  'PARTIALLY_REVERSED',
+  'REVERSED',
+  'REFUNDED',
+  'CANCELLED',
+  'FAILED',
+];
+
+/**
+ * `transaction` as an {@link ObligationFinal} step answer when past any call, else null.
+ * Null too for a caller that did not declare the answer (`FINAL_ANSWER_CONTRACT`): an
+ * older workflow reads any answer as the call's effect, and it keeps the refusal.
+ */
+function finalFor(
+  contract: string | undefined,
+  transaction: TransactionDetailView,
+): { result: ObligationFinal } | null {
+  return contract === FINAL_ANSWER_CONTRACT && PAST_ANY_CALL.includes(transaction.status)
+    ? {
+        result: {
+          final: true,
+          status: transaction.status,
+          funds: fundsOf(transaction),
+        },
+      }
+    : null;
+}
 
 /** The terms the order's obligation is recorded on, from the order row alone. */
 function obligationTermsOf(order: Awaited<ReturnType<OrderService['describe']>>): ObligationTerms {
@@ -279,6 +331,16 @@ export function createActivities(deps: ActivityDependencies) {
   const currentStep = deps.currentStep ?? temporalStep;
   const currentAttempt = deps.currentAttempt ?? temporalAttempt;
 
+  /** The durable record of an unconfirmed release (FU-104), under the order's own tenant. */
+  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
+    asSystemFor(orderId, (order) =>
+      deps.orders.openSagaCall(
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        'resolveObligationDispute',
+        disputeId,
+      ),
+    );
+
   /**
    * An economic-service call, made at most once per scheduled activity
    * (D-053). A refusal or an outage records nothing, so the retry calls again.
@@ -302,8 +364,8 @@ export function createActivities(deps: ActivityDependencies) {
    * failure marked as proof is this step's own refusal, by `fence` or the send,
    * on the first attempt of this scheduling. In doubt — a retry, or a round after
    * an unconfirmed attempt — a failed send asks the obligation, because a code
-   * then says nothing of the attempts before it: its effect is the answer,
-   * `isFinal` is the proof, and anything else stays unknown.
+   * then says nothing of the attempts before it: its effect or a terminal status
+   * is the answer (`finalFor`), and anything else stays unknown.
    *
    * ## No send past `fence` (D-138)
    *
@@ -329,14 +391,14 @@ export function createActivities(deps: ActivityDependencies) {
       answer: (transaction: TransactionDetailView) => { result: T } | null;
       confirmed?: {
         inDoubt: boolean;
-        /** A terminal status without this command's effect as the answer, which nothing can move. */
-        isFinal: (transaction: TransactionDetailView) => boolean;
+        /** Terminal, for a caller that cannot take an {@link ObligationFinal}: a marked failure. */
+        isFinal?: (transaction: TransactionDetailView) => boolean;
         /**
          * Whether the order, as it stands, lets the call be sent: null if so, or the
          * step's answer in its place. A refusal it throws is never reconciled: the
          * obligation's state cannot stand in for a condition of this order's.
          */
-        fence: (order: HeldOrderRow, inDoubt: boolean) => { answer: T } | null;
+        fence?: (order: HeldOrderRow, inDoubt: boolean) => { answer: T } | null;
       };
     },
   ): Promise<T> {
@@ -364,10 +426,11 @@ export function createActivities(deps: ActivityDependencies) {
               });
 
           let refusal: unknown;
-          if (applied && confirmed) {
+          const fence = confirmed?.fence;
+          if (applied && fence) {
             const passes = (row: HeldOrderRow): { answer: T } | null => {
               try {
-                return confirmed.fence(row, inDoubt);
+                return fence(row, inDoubt);
               } catch (fenceRefusal) {
                 throw unanswered(fenceRefusal);
               }
@@ -381,7 +444,7 @@ export function createActivities(deps: ActivityDependencies) {
               if (answer) {
                 logger.warn(
                   `Saga step ${activity} of order ${order.id} is in doubt, and the transaction's state ` +
-                    `already shows its effect (${transaction?.status}); answering from economic-service's record`,
+                    `(${transaction?.status}) answers it; answering from economic-service's record`,
                 );
                 return answer.result;
               }
@@ -419,7 +482,7 @@ export function createActivities(deps: ActivityDependencies) {
           const transaction = await askObligation(applied.transactionId);
           const answer = transaction ? applied.answer(transaction) : null;
           if (!answer) {
-            if (inDoubt && transaction && confirmed?.isFinal(transaction)) {
+            if (inDoubt && transaction && confirmed?.isFinal?.(transaction)) {
               throw ApplicationFailure.create({
                 message: `The obligation is ${transaction.status}: terminal, and nothing further can move it`,
                 type: 'OBLIGATION_ALREADY_FINAL',
@@ -431,7 +494,7 @@ export function createActivities(deps: ActivityDependencies) {
           }
           logger.warn(
             `Saga step ${activity} of order ${order.id} was refused, and the transaction's state ` +
-              `already shows its effect (${transaction?.status}); answering from economic-service's record`,
+              `(${transaction?.status}) answers it; answering from economic-service's record`,
           );
           return answer.result;
         },
@@ -593,11 +656,13 @@ export function createActivities(deps: ActivityDependencies) {
      * the workflow's word that an earlier scheduling of this call went unconfirmed,
      * which this attempt cannot see. Omitted, the workflow still ends nothing on a
      * mark it did not ask for: it ignores the mark while in doubt (`outcomeUnknown`).
+     * An {@link ObligationFinal} when it can never be authorised.
      */
     async authoriseSettlement(
       orderId: string,
       transactionId: string,
       inDoubt = false,
+      contract?: string,
     ): Promise<AuthorisationResult> {
       return economicStep<AuthorisationResult>(
         orderId,
@@ -623,12 +688,15 @@ export function createActivities(deps: ActivityDependencies) {
               return { result: undefined };
             }
             const disputed = disputedSinceAuthorised(transaction, orderId);
-            return disputed ? { result: disputed } : null;
+            if (disputed) return { result: disputed };
+            // SETTLED is the effect, above. DISPUTED and HELD can still move.
+            return finalFor(contract, transaction);
           },
           confirmed: {
             inDoubt,
-            // SETTLED is the effect, above. DISPUTED and HELD can still move.
-            isFinal: ({ status }) => ['REFUNDED', 'CANCELLED', 'FAILED'].includes(status),
+            ...(contract === FINAL_ANSWER_CONTRACT
+              ? {}
+              : { isFinal: ({ status }) => ['REFUNDED', 'CANCELLED', 'FAILED'].includes(status) }),
             fence: ({ status, receiptConfirmed }, doubt) => {
               // Anything else is the order's own path now, not this call's: a
               // dispute or a refund to wait on, or a settled dispute taken back
@@ -744,10 +812,17 @@ export function createActivities(deps: ActivityDependencies) {
      *
      * The only compensation this saga performs, and only before settlement.
      * After receipt confirmation `docs/08` § 8.4 forbids automatic financial
-     * compensation entirely.
+     * compensation entirely. An {@link ObligationFinal} when another terminal status
+     * means no refund can ever land.
      */
-    async compensate(orderId: string, transactionId: string, reason: string): Promise<void> {
-      await economicStep(
+    async compensate(
+      orderId: string,
+      transactionId: string,
+      reason: string,
+      inDoubt = false,
+      contract?: string,
+    ): Promise<ObligationFinal | void> {
+      return economicStep<ObligationFinal | void>(
         orderId,
         'compensate',
         async (order) => {
@@ -764,7 +839,10 @@ export function createActivities(deps: ActivityDependencies) {
           // Terminal, and only a refund reaches it: the held money is back
           // with the buyer, which is all compensation is for.
           answer: (transaction) =>
-            transaction.status === 'REFUNDED' ? { result: undefined } : null,
+            transaction.status === 'REFUNDED'
+              ? { result: undefined }
+              : finalFor(contract, transaction),
+          ...(contract === FINAL_ANSWER_CONTRACT ? { confirmed: { inDoubt } } : {}),
         },
       );
     },
@@ -780,15 +858,20 @@ export function createActivities(deps: ActivityDependencies) {
      *
      * Answers economic-service's identity of the dispute it filed — what the
      * saga names when it mirrors the decision (Codex on #318 round 2, N1) —
-     * or null from an economic-service older than the identity.
+     * or null from an economic-service older than the identity. An
+     * {@link ObligationFinal} when the obligation can no longer be disputed.
      */
     async disputeObligation(
       orderId: string,
       transactionId: string,
       disputeId: string,
       reason: string,
-    ): Promise<string | null> {
-      return economicStep(
+      inDoubt = false,
+      contract?: string,
+    ): Promise<string | ObligationFinal | null> {
+      // Before the call: a call that fails may still have committed.
+      await openRelease(orderId, disputeId);
+      return economicStep<string | ObligationFinal | null>(
         orderId,
         'disputeObligation',
         async (order) => {
@@ -807,10 +890,13 @@ export function createActivities(deps: ActivityDependencies) {
           // Disputed with this dispute's own words. Nothing but the next
           // resolution — which the saga sends only after this step — changes
           // them.
+          // Disputed by another's words can still move, and so can HELD or
+          // PENDING_SETTLEMENT: a late filing can land on those.
           answer: (transaction) =>
             transaction.status === 'DISPUTED' && sameText(transaction.disputeReason, reason)
               ? { result: transaction.disputeId ?? null }
-              : null,
+              : finalFor(contract, transaction),
+          ...(contract === FINAL_ANSWER_CONTRACT ? { confirmed: { inDoubt } } : {}),
         },
       );
     },
@@ -822,7 +908,16 @@ export function createActivities(deps: ActivityDependencies) {
      * resolution, under its row lock, once the transaction holds another — one
      * raised since the dispute decided here was taken, after that one was
      * resolved there (Codex on #318 round 2, N1). The refusal stands: the saga
-     * waits with the funds held and the alert on, for an operator (FU-080).
+     * waits with the funds held and the alert on, for an operator (FU-080). In a
+     * terminal status there is nothing left to release ({@link ObligationFinal}), and
+     * the saga's next call reads that status and says what follows.
+     *
+     * Confirmed on every way this answers, including a retry answered from the
+     * step's record. The record, opened when economic-service was told of the
+     * dispute and again by every attempt here, stays open whether or not a saga
+     * is left to make this call (FU-104). An attempt after an earlier one confirmed
+     * is open until it answers itself, and an earlier attempt's late confirmation
+     * cannot close it.
      */
     async resolveObligationDispute(
       orderId: string,
@@ -830,8 +925,10 @@ export function createActivities(deps: ActivityDependencies) {
       disputeId: string,
       resolution: string,
       economicDisputeId?: string,
-    ): Promise<void> {
-      await economicStep(
+      contract?: string,
+    ): Promise<ObligationFinal | void> {
+      const generation = await openRelease(orderId, disputeId);
+      const answer = await economicStep<ObligationFinal | void>(
         orderId,
         'resolveObligationDispute',
         async (order) => {
@@ -868,10 +965,19 @@ export function createActivities(deps: ActivityDependencies) {
               economicDisputeId === undefined
                 ? sameText(resolutionOf(transaction), resolution)
                 : transaction.disputeId === economicDisputeId;
-            return released && ours ? { result: undefined } : null;
+            return released && ours ? { result: undefined } : finalFor(contract, transaction);
           },
         },
       );
+      await asSystemFor(orderId, (order) =>
+        deps.orders.confirmSagaCall(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          'resolveObligationDispute',
+          disputeId,
+          generation,
+        ),
+      );
+      return answer;
     },
 
     /**
@@ -891,7 +997,7 @@ export function createActivities(deps: ActivityDependencies) {
 
     /**
      * Reports a round of another economic call whose outcome is unknown
-     * (FU-103), as `noteReleaseUnconfirmed` does for the release.
+     * (FU-103, FU-117), as `noteReleaseUnconfirmed` does for the release.
      */
     async noteEconomicCallUnconfirmed(
       orderId: string,
@@ -902,7 +1008,7 @@ export function createActivities(deps: ActivityDependencies) {
       economicCallsUnconfirmedTotal.inc({ service: SERVICE_NAME, operation });
       logger.error(
         `The ${operation} call of order ${orderId} is unconfirmed after round ${round} ` +
-          `(${failure}); its outcome is unknown, its funds stay held and the saga keeps trying ` +
+          `(${failure}); its outcome is unknown and the saga keeps trying ` +
           '(docs/runbooks/marketplace-saga-deploy.md)',
       );
     },

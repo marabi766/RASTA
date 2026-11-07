@@ -370,13 +370,13 @@ Refresh یک رویداد حالتِ بازپخش‌شده (یا `ASSET_CREATED`
 5. `down.sql`ها با نقش **Migrator**، **جدیدترین اول**، فقط تا جایی که برمی‌گردی؛ هر فایل ردیف `_prisma_migrations` خودش را هم حذف می‌کند:
 
    ```bash
-   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261013180000_insurance_epoch/down.sql
-   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261013120000_insurance_revision/down.sql
-   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261012120000_insurance_pending_verification/down.sql
-   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261008230000_asset_ref_ownership_generation/down.sql
+   node scripts/psql-prisma-url.mjs DATABASE_URL_FLEET_MIGRATOR -X -v ON_ERROR_STOP=1 -f services/fleet-service/prisma/migrations/20261013180000_insurance_epoch/down.sql
+   node scripts/psql-prisma-url.mjs DATABASE_URL_FLEET_MIGRATOR -X -v ON_ERROR_STOP=1 -f services/fleet-service/prisma/migrations/20261013120000_insurance_revision/down.sql
+   node scripts/psql-prisma-url.mjs DATABASE_URL_FLEET_MIGRATOR -X -v ON_ERROR_STOP=1 -f services/fleet-service/prisma/migrations/20261012120000_insurance_pending_verification/down.sql
+   node scripts/psql-prisma-url.mjs DATABASE_URL_FLEET_MIGRATOR -X -v ON_ERROR_STOP=1 -f services/fleet-service/prisma/migrations/20261008230000_asset_ref_ownership_generation/down.sql
    ```
 
-   (`psql` نشانی بدون `?schema=` را می‌خواهد.) پنجره‌های پاک‌شده پاک می‌مانند؛ `down.sql` چیزی به آن‌ها اضافه نمی‌کند.
+   (`scripts/psql-prisma-url.mjs` نام متغیر را می‌گیرد، نه نشانی را: گذرواژه روی خط فرمان نمی‌آید، نشانی مبهم رد می‌شود و `?schema=` از راه `PGOPTIONS` به `search_path` تبدیل می‌شود؛ پس Migrator باید مستقیم به PostgreSQL وصل شود، چون PgBouncer این تنظیم را دور می‌ریزد و دستورها روی Schema پیش‌فرض اجرا می‌شوند — FU-144.) پنجره‌های پاک‌شده پاک می‌مانند؛ `down.sql` چیزی به آن‌ها اضافه نمی‌کند.
 
 6. راه‌اندازی asset-service و، اگر نسخهٔ آن `insurance:reproject` دارد، `insurance:reproject -- --reissue`.
 7. Dead letterهای گام ۳ را طبق [replay-dlq](replay-dlq.md) بازپخش کن.

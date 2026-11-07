@@ -3,18 +3,11 @@
 // this repository; the rest pin each refusal on small fixtures, so a mutant
 // that disables a refusal branch fails here.
 import assert from 'node:assert/strict';
-import {
-  chmodSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import test from 'node:test';
 import ts from 'typescript';
 import {
@@ -100,36 +93,16 @@ function clockHazards(source, file = '') {
   return errors;
 }
 
-const SKIPPED_DIRECTORIES = new Set([
-  'node_modules',
-  'dist',
-  '.next',
-  '.turbo',
-  'coverage',
-  'playwright-report',
-  'test-results',
-  // Git-ignored Prisma output, rewritten by `db:generate` while checks run: listed
-  // then gone (ENOENT, FU-090). It holds no test code, so it is never descended into.
-  'generated',
-]);
-
-function sourceFiles(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    if (SKIPPED_DIRECTORIES.has(entry.name)) return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? sourceFiles(path) : [path];
-  });
-}
-
 /**
  * Test code wherever it lives: every TypeScript file under a `test/` or `e2e/`
  * directory (helpers included) and every spec beside the source, in services,
  * packages, the portal and tests/e2e.
  */
 function testCodeFiles(repository) {
-  // Members come from pnpm-workspace.yaml (fails closed), not from four hard-coded roots.
+  // Members come from pnpm-workspace.yaml (fails closed), not from four hard-coded roots;
+  // each member is read through the authored-source inventory (git's own file list).
   return workspaceDirectories(repository)
-    .flatMap((directory) => sourceFiles(join(repository, directory)))
+    .flatMap((directory) => authoredFiles(join(repository, directory), { base: repository }))
     .map((path) => relative(repository, path))
     .filter(
       (path) =>
@@ -890,7 +863,8 @@ test('claim SQL retains the unqualified transaction clock required by the bounda
   const source = readFileSync(join(root, 'packages/nest-common/src/outbox/outbox-sql.ts'), 'utf8');
   const start = source.indexOf('export async function claimPendingSql');
   const claim = source.slice(start, source.indexOf('export async function', start + 1));
-  assert.ok(claim.includes('<= now()'), 'claim SQL must use unqualified now()');
+  assert.ok(claim.includes('<= (jsonb_populate_record('), 'claim SQL must use typed UTC time');
+  assert.ok(claim.includes("now() AT TIME ZONE 'UTC'"), 'clock must use unqualified now()');
   assert.doesNotMatch(
     claim,
     /pg_catalog\.now|CURRENT_TIMESTAMP|(?:transaction|statement|clock)_timestamp/i,

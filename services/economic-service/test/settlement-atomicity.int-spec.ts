@@ -1,9 +1,11 @@
 import { runUnscoped } from '@rasta/nest-common';
+import { PrismaClient } from '../src/generated/prisma';
 import {
   asActor,
   cleanup,
   fundWallet,
   newPrisma,
+  ownerDatabaseUrl,
   readBalances,
   tenants,
   wire,
@@ -194,22 +196,37 @@ describe('settlement atomicity (real database)', () => {
   it('refuses to settle when the held amount does not match the obligation', async () => {
     // A mismatch means somebody changed one of the two out of band. Settling
     // either figure would be a guess about which is right, so it is refused
-    // and left for a person.
+    // and left for a person: a hold above or below what its journal moved, and
+    // below the terms, is no funded hold of its own (`wallet_hold_funded`).
     const payer = `${org.a}-MISMATCH`;
     const transaction = await readyToSettle(payer, '1000000');
 
-    await runUnscoped('the mismatch test corrupts a hold deliberately', () =>
-      prisma.client.$executeRawUnsafe(
-        `UPDATE wallet_hold SET amount_minor = 999999 WHERE reference = $1`,
-        transaction.id,
+    const corrupt = `UPDATE wallet_hold SET amount_minor = 999999 WHERE reference = '${transaction.id}'`;
+    await expect(
+      runUnscoped('the runtime role tries to corrupt a hold', () =>
+        prisma.client.$executeRawUnsafe(corrupt),
       ),
-    );
+    ).rejects.toThrow(/never change/);
+    // A row from before `trg_wallet_hold_terms_fixed`.
+    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE wallet_hold DISABLE TRIGGER trg_wallet_hold_terms_fixed',
+      );
+      await tx.$executeRawUnsafe(corrupt);
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE wallet_hold ENABLE TRIGGER trg_wallet_hold_terms_fixed',
+      );
+    });
+    await owner.$disconnect();
 
     await expect(
       asActor({ organizationId: payer }, () =>
         wiring.settlements.settle(transaction.id, 'USR-ITEST'),
       ),
-    ).rejects.toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
+    ).rejects.toThrow(expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }));
 
     await cleanup(prisma, [payer]);
   });

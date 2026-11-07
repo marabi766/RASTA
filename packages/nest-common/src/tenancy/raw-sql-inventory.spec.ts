@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve, relative, join } from 'node:path';
 import ts from 'typescript';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 interface RawSite {
   file: string;
@@ -59,16 +64,14 @@ function sites(source: string, file: string): RawSite[] {
   visit(parsed);
   return result;
 }
-function sourceFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    if (['generated', 'node_modules', 'dist'].includes(entry.name)) return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory()
-      ? sourceFiles(path)
-      : /\.(?:[cm]?[jt]s|tsx|jsx)$/.test(path)
-        ? [path]
-        : [];
-  });
+/** Authored `services/<name>/src/**` source files (git-ignored output is never listed). */
+function sourceFiles(): string[] {
+  const services = join(root, 'services');
+  return authoredFiles(services).filter(
+    (path) =>
+      /^[^/\\]+[/\\]src[/\\]/.test(relative(services, path)) &&
+      /\.(?:[cm]?[jt]s|tsx|jsx)$/.test(path),
+  );
 }
 function key(site: RawSite): string {
   return `${site.file}:${site.hash}:${site.occurrence}`;
@@ -86,9 +89,7 @@ function unclassified(actual: RawSite[], reviewed: ReviewedSite[]): RawSite[] {
   return actual.filter((site) => !accepted.has(key(site)));
 }
 it('every raw SQL call in ALL service src files has an explicit reviewed classification', () => {
-  const files = readdirSync(join(root, 'services')).flatMap((service) =>
-    sourceFiles(join(root, 'services', service, 'src')),
-  );
+  const files = sourceFiles();
   const actual = files.flatMap((file) => sites(readFileSync(file, 'utf8'), relative(root, file)));
   expect(actual.length).toBeGreaterThan(0);
   expect(unclassified(actual, inventory)).toEqual([]);

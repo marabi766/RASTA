@@ -661,6 +661,7 @@ model IdempotencyKey {
   /// While IN_PROGRESS: the claim's lease (MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS,
   /// 120 by default), after which a retry may take the key over under a new token.
   /// Once COMPLETED: MAINTENANCE_IDEMPOTENCY_TTL_HOURS after the response (24 by default).
+  /// And at least B past a replay deadline (maintenance/idempotency.ts).
   expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
 
   @@id([organizationId, endpoint, key])

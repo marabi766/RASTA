@@ -3,7 +3,10 @@ import addFormats from 'ajv-formats';
 import { z } from 'zod';
 import {
   isoDateTime,
+  numberInput,
+  offsetPaginationSchema,
   parsableUrl,
+  patternRefinement,
   plainText,
   prefixedIdSchema,
   seedIdSchema,
@@ -21,7 +24,8 @@ import { codePointLength, objectShapeOf, toJsonSchema } from './zod-schema';
  * file was recorded under **zod 3.25.76** and is the oracle for the zod 4
  * converter (GHSA-mrhx-c7xc-m3w5, PR B): never re-record it (`-u`) to make a
  * migration pass — every service's generated document depends on these bytes.
- * Deliberate corrections were written by hand, not re-recorded: FU-120 omits
+ * Deliberate corrections were written by hand, not re-recorded: FU-152 omits
+ * case-insensitive patterns; FU-120 omits
  * post-trim code-point bounds and marks unknown refinements; the
  * `instant` field's `pattern` and `description`, the offset bound `isoDateTime()`
  * enforces and `format: date-time` alone does not publish (FU-035).
@@ -60,6 +64,58 @@ describe('toJsonSchema', () => {
       .strict();
 
     expect(toJsonSchema(schema)).toMatchSnapshot();
+  });
+
+  it('FU-131 publishes the registered inner integer through descriptions and wrappers', () => {
+    const properties = toJsonSchema(offsetPaginationSchema).properties as Record<string, unknown>;
+    expect(properties.pageSize).toMatchInlineSnapshot(`
+      {
+        "default": 25,
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer",
+      }
+    `);
+    expect(
+      toJsonSchema(
+        numberInput(z.number().int().min(1).max(10)).describe('Page size').optional().nullable(),
+      ),
+    ).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 10,
+      description: 'Page size',
+      nullable: true,
+    });
+    expect(toJsonSchema(numberInput(z.number().min(-90).max(90)))).toEqual({
+      type: 'number',
+      minimum: -90,
+      maximum: 90,
+    });
+  });
+
+  it('FU-160 accepts JS exponent serialization under the published coordinate bounds', () => {
+    const field = numberInput(z.number().min(-90).max(90)).describe('Latitude').optional();
+    expect(toJsonSchema(field)).toEqual({
+      type: 'number',
+      minimum: -90,
+      maximum: 90,
+      description: 'Latitude',
+    });
+    for (const value of [1e-7, -1e-7, Number.MIN_VALUE, 91, -91]) {
+      const parsed = field.safeParse(String(value));
+      expect(parsed.success).toBe(field.safeParse(value).success);
+      if (parsed.success) expect(parsed.data).toBe(value);
+    }
+    expect(field.safeParse('1e9999').success).toBe(false);
+  });
+
+  it('FU-131 does not publish a different schema piped from a registered transform', () => {
+    const input = numberInput(z.number().int().min(1));
+    const forged = z.pipe(input.in, z.number().max(100));
+    expect(toJsonSchema(forged)).toEqual({
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 
   const boundedText = (schema = z.string()) =>
@@ -431,13 +487,73 @@ describe('toJsonSchema', () => {
       ],
       description: 'owner',
     });
-    // A clone keeps the check, so it keeps the pattern; a flagged one is not published.
+    // A clone keeps the registered check, so it keeps the pattern.
     expect(toJsonSchema(prefixedIdSchema('PO').describe('order'))).toMatchObject({
       pattern: `^PO_${ulid}$`,
     });
-    const flagged = z.refine<string>((value) => /^a$/i.test(value));
-    Object.defineProperty(flagged, Symbol.for('rasta.openapi.publishedPattern'), { value: /^a$/i });
-    expect(toJsonSchema(z.string().check(flagged))).toEqual({ type: 'string' });
+  });
+
+  describe.each(['regex', 'registered refinement'] as const)('FU-152 %s flags', (path) => {
+    const makeSchema = (pattern: RegExp) =>
+      path === 'regex'
+        ? z.string().regex(pattern)
+        : z.string().check(patternRefinement(pattern, 'Invalid pattern'));
+
+    it.each(['', 'u'])('publishes flags=%j and compiles with Unicode semantics', (flags) => {
+      const pattern = new RegExp('^[a-z]+$', flags);
+      const schema = makeSchema(pattern).max(3).pipe(z.string().min(1));
+      const published = toJsonSchema(schema);
+      expect(published).toEqual({
+        type: 'string',
+        pattern: pattern.source,
+        minLength: 1,
+        maxLength: 3,
+      });
+      const validate = new Ajv({ unicodeRegExp: true }).compile(published);
+      for (const input of ['a', 'abc', '', 'A', 'abcd']) {
+        expect(validate(input)).toBe(schema.safeParse(input).success);
+      }
+    });
+
+    it('publishes Unicode property escapes for consumers using u', () => {
+      const pattern = /^\p{Letter}+$/u;
+      const published = toJsonSchema(makeSchema(pattern));
+      expect(published).toEqual({ type: 'string', pattern: pattern.source });
+      const validate = new Ajv({ unicodeRegExp: true }).compile(published);
+      for (const input of ['a', 'é', 'ش', '1']) expect(validate(input)).toBe(pattern.test(input));
+    });
+
+    it.each(['i', 'm', 's', 'g', 'y', 'd', 'v', 'iu', 'mu', 'su', 'gu', 'yu', 'du'])(
+      'omits flags=%j without making a value-preserving check a barrier',
+      (flags) => {
+        const schema = makeSchema(new RegExp('^a$', flags)).max(3).pipe(z.string().min(1));
+        expect(toJsonSchema(schema)).toEqual({ type: 'string', minLength: 1, maxLength: 3 });
+      },
+    );
+
+    it('keeps another safe pattern when a flagged pattern is omitted', () => {
+      const safe = z.string().regex(/^[a-z]+$/);
+      const flagged = makeSchema(/^a$/i);
+      const checks = flagged._zod.def.checks ?? [];
+      expect(toJsonSchema(safe.check(...checks))).toEqual({ type: 'string', pattern: '^[a-z]+$' });
+    });
+  });
+
+  it('FU-152 refuses a forged published-pattern marker on a mutating check', () => {
+    const mutating = z.check<string>((payload) => {
+      payload.value = payload.value.trim();
+    });
+    Object.defineProperty(mutating, Symbol.for('rasta.openapi.publishedPattern'), {
+      value: /^[a-z]+$/,
+    });
+    const schema = z.string().check(mutating).max(3).pipe(z.string().min(3));
+    expect(schema.parse(' abc ')).toBe('abc');
+    const published = toJsonSchema(schema);
+    expect(published).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    expect(new Ajv().compile(published)(' abc ')).toBe(true);
   });
 
   it('keeps identifier checks within the ordered raw-constraint prefix (FU-073/FU-120)', () => {

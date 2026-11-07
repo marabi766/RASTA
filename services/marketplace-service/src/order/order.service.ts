@@ -996,6 +996,14 @@ export class OrderService {
             },
           }),
         );
+        // With the dispute, not after it: economic-service already holds it, and a
+        // saga that died between the two would leave it on no record (FU-104).
+        await this.repository.openSagaCall(
+          tx,
+          { id: order.id, organizationId: order.organizationId },
+          'resolveObligationDispute',
+          disputeId,
+        );
         await runUnscoped(
           'the saga records the dispute on an order on behalf of neither party',
           () => tx.order.update({ where: { id: order.id }, data: { status: 'DISPUTED' } }),
@@ -1240,6 +1248,31 @@ export class OrderService {
         return fn(await this.repository.holdOrder(tx as ExtendedPrismaClient, orderId));
       },
       { timeout: ORDER_HOLD_TRANSACTION_MS },
+    );
+  }
+
+  /** See `OrderRepository.openSagaCall`. */
+  openSagaCall(
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+  ): Promise<number> {
+    return this.repository.openSagaCall(this.prisma.client, order, operation, subject);
+  }
+
+  /** See `OrderRepository.confirmSagaCall`. */
+  confirmSagaCall(
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+    generation: number,
+  ): Promise<void> {
+    return this.repository.confirmSagaCall(
+      this.prisma.client,
+      order,
+      operation,
+      subject,
+      generation,
     );
   }
 

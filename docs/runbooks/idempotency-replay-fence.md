@@ -42,6 +42,15 @@ construction-service برای `POST /v1/projects` هدر `Idempotency-Replay-Dea
 `INVENTORY_IDEMPOTENCY_TTL_HOURS·۳۶۰۰ − B − INVENTORY_CLOCK_SKEW_SECONDS ≥ INVENTORY_MAX_REPLAY_WINDOW_SECONDS` (۳۳۰۰ ثانیه). **هشدار بدهید** وقتی اختلاف NTP
 هر نمونه‌ی inventory یا پایگاه‌داده‌اش از نصف `INVENTORY_CLOCK_SKEW_SECONDS` بیشتر شد. **بازگشت:** فقط بازگرداندن کد؛ داده‌ای تغییر نکرده است.
 
+### maintenance-service (FU-171، تصمیم PM D-133)
+
+همان حصار برای **هر ۷ فرمان کلیددار** maintenance-service، از یک ورودی (`idempotentRequest` و `optionalIdempotentRequest` در `maintenance/idempotency.ts`). هدر هنوز اختیاری است و
+نبودنش رفتار امروز را نگه می‌دارد؛ پرتال هنوز آن را نمی‌فرستد. ددلاین بدون کلید روی `POST /v1/maintenance-requests` با `400` رد می‌شود. این فرمان‌ها ستون ددلاین و Migration ندارند: پاسخ کامل‌شده تا `max(تکمیل + نگهداشت، H + B)`
+می‌ماند. ساعت پایگاه‌داده پس از هر انتظار تازه خوانده می‌شود: درون تراکنش درج Claim، و پس از درج ناموفق و خواندن ردیف؛ پس پاسخ ذخیره‌شده هم
+پس از `H` بازپخش نمی‌شود. `B = 2·MAINTENANCE_CLOCK_SKEW_SECONDS + ۷ ثانیه`. سرویس بالا نمی‌آید مگر
+`MAINTENANCE_IDEMPOTENCY_TTL_HOURS·۳۶۰۰ − B − MAINTENANCE_CLOCK_SKEW_SECONDS ≥ MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS` (۳۳۰۰ ثانیه). **هشدار بدهید** وقتی اختلاف NTP
+هر نمونه‌ی maintenance یا پایگاه‌داده‌اش از نصف `MAINTENANCE_CLOCK_SKEW_SECONDS` بیشتر شد. **بازگشت:** فقط بازگرداندن کد؛ داده‌ای تغییر نکرده است.
+
 ## ۳. وقتی کاربر `REPLAY_WINDOW_CLOSED` دید
 
 پرتال می‌گوید فهرست پروژه‌ها را بررسی کند (فهرست صفحه‌بندی و فیلترشده است؛ نبودن پروژه دلیل نیست). این پاسخ فقط ثابت می‌کند **همین تلاش** چیزی ننوشت؛

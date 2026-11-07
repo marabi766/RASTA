@@ -289,6 +289,60 @@ export class OrderRepository {
   }
 
   /**
+   * A saga call to economic-service is about to be made (FU-104). Every attempt
+   * opens it again, whatever an earlier one confirmed: only this attempt's outcome
+   * says anything about the funds now (#769 r1 F3). A false open row from a late attempt
+   * is an operator's to close; a closed row over a held dispute is silent.
+   *
+   * @returns the generation this attempt confirms with.
+   */
+  async openSagaCall(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+  ): Promise<number> {
+    const key = { organizationId: order.organizationId, orderId: order.id, operation, subject };
+    const { generation } = await runUnscoped(
+      'a saga step records its call on the order it drives, under its tenant',
+      () =>
+        client.sagaUnconfirmedCall.upsert({
+          where: { organizationId_orderId_operation_subject: key },
+          create: key,
+          update: { confirmedAt: null, generation: { increment: 1 } },
+          select: { generation: true },
+        }),
+    );
+    return generation;
+  }
+
+  /**
+   * economic-service has confirmed that call (FU-104). Only the opening's own: an
+   * attempt overtaken by a newer one says nothing about the newer one's outcome.
+   */
+  async confirmSagaCall(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+    generation: number,
+  ): Promise<void> {
+    await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
+      client.sagaUnconfirmedCall.updateMany({
+        where: {
+          organizationId: order.organizationId,
+          orderId: order.id,
+          operation,
+          subject,
+          generation,
+          confirmedAt: null,
+        },
+        data: { confirmedAt: new Date() },
+      }),
+    );
+  }
+
+  /**
    * Whether the order's history holds a row a saga step wrote since `since`
    * (D-053): evidence of a step that took effect before its record could
    * exist — its first attempt ran on a worker older than `saga_step`.

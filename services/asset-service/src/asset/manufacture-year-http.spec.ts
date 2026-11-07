@@ -20,6 +20,19 @@ import { IdempotencyStore } from './idempotency';
  * and nothing is registered or changed.
  */
 describe('an asset’s manufacture year (HTTP)', () => {
+  it.each(['', '0x10', '1e', ' 16 '])(
+    'FU-131 HTTP refuses non-decimal latitude %j',
+    async (value) => {
+      const response = await request(app.getHttpServer())
+        .get('/v1/assets/nearby')
+        .query({ latitude: value, longitude: '0' });
+      expect(response.status).toBe(400);
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: 'latitude' })]),
+      );
+    },
+  );
+
   const QUIET_LOGGER = { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() };
   const assets = { create: jest.fn(), update: jest.fn() };
   const idempotency = { execute: jest.fn() };

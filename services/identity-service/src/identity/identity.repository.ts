@@ -431,10 +431,10 @@ export class IdentityRepository {
     await this.client.$executeRaw`
       UPDATE registration_intake
          SET attempts = LEAST(attempts, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-             next_attempt_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
+             next_attempt_at = date_trunc('milliseconds', date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                + make_interval(secs => ${intervalSeconds}
                    * LEAST(POWER(2, LEAST(attempts, ${BACKOFF_EXPONENT_CAP})),
-                           ${maxIntervals}))
+                           ${maxIntervals})))
        WHERE id = ${id}`;
   }
 
@@ -839,10 +839,10 @@ export class IdentityRepository {
         this.client.$executeRaw`
         UPDATE membership
            SET lapse_failures = LEAST(lapse_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-               lapse_retry_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
+               lapse_retry_at = date_trunc('milliseconds', date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                  + make_interval(secs => ${intervalSeconds}
                      * LEAST(POWER(2, LEAST(lapse_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
-                             ${maxIntervals}))
+                             ${maxIntervals})))
          WHERE id = ${membershipId} AND lapse_handled_at IS NULL`,
     );
   }
