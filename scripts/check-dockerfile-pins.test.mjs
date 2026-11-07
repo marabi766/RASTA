@@ -3532,3 +3532,28 @@ test('task 368 review: GITHUB_ENV writes define the names they write (one line),
     ]).errors.some((e) => /is pasted, but a step appends X_IMAGE to \$GITHUB_ENV/.test(e)),
   );
 });
+
+test('task 368 (CI of 4f77554e): the shared shellInvocation refuses startup-state options only when asked - the Jest-launch guard reads bash -lc', () => {
+  const words = (...values) => values.map((value) => ({ value }));
+  for (const option of ['-lc', '-l', '-ic', '-ac', '--login'])
+    assert.deepEqual(
+      shellInvocation(words(option, 'true'), 'bash').problem,
+      undefined,
+      `${option}: the default reads it`,
+    );
+  assert.deepEqual(shellInvocation(words('-lc', 'true'), 'bash').body, { value: 'true' });
+  for (const option of ['-lc', '-l', '-ic', '-ac', '--login'])
+    assert.match(
+      shellInvocation(words(option, 'true'), 'bash', { startupState: true }).problem,
+      /exports functions or reads startup files/,
+      option,
+    );
+  assert.match(
+    shellInvocation(words('-o', 'allexport', '-c', 'true'), 'bash', { startupState: true }).problem,
+    /allexport/,
+  );
+  assert.equal(
+    shellInvocation(words('-o', 'pipefail', '-c', 'true'), 'bash', { startupState: true }).problem,
+    undefined,
+  );
+});

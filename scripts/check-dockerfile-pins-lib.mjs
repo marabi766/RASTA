@@ -2358,7 +2358,8 @@ function runsFile(commands) {
     if (word.value === 'source' || word.value === '.' || filePath(word.value)) return true;
     return (
       SHELL_WORD.test(word.value) &&
-      shellInvocation(words.slice(chain.at(-1) + 1), word.value).file !== undefined
+      shellInvocation(words.slice(chain.at(-1) + 1), word.value, { startupState: true }).file !==
+        undefined
     );
   });
 }
@@ -2701,7 +2702,7 @@ function shellInput(
   }
   if (args.some(({ value }) => value.startsWith('<')))
     return { problem: `${command.value} reads its commands from a redirection` };
-  const run = shellInvocation(args, command.value);
+  const run = shellInvocation(args, command.value, { startupState: true });
   if (run.problem) return run;
   if (run.body) return { script: run.body.value };
   if (run.file) {

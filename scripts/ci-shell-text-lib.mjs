@@ -48,8 +48,10 @@ const STDIN_FILE = /^(?:\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d
  * and a computed word may be an option, a body or a file: all of those are refused, never
  * read as "some other operand". A long option other than the listed inert ones can name a
  * file the shell runs (--rcfile, --init-file). `name` is the shell word, for the message.
+ * Task 368 F1: `startupState` (the image-pin check) also refuses what exports functions to what the shell starts
+ * (`-a`, `-o allexport`) or reads startup files (`-l`, `-i`, `--login`); the Jest-launch guard reads `bash -lc`.
  */
-export function shellInvocation(args, name = 'the shell') {
+export function shellInvocation(args, name = 'the shell', { startupState = false } = {}) {
   // csh, tcsh and fish do not share POSIX syntax: reading their text as sh would be a guess.
   if (/(?:^|\/)(?:c|tc|fi)sh$/.test(name))
     return { problem: `${name} is a shell whose syntax this check does not read` };
@@ -75,7 +77,10 @@ export function shellInvocation(args, name = 'the shell') {
       return { problem: `${name} option ${value} is not one this check reads` };
     // Task 368 F1: allexport exports every function the text defines (`BASH_FUNC_*`) to what it starts, and a login or
     // interactive shell reads startup files (`~/.bash_profile`, `~/.bashrc`): state this check does not read
-    if (value === '--login' || (value.startsWith('-') && /^-[A-Za-z]*[ail]/.test(value)))
+    if (
+      startupState &&
+      (value === '--login' || (value.startsWith('-') && /^-[A-Za-z]*[ail]/.test(value)))
+    )
       return {
         problem: `${name} option ${value} exports functions or reads startup files this check does not read`,
       };
@@ -86,7 +91,7 @@ export function shellInvocation(args, name = 'the shell') {
         at++; // the option name: one word per o/O, also inside a cluster
         if (!args[at] || computed(args[at]))
           return { problem: `${name} option ${value} has a name this check cannot read` };
-        if (letter === 'o' && /^allexport$/i.test(args[at].value))
+        if (startupState && letter === 'o' && /^allexport$/i.test(args[at].value))
           return { problem: `${name} -o allexport exports functions this check does not read` };
       }
     }
