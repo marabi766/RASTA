@@ -526,6 +526,22 @@ describe('the chain a file travels', () => {
     const outcome = await upload(g, storage(new Response(null, { status: 200 })));
     expect(outcome.kind).toBe('UNCONFIRMED');
   });
+
+  it.each([500, 502, 503])(
+    'says a registration the platform answered %s is unconfirmed: it may follow the commit (FU-189)',
+    async (status) => {
+      const g = gateway([intent(), new Response(null, { status })]);
+      const outcome = await upload(g, storage(new Response(null, { status: 200 })));
+      expect(outcome.kind).toBe('UNCONFIRMED');
+    },
+  );
+
+  it('still says an intent answered 503 failed: an intent is only a permission, no document exists', async () => {
+    const g = gateway([new Response(null, { status: 503 })]);
+    const outcome = await upload(g, storage(new Response(null, { status: 200 })));
+    expect(outcome.kind).toBe('FAILED');
+    expect(g.calls).toHaveLength(1);
+  });
 });
 
 describe('the reference on the machine', () => {
