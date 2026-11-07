@@ -3,7 +3,11 @@ import { RequestService } from '../src/maintenance/request.service';
 import { RepairOrderService } from '../src/maintenance/repair-order.service';
 import { UnverifiedWorkshopDirectory } from '../src/maintenance/workshop.directory';
 import { CREATE_REQUEST_ENDPOINT, RequestController } from '../src/maintenance/request.controller';
-import { IN_FLIGHT_WAIT_MS, IdempotencyStore } from '../src/maintenance/idempotency';
+import {
+  IN_FLIGHT_WAIT_MS,
+  IdempotencyStore,
+  idempotentRequest,
+} from '../src/maintenance/idempotency';
 import type { CreateRequestDto, MaintenanceRequestView } from '../src/maintenance/dto';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
@@ -32,6 +36,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     store = new IdempotencyStore(prisma, {
       MAINTENANCE_IDEMPOTENCY_TTL_HOURS: 24,
       MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: LEASE_SECONDS,
+      MAINTENANCE_CLOCK_SKEW_SECONDS: 30,
     });
     controller = new RequestController(
       requests,
@@ -62,7 +67,10 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     dto: CreateRequestDto,
     key: string | undefined,
     { organizationId = org.a, userId = reporter } = {},
-  ) => asActor({ organizationId, userId }, () => controller.create(dto, key));
+  ) =>
+    asActor({ organizationId, userId }, () =>
+      controller.create(dto, key === undefined ? {} : { 'idempotency-key': key }),
+    );
 
   const requestsFor = (assetId: string) =>
     prisma.client.$queryRawUnsafe<{ id: string; organization_id: string }[]>(
@@ -183,7 +191,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     const first = asActor(actor, () =>
       store.execute<MaintenanceRequestView>(
         CREATE_REQUEST_ENDPOINT,
-        key,
+        idempotentRequest({ 'idempotency-key': key }),
         dto,
         201,
         async (fence) => {
@@ -227,7 +235,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     const first = asActor(actor, () =>
       store.execute<MaintenanceRequestView>(
         CREATE_REQUEST_ENDPOINT,
-        key,
+        idempotentRequest({ 'idempotency-key': key }),
         dto,
         201,
         async (fence) => {
@@ -288,7 +296,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
         asActor(actor, () =>
           store.execute<MaintenanceRequestView>(
             CREATE_REQUEST_ENDPOINT,
-            key,
+            idempotentRequest({ 'idempotency-key': key }),
             hashed(x),
             201,
             (fence) => requests.create(dto, fence),
@@ -322,7 +330,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     const assetId = await machine();
     const key = id('KEY');
     const dto = breakdown(assetId);
-    await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+    await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto, undefined));
     await prisma.client.$executeRawUnsafe(
       `UPDATE idempotency_key SET expires_at = now() - interval '1 second'
        WHERE organization_id = $1 AND endpoint = $2 AND key = $3`,
@@ -450,7 +458,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
       const key = id('KEY');
       const dto = breakdown(assetId);
 
-      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto, undefined));
       const claimed = await row(key);
       expect(claimed?.state).toBe('IN_PROGRESS');
       expect(claimed?.secs).toBeGreaterThan(LEASE_SECONDS - 30);
@@ -467,7 +475,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
       const assetId = await machine();
       const key = id('KEY');
       const dto = breakdown(assetId);
-      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto, undefined));
 
       await expect(create(dto, key)).rejects.toMatchObject({
         code: 'CONFLICT',
@@ -480,7 +488,7 @@ describe('maintenance request creation under an Idempotency-Key', () => {
       const assetId = await machine();
       const key = id('KEY');
       const dto = breakdown(assetId);
-      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto, undefined));
       const dead = (await row(key))?.claim_token;
       await lapse(key);
 
