@@ -493,7 +493,8 @@ describe('what the service refuses with a sentence, and how the portal says it',
       404: 'NOT_FOUND',
       409: 'INVALID',
       422: 'INVALID',
-      500: 'UNAVAILABLE',
+      // Every 5xx is unconfirmed at the writer (FU-189): the documented 500 below is one.
+      500: 'UNKNOWN_OUTCOME',
     });
     expect(unknownCode).toEqual({
       400: 'UNKNOWN_OUTCOME',
@@ -502,7 +503,7 @@ describe('what the service refuses with a sentence, and how the portal says it',
       404: 'UNKNOWN_OUTCOME',
       409: 'UNKNOWN_OUTCOME',
       422: 'UNKNOWN_OUTCOME',
-      500: 'UNAVAILABLE',
+      500: 'UNKNOWN_OUTCOME',
     });
     expect(supplierFailureText(401)).toMatch(/نشست/);
     expect(supplierFailureText(429)).toMatch(/چیزی تغییر نکرد/);
