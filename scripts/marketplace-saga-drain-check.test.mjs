@@ -142,13 +142,15 @@ function drained() {
 }
 
 // FU-221: the stand-in `psql`, first on PATH, records its argv, its stdin (the SQL) and
-// the connection environment it got, and answers as told.
+// its whole environment, and answers as told. It finds both files beside its own
+// directory, not through the environment: the gate hands psql an allowlisted one (#947).
 const FAKE_PSQL = `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
-const answer = JSON.parse(readFileSync(process.env.FAKE_PSQL_ANSWER, 'utf8'));
+const answer = JSON.parse(readFileSync(new URL('../psql-answer.json', import.meta.url), 'utf8'));
 const { PGPASSWORD = null, PGOPTIONS = null } = process.env;
-const call = { args: process.argv.slice(2), sql: readFileSync(0, 'utf8'), PGPASSWORD, PGOPTIONS };
-appendFileSync(process.env.FAKE_PSQL_CALLS, JSON.stringify(call) + '\\n');
+const env = Object.fromEntries(Object.entries(process.env).toSorted());
+const call = { args: process.argv.slice(2), sql: readFileSync(0, 'utf8'), PGPASSWORD, PGOPTIONS, env };
+appendFileSync(new URL('../psql-calls.jsonl', import.meta.url), JSON.stringify(call) + '\\n');
 if (answer.stderr) process.stderr.write(answer.stderr);
 if (answer.stdout !== undefined) {
   process.stdout.write(typeof answer.stdout === 'string' ? answer.stdout : JSON.stringify(answer.stdout) + '\\n');
@@ -156,8 +158,8 @@ if (answer.stdout !== undefined) {
 process.exit(answer.status ?? 0);
 `;
 /** psql's answer with no record open: `json_agg` of nothing, coalesced. */
-const openRecords = (open = [], rowSecurity = false, recovery = false) => ({
-  stdout: { recovery, rowSecurity, open },
+const openRecords = (open = [], rowSecurity = false, recovery = false, where = {}) => ({
+  stdout: { database: 'rasta_marketplace', port: 5432, ...where, recovery, rowSecurity, open },
 });
 const DATABASE = 'postgresql://rasta_marketplace:hunter2@db.invalid:5432/rasta_marketplace';
 
@@ -209,8 +211,6 @@ function run(
     const env = {
       MARKETPLACE_TARGET_PACKAGE_JSON: join(dir, 'target.json'),
       PATH: bin,
-      FAKE_PSQL_ANSWER: join(dir, 'psql-answer.json'),
-      FAKE_PSQL_CALLS: join(dir, 'psql-calls.jsonl'),
       ...settings,
       TEMPORAL_CLI: cli ?? fake,
     };
@@ -298,6 +298,8 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
     ['workflow', 'list', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
     ['workflow', 'count', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
     ['workflow', 'count', ...common, '--query', QUERY, '--output', 'json'],
+    // After the database read (#947 r1 L1).
+    ['task-queue', 'describe', ...common, '--task-queue', 'rasta-order', '--output', 'json'],
   ]);
 });
 
@@ -2056,17 +2058,13 @@ for (const [name, psql, words] of [
   ['psql prints no JSON', { stdout: 'SET\n[]\n' }, /psql did not print the open records/],
   [
     'an answer without row security',
-    { stdout: { recovery: false, open: [] } },
+    { stdout: { database: 'rasta_marketplace', port: 5432, recovery: false, open: [] } },
     /did not print the open records/,
   ],
-  [
-    'an answer with more keys',
-    { stdout: { recovery: false, rowSecurity: false, open: [], more: 1 } },
-    /did not print/,
-  ],
+  ['an answer with more keys', { stdout: { ...openRecords().stdout, more: 1 } }, /did not print/],
   [
     'open not a list',
-    { stdout: { recovery: false, rowSecurity: false, open: {} } },
+    { stdout: { ...openRecords().stdout, open: {} } },
     /did not print the open records/,
   ],
   ['a list longer than asked', openRecords(Array(52).fill(openRecord('settle'))), /did not print/],
@@ -2076,7 +2074,11 @@ for (const [name, psql, words] of [
     /has row security: an empty answer proves nothing/,
   ],
   ['a standby (lagging replica)', openRecords([], false, true), /was read on a standby/],
-  ['an answer without recovery', { stdout: { rowSecurity: false, open: [] } }, /did not print/],
+  [
+    'an answer without recovery',
+    { stdout: { database: 'rasta_marketplace', port: 5432, rowSecurity: false, open: [] } },
+    /did not print/,
+  ],
   [
     'an unknown operation',
     openRecords([openRecord('disputeObligation')]),
@@ -2116,7 +2118,6 @@ for (const [name, settings] of [
     { DATABASE_URL_MARKETPLACE: `${DATABASE}?sslpassword=${SENTINELS[0]}` },
   ],
   ['not a URL', { DATABASE_URL_MARKETPLACE: SENTINELS[0] }],
-  ['PGSERVICE set', { PGSERVICE: 'other' }],
 ]) {
   test(`FU-221: refuses ${name} before asking Temporal or psql anything`, () => {
     const { status, stderr, calls, psqlCalls } = run(drained(), {
@@ -2125,9 +2126,233 @@ for (const [name, settings] of [
     assert.equal(status, 1);
     assert.match(
       stderr,
-      /cannot verify — deployment blocked: (DATABASE_URL_MARKETPLACE cannot be handed to psql; its value is not repeated|PGSERVICE is set)/,
+      /cannot verify — deployment blocked: DATABASE_URL_MARKETPLACE cannot be handed to psql \(it must name host, port and database, with no parameter that can move the connection\); its value is not repeated\n$/,
     );
     assert.deepEqual([calls, psqlCalls], [[], []]);
     assertNoSentinel(stderr);
   });
 }
+
+// ---- #947 r1 M1: the read lands only where the URL says ---------------------------
+//
+// libpq fills whatever the URL leaves out from PG* variables and a service file, and a
+// `service`, `hostaddr`, `host` or `port` parameter moves the connection; Prisma reads
+// none of them. Another database with an empty table would answer "no open record".
+
+/** Every environment variable libpq or psql reads (libpq-envars, psql ENVIRONMENT). */
+const LIBPQ_VARIABLES = [
+  'PGHOST',
+  'PGHOSTADDR',
+  'PGPORT',
+  'PGDATABASE',
+  'PGUSER',
+  'PGPASSWORD',
+  'PGPASSFILE',
+  'PGSERVICE',
+  'PGSERVICEFILE',
+  'PGSYSCONFDIR',
+  'PGOPTIONS',
+  'PGAPPNAME',
+  'PGSSLMODE',
+  'PGREQUIRESSL',
+  'PGSSLNEGOTIATION',
+  'PGSSLCOMPRESSION',
+  'PGSSLCERT',
+  'PGSSLKEY',
+  'PGSSLROOTCERT',
+  'PGSSLCRL',
+  'PGSSLCRLDIR',
+  'PGSSLSNI',
+  'PGREQUIREPEER',
+  'PGSSLMINPROTOCOLVERSION',
+  'PGSSLMAXPROTOCOLVERSION',
+  'PGGSSENCMODE',
+  'PGKRBSRVNAME',
+  'PGGSSLIB',
+  'PGGSSDELEGATION',
+  'PGCONNECT_TIMEOUT',
+  'PGCLIENTENCODING',
+  'PGTARGETSESSIONATTRS',
+  'PGLOADBALANCEHOSTS',
+  'PGCHANNELBINDING',
+  'PGREQUIREAUTH',
+  'PGDATESTYLE',
+  'PGTZ',
+  'PGGEQO',
+  'PGLOCALEDIR',
+  'PSQLRC',
+  'PSQL_HISTORY',
+  'PSQL_PAGER',
+  'PAGER',
+];
+
+test('#947 M1 (a, b, c): psql gets an allowlisted environment, no inherited PG* variable', () => {
+  const inherited = Object.fromEntries(LIBPQ_VARIABLES.map((name) => [name, '10.9.9.9']));
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, ...inherited, HOME: '/nonexistent' },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  const { env, args } = psqlCalls[0];
+  assert.deepEqual(Object.keys(env).toSorted(), [
+    'HOME',
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGPASSWORD',
+  ]);
+  assert.equal(env.HOME, '/nonexistent');
+  assert.equal(env.PGPASSWORD, 'hunter2');
+  assert.equal(env.PGCONNECT_TIMEOUT, '10');
+  assert.equal(args[0], 'postgresql://rasta_marketplace@db.invalid:5432/rasta_marketplace');
+});
+
+test("#947 M1 (a): an inherited PGHOSTADDR does not reach psql (the review's probe row)", () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, PGHOSTADDR: '10.9.9.9' },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  assert.equal(Object.hasOwn(psqlCalls[0].env, 'PGHOSTADDR'), false);
+  assert.deepEqual(Object.keys(psqlCalls[0].env).toSorted(), [
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGPASSWORD',
+  ]);
+});
+
+test('#947 M1: the URL options are the only PGOPTIONS psql gets', () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: {
+      ...SETTINGS,
+      PGOPTIONS: '-c search_path=other',
+      DATABASE_URL_MARKETPLACE: `${DATABASE}?options=-c%20statement_timeout%3D5000&sslmode=verify-full`,
+    },
+  });
+  assert.equal(status, 0);
+  const [{ env, args }] = psqlCalls;
+  assert.deepEqual(Object.keys(env).toSorted(), [
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGOPTIONS',
+    'PGPASSWORD',
+  ]);
+  assert.equal(env.PGOPTIONS, '-c statement_timeout=5000');
+  assert.match(args[0], /\?sslmode=verify-full$/);
+});
+
+const PINNED = 'postgresql://rasta_marketplace:hunter2@db.invalid';
+for (const [name, url, inherited = {}] of [
+  ['(d) a service parameter', `${DATABASE}?service=other`],
+  ['(d) a percent-encoded service parameter', `${DATABASE}?serv%69ce=other`],
+  ['(e) a hostaddr parameter', `${DATABASE}?hostaddr=10.9.9.9`],
+  ['a host parameter', `${DATABASE}?host=other.invalid`],
+  ['a port parameter', `${DATABASE}?port=6543`],
+  ['a user parameter', `${DATABASE}?user=other`],
+  ['a dbname parameter', `${DATABASE}?dbname=other`],
+  ['target_session_attrs', `${DATABASE}?target_session_attrs=any`],
+  ['load_balance_hosts', `${DATABASE}?load_balance_hosts=random`],
+  ['an unknown parameter', `${DATABASE}?later_libpq_parameter=1`],
+  ['(b) no port, PGPORT inherited', `${PINNED}/rasta_marketplace`, { PGPORT: '6543' }],
+  ['(c) no database, PGDATABASE inherited', `${PINNED}:5432`, { PGDATABASE: 'staging' }],
+  ['(c) no database, only a schema', `${PINNED}:5432?schema=public`, { PGDATABASE: 'staging' }],
+  ['an empty database', `${PINNED}:5432/`],
+  ['port 0', `${PINNED}:0/rasta_marketplace`],
+  ['a port out of range', `${PINNED}:65536/rasta_marketplace`],
+  ['no host', 'postgresql://rasta_marketplace:hunter2@:5432/rasta_marketplace'],
+  ['no host at all', 'postgresql:///rasta_marketplace'],
+]) {
+  test(`#947 M1: refuses ${name} before asking Temporal or psql anything`, () => {
+    const { status, stdout, stderr, calls, psqlCalls } = run(drained(), {
+      settings: { ...SETTINGS, ...inherited, DATABASE_URL_MARKETPLACE: url },
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(
+      stderr,
+      /cannot verify — deployment blocked: DATABASE_URL_MARKETPLACE cannot be handed to psql \(it must name host, port and database, with no parameter that can move the connection\); its value is not repeated\n$/,
+    );
+    assert.doesNotMatch(stderr, /hunter2/);
+    assert.deepEqual([calls, psqlCalls], [[], []]);
+  });
+}
+
+test('#947 M1: the read asks the server, in the same statement, which database and port it is', () => {
+  const { status, psqlCalls } = run(drained());
+  assert.equal(status, 0);
+  assert.match(
+    psqlCalls[0].sql,
+    /SELECT json_build_object\(\n {2}'database', current_database\(\),\n {2}'port', inet_server_port\(\),\n {2}'recovery', pg_is_in_recovery\(\),\n/,
+  );
+});
+
+const ELSEWHERE = /read from a database or port other than the URL names\n$/;
+const NOT_AN_ANSWER = /psql did not print the open records\n$/;
+for (const [name, where, words] of [
+  ['(f) another database answered', { database: 'marketplace_staging' }, ELSEWHERE],
+  ['(f) another port answered', { port: 6543 }, ELSEWHERE],
+  ['a Unix socket answered (no port)', { port: null }, NOT_AN_ANSWER],
+  ['the port is text', { port: '5432' }, NOT_AN_ANSWER],
+  ['no database named', { database: null }, NOT_AN_ANSWER],
+]) {
+  test(`#947 M1: cannot verify when ${name}, even with no open record`, () => {
+    const { status, stdout, stderr } = run(drained(), {
+      psql: openRecords([], false, false, where),
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(stderr, /cannot verify — deployment blocked: saga_unconfirmed_call/);
+    assert.match(stderr, words);
+  });
+}
+
+test('#947 M1: an answer missing the database or the port is not an answer', () => {
+  for (const missing of ['database', 'port']) {
+    const answer = openRecords();
+    delete answer.stdout[missing];
+    const { status, stderr } = run(drained(), { psql: answer });
+    assert.equal(status, 1);
+    assert.match(stderr, /psql did not print the open records/);
+  }
+});
+
+// ---- #947 r1 L1: a poller is looked for again after the read ----------------------
+
+test('#947 L1: a worker that came back during the check blocks, found after the read', () => {
+  const poller = { buildId: 'UNVERSIONED', taskQueueType: 'activity', identity: 'w@new' };
+  const scenario = {
+    ...drained(),
+    'task-queue describe': {
+      sequence: [
+        { stdout: { reachability: null, pollers: null, stats } },
+        { stdout: { reachability: null, pollers: [poller], stats } },
+      ],
+    },
+  };
+  const { status, stdout, stderr, calls } = run(scenario);
+  assert.equal(status, 1);
+  assert.equal(stdout, '');
+  assert.match(
+    stderr,
+    /BLOCKED — 1 finding\(s\):\n {2}task queue has an active poller after the record read; details withheld\n$/,
+  );
+  assert.deepEqual(calls.at(-1).slice(0, 2), ['task-queue', 'describe']);
+});
+
+test('#947 L1: the second poller check follows the read (a failed read leaves it unasked)', () => {
+  const { status, calls, psqlCalls } = run(drained(), { psql: { status: 3 } });
+  assert.equal(status, 1);
+  assert.equal(psqlCalls.length, 1);
+  assert.equal(calls.filter((args) => args[0] === 'task-queue').length, 1);
+});
+
+test('#947 L1: the second describe is checked like the first', () => {
+  const scenario = {
+    ...drained(),
+    'task-queue describe': {
+      sequence: [{ stdout: { reachability: null, pollers: null, stats } }, { stdout: {} }],
+    },
+  };
+  const { status, stderr } = run(scenario);
+  assert.equal(status, 1);
+  assert.match(stderr, /temporal task-queue describe: no poller list in its answer/);
+});
