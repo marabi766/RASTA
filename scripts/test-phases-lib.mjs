@@ -46,7 +46,7 @@ export const EXCLUSIVE_PHASE = Object.freeze({
 /** The CI steps that must keep exercising the stress proofs. */
 export const CI_STEPS = Object.freeze({
   integration: 'Integration tests',
-  security: 'Tenant isolation and authorization tests',
+  security: 'Tenant isolation and financial invariant tests',
 });
 
 /**

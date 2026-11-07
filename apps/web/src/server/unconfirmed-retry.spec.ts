@@ -234,7 +234,6 @@ describe('what a write sent during the retry answers (the real writer)', () => {
     ['403 FORBIDDEN', 403, { code: 'FORBIDDEN', message: 'no' }],
     ['404 NOT_FOUND', 404, { code: 'NOT_FOUND', message: 'gone' }],
     ['400 VALIDATION_FAILED', 400, { code: 'VALIDATION_FAILED', message: 'bad' }],
-    ['503', 503, {}],
   ];
 
   it.each(refusals)(
@@ -246,6 +245,11 @@ describe('what a write sent during the retry answers (the real writer)', () => {
       expect((await duringRetry(() => write(answer(status, body)))).kind).toBe('UNKNOWN_OUTCOME');
     },
   );
+
+  it('a 503 is UNKNOWN_OUTCOME during a retry and outside one alike (FU-189)', async () => {
+    expect((await write(answer(503, {}))).kind).toBe('UNKNOWN_OUTCOME');
+    expect((await duringRetry(() => write(answer(503, {})))).kind).toBe('UNKNOWN_OUTCOME');
+  });
 
   it('a success during a retry is the confirmation, and "in progress" stays itself', async () => {
     expect((await duringRetry(() => write(answer(201, { id: 'X' })))).kind).toBe('CREATED');

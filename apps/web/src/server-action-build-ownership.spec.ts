@@ -24,6 +24,7 @@ import {
   LOCK,
   plantFakeApp,
   plantFakeNext,
+  releaseHold,
   runDriver,
   runModule,
   startDriver,
@@ -457,6 +458,8 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     for (const dir of caseApps) {
       chmodSync(dir, 0o700);
       if (existsSync(join(dir, '.next'))) chmodSync(join(dir, '.next'), 0o700);
+      // A case that failed before it released its writer must not leave it held (FU-199).
+      releaseHold(dir, true);
     }
     await cleanupFixtures();
     caseApps.clear();
@@ -548,9 +551,10 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   });
 
   it('R6-1: controller loss is LOST, and the watchdog rejects while inherited pipes stay held', async () => {
-    // A bounded root holds the wrapper's inherited stdout/stderr pipes after its
-    // supervisor dies, so the wrapper's 'close' cannot arrive until it exits.
-    const dir = app({ holdMs: 4_000 });
+    // A root held until released (FU-199: not on a timer) holds the wrapper's inherited
+    // stdout/stderr pipes after its supervisor dies, so the wrapper's 'close' cannot arrive
+    // until it exits.
+    const dir = app({ holdUntilRelease: true });
     const driver = startDriver(dir, {
       nextFrom,
       inherit: true,
@@ -574,7 +578,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(outcome).toBe(`fixture watchdog expired; ${LOST_DIAGNOSTIC}`);
     expect(performance.now() - started).toBeLessThan(2_000);
     expect(alive({ group })).toBe(true); // The pipe holder still lives: rejection did not wait.
-    // Its parent died: no endpoint can authorize a root signal. Observe its natural exit.
+    // Its parent died: no endpoint can authorize a root signal. Let it finish and observe its
+    // natural exit.
+    releaseHold(dir);
     await waitFor(() => !alive({ group }));
     await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
   });
@@ -1040,7 +1046,9 @@ setInterval(() => {}, 1000);`,
   );
 
   it('R4-2: unexpected supervisor death retires signalling and keeps the lock while writers live', async () => {
-    const dir = app({ holdMs: 2_000 });
+    // Held until released below, never on a timer (FU-199): `driver.done` can take longer than any
+    // fixed hold on a loaded runner, and the writer must still be alive when it is checked.
+    const dir = app({ holdUntilRelease: true });
     const driver = startDriver(dir, {
       nextFrom,
       recordChild: join(dir, 'child.json'),
@@ -1062,8 +1070,9 @@ setInterval(() => {}, 1000);`,
     expect(existsSync(join(dir, LOCK))).toBe(true);
     const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
     expect(events.filter((e) => e === 'send-term' || e === 'send-kill')).toEqual([]);
-    // Its parent died: no endpoint can authorize a root signal.
-    // Observe this bounded fixture's natural exit instead of using its saved PID.
+    // Its parent died: no endpoint can authorize a root signal. Let the writer finish by itself
+    // and observe its natural exit instead of using its saved PID.
+    releaseHold(dir);
     await waitFor(() => !alive({ group }));
     expect(inProgress(dir)).toBe(false);
     await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
