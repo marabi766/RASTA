@@ -309,6 +309,8 @@ export {
   DEFAULT_AFTER_CLOSE_TIMEOUT_MS,
   DEFAULT_SHUTDOWN_SIGNALS,
 } from './lifecycle/graceful-shutdown';
+// What a component that cannot recover asks for: the service's own shutdown, or exit(1).
+export { fatalShutdown } from './lifecycle/fatal-shutdown';
 export type {
   GracefulShutdown,
   GracefulShutdownOptions,

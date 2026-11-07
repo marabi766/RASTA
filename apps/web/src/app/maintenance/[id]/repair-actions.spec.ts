@@ -421,6 +421,7 @@ describe.each(COMMANDS)('$name — what reaches the service', (command) => {
       expect(await command.submit(formData(validFor(command)))).toEqual({
         kind: 'UNCONFIRMED',
         correlationId: 'corr-sample',
+        submissionId: expect.any(String),
       });
       expect(redirect).not.toHaveBeenCalled();
     },

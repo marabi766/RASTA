@@ -3,7 +3,11 @@ import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { RequestService } from './request.service';
 import { RepairOrderService } from './repair-order.service';
-import { IdempotencyStore, optionalIdempotencyKey } from './idempotency';
+import {
+  IdempotencyStore,
+  optionalIdempotentRequest,
+  type IdempotencyHeaders,
+} from './idempotency';
 import {
   approveRequestSchema,
   assignWorkshopSchema,
@@ -93,13 +97,13 @@ export class RequestController {
   })
   async create(
     @Body(zodPipe(createRequestSchema)) dto: CreateRequestDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ) {
-    const key = optionalIdempotencyKey(idempotencyKey);
-    if (key === undefined) return this.requests.create(dto);
+    const request = optionalIdempotentRequest(headers);
+    if (request === undefined) return this.requests.create(dto);
     const { result } = await this.idempotency.execute<MaintenanceRequestView>(
       CREATE_REQUEST_ENDPOINT,
-      key,
+      request,
       dto,
       201,
       (fence) => this.requests.create(dto, fence),

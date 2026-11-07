@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { isoDateTime } from './iso-datetime';
-import { parsableUrl } from './parsable-url';
+import { parsableUrl, isParsableUrlCheck } from './parsable-url';
 import { legacyParse } from './zod-issues';
 
 /**
@@ -10,6 +10,28 @@ import { legacyParse } from './zod-issues';
  */
 describe('parsableUrl', () => {
   const url = z.string().check(parsableUrl());
+
+  it('grants URL publication only to the reviewed helper, never native or copied checks', () => {
+    const check = parsableUrl();
+    expect(isParsableUrlCheck(check)).toBe(true);
+    expect(isParsableUrlCheck(z.url())).toBe(false);
+    expect(isParsableUrlCheck({ ...check })).toBe(false);
+  });
+
+  it.each(['runner', 'kind', 'when', 'prototype'])(
+    'refuses URL trust after changing %s',
+    (field) => {
+      const check = parsableUrl();
+      if (field === 'runner')
+        check._zod.check = (payload) => {
+          payload.value = 'https://example.ir';
+        };
+      if (field === 'kind') Object.assign(check._zod.def, { format: 'email' });
+      if (field === 'when') Object.assign(check._zod.def, { when: () => true });
+      if (field === 'prototype') Object.setPrototypeOf(check._zod.def, {});
+      expect(isParsableUrlCheck(check)).toBe(false);
+    },
+  );
 
   it.each([' https://example.ir', 'https://exa\tmple.ir/\n', 'gateway:3000'])(
     'returns %j exactly as written (zod 4’s own .url() trims and strips)',

@@ -30,7 +30,12 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
-export { patternRefinement, publishedRefinementPattern } from './common/pattern-refinement';
+export {
+  patternRefinement,
+  publishedRefinementPattern,
+  publishablePattern,
+  unchangedCheck,
+} from './common/pattern-refinement';
 
 export { withMaxKeys } from './common/bounds';
 export {
@@ -41,7 +46,7 @@ export {
   textWithin,
   type TextBounds,
 } from './common/transaction-text';
-export { parsableUrl } from './common/parsable-url';
+export { parsableUrl, isParsableUrlCheck } from './common/parsable-url';
 export {
   isoDateTime,
   legacyDatetimeRegex,
@@ -106,6 +111,7 @@ export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 
 export {
   INVENTORY_MAX_REPLAY_WINDOW_SECONDS,
+  MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS,
   PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
   PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
 } from './common/replay-window';
