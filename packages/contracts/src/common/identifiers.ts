@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { patternRefinement } from './pattern-refinement';
 
 /**
  * Rasta identifier scheme.
@@ -75,22 +76,6 @@ export const ID_PREFIXES = {
 
 export type IdPrefix = (typeof ID_PREFIXES)[keyof typeof ID_PREFIXES];
 
-/**
- * Marks a refinement with the anchored pattern it applies, so the OpenAPI
- * converter (`@rasta/nest-common` `toJsonSchema`) can publish it (FU-073).
- *
- * Why not `.regex()`: a refinement is invisible to a JSON Schema converter, so
- * every identifier field was published as `{type: "string"}` — any string —
- * while the runtime refused all but one form. `.regex()` would publish the
- * pattern but changes the issue clients receive (`custom` → `invalid_string`,
- * pinned by the zod 3 goldens), so the check stays a refinement and carries its
- * own pattern. The marker sits on the check object, which every clone of the
- * schema (`.optional()`, `.describe()`, a further `.refine()`) shares, so the
- * pattern travels as far as the check does. A symbol registered by name rather
- * than an export, like `rasta.openapi.queryBoolean` in `@rasta/config`.
- */
-const PUBLISHED_PATTERN = Symbol.for('rasta.openapi.publishedPattern');
-
 /** The anchored pattern of a `prefix_<ULID>` identifier: the accepted set, exactly. */
 function prefixedIdPattern(prefix: IdPrefix): RegExp {
   return new RegExp(`^${prefix}_${ULID_PATTERN.source.slice(1, -1)}$`);
@@ -106,10 +91,7 @@ function prefixedIdPattern(prefix: IdPrefix): RegExp {
  */
 export function prefixedIdSchema(prefix: IdPrefix) {
   const pattern = prefixedIdPattern(prefix);
-  const check = z.refine<string>((value) => pattern.test(value), {
-    message: `Expected an identifier of the form ${prefix}_<ULID>`,
-  });
-  Object.defineProperty(check, PUBLISHED_PATTERN, { value: pattern });
+  const check = patternRefinement(pattern, `Expected an identifier of the form ${prefix}_<ULID>`);
   return z.string().check(check).describe(`${prefix} identifier`);
 }
 

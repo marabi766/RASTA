@@ -1,9 +1,16 @@
 import 'reflect-metadata';
-import { readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { isCanonicalBodyPipe } from './canonical';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (
+    dir: string,
+    options?: { skip?: (name: string) => boolean; optional?: boolean },
+  ) => string[];
+};
 
 /**
  * The guard that closes the class (Codex PR-480 r1, R2; task 129): every
@@ -31,12 +38,9 @@ interface RouteArgument {
   pipes: unknown[];
 }
 
+// Authored files only: `src/generated` (the Prisma client) is never opened (FU-102).
 function controllerFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return controllerFiles(path);
-    return entry.name.endsWith('.controller.ts') ? [path] : [];
-  });
+  return authoredFiles(dir).filter((path) => basename(path).endsWith('.controller.ts'));
 }
 
 const SRC = join(__dirname, '..');

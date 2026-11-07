@@ -29,7 +29,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 describe('organization-service published errors (D-121)', () => {
-  it.each(['', '0x10', '1e1', ' 16 '])(
+  it.each(['', '0x10', '1e', ' 16 '])(
     'FU-131 HTTP refuses non-decimal latitude %j',
     async (value) => {
       const response = await request(app.getHttpServer())
@@ -65,6 +65,34 @@ describe('organization-service published errors (D-121)', () => {
 
   afterAll(async () => {
     await app.close();
+  });
+
+  it('FU-160 accepts JS exponent serialization for both published coordinates over HTTP', async () => {
+    const parameters = document.paths['/v1/organizations/nearby']?.get?.parameters as {
+      name: string;
+      schema: { type: string };
+    }[];
+    const service = app.get(OrganizationService);
+    const nearby = jest.fn().mockResolvedValue([]);
+    service.nearby = nearby;
+    try {
+      for (const name of ['latitude', 'longitude']) {
+        nearby.mockClear();
+        expect(parameters.find((parameter) => parameter.name === name)?.schema.type).toBe('number');
+        await request(app.getHttpServer())
+          .get('/v1/organizations/nearby')
+          .query({ latitude: '0', longitude: '0', [name]: String(0.0000001) })
+          .expect(200);
+        expect(nearby).toHaveBeenLastCalledWith(expect.objectContaining({ [name]: 0.0000001 }));
+        await request(app.getHttpServer())
+          .get('/v1/organizations/nearby')
+          .query({ latitude: '0', longitude: '0', [name]: '1e9999' })
+          .expect(400);
+        expect(nearby).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      delete (service as Partial<OrganizationService>).nearby;
+    }
   });
 
   it('holds the routes the app really serves, and their real error answers, against the document (FU-031)', async () => {

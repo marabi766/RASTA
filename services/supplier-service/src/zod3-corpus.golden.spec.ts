@@ -49,9 +49,16 @@ const ZOD3: Record<string, unknown> = {
       'qualifiedFor already implies an active supplier; a suspended supplier is never currently qualified, so the two filters cannot be combined',
     ],
   ],
-  // FU-131: fractional query text is refused before the integer/refinement checks.
+  // FU-160: fixed transport refusal keeps the enclosing filter diagnostic.
   'searchSuppliersQuerySchema review r2: qualifiedFor already implies an active supplier; a suspended':
-    [['limit', 'invalid_type', 'Expected number, received nan']],
+    [
+      ['limit', 'custom', 'Expected an integer in decimal notation'],
+      [
+        'status',
+        'custom',
+        'qualifiedFor already implies an active supplier; a suspended supplier is never currently qualified, so the two filters cannot be combined',
+      ],
+    ],
 };
 
 const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
