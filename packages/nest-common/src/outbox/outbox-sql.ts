@@ -9,6 +9,18 @@ import {
   type OutboxRow,
 } from './outbox';
 
+// Services own either timestamp(3) (UTC wall time) or timestamptz(3) columns.
+// Decode an explicit UTC instant into the table's own deadline type, so neither
+// assignment nor comparison can implicitly reinterpret it in the session zone.
+// Floor before decoding: populate_record applies the column's millisecond
+// precision. For aligned columns, <= / > this floor equals <= / > raw now().
+// Keep this on the RHS of predicates: indexed deadline columns stay untouched.
+// Comparisons spell it out so the eligibility-clock guard sees their DB clock.
+const OUTBOX_NOW = `(jsonb_populate_record(NULL::outbox_message, jsonb_build_object(
+  'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+))).claim_expires_at`;
+
+// TIMESTAMP(3) rounds to nearest. Floor the clock and the complete deadline.
 /**
  * The SQL behind every service's outbox store.
  *
@@ -338,14 +350,14 @@ export async function claimPendingSql(
      lease AS (
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL AND next_attempt_at IS NULL
-          AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
+          AND claim_expires_at IS NOT NULL AND claim_expires_at <= (jsonb_populate_record(NULL::outbox_message, jsonb_build_object( 'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') ))).claim_expires_at
         ORDER BY created_at, id LIMIT $4
           FOR UPDATE SKIP LOCKED
      ),
      retry AS (
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL AND claim_expires_at IS NULL
-          AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
+          AND next_attempt_at IS NOT NULL AND next_attempt_at <= (jsonb_populate_record(NULL::outbox_message, jsonb_build_object( 'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') ))).claim_expires_at
         ORDER BY created_at, id LIMIT $4
           FOR UPDATE SKIP LOCKED
      ),
@@ -353,7 +365,7 @@ export async function claimPendingSql(
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL
           AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
-          AND GREATEST(claim_expires_at, next_attempt_at) <= now()
+          AND GREATEST(claim_expires_at, next_attempt_at) <= (jsonb_populate_record(NULL::outbox_message, jsonb_build_object( 'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') ))).claim_expires_at
         ORDER BY created_at, id LIMIT $4
           FOR UPDATE SKIP LOCKED
      ),
@@ -371,15 +383,16 @@ export async function claimPendingSql(
          FROM outbox_message o
         WHERE o.id IN (SELECT id FROM candidates)
           AND o.published_at IS NULL
-          AND (o.claim_expires_at IS NULL OR o.claim_expires_at <= now())
-          AND (o.next_attempt_at  IS NULL OR o.next_attempt_at  <= now())
+          AND (o.claim_expires_at IS NULL OR o.claim_expires_at <= (jsonb_populate_record(NULL::outbox_message, jsonb_build_object( 'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') ))).claim_expires_at)
+          AND (o.next_attempt_at  IS NULL OR o.next_attempt_at  <= (jsonb_populate_record(NULL::outbox_message, jsonb_build_object( 'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') ))).claim_expires_at)
         ORDER BY o.created_at, o.id
           FOR UPDATE SKIP LOCKED
      )
      UPDATE outbox_message AS o
         SET claim_token      = $1,
             claim_owner      = $2,
-            claim_expires_at = now() + make_interval(secs => $3::double precision),
+            claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', ${OUTBOX_NOW})
+                + make_interval(secs => $3::double precision)),
             claim_count      = o.claim_count + 1
        FROM due
       WHERE o.id = due.id
@@ -487,10 +500,10 @@ export async function markFailedSql(
     `UPDATE outbox_message
         SET attempts         = attempts + 1,
             last_error       = $3,
-            next_attempt_at  = now() + make_interval(secs => least(
+            next_attempt_at  = date_trunc('milliseconds', date_trunc('milliseconds', ${OUTBOX_NOW}) + make_interval(secs => least(
               power(2, least(attempts, 10)) * $4::double precision,
               $5::double precision
-            )),
+            ))),
             claim_token      = NULL,
             claim_owner      = NULL,
             claim_expires_at = NULL
@@ -629,7 +642,8 @@ export async function renewSql(
     await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
     const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
       `UPDATE outbox_message
-          SET claim_expires_at = now() + make_interval(secs => $3::double precision)
+          SET claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', ${OUTBOX_NOW})
+                + make_interval(secs => $3::double precision))
         WHERE id = ANY($1::text[])
           AND claim_token = $2
           AND published_at IS NULL
@@ -803,7 +817,7 @@ export async function activeLeaseCountSql(client: OutboxSqlClient): Promise<numb
        FROM outbox_message
       WHERE published_at IS NULL
         AND claim_expires_at IS NOT NULL
-        AND claim_expires_at > now()`,
+        AND claim_expires_at > (jsonb_populate_record(NULL::outbox_message, jsonb_build_object( 'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') ))).claim_expires_at`,
   );
   return Number(result[0]?.count ?? 0);
 }

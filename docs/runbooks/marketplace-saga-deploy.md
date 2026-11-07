@@ -143,7 +143,10 @@ that shortens retention after deleting older history also requires operator revi
 `rasta_marketplace_saga_start_backlog` and
 `rasta_marketplace_saga_start_backlog_age_seconds` expose counts/age only.
 `RastaMarketplaceSagaStartBacklogAging` fires after age exceeds five minutes for
-two minutes. Local Prometheus loads the rule; external notification routing remains
+two minutes. An older economic-service causes it too: no saga starts until
+`GET /v1/transactions/capabilities` says yes (outcome `economic_not_ready` on
+`rasta_marketplace_saga_start_deliveries_total`), and those orders stay unclaimed and
+start by themselves after the upgrade (ADR-040). Local Prometheus loads the rule; external notification routing remains
 a deployment responsibility. Starter shutdown aborts active RPCs, joins database
 work and stops polling before Prisma disconnects.
 
@@ -318,6 +321,49 @@ does it file the dispute or refund, and those calls can still end it. One rollba
 edge, as for the release: an authorisation whose last attempt failed just as workers
 stopped has no marker yet, so a protocol-3 target passes the gate and ends that saga
 as before this wait.
+
+## رکورد فراخوانی‌های تأییدنشده (FU-104)
+
+`saga_unconfirmed_call` رکورد پایدار فراخوانی‌هایی به economic-service است که نتیجه‌شان تأیید نشده است. ردیف پیش از فراخوانی نوشته می‌شود،
+هر تلاش تازه آن را دوباره باز می‌کند و `generation` را جلو می‌برد، و فقط تأیید همان تلاش آن را می‌بندد؛ پس تأیید دیرهنگام تلاشی قدیمی‌تر چیزی را نمی‌بندد،
+و ردیف با توقف Worker یا پایان Saga از بین نمی‌رود. فعلاً فقط `resolveObligationDispute` ثبت می‌شود، پس ردیف بسته فقط تأیید همان آزادسازی است و ثابت نمی‌کند بازپرداخت یا تسویهٔ پس از آن هم انجام شده است.
+این جدول فقط ثبت می‌کند: هنوز هیچ هشداری آن را نمی‌خواند، پس برای دیدن ردیف‌های باز این پرس‌وجو را اجرا کن (`opened_at` زمان نخستین بازشدن است و با تلاش تازه جلو نمی‌رود):
+
+```sql
+SELECT organization_id, order_id, operation, subject AS dispute_id, generation, opened_at
+FROM saga_unconfirmed_call WHERE confirmed_at IS NULL ORDER BY opened_at;
+```
+
+ردیف باز ثابت نمی‌کند وجه هنوز در Hold است؛ ثابت می‌کند که کسی خلافش را ثابت نکرده است. پس آن را با economic-service تطبیق بده (اختلاف باز هنوز چیزی برای آزادسازی ندارد).
+ردیف را فقط با تصمیم ثبت‌شدهٔ تطبیق ببند، و با همان `generation` که خوانده‌ای، تا تلاشی که پس از خواندن تو آغاز شده بسته نشود. اگر `UPDATE 0` برگشت، دوباره بخوان و دوباره تطبیق بده:
+
+```sql
+UPDATE saga_unconfirmed_call SET confirmed_at = now()
+WHERE organization_id = '<org>' AND order_id = '<order>' AND operation = 'resolveObligationDispute'
+  AND subject = '<dispute>' AND generation = <generation> AND confirmed_at IS NULL;
+```
+
+### پرکردن گذشته
+
+Migration برای **هر** اختلافی که سفارشش `COMPLETED` یا `CANCELLED` نیست ردیف می‌نویسد، چه اختلاف باز باشد چه تصمیم‌گرفته، چه Saga ـش زنده باشد چه بسته. هیچ رسید و هیچ زمانی
+این را تغییر نمی‌دهد: رسید آزادسازی نمی‌گوید پاسخ کدام اختلاف است، زمانش با ساعت دیگری از زمان تصمیم ثبت می‌شود، و ممکن است دیر برسد یا هرگز نوشته نشود. پس آزادسازی‌ای که واقعاً
+انجام شده هم ردیف می‌گیرد: Saga ـی که منتظر است ردیف خود را با تلاش بعدی‌اش می‌بندد (در فاز `RELEASE_UNCONFIRMED`، `retryDisputeRelease` آن را زودتر می‌کند)، و بقیه را با economic-service تطبیق بده، با همان مسیر بالا ببند و ثبت کن.
+
+Migration پیش از توقف نسخهٔ قدیمی اجرا می‌شود (گام ۱) و آن نسخه تا گام ۲ هنوز می‌تواند اختلافی را ثبت کند. پس **در هر تلاش استقرار، میان گام ۲ و ۴ این پرکردن را دوباره اجرا کن**، از جمله پس از Rollback: `db:migrate` دوم کاری نمی‌کند، و اختلافی که نسخهٔ قدیمی در این میان ثبت کرده ردیف نمی‌گیرد؛
+همان عبارت Migration است، تکرارش بی‌خطر است و ردیف موجود را تغییر نمی‌دهد. از ریشهٔ مخزن اجرا کن. کد خروج غیرصفر (از جمله وقتی عبارتی پیدا نشود) استقرار را متوقف می‌کند،
+و سطر `INSERT 0 <n>` در Change Record ثبت می‌شود:
+
+```bash
+set -o pipefail
+sed -n '/^-- BACKFILL BEGIN/,/^-- BACKFILL END/p' \
+  services/marketplace-service/prisma/migrations/20261105130000_saga_unconfirmed_call/migration.sql |
+  node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 -f - |
+  grep -E '^INSERT 0 [0-9]+$'
+```
+
+`scripts/psql-prisma-url.mjs` تنها تبدیل نشانی Prisma به libpq است: `psql` پارامتر `?schema=` را نمی‌پذیرد، و این ابزار آن را به `search_path` تبدیل می‌کند، پس Schema ـی غیر از `public` هم از دست نمی‌رود. نشانی مبهم یا پارامتری که شاید گذرواژه داشته باشد (مانند `sslpassword`) رد می‌شود. این تبدیل از راه `PGOPTIONS` است، پس Migrator باید مستقیم به PostgreSQL وصل شود، چون PgBouncer آن را دور می‌ریزد (FU-144).
+
+`down.sql` این Migration رکورد فراخوانی‌های باز را از بین می‌برد: پیش از اجرایش همین فهرست را ثبت کن.
 
 ## Continued-as-new visibility gap (FU-046)
 

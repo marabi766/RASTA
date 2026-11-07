@@ -15,6 +15,7 @@
     "tests/e2e/src/api.ts",
     "apps/web/e2e/expect.ts"
   ],
+  "globalPassThroughEnv": ["TEMPORAL_TEST_SERVER_DIR"],
   "globalEnv": ["NODE_ENV", "CI"],
   "tasks": {
     "build": {
@@ -108,7 +109,8 @@
         "$TURBO_ROOT$/apps/web/src/lib/format/index.ts",
         "$TURBO_ROOT$/apps/web/src/lib/format/money.ts",
         "$TURBO_ROOT$/apps/web/src/lib/format/text.ts",
-        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
+        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs",
+        "$TURBO_ROOT$/scripts/lint-extensions.mjs"
       ],
       "outputs": []
     },
@@ -151,6 +153,7 @@
         "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
+        "INVENTORY_CLOCK_SKEW_SECONDS",
         "INVENTORY_LOCK_TIMEOUT_MS",
         "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
         "MARKETPLACE_SERVICE_URL",
@@ -237,6 +240,7 @@
         "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
+        "INVENTORY_CLOCK_SKEW_SECONDS",
         "INVENTORY_LOCK_TIMEOUT_MS",
         "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
         "MARKETPLACE_SERVICE_URL",
@@ -421,6 +425,7 @@
         "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
+        "INVENTORY_CLOCK_SKEW_SECONDS",
         "INVENTORY_LOCK_TIMEOUT_MS",
         "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
         "MARKETPLACE_SERVICE_URL",

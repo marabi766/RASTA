@@ -333,17 +333,12 @@ export const CLI_CONTRACT = Object.freeze({
       '--interactive',
       '--label',
       '--log-level',
-      '--login',
       '--memory',
       '--mount',
       '--name',
       '--net',
       '--network',
-      '--noediting',
-      '--noprofile',
-      '--norc',
       '--platform',
-      '--posix',
       '--publish',
       '--pull',
       '--quiet',
@@ -388,6 +383,10 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/check-service-boundaries.mjs': { positionals: [], accepts: { '--root': 'path' } },
   'scripts/check-test-phases.mjs': { positionals: ['script'] },
   'scripts/ci-image-matrix.mjs': { other: ['--run'] },
+  // FU-092: the shell options the shared shell reader accepts as inert (a shell option, never a command line).
+  'scripts/ci-shell-text-lib.mjs': {
+    other: ['--login', '--noediting', '--noprofile', '--norc', '--posix'],
+  },
   'scripts/ci-integration-split-lib.mjs': { other: ['--filter', '--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
@@ -498,6 +497,11 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
+  // The name of a DATABASE_URL_* variable, never its value, then the few flags it passes on to psql.
+  'scripts/psql-prisma-url.mjs': {
+    positionals: ['identifier', 'forwarded'],
+    other: ['--file', '--set', '-c', '-f', '-v'],
+  },
   'scripts/replay-dlq-lib.mjs': {
     accepts: {
       '--allow-stale': 'identifier',

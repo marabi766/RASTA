@@ -5,9 +5,7 @@ import { numberInput } from './number-input';
 /**
  * `numberInput` replaces `z.coerce.number()` in request schemas (#393 r1 F1).
  *
- * The change is for non-text, non-number input only: every number and every
- * string is accepted or refused exactly as `z.coerce.number()` decides, with the
- * same value; anything else is refused as `invalid_type` and nothing throws.
+ * Only decimal text may cross the request conversion boundary (FU-131).
  */
 
 const bounded = () => z.number().int().min(0).max(3650);
@@ -15,6 +13,53 @@ const before = z.coerce.number().int().min(0).max(3650);
 const after = numberInput(bounded());
 
 describe('numberInput', () => {
+  it.each([
+    '',
+    ' ',
+    '\t',
+    '\n',
+    ' 7',
+    '7 ',
+    '7\n',
+    '7\r\n',
+    '0x10',
+    '0X10',
+    '0o10',
+    '0O10',
+    '0b10',
+    '0B10',
+    '1e1',
+    '1E+1',
+    'Infinity',
+    '-Infinity',
+    'NaN',
+    '.5',
+    '5.',
+    '+',
+    '-',
+    '1_000',
+    '1,000',
+    '٧',
+  ])('FU-131 refuses non-decimal text %j', (value) => {
+    expect(numberInput(z.number()).safeParse(value).success).toBe(false);
+  });
+
+  it.each(['7.0', '7.5', '1.00000000000000001'])(
+    'FU-131 refuses fractions on integer fields %j',
+    (value) => {
+      expect(after.safeParse(value).success).toBe(false);
+    },
+  );
+
+  it.each(['0', '+7', '-7', '07', '7.50', '-0.5'])('FU-131 accepts decimal text %j', (value) => {
+    expect(numberInput(z.number()).parse(value)).toBe(Number(value));
+  });
+
+  it('FU-131 preserves inner bounds and rejects conversion overflow', () => {
+    expect(after.safeParse('3651').success).toBe(false);
+    expect(numberInput(z.number()).safeParse('9'.repeat(400)).success).toBe(false);
+  });
+
   it.each([
     0,
     7,
@@ -25,16 +70,9 @@ describe('numberInput', () => {
     Number.NaN,
     Number.POSITIVE_INFINITY,
     '7',
-    ' 7 ',
-    '',
-    ' ',
-    '0x1e',
-    '1e3',
-    '1e1',
     '+7',
     '-0',
     '07',
-    '7.0',
     '7.5',
     'abc',
     'Infinity',

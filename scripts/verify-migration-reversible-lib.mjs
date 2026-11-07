@@ -2,7 +2,16 @@ import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.t
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { readUrl } from '../packages/config/src/url-reader.js';
+import { libpqInvocation } from './psql-prisma-url.mjs';
+
+export {
+  UNREADABLE_DATABASE_URL,
+  UNSAFE_DATABASE_PARAMETER,
+  UNUSABLE_PRISMA_OPTIONS,
+  UNUSABLE_PRISMA_SCHEMA,
+  libpqInvocation,
+  psqlInvocation,
+} from './psql-prisma-url.mjs';
 
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
@@ -667,6 +676,7 @@ export const ASSET_DATA_ROLLBACK = {
 const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
 // Sits on top of the chain, and refuses a bare probe row: the steps writing one take it down first.
 const SETTLEMENT_CREATION_PROOF = '20261105120000_settlement_creation_proof';
+const TRANSACTION_HOLD_DECISION = '20261106120000_transaction_hold_decision';
 
 /** A transaction as the schema before business lines holds it (or after, with a line). */
 const TRANSACTION_MIGCHECK = (id, line = null) => `
@@ -748,7 +758,7 @@ ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN
 const COMMISSION_BUSINESS_LINES_STEPS = [
   {
     label: 'commission: down to the schema before business lines (empty)',
-    runDownScript: [SETTLEMENT_CREATION_PROOF, COMMISSION_BUSINESS_LINES],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF, COMMISSION_BUSINESS_LINES],
   },
   {
     label: 'commission: a priced and an unpriced charge, as the old engine wrote them',
@@ -1120,6 +1130,7 @@ const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_disput
  */
 const RESOLVED_DISPUTE_DOWNS = [
   // These probes move a transaction to SETTLED with no settlement behind it.
+  TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
   '20261103121000_transaction_settlement_authority',
   '20261103120000_transaction_dispute_resolution_by_authority',
@@ -1564,7 +1575,7 @@ const SETTLEMENT_REVERSAL = '20261104120000_settlement_reversal';
 const SETTLEMENT_REVERSAL_STEPS = [
   {
     label: 'settlement reversal: the proof of creation goes first, these probes are bare rows',
-    runDownScript: [SETTLEMENT_CREATION_PROOF],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
   },
   {
     label: 'settlement reversal: a settled transaction, its settlement, and one open case',
@@ -1621,7 +1632,7 @@ const SETTLEMENT_REVERSAL_STEPS = [
   },
   {
     label: 'settlement reversal: the proof of creation goes again, before the probe rows do',
-    runDownScript: [SETTLEMENT_CREATION_PROOF],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
   },
   {
     label: 'settlement reversal: the probe rows are removed before the chain reversal',
@@ -1826,7 +1837,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
   },
   {
     label: 'creation proof: down over them refuses nothing, and leaves every row',
-    runDownScript: [SETTLEMENT_CREATION_PROOF],
+    runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
   },
   {
     label: 'creation proof: the rows are all there, and an owner clears the unprovable',
@@ -1857,6 +1868,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
 ];
 
 const HOLD_DECISION_DOWNS = [
+  TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
   SETTLEMENT_REVERSAL,
   '20261103121000_transaction_settlement_authority',
@@ -1950,10 +1962,25 @@ const HOLD_DECISION_STEPS = [
     mustFail: 'fixed by its migration',
   },
   {
+    label: 'hold decisions: an operator decides a listed row',
+    sql: `SELECT decide_transaction_hold('TXN_MIGCHECK_HD_AUTHORISED', 'CONFIRMED', 'the verifier decides this');`,
+  },
+  {
+    label: 'hold decisions: a decision is not undone by a rollback',
+    runDownScript: [TRANSACTION_HOLD_DECISION],
+    mustFail: 'refusing to drop the decisions',
+  },
+  {
+    label: 'hold decisions: the decision is removed with its guard lifted',
+    sql: `ALTER TABLE "transaction_hold_decision" DISABLE TRIGGER "trg_transaction_hold_decision_guard";
+          DELETE FROM "transaction_hold_decision" WHERE transaction_id = 'TXN_MIGCHECK_HD_AUTHORISED';
+          ALTER TABLE "transaction_hold_decision" ENABLE TRIGGER "trg_transaction_hold_decision_guard";`,
+  },
+  {
     label: 'hold decisions: a later move is not undone by the rollback',
     sql: `UPDATE "transaction" SET settlement_authorised_at = now() WHERE id = 'TXN_MIGCHECK_HD_RESTORED';`,
   },
-  { label: 'hold decisions: down', runDownScript: [SETTLEMENT_CREATION_PROOF] },
+  { label: 'hold decisions: down', runDownScript: [TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF] },
   {
     label: 'hold decisions: down puts back only what up moved and nothing moved since',
     sql: `DO $$
@@ -2661,6 +2688,8 @@ export const EXPECTED = {
       'settlement_creation_quarantine',
       // What 20261105120000 found standing on a decision read from another's hold (#762 r2, F2).
       'transaction_hold_reconciliation',
+      // Who decided a row of it, and why (FU-138).
+      'transaction_hold_decision',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2723,6 +2752,8 @@ export const EXPECTED = {
       'trg_transaction_id_unclaimed',
       'trg_transaction_hold_reconciliation_frozen',
       'trg_transaction_hold_reconciliation_no_truncate',
+      'trg_transaction_hold_decision_guard',
+      'trg_transaction_hold_decision_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2906,6 +2937,8 @@ export const EXPECTED = {
       'order_status_history',
       // 20261015120000_saga_step (D-053): replay records of saga activities.
       'saga_step',
+      // 20261105130000_saga_unconfirmed_call (FU-104): the record of unconfirmed economic calls.
+      'saga_unconfirmed_call',
       // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
       'return_request',
       'return_line',
@@ -2951,6 +2984,7 @@ export const EXPECTED = {
       'ck_return_dispatch_release_actors',
       'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
+      'ck_saga_unconfirmed_call_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',
@@ -4844,70 +4878,6 @@ export function sqlstateFrom(stderr) {
 }
 
 /**
- * Query parameters only Prisma understands. Everything else — `sslmode`,
- * `sslrootcert`, `connect_timeout`, `application_name` and the rest of
- * libpq's — is kept, so psql connects exactly as configured.
- */
-const PRISMA_ONLY_PARAMETERS = [
-  'schema',
-  'connection_limit',
-  'pool_timeout',
-  'socket_timeout',
-  'pgbouncer',
-  'statement_cache_size',
-];
-
-/**
- * `target` with `params` as its query, each name and value percent-encoded.
- *
- * Not `URLSearchParams`: it writes a space as `+`, which libpq's URI parser
- * does not decode — `options=-c TimeZone=UTC` (L7-37) would reach the server
- * as `-c+TimeZone=UTC` and the connection be refused. Prisma reads either.
- */
-function withLibpqQuery(target, params) {
-  const query = params
-    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
-    .join('&');
-  target.search = '';
-  return query ? `${target.toString()}?${query}` : target.toString();
-}
-
-/**
- * What every libpq helper below refuses a URL that does not parse with: a fixed
- * text. `new URL`'s own error keeps the whole input on `.input`, which an
- * uncaught throw prints — the password included, since these run before it is
- * taken out (#385 r5).
- */
-export const UNREADABLE_DATABASE_URL =
-  'the database URL cannot be read as a URL, so it is not handed to psql; its value is not repeated';
-
-/** `url` as libpq should see it: Prisma's own parameters removed, libpq's kept. */
-export function libpqUrl(url) {
-  const target = readUrl(url, { refusal: UNREADABLE_DATABASE_URL });
-  const kept = [...target.searchParams].filter(([name]) => !PRISMA_ONLY_PARAMETERS.includes(name));
-  return withLibpqQuery(target, kept);
-}
-
-/**
- * How to hand `url` to psql without putting its password on the command line,
- * where any local user can read it (`ps`, `/proc/<pid>/cmdline`) for as long
- * as the process runs (D-045 follow-up). `target` is the libpq URL with the
- * password removed — from the userinfo and from a `password=` parameter alike
- * — and `env` carries it as `PGPASSWORD`, which libpq reads when the URL has
- * none. Spread `env` over the child's environment; it is empty when the URL
- * has no password, so an inherited `PGPASSWORD` or `.pgpass` still applies.
- */
-export function libpqInvocation(url) {
-  const target = readUrl(libpqUrl(url), { refusal: UNREADABLE_DATABASE_URL });
-  const password = target.password
-    ? decodeURIComponent(target.password)
-    : target.searchParams.get('password');
-  target.password = '';
-  const kept = [...target.searchParams].filter(([name]) => name !== 'password');
-  return { target: withLibpqQuery(target, kept), env: password ? { PGPASSWORD: password } : {} };
-}
-
-/**
  * Runs one SQL script with psql against `url`'s database. Returns
  * `{ ok, stdout, output, sqlstate }`; `stdout` is unaligned tuples only.
  */
@@ -5218,7 +5188,7 @@ export function downFileMode(sql) {
  * the commands it runs; psql has no such parameter, and an unqualified name in
  * a down would otherwise resolve against `public`. A separate `-c`, run before
  * the file in the same session, rather than `PGOPTIONS`, which a URL's own
- * `options` parameter would silently override.
+ * `options` parameter would replace.
  */
 export function psqlFileRunner(url, schema) {
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {

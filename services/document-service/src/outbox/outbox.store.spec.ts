@@ -147,14 +147,19 @@ describe('claimPending', () => {
       expect(sql).toContain(stream);
     }
     expect(sql).toContain('claim_expires_at IS NULL AND next_attempt_at IS NULL');
-    expect(sql).toContain('claim_expires_at IS NOT NULL AND claim_expires_at <= now()');
-    expect(sql).toContain('next_attempt_at IS NOT NULL AND next_attempt_at <= now()');
-    expect(sql).toContain('GREATEST(claim_expires_at, next_attempt_at) <= now()');
+    const deadlineClock = sql.match(
+      /\(jsonb_populate_record\(NULL::outbox_message,.*?\)\)\)\.claim_expires_at/,
+    )?.[0];
+    expect(deadlineClock).toContain("now() AT TIME ZONE 'UTC'");
+    expect(deadlineClock).toContain('HH24:MI:SS.US"Z"');
+    expect(sql).toContain(`claim_expires_at IS NOT NULL AND claim_expires_at <= ${deadlineClock}`);
+    expect(sql).toContain(`next_attempt_at IS NOT NULL AND next_attempt_at <= ${deadlineClock}`);
+    expect(sql).toContain(`GREATEST(claim_expires_at, next_attempt_at) <= ${deadlineClock}`);
 
     // The bounded candidate set is re-checked against the original predicate
     // before it is locked, so the rewrite cannot widen what gets claimed.
-    expect(sql).toContain('o.claim_expires_at IS NULL OR o.claim_expires_at <= now()');
-    expect(sql).toContain('o.next_attempt_at IS NULL OR o.next_attempt_at <= now()');
+    expect(sql).toContain(`o.claim_expires_at IS NULL OR o.claim_expires_at <= ${deadlineClock}`);
+    expect(sql).toContain(`o.next_attempt_at IS NULL OR o.next_attempt_at <= ${deadlineClock}`);
 
     // The total order. `created_at` alone leaves same-millisecond ties
     // arbitrary, which is what made claim windows non-deterministic.

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
-import { publishedIsoDateTimeZone } from '@rasta/contracts';
+import { numberInputInnerSchema, publishedIsoDateTimeZone } from '@rasta/contracts';
 
 /**
  * Converts the Zod schemas a service validates with into JSON Schema, so its
@@ -93,11 +93,17 @@ export function toJsonSchema(schema: z.ZodType): JsonSchema {
   // how a boolean is carried in a query string, so `type: boolean` is both
   // true and enough. The marker travels on the schema itself, so the accepted
   // input and the published output come from one call and cannot drift.
+  // Known decimal transport adapters publish numeric semantics, including integer
+  // bounds. Unregistered preprocessors keep the fail-closed omission below.
+  const numberInner = numberInputInnerSchema(schema);
+
   const queryBooleanDefaultValue = queryBooleanDefault(schema);
   const base =
-    queryBooleanDefaultValue === undefined
-      ? convert(defOf(schema))
-      : { type: 'boolean', default: queryBooleanDefaultValue };
+    numberInner !== undefined
+      ? toJsonSchema(numberInner)
+      : queryBooleanDefaultValue === undefined
+        ? convert(defOf(schema))
+        : { type: 'boolean', default: queryBooleanDefaultValue };
 
   if (!description) return base;
   // A schema's own words come first; a bound its format carries (FU-035) is kept after them.
