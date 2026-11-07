@@ -6,9 +6,9 @@ export const JEST_LAUNCHERS = {
       'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
     sha256: {
       'scripts/verify-migration-reversible-lib.test.mjs':
-        'def875018903ff377cd99173ceeaf4f5676905ed91d313da44c9be225fd83423',
+        'cabc139c9859660c52832d0cc57d8b4853250ed3ee16ee73541114c1df62c15c',
       'scripts/verify-migration-reversible-lib.mjs':
-        '0f9e617bfb2d7ba482a3aa7b2439ba8326c42283fa40675843a9466889289f8d',
+        '586290851585cbe4a3edcb2d50cd2c520474ca5a6118585a31bd2f77e2639536',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },
@@ -164,14 +164,14 @@ export const JEST_LAUNCHERS = {
   'scripts/check-unit-step-concurrency.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
+      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed. Workspace manifests are listed through authoredFiles() (read-only git ls-files).',
     sha256: {
       'scripts/ci-shell-text-lib.mjs':
-        '040fb4931fa106a05672a47e953616f92cb838901b5d765546ee1fe6e3cfd869',
+        'db19f3f6803e260d87a53d9420bd09a779f775bd117c17978f848bcfd1fe1188',
       'scripts/ci-node-test-timeouts-lib.mjs':
         '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '5bc35b029d5ab3da138660bd09a79e5dd4837a6595e043f528b2bcf8557f78aa',
+        '28d6cdc3448cd216af36457af701d65ec2b2c0d5c09f43605fc32a126b5f21ba',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
@@ -193,9 +193,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        'ff241898e4e15633254c9e1034afc6b726a58546e8b74c194f94a4060ad570e6',
+        'd7d58f0fb4d63fa7e44047510429da3f0bbf3e39554ec115cac91d3ffe9c0ede',
       'scripts/ci-integration-split-lib.mjs':
-        'c49d3b00663aa7c77a4125220a2d2bdb83746fec8339214d12cd96aef9bcffe2',
+        '27fa6f1964598d33d810c8d2b452cbe40e6715e97631c791d650e268d7bda28a',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },

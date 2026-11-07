@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { ApplicationFailure, Context } from '@temporalio/activity';
-import { REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
+import { FINAL_ANSWER_CONTRACT, REFUSED_ON_FIRST_ATTEMPT } from './economic-refusal';
 import { temporalStep, type OrderActivities, type SagaOrderView } from './activities';
 import {
   orderSaga,
@@ -446,7 +446,7 @@ describe('history rollover on real Temporal', () => {
         for (let i = 0; i < 100 && disputes.length < 2; i++)
           await new Promise((resolve) => setTimeout(resolve, 10));
         expect(resolutions).toEqual([
-          [INPUT.orderId, 'TXN_ROLL', 'DSP_OLD', 'old decision', 'ECON_OLD'],
+          [INPUT.orderId, 'TXN_ROLL', 'DSP_OLD', 'old decision', 'ECON_OLD', FINAL_ANSWER_CONTRACT],
         ]);
         expect(disputes).toEqual(['DSP_OLD', 'DSP_NEW']);
         await env.sleep('1 hour');
@@ -544,6 +544,7 @@ describe('history rollover on real Temporal', () => {
               'DSP_RELEASE',
               'decided',
               'ECON_RELEASE',
+              FINAL_ANSWER_CONTRACT,
             ]),
           ]),
         );
@@ -829,7 +830,10 @@ describe('history rollover on real Temporal', () => {
         recovered = true;
         await latest.signal('retryDisputeRelease');
         await eventually(() => filed.length > 0);
-        expect(filed).toEqual([[INPUT.orderId, 'TXN_MOVED', 'DSP_MOVED', 'broken']]);
+        // With the authorisation still in doubt, the filing goes as in doubt too.
+        expect(filed).toEqual([
+          [INPUT.orderId, 'TXN_MOVED', 'DSP_MOVED', 'broken', true, FINAL_ANSWER_CONTRACT],
+        ]);
         // Rolled over in the dispute's wait, the next run knows the call is still
         // in doubt, and that it left the wait.
         await atRest(taskQueue, deadline);
@@ -926,12 +930,347 @@ describe('history rollover on real Temporal', () => {
         await handle.signal('disputeResolved', 'SETTLE');
         await eventually(() => rounds.length > 0);
         expect(rounds[0]).toBe(4);
-        expect(sent[0]).toEqual([INPUT.orderId, 'TXN_LEFT', true]);
+        expect(sent[0]).toEqual([INPUT.orderId, 'TXN_LEFT', true, FINAL_ANSWER_CONTRACT]);
         expect((await handle.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
         await atRest(taskQueue, deadline);
       } finally {
         await handle.terminate();
       }
+    });
+  });
+
+  describe.each([
+    {
+      name: 'the refund',
+      operation: 'compensate',
+      // Recorded on no order: only the carried transaction says what to refund.
+      state: { status: 'CANCELLING', economicTransactionId: null, cancellationReason: 'why' },
+      carried: { transactionId: 'TXN_CARRIED' },
+      phase: 'COMPENSATION_UNCONFIRMED',
+      sent: [INPUT.orderId, 'TXN_CARRIED', 'why', true, FINAL_ANSWER_CONTRACT],
+      done: 'CANCELLED',
+    },
+    {
+      name: 'the filing',
+      operation: 'disputeObligation',
+      state: {
+        status: 'CANCELLING',
+        economicTransactionId: 'TXN_CARRIED',
+        cancellationReason: 'why',
+      },
+      carried: { transactionId: 'TXN_CARRIED', disputeId: 'DSP_CARRIED', reason: 'its words' },
+      phase: 'DISPUTE_UNCONFIRMED',
+      sent: [INPUT.orderId, 'TXN_CARRIED', 'DSP_CARRIED', 'its words', true, FINAL_ANSWER_CONTRACT],
+      done: 'CANCELLED',
+    },
+  ] as const)('$name, resumed in its wait (FU-117)', (site) => {
+    it('goes on counting from what the last run carried, first of all, and ends on its answer', async () => {
+      const state: SagaOrderView = { ...site.state, dispute: null };
+      const sent: unknown[][] = [];
+      const rounds: number[] = [];
+      const calls: string[] = [];
+      let recovered = false;
+      const taskQueue = `rollover-${site.operation}-${++serial}`;
+      const send = async (...args: unknown[]) => {
+        calls.push(site.operation);
+        sent.push(args);
+        if (!recovered) throw ApplicationFailure.retryable('down', 'UPSTREAM_UNAVAILABLE');
+        return 'E';
+      };
+      const worker = await Worker.create({
+        connection: env.nativeConnection,
+        taskQueue,
+        workflowsPath: require.resolve('./workflows'),
+        activities: {
+          readOrder: async () => {
+            calls.push('readOrder');
+            return state;
+          },
+          disputeObligation: send,
+          compensate: send,
+          findObligation: async () => {
+            calls.push('findObligation');
+            return null;
+          },
+          resolveObligationDispute: async () => undefined,
+          noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+            rounds.push(round);
+          },
+          markCancelled: async () => {
+            state.status = 'CANCELLED';
+            return 'CANCELLED';
+          },
+        } as unknown as Partial<OrderActivities>,
+      });
+      await bounded(worker, async (deadline) => {
+        const handle = await env.client.workflow.start(orderSaga, {
+          workflowId: taskQueue,
+          taskQueue,
+          args: [
+            {
+              ...INPUT,
+              recheckIntervalHours: 1,
+              resume: {
+                status: {
+                  phase: 'WAS',
+                  deferredSteps: [],
+                  remindersRecorded: 0,
+                  settlementAttempts: 0,
+                },
+                waitingIn: state.status,
+                activitySequence: 7,
+                siblingCall: { operation: site.operation, rounds: 4, ...site.carried },
+              },
+            },
+          ],
+        });
+        try {
+          await eventually(() => rounds.length > 0);
+          expect(rounds[0]).toBe(5);
+          expect((await handle.query<SagaStatus>('status')).phase).toBe(site.phase);
+          expect(sent[0]).toEqual(site.sent);
+          expect(calls).not.toContain('findObligation');
+          if (site.operation === 'disputeObligation') expect(calls[0]).toBe(site.operation);
+          await atRest(taskQueue, deadline);
+          recovered = true;
+          await handle.signal('retryDisputeRelease');
+          expect(await handle.result()).toBe(site.done);
+        } finally {
+          await handle.terminate().catch(() => undefined);
+        }
+      });
+    });
+  });
+
+  it.each([
+    {
+      name: 'the refund, of a transaction only the lookup knew',
+      operation: 'compensate',
+      phase: 'COMPENSATION_UNCONFIRMED',
+      state: { status: 'CANCELLING', economicTransactionId: null, cancellationReason: 'why' },
+      carried: { transactionId: 'TXN_FOUND' },
+      words: [INPUT.orderId, 'TXN_FOUND', 'why'],
+    },
+    {
+      name: 'the filing, decided meanwhile',
+      operation: 'disputeObligation',
+      phase: 'DISPUTE_UNCONFIRMED',
+      state: {
+        status: 'DISPUTED',
+        economicTransactionId: 'TXN_FOUND',
+        cancellationReason: null,
+        dispute: { id: 'DSP_R', reason: 'its words', resolution: null },
+      },
+      carried: { transactionId: 'TXN_FOUND', disputeId: 'DSP_R', reason: 'its words' },
+      words: [INPUT.orderId, 'TXN_FOUND', 'DSP_R', 'its words'],
+    },
+  ] as const)('rolls over inside the wait of $name (FU-117)', async (site) => {
+    const state = { dispute: null, ...site.state } as SagaOrderView;
+    const sent: unknown[][] = [];
+    const rounds: number[] = [];
+    const released: unknown[][] = [];
+    let lookups = 0;
+    let recovered = false;
+    const taskQueue = `rollover-real-${site.operation}-${++serial}`;
+    const send = async (...args: unknown[]) => {
+      sent.push(args);
+      if (!recovered) throw ApplicationFailure.retryable('down', 'UPSTREAM_UNAVAILABLE');
+      return 'ECON_R';
+    };
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => state,
+        findObligation: async () => {
+          lookups += 1;
+          return { transactionId: 'TXN_FOUND' };
+        },
+        compensate: site.operation === 'compensate' ? send : async () => undefined,
+        disputeObligation: site.operation === 'disputeObligation' ? send : async () => 'ECON_R',
+        resolveObligationDispute: async (...args: unknown[]) => {
+          released.push(args);
+        },
+        noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+          rounds.push(round);
+        },
+        markCancelled: async () => 'CANCELLED',
+      } as unknown as Partial<OrderActivities>,
+    });
+    await bounded(worker, async (deadline) => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'WAS',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: state.status,
+              activitySequence: 5,
+            },
+          },
+        ],
+      });
+      const latest = env.client.workflow.getHandle(taskQueue);
+      try {
+        const first = (await handle.describe()).runId;
+        await eventually(() => rounds.length > 0);
+        await atRest(taskQueue, deadline);
+        await env.sleep('8 hours');
+        const second = (await latest.describe()).runId;
+        expect(second).not.toBe(first);
+        expect(rounds).toEqual(rounds.map((_, i) => i + 1));
+        const history = await env.client.workflow.getHandle(taskQueue, second).fetchHistory();
+        const started = history.events?.[0]?.workflowExecutionStartedEventAttributes;
+        const data = started?.input?.payloads?.[0]?.data as Uint8Array;
+        expect((JSON.parse(Buffer.from(data).toString()) as OrderSagaInput).resume).toMatchObject({
+          waitingIn: state.status,
+          siblingCall: { operation: site.operation, rounds: expect.any(Number), ...site.carried },
+        });
+        expect((await latest.query<SagaStatus>('status')).phase).toBe(site.phase);
+        // The same words, so the same key, across the runs.
+        const words = sent.map((args) =>
+          JSON.stringify(args.filter((arg) => typeof arg !== 'boolean')),
+        );
+        expect(new Set(words)).toEqual(
+          new Set([JSON.stringify([...site.words, FINAL_ANSWER_CONTRACT])]),
+        );
+        expect(sent.at(-1)?.at(-2)).toBe(true);
+
+        await atRest(taskQueue, deadline);
+        state.status = 'CANCELLING';
+        state.cancellationReason = 'why';
+        state.dispute = null;
+        recovered = true;
+        await latest.signal('retryDisputeRelease');
+        expect(await latest.result()).toBe('CANCELLED');
+        if (site.operation === 'compensate') expect(lookups).toBe(1);
+        // What the filing answered is what the release names.
+        else expect(released[0]?.slice(0, 3)).toEqual([INPUT.orderId, 'TXN_FOUND', 'DSP_R']);
+        if (site.operation !== 'compensate') expect(released[0]?.[4]).toBe('ECON_R');
+        for (const runId of [first, second]) {
+          await Worker.runReplayHistory(
+            { workflowsPath: require.resolve('./workflows') },
+            await env.client.workflow.getHandle(taskQueue, runId).fetchHistory(),
+            taskQueue,
+          );
+        }
+      } finally {
+        await latest.terminate().catch(() => undefined);
+      }
+    });
+  });
+
+  it('a resumed refund whose order read is refused stays in its wait (FU-117)', async () => {
+    const state: SagaOrderView = {
+      status: 'CANCELLING',
+      economicTransactionId: 'TXN_READ',
+      cancellationReason: 'why',
+      dispute: null,
+    };
+    const rounds: number[] = [];
+    const sent: unknown[][] = [];
+    let readable = false;
+    const taskQueue = `rollover-read-sibling-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => {
+          if (!readable) throw ApplicationFailure.nonRetryable('refused', 'NOT_FOUND');
+          return state;
+        },
+        compensate: async (...args: unknown[]) => {
+          sent.push(args);
+        },
+        noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+          rounds.push(round);
+        },
+        markCancelled: async () => 'CANCELLED',
+      } as unknown as Partial<OrderActivities>,
+    });
+    await bounded(worker, async (deadline) => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'WAS',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: 'CANCELLING',
+              activitySequence: 5,
+              siblingCall: { operation: 'compensate', rounds: 2, transactionId: 'TXN_READ' },
+            },
+          },
+        ],
+      });
+      await eventually(() => rounds.length > 0);
+      expect(rounds[0]).toBe(3);
+      expect(sent).toEqual([]);
+      expect((await handle.query<SagaStatus>('status')).phase).toBe('COMPENSATION_UNCONFIRMED');
+      await atRest(taskQueue, deadline);
+      readable = true;
+      await handle.signal('retryDisputeRelease');
+      expect(await handle.result()).toBe('CANCELLED');
+      expect(sent).toEqual([[INPUT.orderId, 'TXN_READ', 'why', true, FINAL_ANSWER_CONTRACT]]);
+    });
+  });
+
+  it('a resumed run at PENDING with no hold in doubt still refuses (FU-117)', async () => {
+    const taskQueue = `rollover-pending-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => ({
+          status: 'PENDING',
+          economicTransactionId: null,
+          cancellationReason: null,
+          dispute: null,
+        }),
+      } as unknown as Partial<OrderActivities>,
+    });
+    await bounded(worker, async () => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            resume: {
+              status: {
+                phase: 'WAS',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: 'PENDING',
+              activitySequence: 3,
+              siblingCall: { operation: 'compensate', rounds: 1, transactionId: 'T' },
+            },
+          },
+        ],
+      });
+      await expect(handle.result()).rejects.toMatchObject({
+        cause: { type: 'SAGA_INCONSISTENT' },
+      });
     });
   });
 
@@ -1251,6 +1590,8 @@ describe('history rollover on real Temporal', () => {
             const seen = await queryQuiet<SagaStatus>(latest, deadline, 'status');
             expect(seen.phase).toBe('AWAITING_CONFIRMATION');
           });
+          // At rest can mean the task that scheduled the reminder has just completed.
+          await eventually(() => reminders === remindersBeforeDeadline);
         });
         expect(reminders).toBe(remindersBeforeDeadline);
 

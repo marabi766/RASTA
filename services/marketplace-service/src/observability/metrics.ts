@@ -196,22 +196,63 @@ export const productSearchesTotal = new Counter({
   registers: [registry],
 });
 
+/**
+ * Monotonic deadlines (`performance.now()`) of the saga state gauges' last good
+ * sample, by gauge (#792 r1 F3). A scrape past the deadline, or with none,
+ * finds the gauge withdrawn: a reporter that hangs, whatever it hangs on, reads
+ * as unknown and never as the last value it published. Only `StateSample` in
+ * `temporal/saga-state-sample.ts` sets them.
+ */
+const stateFreshUntil = new WeakMap<object, number>();
+
+export function setStateFreshUntil(gauges: readonly object[], until: number | undefined): void {
+  for (const gauge of gauges) {
+    if (until === undefined) stateFreshUntil.delete(gauge);
+    else stateFreshUntil.set(gauge, until);
+  }
+}
+
+/** A gauge of saga state: withdrawn at scrape once its sample is no longer fresh. */
+function stateGauge<T extends string>(name: string, help: string, labelNames: readonly T[]) {
+  return new Gauge<T>({
+    name,
+    help,
+    labelNames,
+    registers: [registry],
+    collect() {
+      if (!(performance.now() < (stateFreshUntil.get(this) ?? -Infinity))) this.reset();
+    },
+  });
+}
+
 /** Durable starter backlog; no tenant/order labels or monetary values. */
-export const sagaStartBacklogCount = new Gauge({
-  name: 'rasta_marketplace_saga_start_backlog',
-  help: 'Orders awaiting proven saga acceptance',
-  labelNames: ['service'] as const,
-  registers: [registry],
-});
-export const sagaStartBacklogAge = new Gauge({
-  name: 'rasta_marketplace_saga_start_backlog_age_seconds',
-  help: 'Age of oldest undelivered saga start intent',
-  labelNames: ['service'] as const,
-  registers: [registry],
-});
+export const sagaStartBacklogCount = stateGauge(
+  'rasta_marketplace_saga_start_backlog',
+  'Orders awaiting proven saga acceptance',
+  ['service'] as const,
+);
+export const sagaStartBacklogAge = stateGauge(
+  'rasta_marketplace_saga_start_backlog_age_seconds',
+  'Age of oldest undelivered saga start intent',
+  ['service'] as const,
+);
 export const sagaStartDeliveries = new Counter({
   name: 'rasta_marketplace_saga_start_deliveries_total',
   help: 'Saga start delivery attempts by fixed outcome',
   labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * 1 while this replica's saga worker runs AND Temporal lists it among the
+ * task queue's pollers; 0 otherwise — disabled, never started, failed,
+ * stopping, or a probe that could not tell (FU-104). Liveness is the server's
+ * view, not the SDK's, so a worker that still says RUNNING but no longer polls
+ * reads 0 once Temporal stops listing it.
+ */
+export const sagaWorkerUp = new Gauge({
+  name: 'rasta_marketplace_saga_worker_up',
+  help: 'Whether this replica has a saga worker that Temporal lists as polling (1) or not (0)',
+  labelNames: ['service'] as const,
   registers: [registry],
 });

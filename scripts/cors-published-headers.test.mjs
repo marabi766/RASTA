@@ -23,9 +23,10 @@
 // unreadable document — fails.
 // -----------------------------------------------------------------------------
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join, relative, sep } from 'node:path';
 import { test } from 'node:test';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 const root = join(import.meta.dirname, '..');
 const servicesDir = join(root, 'services');
@@ -87,8 +88,10 @@ export function missingFrom(policy, published) {
   };
 }
 
-const docs = readdirSync(docsDir)
-  .filter((name) => name.endsWith('.openapi.json'))
+// Git's file lists (the inventory), never a directory listing.
+const docs = authoredFiles(docsDir)
+  .filter((file) => relative(docsDir, file) === basename(file) && file.endsWith('.openapi.json'))
+  .map((file) => basename(file))
   .map((name) => ({
     service: name.split('.')[0],
     name,
@@ -102,10 +105,11 @@ for (const { headers } of docs) {
 
 const policies = [
   { name: 'api-gateway', file: join(servicesDir, 'api-gateway', 'src', 'http', 'cors.ts') },
-  ...readdirSync(servicesDir)
-    .filter(
-      (name) => name !== 'api-gateway' && existsSync(join(servicesDir, name, 'src', 'main.ts')),
-    )
+  ...authoredFiles(servicesDir)
+    .map((file) => relative(servicesDir, file).split(sep))
+    .filter((parts) => parts.length === 3 && parts[1] === 'src' && parts[2] === 'main.ts')
+    .map(([name]) => name)
+    .filter((name) => name !== 'api-gateway')
     .map((name) => ({ name, file: join(servicesDir, name, 'src', 'main.ts') })),
 ];
 

@@ -1,8 +1,13 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { logLevel } from 'kafkajs';
 import { kafkaClientConfig } from './connection';
 import { kafkaLogCreator } from './log-creator';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 /**
  * KafkaJS logs through `console` unless given a `logCreator`; a SCRAM failure
@@ -96,21 +101,11 @@ describe('kafkaLogCreator', () => {
 
 describe('every Kafka client in the services takes the shared configuration', () => {
   const root = resolve(__dirname, '../../../..');
-  const found: string[] = [];
-
-  function walk(dir: string): void {
-    for (const name of readdirSync(dir)) {
-      if (['node_modules', 'dist', 'generated', '.turbo'].includes(name)) continue;
-      const path = join(dir, name);
-      if (statSync(path).isDirectory()) walk(path);
-      else if (/\.ts$/.test(name) && !/\.(spec|int-spec)\.ts$/.test(name)) found.push(path);
-    }
-  }
-
-  for (const top of ['services', 'packages']) {
-    const dir = join(root, top);
-    if (existsSync(dir)) walk(dir);
-  }
+  // git-ignored output (build output, installs, generated clients) is never listed
+  const found = ['services', 'packages']
+    .filter((top) => existsSync(join(root, top)))
+    .flatMap((top) => authoredFiles(join(root, top)))
+    .filter((path) => /\.ts$/.test(path) && !/\.(spec|int-spec)\.ts$/.test(path));
 
   it.each(
     found
