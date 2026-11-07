@@ -96,10 +96,14 @@ describe('saga state gauges (#770 r2 F3)', () => {
 
   it('drops a reason a later read no longer reports', async () => {
     let reasons = healthy.unresolved;
-    const client = new OrderSagaClient(env, {
-      ...healthy,
-      unresolved: () => reasons(),
-    } as unknown as SagaStartStore, economic);
+    const client = new OrderSagaClient(
+      env,
+      {
+        ...healthy,
+        unresolved: () => reasons(),
+      } as unknown as SagaStartStore,
+      economic,
+    );
     await client.sampleState();
     reasons = async () => [{ reason: 'PENDING', count: 1, age: 10, overdue: 0 }];
     await client.sampleState();
@@ -116,7 +120,11 @@ describe('saga state gauges (#770 r2 F3)', () => {
       .mockImplementationOnce(healthy.unresolved)
       .mockImplementation(never);
     const backlog = jest.fn(healthy.backlog);
-    const client = new OrderSagaClient(env, { backlog, unresolved } as unknown as SagaStartStore, economic);
+    const client = new OrderSagaClient(
+      env,
+      { backlog, unresolved } as unknown as SagaStartStore,
+      economic,
+    );
     client.startPolling();
     await jest.advanceTimersByTimeAsync(0);
     expect(await series('rasta_marketplace_saga_unresolved_overdue')).toEqual({ '': 3 });
@@ -168,10 +176,14 @@ describe('saga state gauges (#770 r2 F3)', () => {
   it('drops an answer that comes after its deadline', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
     let answer!: (value: unknown) => void;
-    const client = new OrderSagaClient(env, {
-      ...healthy,
-      unresolved: () => new Promise((resolve) => (answer = resolve)),
-    } as unknown as SagaStartStore, economic);
+    const client = new OrderSagaClient(
+      env,
+      {
+        ...healthy,
+        unresolved: () => new Promise((resolve) => (answer = resolve)),
+      } as unknown as SagaStartStore,
+      economic,
+    );
     const sampled = client.sampleState();
     await jest.advanceTimersByTimeAsync(STATE_READ_TIMEOUT_MS);
     await sampled;

@@ -124,6 +124,7 @@ describe('the economic-service prerequisite (#824 r1, F3)', () => {
       claim: jest.fn(async () => [claim]),
       finish: jest.fn(async () => 1),
       backlog: jest.fn(async () => ({ count: 1, age: 0 })),
+      unresolved: jest.fn(async () => []),
     }) as unknown as jest.Mocked<SagaStartStore>;
   const inContext = (act: () => Promise<void>) =>
     runWithContext(
@@ -555,11 +556,15 @@ describe('starter shutdown', () => {
   it('disabled polling samples backlog without marking an unattempted intent as attempted', async () => {
     const claim = jest.fn();
     const backlog = jest.fn(async () => ({ count: 2, age: 60 }));
-    const client = new OrderSagaClient(env({ MARKETPLACE_TEMPORAL_ENABLED: false }), {
-      claim,
-      backlog,
-      unresolved: async () => [],
-    } as unknown as SagaStartStore, economicReady);
+    const client = new OrderSagaClient(
+      env({ MARKETPLACE_TEMPORAL_ENABLED: false }),
+      {
+        claim,
+        backlog,
+        unresolved: async () => [],
+      } as unknown as SagaStartStore,
+      economicReady,
+    );
     await runWithContext(
       createSystemContext({ organizationId: 'ORG_DISABLED', correlationId: 'disabled-start-test' }),
       () => client.start('ORD_DISABLED'),
