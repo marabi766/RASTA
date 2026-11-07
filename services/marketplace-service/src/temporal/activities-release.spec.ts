@@ -215,8 +215,13 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     send: () => unknown,
     read: () => unknown,
     currentAttempt?: () => number,
-  ): { activities: ReturnType<typeof createActivities>; reads: () => number } {
+  ): {
+    activities: ReturnType<typeof createActivities>;
+    reads: () => number;
+    answered: unknown[][];
+  } {
     let reads = 0;
+    const answered: unknown[][] = [];
     const failing = async () => send();
     const activities = createActivities({
       orders: {
@@ -225,6 +230,9 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         // The durable call record (#836, FU-145): opened before the call, confirmed after it.
         openSagaCall: async () => ({ generation: 1, started: true }),
         confirmSagaCall: async () => undefined,
+        confirmSagaCallsOn: async (_o: unknown, operations: unknown, subject: unknown) => {
+          answered.push([operations, subject]);
+        },
       } as unknown as OrderService,
       economic: {
         authoriseSettlement: failing,
@@ -240,7 +248,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
       ...(currentAttempt ? { currentAttempt } : {}),
     });
-    return { activities, reads: () => reads };
+    return { activities, reads: () => reads, answered };
   }
   const failure = (attempted: Promise<unknown>): Promise<ApplicationFailure> =>
     attempted.then(
@@ -633,5 +641,20 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         type: 'RECONCILIATION_READ_FAILED',
       });
     });
+  });
+
+  // #836 sync with #796: only REFUNDED proves no authorisation or settlement of the
+  // obligation can land; another final status answers the refund, not those calls.
+  it('a refund answers the open authorisation and settlement records only once REFUNDED', async () => {
+    const refunded = over(refused, obligation('REFUNDED'), () => 2);
+    await refunded.activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT);
+    expect(refunded.answered).toEqual([[['authoriseSettlement', 'settle'], 'TXN']]);
+    for (const status of ['SETTLED', 'CANCELLED', 'FAILED']) {
+      const final = over(refused, obligation(status), () => 2);
+      await expect(
+        final.activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT),
+      ).resolves.toMatchObject({ final: true, status });
+      expect(final.answered).toEqual([]);
+    }
   });
 });
