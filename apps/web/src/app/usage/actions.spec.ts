@@ -307,6 +307,29 @@ describe('what the service refuses', () => {
     });
   });
 
+  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+    // The first answer was lost; the same form again meets the gateway's rate limit,
+    // which says nothing about the first send.
+    recordUsage.mockReset();
+    recordUsage
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData(VALID);
+    const first = await submitUsage(IDLE_USAGE_FORM, form);
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
+    expect(await submitUsage(first, form)).toEqual(first);
+    expect(recordUsage).toHaveBeenCalledTimes(2);
+  });
+
   it('never puts anything token-shaped in the state it returns', async () => {
     // The state is rendered into the page and readable by any script on it.
     recordUsage.mockResolvedValue({

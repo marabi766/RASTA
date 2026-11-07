@@ -13,6 +13,7 @@ import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { WriteResult } from '@/server/write';
 
 import type { LifecycleFormState } from './lifecycle-form-state';
@@ -73,6 +74,16 @@ export async function runLifecycle<V, B, F extends string>(
    * The asset of the page this form was drawn on — the route's id, bound to the
    * action by the form (`action.bind(null, assetId)`), never a field of it.
    */
+  assetId: string,
+  /** The form's state before this post: a retry of an unresolved send stays unresolved. */
+  previous: LifecycleFormState<V, F>,
+  form: FormData,
+): Promise<LifecycleFormState<V, F>> {
+  return keepUnconfirmed(previous, form, () => attemptLifecycle(command, assetId, form));
+}
+
+async function attemptLifecycle<V, B, F extends string>(
+  command: LifecycleCommand<V, B, F>,
   assetId: string,
   form: FormData,
 ): Promise<LifecycleFormState<V, F>> {

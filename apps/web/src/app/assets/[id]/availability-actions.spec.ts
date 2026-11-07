@@ -290,11 +290,11 @@ describe.each(CASES)('$name', (testCase) => {
       ],
       [
         { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },
-        { kind: 'UNCONFIRMED', correlationId: 'c4' },
+        { kind: 'UNCONFIRMED', correlationId: 'c4', submissionId: expect.any(String) },
       ],
       [
         { kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'c5' },
-        { kind: 'UNCONFIRMED', correlationId: 'c5' },
+        { kind: 'UNCONFIRMED', correlationId: 'c5', submissionId: expect.any(String) },
       ],
     ])(
       'says %j as %j — never "nothing was saved" for a send that may have landed',

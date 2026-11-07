@@ -54,7 +54,7 @@ export const JEST_LAUNCHERS = {
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
+        '4c9fde73cd620b61e184ac77da19e331cdb55d13f2f8ed5bbab2ed5d9c1a5fbe',
     },
   },
   'scripts/aggregation-evidence-cli.test.mjs': {
@@ -99,7 +99,7 @@ export const JEST_LAUNCHERS = {
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
+        '4c9fde73cd620b61e184ac77da19e331cdb55d13f2f8ed5bbab2ed5d9c1a5fbe',
     },
   },
   'scripts/check-kafka-credential-scope.test.mjs': {
@@ -171,11 +171,11 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-node-test-timeouts-lib.mjs':
         '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '28d6cdc3448cd216af36457af701d65ec2b2c0d5c09f43605fc32a126b5f21ba',
+        'e395fd8ef12cdc6910fa34b30dc18326fa5a6368d5d97a075704c0a95491c4a2',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
-        'cf298af03890815894a8b4e09524e230638a78bc9c703621a53096b517c6fbe6',
+        '34b0d346f234bf0a529d5541ae09f3801c5c756d41cc51ae97deffc9e5910a78',
     },
   },
   'scripts/exchange-deadline-rule.test.mjs': {
@@ -188,16 +188,29 @@ export const JEST_LAUNCHERS = {
     },
   },
   'scripts/ci-integration-split.test.mjs': {
-    kind: 'non-jest',
+    kind: 'empty-unit-probe',
     reaches:
-      'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
+      'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        'd7d58f0fb4d63fa7e44047510429da3f0bbf3e39554ec115cac91d3ffe9c0ede',
+        '9db14ea8f986dc6046ef28b44041623745a7222b60c032967c7fb7a063a83978',
       'scripts/ci-integration-split-lib.mjs':
-        '27fa6f1964598d33d810c8d2b452cbe40e6715e97631c791d650e268d7bda28a',
+        '778de7fe530dd477aa75fbb4c324001b91253e4f124864582f5b570160014238',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
+    },
+  },
+  'scripts/raw-http-boundary-rule.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns Node ESLint config/fixture probes and scrubbed Git commands; subprocess API names in the AST guard are inspection fixtures, never Jest launches.',
+    sha256: {
+      'scripts/raw-http-boundary-rule.test.mjs':
+        '5eaa2ac9a55ef76d6cd2423f807de18c4303b8c81d0047cdac4713009a399b80',
+      'scripts/source-inventory.mjs':
+        'd130e1e0d7cfda45d547f088d6b1a8eb346a927d6c0c25fca5bdb675be3ba39c',
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
     },
   },
   'scripts/testing-dev-only.test.mjs': {
@@ -205,8 +218,10 @@ export const JEST_LAUNCHERS = {
     reaches:
       'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
     sha256: {
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/testing-dev-only.test.mjs':
-        '8d315c9824364fdbbd6795dc2cb86c0171cb7e65c60599fa299331934aa07c2d',
+        '70322e435d9e0f736c7189e0c5808388ab6d5f54673b474671172bfa7933f6b9',
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
@@ -218,8 +233,10 @@ export const JEST_LAUNCHERS = {
     reaches:
       'Spawns git fixture commands and Turbo lint --dry=json snapshots; test runner names are registration fixtures, never executed.',
     sha256: {
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/lint-scripts-registration.test.mjs':
-        'e611dc8ccaf8232cfbe179cb4b8f3f5d4443b50424f4cffd0deba6e0c89284a0',
+        '31355969c67278101cb08666e7e60ea3ec5fa2738a8bd71918bfe888f169ac2d',
     },
   },
   'scripts/testing-dev-only.mjs': {

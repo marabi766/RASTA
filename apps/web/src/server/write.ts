@@ -12,6 +12,7 @@ import {
 } from './gateway';
 import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
+import { inheritUnconfirmed } from './unconfirmed-retry';
 import type { WebSession } from './session';
 import { ownValue, ownText } from '@/lib/own-key';
 
@@ -341,6 +342,16 @@ export type WriteCall<S extends z.ZodTypeAny, F extends string> =
   KeyedWriteCall<S, F> | UnkeyedWriteCall<S, F>;
 
 export async function writeThroughGateway<S extends z.ZodTypeAny, F extends string>(
+  session: WebSession,
+  call: WriteCall<S, F>,
+): Promise<WriteResult<z.infer<S>, F>> {
+  // Sent while retrying a send whose outcome is unknown: only a success or "in
+  // progress" is about that send; every other answer is about this attempt only
+  // (`unconfirmed-retry.ts`, FU-173).
+  return inheritUnconfirmed(await dispatchWrite(session, call));
+}
+
+async function dispatchWrite<S extends z.ZodTypeAny, F extends string>(
   session: WebSession,
   call: WriteCall<S, F>,
 ): Promise<WriteResult<z.infer<S>, F>> {

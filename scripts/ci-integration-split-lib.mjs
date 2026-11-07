@@ -339,15 +339,14 @@ export const STEP_INVENTORY = Object.freeze({
     env: { ...KAFKA_TESTS, ...databases('MAINTENANCE') },
     timeout: 8,
   },
-  'Tenant isolation and authorization tests': {
+  'Tenant isolation and financial invariant tests': {
     run: withKafka(
       'tests',
-      'pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"',
       'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose',
     ),
     env: { ...KAFKA_TESTS, ...databases(...SERVICES), ...BUCKET, ...SCANNER },
-    // FU-165: ceil(1.5 x measured p95 587 s / 60) = 15 minutes.
-    timeout: 15,
+    // FU-185: integration-only p95 349 s; 480 / 349 = 1.38 (see timing report).
+    timeout: 8,
   },
   'Outbox stream-sequence protocol (ADR-051 B3)': {
     run: ['pnpm run test:outbox-b3'],
@@ -410,7 +409,8 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  * of the job took in those steps over the last 20 green CI runs on main and
  * `mq/train-*` (2026-10-29, GitHub job listings). A job that has step limits
  * is refused here without an entry, rather than assumed to need no setup.
- * Measured maxima, in seconds: suites 298, security 309, critical 281,
+ * Security was re-measured for FU-185 below; the other historical maxima
+ * in seconds: suites 298, critical 281,
  * coverage 310, backup drill 92, migration chain 135 (per shard), migration
  * guards 253, trivy-db 5. `quality-unit` (FU-111): its one limited step is the
  * unit-step concurrency step (74-87 s in green runs); the rest of the job is
@@ -427,6 +427,8 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-construction': 8,
   'integration-economic': 8,
   'integration-contract': 8,
+  // FU-185, Nov 5-6 main window 42091919570..42295730635 (20 successes):
+  // unbounded steps plus bookkeeping p95/max 324/328 s; ceil(1.3 * 328 / 60) = 8.
   'integration-security': 8,
   'integration-coverage-critical': 8,
   'integration-coverage': 8,
@@ -637,6 +639,7 @@ export function checkIntegrationSplit(workflow, root = ROOT) {
   }
   problems.push(...integrationPartitionProblems(effective, root));
   problems.push(...qualitySplitProblems(workflow));
+  problems.push(...unitCoverageProblems(root));
   if (stressCount !== 1)
     problems.push(`expected exactly one exclusive stress phase, found ${stressCount}`);
   const jobs = isMapping(workflow?.jobs) ? workflow.jobs : {};
@@ -783,6 +786,55 @@ export function checkIntegrationSplit(workflow, root = ROOT) {
   return problems;
 }
 
+/** FU-185: removing the filtered unit rerun is safe only while the full gate covers it. */
+export function unitCoverageProblems(root = ROOT) {
+  const problems = [];
+  const scripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
+  if (scripts?.['test:unit:ci'] !== 'turbo run test:unit --concurrency=3')
+    problems.push('unit coverage: test:unit:ci must run every workspace without filters');
+  for (const file of workspaceManifestFiles(root)) {
+    const { scripts = {} } = JSON.parse(readFileSync(join(root, file), 'utf8'));
+    // Every workspace needs test:unit, including those without test. There are
+    // no missing-unit exemptions. The Node workspace has an exact allowlist:
+    // broadening it requires review of the files the required gate will run.
+    const nodeUnit =
+      file === 'tests/e2e/package.json'
+        ? 'node --test --test-timeout=300000 src/target-guard.test.ts src/kafka-observer.test.ts src/actor.test.ts src/keycloak-transport.test.ts src/expect.test.ts src/guarded-http.test.ts'
+        : null;
+    // All current unit projects contain tests. Refuse passWithNoTests entirely
+    // so a config typo or removal of the last spec makes quality-unit fail.
+    // Legacy test may keep that flag; it cannot weaken the required unit task.
+    const normalize = (command) =>
+      typeof command === 'string' && /^jest(?: --selectProjects unit)?$/.test(command)
+        ? command
+        : null;
+    const unit =
+      nodeUnit === null
+        ? normalize(scripts['test:unit'])
+        : scripts['test:unit'] === nodeUnit
+          ? nodeUnit
+          : null;
+    if (
+      unit === null ||
+      (Object.hasOwn(scripts, 'test') &&
+        unit !==
+          normalize(
+            typeof scripts.test === 'string'
+              ? scripts.test.replace(' --passWithNoTests', '')
+              : scripts.test,
+          )) ||
+      scripts.pretest ||
+      scripts.posttest ||
+      scripts['pretest:unit'] ||
+      scripts['posttest:unit']
+    )
+      problems.push(
+        `${file}: unit coverage requires an allowlisted test:unit without passWithNoTests and equivalent test selection when present`,
+      );
+  }
+  return problems;
+}
+
 /**
  * FU-111: the required check "Lint, types and unit tests" is an aggregate of
  * the parallel `quality-*` jobs, and nothing may let it pass without every one
@@ -866,6 +918,11 @@ export function qualitySplitProblems(workflow) {
       }
     }
   }
+  const unitRuns = (jobs['quality-unit']?.steps ?? []).filter(
+    (step) => step.name === 'Unit tests' && step.run === 'pnpm run test:unit:ci',
+  );
+  if (unitRuns.length !== 1)
+    problems.push('quality-unit must run the unfiltered Unit tests step exactly once');
   const gate = jobs[QUALITY_GATE_JOB];
   const gateRuns = (Array.isArray(gate?.steps) ? gate.steps : []).filter(
     (step) => isMapping(step) && step.run === 'pnpm run typecheck',
