@@ -14,11 +14,16 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const INVENTORY = 'scripts/authored-source-inventory.cjs';
 const git = (...args) =>
-  execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  execFileSync('git', ['-C', root, ...args], {
+    encoding: 'utf8',
+    maxBuffer: 1 << 28,
+    env: fixtureGitEnv(),
+  });
 
 /** A tree with authored files and one ignored path of every pattern shape of the real .gitignore. */
 const AUTHORED = [
@@ -160,7 +165,7 @@ test('the order, skip, optional, base, links and a nested repository', () => {
       code: 'EIGNORED',
     });
     // A repository inside the tree is not listed file by file: refused, never guessed.
-    execFileSync('git', ['init', '-q', join(dir, 'tree/inner')]);
+    execFileSync('git', ['init', '-q', join(dir, 'tree/inner')], { env: fixtureGitEnv() });
     fs.writeFileSync(join(dir, 'tree/inner/f.ts'), 'x');
     assert.throws(() => authoredFiles(join(dir, 'tree')), /nested repository/);
     // A caller's own git environment (a hook runs with GIT_DIR set) does not redirect the listing.
@@ -183,7 +188,8 @@ test('the order, skip, optional, base, links and a nested repository', () => {
 test('a tree with its own repository: tracked files count, a deleted tracked file does not', () => {
   const dir = fs.mkdtempSync(join(tmpdir(), 'authored-repo-'));
   try {
-    const run = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+    const run = (...args) =>
+      execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe', env: fixtureGitEnv() });
     run('init', '-q');
     for (const file of ['keep.ts', 'gone.ts', 'src/generated/tracked.ts', 'src/app.ts']) {
       fs.mkdirSync(dirname(join(dir, file)), { recursive: true });
@@ -232,7 +238,7 @@ function listing(policy, paths) {
 function oracle(policy, paths) {
   const dir = fs.mkdtempSync(join(tmpdir(), 'authored-oracle-git-'));
   try {
-    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['init', '-q', dir], { env: fixtureGitEnv() });
     fs.writeFileSync(join(dir, '.gitignore'), policy);
     for (const path of paths) {
       fs.mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -250,7 +256,7 @@ function oracle(policy, paths) {
         '-co',
         '--exclude-standard',
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', env: fixtureGitEnv() },
     )
       .split('\0')
       .filter(Boolean)

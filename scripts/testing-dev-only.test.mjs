@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -1976,7 +1977,8 @@ test('importing the checker runs no command, whatever argv[1] is; running it doe
  * vanished ignored path is re-swept once, everything else fails at once.
  */
 const GENERATED = 'services/svc/src/generated/prisma';
-const git = (root, ...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' }).status;
+const git = (root, ...args) =>
+  spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: fixtureGitEnv() }).status;
 const gitFixture = (t, { track = false } = {}) => {
   const root = fixture(t);
   assert.equal(git(root, 'init', '-q'), 0);
