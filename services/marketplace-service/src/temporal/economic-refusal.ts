@@ -43,8 +43,17 @@ export const PROVEN_REFUSALS: ReadonlySet<string> = new Set([
 export const REFUSED_ON_FIRST_ATTEMPT = 'REFUSED_ON_FIRST_ATTEMPT';
 
 /**
- * In a failure's details: the call is in doubt, and the obligation is in a terminal
- * status, not the call's answer, which no request still in flight can move. Whether
- * it ever took effect no longer matters: the money has nowhere further to go.
+ * In a failure's details: the call was in doubt, and the obligation terminal. How an
+ * authorisation that did not declare `FINAL_ANSWER_CONTRACT` is told so, and what a
+ * history recorded before `ObligationFinal` carries; the workflow still reads it.
  */
 export const OWNER_STATE_IS_FINAL = 'OWNER_STATE_IS_FINAL';
+
+/**
+ * What a workflow passes to a call that may answer `ObligationFinal`, asked from
+ * `saga-owed-work-durable-v1` right before scheduling it: the marker commits with the
+ * schedule command, so such an answer can only reach a history a build below protocol
+ * 6 is refused (`marketplace-saga-drain-check.mjs`). Anything else, or nothing, is a
+ * caller that would read the answer as the call's own effect, and gets the refusal.
+ */
+export const FINAL_ANSWER_CONTRACT = 'obligation-final-v1';

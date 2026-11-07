@@ -71,6 +71,38 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     // (`7ac5e936`), and the new code must end the same way; with it, the wait.
     'pre-fu103-authorise-exhausted',
     'fu103-authorise-wait',
+    // FU-117: each site before it (`0a3b973a`) ended the run, and must replay that
+    // end. So must protocol 4's own history, carrying the
+    // FU-103 marker from an authorisation and then ending at the refund or the
+    // filing: the reason these sites have a marker of their own. With it, the wait.
+    'pre-fu117-compensate-exhausted',
+    'pre-fu117-dispute-exhausted',
+    'fu103-wait-then-refund-exhausted',
+    'fu103-wait-then-dispute-exhausted',
+    'fu117-compensate-wait',
+    'fu117-dispute-wait',
+    // #796 r1: each exit below ended the run before the owed-work marker (`38d0ca5d`,
+    // protocol 5), and must replay that end, or a filing sent without doubt. With it,
+    // the waits and the owner's answer, to their ends.
+    'pre-fu117r2-lookup-refused',
+    'pre-fu117r2-lookup-not-held',
+    'pre-fu117r2-lookup-mismatch',
+    'pre-fu117r2-cancel-refused',
+    'pre-fu117r2-filing-final',
+    'pre-fu117r2-compensate-final',
+    'pre-fu117r2-settle-then-filing-refused',
+    'pre-fu117r2-read-refused-mirrored',
+    'pre-fu117r2-settled-not-recorded',
+    'pre-fu117r2-settling-refused',
+    'pre-fu117r2-reminder-refused',
+    'fu117r2-lookup-then-cancel-wait',
+    'fu117r2-filing-final-then-cancel',
+    'fu117r2-settled-reconciliation',
+    'fu117r2-settle-doubt-filing',
+    // #796 r2 F5: what this build records. The marker commits with the call that may
+    // answer final (above, it followed the answer, as no history in service does).
+    'fu117r3-declared-filing-release-refund',
+    'fu117r3-declared-authorise-final',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(

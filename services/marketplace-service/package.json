@@ -2,7 +2,7 @@
   "name": "@rasta/marketplace-service",
   "version": "0.1.0",
   "private": true,
-  "marketplaceSagaProtocol": 4,
+  "marketplaceSagaProtocol": 6,
   "description": "The fleet marketplace — products, supplier offers, and the order saga from placement to settlement.",
   "main": "dist/main.js",
   "scripts": {
@@ -51,6 +51,7 @@
     "@swc/core": "^1.10.7",
     "@swc/helpers": "^0.5.15",
     "@swc/jest": "^0.2.37",
+    "@temporalio/nyc-test-coverage": "^1.25.0",
     "@temporalio/testing": "^1.25.0",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",

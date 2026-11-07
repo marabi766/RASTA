@@ -167,7 +167,7 @@ export const JEST_LAUNCHERS = {
       'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed. Workspace manifests are listed through authoredFiles() (read-only git ls-files).',
     sha256: {
       'scripts/ci-shell-text-lib.mjs':
-        '040fb4931fa106a05672a47e953616f92cb838901b5d765546ee1fe6e3cfd869',
+        'db19f3f6803e260d87a53d9420bd09a779f775bd117c17978f848bcfd1fe1188',
       'scripts/ci-node-test-timeouts-lib.mjs':
         '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':
@@ -193,9 +193,9 @@ export const JEST_LAUNCHERS = {
       'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        '490331697a029e4a05b57092392819826908df5e370e38dd05334c7a46104ba3',
+        '9db14ea8f986dc6046ef28b44041623745a7222b60c032967c7fb7a063a83978',
       'scripts/ci-integration-split-lib.mjs':
-        '505015e53a632a25b286fc29eb3090150416878945c439750eb05492610c6c2d',
+        '778de7fe530dd477aa75fbb4c324001b91253e4f124864582f5b570160014238',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
