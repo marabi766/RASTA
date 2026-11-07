@@ -678,6 +678,21 @@ const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
 const SETTLEMENT_CREATION_PROOF = '20261105120000_settlement_creation_proof';
 const TRANSACTION_HOLD_DECISION = '20261106120000_transaction_hold_decision';
 const TRANSACTION_FUNDED_HOLD = '20261106130000_transaction_funded_hold';
+const HOLD_FUNDED_AT_COMMIT = '20261107120000_hold_funded_at_commit';
+
+/**
+ * The `held_at` of every probe row with no hold of its own, cleared with its stamp lifted: what an
+ * operator accepting its loss would do, since 20261106130000's down refuses it (FU-182).
+ */
+const HELD_AT_UNHELD_CLEARED = `
+ALTER TABLE "transaction" DISABLE TRIGGER "trg_transaction_held_at";
+UPDATE "transaction" t SET held_at = NULL
+ WHERE t.id LIKE 'TXN_MIGCHECK_%' AND NOT EXISTS (SELECT 1 FROM transaction_holds(t.id, t.organization_id));
+ALTER TABLE "transaction" ENABLE TRIGGER "trg_transaction_held_at";`;
+const HELD_AT_ACCEPTED = (probe) => ({
+  label: `${probe}: held_at's loss accepted for rows with no hold (in the probe: cleared)`,
+  sql: HELD_AT_UNHELD_CLEARED,
+});
 
 /** A transaction as the schema before business lines holds it (or after, with a line). */
 const TRANSACTION_MIGCHECK = (id, line = null) => `
@@ -760,6 +775,7 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
   {
     label: 'commission: down to the schema before business lines (empty)',
     runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
       TRANSACTION_FUNDED_HOLD,
       TRANSACTION_HOLD_DECISION,
       SETTLEMENT_CREATION_PROOF,
@@ -1136,6 +1152,7 @@ const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_disput
  */
 const RESOLVED_DISPUTE_DOWNS = [
   // These probes move a transaction to SETTLED with no settlement behind it.
+  HOLD_FUNDED_AT_COMMIT,
   TRANSACTION_FUNDED_HOLD,
   TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
@@ -1277,6 +1294,7 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
         none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
       })}`,
   },
+  HELD_AT_ACCEPTED('resolved dispute'),
   {
     label: 'resolved dispute: down succeeds over attributed rows',
     runDownScript: RESOLVED_DISPUTE_DOWNS,
@@ -1582,7 +1600,12 @@ const SETTLEMENT_REVERSAL = '20261104120000_settlement_reversal';
 const SETTLEMENT_REVERSAL_STEPS = [
   {
     label: 'settlement reversal: the proof of creation goes first, these probes are bare rows',
-    runDownScript: [TRANSACTION_FUNDED_HOLD, TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
   },
   {
     label: 'settlement reversal: a settled transaction, its settlement, and one open case',
@@ -1637,9 +1660,15 @@ const SETTLEMENT_REVERSAL_STEPS = [
     sql: `DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';`,
     mustFail: 'append-only',
   },
+  HELD_AT_ACCEPTED('settlement reversal'),
   {
     label: 'settlement reversal: the proof of creation goes again, before the probe rows do',
-    runDownScript: [TRANSACTION_FUNDED_HOLD, TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
   },
   {
     label: 'settlement reversal: the probe rows are removed before the chain reversal',
@@ -1842,9 +1871,15 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
     sql: `DELETE FROM "settlement_creation_quarantine";`,
     mustFail: 'fixed by its migration',
   },
+  HELD_AT_ACCEPTED('creation proof'),
   {
     label: 'creation proof: down over them refuses nothing, and leaves every row',
-    runDownScript: [TRANSACTION_FUNDED_HOLD, TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
   },
   {
     label: 'creation proof: the rows are all there, and an owner clears the unprovable',
@@ -1875,6 +1910,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
 ];
 
 const HOLD_DECISION_DOWNS = [
+  HOLD_FUNDED_AT_COMMIT,
   TRANSACTION_FUNDED_HOLD,
   TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
@@ -1988,9 +2024,15 @@ const HOLD_DECISION_STEPS = [
     label: 'hold decisions: a later move is not undone by the rollback',
     sql: `UPDATE "transaction" SET settlement_authorised_at = now() WHERE id = 'TXN_MIGCHECK_HD_RESTORED';`,
   },
+  HELD_AT_ACCEPTED('hold decisions'),
   {
     label: 'hold decisions: down',
-    runDownScript: [TRANSACTION_FUNDED_HOLD, TRANSACTION_HOLD_DECISION, SETTLEMENT_CREATION_PROOF],
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
   },
   {
     label: 'hold decisions: down puts back only what up moved and nothing moved since',
@@ -2060,6 +2102,37 @@ const HOLD_DECISION_STEPS = [
               RAISE EXCEPTION 'a row that never claimed escrow was barred';
             END IF;
           END $$;`,
+  },
+  { label: 'funded holds: the newest rollback first', runDownScript: [HOLD_FUNDED_AT_COMMIT] },
+  {
+    label:
+      'funded holds: the rollback refuses while a row stamped HELD has no hold of its own (FU-182)',
+    runDownScript: [TRANSACTION_FUNDED_HOLD],
+    mustFail: 'refusing to drop held_at',
+  },
+  {
+    label:
+      'funded holds: an operator accepts the loss for those rows (in the probe: stamps cleared)',
+    sql: HELD_AT_UNHELD_CLEARED,
+  },
+  {
+    label: 'funded holds: down, over a row with a hold of its own',
+    runDownScript: [TRANSACTION_FUNDED_HOLD],
+  },
+  { label: 'funded holds: up again', reapply: true },
+  {
+    label: 'funded holds: up restamps the row with a hold of its own, and the row HELD now',
+    sql: `DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM "transaction"
+                        WHERE id IN ('TXN_MIGCHECK_HD_OWN', 'TXN_MIGCHECK_HD_HELD') AND held_at IS NULL) THEN
+              RAISE EXCEPTION 'a row the backfill can tell was not restamped';
+            END IF;
+          END $$;`,
+  },
+  {
+    label: 'hold decisions: the stamps cleared again, before the probe rows go',
+    sql: HELD_AT_UNHELD_CLEARED,
   },
   {
     label: 'hold decisions: down past the backfill, before the probe rows go',
@@ -2799,6 +2872,10 @@ export const EXPECTED = {
       'trg_wallet_hold_resolved_only_funded',
       'trg_wallet_hold_inserted_only_funded',
       'trg_wallet_hold_terms_fixed',
+      // A hold is funded at commit, by the payer's own money (FU-182).
+      'trg_wallet_hold_funded_at_commit',
+      'trg_ledger_entry_hold_journal_closed',
+      'trg_journal_hold_funding_final',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2852,6 +2929,9 @@ export const EXPECTED = {
       'stamp_transaction_held_at',
       'enforce_wallet_hold_resolved_only_funded',
       'enforce_wallet_hold_terms_fixed',
+      'assert_wallet_hold_funded_at_commit',
+      'reject_hold_journal_leg',
+      'reject_hold_journal_reversal',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',

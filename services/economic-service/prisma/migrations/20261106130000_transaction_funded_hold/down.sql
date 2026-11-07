@@ -1,15 +1,34 @@
 -- Reverse of `migration.sql` (20261106130000_transaction_funded_hold).
 --
 -- Gives 20261106120000's four bodies back, byte for byte, and drops the rest. `held_at` goes with
--- them, and nothing but this migration's functions reads it. Applying this migration again restamps
--- only what its backfill can tell: a row HELD in the past with no hold stays unstamped, the limit
--- `migration.sql` describes. Roll the release back first: its `WalletRepository.isHoldFunded` asks a
--- function that goes here.
+-- them, and nothing but this migration's functions reads it. Roll the release back first: its
+-- `WalletRepository.isHoldFunded` asks a function that goes here.
+--
+-- It refuses, and changes nothing, while a row stamped `held_at` has no hold of its own (FU-182).
+-- Applying the migration again restamps only a row HELD then or with a hold of its own; one that was
+-- HELD, has no hold and has moved on would read as an obligation that never claimed escrow, and pay
+-- from the spendable balance (FU-164). A row HELD now with no hold is refused too: the release this
+-- rolls back to can move it on. A row with a hold of its own is restamped, at the new instant; nothing
+-- reads the instant. To go back over such rows, roll forward instead.
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
 
 LOCK TABLE "wallet_hold", "transaction" IN SHARE ROW EXCLUSIVE MODE;
+
+DO $$
+DECLARE found BIGINT;
+BEGIN
+  SELECT count(*) INTO found FROM "transaction" t
+   WHERE t."held_at" IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM transaction_holds(t."id", t."organization_id"));
+  IF found > 0 THEN
+    RAISE EXCEPTION 'transaction: % row(s) were HELD and have no hold of their own: refusing to drop held_at, the only record that they claimed escrow', found
+      USING ERRCODE = 'restrict_violation',
+            HINT = 'SELECT id, status FROM "transaction" t WHERE held_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM transaction_holds(t.id, t.organization_id)); roll forward instead';
+  END IF;
+END
+$$;
 
 CREATE OR REPLACE FUNCTION transaction_own_hold_for_terms(subject TEXT)
 RETURNS BOOLEAN AS $$

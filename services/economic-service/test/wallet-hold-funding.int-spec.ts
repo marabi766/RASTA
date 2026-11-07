@@ -33,11 +33,18 @@ const TERMS_FIXED = /What a hold holds, and the journal that funded it, never ch
 const FINAL = /A resolved hold is final/;
 const NEVER_FUNDED = /A hold never funded moves no money/;
 const WHOSE_FIXED = /Whose a hold is and what it is for never changes/;
+const AT_COMMIT = /At commit, a hold that names a journal or is resolved is funded by it/;
+const LEG_REFUSED = /A journal takes no leg once a hold names it/;
+const NEVER_REVERSED = /A journal a hold names is never reversed/;
+
+type Raw = Pick<PrismaClient, '$executeRawUnsafe' | '$queryRawUnsafe'>;
 
 interface Leg {
-  purpose: 'ESCROW' | 'WALLET';
+  purpose: 'ESCROW' | 'WALLET' | 'PAYMENT_CLEARING' | 'REWARD_EXPENSE' | 'COMMISSION_REVENUE';
   direction: 'DEBIT' | 'CREDIT';
   amount?: bigint;
+  /** Whose account: the payer's unless named. */
+  organizationId?: string;
 }
 
 /** What `placeHold` posts: the wallet debited and escrow credited, by the amount. */
@@ -52,6 +59,8 @@ describe('funding is money that is there, once, in the wallet’s currency (real
   let payments: PaymentService;
   let provider: MockPaymentProvider;
   let owner: PrismaClient;
+  /** A second owner connection: the other side of a race. */
+  let other: PrismaClient;
   let runtime: PrismaClient;
   let walletId: string;
   const org = tenants();
@@ -71,6 +80,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
       testEnv(),
     );
     owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    other = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
     runtime = new PrismaClient({ datasources: { db: { url: databaseUrl() } } });
     ({ walletId } = await fundWallet(wiring, payer, 50_000_000n));
   });
@@ -83,60 +93,70 @@ describe('funding is money that is there, once, in the wallet’s currency (real
     await cleanup(prisma, [org.a]);
     await prisma.onModuleDestroy();
     await owner.$disconnect();
+    await other.$disconnect();
     await runtime.$disconnect();
   });
 
-  const accountOf = async (purpose: Leg['purpose'], currency: string) =>
-    (
-      await asActor({ organizationId: payer }, () =>
-        wiring.prisma.transaction((tx) =>
-          wiring.ledger.resolveAccount(tx, purpose, payer, currency, 'itest'),
-        ),
-      )
-    ).id;
+  /** The account, and its organization: a platform purpose is the platform's (`ownerOf`). */
+  const accountOf = (purpose: Leg['purpose'], currency: string, organizationId = payer) =>
+    asActor({ organizationId }, () =>
+      wiring.prisma.transaction((tx) =>
+        wiring.ledger.resolveAccount(tx, purpose, organizationId, currency, 'itest'),
+      ),
+    );
 
-  const plantJournal = async (
+  /** Legs onto a journal `tx` opened: what `trg_ledger_entry_open_journal` still lets in. */
+  const writeLegs = async (
+    tx: Raw,
+    journalId: string,
+    legs: Leg[],
+    { amount = AMOUNT, currency = 'IRR' } = {},
+  ) => {
+    for (const leg of legs) {
+      const account = await accountOf(leg.purpose, currency, leg.organizationId);
+      await tx.$executeRawUnsafe(
+        `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+         VALUES ($1, $2, $3, $4, $5::"EntryDirection", $6, $7, now())`,
+        `LGE_${ulid()}`,
+        journalId,
+        account.id,
+        account.organizationId,
+        leg.direction,
+        leg.amount ?? amount,
+        currency,
+      );
+    }
+  };
+
+  const writeJournal = async (
+    tx: Raw,
     transactionId: string,
     { legs = INTO_ESCROW, amount = AMOUNT, currency = 'IRR', type = 'FUNDS_HELD' } = {},
   ) => {
     const journalId = `JRN_${ulid()}`;
-    const resolved: (Leg & { accountId: string })[] = [];
-    for (const leg of legs) {
-      resolved.push({ ...leg, accountId: await accountOf(leg.purpose, currency) });
-    }
-    await owner.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(
-        `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at, posted_by, correlation_id)
-         VALUES ($1, $2, $3, $4::"JournalType", 'planted by the suite', now(), 'itest', 'itest')`,
-        journalId,
-        payer,
-        transactionId,
-        type,
-      );
-      for (const leg of resolved) {
-        await tx.$executeRawUnsafe(
-          `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
-           VALUES ($1, $2, $3, $4, $5::"EntryDirection", $6, $7, now())`,
-          `LGE_${ulid()}`,
-          journalId,
-          leg.accountId,
-          payer,
-          leg.direction,
-          leg.amount ?? amount,
-          currency,
-        );
-      }
-    });
+    await tx.$executeRawUnsafe(
+      `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at, posted_by, correlation_id)
+       VALUES ($1, $2, $3, $4::"JournalType", 'planted by the suite', now(), 'itest', 'itest')`,
+      journalId,
+      payer,
+      transactionId,
+      type,
+    );
+    await writeLegs(tx, journalId, legs, { amount, currency });
     return journalId;
   };
+
+  const plantJournal = (transactionId: string, options: Parameters<typeof writeJournal>[2] = {}) =>
+    owner.$transaction((tx) => writeJournal(tx, transactionId, options));
 
   const plantHold = async (
     reference: string,
     journalId: string | null,
     { type = 'TRANSACTION', amount = AMOUNT, currency = 'IRR' } = {},
+    client: Raw = owner,
   ) => {
     const holdId = `HLD_${ulid()}`;
-    await owner.$executeRawUnsafe(
+    await client.$executeRawUnsafe(
       `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
                                 reference_type, placed_journal_id, placed_at, placed_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), 'itest')`,
@@ -158,6 +178,34 @@ describe('funding is money that is there, once, in the wallet’s currency (real
       holdId,
     );
     return row!.funded;
+  };
+
+  /**
+   * The predicate's answer for a hold planted by hand, read in the transaction that plants it; and
+   * that transaction commits exactly when the answer is yes (`trg_wallet_hold_funded_at_commit`).
+   */
+  const plantedFunded = async (
+    reference: string,
+    journalId: string | null,
+    options: Parameters<typeof plantHold>[2] = {},
+  ) => {
+    let seen: boolean | undefined;
+    const outcome = await owner
+      .$transaction(async (tx) => {
+        const holdId = await plantHold(reference, journalId, options, tx);
+        const [row] = await tx.$queryRawUnsafe<{ funded: boolean }[]>(
+          'SELECT wallet_hold_funded($1) AS funded',
+          holdId,
+        );
+        seen = row!.funded;
+      })
+      .then(
+        () => null,
+        (error: Error) => error,
+      );
+    if (seen) expect(outcome).toBeNull();
+    else expect(outcome?.message).toMatch(AT_COMMIT);
+    return seen;
   };
 
   const obligation = () => bareObligation(prisma, payer);
@@ -238,7 +286,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
           { purpose: 'ESCROW', direction: 'DEBIT' },
         ],
       });
-      expect(await funded(await plantHold(reference, journalId))).toBe(false);
+      expect(await plantedFunded(reference, journalId)).toBe(false);
     });
 
     it.each<[string, Leg[], boolean]>([
@@ -271,7 +319,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
     ])('%s', async (_label, legs, expected) => {
       const reference = await obligation();
       const journalId = await plantJournal(reference, { legs });
-      expect(await funded(await plantHold(reference, journalId))).toBe(expected);
+      expect(await plantedFunded(reference, journalId)).toBe(expected);
     });
   });
 
@@ -442,13 +490,285 @@ describe('funding is money that is there, once, in the wallet’s currency (real
     });
   });
 
+  describe('funded at commit, by the journal as it stands then (FU-182)', () => {
+    const committedHolds = async (reference: string) =>
+      (
+        await owner.$queryRawUnsafe<{ n: bigint }[]>(
+          'SELECT count(*) AS n FROM wallet_hold WHERE reference = $1',
+          reference,
+        )
+      )[0]!.n;
+
+    /** Escrow back out to the payer's wallet: what a later leg would take from the funding. */
+    const TAKEN_BACK: Leg[] = [
+      { purpose: 'ESCROW', direction: 'DEBIT' },
+      { purpose: 'WALLET', direction: 'CREDIT' },
+    ];
+
+    /**
+     * One transaction: the funding journal and its hold, the hold resolved while that journal still
+     * funds it (so every statement-time check passes), then `edit`. `lifted`: the statement-time
+     * refusal of a leg is disabled first, inside this transaction only (back with its rollback).
+     */
+    const resolvedThenEdited = (
+      reference: string,
+      edit: (tx: Raw, journalId: string) => Promise<unknown>,
+      { lifted = false } = {},
+    ) =>
+      owner.$transaction(
+        async (tx) => {
+          if (lifted) {
+            await tx.$executeRawUnsafe(
+              'ALTER TABLE ledger_entry DISABLE TRIGGER trg_ledger_entry_hold_journal_closed',
+            );
+          }
+          const journalId = await writeJournal(tx, reference);
+          const holdId = await plantHold(reference, journalId, {}, tx);
+          const refund = await writeJournal(tx, reference, {
+            type: 'FUNDS_REFUNDED',
+            legs: TAKEN_BACK,
+          });
+          await tx.$executeRawUnsafe(
+            `UPDATE wallet_hold SET status = 'REFUNDED', resolved_at = now(), resolved_by = 'itest',
+                    resolved_journal_id = $2 WHERE id = $1`,
+            holdId,
+            refund,
+          );
+          await edit(tx, journalId);
+        },
+        { timeout: 30_000 },
+      );
+
+    it('control: written and resolved in one transaction, it commits', async () => {
+      const reference = await obligation();
+      await resolvedThenEdited(reference, async () => undefined);
+      expect(await committedHolds(reference)).toBe(1n);
+    });
+
+    it('a leg added to its journal after the hold is written is refused where it is added', async () => {
+      const reference = await obligation();
+      await expect(
+        resolvedThenEdited(reference, (tx, journalId) => writeLegs(tx, journalId, TAKEN_BACK)),
+      ).rejects.toThrow(LEG_REFUSED);
+      expect(await committedHolds(reference)).toBe(0n);
+    });
+
+    it('with that refusal lifted, the commit refuses what every statement let through', async () => {
+      const reference = await obligation();
+      await expect(
+        resolvedThenEdited(reference, (tx, journalId) => writeLegs(tx, journalId, TAKEN_BACK), {
+          lifted: true,
+        }),
+      ).rejects.toThrow(AT_COMMIT);
+      expect(await committedHolds(reference)).toBe(0n);
+      const [trigger] = await owner.$queryRawUnsafe<{ enabled: string }[]>(
+        `SELECT tgenabled AS enabled FROM pg_trigger WHERE tgname = 'trg_ledger_entry_hold_journal_closed'`,
+      );
+      expect(trigger!.enabled).toBe('O');
+    });
+
+    const reverse = (journalId: string) =>
+      asActor({ organizationId: payer }, () =>
+        wiring.prisma.transaction((tx) => wiring.ledger.reverse(tx, journalId, 'itest', 'itest')),
+      );
+
+    it('its journal is never reversed, the hold active or resolved', async () => {
+      const active = await fundedHold();
+      const resolved = await fundedHold();
+      await resolve(resolved.holdId);
+      for (const { holdId, journalId } of [active, resolved]) {
+        await expect(reverse(journalId)).rejects.toThrow(NEVER_REVERSED);
+        expect(await funded(holdId)).toBe(true);
+      }
+    });
+
+    /** The exact opposite of a journal, by hand: what `LedgerService.reverse` writes. */
+    const reversalOf = async (tx: Raw, journalId: string) => {
+      const reversal = `JRN_${ulid()}`;
+      await tx.$executeRawUnsafe(
+        `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at,
+                              posted_by, correlation_id, reverses_id, reversal_reason)
+         SELECT $1, organization_id, transaction_id, 'REVERSAL', 'reversed by the suite', now(), posted_by,
+                correlation_id, id, 'planted by the suite'
+           FROM journal WHERE id = $2`,
+        reversal,
+        journalId,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+         SELECT 'LGE_' || md5(id || $1), $1, account_id, organization_id,
+                (CASE direction WHEN 'CREDIT' THEN 'DEBIT' ELSE 'CREDIT' END)::"EntryDirection",
+                amount_minor, currency, now()
+           FROM ledger_entry WHERE journal_id = $2`,
+        reversal,
+        journalId,
+      );
+    };
+
+    /** Until a session of this database waits on an advisory lock: the race is on. */
+    const someoneWaits = async () => {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        // As the owner: a role sees only its own sessions' wait events.
+        const [row] = await owner.$queryRawUnsafe<{ n: bigint }[]>(
+          `SELECT count(*) AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`,
+        );
+        if (row!.n > 0n) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error('nobody waited on the hold journal lock');
+    };
+
+    /** Opens `first` in a transaction on `other`, runs `then` while it is open, then commits it. */
+    const whileOpen = async (
+      first: (tx: Raw) => Promise<unknown>,
+      then: () => Promise<unknown>,
+    ) => {
+      let release!: () => void;
+      let opened!: () => void;
+      const ready = new Promise<void>((resolve) => (opened = resolve));
+      const held = other.$transaction(
+        async (tx) => {
+          await first(tx);
+          opened();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 60_000 },
+      );
+      await Promise.race([ready, held]);
+      const second = then().then(
+        () => null,
+        (error: Error) => error,
+      );
+      try {
+        await someoneWaits();
+      } finally {
+        release?.();
+      }
+      return {
+        first: await held.then(
+          () => null,
+          (error: Error) => error,
+        ),
+        second: await second,
+      };
+    };
+
+    it('a reversal first and a hold naming its journal at once: the hold waits for it, and is refused', async () => {
+      const reference = await obligation();
+      const journalId = await plantJournal(reference);
+      const raced = await whileOpen(
+        (tx) => reversalOf(tx, journalId),
+        () => plantHold(reference, journalId),
+      );
+      expect(raced.first).toBeNull();
+      expect(raced.second?.message).toMatch(AT_COMMIT);
+    });
+
+    it('a hold first and a reversal of its journal at once: the reversal waits for it, and is refused', async () => {
+      const reference = await obligation();
+      const journalId = await plantJournal(reference);
+      const raced = await whileOpen(
+        async (tx) => {
+          // Its check runs at this statement, not at commit: the lock is held from here.
+          await tx.$executeRawUnsafe('SET CONSTRAINTS trg_wallet_hold_funded_at_commit IMMEDIATE');
+          await plantHold(reference, journalId, {}, tx);
+        },
+        () => owner.$transaction((tx) => reversalOf(tx, journalId)),
+      );
+      expect(raced.first).toBeNull();
+      expect(raced.second?.message).toMatch(NEVER_REVERSED);
+    });
+
+    it('under REPEATABLE READ, which reads from before the wait, neither is written', async () => {
+      const repeatable = { isolationLevel: 'RepeatableRead' } as const;
+      const reference = await obligation();
+      const journalId = await plantJournal(reference);
+      await expect(
+        owner.$transaction((tx) => plantHold(reference, journalId, {}, tx), repeatable),
+      ).rejects.toThrow(/written only under READ COMMITTED or SERIALIZABLE/);
+      await expect(
+        owner.$transaction((tx) => reversalOf(tx, journalId), repeatable),
+      ).rejects.toThrow(/reversed only under READ COMMITTED or SERIALIZABLE/);
+      // Control: the same two under READ COMMITTED, one after the other.
+      await plantHold(reference, journalId);
+      await expect(owner.$transaction((tx) => reversalOf(tx, journalId))).rejects.toThrow(
+        NEVER_REVERSED,
+      );
+    });
+
+    it('control: a FUNDS_HELD journal no hold names is reversed like any other', async () => {
+      await expect(reverse(await plantJournal(await obligation()))).resolves.toBeDefined();
+    });
+  });
+
+  describe('funded by the payer’s own wallet, and by nothing else (FU-182)', () => {
+    const stranger = `${org.a}-SOURCE`;
+    const INTO_ESCROW_FROM = (...sources: Leg[]): Leg[] => [
+      ...sources,
+      { purpose: 'ESCROW', direction: 'CREDIT' },
+    ];
+
+    it.each<[string, Leg[]]>([
+      [
+        'platform payment clearing, the top-up’s own counterpart',
+        INTO_ESCROW_FROM({ purpose: 'PAYMENT_CLEARING', direction: 'DEBIT' }),
+      ],
+      ['reward expense', INTO_ESCROW_FROM({ purpose: 'REWARD_EXPENSE', direction: 'DEBIT' })],
+      [
+        'commission revenue',
+        INTO_ESCROW_FROM({ purpose: 'COMMISSION_REVENUE', direction: 'DEBIT' }),
+      ],
+      [
+        'another organization’s wallet',
+        INTO_ESCROW_FROM({ purpose: 'WALLET', direction: 'DEBIT', organizationId: stranger }),
+      ],
+      [
+        'half the payer’s wallet and half clearing',
+        INTO_ESCROW_FROM(
+          { purpose: 'WALLET', direction: 'DEBIT', amount: AMOUNT / 2n },
+          { purpose: 'PAYMENT_CLEARING', direction: 'DEBIT', amount: AMOUNT / 2n },
+        ),
+      ],
+    ])('escrow credited from %s funds no hold', async (_label, legs) => {
+      const reference = await obligation();
+      expect(await plantedFunded(reference, await plantJournal(reference, { legs }))).toBe(false);
+    });
+
+    it('nor does the top-up’s own journal', async () => {
+      const made = await toppedUp();
+      const [topUp] = await owner.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM journal WHERE transaction_id = $1 AND journal_type = 'WALLET_TOP_UP'`,
+        made.transactionId,
+      );
+      expect(await plantedFunded(made.transactionId, topUp!.id)).toBe(false);
+    });
+
+    it('control: a real top-up does, held by the service', async () => {
+      await toppedUp();
+      const reference = await obligation();
+      const { holdId } = await asActor({ organizationId: payer }, () =>
+        wiring.prisma.transaction(async (tx) => {
+          const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
+          return wiring.wallets.placeHold(tx, {
+            wallet: locked!,
+            amountMinor: AMOUNT,
+            reference,
+            referenceType: 'TRANSACTION',
+            transactionId: reference,
+            placedBy: 'itest',
+          });
+        }),
+      );
+      expect(await funded(holdId)).toBe(true);
+    });
+  });
+
   describe('the obligation of its purpose', () => {
     it('control: a refund hold funded for its own intent', async () => {
       const made = await toppedUp();
       const journalId = await plantJournal(made.transactionId);
-      expect(
-        await funded(await plantHold(made.intentId, journalId, { type: 'PAYMENT_REFUND' })),
-      ).toBe(true);
+      expect(await plantedFunded(made.intentId, journalId, { type: 'PAYMENT_REFUND' })).toBe(true);
     });
 
     it.each<[string, (made: { intentId: string; transactionId: string }) => Promise<string>]>([
@@ -457,28 +777,22 @@ describe('funding is money that is there, once, in the wallet’s currency (real
     ])('a refund hold is not funded by a journal naming %s', async (_label, named) => {
       const made = await toppedUp();
       const journalId = await plantJournal(await named(made));
-      expect(
-        await funded(await plantHold(made.intentId, journalId, { type: 'PAYMENT_REFUND' })),
-      ).toBe(false);
+      expect(await plantedFunded(made.intentId, journalId, { type: 'PAYMENT_REFUND' })).toBe(false);
     });
 
     it('nor when it names no intent, nor another amount than the intent’s', async () => {
       const made = await toppedUp();
-      const nothing = await funded(
-        await plantHold(`REF_${ulid()}`, await plantJournal(made.transactionId), {
-          type: 'PAYMENT_REFUND',
-        }),
-      );
+      const nothing = await plantedFunded(`REF_${ulid()}`, await plantJournal(made.transactionId), {
+        type: 'PAYMENT_REFUND',
+      });
       expect(nothing).toBe(false);
       const other = await toppedUp();
       const journalId = await plantJournal(other.transactionId, { amount: AMOUNT + 1n });
       expect(
-        await funded(
-          await plantHold(other.intentId, journalId, {
-            type: 'PAYMENT_REFUND',
-            amount: AMOUNT + 1n,
-          }),
-        ),
+        await plantedFunded(other.intentId, journalId, {
+          type: 'PAYMENT_REFUND',
+          amount: AMOUNT + 1n,
+        }),
       ).toBe(false);
     });
 
@@ -487,9 +801,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
       const { walletId: theirs } = await fundWallet(wiring, elsewhere, 0n);
       const made = await toppedUp(AMOUNT, elsewhere, theirs);
       const journalId = await plantJournal(made.transactionId);
-      expect(
-        await funded(await plantHold(made.intentId, journalId, { type: 'PAYMENT_REFUND' })),
-      ).toBe(false);
+      expect(await plantedFunded(made.intentId, journalId, { type: 'PAYMENT_REFUND' })).toBe(false);
     });
 
     it('nor when the intent it names is in another currency', async () => {
@@ -499,34 +811,34 @@ describe('funding is money that is there, once, in the wallet’s currency (real
         made.intentId,
       );
       const journalId = await plantJournal(made.transactionId);
-      expect(
-        await funded(await plantHold(made.intentId, journalId, { type: 'PAYMENT_REFUND' })),
-      ).toBe(false);
+      expect(await plantedFunded(made.intentId, journalId, { type: 'PAYMENT_REFUND' })).toBe(false);
     });
 
     it('a purpose not named is funded by nothing', async () => {
       const reference = `REF_${ulid()}`;
       const journalId = await plantJournal(reference);
-      expect(await funded(await plantHold(reference, journalId, { type: 'OTHER' }))).toBe(false);
+      expect(await plantedFunded(reference, journalId, { type: 'OTHER' })).toBe(false);
     });
 
     it('a transaction’s hold is not funded by a journal of another transaction', async () => {
       const journalId = await plantJournal(await obligation());
-      expect(await funded(await plantHold(await obligation(), journalId))).toBe(false);
+      expect(await plantedFunded(await obligation(), journalId)).toBe(false);
     });
   });
 
   describe('the wallet’s currency', () => {
-    const inDollars = async (reference: string, transactionId: string, type: string) =>
-      plantHold(reference, await plantJournal(transactionId, { currency: 'USD' }), {
-        type,
-        currency: 'USD',
-      });
-
     it('genuine USD escrow does not fund a USD hold on an IRR wallet', async () => {
       const reference = await obligation();
-      expect(await funded(await inDollars(reference, reference, 'TRANSACTION'))).toBe(false);
+      const journalId = await plantJournal(reference, { currency: 'USD' });
+      expect(await plantedFunded(reference, journalId, { currency: 'USD' })).toBe(false);
     });
+
+    /**
+     * What can still stand: a USD hold naming no journal (D-130's unproven rows). One naming a
+     * journal never commits, so the service's own currency checks are asked of this one.
+     */
+    const inDollars = (reference: string, type: string) =>
+      plantHold(reference, null, { type, currency: 'USD' });
 
     it('control: the same journal shape in IRR does', async () => {
       await fundedHold();
@@ -534,7 +846,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
 
     it('a retry is no replay of a hold in another currency, and moves nothing', async () => {
       const reference = await obligation();
-      await inDollars(reference, reference, 'TRANSACTION');
+      await inDollars(reference, 'TRANSACTION');
       const placed = jest.spyOn(wiring.ledger, 'post');
       await expect(
         asActor({ organizationId: payer }, () =>
@@ -556,7 +868,7 @@ describe('funding is money that is there, once, in the wallet’s currency (real
 
     it('a payment refund with a USD hold on an IRR wallet never reaches the provider', async () => {
       const made = await toppedUp();
-      await inDollars(made.intentId, made.transactionId, REFUND_HOLD_REFERENCE_TYPE);
+      await inDollars(made.intentId, REFUND_HOLD_REFERENCE_TYPE);
       const before = await intentState(made.intentId);
       const ask = spyOnRefund();
       await expect(refund(made.intentId)).rejects.toThrow(/in another currency/);
