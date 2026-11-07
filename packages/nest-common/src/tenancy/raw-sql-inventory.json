@@ -1058,8 +1058,15 @@
   },
   {
     "file": "services/economic-service/src/shared/idempotency.ts",
-    "line": 287,
+    "line": 350,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
+  },
+  {
+    "file": "services/economic-service/src/shared/idempotency.ts",
+    "line": 607,
+    "hash": "aeb744de90db395a80b4075b80d09eb8910c9f980c83783afc5fe7b7c541deaa",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
@@ -2408,8 +2415,22 @@
     "decision": "platform-wide: the saga holds the order it drives by global id, read from that order under its buyer's context; returns only the row's status and whether its receipt is recorded (FU-178)"
   },
   {
+    "file": "services/marketplace-service/src/order/order.repository.ts",
+    "line": 335,
+    "hash": "48708c323d033c8bf27b541374b8f3f5721759ad2d1ecc86905e891dd1b369c5",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/marketplace-service/src/order/order.repository.ts",
+    "line": 402,
+    "hash": "89cb5847e8caaa97fb38a8123c4eeb63c2c2e503868650d04500fa71f6be538d",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
     "file": "services/marketplace-service/src/order/order.service.ts",
-    "line": 1239,
+    "line": 1249,
     "hash": "1f9813e3acb98d6f59e103a4f2b7ab1a2e2dee1554ceef6e1722e1a3f8bb3cd2",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"

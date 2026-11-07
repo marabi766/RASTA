@@ -298,6 +298,7 @@ test('Temporal unexpected exception discards stack, own properties and cause', (
           MARKETPLACE_TEMPORAL_TASK_QUEUE: 'unused',
           MARKETPLACE_SAGA_STOP_TIME: '2026-01-01T00:00:00.000Z',
           MARKETPLACE_TARGET_PACKAGE_JSON: join(root, 'services/marketplace-service/package.json'),
+          MARKETPLACE_STOPPED_PACKAGE_JSON: join(root, 'services/marketplace-service/package.json'),
         },
       },
     );

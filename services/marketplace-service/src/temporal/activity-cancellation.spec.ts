@@ -63,6 +63,10 @@ it('real Temporal cancellation reaches a financial fetch through heartbeats with
       _name: unknown,
       effect: () => Promise<unknown>,
     ) => effect(),
+    claimHoldSend: async (_order: unknown, proposed?: string) => ({
+      holdNotAfter: proposed ?? null,
+      claims: 1,
+    }),
     markFailed,
   } as unknown as OrderService;
   const env = await createTemporalTestEnvironment();

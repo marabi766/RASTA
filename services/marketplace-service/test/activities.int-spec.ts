@@ -124,7 +124,11 @@ describe('order saga activities (real database)', () => {
   }
 
   /** A real PENDING order, placed through the real service by a real buyer. */
-  async function placeOrder(): Promise<{ orderId: string; correlationId: string }> {
+  async function placeOrder(): Promise<{
+    orderId: string;
+    correlationId: string;
+    offerId: string;
+  }> {
     const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '500000' });
 
     const order = await asActor(
@@ -136,8 +140,15 @@ describe('order saga activities (real database)', () => {
       prisma.client.order.findUniqueOrThrow({ where: { id: order.id } }),
     );
 
-    return { orderId: order.id, correlationId: row.correlationId };
+    return { orderId: order.id, correlationId: row.correlationId, offerId };
   }
+
+  const availableOf = async (offerId: string): Promise<number> =>
+    (
+      await runUnscoped('the suite reads what the offer has left', () =>
+        prisma.client.offer.findUniqueOrThrow({ where: { id: offerId } }),
+      )
+    ).availableQuantity;
 
   // -------------------------------------------------------------------------
 
@@ -418,6 +429,42 @@ describe('order saga activities (real database)', () => {
         prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
       );
       expect(row.status).toBe('FAILED');
+    });
+
+    it('a hold given up on, nobody having cancelled: the stock comes back, an attempt running on sends nothing, and a late hold is still refunded', async () => {
+      const { orderId, offerId } = await placeOrder();
+      const reserved = await availableOf(offerId);
+      const { calls, economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+
+      await expect(acts.markFailed(orderId, 'INSUFFICIENT_BALANCE')).resolves.toBe('FAILED');
+      expect(await availableOf(offerId)).toBe(reserved + 1);
+
+      await expect(acts.createObligation(orderId)).rejects.toMatchObject({
+        type: 'ORDER_ALREADY_CLOSED',
+      });
+      expect(calls.some((c) => c.method === 'createObligation')).toBe(false);
+
+      await acts.compensate(orderId, 'TXN_LATE', 'A hold arrived after the saga gave up', true);
+      const refund = calls.find((c) => c.method === 'refund');
+      expect(refund?.input.transactionId).toBe('TXN_LATE');
+    });
+
+    it('a hold given up on, the buyer having cancelled: the failure yields, and closing returns the stock once', async () => {
+      const { orderId, offerId } = await placeOrder();
+      const reserved = await availableOf(offerId);
+      const { economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+      await asActor(
+        { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
+        () => wiring.orders.cancel(orderId, { reason: 'no longer needed' }),
+      );
+
+      await expect(acts.markFailed(orderId, 'INSUFFICIENT_BALANCE')).resolves.toBe('CANCELLING');
+      expect(await availableOf(offerId)).toBe(reserved);
+
+      await acts.markCancelled(orderId, 'no longer needed');
+      expect(await availableOf(offerId)).toBe(reserved + 1);
     });
 
     it('returns the held funds and cancels, in the order the saga does it', async () => {

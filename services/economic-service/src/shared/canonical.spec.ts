@@ -409,6 +409,7 @@ describe('every idempotent command’s body (task 129)', () => {
       occurredAt: { kind: 'instant', options: ZULU },
       sourceType: { kind: 'form', canonicalize: expect.any(Function) },
       sourceReference: { kind: 'form', canonicalize: expect.any(Function) },
+      holdNotAfter: { kind: 'instant', options: ZULU },
       idempotencyKey: { kind: 'form', canonicalize: expect.any(Function) },
     });
   });
