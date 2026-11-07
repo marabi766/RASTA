@@ -505,7 +505,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
         ...economic,
         // An authorisation outside a worker is in doubt (FU-103) and reads the
         // obligation: still HELD, so the lost call stays unanswered.
-        readObligation: async () => ({ status: 'HELD' }),
+        readObligation: async () => ({ status: 'HELD', heldProven: true }),
         authoriseSettlement: async () => {
           if (!answers.authorise) throw lost();
         },
@@ -704,7 +704,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       economic: {
         ...economic,
         createObligation: () => answer({ id: `TXN_${ulid()}` }),
-        readObligation: async () => ({ status: 'HELD' }),
+        readObligation: async () => ({ status: 'HELD', heldProven: true }),
         authoriseSettlement: () => answer(undefined),
         settle: () =>
           answer({
@@ -949,7 +949,7 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       economic: {
         ...economic,
         createObligation: () => creating(),
-        readObligation: async () => ({ status: 'HELD' }),
+        readObligation: async () => ({ status: 'HELD', heldProven: true }),
         findObligations: async ({ orderId }: { orderId: string }) => found(orderId),
       } as unknown as EconomicClient,
       currentStep: () => retrying ?? sagaStep(),
