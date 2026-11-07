@@ -13,10 +13,11 @@ import {
 } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { inspect } from 'node:util';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { parse as parseYaml } from 'yaml';
 
 import {
@@ -1569,19 +1570,15 @@ test('psql-prisma-url passes on the flags that can hold nothing, and no URL opti
 });
 
 test('no document hands a database URL straight to psql (FU-128, FU-104)', (t) => {
-  const documents = readdirSync(join(ROOT, 'docs'), { recursive: true })
-    .map(String)
-    .filter((name) => name.endsWith('.md'))
-    .map((name) => join(ROOT, 'docs', name));
+  // Git's file lists (the inventory), never a directory walk (FU-112).
+  const documents = authoredFiles(join(ROOT, 'docs')).filter((file) => file.endsWith('.md'));
   assert.ok(documents.length > 10, 'the walk found the documents');
   // A down.sql's header tells the operator how to run it.
-  const downFiles = readdirSync(join(ROOT, 'services')).flatMap((service) => {
-    const dir = join(ROOT, 'services', service, 'prisma', 'migrations');
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir)
-      .map((migration) => join(dir, migration, 'down.sql'))
-      .filter((file) => existsSync(file));
-  });
+  const downFiles = authoredFiles(join(ROOT, 'services')).filter((file) =>
+    /^[^/]+\/prisma\/migrations\/[^/]+\/down\.sql$/.test(
+      relative(join(ROOT, 'services'), file).split(sep).join('/'),
+    ),
+  );
   assert.ok(downFiles.length > 10, 'the walk found the down.sql files');
   const { seen, run } = recordingPsqlCommand(t);
   let commands = 0;
@@ -1891,23 +1888,9 @@ function runnableSources(root = ROOT) {
       roots.push(join(root, 'services', service, part));
     }
   }
-  const files = [];
-  const walk = (dir) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (['node_modules', 'dist', 'generated'].includes(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (/\.(?:[cm]?js|ts)$/.test(entry.name)) files.push(path);
-    }
-  };
-  roots.forEach(walk);
-  return files;
+  return roots
+    .flatMap((dir) => authoredFiles(dir, { optional: true, base: root }))
+    .filter((path) => /\.(?:[cm]?js|ts)$/.test(basename(path)));
 }
 
 /**
@@ -1918,17 +1901,9 @@ const URL_FLAG_REFUSAL_TESTS = new Set(['scripts/outbox-b2-vacuum.pg.test.mjs'])
 
 /** Every shell script the repository runs, outside node_modules. */
 function shellScripts() {
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (['node_modules', 'dist', 'generated'].includes(entry.name)) continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else if (/\.(?:sh|bash)$/.test(entry.name)) files.push(path);
-    }
-  };
-  ['infrastructure', 'scripts'].forEach((root) => walk(join(ROOT, root)));
-  return files;
+  return ['infrastructure', 'scripts']
+    .flatMap((root) => authoredFiles(join(ROOT, root)))
+    .filter((path) => /\.(?:sh|bash)$/.test(basename(path)));
 }
 
 const PG_CLIENT =

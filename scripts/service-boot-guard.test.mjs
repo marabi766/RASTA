@@ -48,12 +48,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 import { KEY_SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVICES = readdirSync(join(ROOT, 'services'))
@@ -305,16 +306,10 @@ const APPLICATION_WIRING = new Set([
 ]);
 
 function sourceFiles(dir) {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).flatMap((name) => {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) {
-      return ['generated', 'node_modules', 'dist', 'test'].includes(name) ? [] : sourceFiles(path);
-    }
-    return /\.(ts|mts|cts|js|mjs|cjs)$/.test(name) && !/\.(spec|int-spec|test)\./.test(name)
-      ? [path]
-      : [];
-  });
+  return authoredFiles(dir, { optional: true, skip: (name) => name === 'test' }).filter(
+    (path) =>
+      /\.(ts|mts|cts|js|mjs|cjs)$/.test(path) && !/\.(spec|int-spec|test)\./.test(basename(path)),
+  );
 }
 
 /** Every file of a service, outside tests, that opens the database on its own. */

@@ -2,6 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the Jest specs
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (
+    dir: string,
+    options?: { skip?: (name: string) => boolean; optional?: boolean; base?: string },
+  ) => string[];
+};
+
 /**
  * Fails a spec that reads a file outside this package which `turbo.json` does
  * not list as a test input.
@@ -191,23 +199,14 @@ export function filesMatching(pattern: string, root: string = REPO_ROOT): string
   const parts = pattern.split('/');
   const firstWild = parts.findIndex((part) => /[*?]/.test(part));
   const fixed = firstWild === -1 ? parts : parts.slice(0, firstWild);
-  const found: string[] = [];
-  const walk = (relative: string): void => {
-    const full = path.join(root, relative);
-    if (!fs.existsSync(full)) return;
-    if (!fs.statSync(full).isDirectory()) {
-      if (regex.test(relative)) found.push(relative);
-      return;
-    }
-    for (const entry of fs.readdirSync(full)) {
-      // `generated` is git-ignored Prisma output that another task regenerates mid-walk
-      // (ENOENT on a vanished file, FU-090); a turbo input must match authored files.
-      if (entry === 'node_modules' || entry === 'dist' || entry === 'generated') continue;
-      walk(`${relative}/${entry}`);
-    }
-  };
-  walk(fixed.join('/'));
-  return found;
+  const start = path.join(root, fixed.join('/'));
+  if (!fs.existsSync(start)) return [];
+  // A turbo input must match authored files: git-ignored output (`generated` Prisma clients another
+  // task regenerates mid-walk, `node_modules`, build output) is never listed (FU-090, FU-102).
+  const files = fs.statSync(start).isDirectory()
+    ? authoredFiles(start, { base: root }).map((file) => path.relative(root, file))
+    : [fixed.join('/')];
+  return files.filter((relative) => regex.test(relative));
 }
 
 /** What was read outside this package and is not declared, as repository-relative paths. */

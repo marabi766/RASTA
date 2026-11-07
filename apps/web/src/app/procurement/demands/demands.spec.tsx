@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { act, render, screen } from '@testing-library/react';
@@ -16,6 +16,11 @@ import { DemandForm } from './DemandForm';
 import type { DemandFormState } from './demand-form-state';
 import { DemandsScreen } from './DemandsScreen';
 import { UnresolvedDemandNotice } from './UnresolvedDemandNotice';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the .mjs checks
+const { authoredFiles } = require('../../../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 /**
  * The demand screens as rendered: every outcome a read can have, the honest
@@ -310,14 +315,11 @@ describe('Persian orthography of everything the demand screens say', () => {
   });
 
   const root = __dirname;
-  const walk = (dir: string): string[] =>
-    readdirSync(dir).flatMap((entry) => {
-      const full = path.join(dir, entry);
-      if (statSync(full).isDirectory()) return walk(full);
-      return /\.(ts|tsx)$/.test(entry) && !/\.spec\./.test(entry) ? [full] : [];
-    });
+  // The screens' own sources: git's file list (the inventory), never a walk of this directory.
   const files = [
-    ...walk(root),
+    ...authoredFiles(root).filter(
+      (file) => /\.(ts|tsx)$/.test(file) && !/\.spec\./.test(path.basename(file)),
+    ),
     path.join(root, '..', '..', '..', 'lib', 'demand-commands.ts'),
     path.join(root, '..', '..', '..', 'server', 'demands.ts'),
     path.join(root, '..', '..', '..', 'server', 'demand-commands.ts'),

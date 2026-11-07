@@ -1,5 +1,9 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 /**
  * Every interactive transaction of this service is opened through
@@ -16,11 +20,7 @@ const ALLOWED: Readonly<Record<string, string>> = {
 };
 
 function sources(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return entry.name === 'generated' ? [] : sources(path);
-    return /\.ts$/.test(entry.name) && !/\.spec\.ts$/.test(entry.name) ? [path] : [];
-  });
+  return authoredFiles(dir).filter((path) => /\.ts$/.test(path) && !/\.spec\.ts$/.test(path));
 }
 
 describe('every interactive transaction goes through PrismaService.transaction', () => {
