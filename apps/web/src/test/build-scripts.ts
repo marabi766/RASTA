@@ -597,12 +597,16 @@ const worker = path.join(__dirname, '../build/worker.js');
   if (plan.ownerSocket) {
     // The writer's lifetime is this connection (FU-216): the kernel closes the owner's end when the
     // owner exits in any way, a zombie included, and a refused connection means no owner at all.
+    // A connect the kernel completes is not yet a registered writer: the owner may not have accepted
+    // it (F2). The writer does no work until the owner ACKNOWLEDGES the connection, which it does
+    // only after registering it; an owner that closes instead (a fenced sweep) ends it with 72.
     await new Promise((resolve) => {
       const socket = require('net').connect(plan.ownerSocket);
       socket.on('error', () => process.exit(72));
       socket.on('close', () => process.exit(72));
+      socket.once('data', () => { socket.unref(); resolve(); });
       socket.on('data', () => {});
-      socket.once('connect', () => { socket.unref(); resolve(); });
+      socket.once('connect', () => { try { fs.writeFileSync(path.join(dir, 'connected-' + process.pid), ''); } catch {} });
     });
   }
   fs.writeFileSync(path.join(dir, 'ran-' + process.pid), '');
@@ -702,6 +706,8 @@ interface Hold {
   marker: string;
   failure?: Error;
   done: boolean;
+  /** No new writer is accepted any more (the sweep's fence); registered ones are still joined. */
+  fenced: boolean;
 }
 const holds = new Map<string, Hold>();
 
@@ -714,14 +720,20 @@ function openHold(dir: string): Hold {
     live: new Set(),
     marker: join(dir, HOLD_RELEASE),
     done: false,
+    fenced: false,
   };
   hold.server.on('connection', (connection) => {
-    hold.seen += 1;
-    hold.live.add(connection);
     connection.on('error', () => {});
     connection.on('data', () => {});
+    if (hold.fenced) {
+      connection.destroy(); // accepted after the fence: refused, it never worked (no acknowledgement)
+      return;
+    }
+    hold.seen += 1;
+    hold.live.add(connection);
     // The writer's end closing is the writer ending: the kernel closes it at exit.
     connection.on('close', () => hold.live.delete(connection));
+    connection.write('1'); // registered: only now may the writer start its work
   });
   hold.server.on('error', (error) => {
     hold.failure = error;
@@ -754,6 +766,7 @@ export function heldWriters(): string[] {
 const closeHold = (hold: Hold): Promise<void> =>
   new Promise((resolve) => {
     hold.done = true;
+    hold.fenced = true;
     hold.server.close(() => resolve()); // also refuses a writer that starts late
   });
 
@@ -776,20 +789,25 @@ export async function releaseHold(
     throw new Error(`${dir}: planted without holdUntilRelease`);
   }
   if (hold.done) return;
+  const deadline = Date.now() + ms;
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
+  // The sweep fences FIRST (FU-216 F2): nothing is accepted from here on, so a writer whose connect
+  // the kernel completed but this process has not yet accepted is refused (it was never
+  // acknowledged, so it did no work), and every writer that WAS accepted is in `live` to be joined.
+  // A strict release still waits for its writer to connect, so it fences only once it has one.
+  if (lenient) hold.fenced = true;
   try {
     writeFileSync(hold.marker, '');
   } catch (error) {
     if (!(lenient && (error as NodeJS.ErrnoException).code === 'ENOENT')) throw error;
   }
-  if (!(lenient && hold.seen === 0)) {
-    const deadline = Date.now() + ms;
-    const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
+  if (!lenient) {
     while (hold.seen === 0 && !hold.failure && Date.now() < deadline) await tick();
     if (hold.failure) throw hold.failure;
     if (hold.seen === 0) throw new Error(`${dir}: no writer connected within ${ms} ms`);
-    while (hold.live.size > 0 && Date.now() < deadline) await tick();
-    if (hold.live.size > 0) throw new Error(`${dir}: writer still held ${ms} ms after its release`);
   }
+  while (hold.live.size > 0 && Date.now() < deadline) await tick();
+  if (hold.live.size > 0) throw new Error(`${dir}: writer still held ${ms} ms after its release`);
   await closeHold(hold);
 }
 
