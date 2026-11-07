@@ -110,6 +110,10 @@ const pins = {
     '45c308b60a4588cf7dfba8496b264f4c50fac4c75d5f652868ead8b9cae6de04',
     // CI repair: the pure URL helper gains a read-only construction lookup.
     'bcf57fa29d3032b8106d41bec16165a5423d810d77780e832d03101bd936e527',
+    // + MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS (FU-171, #879) on top of that union: exact union.
+    '0d7a692210ab8c4f739096703984e7253fa3019a63f7c99049666348f2835238',
+    // CI/main synchronization: exact union of FU-181 and the maintenance replay constant.
+    '83991df34a484819959e3e747235a462e0f4e4a6d5c59812dfa60821a1ae036e',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',

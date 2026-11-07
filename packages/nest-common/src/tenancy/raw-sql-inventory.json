@@ -2178,24 +2178,31 @@
   },
   {
     "file": "services/maintenance-service/src/maintenance/idempotency.ts",
-    "line": 261,
+    "line": 451,
     "hash": "3c8d69686c2d237e240b1f8efb7a468b9c867110248344b693c1ca86acf60054",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/maintenance-service/src/maintenance/idempotency.ts",
-    "line": 396,
+    "line": 655,
     "hash": "be13b77228770fba0a49f8751a9b8efa93fd57d8e3019661dc5d69d3eb6dc7c8",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/maintenance-service/src/maintenance/idempotency.ts",
-    "line": 432,
+    "line": 691,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
+  },
+  {
+    "file": "services/maintenance-service/src/maintenance/idempotency.ts",
+    "line": 540,
+    "hash": "f47fcc8a7ad5dd02c08841f76d83ef9a138adb03afa7447ddc6d47c580edba25",
+    "occurrence": 0,
+    "decision": "platform-wide: obtains the database clock; no domain rows accessed"
   },
   {
     "file": "services/maintenance-service/src/maintenance/maintenance.repository.ts",
