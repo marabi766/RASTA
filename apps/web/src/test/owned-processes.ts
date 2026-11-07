@@ -20,8 +20,21 @@ export interface OwnedProcesses {
   watch(what: string, ended: () => boolean): void;
   /** Runs after every process is joined (e.g. the sweep that releases held writers). */
   afterJoin(step: () => void | Promise<void>): void;
+  /**
+   * The WHOLE teardown is capped by `ms` (plus a short grace for the cleanup steps): what is still
+   * running at the deadline is SIGKILLed, the cleanup steps still run, and the leftover is REPORTED.
+   */
   teardown(ms?: number): Promise<void>;
+  /**
+   * True from the moment a teardown starts until one finished with nothing left over. A hook that
+   * the test runner abandons on its own timeout never reaches its `catch`, so the leftovers guard
+   * (the one that keeps the fixture root) reads this instead of a flag set after the await.
+   */
+  readonly unjoined: boolean;
 }
+
+/** A SIGKILLed process is gone within this even when the budget is spent. */
+const JOIN_GRACE_MS = 500;
 
 export function ownedProcesses(): OwnedProcesses {
   const children: { child: ChildProcess; exited: Promise<number | null> }[] = [];
@@ -32,7 +45,11 @@ export function ownedProcesses(): OwnedProcesses {
   const settled = (child: ChildProcess): boolean =>
     child.exitCode !== null || child.signalCode !== null;
 
+  let unjoined = false;
   return {
+    get unjoined() {
+      return unjoined;
+    },
     own(child) {
       const exited = new Promise<number | null>((resolve) => {
         if (settled(child)) resolve(child.exitCode);
@@ -46,6 +63,7 @@ export function ownedProcesses(): OwnedProcesses {
     watch: (what, ended) => void watched.push({ what, ended }),
     afterJoin: (step) => void steps.push(step),
     async teardown(ms = 15_000) {
+      unjoined = true;
       const failures: Error[] = [];
       const attempt = async (what: string, run: () => void | Promise<void>): Promise<void> => {
         try {
@@ -73,14 +91,34 @@ export function ownedProcesses(): OwnedProcesses {
         if (!done)
           failures.push(new Error(`${what}: still running ${ms} ms after its shutdown request`));
       }
-      for (const { child, exited } of children.splice(0)) {
-        if (!settled(child)) child.kill('SIGKILL'); // our own handle
-        const joined = await Promise.race([exited.then(() => true), sleep(ms).then(() => false)]);
+      // Everything still running is killed at once (our own handles), then joined within what is
+      // left of the SAME budget: N stuck processes cost one budget, not N.
+      const pending = children.splice(0);
+      for (const { child } of pending) if (!settled(child)) child.kill('SIGKILL');
+      const joins = pending.map(async ({ child, exited }) => {
+        const joined = await Promise.race([
+          exited.then(() => true),
+          sleep(Math.max(deadline - Date.now(), JOIN_GRACE_MS)).then(() => false),
+        ]);
         if (!joined)
-          failures.push(new Error(`process ${child.pid}: did not exit ${ms} ms after SIGKILL`));
+          failures.push(new Error(`process ${child.pid}: did not exit by the ${ms} ms deadline`));
+      });
+      await Promise.all(joins);
+      // The cleanup steps always run (they release what the processes held); a short grace beyond
+      // the budget keeps a hung step from holding the hook past its own timeout.
+      const stepEnd = Math.max(deadline, Date.now() + 1_000);
+      for (const step of steps.splice(0)) {
+        const left = Math.max(stepEnd - Date.now(), 0);
+        let timer: NodeJS.Timeout | undefined;
+        const timedOut = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`not finished within ${ms} ms`)), left);
+        });
+        await attempt('cleanup', () =>
+          Promise.race([Promise.resolve().then(step), timedOut]),
+        ).finally(() => clearTimeout(timer));
       }
-      for (const step of steps.splice(0)) await attempt('cleanup', step);
       if (failures.length > 0) throw new AggregateError(failures, 'fixture processes not joined');
+      unjoined = false;
     },
   };
 }
