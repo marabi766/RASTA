@@ -1,7 +1,11 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, RastaError, Roles, getContext, zodPipe } from '@rasta/nest-common';
-import { mayRecordSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
+import {
+  mayRecordSource,
+  RECORDED_SOURCE_REFUSAL,
+  refusesUnfencedOrderHold,
+} from './recorded-sources';
 import { TransactionService, type TransactionDetail } from './transaction.service';
 import { IdempotencyStore, targeted, type TerminalRefusals } from '../shared/idempotency';
 import { canonicalBodyPipe } from '../shared/canonical';
@@ -111,10 +115,12 @@ export class TransactionController {
     summary: 'What this release proves about a transaction',
     description:
       '`heldProven`: every transaction view says whether HELD is proven. The order saga starts ' +
-      'no order until this answers true (ADR-040). No tenant data.',
+      'no order until this answers true (ADR-040). `orderHoldDeadlineRequired`: an `ORDER` ' +
+      'hold without `holdNotAfter` is refused (D-150); the saga takes its order row as proof ' +
+      'that no hold can land only while this answers true (FU-233). No tenant data.',
   })
   capabilities() {
-    return { heldProven: true };
+    return { heldProven: true, orderHoldDeadlineRequired: refusesUnfencedOrderHold() };
   }
 
   @Get(':id')
