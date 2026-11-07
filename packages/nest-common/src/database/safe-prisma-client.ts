@@ -3,9 +3,12 @@ import { clientFailureCode } from './client-failure';
 import {
   SessionTimeZoneRefusedError,
   UTC_SESSION_CHECK_SQL,
+  isSessionCheck,
   isSessionTimeZoneRefusal,
   isZoneFreeOperation,
-  runsInTransaction,
+  refuseUncheckedPredecessor,
+  transactionIdentity,
+  uncheckedTransactionRefusal,
 } from './utc-session';
 
 export type RuntimeDatabaseSetting = `DATABASE_URL_${(typeof DATABASE_SERVICES)[number]}`;
@@ -54,6 +57,23 @@ interface SessionCheckClient {
 }
 
 /**
+ * The check as the first statement of a batch. Prisma hands each statement its transaction in
+ * order and at once, so this is told before any other statement of the batch reaches the query
+ * extension; it records that the batch begins with the check. If the statement has no
+ * `requestTransaction`, nothing is recorded and the extension refuses the batch.
+ */
+function firstOfBatch(check: unknown, prove: (transaction: unknown) => void): unknown {
+  const statement = check as { requestTransaction?: (transaction: unknown) => unknown };
+  const request = statement.requestTransaction;
+  if (typeof request !== 'function') return check;
+  statement.requestTransaction = (transaction: unknown) => {
+    prove(transaction);
+    return Reflect.apply(request, statement, [transaction]);
+  };
+  return statement;
+}
+
+/**
  * `$transaction`'s arguments with {@link UTC_SESSION_CHECK_SQL} as the first
  * statement of the transaction, and how to read its result back. An interactive
  * callback gets it before its own first statement, a batch as an extra statement.
@@ -61,6 +81,7 @@ interface SessionCheckClient {
 function checkingTransaction(
   client: SessionCheckClient,
   [work, ...rest]: unknown[],
+  prove: (transaction: unknown) => void,
 ): { args: unknown[]; result: (value: unknown) => unknown } {
   if (typeof work === 'function') {
     const checked = async (tx: SessionCheckClient, ...more: unknown[]): Promise<unknown> => {
@@ -71,7 +92,10 @@ function checkingTransaction(
   }
   if (Array.isArray(work)) {
     return {
-      args: [[client.$queryRawUnsafe(UTC_SESSION_CHECK_SQL), ...work], ...rest],
+      args: [
+        [firstOfBatch(client.$queryRawUnsafe(UTC_SESSION_CHECK_SQL), prove), ...work],
+        ...rest,
+      ],
       result: (value) => (value as unknown[]).slice(1),
     };
   }
@@ -89,6 +113,12 @@ function checkingTransaction(
  * begins with the check, and an autocommit statement that is not a plain model read becomes
  * a two-statement batch, so the check and the work share a transaction, and so a backend,
  * also behind PgBouncer. Refused before the work, so the work never runs.
+ *
+ * No exposed path runs without it (PR #906 r1 F1). Each client sits on a predecessor without the
+ * check, so no predecessor is handed out: `$parent` and the fields behind it are refused, on a
+ * client and on a model, and so is the function form of `$extends`, which receives one. And a
+ * statement in a transaction must find that transaction PROVEN to begin with the check: being in
+ * a transaction proves nothing.
  */
 export function createSafePrismaClient<T extends object>(
   open: () => T,
@@ -115,6 +145,12 @@ export function createSafePrismaClient<T extends object>(
         },
       },
     };
+    // Transactions known to begin with the check: one that passed it, or a batch built with it.
+    const proven = new WeakSet<object>();
+    const prove = (transaction: unknown): void => {
+      const identity = transactionIdentity({ __internalParams: { transaction } });
+      if (identity) proven.add(identity);
+    };
     const sessionCheck = {
       name: 'utc-session-check',
       query: {
@@ -123,10 +159,23 @@ export function createSafePrismaClient<T extends object>(
           model?: unknown;
           operation?: unknown;
           query: (args: unknown) => PromiseLike<unknown>;
+          __internalParams?: { transaction?: { kind?: unknown; index?: unknown } };
         }) {
           const { args, model, operation, query } = params;
-          if (runsInTransaction(params) || isZoneFreeOperation(model, operation)) {
-            return query(args);
+          const identity = transactionIdentity(params);
+          if (isZoneFreeOperation(model, operation)) return query(args);
+          if (identity) {
+            const transaction = params.__internalParams?.transaction;
+            const isCheck = isSessionCheck(operation, args);
+            // A batch was proven when it was built: what comes first must still BE the check.
+            if (proven.has(identity) && (transaction?.index !== 0 || isCheck)) return query(args);
+            if (transaction?.kind !== 'itx' || !isCheck) {
+              return Promise.reject(uncheckedTransactionRefusal());
+            }
+            return Promise.resolve(query(args)).then((result) => {
+              proven.add(identity);
+              return result;
+            });
           }
           return bare
             .$transaction([bare.$queryRawUnsafe(UTC_SESSION_CHECK_SQL), query(args)])
@@ -138,17 +187,46 @@ export function createSafePrismaClient<T extends object>(
     // batch from higher up, `query(args)` runs its statement twice: the extension below has
     // already started the promise it returns, and `requestTransaction` starts it again. So
     // each client is built from its predecessor WITHOUT the check, plus the check.
+    const models = new WeakMap<object, object>();
+    const modelWithoutPredecessor = (model: object): object => {
+      let guarded = models.get(model);
+      if (!guarded) {
+        guarded = new Proxy(model, {
+          get(target, key, receiver) {
+            refuseUncheckedPredecessor(key);
+            return Reflect.get(target, key, receiver) as unknown;
+          },
+        });
+        models.set(model, guarded);
+      }
+      return guarded;
+    };
     const protect = (unchecked: object): T =>
       new Proxy(extended(unchecked, sessionCheck) as T, {
+        // The prototype of an extended client is the original client, without the check.
+        getPrototypeOf: () => Object.prototype,
         get(client, key, receiver) {
+          refuseUncheckedPredecessor(key);
           const value: unknown = Reflect.get(client, key, receiver);
           if (key === '$extends' && typeof value === 'function') {
-            return (extension: unknown) => protect(extended(unchecked, extension));
+            return (extension: unknown) => {
+              // Prisma calls a function with this client's unchecked predecessor.
+              if (typeof extension !== 'object' || extension === null) {
+                throw new Error(
+                  'refused: $extends takes an extension object here; a function would receive a client without the UTC session check',
+                );
+              }
+              return protect(extended(unchecked, extension));
+            };
           }
           if (typeof value === 'function' && key === '$transaction') {
             return (...args: unknown[]) =>
               databaseOperation(async () => {
-                const checked = checkingTransaction(client as unknown as SessionCheckClient, args);
+                const checked = checkingTransaction(
+                  client as unknown as SessionCheckClient,
+                  args,
+                  prove,
+                );
                 return checked.result(
                   await (Reflect.apply(value, client, checked.args) as PromiseLike<unknown>),
                 );
@@ -166,6 +244,15 @@ export function createSafePrismaClient<T extends object>(
           if (key === '$on') {
             const on: unknown = Reflect.get(raw, key);
             if (typeof on === 'function') return on.bind(raw);
+          }
+          // A model delegate: its `$parent`, also through `Prisma.getExtensionContext(this)`.
+          if (
+            typeof value === 'object' &&
+            value !== null &&
+            typeof key === 'string' &&
+            !/^[$_]/.test(key)
+          ) {
+            return modelWithoutPredecessor(value);
           }
           return value;
         },

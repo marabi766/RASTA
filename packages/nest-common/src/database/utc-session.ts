@@ -84,15 +84,62 @@ export function isZoneFreeOperation(model: unknown, operation: unknown): boolean
 }
 
 /**
- * The transaction a Prisma operation runs in (`__internalParams.transaction`):
- * absent for an autocommit statement. Prisma's private field, so if an upgrade removes it
- * this refuses: read as "no transaction", a statement of an interactive transaction would
- * move into a batch of its own and silently lose its atomicity.
+ * What identifies the transaction a Prisma operation runs in: the transaction itself for an
+ * interactive one, the lock its statements share for a batch (`admitBatched` in the identity
+ * service keys on it too); undefined for an autocommit statement. Prisma's private fields, so if
+ * an upgrade removes them this refuses: read as "no transaction", a statement of an interactive
+ * transaction would move into a batch of its own and silently lose its atomicity.
  */
-export function runsInTransaction(params: unknown): boolean {
+export function transactionIdentity(params: unknown): object | undefined {
   const internal = (params as { __internalParams?: { transaction?: unknown } }).__internalParams;
   if (internal === undefined) {
     throw new Error('refused: this Prisma version does not say which transaction a query is in');
   }
-  return internal.transaction !== undefined;
+  const transaction = internal.transaction as { kind?: unknown; lock?: unknown } | undefined;
+  if (transaction === undefined) return undefined;
+  if (transaction.kind === 'itx') return transaction;
+  if (transaction.kind === 'batch' && typeof transaction.lock === 'object' && transaction.lock) {
+    return transaction.lock;
+  }
+  throw new Error('refused: this Prisma version does not say which transaction a query is in');
+}
+
+/** Whether an operation is, verbatim, {@link UTC_SESSION_CHECK_SQL}. */
+export function isSessionCheck(operation: unknown, args: unknown): boolean {
+  return (
+    operation === '$queryRawUnsafe' &&
+    Array.isArray(args) &&
+    args.length === 1 &&
+    args[0] === UTC_SESSION_CHECK_SQL
+  );
+}
+
+/**
+ * A statement in a transaction nothing proves began with the check. Being in a transaction is
+ * no proof: that transaction may have come from a client without the check (PR #906 r1 F1).
+ */
+export function uncheckedTransactionRefusal(): Error {
+  return new Error('refused: this transaction did not begin with the UTC session check');
+}
+
+/**
+ * The properties that hand out a client without the check: Prisma's `$parent`, on a client and on
+ * a model, and the private fields behind it. The check sits on top of each client's predecessor
+ * (see `safe-prisma-client.ts`), so every predecessor is unchecked by construction. Prisma's other
+ * private fields (`_engine`, `_requestHandler`) are untyped internals its own methods read through
+ * this client, so they stay reachable by a cast; what is typed and public is closed.
+ */
+const UNCHECKED_PREDECESSORS: ReadonlySet<PropertyKey> = new Set([
+  '$parent',
+  '_appliedParent',
+  '_originalClient',
+  '__proto__',
+]);
+
+export function refuseUncheckedPredecessor(key: PropertyKey): void {
+  if (UNCHECKED_PREDECESSORS.has(key)) {
+    throw new Error(
+      `refused: ${String(key)} would hand out a client without the UTC session check`,
+    );
+  }
 }

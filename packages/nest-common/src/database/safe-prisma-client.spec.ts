@@ -4,8 +4,9 @@ import { createSafePrismaClient, DatabaseConnectionError } from './safe-prisma-c
 import {
   SessionTimeZoneRefusedError,
   UTC_SESSION_CHECK_SQL,
+  isSessionCheck,
   isZoneFreeOperation,
-  runsInTransaction,
+  transactionIdentity,
 } from './utc-session';
 
 const leaky = () =>
@@ -185,9 +186,26 @@ describe('the session check inside every transaction (FU-188)', () => {
 });
 
 test('a Prisma that stops naming the transaction refuses, it does not guess', () => {
-  expect(() => runsInTransaction({})).toThrow(/refused/);
-  expect(runsInTransaction({ __internalParams: {} })).toBe(false);
-  expect(runsInTransaction({ __internalParams: { transaction: { kind: 'itx' } } })).toBe(true);
+  const lock = {};
+  const itx = { kind: 'itx' };
+  expect(() => transactionIdentity({})).toThrow(/refused/);
+  expect(() => transactionIdentity({ __internalParams: { transaction: {} } })).toThrow(/refused/);
+  expect(() =>
+    transactionIdentity({ __internalParams: { transaction: { kind: 'batch' } } }),
+  ).toThrow(/refused/);
+  expect(transactionIdentity({ __internalParams: {} })).toBeUndefined();
+  expect(transactionIdentity({ __internalParams: { transaction: itx } })).toBe(itx);
+  expect(transactionIdentity({ __internalParams: { transaction: { kind: 'batch', lock } } })).toBe(
+    lock,
+  );
+});
+
+test('only the verbatim statement counts as the check', () => {
+  expect(isSessionCheck('$queryRawUnsafe', [UTC_SESSION_CHECK_SQL])).toBe(true);
+  expect(isSessionCheck('$executeRawUnsafe', [UTC_SESSION_CHECK_SQL])).toBe(false);
+  expect(isSessionCheck('$queryRawUnsafe', [UTC_SESSION_CHECK_SQL, 1])).toBe(false);
+  expect(isSessionCheck('$queryRawUnsafe', ['SELECT 1'])).toBe(false);
+  expect(isSessionCheck('$queryRaw', UTC_SESSION_CHECK_SQL)).toBe(false);
 });
 
 test.each([
