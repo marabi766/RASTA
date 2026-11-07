@@ -827,6 +827,29 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
       currentAttempt: () => 1,
     });
     await expect(economic.compensate('ORD', 'TXN', 'why')).resolves.toBeUndefined();
+    // Behind the wait too (FU-117): it waits on confirmation, but it authorises nothing.
+    await expect(
+      economic.compensate('ORD', 'TXN', 'why', false, FINAL_ANSWER_CONTRACT),
+    ).resolves.toBeUndefined();
     expect(held).not.toHaveBeenCalled();
+  });
+
+  it('in doubt with the row disputed, a terminal obligation is the final answer: nothing is sent', async () => {
+    const { activities, trace } = over(
+      { status: 'DISPUTED' },
+      { attempt: 2, read: () => ({ status: 'REFUNDED', amountMinor: '1' }) },
+    );
+    await expect(
+      activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
+    ).resolves.toMatchObject({ final: true, status: 'REFUNDED' });
+    expect(trace).toEqual(['read']);
+  });
+
+  it('a caller declaring final answers is fenced all the same on a first attempt', async () => {
+    const { activities, trace } = over({ status: 'DISPUTED' });
+    await expect(
+      activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
+    ).resolves.toEqual({ fenced: true, status: 'DISPUTED', inDoubt: false });
+    expect(trace).toEqual(['hold', 'release']);
   });
 });

@@ -246,6 +246,17 @@ const isDisputedAnswer = (value) =>
   value.disputed === true &&
   typeof value.reason === 'string' &&
   Object.keys(value).every((field) => ['disputed', 'reason', 'economicDisputeId'].includes(field));
+// An authorisation the order fenced: nothing was sent. To a build below its protocol this
+// reads as "authorised", and the saga goes on to settle what economic-service never
+// authorised (#895 r1 F1). Only the authorisation answers it.
+const FENCED_ANSWER_PROTOCOL = PATCH_PROTOCOL.get('authorisation-order-fence-v1');
+const isFencedAnswer = (value) =>
+  isRecord(value) &&
+  value.fenced === true &&
+  typeof value.status === 'string' &&
+  value.status !== '' &&
+  typeof value.inDoubt === 'boolean' &&
+  Object.keys(value).length === 3;
 // The four calls that may answer `ObligationFinal`: true for their answers before it.
 const FINAL_ANSWER_CALLS = new Map([
   ['compensate', (value) => value === undefined],
@@ -256,7 +267,7 @@ const FINAL_ANSWER_CALLS = new Map([
   ],
   ['authoriseSettlement', (value) => value === undefined || isDisputedAnswer(value)],
 ]);
-// None of these has ever given a final answer, and one that does is refused.
+// None of these has ever given a final or a fenced answer, and one that does is refused.
 const OTHER_CALLS = new Set([
   'createObligation',
   'findObligation',
@@ -277,7 +288,9 @@ function resultProtocol(activity, value) {
   const earlier = FINAL_ANSWER_CALLS.get(activity);
   if (earlier?.(value)) return 0;
   if (earlier && isFinalAnswer(value)) return FINAL_ANSWER_PROTOCOL;
-  if (OTHER_CALLS.has(activity) && !(isRecord(value) && Object.hasOwn(value, 'final'))) return 0;
+  if (activity === 'authoriseSettlement' && isFencedAnswer(value)) return FENCED_ANSWER_PROTOCOL;
+  const claimsAnother = isRecord(value) && ['final', 'fenced'].some((f) => Object.hasOwn(value, f));
+  if (OTHER_CALLS.has(activity) && !claimsAnother) return 0;
   throw new Unverifiable('workflow history: unknown activity result');
 }
 

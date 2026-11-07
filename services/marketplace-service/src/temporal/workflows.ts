@@ -329,6 +329,8 @@ export const OWED_WORK_PATCH = 'saga-owed-work-durable-v1';
  * The `patched()` marker of `AuthorisationFenced` (D-138). Asked only when an
  * activity answers it: a saga never fenced records nothing. It marks a history no
  * earlier protocol can read, since such a build takes the answer as "authorised".
+ * So does the answer itself, before any workflow task has asked this: the drain
+ * gate reads recorded results too (`resultProtocol`).
  */
 export const AUTHORISATION_FENCE_PATCH = 'authorisation-order-fence-v1';
 

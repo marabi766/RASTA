@@ -1692,7 +1692,7 @@ describe('the order saga', () => {
           'markCompleted',
         ]);
         // No attempt went out, so no doubt came back with the saga.
-        expect(owner.inDoubtArgs).toEqual([undefined, undefined]);
+        expect(owner.inDoubtArgs).toEqual([false, false]);
         const handle = seen as WorkflowHandle;
         expect(await patchIds(handle)).toContain(AUTHORISATION_FENCE_PATCH);
         await replay(handle);
@@ -1770,7 +1770,7 @@ describe('the order saga', () => {
         expect(owner.sentWhile).toEqual(['RECEIPT_CONFIRMED', 'RECEIPT_CONFIRMED']);
         // The first attempt and its retry; the first went out, so the send after the
         // decision is a later round.
-        expect(owner.inDoubtArgs).toEqual([undefined, undefined, true]);
+        expect(owner.inDoubtArgs).toEqual([false, false, true]);
       });
 
       it('during an attempt whose answer was lost: its retry reads the effect and sends nothing', async () => {

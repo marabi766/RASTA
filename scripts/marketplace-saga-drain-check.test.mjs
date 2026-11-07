@@ -777,7 +777,7 @@ const atProtocol = (marketplaceSagaProtocol) => ({
   target: { name: TARGET_NAME, marketplaceSagaProtocol },
 });
 const FINAL_ANSWER = { final: true, status: 'SETTLED', funds: 'PAID_OUT' };
-const LATEST_KNOWN = 6;
+const LATEST_KNOWN = 7;
 const producers = {
   compensate: [undefined],
   resolveObligationDispute: [undefined],
@@ -909,6 +909,154 @@ for (const [name, recorded, words] of [
     assert.match(refused.stderr, words);
   });
 }
+
+// ---- A fenced authorisation, before its marker (#895 r1 F1) ----------------------
+//
+// An authorisation completed `{fenced: true, ...}`, and the workers stopped before the
+// next workflow task recorded `authorisation-order-fence-v1`. A build below the fence
+// took that answer as "authorised": the dispute resolved SETTLE, `markSettling` passed,
+// economic-service still held an unauthorised obligation, and the saga ended
+// SETTLEMENT_EXHAUSTED with the funds held. First attempts, retries and later rounds all
+// reach the workflow through this one recorded result.
+const FENCE_PROTOCOL = 7;
+const fenced = (inDoubt = false, status = 'DISPUTED') => ({ fenced: true, status, inDoubt });
+const answered = (value) => ({ payloads: [encoded(value)] });
+
+/** A real captured history cut right after its last authorisation, answering `value`. */
+function cutAtAuthorisation(name, value, attempt) {
+  const { events } = JSON.parse(
+    readFileSync(
+      new URL(
+        `../services/marketplace-service/src/temporal/__fixtures__/order-saga-${name}.history.json`,
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const last = events.findLastIndex(
+    ({ activityTaskCompletedEventAttributes: done }) =>
+      done &&
+      events[Number(done.scheduledEventId) - 1].activityTaskScheduledEventAttributes.activityType
+        .name === 'authoriseSettlement',
+  );
+  assert.ok(last > 0, `${name} has no authorisation`);
+  const done = events[last].activityTaskCompletedEventAttributes;
+  done.result = answered(value);
+  if (attempt) {
+    events[Number(done.startedEventId) - 1].activityTaskStartedEventAttributes.attempt = attempt;
+  }
+  events[0].workflowExecutionStartedEventAttributes.taskQueue.name = 'rasta-order';
+  return { events: events.slice(0, last + 1) };
+}
+
+for (const [name, recorded] of [
+  ['a first attempt', cutAtAuthorisation('pre-d083-settled', fenced())],
+  ['a retry', cutAtAuthorisation('pre-d083-resumed', fenced(true), 3)],
+  ['a later round', cutAtAuthorisation('fu103-authorise-wait', fenced(true))],
+  [
+    'a resumed run',
+    (() => {
+      const unconfirmedCall = { operation: 'authoriseSettlement', rounds: 2, movedOn: true };
+      const { events } = withResult('authoriseSettlement', answered(fenced(true)));
+      const [start] = history({ resume: { activitySequence: 7, unconfirmedCall } }).events;
+      return { events: [start, ...events.slice(1)] };
+    })(),
+  ],
+]) {
+  test(`#895 r1 F1: a fenced answer to ${name}, no marker yet, refuses below its protocol`, () => {
+    const scenario = showing(recorded);
+    const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+    assert.equal(refused.status, 1);
+    assert.doesNotMatch(refused.stdout, /OK/);
+    assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+    assert.equal(run(scenario, atProtocol(4)).status, 1);
+    assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+  });
+}
+
+test('#895 r1 F1: the fenced answer and its marker together refuse, as the marker alone does', () => {
+  const { events } = withResult('authoriseSettlement', answered(fenced()));
+  const marker = history({}, [{ id: 'authorisation-order-fence-v1', deprecated: false }]).events[1];
+  const scenario = showing({ events: [...events, { ...marker, eventId: '4' }] });
+  const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+  assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+});
+
+test('#895 r1 F1: the authorised answer of a real protocol-4 history still passes protocol 4', () => {
+  const scenario = showing(cutAtAuthorisation('fu103-authorise-wait', undefined));
+  assert.equal(run(scenario, atProtocol(4)).status, 0);
+  assert.match(run(scenario, atProtocol(3)).stderr, /requires saga protocol 4; incompatible/);
+});
+
+for (const [name, result] of [
+  ['an encrypted payload', { payloads: [{ metadata: { encoding: 'YmluYXJ5L2VuY3J5cHRlZA==' } }] }],
+  ['no encoding', { payloads: [{ data: 'e30=' }] }],
+  ['data that is not base64', { payloads: [{ ...payload(0), data: '{"fenced":true}' }] }],
+  ['data that is not JSON', { payloads: [{ ...payload(0), data: 'e2ZlbmNlZA==' }] }],
+  ['data that is not UTF-8', { payloads: [{ ...payload(0), data: 'Iv8i' }] }],
+]) {
+  test(`#895 r1 F1: an authorisation recorded with ${name} refuses even the latest target`, () => {
+    const refused = run(showing(withResult('authoriseSettlement', result)), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /compatibility payload cannot be read/);
+    assertNoSentinel(refused.stdout + refused.stderr);
+  });
+}
+
+// A protocol-6 worker reads every one of these as "authorised".
+for (const value of [
+  { fenced: true },
+  { fenced: true, status: 'DISPUTED' },
+  { fenced: true, inDoubt: false },
+  { fenced: false, status: 'DISPUTED', inDoubt: false },
+  { fenced: 'true', status: 'DISPUTED', inDoubt: false },
+  { fenced: true, status: '', inDoubt: false },
+  { fenced: true, status: 7, inDoubt: false },
+  { fenced: true, status: 'DISPUTED', inDoubt: 'no' },
+  { ...fenced(), another: 1 },
+  { ...fenced(), disputed: true, reason: 'broken' },
+  [fenced()],
+]) {
+  test(`#895 r1 F1: an authorisation answering ${JSON.stringify(value)} refuses even the latest target`, () => {
+    const refused = run(
+      showing(withResult('authoriseSettlement', answered(value))),
+      atProtocol(LATEST),
+    );
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+for (const activity of ['settle', 'markSettling', 'readOrder', 'compensate', 'disputeObligation']) {
+  test(`#895 r1 F1: a fenced answer from ${activity}, which never gives one, refuses`, () => {
+    const refused = run(showing(withResult(activity, answered(fenced()))), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+test('the authorisation answers are the ones the gate reads', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const file = ts.createSourceFile('activities.ts', source, ts.ScriptTarget.Latest, true);
+  const declared = (name) => file.statements.find((node) => node.name?.text === name);
+  // A new answer fails here until it has a protocol and a shape in `resultProtocol`.
+  assert.equal(
+    declared('AuthorisationResult').type.getText().replace(/\s+/g, ' ').trim(),
+    'DisputedObligation | ObligationFinal | AuthorisationFenced | undefined',
+  );
+  const fields = (name) => declared(name).members.map((member) => member.name.text);
+  assert.deepEqual(fields('AuthorisationFenced').toSorted(), ['fenced', 'inDoubt', 'status']);
+  assert.deepEqual(fields('DisputedObligation').toSorted(), [
+    'disputed',
+    'economicDisputeId',
+    'reason',
+  ]);
+});
 
 test('recorded result: a completed event with no result is not taken for a void one', () => {
   const recorded = withResult('compensate');

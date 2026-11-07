@@ -234,7 +234,11 @@ Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 it; a continuation's `resume` fields prove the same before its first marker
 (`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
-history requires.
+history requires. A recorded result counts as well, whether or not a workflow task has
+read it (`resultProtocol`): stop the workers right after an authorisation completes
+and the next worker reads the answer first, with no marker yet. An `authoriseSettlement`
+answer of `{fenced, status, inDoubt}` requires **7**, because a build below it reads it
+as "authorised".
 
 A build of #625 alone declares 1 although it writes the protocol-2 marker. Once a
 saga holds that marker, the gate refuses that image as a target, rollback or
