@@ -381,6 +381,7 @@ describe.each(CASES)('$name', (testCase) => {
         expect(await submit(formData(testCase))).toEqual({
           kind: 'UNCONFIRMED',
           correlationId: 'c4',
+          submissionId: expect.any(String),
         });
         expect(redirect).not.toHaveBeenCalled();
       },

@@ -408,6 +408,9 @@ describe('order saga activities (real database)', () => {
       expect(calls.map((c) => c.method)).toEqual([
         'createObligation',
         'readObligation',
+        // Outside a worker no attempt can be named, so it counts as a retry: in
+        // doubt, the obligation is asked before anything is sent (FU-178).
+        'readObligation',
         'authoriseSettlement',
         'settle',
       ]);

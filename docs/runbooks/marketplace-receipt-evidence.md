@@ -52,7 +52,7 @@ PGOPTIONS='-c default_transaction_read_only=on' \
   (`economic_transaction_id`، از `GET /v1/transactions/:id`) برای PM بفرست. تسویه نکن و وضعیت را دستی عوض نکن. تنها خروج
   موجود همان مسیر عادی است: اختلاف تازه روی سفارش (از `RECEIPT_CONFIRMED` مجاز است) و تصمیم اپراتور؛ `SETTLE` آن با
   `DISPUTE_RECEIPT_EVIDENCE_MISSING` رد می‌شود چون دریافتی برای بازگشت به آن ثبت نشده، و `REFUND` وجه را برمی‌گرداند. انتخاب
-  میان این و هر راه دیگر تصمیم PM است. از Protocol 11 (D-127)، Saga ـِ چنین سفارشی با ردِ این مجوز پایان نمی‌یابد: در
+  میان این و هر راه دیگر تصمیم PM است. از Protocol 12 (D-127)، Saga ـِ چنین سفارشی با ردِ این مجوز پایان نمی‌یابد: در
   `OBLIGATION_RECONCILIATION` با هشدار `RastaMarketplaceSagaEconomicCallUnconfirmed` (برای `authoriseSettlement`) می‌ماند
   تا همان اختلاف تازه و تصمیم اپراتور، و پس از `REFUND` خودش وجه را برمی‌گرداند. هشدار را با پایان دادن Saga خاموش نکن.
 - **`OPEN_DISPUTE_ORIGIN_UNKNOWN`.** اپراتور می‌تواند `REFUND` کند. اگر به نظر او حق با فروشنده است، شناسه را برای PM بفرست؛

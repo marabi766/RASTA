@@ -13,6 +13,12 @@ import {
   type ObligationFunds,
 } from './economic.client';
 import type { MarketplaceEnv } from '../config/env';
+import {
+  ORDER_HOLD_SEND_DEADLINE_MS,
+  ORDER_HOLD_TRANSACTION_MS,
+  ORDER_HOLD_WAIT_MS,
+} from '../config/operation-budgets';
+import { PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS } from '@rasta/config';
 
 /**
  * The client that moves money (ADR-040).
@@ -312,6 +318,9 @@ describe('a refusal keeps economic-service’s own error code', () => {
   });
 });
 
+/** `MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS`'s default: asked under the same lock. */
+const ORGANIZATION_REQUEST_DEFAULT_MS = 2_000;
+
 describe('one deadline covers the response body too (#502 r1 F1)', () => {
   const original = globalThis.fetch;
   afterEach(() => {
@@ -337,6 +346,42 @@ describe('one deadline covers the response body too (#502 r1 F1)', () => {
       }),
       { status: 200 },
     );
+
+  it('an authorisation holds the order row, so its deadline is the hold’s, not the configured one (FU-178)', async () => {
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      signals.push(init.signal!);
+      return stalledBody();
+    }) as unknown as typeof fetch;
+    const client = new EconomicClient(
+      { ...ENV, ECONOMIC_REQUEST_TIMEOUT_MS: 60_000 } as MarketplaceEnv,
+      recordingTokens().service as never,
+    );
+    const started = Date.now();
+
+    await expect(
+      client.authoriseSettlement({
+        orderId: 'ORD_1',
+        transactionId: 'TXN_1',
+        buyerOrganizationId: 'ORG-BUYER',
+        correlationId: 'corr-1',
+      }),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+
+    const took = Date.now() - started;
+    expect(took).toBeGreaterThanOrEqual(ORDER_HOLD_SEND_DEADLINE_MS - 50);
+    expect(took).toBeLessThan(ORDER_HOLD_SEND_DEADLINE_MS + 1_500);
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  it('the hold’s deadline leaves a waiting command its own transaction, and fits inside the hold’s', () => {
+    expect(ORDER_HOLD_SEND_DEADLINE_MS + ORGANIZATION_REQUEST_DEFAULT_MS).toBeLessThan(
+      PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+    );
+    expect(ORDER_HOLD_TRANSACTION_MS).toBeGreaterThan(
+      ORDER_HOLD_WAIT_MS + ORDER_HOLD_SEND_DEADLINE_MS,
+    );
+  });
 
   it('fails a stalled body as an unavailable service within the deadline, with the signal aborted', async () => {
     const signals: AbortSignal[] = [];

@@ -116,6 +116,16 @@ export { PROVEN_REFUSALS };
  * as an earlier request can still commit, so the saga stays. A read refused while
  * a call is unconfirmed waits too (`read`).
  *
+ * ## Authorisation answers to the order, not to the saga's last read (D-138)
+ *
+ * A read here is already old when the activity it leads to runs: a dispute can
+ * commit in between, or during a retry. So this file decides nothing about whether
+ * an authorisation may go out. The activity decides, on every attempt, with the
+ * order's row held for as long as the send takes. When the order does not allow it,
+ * nothing is sent and the answer says so (`AuthorisationFenced`). The saga then
+ * follows the order as it would after any read, keeping the doubt if an earlier
+ * attempt may have sent it (`AUTHORISATION_FENCE_PATCH`).
+ *
  * ## Owed work outlives every exit (FU-117)
  *
  * What the saga owes stays recorded (`owedWork`) until done or reconciled: no refused
@@ -381,6 +391,15 @@ export const HOLD_WAIT_PATCH = 'economic-hold-call-durable-wait-v1';
  * any call that may answer `ObligationFinal` (`finalAnswers`).
  */
 export const OWED_WORK_PATCH = 'saga-owed-work-durable-v1';
+
+/**
+ * The `patched()` marker of `AuthorisationFenced` (D-138). Asked only when an
+ * activity answers it: a saga never fenced records nothing. It marks a history no
+ * earlier protocol can read, since such a build takes the answer as "authorised".
+ * So does the answer itself, before any workflow task has asked this: the drain
+ * gate reads recorded results too (`resultProtocol`).
+ */
+export const AUTHORISATION_FENCE_PATCH = 'authorisation-order-fence-v1';
 
 /**
  * The exit from the hold's wait on a refusal older than the key (FU-117). Retired (D-132):
@@ -1463,9 +1482,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     // the dispute and the saga reads it again (D-053). An activity recorded
     // before this answer existed returns undefined — authorised.
     //
-    // Unconfirmed, each round reads the order first, and a dispute raised
-    // meanwhile stops the authorisation being sent at all. The saga still does
-    // not follow the order until economic-service answers, here to a read: from
+    // Unconfirmed, each round reads the order first, which saves the activity's
+    // work: the activity decides whether anything is sent (D-138). A dispute seen
+    // by this read still does not move the saga until economic-service answers,
+    // here to a read: from
     // that answer on it can dispute or refund the obligation authorised or not,
     // and a dispute settled back brings the saga here again, under the same key.
     const send = (): Promise<AuthorisationResult> =>
@@ -1493,6 +1513,14 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       if (unconfirmed) unconfirmed.movedOn = true;
       return false;
     }
+    if (authorisation && 'fenced' in authorisation && patched(AUTHORISATION_FENCE_PATCH)) {
+      // Nothing was sent. The activity has already asked economic-service if an
+      // earlier attempt may have, and any doubt goes with the saga: when the order
+      // comes back here, the next send goes out as a later round.
+      if (authorisation.inDoubt) unconfirmed ??= { operation: 'authoriseSettlement', rounds: 0 };
+      if (unconfirmed) unconfirmed.movedOn = true;
+      return false;
+    }
     unconfirmed = undefined;
     if (isFinal(authorisation)) {
       await staysForReconciliation(
@@ -1502,7 +1530,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       );
       return false;
     }
-    if (authorisation?.disputed) {
+    if (authorisation && 'disputed' in authorisation) {
       await takeObligationDispute(authorisation);
       return false;
     }

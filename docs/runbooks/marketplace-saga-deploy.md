@@ -44,13 +44,14 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 Retention تاریخچه و Visibility انجام شود؛ پس از آن، تطبیق عملیاتی لازم است.
 
 Gate همیشه از ریشهٔ مخزن **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout
-انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر پنج اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
+انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر شش اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
 TEMPORAL_ADDRESS='<as the service>' TEMPORAL_NAMESPACE='<as the service>' \
   MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' \
   MARKETPLACE_TARGET_PACKAGE_JSON='<package.json extracted from target image>' \
+  MARKETPLACE_STOPPED_PACKAGE_JSON='<package.json extracted from the image just stopped>' \
   MARKETPLACE_SAGA_STOP_TIME='<recorded UTC time>' \
   node scripts/marketplace-saga-drain-check.mjs
 ```
@@ -212,16 +213,28 @@ Durable history proves protocol requirements for a discovered run; it does not
 discover runs or establish visibility completeness. It adds no workflow commands.
 
 Always run the gate from the **newest of the running and target releases**;
-never use the target checkout when rolling back. Use the five-variable invocation
-in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
+never use the target checkout when rolling back. Use the six-variable invocation
+in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON` and
+`MARKETPLACE_STOPPED_PACKAGE_JSON`.
 
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 8); an absent field means protocol **0**, the strictest legacy
+support (this build: 12); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
-even an empty queue. An incompatible
+even an empty queue.
+
+`MARKETPLACE_STOPPED_PACKAGE_JSON` is the same file from the image of the release just
+stopped, read the same way. **Rollback floor (D-150):** when the stopped release declares
+protocol **11** or more, the gate refuses every target below 11, even with no saga running.
+It sees only that release: a rollback done without the gate leaves nothing for a later run
+of it to see, which is why economic-service's refusal below, not the floor, is what keeps
+an older build's send from landing.
+That release counts each hold send on the order row (`hold_send_claims`), and writes 0 on
+an order it places: an order placed and not yet started has no saga for the gate to inspect,
+and a build below 11 would send its hold uncounted. A stopped release newer than the gate's
+checkout is refused too: run the gate from the newest release. An incompatible
 target blocks regardless of pending activities. Missing/malformed markers,
 unsupported payload encodings and incomplete histories (event sequence/length
 checked against describe) also block. Never add protocol 1 to an old build to
@@ -230,11 +243,15 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**, `saga-owed-work-durable-v1` **6**, `economic-hold-call-durable-wait-v1` **7**, `economic-hold-refusal-exit-v1` **8**, `economic-hold-send-fence-v1` **9**, `economic-hold-fence-on-order-v1` **10**, `economic-refusal-reconciles-held-v1` **11**. A marker the gate does not list blocks every target until the gate learns
+**5**, `saga-owed-work-durable-v1` **6**, `authorisation-order-fence-v1` **7**, `economic-hold-call-durable-wait-v1` **8**, `economic-hold-refusal-exit-v1` **9**, `economic-hold-send-fence-v1` **10**, `economic-hold-fence-on-order-v1` **11**, `economic-refusal-reconciles-held-v1` **12**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
-(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 7, `lateHoldWatch`: 8, `holdNotAfter`: 9; any unlisted field blocks; so does an
+(`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 8, `lateHoldWatch`: 9, `holdNotAfter`: 10; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
-history requires.
+history requires. A recorded result counts as well, whether or not a workflow task has
+read it (`resultProtocol`): stop the workers right after an authorisation completes
+and the next worker reads the answer first, with no marker yet. An `authoriseSettlement`
+answer of `{fenced, status, inDoubt}` requires **7**, because a build below it reads it
+as "authorised".
 
 A build of #625 alone declares 1 although it writes the protocol-2 marker. Once a
 saga holds that marker, the gate refuses that image as a target, rollback or
@@ -297,10 +314,19 @@ doubling from one minute to one hour, and nothing settles meanwhile. After resto
 economic-service, try now with the same signal, which keeps its name:
 `--name retryDisputeRelease`.
 
+Each authorisation goes out with the order's row held (`FOR SHARE`, for at most 2 s;
+D-138), after the row as it stands has been checked. An order no longer in
+`RECEIPT_CONFIRMED` or `SETTLING` is not sent for, on any attempt or round: the saga
+follows the order, and this writes a warning naming the status, not an alert. So a
+dispute or an operator's decision can wait up to 2 s behind a send in progress. When
+economic-service is that slow, the call goes unconfirmed here and the next attempt
+reads the obligation first. A party's command that times out behind the lock is a 5xx
+it can retry under its own key.
+
 Only a refusal the activity marks as proof says the call changed nothing: its own refusal,
 by the receipt guard or the send, with a code in `PROVEN_REFUSALS` (`economic-refusal.ts`),
 on the first attempt this run scheduled. It no longer ends the saga while the money may be
-held (protocol 11, D-127; see "Refused on its first attempt" below). A `temporal workflow
+held (protocol 12, D-127; see "Refused on its first attempt" below). A `temporal workflow
 reset` starts a new run with first attempts and no memory of the old ones, so read the
 obligation before resetting such a saga. A code
 says nothing of the attempts before it, so once any attempt went unconfirmed no code
@@ -333,7 +359,7 @@ is not `HELD` or not on the order's terms stops the saga as it always did
 counts as a round.
 
 A refusal that persists, an empty wallet say, ends this wait only behind a fence
-(protocol 9, D-132). The saga's first send fixes a deadline, 24 h on (`HOLD_FENCE` in
+(protocol 10, D-132). The saga's first send fixes a deadline, 24 h on (`HOLD_FENCE` in
 `economic-refusal.ts`), and every request under the key carries it as `holdNotAfter`,
 across rollovers too. economic-service judges it by its own database clock, in the
 transaction that writes the claim and again in the hold's own, as the last thing before its
@@ -361,7 +387,7 @@ clear by itself: once the obligation is settled by hand, terminate that saga. **
 terminate or cancel a saga in this wait** to clear the alert: check the obligation at
 economic-service and escalate.
 
-**The fence is on the order row, so no run has to remember it (protocol 10, D-144).** A run
+**The fence is on the order row, so no run has to remember it (protocol 11, D-144).** A run
 cannot know what an earlier run sent. Before each send the activity counts it in
 `hold_send_claims` and, on the first, fixes `hold_not_after`, one statement committed before the
 request exists; the deadline never moves, and a trigger refuses any writer that tries. Every
@@ -379,31 +405,49 @@ any run that finds the row so:
 Resetting a saga whose order this build placed is therefore safe for the money. It is still no way to clear an alert: the
 replacement waits out the same deadline.
 
+**An older build's send cannot land (D-150).** A build below protocol 11 sends the hold
+counting nothing on the row and carrying no deadline, so the row cannot know of it. So
+economic-service refuses every `ORDER` hold without `holdNotAfter`, whoever sends it:
+`422 HOLD_DEADLINE_REQUIRED`, nothing held or recorded, the key left free
+(`refuseUnfencedOrderHold`). An answer already stored under the key is still replayed: that
+hold exists, and the saga finds it. What the row says of earlier sends is therefore true of
+every hold that can still land, whichever build sent it, and no marketplace-service rollback
+can make it false. It does depend on economic-service itself running this build or a later
+one (below). The cost is fail-closed: from the moment economic-service
+runs this build, a marketplace-service build below 11 places no hold at all, so its orders fail
+at the hold, nothing held, until workers of this build run. Keep that window short. The rollback
+floor above is a second line: it keeps such a build from following this one through the gate,
+so a rollback of economic-service alone still meets only counted sends.
+
 **Migrate marketplace-service before its new workers (`20261107120000_order_hold_fence`).** Only
-additive. An older worker sends without counting, so after a code rollback do not reset a saga on
-an order this build placed until its first send can no longer land. Its `down.sql` refuses while a deadline is still in use: on any order
-not ended, or on a closed order with no obligation whose sends are open and whose deadline and
-margin have not passed. Roll the code back first, and wait for those orders.
+additive. Its `down.sql` refuses while a deadline is still in use: on any order not ended, or on
+a closed order with no obligation whose sends are open and whose deadline and margin have not
+passed. It needs code below protocol 11, which the gate refuses after this build (the floor):
+only for an environment where this build never served traffic.
 
 **Deploy economic-service first.** Its request schema is strict, so a build without the
 fence refuses `holdNotAfter` with `400 VALIDATION_FAILED` rather than ignoring it. That
 keeps the fence fail-closed through a rollback: a saga in doubt goes on waiting. But a new
-marketplace-service ahead of it fails each new order on its first send, nothing held.
+marketplace-service ahead of it fails each new order on its first send, nothing held. Do not
+roll economic-service back below this build either: an older one holds a send without a
+deadline again (above).
 
-A saga whose first send predates protocol 9 carries no deadline, and economic-service holds
-for such a request as it always did: nothing can prove it will not land, so that saga never
-takes this exit and waits as protocol 7 did. This is safe only because the platform has not
-launched: no real money waits on such a run. Before launch, drain them, since an empty
-wallet leaves one waiting for good. `hold_send_claims` defaults to 1 with no deadline, on every
+A saga whose first send predates protocol 10 carries no deadline, and economic-service now
+refuses such a request (above), so its hold never lands, but the saga cannot know that from its
+row: nothing can prove it will not land, so that saga never
+takes this exit and waits as protocol 8 did. This is safe only because the platform has not
+launched: no real money waits on such a run. Before launch, drain them: every new send of
+theirs is refused, so each one not yet held waits for good with the alert on (fail-closed:
+nothing more is held for it; a hold it already placed is still found and followed). `hold_send_claims` defaults to 1 with no deadline, on every
 order the migration finds and any an older build places during the rollout (only `place` of this
 build writes 0), so a later run of such an order gets no deadline either, and nothing on its row
 proves absence: it waits with the alert on, and one that finds such an order closed stays in
-`LATE_HOLD_WATCH`. A protocol-8 `LATE_HOLD_WATCH`, which has no deadline to pass, no longer ends when its time is up:
+`LATE_HOLD_WATCH`. A protocol-9 `LATE_HOLD_WATCH`, which has no deadline to pass, no longer ends when its time is up:
 it stays with the alert on (`createObligation`, "A hold sent with no deadline"), and an order it
 had not yet closed stays open. It ends when a hold lands and is refunded, or the obligation is found
 terminal with nothing to refund; otherwise check the obligation at economic-service, then terminate
 it as part of the drain. Its input may still carry `economicKeyRetentionHours`
-from protocol 8; it decides nothing live. That exit is kept for replay alone, and a history
+from protocol 9; it decides nothing live. That exit is kept for replay alone, and a history
 that took it replays it. `HOLD_FENCE` decides what a live history does: changing it needs a new patch.
 
 **Operator check: a hold on a closed order.** No longer the only guarantee: the fence is what
@@ -431,7 +475,7 @@ Once a dispute is raised or decided the authorisation stops being sent, but the 
 in this phase until economic-service answers a read of the obligation; only then
 does it file the dispute or refund. One rollback edge, as for the release: a call an older
 build scheduled, whose last attempt failed just as workers stopped, has no marker yet, so a
-target one protocol below it (3 for an authorisation, 4 for a filing or refund, 5 for the
+target one protocol below it (3 for an authorisation, 4 for a filing or refund, 7 for the
 hold) passes the gate and ends that saga as before this wait.
 
 Protocol 5 is forward-only like the others, with its own marker: a protocol-4 history
@@ -439,18 +483,18 @@ carrying `economic-call-durable-wait-v1` from an authorisation may have ended at
 filing or refund, and replays that end. A protocol-4 saga still running when this build
 deploys takes the new wait at its next such call.
 
-Protocol 7 is the hold's, with its own marker and its own resume field (`holdCall`), so that
+Protocol 8 is the hold's, with its own marker and its own resume field (`holdCall`), so that
 the gate refuses a lower target for a saga in that wait: that build has no such wait,
 ends the same history in `FAILED`, and refuses a resumed run at `PENDING`. A saga
 a lower protocol started takes the wait if its hold is still unanswered when this build deploys; a
 history in which a lower protocol already recorded `FAILED` replays that end.
 
-Protocol 8 is the exit from that wait, with its own marker and its own resume field
+Protocol 9 is the exit from that wait, with its own marker and its own resume field
 (`lateHoldWatch`), so that the gate refuses a lower target for a saga that gave its hold up:
-that build would send the hold again, or close without the watch. Retired by protocol 9: no
+that build would send the hold again, or close without the watch. Retired by protocol 10: no
 live run takes it, and a history that recorded it replays it.
 
-Protocol 9 is the fence, with its own marker at the first send and its own resume field
+Protocol 10 is the fence, with its own marker at the first send and its own resume field
 (`holdNotAfter`), so that the gate refuses a lower target for a saga whose requests carry a
 deadline: that build would send under the same key without one, and be refused for ever.
 
@@ -484,7 +528,7 @@ failed attempts still end the saga with `SETTLEMENT_EXHAUSTED` for a human
 next window records one. Only a refused first read, with nothing yet sent, still ends
 the saga.
 
-### Refused on its first attempt (D-127, protocol 11)
+### Refused on its first attempt (D-127, protocol 12)
 
 A refund, filing or authorisation refused on its first attempt (`FORBIDDEN`, `NOT_FOUND`,
 `BUSINESS_RULE_VIOLATION` or another code in `PROVEN_REFUSALS`) changed nothing, but that
@@ -502,9 +546,9 @@ never cancels the order. The doubt is carried across a rollover, so no later rou
 a code. **Do not terminate a saga in this wait** to clear the alert: read the obligation at
 economic-service, remove the refusal's cause or settle it by hand, then send the signal;
 for an order `RECEIPT_CONFIRMED` with no receipt, follow `marketplace-receipt-evidence.md`
-instead and settle nothing. A build below protocol 11 that picks up a run continued from
+instead and settle nothing. A build below protocol 12 that picks up a run continued from
 this wait keeps waiting in doubt, showing the call's `*_UNCONFIRMED` phase.
-A history from before protocol 11 that ended on such a refusal replays that end
+A history from before protocol 12 that ended on such a refusal replays that end
 (fixtures `pre-fu158-*`).
 
 Protocol 6 is forward-only like the others. Every exit above replays its old end from a

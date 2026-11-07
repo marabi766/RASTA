@@ -18,7 +18,9 @@
  * `IDEMPOTENCY_KEY_REUSED` and `REPLAY_WINDOW_CLOSED` (the key was used, perhaps
  * to effect), `OPTIMISTIC_LOCK_FAILED`, `RATE_LIMIT_EXCEEDED`, and the 401s of a
  * token this service mints afresh per call. `HOLD_DEADLINE_PASSED` is not here either:
- * it has a mark and a rule of its own (`sentPastHoldFence`).
+ * it has a mark and a rule of its own (`sentPastHoldFence`). Nor `HOLD_DEADLINE_REQUIRED`
+ * (D-150): it answers only a send that counted nothing on the order, which says nothing of
+ * the sends before it.
  */
 export const PROVEN_REFUSALS: ReadonlySet<string> = new Set([
   'VALIDATION_FAILED',

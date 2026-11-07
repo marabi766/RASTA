@@ -265,7 +265,8 @@ const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
       'and test, `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`), so a new obligation must name ' +
       '`businessLine`. Only marketplace-service recording its own `ORDER` may leave it out ' +
       '(docs/24 Q-130) — or HOLD_DEADLINE_PASSED: the `holdNotAfter` the caller fixed has passed ' +
-      "by this service's clock, and this key answers that from now on",
+      "by this service's clock, and this key answers that from now on — or HOLD_DEADLINE_REQUIRED: " +
+      'an `ORDER` sent without `holdNotAfter`; the key stays free',
   },
   'POST /v1/settlements': {
     422:

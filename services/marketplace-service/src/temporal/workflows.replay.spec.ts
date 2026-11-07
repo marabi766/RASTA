@@ -130,7 +130,7 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     'fu117r5-hold-refunded-cancelled',
     'fu117r5-hold-refunded-failed',
     // FU-158 (D-127): a refund, filing or authorisation refused on its first attempt ended the
-    // run on every build before protocol 11, each captured with that build's own workflow, and
+    // run on every build before protocol 12, each captured with that build's own workflow, and
     // must replay that end. With the marker, the wait to its end, and the refusal kept where
     // the obligation holds nothing.
     'pre-fu158-p4-refund-refused',

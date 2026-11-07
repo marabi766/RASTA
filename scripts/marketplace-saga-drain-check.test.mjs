@@ -155,6 +155,9 @@ function run(
     settings = SETTINGS,
     cli,
     target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 },
+    // The release stopped: by default one below the rollback floor, so that every other
+    // test asks only what the histories require.
+    stopped = { name: TARGET_NAME, marketplaceSagaProtocol: 0 },
     args = [],
   } = {},
 ) {
@@ -166,8 +169,10 @@ function run(
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify(scenario));
     writeFileSync(join(dir, 'calls.jsonl'), '');
     writeFileSync(join(dir, 'target.json'), JSON.stringify(target));
+    writeFileSync(join(dir, 'stopped.json'), JSON.stringify(stopped));
     const env = {
       MARKETPLACE_TARGET_PACKAGE_JSON: join(dir, 'target.json'),
+      MARKETPLACE_STOPPED_PACKAGE_JSON: join(dir, 'stopped.json'),
       PATH: process.env.PATH,
       ...settings,
       TEMPORAL_CLI: cli ?? fake,
@@ -777,7 +782,7 @@ const atProtocol = (marketplaceSagaProtocol) => ({
   target: { name: TARGET_NAME, marketplaceSagaProtocol },
 });
 const FINAL_ANSWER = { final: true, status: 'SETTLED', funds: 'PAID_OUT' };
-const LATEST_KNOWN = 6;
+const LATEST_KNOWN = 7;
 const producers = {
   compensate: [undefined],
   resolveObligationDispute: [undefined],
@@ -910,6 +915,154 @@ for (const [name, recorded, words] of [
   });
 }
 
+// ---- A fenced authorisation, before its marker (#895 r1 F1) ----------------------
+//
+// An authorisation completed `{fenced: true, ...}`, and the workers stopped before the
+// next workflow task recorded `authorisation-order-fence-v1`. A build below the fence
+// took that answer as "authorised": the dispute resolved SETTLE, `markSettling` passed,
+// economic-service still held an unauthorised obligation, and the saga ended
+// SETTLEMENT_EXHAUSTED with the funds held. First attempts, retries and later rounds all
+// reach the workflow through this one recorded result.
+const FENCE_PROTOCOL = 7;
+const fenced = (inDoubt = false, status = 'DISPUTED') => ({ fenced: true, status, inDoubt });
+const answered = (value) => ({ payloads: [encoded(value)] });
+
+/** A real captured history cut right after its last authorisation, answering `value`. */
+function cutAtAuthorisation(name, value, attempt) {
+  const { events } = JSON.parse(
+    readFileSync(
+      new URL(
+        `../services/marketplace-service/src/temporal/__fixtures__/order-saga-${name}.history.json`,
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const last = events.findLastIndex(
+    ({ activityTaskCompletedEventAttributes: done }) =>
+      done &&
+      events[Number(done.scheduledEventId) - 1].activityTaskScheduledEventAttributes.activityType
+        .name === 'authoriseSettlement',
+  );
+  assert.ok(last > 0, `${name} has no authorisation`);
+  const done = events[last].activityTaskCompletedEventAttributes;
+  done.result = answered(value);
+  if (attempt) {
+    events[Number(done.startedEventId) - 1].activityTaskStartedEventAttributes.attempt = attempt;
+  }
+  events[0].workflowExecutionStartedEventAttributes.taskQueue.name = 'rasta-order';
+  return { events: events.slice(0, last + 1) };
+}
+
+for (const [name, recorded] of [
+  ['a first attempt', cutAtAuthorisation('pre-d083-settled', fenced())],
+  ['a retry', cutAtAuthorisation('pre-d083-resumed', fenced(true), 3)],
+  ['a later round', cutAtAuthorisation('fu103-authorise-wait', fenced(true))],
+  [
+    'a resumed run',
+    (() => {
+      const unconfirmedCall = { operation: 'authoriseSettlement', rounds: 2, movedOn: true };
+      const { events } = withResult('authoriseSettlement', answered(fenced(true)));
+      const [start] = history({ resume: { activitySequence: 7, unconfirmedCall } }).events;
+      return { events: [start, ...events.slice(1)] };
+    })(),
+  ],
+]) {
+  test(`#895 r1 F1: a fenced answer to ${name}, no marker yet, refuses below its protocol`, () => {
+    const scenario = showing(recorded);
+    const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+    assert.equal(refused.status, 1);
+    assert.doesNotMatch(refused.stdout, /OK/);
+    assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+    assert.equal(run(scenario, atProtocol(4)).status, 1);
+    assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+  });
+}
+
+test('#895 r1 F1: the fenced answer and its marker together refuse, as the marker alone does', () => {
+  const { events } = withResult('authoriseSettlement', answered(fenced()));
+  const marker = history({}, [{ id: 'authorisation-order-fence-v1', deprecated: false }]).events[1];
+  const scenario = showing({ events: [...events, { ...marker, eventId: '4' }] });
+  const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+  assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+});
+
+test('#895 r1 F1: the authorised answer of a real protocol-4 history still passes protocol 4', () => {
+  const scenario = showing(cutAtAuthorisation('fu103-authorise-wait', undefined));
+  assert.equal(run(scenario, atProtocol(4)).status, 0);
+  assert.match(run(scenario, atProtocol(3)).stderr, /requires saga protocol 4; incompatible/);
+});
+
+for (const [name, result] of [
+  ['an encrypted payload', { payloads: [{ metadata: { encoding: 'YmluYXJ5L2VuY3J5cHRlZA==' } }] }],
+  ['no encoding', { payloads: [{ data: 'e30=' }] }],
+  ['data that is not base64', { payloads: [{ ...payload(0), data: '{"fenced":true}' }] }],
+  ['data that is not JSON', { payloads: [{ ...payload(0), data: 'e2ZlbmNlZA==' }] }],
+  ['data that is not UTF-8', { payloads: [{ ...payload(0), data: 'Iv8i' }] }],
+]) {
+  test(`#895 r1 F1: an authorisation recorded with ${name} refuses even the latest target`, () => {
+    const refused = run(showing(withResult('authoriseSettlement', result)), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /compatibility payload cannot be read/);
+    assertNoSentinel(refused.stdout + refused.stderr);
+  });
+}
+
+// A protocol-6 worker reads every one of these as "authorised".
+for (const value of [
+  { fenced: true },
+  { fenced: true, status: 'DISPUTED' },
+  { fenced: true, inDoubt: false },
+  { fenced: false, status: 'DISPUTED', inDoubt: false },
+  { fenced: 'true', status: 'DISPUTED', inDoubt: false },
+  { fenced: true, status: '', inDoubt: false },
+  { fenced: true, status: 7, inDoubt: false },
+  { fenced: true, status: 'DISPUTED', inDoubt: 'no' },
+  { ...fenced(), another: 1 },
+  { ...fenced(), disputed: true, reason: 'broken' },
+  [fenced()],
+]) {
+  test(`#895 r1 F1: an authorisation answering ${JSON.stringify(value)} refuses even the latest target`, () => {
+    const refused = run(
+      showing(withResult('authoriseSettlement', answered(value))),
+      atProtocol(LATEST),
+    );
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+for (const activity of ['settle', 'markSettling', 'readOrder', 'compensate', 'disputeObligation']) {
+  test(`#895 r1 F1: a fenced answer from ${activity}, which never gives one, refuses`, () => {
+    const refused = run(showing(withResult(activity, answered(fenced()))), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+test('the authorisation answers are the ones the gate reads', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const file = ts.createSourceFile('activities.ts', source, ts.ScriptTarget.Latest, true);
+  const declared = (name) => file.statements.find((node) => node.name?.text === name);
+  // A new answer fails here until it has a protocol and a shape in `resultProtocol`.
+  assert.equal(
+    declared('AuthorisationResult').type.getText().replace(/\s+/g, ' ').trim(),
+    'DisputedObligation | ObligationFinal | AuthorisationFenced | undefined',
+  );
+  const fields = (name) => declared(name).members.map((member) => member.name.text);
+  assert.deepEqual(fields('AuthorisationFenced').toSorted(), ['fenced', 'inDoubt', 'status']);
+  assert.deepEqual(fields('DisputedObligation').toSorted(), [
+    'disputed',
+    'economicDisputeId',
+    'reason',
+  ]);
+});
+
 test('recorded result: a completed event with no result is not taken for a void one', () => {
   const recorded = withResult('compensate');
   delete recorded.events[2].activityTaskCompletedEventAttributes.result;
@@ -968,11 +1121,12 @@ const PATCHES = {
   'economic-call-durable-wait-v1': 4,
   'economic-sibling-call-durable-wait-v1': 5,
   'saga-owed-work-durable-v1': 6,
-  'economic-hold-call-durable-wait-v1': 7,
-  'economic-hold-refusal-exit-v1': 8,
-  'economic-hold-send-fence-v1': 9,
-  'economic-hold-fence-on-order-v1': 10,
-  'economic-refusal-reconciles-held-v1': 11,
+  'authorisation-order-fence-v1': 7,
+  'economic-hold-call-durable-wait-v1': 8,
+  'economic-hold-refusal-exit-v1': 9,
+  'economic-hold-send-fence-v1': 10,
+  'economic-hold-fence-on-order-v1': 11,
+  'economic-refusal-reconciles-held-v1': 12,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -1434,9 +1588,9 @@ const RESUME_FIELDS = {
   unconfirmedCall: 4,
   siblingCall: 5,
   outstandingWork: 6,
-  holdCall: 7,
-  lateHoldWatch: 8,
-  holdNotAfter: 9,
+  holdCall: 8,
+  lateHoldWatch: 9,
+  holdNotAfter: 10,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1607,21 +1761,21 @@ test('a continuation rolled over in the wait of a filing or refund needs protoco
   assert.equal(run(rolled, targetOf(5)).status, 0);
 });
 
-test('a continuation rolled over in the wait of the hold needs protocol 7', () => {
+test('a continuation rolled over in the wait of the hold needs protocol 8', () => {
   const rolled = withHistory(history({ resume: { activitySequence: 1, holdCall: { rounds: 2 } } }));
-  assert.match(run(rolled, targetOf(6)).stderr, /requires saga protocol 7; incompatible/);
-  assert.equal(run(rolled, targetOf(7)).status, 0);
-});
-
-test('a continuation that gave its hold up needs protocol 8', () => {
-  const rolled = withHistory(
-    history({ resume: { activitySequence: 1, lateHoldWatch: { until: 1, reason: 'refused' } } }),
-  );
   assert.match(run(rolled, targetOf(7)).stderr, /requires saga protocol 8; incompatible/);
   assert.equal(run(rolled, targetOf(8)).status, 0);
 });
 
-test('a continuation whose hold carries a deadline needs protocol 9', () => {
+test('a continuation that gave its hold up needs protocol 9', () => {
+  const rolled = withHistory(
+    history({ resume: { activitySequence: 1, lateHoldWatch: { until: 1, reason: 'refused' } } }),
+  );
+  assert.match(run(rolled, targetOf(8)).stderr, /requires saga protocol 9; incompatible/);
+  assert.equal(run(rolled, targetOf(9)).status, 0);
+});
+
+test('a continuation whose hold carries a deadline needs protocol 10', () => {
   const rolled = withHistory(
     history({
       resume: {
@@ -1631,8 +1785,8 @@ test('a continuation whose hold carries a deadline needs protocol 9', () => {
       },
     }),
   );
-  assert.match(run(rolled, targetOf(8)).stderr, /requires saga protocol 9; incompatible/);
-  assert.equal(run(rolled, targetOf(9)).status, 0);
+  assert.match(run(rolled, targetOf(9)).stderr, /requires saga protocol 10; incompatible/);
+  assert.equal(run(rolled, targetOf(10)).status, 0);
 });
 
 test('the retention in a start input asks nothing of the target', () => {
@@ -1668,7 +1822,7 @@ for (const [name, required] of [
   ['fu103-wait-then-dispute-exhausted', 4],
   ['fu117-compensate-wait', 5],
   ['fu117-dispute-wait', 5],
-  ['fu158-refund-waits-then-refunded', 11],
+  ['fu158-refund-waits-then-refunded', 12],
 ]) {
   test(`a real captured history (${name}) requires protocol ${required}`, () => {
     const real = JSON.parse(
@@ -1727,6 +1881,60 @@ for (const target of [
     assert.deepEqual(result.calls, []);
   });
 }
+// D-150: an order the stopped build placed has no saga yet, so no history shows it.
+const FLOOR = PATCHES['economic-hold-fence-on-order-v1'];
+test('a stopped build at the rollback floor refuses every target below it, even with nothing running', () => {
+  const empty = {
+    ...drained(),
+    'workflow count': { stdout: {} },
+    'workflow list': { stdout: [] },
+  };
+  const stopped = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR };
+  for (const protocol of [0, 1, FLOOR - 1]) {
+    const result = run(empty, { stopped, ...targetOf(protocol) });
+    assert.equal(result.status, 1, `target ${protocol}`);
+    assert.match(
+      result.stderr,
+      new RegExp(`declares saga protocol ${protocol}, below the rollback floor ${FLOOR}`),
+    );
+  }
+  assert.match(
+    run(empty, { stopped, target: { name: TARGET_NAME } }).stderr,
+    /declares saga protocol 0, below the rollback floor/,
+  );
+  for (const protocol of [FLOOR, LATEST]) {
+    assert.equal(run(empty, { stopped, ...targetOf(protocol) }).status, 0);
+  }
+  const past = { name: TARGET_NAME, marketplaceSagaProtocol: LATEST };
+  assert.equal(run(empty, { stopped: past, ...targetOf(FLOOR - 1) }).status, 1);
+  // Below the floor it binds nothing: what was there before it still rolls back.
+  const below = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR - 1 };
+  assert.equal(run(empty, { stopped: below, ...targetOf(1) }).status, 0);
+  assert.equal(run(empty, { stopped: { name: TARGET_NAME }, ...targetOf(1) }).status, 0);
+});
+for (const stopped of [
+  { name: '@rasta/economic-service', marketplaceSagaProtocol: 1 },
+  { marketplaceSagaProtocol: 1 },
+  null,
+  { name: TARGET_NAME, marketplaceSagaProtocol: LATEST + 1 },
+  { name: TARGET_NAME, marketplaceSagaProtocol: '11' },
+]) {
+  test(`refuses a wrong, unknown or newer stopped manifest ${JSON.stringify(stopped)} before querying`, () => {
+    const result = run(drained(), { stopped, ...targetOf(LATEST) });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /stopped (manifest is not marketplace-service|build compatibility declaration is unsupported)/);
+    assert.deepEqual(result.calls, []);
+  });
+}
+test('refuses an unreadable or omitted stopped manifest', () => {
+  for (const path of ['', '/nonexistent/stopped.json']) {
+    const result = run(drained(), {
+      settings: { ...SETTINGS, MARKETPLACE_STOPPED_PACKAGE_JSON: path },
+    });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls, []);
+  }
+});
 test('refuses unreadable or omitted target manifest', () => {
   for (const path of ['', '/nonexistent/target.json']) {
     assert.equal(

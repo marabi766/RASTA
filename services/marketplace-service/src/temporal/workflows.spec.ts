@@ -1,4 +1,6 @@
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import { handOff, pollWithin, queryQuiet } from '../../test/legacy-handoff';
+import { runBounded } from '../../test/worker-deadline';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ERROR_STATUS } from '@rasta/contracts';
@@ -12,6 +14,7 @@ import {
   type WorkflowHandle,
 } from '@temporalio/client';
 import {
+  AUTHORISATION_FENCE_PATCH,
   orderSaga,
   outcomeUnknown,
   PROVEN_REFUSALS,
@@ -318,6 +321,14 @@ const provenRefusal = (): Error =>
     details: [REFUSED_ON_FIRST_ATTEMPT],
   });
 
+/**
+ * Asks until `predicate` holds, every ask raced against the step deadline: a
+ * request that is never answered ends the wait too, with the deadline's error
+ * (FU-192 r2).
+ */
+const eventually = (predicate: () => Promise<boolean>, what: string) =>
+  pollWithin(STEP_DEADLINE_MS, predicate, what);
+
 /** `promise`, or a rejection naming `what` once `ms` have passed. */
 async function within<T>(ms: number, promise: Promise<T>, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -329,15 +340,6 @@ async function within<T>(ms: number, promise: Promise<T>, what: string): Promise
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** `until`, for a condition only a query can answer. */
-async function eventually(predicate: () => Promise<boolean>, what: string): Promise<void> {
-  for (let i = 0; i < 400; i += 1) {
-    if (await predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`Timed out waiting for ${what}`);
 }
 
 /**
@@ -355,42 +357,6 @@ async function atRest(handle: WorkflowHandle): Promise<void> {
       last?.workflowTaskCompletedEventAttributes,
     );
   }, 'the saga to come to rest');
-}
-
-/**
- * The saga has nothing in flight at all: every activity it scheduled has been
- * answered, and the last event of its history is the timer it armed or a
- * workflow task that has been answered — none scheduled or started. A test
- * that stops a worker and goes on with another must stop it from here
- * (FU-147). Not a phase query: it replays the events it was sent, answered or
- * not, so it reports the phase of a workflow task the worker is still running
- * (the history ended in WorkflowTaskStarted in 25 of 25 local runs when the
- * old test took that phase for rest). Not {@link atRest} alone either, which a
- * workflow task with no command satisfies while an activity is still running.
- */
-async function quiet(handle: WorkflowHandle): Promise<void> {
-  await eventually(async () => {
-    const events = (await handle.fetchHistory()).events ?? [];
-    const open = new Set<number>();
-    for (const e of events) {
-      if (e.activityTaskScheduledEventAttributes) open.add(Number(e.eventId));
-      const answered =
-        e.activityTaskCompletedEventAttributes ??
-        e.activityTaskFailedEventAttributes ??
-        e.activityTaskTimedOutEventAttributes ??
-        e.activityTaskCanceledEventAttributes;
-      if (answered) open.delete(Number(answered.scheduledEventId));
-    }
-    const last = events.at(-1);
-    return (
-      open.size === 0 &&
-      Boolean(
-        last?.timerStartedEventAttributes ??
-        last?.timerCanceledEventAttributes ??
-        last?.workflowTaskCompletedEventAttributes,
-      )
-    );
-  }, 'the saga to have nothing in flight');
 }
 
 async function until(predicate: () => boolean, what: string): Promise<void> {
@@ -1592,6 +1558,266 @@ describe('the order saga', () => {
       expect(calls.filter((c) => c === 'settle')).toHaveLength(1);
     });
 
+    /**
+     * FU-178, D-138: the real activity over the fake order, so what the saga read
+     * and what the activity holds can differ, as they do in production. `sentWhile`
+     * is the status the order had committed when each authorisation went out: what
+     * the reviewer's probe printed as `sends after dispute commit = ["DISPUTED"]`.
+     */
+    describe('a dispute that commits after the saga read the order (FU-178)', () => {
+      const lost = (): Error => RastaError.upstreamUnavailable('economic-service');
+
+      function overFence(order: FakeOrder) {
+        const owner = {
+          status: 'HELD',
+          sentWhile: [] as Status[],
+          inDoubtArgs: [] as (boolean | undefined)[],
+          post: (): void => {
+            owner.status = 'PENDING_SETTLEMENT';
+          },
+        };
+        const real = createActivities({
+          orders: {
+            describe: async () => ({
+              id: INPUT.orderId,
+              status: order.status,
+              buyerOrganizationId: 'ORG',
+              correlationId: 'COR',
+              receiptConfirmed: true,
+            }),
+            onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+            whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
+              fn({ status: order.status, receiptConfirmed: true }),
+          } as unknown as OrderService,
+          economic: {
+            authoriseSettlement: async () => {
+              owner.sentWhile.push(order.status);
+              owner.post();
+            },
+            readObligation: async () => ({ status: owner.status }),
+          } as unknown as EconomicClient,
+        });
+        const recording = recordingActivities(order);
+        recording.activities.authoriseSettlement = async (id, transaction, inDoubt) => {
+          recording.calls.push('authoriseSettlement');
+          owner.inDoubtArgs.push(inDoubt);
+          return real.authoriseSettlement(id, transaction, inDoubt);
+        };
+        return { ...recording, owner };
+      }
+
+      /** The read the saga is about to act on answers, and `commit` lands right after it. */
+      function afterNextRead(
+        activities: OrderActivities,
+        order: FakeOrder,
+        commit: () => void,
+      ): void {
+        let armed = true;
+        activities.readOrder = async (_id: string, mirrored?: string) => {
+          const view = order.view(mirrored);
+          if (armed && view.status === 'RECEIPT_CONFIRMED') {
+            armed = false;
+            commit();
+          }
+          return view;
+        };
+      }
+
+      const replay = (handle: WorkflowHandle): Promise<void> =>
+        handle
+          .fetchHistory()
+          .then((history) =>
+            Worker.runReplayHistory(
+              { workflowsPath: require.resolve('./workflows') },
+              history,
+              handle.workflowId,
+            ),
+          );
+
+      const reachReceipt = async ({ party, held }: { party: Party; held: () => Promise<void> }) => {
+        await held();
+        await party.confirm();
+        await party.fulfil();
+        await party.confirmReceipt();
+      };
+
+      it('between the read and the first send: nothing is sent, and the saga waits on the dispute', async () => {
+        const order = new FakeOrder();
+        const { calls, effects, activities, owner } = overFence(order);
+        afterNextRead(activities, order, () => order.raiseDispute('it arrived broken'));
+        let seen: WorkflowHandle | undefined;
+
+        const result = await run(order, activities, async (ctx) => {
+          seen = ctx.handle;
+          await reachReceipt(ctx);
+          await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+          // The saga sits in the dispute: no send, however long it waits.
+          await phaseIs(ctx.handle, 'DISPUTED');
+          await atRest(ctx.handle);
+          await env.sleep('3 days');
+          expect(owner.sentWhile).toEqual([]);
+          await atRest(ctx.handle);
+          await ctx.party.resolve('SETTLE', 'the supplier replaced it');
+        });
+
+        expect(result).toBe('COMPLETED');
+        expect(owner.sentWhile).toEqual(['RECEIPT_CONFIRMED']);
+        expect(effects()).toEqual([
+          'createObligation',
+          'markFundsHeld',
+          'authoriseSettlement',
+          'disputeObligation',
+          'resolveObligationDispute',
+          'authoriseSettlement',
+          'markSettling',
+          'settle',
+          'markCompleted',
+        ]);
+        // No attempt went out, so no doubt came back with the saga.
+        expect(owner.inDoubtArgs).toEqual([false, false]);
+        const handle = seen as WorkflowHandle;
+        expect(await patchIds(handle)).toContain(AUTHORISATION_FENCE_PATCH);
+        await replay(handle);
+      });
+
+      it('between a later round’s read and its send: nothing is sent, and the doubt stays with the saga', async () => {
+        const order = new FakeOrder();
+        const { calls, rounds, activities, owner } = overFence(order);
+        owner.post = () => {
+          throw lost();
+        };
+        const commitAfterRead: { current?: () => void } = {};
+        const readNow = activities.readOrder;
+        activities.readOrder = async (id: string, mirrored?: string) => {
+          const view = await readNow(id, mirrored);
+          const commit = view.status === 'RECEIPT_CONFIRMED' ? commitAfterRead.current : undefined;
+          if (commit) {
+            commitAfterRead.current = undefined;
+            commit();
+          }
+          return view;
+        };
+        let seen: WorkflowHandle | undefined;
+
+        const result = await run(
+          order,
+          activities,
+          async (ctx) => {
+            seen = ctx.handle;
+            await toWait(ctx, () => rounds.length);
+            const sentBefore = owner.sentWhile.length;
+            await atRest(ctx.handle);
+            commitAfterRead.current = () => order.raiseDispute('it arrived broken');
+            await ctx.handle.signal(retryDisputeRelease);
+            await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+            expect(owner.sentWhile).toHaveLength(sentBefore);
+            expect(owner.sentWhile).not.toContain('DISPUTED');
+            await phaseIs(ctx.handle, 'DISPUTED');
+            await atRest(ctx.handle);
+            owner.post = () => {
+              owner.status = 'PENDING_SETTLEMENT';
+            };
+            await ctx.party.resolve('SETTLE', 'the supplier replaced it');
+          },
+          { input: NO_RECHECK },
+        );
+
+        expect(result).toBe('COMPLETED');
+        expect(owner.sentWhile).not.toContain('DISPUTED');
+        expect(owner.inDoubtArgs.at(-1)).toBe(true);
+        await replay(seen as WorkflowHandle);
+      });
+
+      it('during an attempt that then fails: its retry sends nothing, and the saga waits on the dispute', async () => {
+        const order = new FakeOrder();
+        const { calls, activities, owner } = overFence(order);
+        owner.post = () => {
+          owner.post = () => {
+            owner.status = 'PENDING_SETTLEMENT';
+          };
+          order.raiseDispute('it arrived broken');
+          throw lost();
+        };
+
+        const result = await run(order, activities, async (ctx) => {
+          await reachReceipt(ctx);
+          await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+          expect(owner.sentWhile).toEqual(['RECEIPT_CONFIRMED']);
+          await phaseIs(ctx.handle, 'DISPUTED');
+          await atRest(ctx.handle);
+          await ctx.party.resolve('SETTLE', 'the supplier replaced it');
+        });
+
+        expect(result).toBe('COMPLETED');
+        expect(owner.sentWhile).toEqual(['RECEIPT_CONFIRMED', 'RECEIPT_CONFIRMED']);
+        // The first attempt and its retry; the first went out, so the send after the
+        // decision is a later round.
+        expect(owner.inDoubtArgs).toEqual([false, false, true]);
+      });
+
+      it('during an attempt whose answer was lost: its retry reads the effect and sends nothing', async () => {
+        const order = new FakeOrder();
+        const { calls, activities, owner } = overFence(order);
+        owner.post = () => {
+          owner.status = 'PENDING_SETTLEMENT';
+          order.raiseDispute('it arrived broken');
+          throw lost();
+        };
+
+        const result = await run(order, activities, async (ctx) => {
+          await reachReceipt(ctx);
+          await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+          await phaseIs(ctx.handle, 'DISPUTED');
+          await atRest(ctx.handle);
+          owner.post = () => undefined;
+          await ctx.party.resolve('SETTLE', 'the supplier replaced it');
+        });
+
+        expect(result).toBe('COMPLETED');
+        // The retry is answered from the obligation ("authorised"), so the saga goes on
+        // to `markSettling`, which yields to the dispute; the next send follows the decision.
+        expect(owner.sentWhile).toEqual(['RECEIPT_CONFIRMED', 'RECEIPT_CONFIRMED']);
+        expect(calls.indexOf('markSettling')).toBeLessThan(calls.indexOf('disputeObligation'));
+        expect(calls.indexOf('markSettling')).toBeGreaterThan(-1);
+      });
+
+      it('disputed and decided REFUND before the send: nothing is sent, and the saga refunds', async () => {
+        const order = new FakeOrder();
+        const { effects, activities, owner } = overFence(order);
+        afterNextRead(activities, order, () => {
+          order.raiseDispute('it never arrived');
+          order.resolveDispute('REFUND', 'the supplier agrees');
+        });
+
+        const result = await run(order, activities, reachReceipt);
+
+        expect(result).toBe('CANCELLED');
+        expect(owner.sentWhile).toEqual([]);
+        expect(effects()).toEqual([
+          'createObligation',
+          'markFundsHeld',
+          'authoriseSettlement',
+          'compensate',
+          'markCancelled',
+        ]);
+      });
+
+      it('a saga never fenced records no marker', async () => {
+        const order = new FakeOrder();
+        const { activities, owner } = overFence(order);
+        let seen: WorkflowHandle | undefined;
+
+        const result = await run(order, activities, async (ctx) => {
+          seen = ctx.handle;
+          await reachReceipt(ctx);
+        });
+
+        expect(result).toBe('COMPLETED');
+        expect(owner.sentWhile).toEqual(['RECEIPT_CONFIRMED']);
+        expect(await patchIds(seen as WorkflowHandle)).not.toContain(AUTHORISATION_FENCE_PATCH);
+      });
+    });
+
     it('decided REFUND during the wait: nothing is refunded until economic-service answers', async () => {
       const order = new FakeOrder();
       const { calls, rounds, activities, economic } = failing(order);
@@ -1682,6 +1908,9 @@ describe('the order saga', () => {
         'RATE_LIMIT_EXCEEDED',
         // Has its own mark and rule instead (`sentPastHoldFence`), and never ends a wait alone.
         'HOLD_DEADLINE_PASSED',
+        // Answers only a send that counted nothing, so it says nothing of the sends before it
+        // (D-150): never proof, whichever attempt hears it.
+        'HOLD_DEADLINE_REQUIRED',
       ];
       for (const [code, status] of Object.entries(ERROR_STATUS)) {
         const proof = status < 500 && !notProof.includes(code);
@@ -1750,9 +1979,12 @@ describe('the order saga', () => {
               id: INPUT.orderId,
               buyerOrganizationId: 'ORG',
               correlationId: 'COR',
+              status: 'RECEIPT_CONFIRMED',
               receiptConfirmed: true,
             }),
             onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+            whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
+              fn({ status: 'RECEIPT_CONFIRMED', receiptConfirmed: true }),
           } as unknown as OrderService,
           economic: {
             authoriseSettlement: async () => {
@@ -1776,7 +2008,7 @@ describe('the order saga', () => {
         await party.confirmReceipt();
       };
 
-      it.each(LISTED)('%s on a retry, the read answers: the effect is the answer', async (code) => {
+      it.each(LISTED)('%s on a retry, the read answers first: no second POST', async (code) => {
         const order = new FakeOrder();
         const { calls, activities, owner } = overRealActivity(order);
         owner.losesFirstAnswer(() => {
@@ -1786,7 +2018,7 @@ describe('the order saga', () => {
         const result = await run(order, activities, reachReceipt);
 
         expect(result).toBe('COMPLETED');
-        expect(owner.posts).toBe(2);
+        expect(owner.posts).toBe(1);
         expect(calls).not.toContain('noteEconomicCallUnconfirmed');
       });
 
@@ -3626,12 +3858,14 @@ describe('a saga the previous release started, replayed and then run live (#625 
       });
       // Stopped from a history with nothing in flight, not from the phase the
       // saga reported: that is read off a workflow task still running (FU-147).
-      await old.runUntil(
-        within(
-          STEP_DEADLINE_MS,
-          previous({ party, handle }).then(() => quiet(handle)),
-          'the previous release to drive',
-        ),
+      await runBounded(
+        old,
+        {
+          what: 'the previous release to drive',
+          ms: STEP_DEADLINE_MS,
+          connection: env.client.connection,
+        },
+        (deadline) => handOff(handle, deadline, () => previous({ party, handle })),
       );
       const fresh = await Worker.create({
         connection: env.nativeConnection,
@@ -3692,9 +3926,10 @@ describe('a saga the previous release started, replayed and then run live (#625 
    * the saga has nothing in flight, which takes one query, not a poll.
    */
   const phaseIs = async (handle: WorkflowHandle, phase: string): Promise<void> => {
-    await quiet(handle);
-    await eventually(
-      async () => (await handle.query<SagaStatus, []>('status')).phase === phase,
+    await pollWithin(
+      STEP_DEADLINE_MS,
+      async (deadline) =>
+        (await queryQuiet<SagaStatus>(handle, deadline, 'status')).phase === phase,
       `the saga to wait in ${phase}`,
     );
   };

@@ -44,7 +44,9 @@
  * MARKETPLACE_TARGET_PACKAGE_JSON is the package.json extracted from the target
  * image, whose name must be @rasta/marketplace-service. marketplaceSagaProtocol
  * is a protocol this gate knows (`PATCH_PROTOCOL`); an absent field means 0, the
- * legacy protocol. Always run this gate from the
+ * legacy protocol. MARKETPLACE_STOPPED_PACKAGE_JSON is the same file from the image of the
+ * release just stopped: when it is at or above ROLLBACK_FLOOR, no target below it passes,
+ * as it may have left orders no saga lists yet (D-150). Always run this gate from the
  * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
@@ -182,21 +184,38 @@ const PATCH_PROTOCOL = new Map([
   ['economic-call-durable-wait-v1', 4],
   ['economic-sibling-call-durable-wait-v1', 5],
   ['saga-owed-work-durable-v1', 6],
-  ['economic-hold-call-durable-wait-v1', 7],
-  ['economic-hold-refusal-exit-v1', 8],
-  ['economic-hold-send-fence-v1', 9],
-  ['economic-hold-fence-on-order-v1', 10],
-  ['economic-refusal-reconciles-held-v1', 11],
+  ['authorisation-order-fence-v1', 7],
+  ['economic-hold-call-durable-wait-v1', 8],
+  ['economic-hold-refusal-exit-v1', 9],
+  ['economic-hold-send-fence-v1', 10],
+  ['economic-hold-fence-on-order-v1', 11],
+  ['economic-refusal-reconciles-held-v1', 12],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
+// The hold's fence on the order row (D-144): a build below it sends uncounted (D-150).
+const ROLLBACK_FLOOR = PATCH_PROTOCOL.get('economic-hold-fence-on-order-v1');
+
+/** A release manifest's declared protocol. Pre-protocol releases declare none: 0. */
+function declaredProtocol(manifest, which) {
+  if (manifest?.name !== '@rasta/marketplace-service') {
+    throw new Unverifiable(`${which} manifest is not marketplace-service`);
+  }
+  // Pre-protocol releases support only legacy histories; do not rewrite their manifests.
+  const protocol =
+    manifest.marketplaceSagaProtocol === undefined ? 0 : manifest.marketplaceSagaProtocol;
+  if (!Number.isInteger(protocol) || protocol < 0 || protocol > LATEST_PROTOCOL) {
+    throw new Unverifiable(`${which} build compatibility declaration is unsupported`);
+  }
+  return protocol;
+}
 // A continued run has no marker until its first workflow task: its `resume` is
 // the only evidence of what wrote it: `reminderDue` came with protocol 2, and
 // `releaseRounds` means it rolled over inside the release wait of protocol 3,
 // `unconfirmedCall` inside the same wait of an authorisation, protocol 4,
 // `siblingCall` inside that of a dispute filing or a refund, protocol 5,
 // `outstandingWork` with work owed outside any call's wait, protocol 6,
-// `holdCall` inside the wait of the hold, protocol 7, `lateHoldWatch` after giving
-// that hold up, protocol 8, and `holdNotAfter` in that wait with a fenced hold, protocol 9.
+// `holdCall` inside the wait of the hold, protocol 8, `lateHoldWatch` after giving
+// that hold up, protocol 9, and `holdNotAfter` in that wait with a fenced hold, protocol 10.
 const RESUME_PROTOCOL = new Map([
   ['status', 1],
   ['mirroredDispute', 1],
@@ -209,9 +228,9 @@ const RESUME_PROTOCOL = new Map([
   ['unconfirmedCall', 4],
   ['siblingCall', 5],
   ['outstandingWork', 6],
-  ['holdCall', 7],
-  ['lateHoldWatch', 8],
-  ['holdNotAfter', 9],
+  ['holdCall', 8],
+  ['lateHoldWatch', 9],
+  ['holdNotAfter', 10],
 ]);
 // Every field a saga has ever been started with; any other could mean anything.
 const INPUT_FIELDS = new Set([
@@ -256,6 +275,17 @@ const isDisputedAnswer = (value) =>
   value.disputed === true &&
   typeof value.reason === 'string' &&
   Object.keys(value).every((field) => ['disputed', 'reason', 'economicDisputeId'].includes(field));
+// An authorisation the order fenced: nothing was sent. To a build below its protocol this
+// reads as "authorised", and the saga goes on to settle what economic-service never
+// authorised (#895 r1 F1). Only the authorisation answers it.
+const FENCED_ANSWER_PROTOCOL = PATCH_PROTOCOL.get('authorisation-order-fence-v1');
+const isFencedAnswer = (value) =>
+  isRecord(value) &&
+  value.fenced === true &&
+  typeof value.status === 'string' &&
+  value.status !== '' &&
+  typeof value.inDoubt === 'boolean' &&
+  Object.keys(value).length === 3;
 // The four calls that may answer `ObligationFinal`: true for their answers before it.
 const FINAL_ANSWER_CALLS = new Map([
   ['compensate', (value) => value === undefined],
@@ -266,7 +296,7 @@ const FINAL_ANSWER_CALLS = new Map([
   ],
   ['authoriseSettlement', (value) => value === undefined || isDisputedAnswer(value)],
 ]);
-// None of these has ever given a final answer, and one that does is refused.
+// None of these has ever given a final or a fenced answer, and one that does is refused.
 const OTHER_CALLS = new Set([
   'createObligation',
   'findObligation',
@@ -288,7 +318,9 @@ function resultProtocol(activity, value) {
   const earlier = FINAL_ANSWER_CALLS.get(activity);
   if (earlier?.(value)) return 0;
   if (earlier && isFinalAnswer(value)) return FINAL_ANSWER_PROTOCOL;
-  if (OTHER_CALLS.has(activity) && !(isRecord(value) && Object.hasOwn(value, 'final'))) return 0;
+  if (activity === 'authoriseSettlement' && isFencedAnswer(value)) return FENCED_ANSWER_PROTOCOL;
+  const claimsAnother = isRecord(value) && ['final', 'fenced'].some((f) => Object.hasOwn(value, f));
+  if (OTHER_CALLS.has(activity) && !claimsAnother) return 0;
   throw new Unverifiable('workflow history: unknown activity result');
 }
 
@@ -411,17 +443,28 @@ function check() {
   } catch {
     throw new Unverifiable('target build compatibility declaration cannot be read');
   }
-  if (target?.name !== '@rasta/marketplace-service') {
-    throw new Unverifiable('target manifest is not marketplace-service');
+  const targetProtocol = declaredProtocol(target, 'target');
+  // The release just stopped, from its own image too. It may have left on an order what no
+  // listed saga shows: an order placed, its saga not yet started, whose row counts every
+  // send (`hold_send_claims` = 0). A build below `ROLLBACK_FLOOR` would send that hold
+  // uncounted (review of #812 r3, F1), so once a release at or above it has run, nothing
+  // below follows it, whatever Temporal lists (D-150). A stopped release newer than this
+  // gate is one the gate cannot speak for: run it from the newest release.
+  let stopped;
+  try {
+    stopped = JSON.parse(readFileSync(setting('MARKETPLACE_STOPPED_PACKAGE_JSON'), 'utf8'));
+  } catch {
+    throw new Unverifiable('stopped build compatibility declaration cannot be read');
   }
-  // Pre-protocol releases support only legacy histories; do not rewrite their manifests.
-  const targetProtocol =
-    target.marketplaceSagaProtocol === undefined ? 0 : target.marketplaceSagaProtocol;
-  if (!Number.isInteger(targetProtocol) || targetProtocol < 0 || targetProtocol > LATEST_PROTOCOL) {
-    throw new Unverifiable('target build compatibility declaration is unsupported');
+  const stoppedProtocol = declaredProtocol(stopped, 'stopped');
+  const blockers = [];
+  if (stoppedProtocol >= ROLLBACK_FLOOR && targetProtocol < ROLLBACK_FLOOR) {
+    blockers.push(
+      `target build declares saga protocol ${targetProtocol}, below the rollback floor ` +
+        `${ROLLBACK_FLOOR} the stopped build reached: it would send a hold uncounted`,
+    );
   }
   const common = ['--address', address, '--namespace', namespace];
-  const blockers = [];
 
   const queue = temporal(cli, [
     'task-queue',

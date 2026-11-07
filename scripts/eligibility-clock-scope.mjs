@@ -331,6 +331,12 @@ const REVIEWED_COMPUTED_IMPORTS = [
       'the server-action modules discoverServerActions finds under apps/web/src: production (apps/*/src)',
   },
   {
+    file: 'apps/web/src/unconfirmed-retry-guard.spec.ts',
+    argument: 'join(REPO_ROOT, module)',
+    loads:
+      'the server-action modules discoverServerActions finds under apps/web/src: production (apps/*/src)',
+  },
+  {
     file: 'packages/observability/src/diagnostics.spec.ts',
     argument: 'name',
     loads:

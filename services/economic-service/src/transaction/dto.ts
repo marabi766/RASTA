@@ -109,8 +109,9 @@ export const createTransactionSchema = z
      * The instant after which this hold may no longer be placed, fixed by the caller at
      * its first send and the same on every retry: past it by this service's clock, 422
      * `HOLD_DEADLINE_PASSED` with nothing recorded (`IdempotencyStore`, D-132). In the
-     * request's hash, so one key never answers two deadlines. A hold without it is placed
-     * as ever; only a saga that predates the deadline sends none (docs/runbooks/marketplace-saga-deploy.md).
+     * request's hash, so one key never answers two deadlines. Required for an `ORDER`:
+     * without it, 422 `HOLD_DEADLINE_REQUIRED` with nothing recorded (D-150,
+     * `TransactionService.create`); any other source may hold without one.
      */
     holdNotAfter: z.string().check(isoDateTime()).optional(),
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */

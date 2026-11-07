@@ -254,7 +254,19 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
 
   type Fn = (...args: never[]) => unknown;
 
-  function saga(row: Row, overrides: Record<string, Fn> = {}) {
+  /** An empty wallet's economic-service: its refusal, and past the deadline the fence's. */
+  const emptyWallet = async (input: Sent): Promise<never> => {
+    const past =
+      input.holdNotAfter !== undefined &&
+      (await env.currentTimeMs()) > Date.parse(input.holdNotAfter);
+    throw refuse(past ? HOLD_DEADLINE_PASSED : BROKE);
+  };
+
+  function saga(
+    row: Row,
+    overrides: Record<string, Fn> = {},
+    holds: (input: Sent) => Promise<unknown> = emptyWallet,
+  ) {
     const calls: string[] = [];
     const sent: Sent[] = [];
     const rounds: string[] = [];
@@ -263,13 +275,9 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
     const real = createActivities({
       orders: ordersOver(row, () => env.currentTimeMs()) as unknown as OrderService,
       economic: {
-        // An empty wallet's economic-service: its refusal, and past the deadline the fence's.
         createObligation: async (input: Sent) => {
           sent.push(input);
-          const past =
-            input.holdNotAfter !== undefined &&
-            (await env.currentTimeMs()) > Date.parse(input.holdNotAfter);
-          throw refuse(past ? HOLD_DEADLINE_PASSED : BROKE);
+          return holds(input);
         },
         readObligation: async () => ({ status: 'HELD', heldProven: true }),
       } as unknown as EconomicClient,
@@ -507,7 +515,7 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
     expect(s.calls).not.toContain('markCancelled');
   });
 
-  describe('a legacy watch, from before the fence (protocol 8)', () => {
+  describe('a legacy watch, from before the fence (protocol 9)', () => {
     const watching = async (order: string): Promise<Partial<OrderSagaInput>> => ({
       resume: {
         status: STATUS,
@@ -606,6 +614,164 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
       (input.resume as SagaResume).holdNotAfter = holdDeadlineFrom(0);
       await expect(drive(s, resultOf, input)).resolves.toBe('FAILED');
       expect(s.rounds).toEqual([]);
+    });
+  });
+
+  /**
+   * Review of #812 r3, F1 (PM decision D-150): an older or rolled-back marketplace build
+   * sends the hold of an order this build placed, counting nothing on its row and carrying
+   * no deadline, and that request lands after this build's saga has decided from the row.
+   * The row cannot know of it, so economic-service refuses every such send, whoever sends
+   * it (`refuseUnfencedOrderHold`, proven against the real endpoint and database in
+   * economic-service's `order-hold-deadline-required.int-spec.ts`). Here that service is
+   * a ledger under the order's one key, and each of the four consequences the review
+   * reproduced is driven to its end. Its invariant: no hold is left held on an order the
+   * saga closed without refunding it. `fenced: false` is the service before D-150, which
+   * held such a send: the same runs then strand it, as the review found.
+   */
+  describe('an older build’s send, on an order this build placed (#812 r3 F1, D-150)', () => {
+    function economicService({ fenced = true } = {}) {
+      const ledger = { funded: false, held: [] as string[], refunded: [] as string[] };
+      let heldWith: string | undefined;
+      const holds = async (input: Sent): Promise<{ id: string }> => {
+        // One key: a hold already there answers the same request, and refuses another,
+        // before any rule of the work is asked.
+        if (ledger.held.length > 0 && heldWith !== input.holdNotAfter) {
+          throw refuse('IDEMPOTENCY_KEY_REUSED');
+        }
+        if (fenced && input.holdNotAfter === undefined) throw refuse('HOLD_DEADLINE_REQUIRED');
+        await emptyWallet(input).catch((refusal: RastaError) => {
+          if (refusal.code === HOLD_DEADLINE_PASSED || !ledger.funded) throw refusal;
+        });
+        if (ledger.held.length === 0) {
+          ledger.held.push('TXN_OLDER');
+          heldWith = input.holdNotAfter;
+        }
+        return { id: ledger.held[0]! };
+      };
+      return {
+        ledger,
+        holds,
+        /** What the saga can see of the ledger: the lookup, and the refund. */
+        overrides: {
+          findObligation: () => {
+            const open = ledger.held.filter((id) => !ledger.refunded.includes(id));
+            return open.length > 0 ? { transactionId: open[0] } : null;
+          },
+          compensate: () => {
+            ledger.refunded.push(...ledger.held);
+          },
+        } as Record<string, Fn>,
+        /**
+         * origin/main's `createObligation`, the build a rollback runs: the same request,
+         * nothing claimed on the row and no deadline (that build has neither). It left
+         * before this build's saga decided, and is let through to land afterwards, with the
+         * buyer's wallet funded by then.
+         */
+        olderBuildsSendLands: async (row: Row) => {
+          const claims = row.claims;
+          ledger.funded = true;
+          const answer = await holds({}).catch((refusal: unknown) => refusal);
+          expect(row.claims).toBe(claims);
+          return answer;
+        },
+        /** Held on an order the saga closed, never refunded: the money the review lost. */
+        stranded: () => ledger.held.filter((id) => !ledger.refunded.includes(id)),
+      };
+    }
+    /**
+     * The four consequences the review reproduced. Each drives a run of this build to its
+     * end over a row an older build's send never counted on, and checks what the run
+     * decided from it, the decision the review found unsafe.
+     */
+    const CONSEQUENCES: [
+      string,
+      () => Promise<Row>,
+      (s: ReturnType<typeof saga>, row: Row) => Promise<void>,
+    ][] = [
+      [
+        'zero count: the replacement cancels on "no send began"',
+        async () => freshRow(cancelling),
+        async (s) => {
+          await expect(drive(s, resultOf)).resolves.toBe('CANCELLED');
+          expect(s.calls).toContain('noHoldCanLand');
+          expect(s.sent).toEqual([]);
+        },
+      ],
+      [
+        'first-ever refusal: the order fails at once on it',
+        async () => freshRow(),
+        async (s, row) => {
+          const started = await env.currentTimeMs();
+          await expect(drive(s, resultOf)).resolves.toBe('FAILED');
+          expect(s.closedAt[0]! - started).toBeLessThan(HOLD_FENCE.clockMarginMs);
+          expect(row).toMatchObject({ claims: 1, closed: true });
+        },
+      ],
+      [
+        'deadline expiry: the replacement fails the order past deadline and margin',
+        async () => (await leftBy()).row,
+        async (s, row) => {
+          const limit = Date.parse(row.holdNotAfter!) + HOLD_FENCE.clockMarginMs;
+          await expect(drive(s, resultOf)).resolves.toBe('FAILED');
+          expect(s.closedAt[0]).toBeGreaterThan(limit);
+          expect(s.sent.every((input) => input.holdNotAfter === row.holdNotAfter)).toBe(true);
+        },
+      ],
+      [
+        'closed-order recovery: the replacement finds no recorded send and ends',
+        async () => freshRow({ status: 'CANCELLED' }),
+        async (s) => {
+          await expect(drive(s, resultOf)).resolves.toBe('CANCELLED');
+          expect(s.calls).not.toContain('findObligation');
+        },
+      ],
+    ];
+
+    it.each(CONSEQUENCES)(
+      '%s, and the older send that lands holds nothing',
+      async (_name, rowOf, decides) => {
+        const row = await rowOf();
+        const economic = economicService();
+        await decides(saga(row, economic.overrides, economic.holds), row);
+
+        expect(await economic.olderBuildsSendLands(row)).toMatchObject({
+          code: 'HOLD_DEADLINE_REQUIRED',
+        });
+        expect(economic.stranded()).toEqual([]);
+      },
+    );
+
+    it.each(CONSEQUENCES)(
+      'before D-150, %s, and the older send that lands is held for good',
+      async (_name, rowOf, decides) => {
+        const row = await rowOf();
+        const economic = economicService({ fenced: false });
+        await decides(saga(row, economic.overrides, economic.holds), row);
+
+        expect(await economic.olderBuildsSendLands(row)).toEqual({ id: 'TXN_OLDER' });
+        expect(economic.stranded()).toEqual(['TXN_OLDER']);
+      },
+    );
+
+    it('this build’s own counted send still holds, and the older build’s send after it holds nothing more', async () => {
+      const row = freshRow();
+      const economic = economicService();
+      economic.ledger.funded = true;
+      const s = saga(
+        row,
+        { ...economic.overrides, markFundsHeld: () => 'FUNDS_HELD' },
+        economic.holds,
+      );
+      await drive(s, async () => {
+        await eventually(() => s.calls.includes('markFundsHeld'), 'the hold');
+      });
+      expect(economic.ledger.held).toEqual(['TXN_OLDER']);
+      expect(s.sent[0]?.holdNotAfter).toBe(row.holdNotAfter);
+      expect(await economic.olderBuildsSendLands(row)).toMatchObject({
+        code: 'IDEMPOTENCY_KEY_REUSED',
+      });
+      expect(economic.ledger.held).toEqual(['TXN_OLDER']);
     });
   });
 

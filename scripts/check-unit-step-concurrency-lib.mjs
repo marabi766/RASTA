@@ -61,16 +61,8 @@ import { shellTextProblem } from './ci-shell-text-lib.mjs';
 export const BOUNDED = { workflow: 'ci.yml', job: 'quality-unit', step: 'Unit tests' };
 export const BOUNDED_COMMAND = 'pnpm run test:unit:ci';
 
-export const UNBOUNDED_EXCEPTIONS = [
-  {
-    workflow: 'ci.yml',
-    job: 'integration-security',
-    step: 'Tenant isolation and authorization tests',
-    command:
-      'pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"',
-    reason: 'The filtered integration-security phase is outside the measured quality unit step.',
-  },
-];
+// FU-185: the filtered security unit rerun was removed; no unbounded unit runs remain.
+export const UNBOUNDED_EXCEPTIONS = [];
 
 /** One extractor for every run block; source stays exact for the exception identity. */
 function logicalCommands(script, opaqueFragments = false) {
