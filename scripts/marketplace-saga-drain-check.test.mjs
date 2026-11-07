@@ -155,6 +155,9 @@ function run(
     settings = SETTINGS,
     cli,
     target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 },
+    // The release stopped: by default one below the rollback floor, so that every other
+    // test asks only what the histories require.
+    stopped = { name: TARGET_NAME, marketplaceSagaProtocol: 0 },
     args = [],
   } = {},
 ) {
@@ -166,8 +169,10 @@ function run(
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify(scenario));
     writeFileSync(join(dir, 'calls.jsonl'), '');
     writeFileSync(join(dir, 'target.json'), JSON.stringify(target));
+    writeFileSync(join(dir, 'stopped.json'), JSON.stringify(stopped));
     const env = {
       MARKETPLACE_TARGET_PACKAGE_JSON: join(dir, 'target.json'),
+      MARKETPLACE_STOPPED_PACKAGE_JSON: join(dir, 'stopped.json'),
       PATH: process.env.PATH,
       ...settings,
       TEMPORAL_CLI: cli ?? fake,
@@ -1874,6 +1879,60 @@ for (const target of [
     assert.deepEqual(result.calls, []);
   });
 }
+// D-150: an order the stopped build placed has no saga yet, so no history shows it.
+const FLOOR = PATCHES['economic-hold-fence-on-order-v1'];
+test('a stopped build at the rollback floor refuses every target below it, even with nothing running', () => {
+  const empty = {
+    ...drained(),
+    'workflow count': { stdout: {} },
+    'workflow list': { stdout: [] },
+  };
+  const stopped = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR };
+  for (const protocol of [0, 1, FLOOR - 1]) {
+    const result = run(empty, { stopped, ...targetOf(protocol) });
+    assert.equal(result.status, 1, `target ${protocol}`);
+    assert.match(
+      result.stderr,
+      new RegExp(`declares saga protocol ${protocol}, below the rollback floor ${FLOOR}`),
+    );
+  }
+  assert.match(
+    run(empty, { stopped, target: { name: TARGET_NAME } }).stderr,
+    /declares saga protocol 0, below the rollback floor/,
+  );
+  for (const protocol of [FLOOR, LATEST]) {
+    assert.equal(run(empty, { stopped, ...targetOf(protocol) }).status, 0);
+  }
+  const past = { name: TARGET_NAME, marketplaceSagaProtocol: LATEST };
+  assert.equal(run(empty, { stopped: past, ...targetOf(FLOOR - 1) }).status, 1);
+  // Below the floor it binds nothing: what was there before it still rolls back.
+  const below = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR - 1 };
+  assert.equal(run(empty, { stopped: below, ...targetOf(1) }).status, 0);
+  assert.equal(run(empty, { stopped: { name: TARGET_NAME }, ...targetOf(1) }).status, 0);
+});
+for (const stopped of [
+  { name: '@rasta/economic-service', marketplaceSagaProtocol: 1 },
+  { marketplaceSagaProtocol: 1 },
+  null,
+  { name: TARGET_NAME, marketplaceSagaProtocol: LATEST + 1 },
+  { name: TARGET_NAME, marketplaceSagaProtocol: '11' },
+]) {
+  test(`refuses a wrong, unknown or newer stopped manifest ${JSON.stringify(stopped)} before querying`, () => {
+    const result = run(drained(), { stopped, ...targetOf(LATEST) });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /stopped (manifest is not marketplace-service|build compatibility declaration is unsupported)/);
+    assert.deepEqual(result.calls, []);
+  });
+}
+test('refuses an unreadable or omitted stopped manifest', () => {
+  for (const path of ['', '/nonexistent/stopped.json']) {
+    const result = run(drained(), {
+      settings: { ...SETTINGS, MARKETPLACE_STOPPED_PACKAGE_JSON: path },
+    });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls, []);
+  }
+});
 test('refuses unreadable or omitted target manifest', () => {
   for (const path of ['', '/nonexistent/target.json']) {
     assert.equal(

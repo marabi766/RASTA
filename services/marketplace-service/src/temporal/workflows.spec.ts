@@ -1901,6 +1901,9 @@ describe('the order saga', () => {
         'RATE_LIMIT_EXCEEDED',
         // Has its own mark and rule instead (`sentPastHoldFence`), and never ends a wait alone.
         'HOLD_DEADLINE_PASSED',
+        // Answers only a send that counted nothing, so it says nothing of the sends before it
+        // (D-150): never proof, whichever attempt hears it.
+        'HOLD_DEADLINE_REQUIRED',
       ];
       for (const [code, status] of Object.entries(ERROR_STATUS)) {
         const proof = status < 500 && !notProof.includes(code);

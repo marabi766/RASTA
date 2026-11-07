@@ -879,3 +879,10 @@ export async function removeRewardRules(ruleIds: readonly string[]): Promise<voi
     await owner.$disconnect();
   }
 }
+
+/**
+ * The deadline marketplace-service fixes on an order before its first hold send (D-144),
+ * here far enough off never to pass during a run. economic-service refuses an `ORDER` hold
+ * without one (D-150), as only a build that counts nothing sends it so.
+ */
+export const ORDER_HOLD_DEADLINE = '2999-01-01T00:00:00.000Z';

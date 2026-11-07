@@ -90,6 +90,13 @@ export const ERROR_CODES = {
    * also says this of every request under the key (PM decision D-132).
    */
   HOLD_DEADLINE_PASSED: 'HOLD_DEADLINE_PASSED',
+  /**
+   * An order's hold arrived without the deadline its order's fence gives every request
+   * (`holdNotAfter`): only a marketplace-service build that does not count its sends on
+   * the order sends one so. Refused before anything is held, recorded under nothing, so
+   * the key stays free; a stored answer under it is still replayed (PM decision D-150).
+   */
+  HOLD_DEADLINE_REQUIRED: 'HOLD_DEADLINE_REQUIRED',
 
   // 429
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
@@ -179,6 +186,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   NO_ACTIVE_RULE: 422,
   BUSINESS_LINE_REQUIRED: 422,
   HOLD_DEADLINE_PASSED: 422,
+  HOLD_DEADLINE_REQUIRED: 422,
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,

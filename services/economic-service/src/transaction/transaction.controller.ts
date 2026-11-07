@@ -159,7 +159,8 @@ export class TransactionController {
       'required — 422 BUSINESS_LINE_REQUIRED, nothing recorded — except for marketplace-service ' +
       'recording its own `ORDER` (docs/24 Q-130). With `holdNotAfter`, past that instant by this ' +
       "service's clock: 422 HOLD_DEADLINE_PASSED, nothing recorded or held, and the key answers " +
-      'it from then on.',
+      'it from then on. An `ORDER` without `holdNotAfter`: 422 HOLD_DEADLINE_REQUIRED, nothing ' +
+      'recorded or held, the key left free; an answer already stored under the key is replayed.',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,

@@ -44,7 +44,9 @@
  * MARKETPLACE_TARGET_PACKAGE_JSON is the package.json extracted from the target
  * image, whose name must be @rasta/marketplace-service. marketplaceSagaProtocol
  * is a protocol this gate knows (`PATCH_PROTOCOL`); an absent field means 0, the
- * legacy protocol. Always run this gate from the
+ * legacy protocol. MARKETPLACE_STOPPED_PACKAGE_JSON is the same file from the image of the
+ * release just stopped: when it is at or above ROLLBACK_FLOOR, no target below it passes,
+ * as it may have left orders no saga lists yet (D-150). Always run this gate from the
  * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
@@ -189,6 +191,22 @@ const PATCH_PROTOCOL = new Map([
   ['economic-hold-fence-on-order-v1', 11],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
+// The hold's fence on the order row (D-144): a build below it sends uncounted (D-150).
+const ROLLBACK_FLOOR = PATCH_PROTOCOL.get('economic-hold-fence-on-order-v1');
+
+/** A release manifest's declared protocol. Pre-protocol releases declare none: 0. */
+function declaredProtocol(manifest, which) {
+  if (manifest?.name !== '@rasta/marketplace-service') {
+    throw new Unverifiable(`${which} manifest is not marketplace-service`);
+  }
+  // Pre-protocol releases support only legacy histories; do not rewrite their manifests.
+  const protocol =
+    manifest.marketplaceSagaProtocol === undefined ? 0 : manifest.marketplaceSagaProtocol;
+  if (!Number.isInteger(protocol) || protocol < 0 || protocol > LATEST_PROTOCOL) {
+    throw new Unverifiable(`${which} build compatibility declaration is unsupported`);
+  }
+  return protocol;
+}
 // A continued run has no marker until its first workflow task: its `resume` is
 // the only evidence of what wrote it: `reminderDue` came with protocol 2, and
 // `releaseRounds` means it rolled over inside the release wait of protocol 3,
@@ -424,17 +442,28 @@ function check() {
   } catch {
     throw new Unverifiable('target build compatibility declaration cannot be read');
   }
-  if (target?.name !== '@rasta/marketplace-service') {
-    throw new Unverifiable('target manifest is not marketplace-service');
+  const targetProtocol = declaredProtocol(target, 'target');
+  // The release just stopped, from its own image too. It may have left on an order what no
+  // listed saga shows: an order placed, its saga not yet started, whose row counts every
+  // send (`hold_send_claims` = 0). A build below `ROLLBACK_FLOOR` would send that hold
+  // uncounted (review of #812 r3, F1), so once a release at or above it has run, nothing
+  // below follows it, whatever Temporal lists (D-150). A stopped release newer than this
+  // gate is one the gate cannot speak for: run it from the newest release.
+  let stopped;
+  try {
+    stopped = JSON.parse(readFileSync(setting('MARKETPLACE_STOPPED_PACKAGE_JSON'), 'utf8'));
+  } catch {
+    throw new Unverifiable('stopped build compatibility declaration cannot be read');
   }
-  // Pre-protocol releases support only legacy histories; do not rewrite their manifests.
-  const targetProtocol =
-    target.marketplaceSagaProtocol === undefined ? 0 : target.marketplaceSagaProtocol;
-  if (!Number.isInteger(targetProtocol) || targetProtocol < 0 || targetProtocol > LATEST_PROTOCOL) {
-    throw new Unverifiable('target build compatibility declaration is unsupported');
+  const stoppedProtocol = declaredProtocol(stopped, 'stopped');
+  const blockers = [];
+  if (stoppedProtocol >= ROLLBACK_FLOOR && targetProtocol < ROLLBACK_FLOOR) {
+    blockers.push(
+      `target build declares saga protocol ${targetProtocol}, below the rollback floor ` +
+        `${ROLLBACK_FLOOR} the stopped build reached: it would send a hold uncounted`,
+    );
   }
   const common = ['--address', address, '--namespace', namespace];
-  const blockers = [];
 
   const queue = temporal(cli, [
     'task-queue',

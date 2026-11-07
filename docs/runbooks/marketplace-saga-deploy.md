@@ -44,13 +44,14 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 Retention تاریخچه و Visibility انجام شود؛ پس از آن، تطبیق عملیاتی لازم است.
 
 Gate همیشه از ریشهٔ مخزن **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout
-انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر پنج اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
+انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر شش اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
 TEMPORAL_ADDRESS='<as the service>' TEMPORAL_NAMESPACE='<as the service>' \
   MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' \
   MARKETPLACE_TARGET_PACKAGE_JSON='<package.json extracted from target image>' \
+  MARKETPLACE_STOPPED_PACKAGE_JSON='<package.json extracted from the image just stopped>' \
   MARKETPLACE_SAGA_STOP_TIME='<recorded UTC time>' \
   node scripts/marketplace-saga-drain-check.mjs
 ```
@@ -212,8 +213,9 @@ Durable history proves protocol requirements for a discovered run; it does not
 discover runs or establish visibility completeness. It adds no workflow commands.
 
 Always run the gate from the **newest of the running and target releases**;
-never use the target checkout when rolling back. Use the five-variable invocation
-in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
+never use the target checkout when rolling back. Use the six-variable invocation
+in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON` and
+`MARKETPLACE_STOPPED_PACKAGE_JSON`.
 
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
@@ -221,7 +223,18 @@ image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 support (this build: 11); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
-even an empty queue. An incompatible
+even an empty queue.
+
+`MARKETPLACE_STOPPED_PACKAGE_JSON` is the same file from the image of the release just
+stopped, read the same way. **Rollback floor (D-150):** when the stopped release declares
+protocol **11** or more, the gate refuses every target below 11, even with no saga running.
+It sees only that release: a rollback done without the gate leaves nothing for a later run
+of it to see, which is why economic-service's refusal below, not the floor, is what keeps
+an older build's send from landing.
+That release counts each hold send on the order row (`hold_send_claims`), and writes 0 on
+an order it places: an order placed and not yet started has no saga for the gate to inspect,
+and a build below 11 would send its hold uncounted. A stopped release newer than the gate's
+checkout is refused too: run the gate from the newest release. An incompatible
 target blocks regardless of pending activities. Missing/malformed markers,
 unsupported payload encodings and incomplete histories (event sequence/length
 checked against describe) also block. Never add protocol 1 to an old build to
@@ -391,22 +404,40 @@ any run that finds the row so:
 Resetting a saga whose order this build placed is therefore safe for the money. It is still no way to clear an alert: the
 replacement waits out the same deadline.
 
+**An older build's send cannot land (D-150).** A build below protocol 11 sends the hold
+counting nothing on the row and carrying no deadline, so the row cannot know of it. So
+economic-service refuses every `ORDER` hold without `holdNotAfter`, whoever sends it:
+`422 HOLD_DEADLINE_REQUIRED`, nothing held or recorded, the key left free
+(`refuseUnfencedOrderHold`). An answer already stored under the key is still replayed: that
+hold exists, and the saga finds it. What the row says of earlier sends is therefore true of
+every hold that can still land, whichever build sent it, and no marketplace-service rollback
+can make it false. It does depend on economic-service itself running this build or a later
+one (below). The cost is fail-closed: from the moment economic-service
+runs this build, a marketplace-service build below 11 places no hold at all, so its orders fail
+at the hold, nothing held, until workers of this build run. Keep that window short. The rollback
+floor above is a second line: it keeps such a build from following this one through the gate,
+so a rollback of economic-service alone still meets only counted sends.
+
 **Migrate marketplace-service before its new workers (`20261107120000_order_hold_fence`).** Only
-additive. An older worker sends without counting, so after a code rollback do not reset a saga on
-an order this build placed until its first send can no longer land. Its `down.sql` refuses while a deadline is still in use: on any order
-not ended, or on a closed order with no obligation whose sends are open and whose deadline and
-margin have not passed. Roll the code back first, and wait for those orders.
+additive. Its `down.sql` refuses while a deadline is still in use: on any order not ended, or on
+a closed order with no obligation whose sends are open and whose deadline and margin have not
+passed. It needs code below protocol 11, which the gate refuses after this build (the floor):
+only for an environment where this build never served traffic.
 
 **Deploy economic-service first.** Its request schema is strict, so a build without the
 fence refuses `holdNotAfter` with `400 VALIDATION_FAILED` rather than ignoring it. That
 keeps the fence fail-closed through a rollback: a saga in doubt goes on waiting. But a new
-marketplace-service ahead of it fails each new order on its first send, nothing held.
+marketplace-service ahead of it fails each new order on its first send, nothing held. Do not
+roll economic-service back below this build either: an older one holds a send without a
+deadline again (above).
 
-A saga whose first send predates protocol 10 carries no deadline, and economic-service holds
-for such a request as it always did: nothing can prove it will not land, so that saga never
+A saga whose first send predates protocol 10 carries no deadline, and economic-service now
+refuses such a request (above), so its hold never lands, but the saga cannot know that from its
+row: nothing can prove it will not land, so that saga never
 takes this exit and waits as protocol 8 did. This is safe only because the platform has not
-launched: no real money waits on such a run. Before launch, drain them, since an empty
-wallet leaves one waiting for good. `hold_send_claims` defaults to 1 with no deadline, on every
+launched: no real money waits on such a run. Before launch, drain them: every new send of
+theirs is refused, so each one not yet held waits for good with the alert on (fail-closed:
+nothing more is held for it; a hold it already placed is still found and followed). `hold_send_claims` defaults to 1 with no deadline, on every
 order the migration finds and any an older build places during the rollout (only `place` of this
 build writes 0), so a later run of such an order gets no deadline either, and nothing on its row
 proves absence: it waits with the alert on, and one that finds such an order closed stays in

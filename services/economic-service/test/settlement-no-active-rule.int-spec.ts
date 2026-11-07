@@ -14,10 +14,11 @@ import {
   fundWallet,
   id,
   newPrisma,
+  ORDER_HOLD_DEADLINE,
   readBalances,
   testEnv,
-  wire,
   type Wiring,
+  wire,
 } from './helpers';
 
 /**
@@ -456,6 +457,7 @@ describe('settlement without an active commission rule (docs/24 Q-29, Q-08)', ()
         sourceType: 'ORDER',
         sourceReference: orderId,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     expect(created.body.businessLine).toBeNull();
