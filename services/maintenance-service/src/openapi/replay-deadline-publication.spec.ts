@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { VersioningType, type INestApplication, type Type } from '@nestjs/common';
 import { MODULE_METADATA } from '@nestjs/common/constants';
 import { NestFactory } from '@nestjs/core';
@@ -9,6 +9,10 @@ import { AppModule } from '../app.module';
 import { REPAIR_ORDER_ENDPOINTS } from '../maintenance/repair-order.controller';
 import { CREATE_REQUEST_ENDPOINT } from '../maintenance/request.controller';
 import { enrichOpenApiDocument } from './document';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 type Parameter = { name: string; in: string; required?: boolean; schema?: unknown };
 type Operation = {
@@ -95,10 +99,11 @@ describe('the published replay deadline (FU-171)', () => {
 
   it('no controller reads a key by itself: the header goes through the one entry point', () => {
     const directory = join(__dirname, '..', 'maintenance');
-    const sources = readdirSync(directory).filter((file) => file.endsWith('.controller.ts'));
+    const sources = authoredFiles(directory).filter((path) => path.endsWith('.controller.ts'));
     expect(sources.length).toBeGreaterThan(0);
-    for (const file of sources) {
-      const source = readFileSync(join(directory, file), 'utf8');
+    for (const path of sources) {
+      const file = basename(path);
+      const source = readFileSync(path, 'utf8');
       // The lower-case name is how a header is read, by `@Headers(…)` or off `@Req()` alike.
       expect([file, /['"`]idempotency-/.test(source)]).toEqual([file, false]);
     }
