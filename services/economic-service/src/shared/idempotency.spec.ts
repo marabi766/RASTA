@@ -791,3 +791,210 @@ describe('hashRequestBody — every own key, whatever its name (#194)', () => {
     );
   });
 });
+
+/**
+ * A deadline the caller fixed (D-132): the database's clock judges it, in the transaction
+ * that writes the claim and in the one that applies the effect. Over a real database:
+ * `test/hold-deadline.int-spec.ts`.
+ */
+describe('IdempotencyStore.run with a deadline', () => {
+  const DEADLINE = new Date('2026-11-07T00:00:00.000Z');
+  const REFUSALS = {
+    PAST_IT: { code: 'HOLD_DEADLINE_PASSED', message: 'Past it' },
+  } as const;
+  const options = (at = DEADLINE, refusal = 'PAST_IT') => ({
+    ...openly,
+    terminalRefusals: REFUSALS,
+    notAfter: { at, refusal },
+  });
+  const asTenant = <T>(fn: () => Promise<T>) =>
+    runWithContext(
+      createSystemContext({ correlationId: 'unit-fence', organizationId: 'ORG-UNIT' }),
+      fn,
+    );
+
+  /** A store whose database reads `clock` at each `clock_timestamp()`, its transactions in `order`. */
+  function storeAt(clock: Date[], script: { create?: jest.Mock; findUnique?: jest.Mock } = {}) {
+    const order: string[] = [];
+    const idempotencyKey = {
+      create: script.create ?? jest.fn(async () => order.push('claim')),
+      findUnique: script.findUnique ?? jest.fn(),
+      updateMany: jest.fn(async () => {
+        order.push('complete');
+        return { count: 1 };
+      }),
+      deleteMany: jest.fn(async () => ({ count: 1 })),
+    };
+    const tx = {
+      idempotencyKey,
+      $queryRaw: jest.fn(async (sql: TemplateStringsArray) => {
+        if (!sql.join('').includes('clock_timestamp')) {
+          order.push(sql.join('').includes('idle_in_transaction') ? 'idle' : 'lock');
+          return [];
+        }
+        order.push('clock');
+        return [{ now: clock.shift() }];
+      }),
+    };
+    const prisma = {
+      client: {
+        idempotencyKey,
+        $transaction: jest.fn((fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
+      },
+    } as unknown as PrismaService;
+    const store = new IdempotencyStore(prisma, {
+      ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
+    } as EconomicEnv);
+    return { store, idempotencyKey, order, tx };
+  }
+  const AFTER = new Date(DEADLINE.getTime() + 1);
+  const BEFORE = new Date(DEADLINE.getTime() - 1);
+
+  it('past it at the claim: the row written is the refusal, and the work never runs', async () => {
+    const { store, idempotencyKey, order } = storeAt([AFTER]);
+    const work = jest.fn();
+    await expect(
+      asTenant(() => store.run('POST /x', 'K', {}, 201, work, options())),
+    ).rejects.toMatchObject({ code: 'HOLD_DEADLINE_PASSED', refusal: 'PAST_IT' });
+    expect(work).not.toHaveBeenCalled();
+    expect(order).toEqual(['lock', 'clock', 'claim']);
+    expect(idempotencyKey.create.mock.calls[0][0].data).toMatchObject({
+      state: 'COMPLETED',
+      responseStatus: 422,
+      responseBody: { refusal: 'PAST_IT' },
+    });
+  });
+
+  it.each([
+    ['exactly at it', DEADLINE],
+    ['just before it', BEFORE],
+  ])('%s the work runs under an ordinary claim', async (_name, now) => {
+    const { store, idempotencyKey, tx } = storeAt([now, now]);
+    await expect(
+      asTenant(() =>
+        store.run(
+          'POST /x',
+          'K',
+          {},
+          201,
+          (answer) => answer.respond(tx as never, { ok: true }),
+          options(),
+        ),
+      ),
+    ).resolves.toEqual({ ok: true });
+    expect(idempotencyKey.create.mock.calls[0][0].data).toMatchObject({ state: 'IN_PROGRESS' });
+  });
+
+  it('past it by the effect: refused inside its transaction, before its answer, and recorded', async () => {
+    const { store, idempotencyKey, order, tx } = storeAt([BEFORE, AFTER]);
+    await expect(
+      asTenant(() =>
+        store.run(
+          'POST /x',
+          'K',
+          {},
+          201,
+          (answer) => answer.respond(tx as never, { ok: true }),
+          options(),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'HOLD_DEADLINE_PASSED' });
+    // Never the COMPLETED of a response: thrown first, the effect's transaction rolls back.
+    expect(order).toEqual(['lock', 'clock', 'claim', 'idle', 'clock', 'complete']);
+    expect(idempotencyKey.updateMany.mock.calls).toEqual([
+      [
+        expect.objectContaining({
+          data: { state: 'COMPLETED', responseStatus: 422, responseBody: { refusal: 'PAST_IT' } },
+        }),
+      ],
+    ]);
+  });
+
+  it('a refusal stored with an effect is that effect: past it, refused by the deadline instead', async () => {
+    const { store, idempotencyKey, tx } = storeAt([BEFORE, AFTER]);
+    const declined = {
+      DECLINED: { code: 'INSUFFICIENT_BALANCE', message: 'Declined' },
+    } as const;
+    await expect(
+      asTenant(() =>
+        store.run(
+          'POST /x',
+          'K',
+          {},
+          201,
+          async (answer) => {
+            const refusal = new TerminalRefusalError('DECLINED', declined.DECLINED);
+            await answer.refuse(tx as never, refusal);
+            throw refusal;
+          },
+          { ...options(), terminalRefusals: { ...REFUSALS, ...declined } },
+        ),
+      ),
+    ).rejects.toMatchObject({ refusal: 'PAST_IT' });
+    expect(idempotencyKey.updateMany.mock.calls).toEqual([
+      [
+        expect.objectContaining({
+          data: expect.objectContaining({ responseBody: { refusal: 'PAST_IT' } }),
+        }),
+      ],
+    ]);
+  });
+
+  it('asks the database for an idle limit before that last clock reading', async () => {
+    const { store, order, tx } = storeAt([BEFORE, BEFORE]);
+    await asTenant(() =>
+      store.run(
+        'POST /x',
+        'K',
+        {},
+        201,
+        (answer) => answer.respond(tx as never, { ok: true }),
+        options(),
+      ),
+    );
+    expect(order.slice(order.indexOf('idle'))).toEqual(['idle', 'clock', 'complete']);
+  });
+
+  it('a success stored in time is replayed past it', async () => {
+    const stored = {
+      state: 'COMPLETED',
+      requestHash: hashRequestBody({}),
+      canonicalHash: hashRequestBody({}),
+      actorHash: null,
+      expiresAt: new Date(Date.now() + 60_000),
+      responseStatus: 201,
+      responseBody: { id: 'TXN' },
+    };
+    const { store } = storeAt([AFTER], {
+      create: jest
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' })),
+      findUnique: jest.fn().mockResolvedValue(stored),
+    });
+    await expect(
+      asTenant(() => store.run('POST /x', 'K', {}, 201, jest.fn(), options())),
+    ).resolves.toEqual({ id: 'TXN' });
+  });
+
+  it.each([
+    ['a refusal its endpoint does not declare', options(DEADLINE, 'UNDECLARED')],
+    ['a deadline that is not an instant', options(new Date('nonsense'))],
+  ])('%s is a fault, before anything is claimed', async (_name, bad) => {
+    const { store, idempotencyKey } = storeAt([AFTER]);
+    await expect(
+      asTenant(() => store.run('POST /x', 'K', {}, 201, jest.fn(), bad)),
+    ).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+    expect(idempotencyKey.create).not.toHaveBeenCalled();
+  });
+
+  it('with no deadline nothing asks the clock', async () => {
+    const { store, order, tx } = storeAt([]);
+    await asTenant(() =>
+      store.run('POST /x', 'K', {}, 201, (answer) => answer.respond(tx as never, { ok: true }), {
+        ...openly,
+      }),
+    );
+    expect(order).not.toContain('clock');
+    expect(order).not.toContain('idle');
+  });
+});

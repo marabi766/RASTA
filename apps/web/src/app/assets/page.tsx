@@ -3,10 +3,12 @@ import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssets, type AssetListQuery } from '@/server/assets';
 import { canManageAssets } from '@/server/asset-commands';
-import { mintSubmissionId } from '@/server/submission';
+import { assetRegistrationRequest } from '@/server/create-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
+import { releaseUnresolvedAssetRegistration } from './actions';
+import { UnresolvedRegistrationNotice } from '@/app/UnresolvedRegistrationNotice';
 import { RegisterAssetForm } from './RegisterAssetForm';
 import {
   actingOrganizationLabel,
@@ -61,6 +63,8 @@ export default async function AssetsPage({
   // decides again on every submit.
   const manage = roles !== null && canManageAssets(roles);
 
+  const createState = await assetRegistrationRequest.restore(session);
+
   return (
     <AppShell
       key={actingScope(session)}
@@ -76,14 +80,26 @@ export default async function AssetsPage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
+      {!manage && 'releaseToken' in createState && createState.releaseToken ? (
+        <UnresolvedRegistrationNotice
+          csrfToken={session.csrfToken}
+          releaseToken={createState.releaseToken}
+          href="/assets"
+          action={releaseUnresolvedAssetRegistration}
+        />
+      ) : null}
       <AssetsScreen
         result={result}
         query={{ ...query, context: pageContext(session) }}
         registerForm={
           manage ? (
             <RegisterAssetForm
+              key={
+                'releaseToken' in createState ? createState.releaseToken : createState.submissionId
+              }
               csrfToken={session.csrfToken}
-              submissionId={mintSubmissionId(session)}
+              submissionId={createState?.submissionId ?? ''}
+              initialState={createState ?? undefined}
             />
           ) : undefined
         }

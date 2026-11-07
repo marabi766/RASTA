@@ -207,18 +207,20 @@ describe('settlement atomicity (real database)', () => {
         prisma.client.$executeRawUnsafe(corrupt),
       ),
     ).rejects.toThrow(/never change/);
-    // A row from before `trg_wallet_hold_terms_fixed`.
+    // A row from before `trg_wallet_hold_terms_fixed`, and `trg_wallet_hold_funded_at_commit`
+    // (FU-182): both lifted before the write, which leaves no deferred event to block the ALTER.
+    const lifted = ['trg_wallet_hold_terms_fixed', 'trg_wallet_hold_funded_at_commit'];
     const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
     await owner.$transaction(async (tx) => {
-      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
-      await tx.$executeRawUnsafe(
-        'ALTER TABLE wallet_hold DISABLE TRIGGER trg_wallet_hold_terms_fixed',
-      );
+      for (const trigger of lifted) {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+        await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold DISABLE TRIGGER ${trigger}`);
+      }
       await tx.$executeRawUnsafe(corrupt);
-      // ISOLATION-ALLOW-UNBOUNDED: as above.
-      await tx.$executeRawUnsafe(
-        'ALTER TABLE wallet_hold ENABLE TRIGGER trg_wallet_hold_terms_fixed',
-      );
+      for (const trigger of lifted) {
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold ENABLE TRIGGER ${trigger}`);
+      }
     });
     await owner.$disconnect();
 

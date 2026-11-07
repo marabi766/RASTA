@@ -8,6 +8,7 @@ import {
   FINAL_ANSWER_CONTRACT,
   OWNER_STATE_IS_FINAL,
   REFUSED_ON_FIRST_ATTEMPT,
+  REFUSED_PAST_HOLD_DEADLINE,
 } from './economic-refusal';
 import { outcomeUnknown } from './workflows';
 import type { EconomicClient } from '../economic/economic.client';
@@ -47,6 +48,7 @@ it('counts each round from a series that starts at zero, and logs the order', as
  * The order of the calls is the point, so one log records them all.
  */
 describe('resolveObligationDispute on record', () => {
+  const STEP = { key: 'k', scheduledAt: new Date('2026-11-06T00:00:00.000Z') };
   function build(options: { resolveDispute: () => Promise<unknown>; recorded?: boolean }) {
     const log: string[] = [];
     const orders = {
@@ -59,7 +61,7 @@ describe('resolveObligationDispute on record', () => {
         options.recorded ? (log.push('answered from the record'), undefined) : call(),
       openSagaCall: async (...args: unknown[]) => {
         log.push(`open ${JSON.stringify(args)}`);
-        return 7;
+        return { generation: 7, started: true };
       },
       confirmSagaCall: async (...args: unknown[]) =>
         void log.push(`confirm ${JSON.stringify(args)}`),
@@ -78,18 +80,16 @@ describe('resolveObligationDispute on record', () => {
     const activities = createActivities({
       orders: orders as unknown as OrderService,
       economic: economic as unknown as EconomicClient,
-      currentStep: () => ({ key: 'k', scheduledAt: new Date() }),
+      currentStep: () => STEP,
     });
     const release = () => activities.resolveObligationDispute('ORD_R', 'TX', 'DSP', 'SETTLE');
     return { log, release, activities };
   }
-  const args = JSON.stringify([
-    { id: 'ORD_R', organizationId: 'ORG_B' },
-    'resolveObligationDispute',
-    'DSP',
-  ]);
-  // With the generation this attempt's own opening was given.
-  const confirmArgs = `${args.slice(0, -1)},7]`;
+  const call = [{ id: 'ORD_R', organizationId: 'ORG_B' }, 'resolveObligationDispute', 'DSP'];
+  // By the scheduled command that runs (#836 r1 R1).
+  const args = JSON.stringify([...call, STEP]);
+  // With the command and the generation its own opening was given.
+  const confirmArgs = JSON.stringify([...call, { command: STEP, generation: 7, started: true }]);
 
   it('opens before the call and confirms after it, under the buying tenant', async () => {
     const { log, release } = build({ resolveDispute: async () => ({}) });
@@ -178,9 +178,15 @@ it.each([
       describe: async () => order,
       onceForSaga: (_order: unknown, _step: unknown, _activity: unknown, call: () => unknown) =>
         call(),
+      claimHoldSend: async (_o: unknown, proposed?: string) => ({
+        holdNotAfter: proposed ?? null,
+        claims: 1,
+      }),
+      closeHoldSendsOnRefusal: async () => true,
       whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
         fn({ status: 'RECEIPT_CONFIRMED', receiptConfirmed: true }),
-      openSagaCall: async () => 1,
+      // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+      openSagaCall: async () => ({ generation: 1, started: true }),
       confirmSagaCall: async () => undefined,
     } as unknown as OrderService,
     economic: {
@@ -211,6 +217,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     buyerOrganizationId: 'ORG',
     correlationId: 'COR',
     receiptConfirmed: true,
+    totalAmountMinor: '1000',
   };
   afterEach(() => {
     order.receiptConfirmed = true;
@@ -219,18 +226,35 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     send: () => unknown,
     read: () => unknown,
     currentAttempt?: () => number,
-  ): { activities: ReturnType<typeof createActivities>; reads: () => number } {
+  ): {
+    activities: ReturnType<typeof createActivities>;
+    reads: () => number;
+    answered: unknown[][];
+  } {
     let reads = 0;
+    const answered: unknown[][] = [];
     const failing = async () => send();
     const activities = createActivities({
       orders: {
         describe: async () => order,
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        claimHoldSend: async (_o: unknown, proposed?: string) => ({
+          holdNotAfter: proposed ?? null,
+          claims: 1,
+        }),
+        closeHoldSendsOnRefusal: async () => true,
         whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) => fn(order),
-        openSagaCall: async () => 1,
+        // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
         confirmSagaCall: async () => undefined,
+        confirmSagaCallsOn: async (_o: unknown, operations: unknown, subject: unknown) => {
+          answered.push([operations, subject]);
+        },
       } as unknown as OrderService,
       economic: {
+        // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+        requiresOrderHoldDeadline: async () => true,
+        createObligation: failing,
         authoriseSettlement: failing,
         refund: failing,
         settle: failing,
@@ -244,7 +268,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
       ...(currentAttempt ? { currentAttempt } : {}),
     });
-    return { activities, reads: () => reads };
+    return { activities, reads: () => reads, answered };
   }
   const failure = (attempted: Promise<unknown>): Promise<ApplicationFailure> =>
     attempted.then(
@@ -478,6 +502,24 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     });
   });
 
+  // A pin for the late hold's refund (`watchForLateHold`): the order has ended, and no
+  // status guard may be added here, as nothing else would ever refund it.
+  it.each(['FAILED', 'CANCELLED'])('a refund goes out for an order already %s', async (status) => {
+    const closed = order as unknown as { status: string };
+    const was = closed.status;
+    closed.status = status;
+    try {
+      const send = jest.fn();
+      const { activities } = over(send, obligation('HELD'), () => 1);
+      await expect(
+        activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT),
+      ).resolves.toBeUndefined();
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      closed.status = was;
+    }
+  });
+
   // Review of #796 r2, F5: an older workflow reads any answer as the call's own effect,
   // and a paid-out order would be cancelled under it. What did not declare the contract
   // keeps the refusal; a contract it cannot name is not a declaration.
@@ -638,6 +680,283 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       });
     });
   });
+
+  // #836 sync with #796: only REFUNDED proves no authorisation or settlement of the
+  // obligation can land; another final status answers the refund, not those calls.
+  it('a refund answers the open authorisation and settlement records only once REFUNDED', async () => {
+    const refunded = over(refused, obligation('REFUNDED'), () => 2);
+    await refunded.activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT);
+    expect(refunded.answered).toEqual([[['authoriseSettlement', 'settle'], 'TXN']]);
+    for (const status of ['SETTLED', 'CANCELLED', 'FAILED']) {
+      const final = over(refused, obligation(status), () => 2);
+      await expect(
+        final.activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT),
+      ).resolves.toMatchObject({ final: true, status });
+      expect(final.answered).toEqual([]);
+    }
+  });
+
+  describe('createObligation behind the wait (FU-117)', () => {
+    const DEADLINE = '2026-11-08T00:00:00.000Z';
+    const noTransaction = () => null;
+    const refuses = (code: string) => () => {
+      throw refuse(code);
+    };
+
+    it('the send’s own listed refusal on its first attempt is proof', async () => {
+      const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction, () => 1);
+      const caught = await failure(activities.createObligation('ORD', DEADLINE));
+      expect(caught.type).toBe('INSUFFICIENT_BALANCE');
+      expect(caught.details).toEqual([REFUSED_ON_FIRST_ATTEMPT]);
+    });
+
+    it.each([
+      ['a later attempt', 'INSUFFICIENT_BALANCE', 2],
+      ['an unlisted code', 'IDEMPOTENCY_KEY_REUSED', 1],
+      ['a key in flight', 'CONFLICT', 1],
+      ['a source already taken', 'ALREADY_EXISTS', 1],
+    ] as const)('%s is no proof', async (_name, code, attempt) => {
+      const { activities } = over(refuses(code), noTransaction, () => attempt);
+      const caught = await failure(activities.createObligation('ORD', DEADLINE));
+      expect(caught.type).toBe(code);
+      expect(caught.details ?? []).toEqual([]);
+    });
+
+    it.each(['FAILED', 'CANCELLED'])(
+      'an attempt running on past a saga that closed the order %s sends nothing, and proves nothing',
+      async (status) => {
+        const closed = order as unknown as { status?: string };
+        closed.status = status;
+        try {
+          const send = jest.fn();
+          const { activities } = over(send, noTransaction, () => 1);
+          const caught = await failure(activities.createObligation('ORD'));
+          expect(caught.type).toBe('ORDER_ALREADY_CLOSED');
+          expect(caught.details ?? []).toEqual([]);
+          expect(send).not.toHaveBeenCalled();
+        } finally {
+          delete closed.status;
+        }
+      },
+    );
+
+    it.each(['PENDING', 'CANCELLING'])(
+      'at %s the send still goes: it is the fence',
+      async (status) => {
+        const closed = order as unknown as { status?: string };
+        closed.status = status;
+        try {
+          const send = jest.fn(() => ({ id: 'TXN' }));
+          const { activities } = over(
+            send,
+            () => ({ status: 'HELD', heldProven: true }),
+            () => 1,
+          );
+          await expect(activities.createObligation('ORD')).resolves.toEqual({
+            transactionId: 'TXN',
+          });
+          expect(send).toHaveBeenCalledTimes(1);
+        } finally {
+          delete closed.status;
+        }
+      },
+    );
+
+    it('no attempt known: no proof', async () => {
+      const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction);
+      expect((await failure(activities.createObligation('ORD', DEADLINE))).details ?? []).toEqual(
+        [],
+      );
+    });
+  });
+});
+
+/**
+ * Review of #812 F1, executed: `describe()` before the awaited `onceForSaga()` lookup, the
+ * order closed in between, printed `sent: 1` for both FAILED and CANCELLED.
+ */
+describe('every guard of an economic step reads the order after the step looked', () => {
+  const refuse = (code: string): Error => new RastaError(code as never, 'answered');
+  function racing(row: Record<string, unknown>, read: () => Promise<unknown> = async () => row) {
+    let resume: () => void = () => undefined;
+    const lookup = new Promise<void>((resolve) => (resume = resolve));
+    let entered: () => void = () => undefined;
+    const looking = new Promise<void>((resolve) => (entered = resolve));
+    const sent: unknown[] = [];
+    let reads = 0;
+    const send = async (input: unknown) => {
+      sent.push(input);
+      return { id: 'TXN' };
+    };
+    const activities = createActivities({
+      orders: {
+        describe: async () => {
+          reads += 1;
+          return { ...((reads === 1 ? row : await read()) as object) };
+        },
+        onceForSaga: async (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => {
+          entered();
+          await lookup;
+          return call();
+        },
+        claimHoldSend: async (_o: unknown, proposed?: string) => ({
+          holdNotAfter: proposed ?? null,
+          claims: 1,
+        }),
+        closeHoldSendsOnRefusal: async () => true,
+        // The durable call record (#836, FU-145): opened before the send, confirmed after it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
+        // The row as it stands when the send would go, under the order's lock (D-138).
+        whileOrderHeld: (_id: string, fn: (held: unknown) => unknown) => fn({ ...row }),
+      } as unknown as OrderService,
+      economic: {
+        // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+        requiresOrderHoldDeadline: async () => true,
+        createObligation: send,
+        authoriseSettlement: send,
+        readObligation: async () => ({ status: 'HELD', heldProven: true }),
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => 1,
+    });
+    return { activities, looking, resume, sent };
+  }
+  const pending = () => ({
+    id: 'ORD',
+    status: 'PENDING',
+    buyerOrganizationId: 'ORG',
+    supplierOrganizationId: 'SUP',
+    correlationId: 'COR',
+    receiptConfirmed: true,
+    totalAmountMinor: '1000',
+    economicTransactionId: null as string | null,
+  });
+
+  it.each(['FAILED', 'CANCELLED'])(
+    'createObligation: the order closed %s during the lookup sends nothing',
+    async (closed) => {
+      const row = pending();
+      const { activities, looking, resume, sent } = racing(row);
+      const attempt = activities.createObligation('ORD', '2026-11-07T00:00:00.000Z');
+      await looking;
+      row.status = closed;
+      resume();
+      await expect(attempt).rejects.toMatchObject({ type: 'ORDER_ALREADY_CLOSED', details: [] });
+      expect(sent).toEqual([]);
+    },
+  );
+
+  it('createObligation: a hold recorded during the lookup is that hold, not a second send', async () => {
+    const row = pending();
+    const { activities, looking, resume, sent } = racing(row);
+    const attempt = activities.createObligation('ORD');
+    await looking;
+    row.economicTransactionId = 'TXN_KNOWN';
+    resume();
+    await expect(attempt).resolves.toEqual({ transactionId: 'TXN_KNOWN' });
+    expect(sent).toEqual([]);
+  });
+
+  it('authoriseSettlement: its fence reads the order as it stands, under the lock', async () => {
+    const row = { ...pending(), status: 'RECEIPT_CONFIRMED' };
+    const { activities, looking, resume, sent } = racing(row);
+    const attempt = activities.authoriseSettlement('ORD', 'TXN');
+    await looking;
+    row.receiptConfirmed = false;
+    resume();
+    await expect(attempt).rejects.toMatchObject({ type: 'BUSINESS_RULE_VIOLATION' });
+    expect(sent).toEqual([]);
+  });
+
+  it('a read that fails after the lookup is no refusal of the call: not marked, nothing sent', async () => {
+    const { activities, resume, sent } = racing(pending(), async () => {
+      throw refuse('NOT_FOUND');
+    });
+    resume();
+    const caught = await activities.createObligation('ORD').then(
+      () => {
+        throw new Error('expected to fail');
+      },
+      (error: ApplicationFailure) => error,
+    );
+    expect(caught.type).toBe('NOT_FOUND');
+    expect(caught.details ?? []).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+});
+
+describe('the deadline of a hold (D-132)', () => {
+  const DEADLINE = '2026-11-07T00:00:00.000Z';
+  function sending(answer: () => unknown, attempt = 1) {
+    const send = jest.fn(async (_input: { holdNotAfter?: string }) => answer());
+    const activities = createActivities({
+      orders: {
+        describe: async () => ({
+          id: 'ORD',
+          status: 'PENDING',
+          buyerOrganizationId: 'ORG',
+          supplierOrganizationId: 'SUP',
+          correlationId: 'COR',
+          totalAmountMinor: '1000',
+          economicTransactionId: null,
+        }),
+        onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        claimHoldSend: async (_o: unknown, proposed?: string) => ({
+          holdNotAfter: proposed ?? null,
+          claims: 1,
+        }),
+        closeHoldSendsOnRefusal: async () => true,
+        // The durable call record (#836, FU-145): opened before the send, confirmed after it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
+      } as unknown as OrderService,
+      economic: {
+        // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+        requiresOrderHoldDeadline: async () => true,
+        createObligation: send,
+        readObligation: async () => ({ status: 'HELD', heldProven: true }),
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => attempt,
+    });
+    return { activities, send };
+  }
+  const past = () => {
+    throw new RastaError('HOLD_DEADLINE_PASSED', 'past it');
+  };
+
+  it('goes to economic-service as the workflow fixed it', async () => {
+    const { activities, send } = sending(() => ({ id: 'TXN' }));
+    await activities.createObligation('ORD', DEADLINE);
+    expect(send.mock.calls[0]?.[0].holdNotAfter).toBe(DEADLINE);
+  });
+
+  it('a workflow from before the fence sends none', async () => {
+    const { activities, send } = sending(() => ({ id: 'TXN' }));
+    await activities.createObligation('ORD');
+    expect(send.mock.calls[0]?.[0]).not.toHaveProperty('holdNotAfter');
+  });
+
+  it.each([1, 2, 3])('its refusal is marked on attempt %d, and not retried', async (attempt) => {
+    const { activities } = sending(past, attempt);
+    await expect(activities.createObligation('ORD', DEADLINE)).rejects.toMatchObject({
+      type: 'HOLD_DEADLINE_PASSED',
+      nonRetryable: true,
+      details: [REFUSED_PAST_HOLD_DEADLINE],
+    });
+  });
+
+  it('the same code to a request that set no deadline proves nothing', async () => {
+    const { activities } = sending(past, 2);
+    const caught = await activities.createObligation('ORD').then(
+      () => {
+        throw new Error('expected to fail');
+      },
+      (error: ApplicationFailure) => error,
+    );
+    expect(caught.details ?? []).not.toContain(REFUSED_PAST_HOLD_DEADLINE);
+  });
 });
 
 /**
@@ -680,6 +999,9 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
             trace.push('release');
           }
         },
+        // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
       } as unknown as OrderService,
       economic: {
         authoriseSettlement: async () => {
@@ -821,6 +1143,10 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
         describe: async () => ({ id: 'ORD', buyerOrganizationId: 'ORG', correlationId: 'COR' }),
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
         whileOrderHeld: held,
+        // The durable call record (#836, FU-145); a refund answers the open ones on it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
+        confirmSagaCallsOn: async () => undefined,
       } as unknown as OrderService,
       economic: { refund: async () => undefined } as unknown as EconomicClient,
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
@@ -851,5 +1177,80 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
       activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
     ).resolves.toEqual({ fenced: true, status: 'DISPUTED', inDoubt: false });
     expect(trace).toEqual(['hold', 'release']);
+  });
+});
+
+/**
+ * D-151: only economic-service's answer closes an authorisation's call record.
+ * A fenced attempt sent nothing, so it never confirms it, whatever its doubt,
+ * attempt or episode: an earlier send of the episode may still land.
+ */
+describe('a fenced authorisation never confirms its call record (D-151)', () => {
+  function over(
+    row: { status: string },
+    opening: { generation: number; started: boolean },
+    attempt: number,
+  ) {
+    const records: string[] = [];
+    const sends: string[] = [];
+    const activities = createActivities({
+      orders: {
+        describe: async () => ({
+          id: 'ORD',
+          status: 'RECEIPT_CONFIRMED',
+          buyerOrganizationId: 'ORG',
+          correlationId: 'COR',
+          receiptConfirmed: true,
+        }),
+        onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        whileOrderHeld: async (_id: string, fn: (held: unknown) => unknown) =>
+          fn({ receiptConfirmed: true, ...row }),
+        openSagaCall: async () => {
+          records.push('open');
+          return opening;
+        },
+        confirmSagaCall: async () => {
+          records.push('confirm');
+        },
+      } as unknown as OrderService,
+      economic: {
+        authoriseSettlement: async () => {
+          sends.push('send');
+        },
+        readObligation: async () => ({ status: 'HELD' }),
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => attempt,
+    });
+    return { activities, records, sends };
+  }
+
+  it.each([
+    ['a retry in doubt, the episode begun earlier', 2, false, { generation: 2, started: false }],
+    ['a first attempt the workflow holds in doubt', 1, true, { generation: 2, started: false }],
+    ['a first attempt that began the episode', 1, false, { generation: 1, started: true }],
+  ] as const)(
+    '%s: opened, never confirmed, nothing sent',
+    async (_name, attempt, inDoubt, opening) => {
+      const { activities, records, sends } = over({ status: 'DISPUTED' }, opening, attempt);
+      await expect(activities.authoriseSettlement('ORD', 'TXN', inDoubt)).resolves.toEqual({
+        fenced: true,
+        status: 'DISPUTED',
+        inDoubt: attempt !== 1 || inDoubt,
+      });
+      expect(records).toEqual(['open']);
+      expect(sends).toEqual([]);
+    },
+  );
+
+  it("economic-service's answer still confirms it (control)", async () => {
+    const { activities, records, sends } = over(
+      { status: 'RECEIPT_CONFIRMED' },
+      { generation: 1, started: true },
+      1,
+    );
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toBeUndefined();
+    expect(records).toEqual(['open', 'confirm']);
+    expect(sends).toEqual(['send']);
   });
 });

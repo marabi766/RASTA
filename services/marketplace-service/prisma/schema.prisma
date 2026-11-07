@@ -234,6 +234,15 @@ model Order {
   sagaStartClaimToken String? @db.Uuid @map("saga_start_claim_token")
   sagaStartClaimExpiresAt DateTime? @map("saga_start_claim_expires_at")
 
+  /// The hold's fence, which outlives any run of the saga (D-144). The deadline every
+  /// request under the hold's key carries, set once, before the first send.
+  holdNotAfter DateTime? @db.Timestamptz(3) @map("hold_not_after")
+  /// Sends begun, each counted before it leaves. Above zero: one may be on its way. By
+  /// default one: only `place` of a build that counts them can say there has been none.
+  holdSendClaims Int @default(1) @map("hold_send_claims")
+  /// No send can begin from here on, and none begun can still hold (`noHoldCanLand`).
+  holdSendsClosedAt DateTime? @db.Timestamptz(3) @map("hold_sends_closed_at")
+
   /// Recomputed from the lines, never accumulated (the maintenance-service
   /// lesson): a total that drifts from its lines is a total nobody can audit.
   totalAmountMinor BigInt @map("total_amount_minor")
@@ -443,6 +452,15 @@ model SagaUnconfirmedCall {
 
   /// Moves with every opening; a confirmation of an earlier one closes nothing.
   generation Int @default(1)
+
+  /// The scheduled command (saga step key) that owns the record, and when
+  /// Temporal scheduled it: an older command's opening is refused (#836 r1 R1).
+  /// Both null on a row opened before this release.
+  command            String?
+  commandScheduledAt DateTime? @map("command_scheduled_at") @db.Timestamptz(3)
+
+  /// The generation that began the open episode; null on a row from before #836.
+  episodeGeneration Int? @map("episode_generation")
 
   openedAt    DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
   confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(3)

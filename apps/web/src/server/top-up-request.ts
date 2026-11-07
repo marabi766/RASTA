@@ -1,9 +1,10 @@
 import { z } from 'zod';
 
 import type { TopUpFormState } from '@/app/wallet/form-state';
-import { open, seal, type WebSession } from './session';
-import { mintSubmissionId, submissionBinding } from './submission';
-import { readUnresolved, releaseToken, requestDigest } from './unresolved-request';
+import { seal, type WebSession } from './session';
+import { actingOrganizationId } from './session-organization';
+import { requestDigest } from './unresolved-request';
+import { restoreRequestSnapshot } from './request-snapshot';
 
 export const topUpScope = (walletId: string): { purpose: string; target: string } => ({
   purpose: 'wallet-top-up',
@@ -15,7 +16,7 @@ const snapshotSchema = z.object({ submissionId: z.string(), amountMinor: z.strin
 const snapshotKey = (session: WebSession, walletId: string): string =>
   requestDigest(session, 'wallet-top-up-snapshot', {
     walletId,
-    login: submissionBinding(session).session,
+    organizationId: actingOrganizationId(session),
   });
 
 export function topUpSnapshot(
@@ -32,23 +33,18 @@ export async function restoreTopUp(
   session: WebSession,
   walletId: string,
 ): Promise<TopUpFormState & { submissionId: string }> {
-  const pending = await readUnresolved(session, topUpScope(walletId));
-  if (pending.kind === 'NONE') return { kind: 'IDLE', submissionId: mintSubmissionId(session) };
-  const token =
-    pending.kind === 'PENDING'
-      ? releaseToken(session, topUpScope(walletId), pending.request)
-      : undefined;
-  if (pending.kind === 'PENDING' && !pending.request.former && pending.request.ref) {
-    const saved = open(pending.request.ref, snapshotKey(session, walletId), snapshotSchema);
-    if (saved && saved.submissionId === pending.request.key) {
-      return {
+  const restored = await restoreRequestSnapshot(
+    session,
+    topUpScope(walletId),
+    snapshotKey(session, walletId),
+    snapshotSchema,
+  );
+  return restored.kind === 'HELD'
+    ? {
         kind: 'HELD',
-        releaseToken: token,
-        submissionId: saved.submissionId,
-        values: { amountMinor: saved.amountMinor },
-      };
-    }
-  }
-  // Missing, corrupt, foreign or unavailable: no usable key and no writable form.
-  return { kind: 'NOT_CHECKED', submissionId: '', releaseToken: token };
+        releaseToken: restored.releaseToken,
+        submissionId: restored.submissionId,
+        values: { amountMinor: restored.snapshot.amountMinor },
+      }
+    : restored;
 }

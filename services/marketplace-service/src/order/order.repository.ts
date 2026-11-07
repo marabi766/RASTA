@@ -289,43 +289,172 @@ export class OrderRepository {
   }
 
   /**
-   * A saga call to economic-service is about to be made (FU-104). Every attempt
-   * opens it again, whatever an earlier one confirmed: only this attempt's outcome
-   * says anything about the funds now (#769 r1 F3). A false open row from a late attempt
-   * is an operator's to close; a closed row over a held dispute is silent.
+   * A saga call to economic-service is about to be made (FU-104), by the
+   * scheduled command `command` (#836 r1 R1). One statement, under the row's
+   * lock, decides the whole opening, so a confirmation racing it lands wholly
+   * before (the episode restarts) or after (it confirms an earlier generation,
+   * which closes nothing):
    *
-   * @returns the generation this attempt confirms with.
+   * - the record names the command that owns it and when Temporal scheduled it.
+   *   The owner, or a command scheduled strictly later, opens it: a new
+   *   generation, which only this opening's own answer confirms. Every attempt
+   *   opens it again, whatever an earlier one confirmed: only this attempt's
+   *   outcome says anything about the funds now (#769 r1 F3);
+   * - any other command, scheduled earlier or not provably later, is refused
+   *   (`SagaCallSuperseded`) before it calls: the saga has moved past it, so its
+   *   answer — a step record's cached one included — must not end the episode
+   *   of a newer command (#836 r1 R1). A record no command owns yet (opened
+   *   before this release) is taken by the first command that opens it;
+   * - `opened_at` is when the episode began: kept while the record stays open,
+   *   however many attempts or commands follow, so unconfirmed money never
+   *   grows younger; restarted only when a confirmed record is opened again,
+   *   a new call (#792 r2 F2). `episode_generation` is the generation that
+   *   began it, so `started` says no earlier send in this episode is
+   *   unanswered (NULL on a record from before this release: never started).
+   *
+   * @returns the generation this attempt confirms with, and whether this
+   * opening began the episode.
    */
   async openSagaCall(
     client: ExtendedPrismaClient,
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
-  ): Promise<number> {
-    const key = { organizationId: order.organizationId, orderId: order.id, operation, subject };
-    const { generation } = await runUnscoped(
+    command: SagaStep,
+  ): Promise<{ generation: number; started: boolean }> {
+    const scheduledAt = command.scheduledAt.toISOString();
+    const [opened] = await runUnscoped(
       'a saga step records its call on the order it drives, under its tenant',
-      () =>
-        client.sagaUnconfirmedCall.upsert({
-          where: { organizationId_orderId_operation_subject: key },
-          create: key,
-          update: { confirmedAt: null, generation: { increment: 1 } },
-          select: { generation: true },
-        }),
+      () => client.$queryRaw<{ generation: number; started: boolean }[]>`
+        INSERT INTO saga_unconfirmed_call AS c
+          (organization_id, order_id, operation, subject, command, command_scheduled_at,
+            episode_generation)
+        VALUES (${order.organizationId}, ${order.id}, ${operation}, ${subject}, ${command.key},
+          ${scheduledAt}::timestamptz, 1)
+        ON CONFLICT (organization_id, order_id, operation, subject) DO UPDATE SET
+          opened_at = CASE WHEN c.confirmed_at IS NULL THEN c.opened_at ELSE CURRENT_TIMESTAMP END,
+          episode_generation = CASE WHEN c.confirmed_at IS NULL THEN c.episode_generation
+            ELSE c.generation + 1 END,
+          confirmed_at = NULL,
+          generation = c.generation + 1,
+          command = EXCLUDED.command,
+          command_scheduled_at = EXCLUDED.command_scheduled_at
+        WHERE c.command IS NULL OR c.command = EXCLUDED.command
+          OR c.command_scheduled_at < EXCLUDED.command_scheduled_at
+        RETURNING generation, COALESCE(episode_generation = generation, false) AS started
+      `,
     );
-    return generation;
+    if (!opened) throw new SagaCallSuperseded(order.id, operation, command.key);
+    return opened;
   }
 
   /**
-   * economic-service has confirmed that call (FU-104). Only the opening's own: an
-   * attempt overtaken by a newer one says nothing about the newer one's outcome.
+   * Counts a send of the order's hold before it leaves, and fixes its deadline if this is
+   * the first (D-144). One statement, committed before the request exists, so a later run
+   * or attempt learns of it whatever became of this one. The deadline never moves: a
+   * later `proposed` is ignored, and an order that may have sent before this column
+   * existed (claims above zero, no deadline) never gets one, as nothing fences that send.
+   *
+   * Null: no send may begin, as the order is closed or its sends are (`closed`).
+   */
+  async claimHoldSend(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    proposed: string | undefined,
+  ): Promise<{ holdNotAfter: string | null; claims: number } | { closed: boolean }> {
+    const [claim] = await runUnscoped(
+      'a saga step records its hold send on the order it drives, under its tenant',
+      () => client.$queryRaw<{ hold_not_after: Date | null; hold_send_claims: number }[]>`
+        UPDATE "order"
+        SET hold_not_after = COALESCE(
+              hold_not_after,
+              CASE WHEN hold_send_claims = 0 THEN ${proposed ?? null}::timestamptz END
+            ),
+            hold_send_claims = hold_send_claims + 1
+        WHERE id = ${order.id} AND organization_id = ${order.organizationId}
+          AND hold_sends_closed_at IS NULL
+          AND status NOT IN ('FAILED', 'CANCELLED')
+        RETURNING hold_not_after, hold_send_claims`,
+    );
+    if (claim) {
+      return {
+        holdNotAfter: claim.hold_not_after?.toISOString() ?? null,
+        claims: claim.hold_send_claims,
+      };
+    }
+    const row = await runUnscoped(
+      'a saga step reads its hold send on the order it drives, under its tenant',
+      () =>
+        client.order.findFirst({
+          where: { id: order.id, organizationId: order.organizationId },
+          select: { holdSendsClosedAt: true },
+        }),
+    );
+    return { closed: Boolean(row?.holdSendsClosedAt) };
+  }
+
+  /**
+   * The only send there has been was refused: no send can follow it. Compared with
+   * `claimHoldSend`'s count, so an older run's attempt that claimed since keeps this from
+   * being proof, and one that comes later finds the sends closed and sends nothing.
+   */
+  async closeHoldSendsOnRefusal(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+  ): Promise<boolean> {
+    const { count } = await runUnscoped(
+      'a saga step records its hold send on the order it drives, under its tenant',
+      () =>
+        client.order.updateMany({
+          where: {
+            id: order.id,
+            organizationId: order.organizationId,
+            holdSendClaims: 1,
+            holdSendsClosedAt: null,
+          },
+          data: { holdSendsClosedAt: new Date() },
+        }),
+    );
+    return count === 1;
+  }
+
+  /**
+   * Whether no hold can land from here on, closing the sends if so: none was ever begun,
+   * or they are closed, or this database's clock is past the deadline and `marginMs`
+   * (economic-service refuses every request past it). A send with no deadline is never past
+   * anything.
+   */
+  async closeHoldSendsIfNoneCanLand(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    marginMs: number,
+  ): Promise<boolean> {
+    const count = await runUnscoped(
+      'a saga step records its hold send on the order it drives, under its tenant',
+      () => client.$executeRaw`
+        UPDATE "order"
+        SET hold_sends_closed_at = COALESCE(hold_sends_closed_at, now())
+        WHERE id = ${order.id} AND organization_id = ${order.organizationId}
+          AND (
+            hold_sends_closed_at IS NOT NULL
+            OR hold_send_claims = 0
+            OR now() >= hold_not_after + ${marginMs}::double precision * interval '1 millisecond'
+          )`,
+    );
+    return count === 1;
+  }
+
+  /**
+   * economic-service has answered that call (FU-104): only the opening's own
+   * generation, of the command that opened it. An attempt overtaken by a newer
+   * opening says nothing about the newer one's outcome.
    */
   async confirmSagaCall(
     client: ExtendedPrismaClient,
     order: { id: string; organizationId: string },
     operation: SagaActivity,
     subject: string,
-    generation: number,
+    opening: { command: SagaStep; generation: number },
   ): Promise<void> {
     await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
       client.sagaUnconfirmedCall.updateMany({
@@ -334,7 +463,35 @@ export class OrderRepository {
           orderId: order.id,
           operation,
           subject,
-          generation,
+          command: opening.command.key,
+          generation: opening.generation,
+          confirmedAt: null,
+        },
+        data: { confirmedAt: new Date() },
+      }),
+    );
+  }
+
+  /**
+   * economic-service has shown a state of `subject` no call of `operations` can
+   * change any more, so none of them is in doubt, whichever command made it:
+   * the obligation REFUNDED, which is terminal (#792 r2 F2), or the order's own
+   * obligation found, which a create's late commit cannot duplicate (#836 r1
+   * R2). Closes every open row of theirs on it, whatever its generation or owner.
+   */
+  async confirmSagaCallsOn(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    operations: readonly SagaActivity[],
+    subject: string,
+  ): Promise<void> {
+    await runUnscoped('a saga step records its call on the order it drives, under its tenant', () =>
+      client.sagaUnconfirmedCall.updateMany({
+        where: {
+          organizationId: order.organizationId,
+          orderId: order.id,
+          operation: { in: [...operations] },
+          subject,
           confirmedAt: null,
         },
         data: { confirmedAt: new Date() },
@@ -405,6 +562,21 @@ export class OrderRepository {
           take: query.limit,
         }),
     );
+  }
+}
+
+/**
+ * A scheduled command opened a call record another command scheduled later owns
+ * (#836 r1 R1): the saga has moved past it. Thrown before it calls
+ * economic-service, so it changes nothing there or here.
+ */
+export class SagaCallSuperseded extends Error {
+  constructor(orderId: string, operation: string, command: string) {
+    super(
+      `Saga command ${command} may not make ${operation} of order ${orderId}: ` +
+        'a command scheduled later owns its call record',
+    );
+    this.name = 'SagaCallSuperseded';
   }
 }
 

@@ -1,5 +1,6 @@
 'use client';
 
+import { REQUEST_NOT_CHECKED } from '@/lib/request-not-checked';
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
@@ -13,7 +14,8 @@ import {
 } from '@/lib/asset-form-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
-import { submitRegisterAsset } from './actions';
+import { UnresolvedRegistrationNotice } from '@/app/UnresolvedRegistrationNotice';
+import { submitRegisterAsset, releaseUnresolvedAssetRegistration } from './actions';
 import { IDLE_REGISTER_ASSET_FORM, type RegisterAssetFormState } from './form-state';
 
 /**
@@ -38,7 +40,9 @@ const LABELS: Record<RegisterAssetField, string> = {
 };
 
 function valuesOf(state: RegisterAssetFormState): RegisterAssetFormValues {
-  return state.kind === 'INVALID' ? state.values : EMPTY_REGISTER_ASSET_FORM;
+  return state.kind === 'INVALID' || state.kind === 'HELD' || state.kind === 'UNCONFIRMED'
+    ? (state.values ?? EMPTY_REGISTER_ASSET_FORM)
+    : EMPTY_REGISTER_ASSET_FORM;
 }
 
 function errorsOf(state: RegisterAssetFormState): Partial<Record<RegisterAssetField, string>> {
@@ -48,6 +52,7 @@ function errorsOf(state: RegisterAssetFormState): Partial<Record<RegisterAssetFi
 export function RegisterAssetForm({
   csrfToken,
   submissionId,
+  initialState = IDLE_REGISTER_ASSET_FORM,
 }: {
   csrfToken: string;
   /**
@@ -58,17 +63,27 @@ export function RegisterAssetForm({
    * outcome is unknown (see `server/submission.ts`).
    */
   submissionId: string;
+  initialState?: RegisterAssetFormState;
 }) {
-  const [state, action, pending] = useActionState(submitRegisterAsset, IDLE_REGISTER_ASSET_FORM);
+  const [state, action, pending] = useActionState(submitRegisterAsset, initialState);
 
   const values = valuesOf(state);
   const errors = errorsOf(state);
-  const currentSubmissionId = state.kind === 'INVALID' ? state.submissionId : submissionId;
+  const locked =
+    state.kind === 'HELD' || state.kind === 'UNCONFIRMED' || state.kind === 'NOT_CHECKED';
+  const currentSubmissionId =
+    state.kind === 'INVALID' || state.kind === 'HELD' || state.kind === 'UNCONFIRMED'
+      ? state.submissionId
+      : submissionId;
 
-  return (
-    <form action={action} className="flex flex-col gap-4">
+  const form = (
+    <form
+      key={locked ? `held:${currentSubmissionId}` : 'editing'}
+      action={action}
+      className="flex flex-col gap-4"
+    >
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
-      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId ?? ''} />
 
       <FormBanner state={state} />
 
@@ -77,6 +92,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="name"
               defaultValue={values.name}
               maxLength={200}
@@ -91,6 +107,7 @@ export function RegisterAssetForm({
               // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
               key={values.type}
               {...control}
+              disabled={locked}
               name="type"
               defaultValue={values.type}
               className={controlClassName}
@@ -113,6 +130,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="assetTag"
               defaultValue={values.assetTag}
               dir="ltr"
@@ -130,6 +148,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="serialNumber"
               defaultValue={values.serialNumber}
               dir="ltr"
@@ -145,6 +164,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="manufacturer"
               defaultValue={values.manufacturer}
               className={controlClassName}
@@ -156,6 +176,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="model"
               defaultValue={values.model}
               className={controlClassName}
@@ -167,6 +188,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="manufactureYear"
               defaultValue={values.manufactureYear}
               inputMode="numeric"
@@ -184,6 +206,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="siteName"
               defaultValue={values.siteName}
               className={controlClassName}
@@ -195,6 +218,7 @@ export function RegisterAssetForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="addressLine"
               defaultValue={values.addressLine}
               className={controlClassName}
@@ -204,15 +228,37 @@ export function RegisterAssetForm({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 pt-2">
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || locked}>
           {pending ? 'در حال ثبت…' : 'ثبت ماشین'}
         </Button>
       </div>
     </form>
   );
+  return (
+    <>
+      {'releaseToken' in state && state.releaseToken ? (
+        <UnresolvedRegistrationNotice
+          csrfToken={csrfToken}
+          releaseToken={state.releaseToken}
+          href="/assets"
+          action={releaseUnresolvedAssetRegistration}
+        />
+      ) : null}
+      {form}
+    </>
+  );
 }
 
 function FormBanner({ state }: { state: RegisterAssetFormState }) {
+  if (state.kind === 'NOT_CHECKED')
+    return <Alert tone="warning">{REQUEST_NOT_CHECKED[state.reason]}</Alert>;
+  if (state.kind === 'HELD') {
+    return (
+      <Alert tone="warning">
+        نتیجهٔ درخواست پیشین مشخص نیست. پیش از ثبت دوباره، فهرست را بررسی کنید.
+      </Alert>
+    );
+  }
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
   }

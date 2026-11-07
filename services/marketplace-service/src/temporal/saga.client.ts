@@ -13,6 +13,9 @@ import {
   sagaStartBacklogAge,
   sagaStartBacklogCount,
   sagaStartDeliveries,
+  sagaUnresolvedAge,
+  sagaUnresolvedOrders,
+  sagaUnresolvedOverdue,
 } from '../observability/metrics';
 import { STATE_READ_TIMEOUT_MS, STATE_SAMPLE_INTERVAL_MS, StateSample } from './saga-state-sample';
 import { SERVICE_NAME } from '../config/env';
@@ -46,8 +49,8 @@ export class OrderSagaClient implements OnModuleDestroy {
 
   /**
    * State gauges (#770 r2 F3, #792 r1 F3), read by every replica whether or not
-   * it runs a worker, on a timer of their own: a claim or a delivery that hangs
-   * does not stop them. A read that fails, times out or
+   * it runs a worker, on a timer of their own: a claim, a delivery or the other
+   * read that hangs does not stop this one. A read that fails, times out or
    * stops answering withdraws its series rather than keeping the last value:
    * the alerts read a missing series as unknown and fire.
    */
@@ -60,6 +63,20 @@ export class OrderSagaClient implements OnModuleDestroy {
         sagaStartBacklogAge.set({ service: SERVICE_NAME }, age);
       },
       (outcome, error) => this.sampleFailed('backlog', outcome, error),
+    ),
+    new StateSample(
+      [sagaUnresolvedOrders, sagaUnresolvedAge, sagaUnresolvedOverdue],
+      () => this.store.unresolved(),
+      (reasons) => {
+        let overdue = 0;
+        for (const reason of reasons) {
+          sagaUnresolvedOrders.set({ service: SERVICE_NAME, reason: reason.reason }, reason.count);
+          sagaUnresolvedAge.set({ service: SERVICE_NAME, reason: reason.reason }, reason.age);
+          overdue += reason.overdue;
+        }
+        sagaUnresolvedOverdue.set({ service: SERVICE_NAME }, overdue);
+      },
+      (outcome, error) => this.sampleFailed('unresolved', outcome, error),
     ),
   ];
 

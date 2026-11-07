@@ -1,7 +1,18 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
-import { eventually as askUntil, handOff, queryQuiet } from '../../test/legacy-handoff';
-import { runBounded, type Deadline, type RunsUntil } from '../../test/worker-deadline';
+import {
+  eventually as askUntil,
+  handOff,
+  queryQuiet,
+  stopQuietly,
+} from '../../test/legacy-handoff';
+import {
+  cleanUp,
+  runBounded,
+  SETTLE_MS,
+  type Deadline,
+  type RunsUntil,
+} from '../../test/worker-deadline';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MockActivityEnvironment } from '@temporalio/testing';
@@ -64,6 +75,12 @@ it('step identity isolates runs and stays stable on retry for patched and legacy
   expect((await step('RUN_A', '41')).key).toBe('order-ORD_ROLLOVER/RUN_A/41');
 });
 
+/**
+ * How long, at least, a saga is given to come quiet before it is terminated:
+ * a body cut off at its deadline has {@link SETTLE_MS} for that and the stop.
+ */
+const QUIET_FLOOR_MS = SETTLE_MS / 4;
+
 describe('history rollover on real Temporal', () => {
   let env: TestWorkflowEnvironment;
   let serial = 0;
@@ -76,6 +93,8 @@ describe('history rollover on real Temporal', () => {
   // Every wait inside a worker's callback goes through this deadline (FU-192
   // r2): an unanswered request would otherwise leave the callback pending and
   // the worker running past the test.
+  // Every SDK call in the body carries it, so a test's `finally` stops its
+  // workflow through `cleanUp`, under a deadline of its own (FU-214).
   const bounded = <T>(worker: RunsUntil, body: (deadline: Deadline) => Promise<T>): Promise<T> =>
     runBounded(
       worker,
@@ -192,7 +211,7 @@ describe('history rollover on real Temporal', () => {
           );
         });
       } finally {
-        await handle.terminate();
+        await cleanUp(env.client.connection, () => handle.terminate());
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -279,7 +298,9 @@ describe('history rollover on real Temporal', () => {
         expect(new Set(seen.map((s) => s.run)).size).toBeGreaterThan(1);
         expect(new Set(seen.map((s) => s.id)).size).toBe(seen.length);
       } finally {
-        await env.client.workflow.getHandle(taskQueue).terminate();
+        await cleanUp(env.client.connection, () =>
+          env.client.workflow.getHandle(taskQueue).terminate(),
+        );
       }
     });
   });
@@ -392,7 +413,9 @@ describe('history rollover on real Temporal', () => {
         expect(settle).toHaveBeenCalledTimes(1);
         expect(disputeObligation).not.toHaveBeenCalled();
       } finally {
-        await env.client.workflow.getHandle(taskQueue).terminate();
+        await cleanUp(env.client.connection, () =>
+          env.client.workflow.getHandle(taskQueue).terminate(),
+        );
       }
     });
   });
@@ -452,7 +475,9 @@ describe('history rollover on real Temporal', () => {
         await env.sleep('1 hour');
         expect(disputes).toEqual(['DSP_OLD', 'DSP_NEW']);
       } finally {
-        await env.client.workflow.getHandle(taskQueue).terminate();
+        await cleanUp(env.client.connection, () =>
+          env.client.workflow.getHandle(taskQueue).terminate(),
+        );
       }
     });
   });
@@ -578,7 +603,7 @@ describe('history rollover on real Temporal', () => {
           );
         }
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -685,7 +710,7 @@ describe('history rollover on real Temporal', () => {
           );
         }
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -750,7 +775,7 @@ describe('history rollover on real Temporal', () => {
         expect(resumed).not.toHaveProperty('unconfirmedCall');
         await atRest(taskQueue, deadline);
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -850,7 +875,7 @@ describe('history rollover on real Temporal', () => {
         // A terminated activity would stall the server's clock for the next test.
         await atRest(taskQueue, deadline);
       } finally {
-        await latest.terminate();
+        await cleanUp(env.client.connection, () => latest.terminate());
       }
     });
   });
@@ -934,7 +959,7 @@ describe('history rollover on real Temporal', () => {
         expect((await handle.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
         await atRest(taskQueue, deadline);
       } finally {
-        await handle.terminate();
+        await cleanUp(env.client.connection, () => handle.terminate());
       }
     });
   });
@@ -1036,9 +1061,182 @@ describe('history rollover on real Temporal', () => {
           await handle.signal('retryDisputeRelease');
           expect(await handle.result()).toBe(site.done);
         } finally {
-          await handle.terminate().catch(() => undefined);
+          await cleanUp(env.client.connection, () => handle.terminate()).catch(() => undefined);
         }
       });
+    });
+  });
+
+  it('rolls over inside the hold’s wait under its own field, the buyer cancelling meanwhile (FU-117)', async () => {
+    const state: SagaOrderView = {
+      status: 'PENDING',
+      economicTransactionId: null,
+      cancellationReason: null,
+      dispute: null,
+    };
+    const sent: unknown[][] = [];
+    const rounds: number[] = [];
+    const refunded: unknown[][] = [];
+    let recovered = false;
+    const taskQueue = `rollover-hold-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => state,
+        createObligation: async (...args: unknown[]) => {
+          sent.push(args);
+          if (!recovered) throw ApplicationFailure.retryable('down', 'UPSTREAM_UNAVAILABLE');
+          return { transactionId: 'TXN_HELD' };
+        },
+        findObligation: async () => null,
+        noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+          rounds.push(round);
+        },
+        markFundsHeld: async (_id: string, transactionId: string) => {
+          state.economicTransactionId = transactionId;
+          return state.status;
+        },
+        markFailed: async () => {
+          throw new Error('a hold in doubt must not fail the order');
+        },
+        compensate: async (...args: unknown[]) => {
+          refunded.push(args);
+        },
+        markCancelled: async () => 'CANCELLED',
+      } as unknown as Partial<OrderActivities>,
+    });
+    await bounded(worker, async (deadline) => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [{ ...INPUT, recheckIntervalHours: 1 }],
+      });
+      const latest = env.client.workflow.getHandle(taskQueue);
+      try {
+        const first = (await handle.describe()).runId;
+        await eventually(() => rounds.length > 0);
+        await atRest(taskQueue, deadline);
+        await env.sleep('8 hours');
+        const second = (await latest.describe()).runId;
+        expect(second).not.toBe(first);
+        expect(rounds).toEqual(rounds.map((_, i) => i + 1));
+        const history = await env.client.workflow.getHandle(taskQueue, second).fetchHistory();
+        const started = history.events?.[0]?.workflowExecutionStartedEventAttributes;
+        const data = started?.input?.payloads?.[0]?.data as Uint8Array;
+        const { resume } = JSON.parse(Buffer.from(data).toString()) as OrderSagaInput;
+        expect(resume?.holdCall).toEqual({
+          rounds: expect.any(Number),
+          doubtAt: expect.any(Number),
+        });
+        expect(resume?.waitingIn).toBe('PENDING');
+        expect(resume).not.toHaveProperty('siblingCall');
+        expect((await latest.query<SagaStatus>('status')).phase).toBe('HOLD_UNCONFIRMED');
+        expect(new Set(sent.map((args) => JSON.stringify(args))).size).toBe(1);
+
+        // Sent on though the order left PENDING: the answer fences a late request off.
+        await atRest(taskQueue, deadline);
+        state.status = 'CANCELLING';
+        state.cancellationReason = 'why';
+        recovered = true;
+        await latest.signal('retryDisputeRelease');
+        expect(await latest.result()).toBe('CANCELLED');
+        expect(refunded[0]?.slice(0, 2)).toEqual([INPUT.orderId, 'TXN_HELD']);
+        for (const runId of [first, second]) {
+          await Worker.runReplayHistory(
+            { workflowsPath: require.resolve('./workflows') },
+            await env.client.workflow.getHandle(taskQueue, runId).fetchHistory(),
+            taskQueue,
+          );
+        }
+      } catch (error) {
+        await stopQuietly(env.client.connection, handle, QUIET_FLOOR_MS);
+        throw error;
+      }
+      // From a quiet history (FU-214): terminated with an activity in flight,
+      // the saga stalls this file's one test server for every later test.
+      const loud = await stopQuietly(
+        env.client.connection,
+        handle,
+        4 * QUIET_FLOOR_MS,
+        QUIET_FLOOR_MS,
+      );
+      if (loud !== undefined) throw new Error(`${loud}: stopped with an activity in flight`);
+    });
+  });
+
+  it('a run resumed with the hold in doubt sends first and goes on counting, whatever the order is (FU-117)', async () => {
+    const rounds: number[] = [];
+    let sends = 0;
+    const taskQueue = `rollover-hold-resumed-${++serial}`;
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue,
+      workflowsPath: require.resolve('./workflows'),
+      activities: {
+        readOrder: async () => ({
+          status: 'CANCELLING',
+          economicTransactionId: null,
+          cancellationReason: 'why',
+          dispute: null,
+        }),
+        createObligation: async () => {
+          sends += 1;
+          throw ApplicationFailure.nonRetryable('no', 'INSUFFICIENT_BALANCE');
+        },
+        findObligation: async () => null,
+        noteEconomicCallUnconfirmed: async (_id: string, _op: string, round: number) => {
+          rounds.push(round);
+        },
+        markCancelled: async () => {
+          throw new Error('the hold is still in doubt');
+        },
+        compensate: async () => {
+          throw new Error('nothing to refund yet');
+        },
+      } as unknown as Partial<OrderActivities>,
+    });
+    await bounded(worker, async () => {
+      const handle = await env.client.workflow.start(orderSaga, {
+        workflowId: taskQueue,
+        taskQueue,
+        args: [
+          {
+            ...INPUT,
+            recheckIntervalHours: 1,
+            resume: {
+              status: {
+                phase: 'WAS',
+                deferredSteps: [],
+                remindersRecorded: 0,
+                settlementAttempts: 0,
+              },
+              waitingIn: 'PENDING',
+              activitySequence: 7,
+              holdCall: { rounds: 4 },
+            },
+          },
+        ],
+      });
+      try {
+        await eventually(() => rounds.length > 0);
+        expect(rounds[0]).toBe(5);
+        expect(sends).toBe(1);
+        expect((await handle.query<SagaStatus>('status')).phase).toBe('HOLD_UNCONFIRMED');
+      } catch (error) {
+        await stopQuietly(env.client.connection, handle, QUIET_FLOOR_MS);
+        throw error;
+      }
+      // From a quiet history (FU-214): terminated with an activity in flight,
+      // the saga stalls this file's one test server for every later test.
+      const loud = await stopQuietly(
+        env.client.connection,
+        handle,
+        4 * QUIET_FLOOR_MS,
+        QUIET_FLOOR_MS,
+      );
+      if (loud !== undefined) throw new Error(`${loud}: stopped with an activity in flight`);
     });
   });
 
@@ -1083,6 +1281,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities: {
         readOrder: async () => state,
+        noHoldCanLand: async () => true,
         findObligation: async () => {
           lookups += 1;
           return { transactionId: 'TXN_FOUND' };
@@ -1164,7 +1363,7 @@ describe('history rollover on real Temporal', () => {
           );
         }
       } finally {
-        await latest.terminate().catch(() => undefined);
+        await cleanUp(env.client.connection, () => latest.terminate()).catch(() => undefined);
       }
     });
   });
@@ -1348,7 +1547,7 @@ describe('history rollover on real Temporal', () => {
           expect(went[0]).toBe(movedOn ? 'disputeObligation' : 'authoriseSettlement');
           await atRest(taskQueue, deadline);
         } finally {
-          await handle.terminate();
+          await cleanUp(env.client.connection, () => handle.terminate());
         }
       });
     },
