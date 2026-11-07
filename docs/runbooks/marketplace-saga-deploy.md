@@ -218,7 +218,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 6); an absent field means protocol **0**, the strictest legacy
+support (this build: 7); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue. An incompatible
@@ -230,11 +230,15 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**, `saga-owed-work-durable-v1` **6**. A marker the gate does not list blocks every target until the gate learns
+**5**, `saga-owed-work-durable-v1` **6**, `authorisation-order-fence-v1` **7**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
 (`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
-history requires.
+history requires. A recorded result counts as well, whether or not a workflow task has
+read it (`resultProtocol`): stop the workers right after an authorisation completes
+and the next worker reads the answer first, with no marker yet. An `authoriseSettlement`
+answer of `{fenced, status, inDoubt}` requires **7**, because a build below it reads it
+as "authorised".
 
 A build of #625 alone declares 1 although it writes the protocol-2 marker. Once a
 saga holds that marker, the gate refuses that image as a target, rollback or
@@ -297,6 +301,15 @@ call changed nothing, so it may have committed; the call is repeated under the s
 doubling from one minute to one hour, and nothing settles meanwhile. After restoring
 economic-service, try now with the same signal, which keeps its name:
 `--name retryDisputeRelease`.
+
+Each authorisation goes out with the order's row held (`FOR SHARE`, for at most 2 s;
+D-138), after the row as it stands has been checked. An order no longer in
+`RECEIPT_CONFIRMED` or `SETTLING` is not sent for, on any attempt or round: the saga
+follows the order, and this writes a warning naming the status, not an alert. So a
+dispute or an operator's decision can wait up to 2 s behind a send in progress. When
+economic-service is that slow, the call goes unconfirmed here and the next attempt
+reads the obligation first. A party's command that times out behind the lock is a 5xx
+it can retry under its own key.
 
 Only a refusal the activity marks as proof ends the saga, with the funds held for a
 person and no alert of its own: its own refusal, by the receipt guard or the send,
