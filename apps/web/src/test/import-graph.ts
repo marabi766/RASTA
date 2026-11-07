@@ -25,20 +25,39 @@ const SRC = join(WEB_ROOT, 'src');
 const EXECUTABLE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const DECLARATION = /\.d(\.[^./]+)?\.(ts|mts|cts)$/;
 /** A file only a test loads, by its own name or a test directory. Checked anyway once a checked module imports it. */
-const TEST_NAMED =
+export const TEST_NAMED =
   /(^|\/)(test|__tests__|__mocks__|fixtures?)\/|(^|\/)[^/]*(\.(spec|test)\.|fixture)[^/]*$/i;
-/** What Next itself loads, whatever its directory is called: always checked. */
-const NEXT_ENTRY =
-  /^src\/(app\/(.*\/)?(page|layout|route|template|default|error|global-error|loading|not-found|forbidden|unauthorized)|middleware|instrumentation)\.(tsx?|jsx?)$/;
+/**
+ * What Next may load by its location alone, whatever the directory is called: always checked
+ * (FU-219). Over-approximates Next's conventions instead of listing them, so a convention this
+ * file never heard of (a metadata image, `instrumentation-client`, a numbered `icon2`) is still
+ * read: every module under `app/` whose name has no dot before its extension, every module under
+ * `pages/` (any name: `x.spec.tsx` is a page there), and every dotless module directly in `src/`
+ * or the app's own directory. Holds while `next.config.mjs` sets no `pageExtensions`.
+ */
+const NEXT_LOADS = /^(src\/)?(pages\/.+|(app\/(.+\/)?)?[^./]+)\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 
-/** Where the check starts: Next's entries, every file not named as a test, the portal's files beside src/. */
+/** Where the check starts: what Next loads, every file not named as a test, the portal's files beside src/. */
 export const isRoot = (id: string): boolean =>
-  id.startsWith('src/')
-    ? NEXT_ENTRY.test(id) || !TEST_NAMED.test(id.slice(4))
-    : WEB_ROOT_FILES[id] === 'portal';
-const LOADERS = new Set(['getBuiltinModule', '__non_webpack_require__', '__webpack_require__']);
-/** Non-code a module may import; it executes nothing. */
-const ASSET = /\.(css|scss|svg|png|jpe?g|gif|webp|ico|woff2?|json|md|txt)$/;
+  NEXT_LOADS.test(id) ||
+  (id.startsWith('src/') ? !TEST_NAMED.test(id.slice(4)) : WEB_ROOT_FILES[id] === 'portal');
+const LOADERS = new Set([
+  'getBuiltinModule',
+  '__non_webpack_require__',
+  '__webpack_require__',
+  '_load',
+]);
+/** Loader names reached as a string (`process['getBuiltinModule']`, `m['createRequire']`). */
+const LOADER_NAMES = new Set([...LOADERS, 'require', 'createRequire']);
+/** What `process` itself loads code or native bindings with. */
+const PROCESS_LOADERS = new Set(['binding', '_linkedBinding', 'dlopen']);
+/**
+ * The one non-code a module may import: a static import of a stylesheet from `src/`, which Next's
+ * CSS loader turns into a stylesheet. Node's loader executes any other suffix as JavaScript, and
+ * webpack parses a suffix it has no rule for as JavaScript too, so every other "asset" (`.svg`,
+ * `.txt`, `.json` …) and every load of one is refused until classified (FU-219).
+ */
+const ASSET = /\.css$/;
 
 /**
  * The executable files directly in `apps/web/` outside `src/`. The two the portal
@@ -110,7 +129,9 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
   // Every file the repository authors in this app (git's view: what CI checks out and builds).
   const authored = authoredFiles(WEB_ROOT);
   const atRoot = authored.filter((path) => dirname(path) === WEB_ROOT);
-  const inSrc = authored.filter((path) => path.startsWith(`${SRC}/`));
+  const inSrc = authored.filter(
+    (path) => path.startsWith(`${SRC}/`) || /^(app|pages)\//.test(idOf(path)),
+  );
   const files = [...new Set([...inSrc, ...atRoot, ...virtual.keys()])].filter(
     (path) => EXECUTABLE.test(path) && !DECLARATION.test(path),
   );
@@ -123,15 +144,29 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
   }
   const twins = [...stems.values()].filter((ids) => ids.length > 1);
 
-  const resolve = (specifier: string, from: string): string => {
+  const resolve = (specifier: string, from: string, how: Edge['how'], nodeLoad = false): string => {
     const bare = specifier.replace(/^node:/, '');
     if (specifier.startsWith('node:') || builtinModules.includes(bare)) return `node:${bare}`;
+    // A Node require does not use TypeScript's .js → .ts substitution or @/ alias.
+    // Accept only exact, inventoried local code; refuse other Node resolution modes.
+    if (nodeLoad && /^[./@]/.test(specifier)) {
+      const exact = join(dirname(from), specifier);
+      return specifier.startsWith('.') &&
+        EXECUTABLE.test(exact) &&
+        host.fileExists(exact) &&
+        inventory.has(idOf(exact))
+        ? idOf(exact)
+        : `unresolved:${specifier}`;
+    }
     const found = ts.resolveModuleName(specifier, from, COMPILER_OPTIONS, host).resolvedModule;
     const path = found?.resolvedFileName;
     // A package that is not installed: the package list decides, as if it were.
     if (path === undefined && !/^(\.|\/|@\/)/.test(specifier)) return `pkg:${specifier}`;
     if (path === undefined || ASSET.test(path))
-      return ASSET.test(specifier) && /^[./@]/.test(specifier)
+      return how !== 'load' &&
+        from.startsWith(`${SRC}/`) &&
+        ASSET.test(specifier) &&
+        /^[./@]/.test(specifier)
         ? 'asset'
         : `unresolved:${specifier}`;
     // By the whole specifier: `next/navigation` is not `next/dist/compiled/undici`. A workspace
@@ -154,9 +189,28 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
     const edges: Edge[] = [];
     const unprovable: string[] = [];
     const lineOf = (node: ts.Node) => file.getLineAndCharacterOfPosition(node.getStart()).line + 1;
-    const add = (node: ts.Node, specifier: string, edge: Omit<Edge, 'to' | 'line'>) =>
-      edges.push({ ...edge, to: resolve(specifier, path), line: lineOf(node) });
+    const add = (
+      node: ts.Node,
+      specifier: string,
+      edge: Omit<Edge, 'to' | 'line'>,
+      nodeLoad = false,
+    ) =>
+      edges.push({ ...edge, to: resolve(specifier, path, edge.how, nodeLoad), line: lineOf(node) });
 
+    const factories = new Set<string>();
+    for (const statement of file.statements) {
+      if (
+        !ts.isImportDeclaration(statement) ||
+        !ts.isStringLiteral(statement.moduleSpecifier) ||
+        !/^(node:)?module$/.test(statement.moduleSpecifier.text)
+      )
+        continue;
+      const bindings = statement.importClause?.namedBindings;
+      if (bindings && ts.isNamedImports(bindings))
+        for (const item of bindings.elements)
+          if ((item.propertyName ?? item.name).text === 'createRequire')
+            factories.add(item.name.text);
+    }
     const visit = (node: ts.Node): void => {
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
         const clause = node.importClause;
@@ -205,12 +259,17 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
       ) {
         const expression = node.moduleReference.expression;
         if (ts.isStringLiteralLike(expression)) {
-          add(node, expression.text, {
-            how: 'load',
-            typeOnly: node.isTypeOnly,
-            whole: true,
-            names: [],
-          });
+          add(
+            node,
+            expression.text,
+            {
+              how: 'load',
+              typeOnly: node.isTypeOnly,
+              whole: true,
+              names: [],
+            },
+            true,
+          );
         } else unprovable.push(`${id}:${lineOf(node)} loads a module it cannot name`);
       } else if (
         ts.isCallExpression(node) &&
@@ -219,8 +278,41 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
       ) {
         const [specifier] = node.arguments;
         if (specifier && ts.isStringLiteralLike(specifier)) {
-          add(node, specifier.text, { how: 'load', typeOnly: false, whole: true, names: [] });
+          add(
+            node,
+            specifier.text,
+            { how: 'load', typeOnly: false, whole: true, names: [] },
+            node.expression.kind !== ts.SyntaxKind.ImportKeyword,
+          );
         } else unprovable.push(`${id}:${lineOf(node)} loads a module it cannot name`);
+      }
+      // Model only the inline factory at this module's actual URL. Escaping it,
+      // another base, namespace/default imports and computed access are refused.
+      if (ts.isIdentifier(node) && factories.has(node.text) && !ts.isImportSpecifier(node.parent)) {
+        const factory = node.parent;
+        const load = factory.parent;
+        if (
+          ts.isCallExpression(factory) &&
+          factory.expression === node &&
+          factory.arguments.length === 1 &&
+          factory.arguments[0]?.getText(file) === 'import.meta.url' &&
+          ts.isCallExpression(load) &&
+          load.expression === factory &&
+          load.arguments.length === 1 &&
+          ts.isStringLiteralLike(load.arguments[0]!)
+        )
+          add(
+            load,
+            (load.arguments[0] as ts.StringLiteralLike).text,
+            {
+              how: 'load',
+              typeOnly: false,
+              whole: true,
+              names: [],
+            },
+            true,
+          );
+        else unprovable.push(`${id}:${lineOf(node)} escapes a loader factory or its base`);
       }
       // `const r = require`, `module.require`, `require.context`, `process.getBuiltinModule('http')`,
       // webpack's own loaders: a load with no specifier to resolve.
@@ -231,6 +323,19 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
             !(ts.isCallExpression(node.parent) && node.parent.expression === node)))
       )
         unprovable.push(`${id}:${lineOf(node)} reaches ${node.text} other than as a named load`);
+      // The same capabilities by a string, and `process`'s own loaders by any name (FU-219).
+      if (ts.isStringLiteralLike(node) && LOADER_NAMES.has(node.text))
+        unprovable.push(`${id}:${lineOf(node)} names the loader ${node.text} as a string`);
+      if (
+        (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'process' &&
+        (ts.isPropertyAccessExpression(node)
+          ? PROCESS_LOADERS.has(node.name.text)
+          : !ts.isStringLiteralLike(node.argumentExpression) ||
+            PROCESS_LOADERS.has(node.argumentExpression.text))
+      )
+        unprovable.push(`${id}:${lineOf(node)} reaches a loader of process`);
       ts.forEachChild(node, visit);
     };
     visit(file);
@@ -246,6 +351,10 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
     for (const edge of facts.get(id)?.edges ?? [])
       if (!edge.typeOnly && inventory.has(edge.to)) pending.push(edge.to);
   }
-  const rootFiles = atRoot.map(idOf).filter((id) => EXECUTABLE.test(id));
+  const rootFiles = [
+    ...new Set([...atRoot, ...virtual.keys()].filter((p) => dirname(p) === WEB_ROOT)),
+  ]
+    .map(idOf)
+    .filter((id) => EXECUTABLE.test(id));
   return { facts, inventory, checked: [...checked].sort(), rootFiles, twins };
 }

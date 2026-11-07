@@ -21,7 +21,7 @@
  *   - the gateway: outside the writer and the gateway itself, only a named import
  *     of a reviewed export, and `callGateway` only ever called as a read — an
  *     object literal with no method other than `GET`, no body, no idempotency key
- *     and no replay deadline;
+ *     and no replay deadline, each a plain property (no getter or method);
  *   - a transport (`credentialFetch`, `putToSignedUrl`): only its reviewed
  *     importers, by a named import, used only as the callee of a call;
  *   - a package or node builtin: only the reviewed ones (a client library or
@@ -35,11 +35,14 @@
  * name, a specifier that resolves to no file it reads.
  */
 
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { isMetadataRouteFile } from 'next/dist/lib/metadata/is-metadata-route';
 import ts from 'typescript';
 
-import { WEB_ROOT, WEB_ROOT_FILES, importGraph, isRoot } from '@/test/import-graph';
+import { WEB_ROOT, WEB_ROOT_FILES, TEST_NAMED, importGraph, isRoot } from '@/test/import-graph';
 
 const GATEWAY = 'src/server/gateway.ts';
 /** The writer, and the module that defines `callGateway`. */
@@ -141,9 +144,14 @@ function findingsIn(graph: Graph): string[] {
     .filter((ids) => ids.some((id) => graph.checked.includes(id)))
     .map((ids) => `${ids.join(' and ')} are one module to the bundler: which runs is unproven`);
   for (const id of graph.checked) {
-    // `internal/raw-http` (lint: global aliases, reflection, computed names) skips test files.
-    if (!isRoot(id))
-      findings.push(`${id} is named as a test but ships: a checked module imports it`);
+    // `internal/raw-http` (lint: global aliases, reflection, computed names, string execution)
+    // covers `src/` without its tests, and the portal's root files: whatever else ships is refused.
+    if (TEST_NAMED.test(id))
+      findings.push(
+        `${id} is named as a test but ships: Next loads it or a checked module imports it`,
+      );
+    else if (!id.startsWith('src/') && WEB_ROOT_FILES[id] !== 'portal')
+      findings.push(`${id} ships but internal/raw-http does not lint it: classify explicitly`);
     const facts = graph.facts.get(id);
     if (!facts) throw new Error(`no facts for ${id}`);
     findings.push(...facts.unprovable);
@@ -155,6 +163,13 @@ function findingsIn(graph: Graph): string[] {
       if (edge.to.startsWith('unresolved:')) {
         findings.push(`${at} imports ${edge.to.slice(11)}, which resolves to no module it reads`);
       } else if (edge.to.startsWith('pkg:') || edge.to.startsWith('node:')) {
+        if (
+          edge.to === 'node:module' &&
+          (edge.how !== 'import' ||
+            edge.whole ||
+            edge.names.some((name) => name.imported !== 'createRequire'))
+        )
+          findings.push(`${at} reaches an unclassified module loader`);
         const allowed = PACKAGES[edge.to];
         if (allowed === undefined || (allowed !== NO_NETWORK && !Object.hasOwn(allowed, id)))
           findings.push(`${at} uses ${edge.to}, not reviewed for this module`);
@@ -215,6 +230,13 @@ function callsIn(
                 property.name && ts.isIdentifier(property.name) ? property.name.text : null;
               if (name === null) {
                 at(property, 'names a callGateway property it cannot be read from');
+                continue;
+              }
+              if (
+                !ts.isPropertyAssignment(property) &&
+                !ts.isShorthandPropertyAssignment(property)
+              ) {
+                at(property, 'uses an accessor or method in a read request');
                 continue;
               }
               if (READ_PROPERTIES.has(name)) continue;
@@ -344,7 +366,7 @@ const PROBES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   'a dynamic gateway import': {
     'a.ts': "const { callGateway } = await import('@/server/gateway');",
   },
-  'a gateway require': { 'a.js': "const g = require('../server/gateway');" },
+  'a gateway require': { 'a.js': "const g = require('../server/gateway.ts');" },
   'a load it cannot name': { 'a.ts': 'await import(where);' },
   'a property of something else': { 'a.ts': 'mod.callGateway({ path });' },
   'an unreviewed gateway export': {
@@ -409,6 +431,14 @@ const PROBES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   'a builtin without an import': { 'a.ts': "process.getBuiltinModule('node:https');" },
   'webpack’s own loader': { 'a.ts': "__non_webpack_require__('node:https');" },
   'a .js twin of a .ts module': { 'a.ts': 'export {};', 'a.js': 'export {};' },
+  ...Object.fromEntries(
+    ['baseUrl', 'path', 'credential', 'correlationId'].map((property) => [
+      `FU-219: a ${property} getter`,
+      {
+        'a.ts': `import { callGateway } from '@/server/gateway'; callGateway({ get ${property}() { return value; } });`,
+      },
+    ]),
+  ),
   'an unknown callGateway property': {
     'a.ts':
       "import { callGateway } from '@/server/gateway';\ncallGateway({ path, fetchImpl: send });",
@@ -444,8 +474,10 @@ const ALLOWED: Readonly<Record<string, Readonly<Record<string, string>>>> = {
 it('starts from every Next entry and every file not named as a test', () => {
   for (const id of ['src/app/test/page.tsx', 'src/app/fixture-x/route.ts', 'src/middleware.ts'])
     expect(isRoot(id)).toBe(true);
-  expect(isRoot('src/app/fixtures-admin/actions.ts')).toBe(true);
-  for (const id of ['src/a.spec.ts', 'src/test/x.ts', 'src/app/x/order-fixture.ts'])
+  // Next may load any dotless module under app/: a fixture there needs a dotted name (FU-219).
+  for (const id of ['src/app/fixtures-admin/actions.ts', 'src/app/x/order-fixture.ts'])
+    expect(isRoot(id)).toBe(true);
+  for (const id of ['src/a.spec.ts', 'src/test/x.ts', 'src/app/x/order.fixture.ts'])
     expect(isRoot(id)).toBe(false);
 });
 
@@ -486,3 +518,170 @@ describe('the guard, on each way a write could bypass the writer', () => {
     expect(inProbe('ok', label)).toEqual([]);
   });
 });
+
+// FU-219 / PR-921 executed-review regressions, one graph: what Next and Node load
+// and execute is checked, and anything the guard cannot model is refused.
+describe('FU-219: what Next and Node actually load and execute', () => {
+  const SEND =
+    "import * as t from '@/server/credential-fetch'; t.credentialFetch(url, { method: 'POST' });";
+  const RAW_SEND = "fetch('/v1/x', { method: 'POST' });";
+  const ENTRIES = [
+    ...['sitemap.ts', 'icon.tsx', 'apple-icon.tsx', 'opengraph-image.tsx', 'twitter-image.tsx'].map(
+      (name) => `src/app/test/${name}`,
+    ),
+    'src/app/__tests__/icon2.tsx',
+    'src/app/fixtures/robots.ts',
+    'src/app/test/manifest.ts',
+    'src/app/test/global-not-found.tsx',
+    'src/instrumentation-client.ts',
+    'src/pages/test/index.tsx',
+    'src/pages/api/test/send.ts',
+    'src/pages/order.fixture.tsx',
+    'src/pages/order.spec.tsx',
+    'pages/__tests__/index.jsx',
+    'app/fixtures/icon.tsx',
+  ];
+  /** Every suffix Node's CommonJS loader was seen executing as JavaScript, and more. */
+  const SUFFIXES = [
+    ...['css', 'scss', 'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'woff', 'woff2', 'md'],
+    ...['txt', 'json', 'node', 'unknown'],
+  ];
+  const LOADER_ESCAPES = [
+    "import { createRequire as factory } from 'node:module'; const load = factory(import.meta.url); load(target);",
+    "import { createRequire } from 'node:module'; createRequire('/elsewhere/config.js')('./send.cjs');",
+    "import * as m from 'node:module'; m['create' + 'Require'](import.meta.url)(target);",
+    "const m = require('node:module'); m.createRequire(__filename)(target);",
+    "process['getBuiltin' + 'Module']('node:http');",
+    "process['getBuiltinModule']('node:http');",
+    "const p = process; p['getBuiltinModule']('node:http');",
+    "process.binding('tcp_wrap');",
+    "module.constructor._load('node:http');",
+  ];
+  const at = (id: string) => join(WEB_ROOT, id);
+  const virtual = new Map<string, string>([
+    ...ENTRIES.map((id) => [at(id), SEND] as const),
+    // The review's own probe: the root file Node runs, loading a text file.
+    [at('upload-limit.cjs'), "require('./probe.txt');"],
+    [at('probe.txt'), RAW_SEND],
+    // The inline factory is followed to the module it loads, at the module's own base.
+    [
+      at('next.config.mjs'),
+      "import { createRequire as factory } from 'node:module'; factory(import.meta.url)('./src/test/send.cjs');",
+    ],
+    [at('src/test/send.cjs'), RAW_SEND],
+    // Node does not substitute .ts for .js.
+    [at('src/zz-fu219-subst/a.cjs'), "require('./send.js');"],
+    [at('src/zz-fu219-subst/send.ts'), 'export {};'],
+    ...SUFFIXES.flatMap((ext) => [
+      [at(`src/zz-fu219-load-${ext}/a.cjs`), `require('./send.${ext}');`] as const,
+      [at(`src/zz-fu219-import-${ext}/a.ts`), `import './send.${ext}';`] as const,
+    ]),
+    ...LOADER_ESCAPES.map((source, n) => [at(`src/zz-fu219-loader-${n}/a.mjs`), source] as const),
+    [at('src/zz-fu219-css/a.ts'), "import './globals.css';"],
+    // A tooling file beside src/ that a shipped module imports: checked, but never linted.
+    [at('src/zz-fu219-tooling/a.ts'), "import '../../postcss.config.mjs';"],
+  ]);
+  const graph = importGraph(virtual);
+  const findings = findingsIn(graph);
+  const from = (prefix: string) => findings.filter((finding) => finding.startsWith(prefix));
+
+  it.each(ENTRIES)('checks and refuses unclassified %s', (id) => {
+    expect(isRoot(id)).toBe(true);
+    expect(graph.checked).toContain(id);
+    expect(from(`${id}`)).not.toEqual([]);
+  });
+
+  it('covers every name the installed Next metadata matcher accepts', () => {
+    const exts = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'];
+    for (const name of ['sitemap', 'robots', 'manifest', 'icon', 'icon2', 'apple-icon'])
+      for (const ext of exts) {
+        const id = `src/app/test/${name}.${ext}`;
+        if (isMetadataRouteFile(id.slice(7), exts, true)) expect(isRoot(id)).toBe(true);
+      }
+    // Next's conventions hold only for its default page extensions.
+    expect(readFileSync(join(WEB_ROOT, 'next.config.mjs'), 'utf8')).not.toMatch(/pageExtensions/);
+  });
+
+  it('follows the inline loader factory from next.config.mjs to what it loads', () => {
+    expect(graph.checked).toContain('src/test/send.cjs');
+    expect(from('src/test/send.cjs:')).not.toEqual([]);
+    expect(from('next.config.mjs:')).toEqual([]);
+  });
+
+  it('refuses the text file upload-limit.cjs loads: Node executes it', () => {
+    expect(from('upload-limit.cjs:')).toEqual([
+      'upload-limit.cjs:1 imports ./probe.txt, which resolves to no module it reads',
+    ]);
+  });
+
+  it('refuses TypeScript substitution for a Node load', () => {
+    expect(graph.facts.get('src/zz-fu219-subst/a.cjs')?.edges[0]?.to).toBe('unresolved:./send.js');
+  });
+
+  // A static import of a stylesheet is the one asset: Next's CSS loader compiles it, nothing executes it.
+  it.each(SUFFIXES)('refuses loading or importing .%s as an asset', (ext) => {
+    for (const how of ext === 'css' ? ['load'] : ['load', 'import'])
+      expect(from(`src/zz-fu219-${how}-${ext}/a.`)).toContainEqual(
+        expect.stringMatching(/resolves to no module it reads/),
+      );
+  });
+
+  it('refuses a shipped module that internal/raw-http does not lint', () => {
+    expect(graph.checked).toContain('postcss.config.mjs');
+    expect(from('postcss.config.mjs ')).toEqual([
+      'postcss.config.mjs ships but internal/raw-http does not lint it: classify explicitly',
+    ]);
+  });
+
+  it('lets a stylesheet import through, which Next compiles as CSS', () => {
+    expect(from('src/zz-fu219-css/')).toEqual([]);
+  });
+
+  it.each(LOADER_ESCAPES.map((source, n) => [n, source]))('refuses loader escape %i: %s', (n) => {
+    expect(from(`src/zz-fu219-loader-${n}/a.mjs:`)).toContainEqual(
+      expect.stringMatching(
+        /escapes a loader factory|unclassified module loader|names the loader|loader of process|other than as a named load/,
+      ),
+    );
+  });
+});
+
+it('FU-219 runs transport lint on every executable root (aliases, reflection, computed loaders)', () => {
+  const roots = Object.entries(WEB_ROOT_FILES)
+    .filter(([, role]) => role === 'portal')
+    .map(([id]) => id);
+  const command = JSON.parse(readFileSync(join(WEB_ROOT, 'package.json'), 'utf8')).scripts.lint;
+  for (const root of roots) expect(command.split(/\s+/)).toContain(root);
+  const probes = [
+    "const g = globalThis; g['fet' + 'ch']('/v1/x', { method: 'POST' });",
+    "Reflect['g' + 'et'](globalThis, 'fet' + 'ch')('/v1/x');",
+    "process['getBuiltin' + 'Module']('node:http').request('/v1/x');",
+    "process['getBuiltinModule']('node:http').request('/v1/x');",
+    "import * as m from 'node:module'; m['create' + 'Require'](import.meta.url)(target);",
+    "eval('fet' + 'ch')('/v1/x');",
+    "new Function('return fetch')()('/v1/x');",
+  ];
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+    import { ESLint } from 'eslint';
+    let input = ''; for await (const chunk of process.stdin) input += chunk;
+    const { roots, probes } = JSON.parse(input);
+    const lint = new ESLint(); const counts = [];
+    for (const root of roots) for (const probe of probes) {
+      const [result] = await lint.lintText(probe, { filePath: root });
+      counts.push(result.messages.filter(m => m.ruleId === 'internal/raw-http').length);
+    }
+    process.stdout.write(JSON.stringify(counts));
+  `,
+    ],
+    { cwd: WEB_ROOT, input: JSON.stringify({ roots, probes }), encoding: 'utf8', timeout: 30000 },
+  );
+  expect(result.status).toBe(0);
+  const counts = JSON.parse(result.stdout) as number[];
+  expect(counts).toHaveLength(roots.length * probes.length);
+  for (const count of counts) expect(count).toBeGreaterThan(0);
+}, 35000);
