@@ -108,6 +108,8 @@ const pins = {
     'ea1656bd023da6f0fddd9d24e1842aa628939bd610f77c5a7ad4f793e277c155',
     // FU-181 construction identities; reviewed value-preserving helper.
     '45c308b60a4588cf7dfba8496b264f4c50fac4c75d5f652868ead8b9cae6de04',
+    // CI repair: the pure URL helper gains a read-only construction lookup.
+    'bcf57fa29d3032b8106d41bec16165a5423d810d77780e832d03101bd936e527',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',

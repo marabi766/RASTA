@@ -397,6 +397,10 @@ it('FU-181 refuses the stale partial contracts barrel', () => {
       cpSync(join(ROOT, file), join(root, file));
     const barrel = join(root, 'packages/contracts/src/index.ts');
     const stale = readFileSync(barrel, 'utf8')
+      .replace(
+        "export { parsableUrl, isParsableUrlCheck } from './common/parsable-url';",
+        "export { parsableUrl } from './common/parsable-url';",
+      )
       .replace(/export \{[^}]*\} from '\.\/common\/transaction-text';\n/, '')
       .replace(
         /export \{[^}]*PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,[^}]*\} from '\.\/common\/replay-window';/,

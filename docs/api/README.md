@@ -123,5 +123,6 @@ FU-181 captures original built-in check runners and definitions inside the pinne
 Converter trust refuses changed runners, forged kind strings and changed definitions. Only named
 value-preserving formats (regex, email, datetime, UUID) cross the raw-input barrier; URL checks
 may rewrite their input and remain barriers. Code-point and ISO zone constructors snapshot their
-own checks too, and zone publication uses the same pattern predicate. Unknown checks omit later
+own checks too, and zone publication uses the same pattern predicate. The input-preserving
+`parsableUrl()` helper has its own constructor-identity lookup; native Zod URL checks remain barriers. Unknown checks omit later
 constraints. Construction snapshots do not register arbitrary caller callbacks.

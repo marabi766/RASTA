@@ -46,7 +46,7 @@ export {
   textWithin,
   type TextBounds,
 } from './common/transaction-text';
-export { parsableUrl } from './common/parsable-url';
+export { parsableUrl, isParsableUrlCheck } from './common/parsable-url';
 export {
   isoDateTime,
   legacyDatetimeRegex,

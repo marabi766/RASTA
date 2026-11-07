@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
 import {
   numberInputInnerSchema,
+  isParsableUrlCheck,
   publishablePattern,
   unchangedCheck,
   publishedIsoDateTimeZone,
@@ -307,6 +308,7 @@ function rawChecks(def: any): { checks: ReturnType<typeof checkDefs>; changed: b
       !CODE_POINT_BOUNDS.get(check)?.unchanged() &&
       !publishedRefinementPattern(check) &&
       !publishedIsoDateTimeZone(check) &&
+      !isParsableUrlCheck(check) &&
       !(
         Object.getPrototypeOf(definition) === Object.prototype &&
         z.core.originalZodCheck(check) &&

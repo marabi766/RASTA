@@ -100,7 +100,7 @@ exports[`toJsonSchema publishes every construct the services use 1`] = `
     },
     "unsupported": {},
     "url": {
-      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
+      "format": "uri",
       "type": "string",
     },
     "version": {

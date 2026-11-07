@@ -657,7 +657,7 @@ describe('FU-181 construction trust', () => {
       }
     },
   );
-  it.each(['bounds', 'zone', 'builtin', 'forged'] as const)(
+  it.each(['bounds', 'zone', 'url', 'builtin', 'forged'] as const)(
     'refuses a replaced %s runner',
     (kind) => {
       const schema =
@@ -665,9 +665,11 @@ describe('FU-181 construction trust', () => {
           ? codePointLength(z.string(), 1, 3)
           : kind === 'zone'
             ? z.string().check(isoDateTime())
-            : kind === 'builtin'
-              ? z.string().min(2)
-              : z.string().check(z.check<string>(() => {}));
+            : kind === 'url'
+              ? z.string().check(parsableUrl())
+              : kind === 'builtin'
+                ? z.string().min(2)
+                : z.string().check(z.check<string>(() => {}));
       const check = schema._zod.def.checks![0]!;
       check._zod.check = (payload) => {
         payload.value = 'a';
