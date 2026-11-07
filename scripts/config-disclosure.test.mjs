@@ -375,7 +375,7 @@ Module._load = function(id, ...args) {
           role: 'rasta_asset', sessionRole: 'rasta_asset', database: 'asset',
           superuser: false, createDb: false, createRole: false, bypassRls: false,
           ownsDatabase: false, ownedSchemas: [], ownsRelationIn: [],
-          createOnDatabase: false, createOnSchemas: [], memberOf: [],
+          createOnDatabase: false, createOnSchemas: [], memberOf: [], timeZone: 'UTC',
         }];
         process.stdout.write('probe: preflight client opened\\n');
       } else if (phase.startsWith('second-')) {

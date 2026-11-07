@@ -359,7 +359,7 @@ export class RewardService {
       () =>
         tx.$executeRaw`
         INSERT INTO reward_balance (organization_id, user_id, total_points, lifetime_credit_minor, updated_at)
-        VALUES (${organizationId}, ${userId}, 0, 0, now())
+        VALUES (${organizationId}, ${userId}, 0, 0, (now() AT TIME ZONE 'UTC'))
         ON CONFLICT (organization_id, user_id) DO NOTHING
       `,
     );
