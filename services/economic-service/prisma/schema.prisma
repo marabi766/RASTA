@@ -554,8 +554,11 @@ model Transaction {
   /// `20261103121000_transaction_settlement_authority`), what that migration
   /// found and did about an escrowed, settlement-ready row with no recorded
   /// authorisation — AUTHORISED_UNRECORDED (counts as authorised) or
-  /// RETURNED_TO_HELD. Filled there and frozen; read only by raw SQL
-  /// (`TransactionRepository.lockForUpdate`) and the settlement triggers.
+  /// RETURNED_TO_HELD. Filled there and frozen; read only by
+  /// `transaction_settlement_authorised` (migration
+  /// `20261106120000_transaction_hold_decision`), which the service's lock read
+  /// and the settlement triggers ask. Not modelled either, and read the same way:
+  /// `transaction_hold_reconciliation` and `transaction_hold_decision`.
   @@map("transaction")
 }
 
@@ -1476,7 +1479,8 @@ model Settlement {
   // (`trg_settlement_creation_proven`, migration 20261105120000_settlement_creation_proof).
   // `journalId` has a foreign key there; what it found on older rows is
   // `settlement_creation_quarantine`, not modelled: filled there, frozen, read by triggers.
-  // So is `transaction_hold_reconciliation`, there too: read by `down.sql` and by people.
+  // So is `transaction_hold_reconciliation`, there too: read by `down.sql` and
+  // `transaction_hold_decision_unresolved`; and `transaction_hold_decision`, the decisions on it.
   /// `STL_<ULID>`.
   id String @id
 

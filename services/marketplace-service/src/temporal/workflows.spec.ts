@@ -1,4 +1,5 @@
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ERROR_STATUS } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
@@ -346,6 +347,42 @@ async function atRest(handle: WorkflowHandle): Promise<void> {
   }, 'the saga to come to rest');
 }
 
+/**
+ * The saga has nothing in flight at all: every activity it scheduled has been
+ * answered, and the last event of its history is the timer it armed or a
+ * workflow task that has been answered — none scheduled or started. A test
+ * that stops a worker and goes on with another must stop it from here
+ * (FU-147). Not a phase query: it replays the events it was sent, answered or
+ * not, so it reports the phase of a workflow task the worker is still running
+ * (the history ended in WorkflowTaskStarted in 25 of 25 local runs when the
+ * old test took that phase for rest). Not {@link atRest} alone either, which a
+ * workflow task with no command satisfies while an activity is still running.
+ */
+async function quiet(handle: WorkflowHandle): Promise<void> {
+  await eventually(async () => {
+    const events = (await handle.fetchHistory()).events ?? [];
+    const open = new Set<number>();
+    for (const e of events) {
+      if (e.activityTaskScheduledEventAttributes) open.add(Number(e.eventId));
+      const answered =
+        e.activityTaskCompletedEventAttributes ??
+        e.activityTaskFailedEventAttributes ??
+        e.activityTaskTimedOutEventAttributes ??
+        e.activityTaskCanceledEventAttributes;
+      if (answered) open.delete(Number(answered.scheduledEventId));
+    }
+    const last = events.at(-1);
+    return (
+      open.size === 0 &&
+      Boolean(
+        last?.timerStartedEventAttributes ??
+        last?.timerCanceledEventAttributes ??
+        last?.workflowTaskCompletedEventAttributes,
+      )
+    );
+  }, 'the saga to have nothing in flight');
+}
+
 async function until(predicate: () => boolean, what: string): Promise<void> {
   for (let i = 0; i < 400; i += 1) {
     if (predicate()) return;
@@ -358,24 +395,8 @@ describe('the order saga', () => {
   let env: TestWorkflowEnvironment;
   let queues = 0;
 
-  /**
-   * A time-skipping server. CI points TEMPORAL_TEST_SERVER_DIR at a cached
-   * directory. The time-skipping server is a ~300 MB download, and fetching it
-   * on every run was what made this hook exceed its timeout on a slow network:
-   * the whole file failed before a single saga ran. Locally it falls back to
-   * the system temp dir.
-   */
-  const timeSkippingServer = (): Promise<TestWorkflowEnvironment> => {
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    return TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
-  };
-
   beforeAll(async () => {
-    env = await timeSkippingServer();
+    env = await createTemporalTestEnvironment();
   }, 300_000);
 
   afterAll(async () => {
@@ -948,7 +969,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -1336,7 +1357,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -1374,7 +1395,31 @@ describe('the order saga', () => {
         );
     const phaseIs = (handle: WorkflowHandle, phase: string): Promise<void> =>
       eventually(async () => (await handle.query<SagaStatus, []>('status')).phase === phase, phase);
-    /** The receipt is confirmed and the saga at rest in the wait, a round reported. */
+    /**
+     * The saga is blocked in a backoff: past the workflow tasks, the last
+     * thing in its history is the timer it armed. Not {@link atRest}: the test
+     * server also records a workflow task with no command while the round's
+     * report is still running, and the saga then had a round in flight that
+     * the test took for over (FU-174).
+     */
+    const backingOff = (handle: WorkflowHandle): Promise<void> =>
+      eventually(async () => {
+        const last = ((await handle.fetchHistory()).events ?? [])
+          .filter(
+            (e) =>
+              !e.workflowTaskScheduledEventAttributes &&
+              !e.workflowTaskStartedEventAttributes &&
+              !e.workflowTaskCompletedEventAttributes,
+          )
+          .at(-1);
+        return Boolean(last?.timerStartedEventAttributes);
+      }, 'the backoff to be armed');
+    /**
+     * The receipt is confirmed and the saga waiting out a backoff, a round
+     * reported. Not necessarily the first: the receipt's signal can land while
+     * the read that already saw it runs, and that nudge ends the first backoff
+     * at once (FU-174). Waiting for the timer is what makes the rounds settled.
+     */
     const toWait = async (
       { party, held, handle }: { party: Party; held: () => Promise<void>; handle: WorkflowHandle },
       rounds: () => number,
@@ -1385,7 +1430,7 @@ describe('the order saga', () => {
       await party.confirmReceipt();
       await phaseIs(handle, 'AUTHORISATION_UNCONFIRMED');
       await until(() => rounds() > 0, 'the round to be reported');
-      await atRest(handle);
+      await backingOff(handle);
     };
 
     it('exhausted: the saga stays, settles nothing, and goes on once confirmed', async () => {
@@ -2352,7 +2397,7 @@ describe('the order saga', () => {
     let shared: TestWorkflowEnvironment;
     beforeAll(async () => {
       shared = env;
-      env = await timeSkippingServer();
+      env = await createTemporalTestEnvironment();
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -2899,12 +2944,7 @@ describe('a saga the previous release started, replayed and then run live (#625 
   let queues = 0;
 
   beforeAll(async () => {
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
+    env = await createTemporalTestEnvironment();
     bundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
   }, 300_000);
 
@@ -2938,8 +2978,14 @@ describe('a saga the previous release started, replayed and then run live (#625 
         maxCachedWorkflows: 0,
         patchActivationCallback: () => false,
       });
+      // Stopped from a history with nothing in flight, not from the phase the
+      // saga reported: that is read off a workflow task still running (FU-147).
       await old.runUntil(
-        within(STEP_DEADLINE_MS, previous({ party, handle }), 'the previous release to drive'),
+        within(
+          STEP_DEADLINE_MS,
+          previous({ party, handle }).then(() => quiet(handle)),
+          'the previous release to drive',
+        ),
       );
       const fresh = await Worker.create({
         connection: env.nativeConnection,
@@ -2990,11 +3036,22 @@ describe('a saga the previous release started, replayed and then run live (#625 
     CONFIRMED: 'AWAITING_FULFILMENT',
     AWAITING_RECEIPT_CONFIRMATION: 'AWAITING_RECEIPT_CONFIRMATION',
   };
-  const phaseIs = (handle: WorkflowHandle, phase: string) =>
-    eventually(
+  /**
+   * The previous release's worker caches nothing (`maxCachedWorkflows: 0`), so
+   * every query it answers is a full replay of its own. Polled while the saga
+   * is still working, the queries kept it running workflow tasks that carried
+   * no command (340 events in one local run) and it did not come to rest; and
+   * with the polling made continuous, the next release's first wake-up was
+   * never answered in about one case in a hundred (FU-147). So ask only once
+   * the saga has nothing in flight, which takes one query, not a poll.
+   */
+  const phaseIs = async (handle: WorkflowHandle, phase: string): Promise<void> => {
+    await quiet(handle);
+    await eventually(
       async () => (await handle.query<SagaStatus, []>('status')).phase === phase,
       `the saga to wait in ${phase}`,
     );
+  };
 
   /** `resolveObligationDispute`, recording which dispute it decided and with what words. */
   function deciding(order: FakeOrder) {

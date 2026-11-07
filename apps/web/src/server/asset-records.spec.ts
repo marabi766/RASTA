@@ -475,7 +475,7 @@ describe('sending', () => {
           ASSET,
           INSPECTION_BODY,
           's',
-          recording(status, { code: 'X', message: 'y' }).impl,
+          recording(status, { code: kind, message: 'y' }).impl,
         ),
       ).toMatchObject({ kind });
     });

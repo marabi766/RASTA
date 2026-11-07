@@ -94,7 +94,7 @@ export {
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
 
-export { numberInput } from './common/number-input';
+export { numberInput, numberInputInnerSchema } from './common/number-input';
 
 export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
 export type { BusinessLine } from './common/business-line';
@@ -102,7 +102,11 @@ export type { BusinessLine } from './common/business-line';
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
 
-export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';
+export {
+  INVENTORY_MAX_REPLAY_WINDOW_SECONDS,
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
+  PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
+} from './common/replay-window';
 
 export {
   DEFAULT_PAGE_SIZE,

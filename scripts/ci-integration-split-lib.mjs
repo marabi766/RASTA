@@ -225,6 +225,7 @@ export const STEP_INVENTORY = Object.freeze({
           shard,
           run: withKafka('tests', `pnpm run test:integration --shard=${shard} -- --verbose`),
           env: {
+            TEMPORAL_TEST_SERVER_DIR: '${{ runner.temp }}/temporal-test-server',
             KAFKA_SECRETS_DIR: '${{ runner.temp }}/rasta-kafka-secrets',
             NODE_ENV: 'test',
             KAFKA_BROKERS: 'localhost:9092',
@@ -345,7 +346,8 @@ export const STEP_INVENTORY = Object.freeze({
       'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose',
     ),
     env: { ...KAFKA_TESTS, ...databases(...SERVICES), ...BUCKET, ...SCANNER },
-    timeout: 10,
+    // FU-165: ceil(1.5 x measured p95 587 s / 60) = 15 minutes.
+    timeout: 15,
   },
   'Outbox stream-sequence protocol (ADR-051 B3)': {
     run: ['pnpm run test:outbox-b3'],

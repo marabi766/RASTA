@@ -41,6 +41,7 @@ describe('the documented transaction view', () => {
     failureReason: 'none',
     createdAt: at,
     createdBy: 'USR-PAYER',
+    heldProven: true,
     settlementAuthorisedAt: at,
     settlementAuthorisedService: 'marketplace-service',
     settlementAuthorisationKey: 'order:ORD_1:authorise-settlement',
@@ -91,6 +92,14 @@ describe('the documented transaction view', () => {
   ])('describes the detail view with %s', (_, row) => {
     const schema = TRANSACTION_VIEW_SCHEMAS.TransactionDetailView as JsonSchema;
     expect(mismatches(schema, toTransactionDetailView(row), 'detail')).toEqual([]);
+  });
+
+  // FU-138: a row nobody asked the database about proves nothing, in either view.
+  it('reads a row with no answer on `heldProven` as not proven', () => {
+    const { heldProven: _asked, ...unasked } = full;
+    expect(toTransactionView(unasked).heldProven).toBe(false);
+    expect(toTransactionDetailView(unasked).heldProven).toBe(false);
+    expect(toTransactionView(full).heldProven).toBe(true);
   });
 
   it.each([

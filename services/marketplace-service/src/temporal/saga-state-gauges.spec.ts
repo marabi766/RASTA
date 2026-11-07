@@ -27,6 +27,8 @@ async function series(name: string): Promise<Record<string, number>> {
   );
 }
 
+// Economic readiness is the start gate (main), not part of sampling: proven here.
+const economic = { provesHeldFunds: async () => true };
 const healthy = {
   backlog: async () => ({ count: 0, age: 0 }),
   unresolved: async () => [
@@ -49,7 +51,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
   afterEach(() => jest.useRealTimers());
 
   it('reports unresolved episodes and their age by reason, with no worker at all', async () => {
-    const client = new OrderSagaClient(env, healthy as unknown as SagaStartStore);
+    const client = new OrderSagaClient(env, healthy as unknown as SagaStartStore, economic);
     await client.sampleState();
     expect(await series('rasta_marketplace_saga_unresolved_orders')).toEqual({
       SETTLING: 2,
@@ -64,7 +66,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
 
   // #792 r1 F2: the alert reads one count, with no reason label to change.
   it('reports the overdue episodes of every reason as one series without a reason', async () => {
-    const client = new OrderSagaClient(env, healthy as unknown as SagaStartStore);
+    const client = new OrderSagaClient(env, healthy as unknown as SagaStartStore, economic);
     await client.sampleState();
     expect(await series('rasta_marketplace_saga_unresolved_overdue')).toEqual({ '': 3 });
     await client.stop();
@@ -82,7 +84,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
         return healthy.unresolved();
       },
     } as unknown as SagaStartStore;
-    const client = new OrderSagaClient(env, store);
+    const client = new OrderSagaClient(env, store, economic);
     await client.sampleState();
     for (const name of STATE_SERIES) expect(await series(name)).not.toEqual({});
 
@@ -97,7 +99,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
     const client = new OrderSagaClient(env, {
       ...healthy,
       unresolved: () => reasons(),
-    } as unknown as SagaStartStore);
+    } as unknown as SagaStartStore, economic);
     await client.sampleState();
     reasons = async () => [{ reason: 'PENDING', count: 1, age: 10, overdue: 0 }];
     await client.sampleState();
@@ -114,7 +116,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
       .mockImplementationOnce(healthy.unresolved)
       .mockImplementation(never);
     const backlog = jest.fn(healthy.backlog);
-    const client = new OrderSagaClient(env, { backlog, unresolved } as unknown as SagaStartStore);
+    const client = new OrderSagaClient(env, { backlog, unresolved } as unknown as SagaStartStore, economic);
     client.startPolling();
     await jest.advanceTimersByTimeAsync(0);
     expect(await series('rasta_marketplace_saga_unresolved_overdue')).toEqual({ '': 3 });
@@ -150,6 +152,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
     const client = new OrderSagaClient(
       { MARKETPLACE_TEMPORAL_ENABLED: true } as unknown as MarketplaceEnv,
       { ...healthy, unresolved, claim } as unknown as SagaStartStore,
+      economic,
     );
     client.startPolling();
     for (let poll = 0; poll < 10; poll += 1) {
@@ -168,7 +171,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
     const client = new OrderSagaClient(env, {
       ...healthy,
       unresolved: () => new Promise((resolve) => (answer = resolve)),
-    } as unknown as SagaStartStore);
+    } as unknown as SagaStartStore, economic);
     const sampled = client.sampleState();
     await jest.advanceTimersByTimeAsync(STATE_READ_TIMEOUT_MS);
     await sampled;
@@ -182,7 +185,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
   // by the monotonic clock, finds nothing.
   it('withdraws at scrape a sample older than the freshness horizon, with no read since', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
-    const client = new OrderSagaClient(env, healthy as unknown as SagaStartStore);
+    const client = new OrderSagaClient(env, healthy as unknown as SagaStartStore, economic);
     await client.sampleState();
     jest.advanceTimersByTime(STATE_FRESH_MS - 1);
     for (const name of STATE_SERIES) expect(await series(name)).not.toEqual({});
@@ -201,7 +204,7 @@ describe('saga state gauges (#770 r2 F3)', () => {
         return healthy.unresolved();
       },
     } as unknown as SagaStartStore;
-    const client = new OrderSagaClient(env, store);
+    const client = new OrderSagaClient(env, store, economic);
     const sampled = client.sampleState();
     await new Promise((resolve) => setImmediate(resolve));
     const stop = client.stop();

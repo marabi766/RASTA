@@ -183,6 +183,17 @@ describe('transaction history', () => {
       return withFetch(impl, () => fetchTransactions(SESSION));
     };
 
+    // #824 r1, F2: dropped here, every HELD read as proven escrow.
+    it.each([[true], [false]])('keeps heldProven %s as the API sent it', async (heldProven) => {
+      const { impl } = answering({
+        items: [{ ...row('1'), heldProven }],
+        nextCursor: null,
+        hasMore: false,
+      });
+      const result = await withFetch(impl, () => fetchTransactions(SESSION));
+      expect(result).toMatchObject({ kind: 'OK', data: { items: [{ heldProven }] } });
+    });
+
     it('keeps the gross as the string the API sent, beside the zero net', async () => {
       const result = await read('9007199254740993123');
       expect(result.kind).toBe('OK');
