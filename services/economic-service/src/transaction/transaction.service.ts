@@ -30,7 +30,11 @@ import { ENV } from '../tokens';
 import type { IdempotentAnswer } from '../shared/idempotency';
 import { databaseNow } from '../shared/database-clock';
 import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
-import { BUSINESS_LINE_REQUIRED_MESSAGE, mayRecordWithoutLine } from './recorded-sources';
+import {
+  BUSINESS_LINE_REQUIRED_MESSAGE,
+  mayRecordWithoutLine,
+  refuseUnfencedOrderHold,
+} from './recorded-sources';
 import {
   STATEMENT_SOURCE_TYPE,
   type CreateTransactionDto,
@@ -88,6 +92,7 @@ export class TransactionService {
     const actor = getContext().userId ?? SERVICE_NAME;
     const grossAmountMinor = parseMinor(dto.grossAmountMinor, 'grossAmountMinor');
 
+    refuseUnfencedOrderHold(dto);
     if (dto.counterpartyOrganizationId === organizationId) {
       throw RastaError.businessRule('A transaction cannot have the same payer and payee');
     }
