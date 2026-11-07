@@ -12,7 +12,7 @@ import {
   verifyInternalToken,
   type ApiHarness,
 } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * A union administrator acts financially for another organization only within
@@ -675,6 +675,7 @@ describe('a union administrator acts financially only within its union (docs/24 
           sourceType: 'ORDER',
           sourceReference: orderId,
           holdFunds: true,
+          holdNotAfter: ORDER_HOLD_DEADLINE,
         })
         .expect(201);
       return { orderId, transactionId: created.body.id as string };

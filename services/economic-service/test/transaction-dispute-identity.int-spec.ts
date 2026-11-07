@@ -2,7 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * A resolution decides one dispute, named by its identity (Codex on #318
@@ -67,6 +67,7 @@ describe('a dispute resolution names the dispute it decides', () => {
         sourceType: 'ORDER',
         sourceReference: order,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     return created.body.id;

@@ -317,6 +317,102 @@ export class OrderRepository {
   }
 
   /**
+   * Counts a send of the order's hold before it leaves, and fixes its deadline if this is
+   * the first (D-144). One statement, committed before the request exists, so a later run
+   * or attempt learns of it whatever became of this one. The deadline never moves: a
+   * later `proposed` is ignored, and an order that may have sent before this column
+   * existed (claims above zero, no deadline) never gets one, as nothing fences that send.
+   *
+   * Null: no send may begin, as the order is closed or its sends are (`closed`).
+   */
+  async claimHoldSend(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    proposed: string | undefined,
+  ): Promise<{ holdNotAfter: string | null; claims: number } | { closed: boolean }> {
+    const [claim] = await runUnscoped(
+      'a saga step records its hold send on the order it drives, under its tenant',
+      () => client.$queryRaw<{ hold_not_after: Date | null; hold_send_claims: number }[]>`
+        UPDATE "order"
+        SET hold_not_after = COALESCE(
+              hold_not_after,
+              CASE WHEN hold_send_claims = 0 THEN ${proposed ?? null}::timestamptz END
+            ),
+            hold_send_claims = hold_send_claims + 1
+        WHERE id = ${order.id} AND organization_id = ${order.organizationId}
+          AND hold_sends_closed_at IS NULL
+          AND status NOT IN ('FAILED', 'CANCELLED')
+        RETURNING hold_not_after, hold_send_claims`,
+    );
+    if (claim) {
+      return {
+        holdNotAfter: claim.hold_not_after?.toISOString() ?? null,
+        claims: claim.hold_send_claims,
+      };
+    }
+    const row = await runUnscoped(
+      'a saga step reads its hold send on the order it drives, under its tenant',
+      () =>
+        client.order.findFirst({
+          where: { id: order.id, organizationId: order.organizationId },
+          select: { holdSendsClosedAt: true },
+        }),
+    );
+    return { closed: Boolean(row?.holdSendsClosedAt) };
+  }
+
+  /**
+   * The only send there has been was refused: no send can follow it. Compared with
+   * `claimHoldSend`'s count, so an older run's attempt that claimed since keeps this from
+   * being proof, and one that comes later finds the sends closed and sends nothing.
+   */
+  async closeHoldSendsOnRefusal(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+  ): Promise<boolean> {
+    const { count } = await runUnscoped(
+      'a saga step records its hold send on the order it drives, under its tenant',
+      () =>
+        client.order.updateMany({
+          where: {
+            id: order.id,
+            organizationId: order.organizationId,
+            holdSendClaims: 1,
+            holdSendsClosedAt: null,
+          },
+          data: { holdSendsClosedAt: new Date() },
+        }),
+    );
+    return count === 1;
+  }
+
+  /**
+   * Whether no hold can land from here on, closing the sends if so: none was ever begun,
+   * or they are closed, or this database's clock is past the deadline and `marginMs`
+   * (economic-service refuses every request past it). A send with no deadline is never past
+   * anything.
+   */
+  async closeHoldSendsIfNoneCanLand(
+    client: ExtendedPrismaClient,
+    order: { id: string; organizationId: string },
+    marginMs: number,
+  ): Promise<boolean> {
+    const count = await runUnscoped(
+      'a saga step records its hold send on the order it drives, under its tenant',
+      () => client.$executeRaw`
+        UPDATE "order"
+        SET hold_sends_closed_at = COALESCE(hold_sends_closed_at, now())
+        WHERE id = ${order.id} AND organization_id = ${order.organizationId}
+          AND (
+            hold_sends_closed_at IS NOT NULL
+            OR hold_send_claims = 0
+            OR now() >= hold_not_after + ${marginMs}::double precision * interval '1 millisecond'
+          )`,
+    );
+    return count === 1;
+  }
+
+  /**
    * economic-service has confirmed that call (FU-104). Only the opening's own: an
    * attempt overtaken by a newer one says nothing about the newer one's outcome.
    */

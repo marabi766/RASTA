@@ -25,9 +25,13 @@ import {
 import { SERVICE_NAME } from '../config/env';
 import {
   FINAL_ANSWER_CONTRACT,
+  HOLD_DEADLINE_PASSED,
+  HOLD_FENCE,
+  HOLD_SENDS_CLOSED,
   OWNER_STATE_IS_FINAL,
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
+  REFUSED_PAST_HOLD_DEADLINE,
 } from './economic-refusal';
 import {
   economicCallsUnconfirmedTotal,
@@ -184,6 +188,7 @@ export interface ObligationFinal {
 
 /** The economic calls whose outcome the saga can owe beside the release (FU-103, FU-117). */
 export const UNCONFIRMED_OPERATIONS = [
+  'createObligation',
   'readOrder',
   'authoriseSettlement',
   'settle',
@@ -367,6 +372,12 @@ export function createActivities(deps: ActivityDependencies) {
    * then says nothing of the attempts before it: its effect or a terminal status
    * is the answer (`finalFor`), and anything else stays unknown.
    *
+   * The call's own guards read the order after the step's lookup
+   * awaited: a snapshot from before it can be of an order since closed (review of #812,
+   * F1). The closure holds only what cannot change, so no guard can reach the old read;
+   * `fence` reads the row under its lock.
+   * A failed read is no refusal of the call: it stays outside what `unanswered` marks.
+   *
    * ## No send past `fence` (D-138)
    *
    * Every send of such a call, on every attempt and round, goes out from inside
@@ -407,12 +418,13 @@ export function createActivities(deps: ActivityDependencies) {
     const inDoubt = confirmed !== undefined && (confirmed.inDoubt || currentAttempt() !== 1);
     const unanswered = (refusal: unknown): unknown =>
       confirmed && !inDoubt ? provenIfListed(refusal) : refusal;
-    return asSystemFor(orderId, (order) =>
+    return asSystemFor(orderId, ({ id, buyerOrganizationId }) =>
       deps.orders.onceForSaga(
-        { id: order.id, organizationId: order.buyerOrganizationId },
+        { id, organizationId: buyerOrganizationId },
         step,
         activity,
         async () => {
+          const order = await deps.orders.describe(id);
           const askObligation = (transactionId: string) =>
             deps.economic
               .readObligation({
@@ -520,19 +532,76 @@ export function createActivities(deps: ActivityDependencies) {
      * the workflow's recovery (`findObligation`) names the status and stops.
      * HELD from a release too old to say whether it is proven: retryable, and
      * that recovery waits for one that can (`heldProofUnavailable`).
+     *
+     * `holdNotAfter` is the deadline the workflow proposes at its first send; only a
+     * workflow from before the fence proposes none (`placeHold`). What goes out is the
+     * order row's (`claimHoldSend`), counted before it goes, because no run knows what an
+     * earlier run sent (D-144). So a refusal is proof only for the first send there has
+     * ever been, and only once the row has shut out any other (`closeHoldSendsOnRefusal`).
      */
-    async createObligation(orderId: string): Promise<HeldResult> {
+    async createObligation(orderId: string, holdNotAfter?: string): Promise<HeldResult> {
       const held = await economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
           // A retry after the call succeeded but the recording did not. The
           // obligation exists; do not create a second one.
           return { transactionId: order.economicTransactionId };
         }
+        // An attempt that outlived its worker's timeout, running on past the end of the
+        // saga's wait: nobody would read its answer. Not proof: the saga learns nothing.
+        if (order.status === 'FAILED' || order.status === 'CANCELLED') {
+          throw ApplicationFailure.nonRetryable(
+            `Order ${order.id} is ${order.status}; no hold is placed for it`,
+            'ORDER_ALREADY_CLOSED',
+          );
+        }
 
-        const transaction = await deps.economic.createObligation({
-          ...obligationTermsOf(order),
-          correlationId: order.correlationId,
-        });
+        const own = { id: order.id, organizationId: order.buyerOrganizationId };
+        const claim = await deps.orders.claimHoldSend(own, holdNotAfter);
+        if ('closed' in claim) {
+          // Closed by the refusal or the deadline: proof. Closed as an order: as above, not.
+          throw ApplicationFailure.create({
+            message: `Order ${order.id} is closed to further holds`,
+            type: claim.closed ? HOLD_SENDS_CLOSED : 'ORDER_ALREADY_CLOSED',
+            nonRetryable: true,
+            details: claim.closed ? [HOLD_SENDS_CLOSED] : [],
+          });
+        }
+        const deadline = claim.holdNotAfter;
+
+        const transaction = await deps.economic
+          .createObligation({
+            ...obligationTermsOf(order),
+            correlationId: order.correlationId,
+            ...(deadline === null ? {} : { holdNotAfter: deadline }),
+          })
+          .catch(async (refusal: unknown) => {
+            // The key's own answer, whichever attempt hears it, to a request that set it.
+            if (
+              deadline !== null &&
+              isRastaError(refusal) &&
+              refusal.code === HOLD_DEADLINE_PASSED
+            ) {
+              throw ApplicationFailure.create({
+                message: refusal.message,
+                type: HOLD_DEADLINE_PASSED,
+                nonRetryable: true,
+                details: [REFUSED_PAST_HOLD_DEADLINE],
+              });
+            }
+            // Only the send's own refusal on its first attempt is proof (`placeHold`).
+            // Not ALREADY_EXISTS: that says an obligation is there, the opposite of
+            // nothing having moved.
+            const taken = isRastaError(refusal) && refusal.code === 'ALREADY_EXISTS';
+            // A send with no deadline to propose is a round of a wait from before the fence.
+            const firstEver = holdNotAfter !== undefined && claim.claims === 1;
+            const proven =
+              currentAttempt() === 1 &&
+              firstEver &&
+              !taken &&
+              provenIfListed(refusal) !== refusal &&
+              (await deps.orders.closeHoldSendsOnRefusal(own));
+            throw proven ? provenIfListed(refusal) : refusal;
+          });
         return { transactionId: transaction.id };
       });
       await asSystemFor(orderId, async (order) => {
@@ -628,6 +697,20 @@ export function createActivities(deps: ActivityDependencies) {
           throw asTemporalFailure(error);
         }
       });
+    },
+
+    /**
+     * Whether an empty lookup says no hold will land (D-144), asked of the order row so
+     * that no run depends on what it remembers. Once true, no send can begin. Past the
+     * deadline and margin, the claim-time fence is what makes it so.
+     */
+    async noHoldCanLand(orderId: string): Promise<boolean> {
+      return asSystemFor(orderId, (order) =>
+        deps.orders.closeHoldSendsIfNoneCanLand(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          HOLD_FENCE.clockMarginMs,
+        ),
+      );
     },
 
     /**
