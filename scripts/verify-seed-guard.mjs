@@ -40,7 +40,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { readUrl, tryReadUrl } from '../packages/config/src/url-reader.js';
-import { libpqInvocation } from './verify-migration-reversible-lib.mjs';
+import { psqlInvocation } from './psql-prisma-url.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVICES = [
@@ -93,20 +93,13 @@ const SNAPSHOT_SQL = `
   ORDER BY t.table_name;`;
 
 function psql(url, sql, extraOptions = '') {
-  // psql does not understand Prisma's `?schema=` parameter; pass it as the
+  // psql does not understand Prisma's `?schema=` parameter; it becomes the
   // search_path instead, so current_schema() is the schema the seed writes.
-  const parsed = readUrl(url);
-  const schema = parsed.searchParams.get('schema') ?? 'public';
-  parsed.search = '';
   // The password travels in the environment, never in psql's argv.
-  const { target, env } = libpqInvocation(parsed.toString());
+  const { target, env } = psqlInvocation(url, `-c TimeZone=UTC ${extraOptions}`.trim());
   return spawnSync('psql', [target, '-X', '-v', 'ON_ERROR_STOP=1', '-tA', '-c', sql], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      ...env,
-      PGOPTIONS: `-c search_path=${schema} -c TimeZone=UTC ${extraOptions}`.trim(),
-    },
+    env: { ...process.env, ...env },
   });
 }
 

@@ -315,6 +315,16 @@ export function createActivities(deps: ActivityDependencies) {
   const currentStep = deps.currentStep ?? temporalStep;
   const currentAttempt = deps.currentAttempt ?? temporalAttempt;
 
+  /** The durable record of an unconfirmed release (FU-104), under the order's own tenant. */
+  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
+    asSystemFor(orderId, (order) =>
+      deps.orders.openSagaCall(
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        'resolveObligationDispute',
+        disputeId,
+      ),
+    );
+
   /**
    * An economic-service call, made at most once per scheduled activity
    * (D-053). A refusal or an outage records nothing, so the retry calls again.
@@ -811,6 +821,8 @@ export function createActivities(deps: ActivityDependencies) {
       inDoubt = false,
       contract?: string,
     ): Promise<string | ObligationFinal | null> {
+      // Before the call: a call that fails may still have committed.
+      await openRelease(orderId, disputeId);
       return economicStep<string | ObligationFinal | null>(
         orderId,
         'disputeObligation',
@@ -851,6 +863,13 @@ export function createActivities(deps: ActivityDependencies) {
      * waits with the funds held and the alert on, for an operator (FU-080). In a
      * terminal status there is nothing left to release ({@link ObligationFinal}), and
      * the saga's next call reads that status and says what follows.
+     *
+     * Confirmed on every way this answers, including a retry answered from the
+     * step's record. The record, opened when economic-service was told of the
+     * dispute and again by every attempt here, stays open whether or not a saga
+     * is left to make this call (FU-104). An attempt after an earlier one confirmed
+     * is open until it answers itself, and an earlier attempt's late confirmation
+     * cannot close it.
      */
     async resolveObligationDispute(
       orderId: string,
@@ -860,7 +879,8 @@ export function createActivities(deps: ActivityDependencies) {
       economicDisputeId?: string,
       contract?: string,
     ): Promise<ObligationFinal | void> {
-      return economicStep<ObligationFinal | void>(
+      const generation = await openRelease(orderId, disputeId);
+      const answer = await economicStep<ObligationFinal | void>(
         orderId,
         'resolveObligationDispute',
         async (order) => {
@@ -901,6 +921,15 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
+      await asSystemFor(orderId, (order) =>
+        deps.orders.confirmSagaCall(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          'resolveObligationDispute',
+          disputeId,
+          generation,
+        ),
+      );
+      return answer;
     },
 
     /**

@@ -28,7 +28,6 @@ import { urlWithSchema } from './outbox-b2-fixture.mjs';
 import {
   UNREADABLE_DATABASE_URL,
   libpqInvocation,
-  libpqUrl,
   psqlFileRunner,
   psqlRunner,
 } from './verify-migration-reversible-lib.mjs';
@@ -143,7 +142,6 @@ test('verify-seed-guard.mjs --with-database refuses the URL by name, before psql
 });
 
 for (const [name, call] of [
-  ['libpqUrl', () => libpqUrl(UNREADABLE)],
   ['libpqInvocation', () => libpqInvocation(UNREADABLE)],
   ['psqlRunner', () => psqlRunner(UNREADABLE)],
   ['psqlFileRunner', () => psqlFileRunner(UNREADABLE, 'public')],

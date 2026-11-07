@@ -94,13 +94,14 @@ const pins = {
     '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
+    'baa12fdedf9e9bfbbeadd2be36f3b97acc62229af37ce9bc3ccdfea5c3e98cf9',
     '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',
     // + the transaction-text exports (FU-134, PR #806): `plainText` still re-exported from text.ts.
     'd470201ab822d732e8c10f0b6db953e4a5daacf94e47ae77afd0b75b64313822',
     // + PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (FU-156): one constant beside the project-create one.
     '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
-    // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171): one constant beside the other two.
-    'e4b6a416c08652a1f8c448f99fb26920c41e802c5ec866437a5b50dbe41ed6de',
+    // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171) and the reviewed numberInputInnerSchema export (FU-160, #831): exact union of both.
+    '9fa17d9f3a09523861c8de042c6ea87789bc386f75f72bf14e422a156287809c',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',

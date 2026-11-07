@@ -156,11 +156,10 @@ describe('legacyParse', () => {
     ]);
   });
 
-  it('a non-finite number after a preprocess gets the checks on the parsed number (r1 F1, ?limit=1e999)', () => {
+  it('FU-131 refuses exponent syntax before numeric checks', () => {
     const limit = numberInput(z.number().int().min(1).max(200));
     expect(brief(legacy(z.object({ limit }), { limit: '1e999' }))).toEqual([
-      { path: 'limit', code: 'invalid_type', message: 'Expected integer, received float' },
-      { path: 'limit', code: 'too_big', message: 'Number must be less than or equal to 200' },
+      { path: 'limit', code: 'invalid_type', message: 'Expected number, received nan' },
     ]);
   });
 

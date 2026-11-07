@@ -3,6 +3,8 @@ import addFormats from 'ajv-formats';
 import { z } from 'zod';
 import {
   isoDateTime,
+  numberInput,
+  offsetPaginationSchema,
   parsableUrl,
   plainText,
   prefixedIdSchema,
@@ -60,6 +62,42 @@ describe('toJsonSchema', () => {
       .strict();
 
     expect(toJsonSchema(schema)).toMatchSnapshot();
+  });
+
+  it('FU-131 publishes the registered inner integer through descriptions and wrappers', () => {
+    const properties = toJsonSchema(offsetPaginationSchema).properties as Record<string, unknown>;
+    expect(properties.pageSize).toMatchInlineSnapshot(`
+      {
+        "default": 25,
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer",
+      }
+    `);
+    expect(
+      toJsonSchema(
+        numberInput(z.number().int().min(1).max(10)).describe('Page size').optional().nullable(),
+      ),
+    ).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 10,
+      description: 'Page size',
+      nullable: true,
+    });
+    expect(toJsonSchema(numberInput(z.number().min(-90).max(90)))).toEqual({
+      type: 'number',
+      minimum: -90,
+      maximum: 90,
+    });
+  });
+
+  it('FU-131 does not publish a different schema piped from a registered transform', () => {
+    const input = numberInput(z.number().int().min(1));
+    const forged = z.pipe(input.in, z.number().max(100));
+    expect(toJsonSchema(forged)).toEqual({
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 
   const boundedText = (schema = z.string()) =>
