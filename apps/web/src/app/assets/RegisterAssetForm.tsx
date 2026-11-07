@@ -1,5 +1,6 @@
 'use client';
 
+import { REQUEST_NOT_CHECKED } from '@/lib/request-not-checked';
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
@@ -249,7 +250,9 @@ export function RegisterAssetForm({
 }
 
 function FormBanner({ state }: { state: RegisterAssetFormState }) {
-  if (state.kind === 'HELD' || state.kind === 'NOT_CHECKED') {
+  if (state.kind === 'NOT_CHECKED')
+    return <Alert tone="warning">{REQUEST_NOT_CHECKED[state.reason]}</Alert>;
+  if (state.kind === 'HELD') {
     return (
       <Alert tone="warning">
         نتیجهٔ درخواست پیشین مشخص نیست. پیش از ثبت دوباره، فهرست را بررسی کنید.

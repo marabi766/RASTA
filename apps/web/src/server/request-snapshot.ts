@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { RequestNotChecked } from '@/lib/request-not-checked';
 import { open, type WebSession } from './session';
 import { mintSubmissionId } from './submission';
 import { readUnresolved, releaseToken, type UnresolvedScope } from './unresolved-request';
@@ -12,10 +13,12 @@ export async function restoreRequestSnapshot<T extends { submissionId: string }>
 ): Promise<
   | { kind: 'IDLE'; submissionId: string }
   | { kind: 'HELD'; submissionId: string; snapshot: T; releaseToken: string }
-  | { kind: 'NOT_CHECKED'; submissionId: string; releaseToken?: string }
+  | (RequestNotChecked & { submissionId: string })
 > {
-  const pending = await readUnresolved(session, scope);
+  const pending = await readUnresolved(session, scope, true);
   if (pending.kind === 'NONE') return { kind: 'IDLE', submissionId: mintSubmissionId(session) };
+  if (pending.kind === 'UNAVAILABLE')
+    return { kind: 'NOT_CHECKED', submissionId: '', reason: pending.reason ?? 'STORE_UNAVAILABLE' };
   const token =
     pending.kind === 'PENDING' ? releaseToken(session, scope, pending.request) : undefined;
   if (
@@ -33,5 +36,10 @@ export async function restoreRequestSnapshot<T extends { submissionId: string }>
         releaseToken: token,
       };
   }
-  return { kind: 'NOT_CHECKED', submissionId: '', releaseToken: token };
+  return {
+    kind: 'NOT_CHECKED',
+    submissionId: '',
+    releaseToken: token,
+    reason: pending.request.former ? 'FORMER_COPY' : 'SNAPSHOT_UNREADABLE',
+  };
 }
