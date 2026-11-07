@@ -13,7 +13,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -133,11 +141,32 @@ function drained() {
   };
 }
 
+// FU-221: the stand-in `psql`, first on PATH, records its argv, its stdin (the SQL) and
+// the connection environment it got, and answers as told.
+const FAKE_PSQL = `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from 'node:fs';
+const answer = JSON.parse(readFileSync(process.env.FAKE_PSQL_ANSWER, 'utf8'));
+const { PGPASSWORD = null, PGOPTIONS = null } = process.env;
+const call = { args: process.argv.slice(2), sql: readFileSync(0, 'utf8'), PGPASSWORD, PGOPTIONS };
+appendFileSync(process.env.FAKE_PSQL_CALLS, JSON.stringify(call) + '\\n');
+if (answer.stderr) process.stderr.write(answer.stderr);
+if (answer.stdout !== undefined) {
+  process.stdout.write(typeof answer.stdout === 'string' ? answer.stdout : JSON.stringify(answer.stdout) + '\\n');
+}
+process.exit(answer.status ?? 0);
+`;
+/** psql's answer with no record open: `json_agg` of nothing, coalesced. */
+const openRecords = (open = [], rowSecurity = false, recovery = false) => ({
+  stdout: { recovery, rowSecurity, open },
+});
+const DATABASE = 'postgresql://rasta_marketplace:hunter2@db.invalid:5432/rasta_marketplace';
+
 const SETTINGS = {
   TEMPORAL_ADDRESS: 'temporal.internal:7233',
   TEMPORAL_NAMESPACE: 'rasta-prod',
   MARKETPLACE_TEMPORAL_TASK_QUEUE: 'rasta-order',
   MARKETPLACE_SAGA_STOP_TIME: STOP_TIME,
+  DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=public`,
 };
 
 const TARGET_NAME = '@rasta/marketplace-service';
@@ -156,6 +185,7 @@ function run(
     cli,
     target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 },
     args = [],
+    psql = openRecords(),
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'saga-drain-'));
@@ -166,9 +196,21 @@ function run(
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify(scenario));
     writeFileSync(join(dir, 'calls.jsonl'), '');
     writeFileSync(join(dir, 'target.json'), JSON.stringify(target));
+    // Only node and the stand-in psql (`null`: none): a host's psql is never reached.
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, 'node'));
+    if (psql !== null) {
+      writeFileSync(join(bin, 'psql'), FAKE_PSQL);
+      chmodSync(join(bin, 'psql'), 0o755);
+    }
+    writeFileSync(join(dir, 'psql-answer.json'), JSON.stringify(psql ?? {}));
+    writeFileSync(join(dir, 'psql-calls.jsonl'), '');
     const env = {
       MARKETPLACE_TARGET_PACKAGE_JSON: join(dir, 'target.json'),
-      PATH: process.env.PATH,
+      PATH: bin,
+      FAKE_PSQL_ANSWER: join(dir, 'psql-answer.json'),
+      FAKE_PSQL_CALLS: join(dir, 'psql-calls.jsonl'),
       ...settings,
       TEMPORAL_CLI: cli ?? fake,
     };
@@ -180,7 +222,18 @@ function run(
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-    return { status: result.status, stdout: result.stdout, stderr: result.stderr, calls };
+    const psqlCalls = readFileSync(join(dir, 'psql-calls.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      calls,
+      psqlCalls,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1863,3 +1916,218 @@ test('refuses unreadable histories, inputs and compatibility markers', () => {
   truncated['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = '2';
   assert.equal(run(truncated).status, 1);
 });
+
+// ---- FU-221: open durable saga call records (D-151) ------------------------------
+//
+// The review's probe: an authorisation the order fenced completed (nothing sent, its
+// record left open by D-151), workers stopped, no pending activity, a protocol-7 target.
+// Temporal shows nothing to wait for; only `saga_unconfirmed_call` does.
+const RECORDED = [
+  'createObligation',
+  'authoriseSettlement',
+  'settle',
+  'compensate',
+  'resolveObligationDispute',
+];
+const openRecord = (operation, fields = {}) => ({
+  organizationId: 'org-1',
+  orderId: 'ord-9',
+  operation,
+  subject: 'obl-4',
+  generation: 2,
+  ageSeconds: 7260,
+  ...fields,
+});
+const fencedProbe = () =>
+  showing(cutAtAuthorisation('fu103-authorise-wait', fenced(true, 'DISPUTED')));
+
+test('FU-221 probe: a fenced completion with its record open refuses; closed, it passes', () => {
+  const refused = run(fencedProbe(), {
+    ...atProtocol(FENCE_PROTOCOL),
+    psql: openRecords([openRecord('authoriseSettlement')]),
+  });
+  assert.equal(refused.status, 1);
+  assert.doesNotMatch(refused.stdout, /OK/);
+  assert.match(
+    refused.stderr,
+    /BLOCKED — 1 finding\(s\):\n {2}open saga call record: order ord-9 \(organization org-1\), authoriseSettlement on obl-4, generation 2, open 7260 s\n$/,
+  );
+  // The record closed: the read returns no open row, and the same history passes.
+  const passed = run(fencedProbe(), { ...atProtocol(FENCE_PROTOCOL), psql: openRecords() });
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.match(passed.stdout, /no pending activity, no open saga call record$/m);
+});
+
+for (const operation of RECORDED) {
+  test(`FU-221: an open ${operation} record blocks a drained queue`, () => {
+    const { status, stdout, stderr } = run(drained(), {
+      psql: openRecords([openRecord(operation, { generation: 1, ageSeconds: 5 })]),
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(
+      stderr,
+      new RegExp(
+        `order ord-9 \\(organization org-1\\), ${operation} on obl-4, generation 1, open 5 s`,
+      ),
+    );
+  });
+}
+
+test('FU-221: the gate knows exactly the operations the saga records', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const union = /type RecordedCall =([^;]+);/.exec(source)?.[1];
+  assert.ok(union, 'RecordedCall not found');
+  const listed = [...union.matchAll(/'(\w+)'/g)].map(([, name]) => name);
+  assert.deepEqual(listed.toSorted(), RECORDED.toSorted());
+  const gate = readFileSync(SCRIPT, 'utf8');
+  const known = /const RECORDED_CALLS = new Set\(\[([^\]]+)\]\)/.exec(gate)?.[1];
+  assert.deepEqual(
+    [...known.matchAll(/'(\w+)'/g)].map(([, name]) => name).toSorted(),
+    RECORDED.toSorted(),
+  );
+});
+
+test('FU-221: reads once, last, read-only, through the open-record index, password off argv', () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=market` },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  const [{ args, sql, PGPASSWORD }] = psqlCalls;
+  assert.deepEqual(args, [
+    'postgresql://rasta_marketplace@db.invalid:5432/rasta_marketplace',
+    '-X',
+    '-q',
+    '-A',
+    '-t',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-f',
+    '-',
+  ]);
+  assert.equal(PGPASSWORD, 'hunter2');
+  assert.match(sql, /^BEGIN TRANSACTION READ ONLY;\nSET LOCAL statement_timeout = '10s';\n/);
+  assert.match(sql, /\nSET LOCAL search_path = pg_catalog;\n/);
+  assert.match(sql, /'recovery', pg_is_in_recovery\(\),\n/);
+  assert.match(sql, /WHERE oid = '"market"\.saga_unconfirmed_call'::regclass/);
+  assert.match(sql, /FROM "market"\.saga_unconfirmed_call c\n\s+WHERE c\.confirmed_at IS NULL\n/);
+  assert.match(sql, /ORDER BY c\.opened_at, [^\n]+\n\s+LIMIT 51\n/);
+  assert.match(sql, /\nCOMMIT;\n$/);
+});
+
+test('FU-221: no psql read when Temporal already could not be checked', () => {
+  const scenario = { ...drained(), 'workflow count': { status: 1 } };
+  const { status, psqlCalls } = run(scenario);
+  assert.equal(status, 1);
+  assert.deepEqual(psqlCalls, []);
+});
+
+test('FU-221: more than 50 open records: 50 shown and the list said to be cut', () => {
+  const open = Array.from({ length: 51 }, (_, i) => openRecord('settle', { orderId: `ord-${i}` }));
+  const { status, stderr } = run(drained(), { psql: openRecords(open) });
+  assert.equal(status, 1);
+  assert.match(stderr, /BLOCKED — 51 finding\(s\)/);
+  assert.match(stderr, /order ord-49 /);
+  assert.doesNotMatch(stderr, /order ord-50 /);
+  assert.match(stderr, /more than 50 open saga call records; list them \(runbook\)\n$/);
+});
+
+test('FU-221: an identifier in another shape is withheld, its record still blocks', () => {
+  const { status, stderr } = run(drained(), {
+    psql: openRecords([openRecord('compensate', { orderId: `\u001b]8;;${SENTINELS[0]}` })]),
+  });
+  assert.equal(status, 1);
+  assert.match(stderr, /order <withheld> \(organization org-1\), compensate/);
+  assertNoSentinel(stderr);
+});
+
+for (const [name, psql, words] of [
+  ['psql is not installed', null, /psql could not be run \(ENOENT\)/],
+  [
+    'psql fails (unreachable, no privilege, no table, timed out)',
+    { status: 3, stderr: `ERROR: relation does not exist ${SENTINELS[0]}\n` },
+    /saga_unconfirmed_call could not be read; psql diagnostics withheld/,
+  ],
+  ['psql prints nothing', { stdout: '' }, /psql did not print the open records/],
+  ['psql prints no JSON', { stdout: 'SET\n[]\n' }, /psql did not print the open records/],
+  [
+    'an answer without row security',
+    { stdout: { recovery: false, open: [] } },
+    /did not print the open records/,
+  ],
+  [
+    'an answer with more keys',
+    { stdout: { recovery: false, rowSecurity: false, open: [], more: 1 } },
+    /did not print/,
+  ],
+  [
+    'open not a list',
+    { stdout: { recovery: false, rowSecurity: false, open: {} } },
+    /did not print the open records/,
+  ],
+  ['a list longer than asked', openRecords(Array(52).fill(openRecord('settle'))), /did not print/],
+  [
+    'row security on the table',
+    openRecords([], true),
+    /has row security: an empty answer proves nothing/,
+  ],
+  ['a standby (lagging replica)', openRecords([], false, true), /was read on a standby/],
+  ['an answer without recovery', { stdout: { rowSecurity: false, open: [] } }, /did not print/],
+  [
+    'an unknown operation',
+    openRecords([openRecord('disputeObligation')]),
+    /an open record of an unknown operation/,
+  ],
+  [
+    'generation 0',
+    openRecords([openRecord('settle', { generation: 0 })]),
+    /an open record this gate cannot read/,
+  ],
+  [
+    'an age not an integer',
+    openRecords([openRecord('settle', { ageSeconds: '7' })]),
+    /cannot read/,
+  ],
+  ['an empty subject', openRecords([openRecord('settle', { subject: '' })]), /cannot read/],
+  ['a row not an object', openRecords([null]), /an open record this gate cannot read/],
+]) {
+  test(`FU-221: cannot verify when ${name}`, () => {
+    const { status, stdout, stderr } = run(drained(), { psql });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(stderr, /cannot verify — deployment blocked: /);
+    assert.match(stderr, words);
+    assertNoSentinel(stderr);
+  });
+}
+
+for (const [name, settings] of [
+  [
+    'a schema that is not one plain identifier',
+    { DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=a"b` },
+  ],
+  ['two schemas', { DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=a&schema=b` }],
+  [
+    'a URL that hides a credential',
+    { DATABASE_URL_MARKETPLACE: `${DATABASE}?sslpassword=${SENTINELS[0]}` },
+  ],
+  ['not a URL', { DATABASE_URL_MARKETPLACE: SENTINELS[0] }],
+  ['PGSERVICE set', { PGSERVICE: 'other' }],
+]) {
+  test(`FU-221: refuses ${name} before asking Temporal or psql anything`, () => {
+    const { status, stderr, calls, psqlCalls } = run(drained(), {
+      settings: { ...SETTINGS, ...settings },
+    });
+    assert.equal(status, 1);
+    assert.match(
+      stderr,
+      /cannot verify — deployment blocked: (DATABASE_URL_MARKETPLACE cannot be handed to psql; its value is not repeated|PGSERVICE is set)/,
+    );
+    assert.deepEqual([calls, psqlCalls], [[], []]);
+    assertNoSentinel(stderr);
+  });
+}

@@ -17,7 +17,11 @@
  *      time are enumerated (count/list/count); their CURRENT runs are described
  *      by workflow id alone, and any unlisted running successor blocks;
  *   5. inspected histories, their markers and their recorded activity results, are
- *      compatible with the declared target build.
+ *      compatible with the declared target build;
+ *   6. no durable saga call record is open (`saga_unconfirmed_call`, FU-221, D-151),
+ *      whatever its operation: a call economic-service has not answered may still be
+ *      answered only by the build that made it. Temporal cannot show one: a fenced
+ *      authorisation completes its saga with no pending activity and its record open.
  * This is an observation after workers stop, not proof that workflows have
  * completed or that funds cannot move when workers resume.
  * Exit 1: a poller or a pending activity was found, or anything could not
@@ -47,14 +51,19 @@
  * legacy protocol. Always run this gate from the
  * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
+ * DATABASE_URL_MARKETPLACE — the service's own runtime URL, required: psql on PATH reads
+ * the table with the role the service's monitor reads it with (cross-tenant platform
+ * plumbing; the table has no row security, and row security found on it refuses).
  */
 import {
   commandFailure,
   clientFailureCode,
   markRefusal,
 } from '../packages/config/src/command-failure.js';
+import { readUrl } from '../packages/config/src/url-reader.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { libpqInvocation } from './psql-prisma-url.mjs';
 
 const QUERY = 'WorkflowType="orderSaga" AND ExecutionStatus="Running"';
 const CLI_TIMEOUT_MS = 60_000;
@@ -391,6 +400,143 @@ function requiredProtocol(history, historyLength, taskQueue) {
   return Math.max(required, activityResultProtocol(events));
 }
 
+// Every operation the saga keeps a durable call record of (`RecordedCall` in
+// services/marketplace-service/src/temporal/activities.ts; the test pins the two equal).
+// An open record of another operation was written by a build this gate does not know.
+const RECORDED_CALLS = new Set([
+  'createObligation',
+  'authoriseSettlement',
+  'settle',
+  'compensate',
+  'resolveObligationDispute',
+]);
+const OPEN_CALLS_SHOWN = 50;
+const DATABASE_URL = 'DATABASE_URL_MARKETPLACE';
+/** An identifier is printed only in this shape; any other is withheld, never the row dropped. */
+const PRINTABLE = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+/**
+ * How psql reaches the service's database: the service's own runtime URL, through the
+ * one URL-to-psql boundary (password in PGPASSWORD, never argv), and the URL's schema,
+ * which qualifies the table itself: nothing rides on a search_path a pooler may drop.
+ * Refused with a fixed text, before Temporal is asked anything.
+ */
+function databaseConnection() {
+  const url = setting(DATABASE_URL);
+  // A service file's parameters would apply beside the URL's, with no error.
+  if (process.env.PGSERVICE) throw new Unverifiable('PGSERVICE is set; unset it for this gate');
+  try {
+    const { target, env } = libpqInvocation(url);
+    const schemas = readUrl(url).searchParams.getAll('schema');
+    const schema = schemas.length === 0 ? 'public' : schemas[0];
+    if (schemas.length > 1 || !/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error();
+    return { target, env, schema };
+  } catch {
+    throw new Unverifiable(`${DATABASE_URL} cannot be handed to psql; its value is not repeated`);
+  }
+}
+
+/**
+ * Every durable saga call record still open (FU-221, D-151) becomes a blocker. A fenced
+ * authorisation completes with no pending activity and its record open, so Temporal
+ * cannot show it. One READ ONLY transaction, time-boxed in the SQL itself; the rows come
+ * through the partial index `ix_saga_unconfirmed_call_open` (opened_at WHERE confirmed_at
+ * IS NULL), oldest first and one more than shown, so closed history is never walked.
+ * Row security on the table would make an empty answer the policy's, not the table's,
+ * and a standby's may lag the primary: both refused. Only pg_catalog is searched, the
+ * table named with its schema. Whatever does not answer exactly as asked refuses.
+ */
+function openCallRecords({ target, env, schema }) {
+  const table = `"${schema}".saga_unconfirmed_call`;
+  const sql = `BEGIN TRANSACTION READ ONLY;
+SET LOCAL statement_timeout = '10s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL search_path = pg_catalog;
+SELECT json_build_object(
+  'recovery', pg_is_in_recovery(),
+  'rowSecurity', (SELECT relrowsecurity OR relforcerowsecurity FROM pg_catalog.pg_class
+    WHERE oid = '${table}'::regclass),
+  'open', COALESCE((SELECT json_agg(r) FROM (
+    SELECT c.organization_id AS "organizationId", c.order_id AS "orderId", c.operation,
+      c.subject, c.generation,
+      floor(extract(epoch FROM clock_timestamp() - c.opened_at))::bigint AS "ageSeconds"
+    FROM ${table} c
+    WHERE c.confirmed_at IS NULL
+    ORDER BY c.opened_at, c.organization_id, c.order_id, c.operation, c.subject
+    LIMIT ${OPEN_CALLS_SHOWN + 1}
+  ) r), '[]'::json));
+COMMIT;
+`;
+  const result = spawnSync(
+    'psql',
+    [target, '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-f', '-'],
+    {
+      input: sql,
+      encoding: 'utf8',
+      timeout: CLI_TIMEOUT_MS,
+      env: { ...process.env, PGCONNECT_TIMEOUT: '10', ...env },
+    },
+  );
+  if (result.error) throw new Unverifiable(`psql could not be run (${spawnCode(result.error)})`);
+  if (result.status !== 0) {
+    throw new Unverifiable('saga_unconfirmed_call could not be read; psql diagnostics withheld');
+  }
+  let answer;
+  try {
+    answer = JSON.parse(result.stdout);
+  } catch {
+    answer = undefined;
+  }
+  const rows = isRecord(answer) ? answer.open : undefined;
+  if (
+    !isRecord(answer) ||
+    Object.keys(answer).length !== 3 ||
+    typeof answer.recovery !== 'boolean' ||
+    typeof answer.rowSecurity !== 'boolean' ||
+    !Array.isArray(rows) ||
+    rows.length > OPEN_CALLS_SHOWN + 1
+  ) {
+    throw new Unverifiable('saga_unconfirmed_call: psql did not print the open records');
+  }
+  if (answer.recovery) {
+    throw new Unverifiable(
+      'saga_unconfirmed_call was read on a standby; a record may not have arrived',
+    );
+  }
+  if (answer.rowSecurity) {
+    throw new Unverifiable(
+      'saga_unconfirmed_call has row security: an empty answer proves nothing',
+    );
+  }
+  const shown = (value) => (PRINTABLE.test(value) ? value : '<withheld>');
+  const blockers = [];
+  for (const row of rows) {
+    if (
+      !isRecord(row) ||
+      ['organizationId', 'orderId', 'operation', 'subject'].some(
+        (field) => typeof row[field] !== 'string' || !row[field],
+      ) ||
+      !Number.isSafeInteger(row.generation) ||
+      row.generation < 1 ||
+      !Number.isSafeInteger(row.ageSeconds)
+    ) {
+      throw new Unverifiable('saga_unconfirmed_call: an open record this gate cannot read');
+    }
+    if (!RECORDED_CALLS.has(row.operation)) {
+      throw new Unverifiable('saga_unconfirmed_call: an open record of an unknown operation');
+    }
+    if (blockers.length === OPEN_CALLS_SHOWN) {
+      blockers.push(`more than ${OPEN_CALLS_SHOWN} open saga call records; list them (runbook)`);
+      break;
+    }
+    blockers.push(
+      `open saga call record: order ${shown(row.orderId)} (organization ${shown(row.organizationId)}), ` +
+        `${row.operation} on ${shown(row.subject)}, generation ${row.generation}, open ${row.ageSeconds} s`,
+    );
+  }
+  return blockers;
+}
+
 function check() {
   const cli = process.env.TEMPORAL_CLI?.trim() || 'temporal';
   const address = setting('TEMPORAL_ADDRESS');
@@ -405,6 +551,7 @@ function check() {
   ) {
     throw new Unverifiable('MARKETPLACE_SAGA_STOP_TIME must be a past canonical UTC timestamp');
   }
+  const database = databaseConnection();
   const continuedQuery = `WorkflowType="orderSaga" AND ExecutionStatus="ContinuedAsNew" AND CloseTime >= "${stopTime}"`;
   let target;
   try {
@@ -539,6 +686,8 @@ function check() {
   if (after !== before) {
     throw new Unverifiable(`running order sagas went from ${before} to ${after} during the check`);
   }
+  // Last: with no poller listed, nothing left running opens a record after this read.
+  blockers.push(...openCallRecords(database));
   return { running: before, blockers };
 }
 
@@ -562,7 +711,7 @@ try {
     process.exit(1);
   }
   console.log(
-    `marketplace saga drain check: OK — no poller, ${running} running order saga(s), no pending activity`,
+    `marketplace saga drain check: OK — no poller, ${running} running order saga(s), no pending activity, no open saga call record`,
   );
 } catch (error) {
   const reason = error instanceof Unverifiable ? error.message : commandFailure(error);

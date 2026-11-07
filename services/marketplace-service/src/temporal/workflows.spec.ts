@@ -1571,6 +1571,9 @@ describe('the order saga', () => {
             onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
             whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
               fn({ status: order.status, receiptConfirmed: true }),
+            // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+            openSagaCall: async () => ({ generation: 1, started: true }),
+            confirmSagaCall: async () => undefined,
           } as unknown as OrderService,
           economic: {
             authoriseSettlement: async () => {
@@ -1970,6 +1973,9 @@ describe('the order saga', () => {
             onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
             whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
               fn({ status: 'RECEIPT_CONFIRMED', receiptConfirmed: true }),
+            // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+            openSagaCall: async () => ({ generation: 1, started: true }),
+            confirmSagaCall: async () => undefined,
           } as unknown as OrderService,
           economic: {
             authoriseSettlement: async () => {

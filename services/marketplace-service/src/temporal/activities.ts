@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { ApplicationFailure, Context, CancelledFailure } from '@temporalio/activity';
+import { ERROR_STATUS, type ErrorCode } from '@rasta/contracts';
 import {
   createSystemContext,
   isRastaError,
@@ -9,7 +10,12 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { OrderService } from '../order/order.service';
-import type { HeldOrderRow, SagaActivity, SagaStep } from '../order/order.repository';
+import {
+  SagaCallSuperseded,
+  type HeldOrderRow,
+  type SagaActivity,
+  type SagaStep,
+} from '../order/order.repository';
 import type { OrderStatus } from '../generated/prisma';
 import {
   fundsOf,
@@ -171,6 +177,18 @@ export interface DisputedObligation {
   economicDisputeId?: string | null;
 }
 
+/** The economic-service calls with a durable record until answered (FU-104, FU-145, #836 r1). */
+type RecordedCall =
+  'createObligation' | 'authoriseSettlement' | 'settle' | 'compensate' | 'resolveObligationDispute';
+
+/** A call record as one attempt of one scheduled command opened it (#836 r1 R1). */
+interface Opening {
+  command: SagaStep;
+  generation: number;
+  /** This opening began the episode: no earlier send in it is unanswered. */
+  started: boolean;
+}
+
 /**
  * The obligation is in a terminal status that is not the call's own effect, so no
  * attempt can ever have that effect, and no request still in flight can move it.
@@ -212,6 +230,15 @@ export interface AuthorisationFenced {
    * that yet. It could still land, so the saga keeps the doubt (`unconfirmed`).
    */
   inDoubt: boolean;
+}
+
+/**
+ * The fence's own answer, not economic-service's (D-151): this attempt sent
+ * nothing, so it says nothing of an earlier send still on its way, and never
+ * confirms the call record — whatever its doubt, attempt or episode.
+ */
+function isAuthorisationFenced(result: AuthorisationResult): result is AuthorisationFenced {
+  return result !== undefined && 'fenced' in result && result.fenced === true;
 }
 
 /**
@@ -331,15 +358,51 @@ export function createActivities(deps: ActivityDependencies) {
   const currentStep = deps.currentStep ?? temporalStep;
   const currentAttempt = deps.currentAttempt ?? temporalAttempt;
 
-  /** The durable record of an unconfirmed release (FU-104), under the order's own tenant. */
-  const openRelease = (orderId: string, disputeId: string): Promise<number> =>
-    asSystemFor(orderId, (order) =>
-      deps.orders.openSagaCall(
+  /**
+   * The durable record of an economic-service call whose outcome is not yet
+   * confirmed (FU-104, FU-145), under the order's own tenant: opened before the
+   * call, since one that fails may still have committed, and closed only by
+   * that attempt's own answer. It outlives the order's status: a dispute raised
+   * on an order a failed settlement left RECEIPT_CONFIRMED pauses settlement,
+   * and confirms nothing about the command already sent (#792 r2 F2).
+   *
+   * Bound to the scheduled command (#836 r1 R1): an attempt of a command older
+   * than the record's owner is refused here, before it calls, and fails for
+   * good — the saga has moved past it, and its answer, a step record's cached
+   * one included, says nothing about the newer command's call.
+   */
+  const openCall = (
+    orderId: string,
+    operation: RecordedCall,
+    subject: string,
+  ): Promise<Opening> => {
+    const command = currentStep();
+    return asSystemFor(orderId, async (order) => ({
+      command,
+      ...(await deps.orders.openSagaCall(
         { id: order.id, organizationId: order.buyerOrganizationId },
-        'resolveObligationDispute',
-        disputeId,
+        operation,
+        subject,
+        command,
+      )),
+    }));
+  };
+  const confirmCall = (
+    orderId: string,
+    operation: RecordedCall,
+    subject: string,
+    opening: Opening,
+  ): Promise<void> =>
+    asSystemFor(orderId, (order) =>
+      deps.orders.confirmSagaCall(
+        { id: order.id, organizationId: order.buyerOrganizationId },
+        operation,
+        subject,
+        opening,
       ),
     );
+  const openRelease = (orderId: string, disputeId: string): Promise<Opening> =>
+    openCall(orderId, 'resolveObligationDispute', disputeId);
 
   /**
    * An economic-service call, made at most once per scheduled activity
@@ -522,6 +585,14 @@ export function createActivities(deps: ActivityDependencies) {
      * that recovery waits for one that can (`heldProofUnavailable`).
      */
     async createObligation(orderId: string): Promise<HeldResult> {
+      // The hold's intent, keyed by the order, before anything is sent (#836 r1
+      // R2): a create that times out may commit after the saga stopped looking,
+      // so only its own answer, a refusal proving it held nothing, or a lookup
+      // that finds the obligation (`findObligation`) ends it. An empty lookup,
+      // the order's terminal status or the record's age never does: a create
+      // delayed before its claim can still commit, and economic-service's
+      // retention starts at the claim (#836 r2 N1, D-135; the fence is FU-161).
+      const opening = await openCall(orderId, 'createObligation', orderId);
       const held = await economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
           // A retry after the call succeeded but the recording did not. The
@@ -529,12 +600,33 @@ export function createActivities(deps: ActivityDependencies) {
           return { transactionId: order.economicTransactionId };
         }
 
-        const transaction = await deps.economic.createObligation({
-          ...obligationTermsOf(order),
-          correlationId: order.correlationId,
-        });
-        return { transactionId: transaction.id };
+        try {
+          const transaction = await deps.economic.createObligation({
+            ...obligationTermsOf(order),
+            correlationId: order.correlationId,
+          });
+          return { transactionId: transaction.id };
+        } catch (refusal) {
+          // Only for the send that began the episode: economic-service frees
+          // the key on a refusal, so an earlier send of this episode still on
+          // its way could claim it and commit after this one was refused.
+          // And only on the scheduling's first attempt (#836 r2 N1, D-135): a
+          // record that began here proves no earlier send only of attempts
+          // that record one, and an older worker's attempt sent unrecorded. A
+          // missing record, like an empty lookup or an old row, is absence,
+          // which never closes anything; unknown (no Temporal context) is not 1.
+          if (opening.started && currentAttempt() === 1 && heldNothing(refusal)) {
+            await deps.orders.confirmSagaCall(
+              { id: order.id, organizationId: order.buyerOrganizationId },
+              'createObligation',
+              order.id,
+              opening,
+            );
+          }
+          throw refusal;
+        }
       });
+      await confirmCall(orderId, 'createObligation', orderId, opening);
       await asSystemFor(orderId, async (order) => {
         const now = await deps.economic.readObligation({
           orderId: order.id,
@@ -597,6 +689,14 @@ export function createActivities(deps: ActivityDependencies) {
           const terms = obligationTermsOf(order);
           const own = found.find((transaction) => termsDiffer(terms, transaction).length === 0);
           if (own) {
+            // The order's own obligation exists, whatever its status: no create
+            // for this order is in doubt any more (#836 r1 R2). A row on other
+            // terms, or none, proves nothing of the order's own create.
+            await deps.orders.confirmSagaCallsOn(
+              { id: order.id, organizationId: order.buyerOrganizationId },
+              ['createObligation'],
+              order.id,
+            );
             // Retried until it answers (LOCAL_OPTIONS): the order waits, and carries on
             // by itself once economic-service is upgraded (FU-138; ADR-040).
             if (heldProofMissing(own)) throw heldProofUnavailable(order.id, own.id);
@@ -664,7 +764,11 @@ export function createActivities(deps: ActivityDependencies) {
       inDoubt = false,
       contract?: string,
     ): Promise<AuthorisationResult> {
-      return economicStep<AuthorisationResult>(
+      // Only economic-service's answer closes the record: authorised, disputed
+      // since this order's own authorisation, or final. A refusal, no answer or
+      // the fence's answer (nothing sent; D-151) leaves it open.
+      const opening = await openCall(orderId, 'authoriseSettlement', transactionId);
+      const authorisation = await economicStep<AuthorisationResult>(
         orderId,
         'authoriseSettlement',
         async (order) => {
@@ -724,6 +828,10 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
+      if (!isAuthorisationFenced(authorisation)) {
+        await confirmCall(orderId, 'authoriseSettlement', transactionId, opening);
+      }
+      return authorisation;
     },
 
     async markSettling(orderId: string): Promise<OrderStatus> {
@@ -740,7 +848,10 @@ export function createActivities(deps: ActivityDependencies) {
       orderId: string,
       transactionId: string,
     ): Promise<SettledResult | DisputedObligation> {
-      return economicStep<SettledResult | DisputedObligation>(
+      // An attempt that gets no answer leaves the record open after the saga
+      // gives up (SETTLEMENT_EXHAUSTED), whatever the order's status becomes.
+      const opening = await openCall(orderId, 'settle', transactionId);
+      const settled = await economicStep<SettledResult | DisputedObligation>(
         orderId,
         'settle',
         async (order) => {
@@ -778,6 +889,8 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
+      await confirmCall(orderId, 'settle', transactionId, opening);
+      return settled;
     },
 
     /**
@@ -822,7 +935,8 @@ export function createActivities(deps: ActivityDependencies) {
       inDoubt = false,
       contract?: string,
     ): Promise<ObligationFinal | void> {
-      return economicStep<ObligationFinal | void>(
+      const opening = await openCall(orderId, 'compensate', transactionId);
+      const answer = await economicStep<ObligationFinal | void>(
         orderId,
         'compensate',
         async (order) => {
@@ -845,6 +959,20 @@ export function createActivities(deps: ActivityDependencies) {
           ...(contract === FINAL_ANSWER_CONTRACT ? { confirmed: { inDoubt } } : {}),
         },
       );
+      await confirmCall(orderId, 'compensate', transactionId, opening);
+      // An ObligationFinal is economic-service's answer to the refund too, but
+      // only REFUNDED proves no authorisation or settlement of it can land:
+      // those left unanswered on it are answered then, and only then.
+      if (answer === undefined) {
+        await asSystemFor(orderId, (order) =>
+          deps.orders.confirmSagaCallsOn(
+            { id: order.id, organizationId: order.buyerOrganizationId },
+            ['authoriseSettlement', 'settle'],
+            transactionId,
+          ),
+        );
+      }
+      return answer;
     },
 
     /**
@@ -927,7 +1055,7 @@ export function createActivities(deps: ActivityDependencies) {
       economicDisputeId?: string,
       contract?: string,
     ): Promise<ObligationFinal | void> {
-      const generation = await openRelease(orderId, disputeId);
+      const opening = await openRelease(orderId, disputeId);
       const answer = await economicStep<ObligationFinal | void>(
         orderId,
         'resolveObligationDispute',
@@ -969,14 +1097,7 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
-      await asSystemFor(orderId, (order) =>
-        deps.orders.confirmSagaCall(
-          { id: order.id, organizationId: order.buyerOrganizationId },
-          'resolveObligationDispute',
-          disputeId,
-          generation,
-        ),
-      );
+      await confirmCall(orderId, 'resolveObligationDispute', disputeId, opening);
       return answer;
     },
 
@@ -1052,13 +1173,27 @@ function systemContext(organizationId: string | undefined, correlationId: string
 }
 
 /**
- * Converts a platform error into one Temporal can classify.
- *
- * The `type` is the platform error code, which is what the workflow's
- * `nonRetryableErrorTypes` matches on: a business-rule refusal must not be
- * retried, because the second attempt gets the same answer and only reports
- * the failure later.
+ * economic-service refused the create outright, so it holds nothing under the
+ * order's key (#836 r1 R2): its own error body, a code it gives only before
+ * any effect, under that code's own status. economic-service claims the key in
+ * a committed row first, so an earlier attempt still in flight makes this one
+ * `CONFLICT`, and an earlier one that committed is replayed, never refused for
+ * its work. Not `NOT_FOUND`, `FORBIDDEN` or `TENANT_MISMATCH`: the replay guard
+ * answers those for a key that did commit, to a caller who lost access since
+ * (economic-service `shared/idempotency.ts`). Anything else — no answer, a
+ * conflict, a reused key, an unknown code or status — leaves the intent open.
  */
+function heldNothing(error: unknown): boolean {
+  if (!isRastaError(error) || !CREATE_REFUSALS.has(error.code)) return false;
+  return error.internalContext?.status === ERROR_STATUS[error.code];
+}
+
+const CREATE_REFUSALS = new Set<ErrorCode>([
+  'INSUFFICIENT_BALANCE',
+  'BUSINESS_RULE_VIOLATION',
+  'VALIDATION_FAILED',
+]);
+
 /**
  * economic-service refused the command for the transaction's current state —
  * the refusal its state machine gives (`nextStatus`), and the only one a
@@ -1150,7 +1285,19 @@ function reconciliationReadFailed(activity: SagaActivity, failure: unknown): App
   );
 }
 
+/**
+ * Converts a platform error into one Temporal can classify.
+ *
+ * The `type` is the platform error code, which is what the workflow's
+ * `nonRetryableErrorTypes` matches on: a business-rule refusal must not be
+ * retried, because the second attempt gets the same answer and only reports
+ * the failure later.
+ */
 function asTemporalFailure(error: unknown): Error {
+  // For good, wherever a record is opened: the saga has moved past this command.
+  if (error instanceof SagaCallSuperseded) {
+    return ApplicationFailure.nonRetryable(error.message, 'SAGA_CALL_SUPERSEDED');
+  }
   if (!isRastaError(error)) {
     return error instanceof Error ? error : new Error('The financial service call failed');
   }

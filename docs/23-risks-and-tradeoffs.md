@@ -1728,9 +1728,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   جای این Gate را نمی‌گیرد. توالی: همهٔ نمونه‌های قدیمی متوقف (Scale به صفر، نه Rolling Update) ⇐ Gate ⇐ فقط با کد خروج ۰
   نسخهٔ جدید بالا می‌آید:
   Gate همیشه از **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout انتشار هدف اجرا نکن:
-  `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… MARKETPLACE_TARGET_PACKAGE_JSON=… node scripts/marketplace-saga-drain-check.mjs`
+  `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… MARKETPLACE_TARGET_PACKAGE_JSON=… MARKETPLACE_SAGA_STOP_TIME=… DATABASE_URL_MARKETPLACE=… node scripts/marketplace-saga-drain-check.mjs`
   — سه مقدار Temporal همان‌هایی که سرویس با آن‌ها اجرا می‌شود؛ Manifest بدون ویرایش از Image ـِ هدف استخراج می‌شود،
-  هر چهار متغیر اجباری و بی پیش‌فرض‌اند. Gate با Query ـِ Visibility
+  همهٔ متغیرها اجباری و بی پیش‌فرض‌اند؛ `DATABASE_URL_MARKETPLACE` برای رکوردهای فراخوانی باز است که هر کدام استقرار را می‌بندد (FU-221). Gate با Query ـِ Visibility
   `WorkflowType="orderSaga" AND ExecutionStatus="Running"` Workflowها را می‌شمارد و فهرست می‌کند
   (`temporal workflow count` / `temporal workflow list --query … --output json`، هیچ اجرایی — `workflowId` و `runId` با هم —
   دو بار فهرست نشود، شمار با شمار اجراهای یکتا یکی باشد و تا پایان عوض نشود؛ Codex دور ۴ روی #283: `[A, A]` با شمار ۲ جای

@@ -33,8 +33,8 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
   را آغاز نمی‌کند، و آن سفارش هرگز از `PENDING` جلو نمی‌رود. نمونه باید متوقف باشد.
 - میان گام ۲ و ۴ marketplace-service در دسترس نیست (سفارشی ثبت نمی‌شود). این بهای Gate است.
 - خروجی گام ۳ (متن و کد خروج) و زمانش را در Change Record استقرار ثبت کن.
-- میان گام ۲ و ۴ هیچ نمونه‌ای گزارش نمی‌دهد و هیچ Worker ـی Poll نمی‌کند، پس `RastaMarketplaceSagaNoLiveWorker`
-  و `RastaMarketplaceSagaStartBacklogAging` فعال می‌شوند. این انتظار می‌رود:
+- میان گام ۲ و ۴ هیچ نمونه‌ای گزارش نمی‌دهد و هیچ Worker ـی Poll نمی‌کند، پس `RastaMarketplaceSagaNoLiveWorker`،
+  `RastaMarketplaceSagaStartBacklogAging` و `RastaMarketplaceSagaFinancialEpisodeOverdue` فعال می‌شوند. این انتظار می‌رود:
   فقط برای همین بازه، با شناسهٔ Change Record و پایانی معین، Silence کن ([`marketplace-saga-liveness`](marketplace-saga-liveness.md)).
 
 ### گام ۳ — Gate
@@ -44,7 +44,7 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 Retention تاریخچه و Visibility انجام شود؛ پس از آن، تطبیق عملیاتی لازم است.
 
 Gate همیشه از ریشهٔ مخزن **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout
-انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر پنج اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
+انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر شش اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
@@ -52,8 +52,19 @@ TEMPORAL_ADDRESS='<as the service>' TEMPORAL_NAMESPACE='<as the service>' \
   MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' \
   MARKETPLACE_TARGET_PACKAGE_JSON='<package.json extracted from target image>' \
   MARKETPLACE_SAGA_STOP_TIME='<recorded UTC time>' \
+  DATABASE_URL_MARKETPLACE='<as the service>' \
   node scripts/marketplace-saga-drain-check.mjs
 ```
+
+پس از همهٔ پرسش‌های Temporal، Gate جدول `saga_unconfirmed_call` را می‌خواند (FU-221، D-151): **هر** رکورد باز، با هر عملیات
+(`createObligation`، `authoriseSettlement`، `settle`، `compensate`، `resolveObligationDispute`)، استقرار را متوقف می‌کند. Temporal
+چنین رکوردی را نشان نمی‌دهد: مجوزی که سفارش حصارش کرده Saga را بی Activity ـِ در انتظار تمام می‌کند و رکوردش باز می‌ماند، و
+فراخوانی‌ای که economic-service هنوز پاسخش را نداده شاید فقط از نسخه‌ای که آن را فرستاده پاسخ بگیرد. خواندن با `psql` ـِ روی PATH
+است، از راه `scripts/psql-prisma-url.mjs` (گذرواژه در `PGPASSWORD`، نه در argv)، با همان نقش زمان اجرای سرویس که پایش سرویس
+همین جدول را با آن می‌خواند (جدول RLS ندارد؛ اگر روزی داشته باشد Gate رد می‌کند، چون پاسخ خالی آن‌گاه از Policy است نه از جدول).
+جدول با Schema ـِ نشانی (`?schema=`) نام برده می‌شود، پس Pooler ـی که `search_path` را دور بریزد Schema ـِ دیگری را نمی‌خواند.
+یک تراکنش `READ ONLY` با `statement_timeout` ده ثانیه و `lock_timeout` پنج ثانیه؛ ردیف‌ها از Index ـِ جزئی
+`ix_saga_unconfirmed_call_open` خوانده می‌شوند و تاریخچهٔ بسته‌شده پیموده نمی‌شود. `PGSERVICE` تنظیم‌شده رد می‌شود.
 
 Gate دقیقاً این‌ها را می‌پرسد (همان Query ـِ Visibility؛ Visibility فعالیت در انتظار را نمایه نمی‌کند، پس هر Workflow جدا
 `describe` می‌شود):
@@ -87,8 +98,8 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 
 | کد خروج | معنا                                                                                                                                                                                                                          | استقرار      |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `0`     | هیچ Poller روی Queue، هر دو شمار و فهرست یکی، اجرای جاری بررسی شده، هیچ Activity در انتظار                                                                                                                                    | مجاز (گام ۴) |
-| `1`     | Poller یا Activity در انتظار یافت شد؛ جزئیات خروجی CLI چاپ نمی‌شود                                                                                                                                                            | **متوقف**    |
+| `0`     | هیچ Poller روی Queue، هر دو شمار و فهرست یکی، اجرای جاری بررسی شده، هیچ Activity در انتظار، هیچ رکورد فراخوانی باز                                                                                                            | مجاز (گام ۴) |
+| `1`     | Poller، Activity در انتظار یا رکورد فراخوانی باز (`open saga call record: order …`) یافت شد؛ جزئیات خروجی CLI چاپ نمی‌شود                                                                                                     | **متوقف**    |
 | `1`     | `cannot verify — deployment blocked`: تنظیمی نیست، CLI نیست یا شکست خورد، پاسخی با شکلی جز جدول بالا، اجرایی دو بار فهرست شده، شمار و اجراهای یکتای فهرست نمی‌خوانند، شمار در حین بررسی عوض شد، Workflow ـی روی Queue ـی دیگر | **متوقف**    |
 
 ### اگر Gate متوقف کرد
@@ -104,6 +115,11 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 - **Protocol ناسازگار یا نشانهٔ ناشناس (کد ۱).** `requires saga protocol N` یعنی Image هدف Protocol لازم را اعلام نکرده است:
   Image سازگار بیاور یا اصلاحی روبه‌جلو منتشر کن. `unknown compatibility marker`، `unknown continuation state`، `invalid start input`، `unknown activity result`، `unreadable activity result` یا `an activity result without its scheduling`
   یعنی این Gate آن تاریخچه را نمی‌شناسد: Gate را از جدیدترین انتشار اجرا کن. Manifest را برای گذشتن از Gate هرگز دستی تغییر نده.
+- **رکورد فراخوانی باز (کد ۱، `open saga call record`).** نسخهٔ جدید را بالا **نیاور.** سطر سفارش، سازمان، عملیات، `subject`،
+  `generation` و سنّ رکورد را نام می‌برد. با economic-service تطبیقش بده، همان‌طور که
+  [`marketplace-saga-liveness`](marketplace-saga-liveness.md) § «The drain gate refuses: an open call record» می‌گوید؛ رکورد را
+  هرگز برای گذشتن از Gate، با گذشت زمان، نگه‌داری کلید یا وضعیت سفارش، دستی نبند (D-135، #836 N1). `unknown operation` یعنی
+  نسخه‌ای تازه‌تر از این Gate آن را نوشته است: Gate را از جدیدترین انتشار اجرا کن.
 - **بررسی ممکن نشد (کد ۱).** دسترسی را درست کن (CLI، نشانی، TLS، Namespace) و گام ۳ را تکرار کن. راه «با این حال مستقر کن»
   نیست و یادداشت استثنا جای Gate را نمی‌گیرد.
 
@@ -111,7 +127,7 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 
 مخزن اسکریپت یا Job استقراری برای marketplace-service ندارد (`.github/workflows/ci.yml` فقط می‌سازد و می‌آزماید؛ Manifest
 استقراری در مخزن نیست)، پس Gate فعلاً گامی دستی است. هر خط استقرار که ساخته شود باید همین اسکریپت را میان گام ۲ و ۴
-از جدیدترینِ انتشار در حال اجرا و انتشار هدف با هر چهار متغیر گام ۳ اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
+از جدیدترینِ انتشار در حال اجرا و انتشار هدف با همهٔ متغیرهای گام ۳ اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
 ـِ CI می‌آزماید (`pnpm run test:marketplace-saga-drain-check`).
 
 ## Durable start delivery (task 1214 A)
@@ -212,7 +228,7 @@ Durable history proves protocol requirements for a discovered run; it does not
 discover runs or establish visibility completeness. It adds no workflow commands.
 
 Always run the gate from the **newest of the running and target releases**;
-never use the target checkout when rolling back. Use the five-variable invocation
+never use the target checkout when rolling back. Use the six-variable invocation
 in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 
 Extract `services/marketplace-service/package.json` from the **immutable target
@@ -254,11 +270,13 @@ above; a history change during inspection requires another drain/check.
 
 ## Unconfirmed dispute release (FU-080)
 
-`RastaMarketplaceSagaDisputeReleaseUnconfirmed` fires from the first round of
-`rasta_marketplace_saga_release_unconfirmed_total` until two hours after the last.
-It counts rounds, not stuck sagas, and rounds need a running worker: with workers
-stopped or failed it clears while the funds are still held. A resolved alert is
-not a confirmed release; the saga's status query is. A decided dispute's
+`RastaMarketplaceSagaFinancialEpisodeOverdue`
+([`marketplace-saga-liveness`](marketplace-saga-liveness.md), reason
+`DISPUTE_RELEASE`) fires once a release has been owed for an hour. It reads the
+dispute's open `saga_unconfirmed_call` row, so it does not clear when the rounds
+stop, the saga ends or no worker runs; it replaces the alert on
+`rasta_marketplace_saga_release_unconfirmed_total`, which did (#792 r1). The
+counter still counts rounds, for diagnosis. A decided dispute's
 resolution has not been confirmed by economic-service: the obligation stays
 DISPUTED and its funds held. The saga does not end. It waits in phase
 `RELEASE_UNCONFIRMED` (`workflow query --name status`) and calls again with the
@@ -296,8 +314,11 @@ call, labelled `operation`, with the same limit: it counts rounds, so it clears
 with workers stopped. Those calls are `authoriseSettlement` (phase
 `AUTHORISATION_UNCONFIRMED`), `settle` (`SETTLEMENT_UNCONFIRMED`), `disputeObligation`
 (`DISPUTE_UNCONFIRMED`) and `compensate` (`COMPENSATION_UNCONFIRMED`). `createObligation` is not: exhausted with
-an empty lookup it still records `FAILED`. economic-service gave no answer proving the
-call changed nothing, so it may have committed; the call is repeated under the same key,
+an empty lookup it still records `FAILED`. Except for `disputeObligation`, which has no
+call record yet, the call's open `saga_unconfirmed_call` row does not clear with workers stopped: it keeps `RastaMarketplaceSagaFinancialEpisodeOverdue`
+(reason `UNCONFIRMED_CALL`) firing once it is an hour old, until economic-service
+answers (FU-145). economic-service gave no answer proving the call
+changed nothing, so it may have committed; the call is repeated under the same key,
 doubling from one minute to one hour, and nothing settles meanwhile. After restoring
 economic-service, try now with the same signal, which keeps its name:
 `--name retryDisputeRelease`.
@@ -410,8 +431,9 @@ on an older build it sends the older calls and gets the older refusals.
 
 `saga_unconfirmed_call` رکورد پایدار فراخوانی‌هایی به economic-service است که نتیجه‌شان تأیید نشده است. ردیف پیش از فراخوانی نوشته می‌شود،
 هر تلاش تازه آن را دوباره باز می‌کند و `generation` را جلو می‌برد، و فقط تأیید همان تلاش آن را می‌بندد؛ پس تأیید دیرهنگام تلاشی قدیمی‌تر چیزی را نمی‌بندد،
-و ردیف با توقف Worker یا پایان Saga از بین نمی‌رود. فعلاً فقط `resolveObligationDispute` ثبت می‌شود، پس ردیف بسته فقط تأیید همان آزادسازی است و ثابت نمی‌کند بازپرداخت یا تسویهٔ پس از آن هم انجام شده است.
-این جدول فقط ثبت می‌کند: هنوز هیچ هشداری آن را نمی‌خواند، پس برای دیدن ردیف‌های باز این پرس‌وجو را اجرا کن (`opened_at` زمان نخستین بازشدن است و با تلاش تازه جلو نمی‌رود):
+و ردیف با توقف Worker یا پایان Saga از بین نمی‌رود. آزادسازی (`resolveObligationDispute`) و نیز مجوز تسویه (`authoriseSettlement`)، تسویه (`settle`) و بازپرداخت (`compensate`) ثبت می‌شوند (FU-145)، که `subject` آن سه شناسهٔ تراکنش است؛ ردیف بسته فقط تأیید همان فراخوانی است. بازپرداخت تأییدشده ردیف‌های باز مجوز و تسویهٔ همان تراکنش را هم می‌بندد، چون `REFUNDED` پایانی است. ایجاد تعهد (`createObligation`، که `subject` آن شناسهٔ سفارش است) هم پیش از ارسال ثبت می‌شود و فقط با پاسخ خودش، با ردی که ثابت می‌کند چیزی نگه داشته نشده (فقط برای نخستین ارسالِ همان دوره و در نخستین تلاشِ همان زمان‌بندی، چون رد کلید را آزاد می‌کند و تلاش Worker قدیمی‌تر رکوردی ننوشته است)، یا با جست‌وجویی که تعهد خود سفارش را بیابد بسته می‌شود؛ جست‌وجوی خالی آن را نمی‌بندد (#836 r1). هر ردیف فرمان زمان‌بندی‌شده‌ای را که مالک آن است نام می‌برد (`command`)، و تلاشِ فرمانی قدیمی‌تر پیش از فراخوانی رد می‌شود (`SAGA_CALL_SUPERSEDED`)، پس پاسخ آن هرگز ردیف فرمانی تازه‌تر را نمی‌بندد.
+این جدول فقط ثبت می‌کند و تصمیمی نمی‌گیرد. `RastaMarketplaceSagaFinancialEpisodeOverdue` ردیف باز را یک ساعت پس از تصمیم اختلافش (یا پس از نخستین بازشدن، اگر اختلافی پشتش نباشد) دیرکرد می‌شمارد، با هر وضعیتی که سفارش داشته باشد ([`marketplace-saga-liveness`](marketplace-saga-liveness.md)).
+برای دیدن ردیف‌های باز این پرس‌وجو را اجرا کن (`opened_at` زمان نخستین بازشدن است و تا ردیف باز است با تلاش تازه جلو نمی‌رود؛ فراخوانی تأییدشده‌ای که دوباره انجام شود از نو آغاز می‌شود):
 
 ```sql
 SELECT organization_id, order_id, operation, subject AS dispute_id, generation, opened_at
@@ -419,7 +441,7 @@ FROM saga_unconfirmed_call WHERE confirmed_at IS NULL ORDER BY opened_at;
 ```
 
 ردیف باز ثابت نمی‌کند وجه هنوز در Hold است؛ ثابت می‌کند که کسی خلافش را ثابت نکرده است. پس آن را با economic-service تطبیق بده (اختلاف باز هنوز چیزی برای آزادسازی ندارد).
-ردیف را فقط با تصمیم ثبت‌شدهٔ تطبیق ببند، و با همان `generation` که خوانده‌ای، تا تلاشی که پس از خواندن تو آغاز شده بسته نشود. اگر `UPDATE 0` برگشت، دوباره بخوان و دوباره تطبیق بده:
+ردیف را فقط با تصمیم ثبت‌شدهٔ تطبیق ببند، آن هم فقط وقتی economic-service اثر همان فراخوانی را نشان دهد، و با همان `generation` که خوانده‌ای، تا تلاشی که پس از خواندن تو آغاز شده بسته نشود. نبودِ تراکنش در جست‌وجو، وضعیت پایانی سفارش، یا گذشت زمان (حتی بیش از مدت نگه‌داری کلید، که از لحظهٔ Claim شمرده می‌شود) هرگز دلیل بستن نیست (D-135). ردیف `createObligation` را هرگز دستی نبند: تا حصار زمان Claim در economic-service (D-132) روی main نیامده، چیزی ثابت نمی‌کند ایجادی که دیر رسیده بعداً ثبت نشود ([`marketplace-saga-liveness`](marketplace-saga-liveness.md) گام ۷؛ بستن پس از آن حصار FU-161 است). اگر `UPDATE 0` برگشت، دوباره بخوان و دوباره تطبیق بده:
 
 ```sql
 UPDATE saga_unconfirmed_call SET confirmed_at = now()
@@ -432,6 +454,7 @@ WHERE organization_id = '<org>' AND order_id = '<order>' AND operation = 'resolv
 Migration برای **هر** اختلافی که سفارشش `COMPLETED` یا `CANCELLED` نیست ردیف می‌نویسد، چه اختلاف باز باشد چه تصمیم‌گرفته، چه Saga ـش زنده باشد چه بسته. هیچ رسید و هیچ زمانی
 این را تغییر نمی‌دهد: رسید آزادسازی نمی‌گوید پاسخ کدام اختلاف است، زمانش با ساعت دیگری از زمان تصمیم ثبت می‌شود، و ممکن است دیر برسد یا هرگز نوشته نشود. پس آزادسازی‌ای که واقعاً
 انجام شده هم ردیف می‌گیرد: Saga ـی که منتظر است ردیف خود را با تلاش بعدی‌اش می‌بندد (در فاز `RELEASE_UNCONFIRMED`، `retryDisputeRelease` آن را زودتر می‌کند)، و بقیه را با economic-service تطبیق بده، با همان مسیر بالا ببند و ثبت کن.
+پس پس از نخستین استقرار `RastaMarketplaceSagaFinancialEpisodeOverdue` برای این ردیف‌ها فعال می‌شود؛ این انتظار می‌رود و تا بسته‌شدن آخرین ردیف دیرکرد فعال می‌ماند.
 
 Migration پیش از توقف نسخهٔ قدیمی اجرا می‌شود (گام ۱) و آن نسخه تا گام ۲ هنوز می‌تواند اختلافی را ثبت کند. پس **در هر تلاش استقرار، میان گام ۲ و ۴ این پرکردن را دوباره اجرا کن**، از جمله پس از Rollback: `db:migrate` دوم کاری نمی‌کند، و اختلافی که نسخهٔ قدیمی در این میان ثبت کرده ردیف نمی‌گیرد؛
 همان عبارت Migration است، تکرارش بی‌خطر است و ردیف موجود را تغییر نمی‌دهد. از ریشهٔ مخزن اجرا کن. کد خروج غیرصفر (از جمله وقتی عبارتی پیدا نشود) استقرار را متوقف می‌کند،

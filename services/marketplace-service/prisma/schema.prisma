@@ -444,6 +444,15 @@ model SagaUnconfirmedCall {
   /// Moves with every opening; a confirmation of an earlier one closes nothing.
   generation Int @default(1)
 
+  /// The scheduled command (saga step key) that owns the record, and when
+  /// Temporal scheduled it: an older command's opening is refused (#836 r1 R1).
+  /// Both null on a row opened before this release.
+  command            String?
+  commandScheduledAt DateTime? @map("command_scheduled_at") @db.Timestamptz(3)
+
+  /// The generation that began the open episode; null on a row from before #836.
+  episodeGeneration Int? @map("episode_generation")
+
   openedAt    DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
   confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(3)
 
