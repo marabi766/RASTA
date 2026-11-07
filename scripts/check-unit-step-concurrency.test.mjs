@@ -12,10 +12,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse, stringify } from 'yaml';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import {
   parsedProblems,
   UNBOUNDED_EXCEPTIONS,
@@ -76,15 +77,14 @@ function workspaceInputProblems(base) {
 for (const pattern of pnpmWorkspace.packages) {
   const dir = /^([a-z]+)\/\*$/.exec(pattern)?.[1];
   if (!dir) throw new Error(`workspace pattern ${pattern} is not read`);
-  for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
-    const base = join(root, dir, entry.name);
-    if (!entry.isDirectory() || !existsSync(join(base, 'package.json'))) continue;
-    const manifest = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8'));
+  // The workspace packages are the directories one level below `dir` that hold an authored
+  // package.json; git's file list answers that without opening any generated tree.
+  for (const manifestPath of authoredFiles(join(root, dir))) {
+    const [name, leaf, ...deeper] = relative(join(root, dir), manifestPath).split(sep);
+    if (leaf !== 'package.json' || deeper.length > 0) continue;
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     realPackages[manifest.name] = manifest.scripts ?? {};
-    realTurboConfigs.push({
-      directory: `${dir}/${entry.name}`,
-      files: turboFiles(`${dir}/${entry.name}`),
-    });
+    realTurboConfigs.push({ directory: `${dir}/${name}`, files: turboFiles(`${dir}/${name}`) });
   }
 }
 // FU-092: the pnpm settings every pnpm command of the job runs under, read from where pnpm reads them.

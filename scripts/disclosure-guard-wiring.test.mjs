@@ -1,35 +1,19 @@
 // Fail closed at every Jest configuration and Playwright assertion entry point (#452).
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { jestCommands } from './disclosure-jest-launches.mjs';
+import { authoredFiles } from './authored-source-inventory.cjs';
 export { jestCommands } from './disclosure-jest-launches.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
 const GUARD = require.resolve(join(root, 'packages/testing/src/disclosure-guard.ts'));
-const SKIPPED = new Set([
-  'node_modules',
-  'dist',
-  '.next',
-  '.turbo',
-  '.git',
-  'coverage',
-  'playwright-report',
-  'test-results',
-]);
-function files(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    if (SKIPPED.has(entry.name)) return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? files(path) : [path];
-  });
-}
-const everyFile = files(root).map((path) => relative(root, path));
+const everyFile = authoredFiles(root).map((path) => relative(root, path));
 
 export function jestWiringProblems(config, name, directory = root, args) {
   if (args !== undefined) return effectiveJestProblems(config, name, directory, args);

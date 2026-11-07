@@ -292,7 +292,7 @@ describe('settlement needs settlement authority, whatever the status says (D-083
             `UPDATE "transaction" SET status = 'SETTLED' WHERE id = $1`,
             transactionId,
           ),
-        ).rejects.toThrow(/trg_transaction_settlement_authority|settles only once/);
+        ).rejects.toThrow(/settles only from a funded hold/);
         throw new Error('rolled back: the probe keeps nothing');
       })
       .catch((error: Error) => {

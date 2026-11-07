@@ -159,7 +159,7 @@ describe('legacyParse', () => {
   it('FU-131 refuses exponent syntax before numeric checks', () => {
     const limit = numberInput(z.number().int().min(1).max(200));
     expect(brief(legacy(z.object({ limit }), { limit: '1e999' }))).toEqual([
-      { path: 'limit', code: 'invalid_type', message: 'Expected number, received nan' },
+      { path: 'limit', code: 'custom', message: 'Expected an integer in decimal notation' },
     ]);
   });
 

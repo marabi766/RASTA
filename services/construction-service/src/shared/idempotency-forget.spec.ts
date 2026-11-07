@@ -1,5 +1,9 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 import { forgettableWhere, mayForget } from './idempotency-forget';
 
 const NOW = 1_900_000_000_000;
@@ -93,12 +97,5 @@ describe('every deletion of a key row goes through the rule', () => {
 });
 
 function listTs(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) {
-      if (name !== 'generated') out.push(...listTs(path));
-    } else if (name.endsWith('.ts') && !name.endsWith('.spec.ts')) out.push(path);
-  }
-  return out;
+  return authoredFiles(dir).filter((path) => path.endsWith('.ts') && !path.endsWith('.spec.ts'));
 }

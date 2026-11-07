@@ -84,7 +84,7 @@ const CROSS_PARTY_REVIEWED: Readonly<Record<string, string>> = {
 const SAME_TENANT = new Set(
   listed(`
   OfferPriceHistory.offer OrderLine.order Fulfillment.order OrderStatusHistory.order
-  SagaStep.order OrderDispute.order Review.order
+  SagaStep.order SagaUnconfirmedCall.order OrderDispute.order Review.order
 `),
 );
 // RUN-005 migrations already enforce (organization_id, return_request_id).
