@@ -13,6 +13,7 @@ import {
   registerAssetFormValues,
 } from '@/server/asset-commands';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { RegisterAssetFormState } from './form-state';
 import { pageContext } from '@/server/page-context';
 import { withContext } from '@/lib/page-context';
@@ -27,9 +28,13 @@ import { withContext } from '@/lib/page-context';
  */
 
 export async function submitRegisterAsset(
-  _previous: RegisterAssetFormState,
+  previous: RegisterAssetFormState,
   form: FormData,
 ): Promise<RegisterAssetFormState> {
+  return keepUnconfirmed(previous, form, () => attemptRegisterAsset(form));
+}
+
+async function attemptRegisterAsset(form: FormData): Promise<RegisterAssetFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 

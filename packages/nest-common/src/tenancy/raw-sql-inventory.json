@@ -2402,17 +2402,31 @@
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 311,
+    "line": 178,
+    "hash": "d9168a8b345a44a51173fbea0170040fbb48bccb059a58e5702093304d91c6b9",
+    "occurrence": 0,
+    "decision": "platform-wide: the saga holds the order it drives by global id, read from that order under its buyer's context; returns only the row's status and whether its receipt is recorded (FU-178)"
+  },
+  {
+    "file": "services/marketplace-service/src/order/order.repository.ts",
+    "line": 335,
     "hash": "48708c323d033c8bf27b541374b8f3f5721759ad2d1ecc86905e891dd1b369c5",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 378,
+    "line": 402,
     "hash": "89cb5847e8caaa97fb38a8123c4eeb63c2c2e503868650d04500fa71f6be538d",
     "occurrence": 0,
     "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/marketplace-service/src/order/order.service.ts",
+    "line": 1249,
+    "hash": "1f9813e3acb98d6f59e103a4f2b7ab1a2e2dee1554ceef6e1722e1a3f8bb3cd2",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/marketplace-service/src/prisma/prisma.service.ts",

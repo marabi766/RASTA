@@ -165,6 +165,30 @@ export class OrderRepository {
     };
   }
 
+  /**
+   * Holds one order row while something outside this database is asked of it
+   * (`OrderService.whileOrderHeld`): `FOR SHARE`, which `lockOrder` and any
+   * `UPDATE` of the row wait behind, while a child row's foreign key still passes.
+   * Behind a transition in progress, this waits for its commit and reads what it
+   * committed.
+   */
+  async holdOrder(tx: ExtendedPrismaClient, orderId: string): Promise<HeldOrderRow> {
+    const rows = await runUnscoped(
+      'the saga holds the order it drives, whichever organization is acting',
+      () => tx.$queryRaw<RawHeldOrderRow[]>`
+        SELECT status::text AS status,
+               (receipt_confirmed_at IS NOT NULL AND receipt_confirmed_by IS NOT NULL)
+                 AS receipt_confirmed
+        FROM "order"
+        WHERE id = ${orderId}
+        FOR SHARE
+      `,
+    );
+    const row = rows[0];
+    if (!row) throw RastaError.notFound('Order', orderId);
+    return { status: row.status, receiptConfirmed: row.receipt_confirmed };
+  }
+
   /** Writes the audit row every transition and every reminder produces. */
   async recordHistory(
     tx: ExtendedPrismaClient,
@@ -541,6 +565,17 @@ interface RawLockedOrderRow {
   correlation_id: string;
   cancellation_cause: string | null;
   receipt_confirmed: boolean;
+}
+
+interface RawHeldOrderRow {
+  status: OrderStatus;
+  receipt_confirmed: boolean;
+}
+
+/** What `holdOrder` reads: the order as it stands for as long as the hold lasts. */
+export interface HeldOrderRow {
+  status: OrderStatus;
+  receiptConfirmed: boolean;
 }
 
 export interface LockedOrderRow {

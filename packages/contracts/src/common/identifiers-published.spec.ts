@@ -1,3 +1,4 @@
+import { publishablePattern } from './pattern-refinement';
 import type { z } from 'zod';
 import { publishedRefinementPattern } from './pattern-refinement';
 import { ID_PREFIXES, type IdPrefix, prefixedIdSchema, seedIdSchema } from './identifiers';
@@ -27,10 +28,10 @@ function publishedPatterns(schema: z.ZodType): (string | undefined)[] {
   let pattern: string | undefined;
   for (const check of def.checks ?? []) {
     const marked = publishedRefinementPattern(check);
-    if (marked && (marked.flags === '' || marked.flags === 'u')) pattern = marked.source;
+    if (marked && publishablePattern(marked)) pattern = marked.source;
     const own = check._zod.def;
     if (own.check === 'string_format' && own.format === 'regex') {
-      pattern = (own.pattern as RegExp).source;
+      if (publishablePattern(own.pattern as RegExp)) pattern = (own.pattern as RegExp).source;
     }
   }
   return [pattern];

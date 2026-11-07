@@ -182,10 +182,11 @@ const PATCH_PROTOCOL = new Map([
   ['economic-call-durable-wait-v1', 4],
   ['economic-sibling-call-durable-wait-v1', 5],
   ['saga-owed-work-durable-v1', 6],
-  ['economic-hold-call-durable-wait-v1', 7],
-  ['economic-hold-refusal-exit-v1', 8],
-  ['economic-hold-send-fence-v1', 9],
-  ['economic-hold-fence-on-order-v1', 10],
+  ['authorisation-order-fence-v1', 7],
+  ['economic-hold-call-durable-wait-v1', 8],
+  ['economic-hold-refusal-exit-v1', 9],
+  ['economic-hold-send-fence-v1', 10],
+  ['economic-hold-fence-on-order-v1', 11],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is
@@ -194,8 +195,8 @@ const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // `unconfirmedCall` inside the same wait of an authorisation, protocol 4,
 // `siblingCall` inside that of a dispute filing or a refund, protocol 5,
 // `outstandingWork` with work owed outside any call's wait, protocol 6,
-// `holdCall` inside the wait of the hold, protocol 7, `lateHoldWatch` after giving
-// that hold up, protocol 8, and `holdNotAfter` in that wait with a fenced hold, protocol 9.
+// `holdCall` inside the wait of the hold, protocol 8, `lateHoldWatch` after giving
+// that hold up, protocol 9, and `holdNotAfter` in that wait with a fenced hold, protocol 10.
 const RESUME_PROTOCOL = new Map([
   ['status', 1],
   ['mirroredDispute', 1],
@@ -208,9 +209,9 @@ const RESUME_PROTOCOL = new Map([
   ['unconfirmedCall', 4],
   ['siblingCall', 5],
   ['outstandingWork', 6],
-  ['holdCall', 7],
-  ['lateHoldWatch', 8],
-  ['holdNotAfter', 9],
+  ['holdCall', 8],
+  ['lateHoldWatch', 9],
+  ['holdNotAfter', 10],
 ]);
 // Every field a saga has ever been started with; any other could mean anything.
 const INPUT_FIELDS = new Set([
@@ -255,6 +256,17 @@ const isDisputedAnswer = (value) =>
   value.disputed === true &&
   typeof value.reason === 'string' &&
   Object.keys(value).every((field) => ['disputed', 'reason', 'economicDisputeId'].includes(field));
+// An authorisation the order fenced: nothing was sent. To a build below its protocol this
+// reads as "authorised", and the saga goes on to settle what economic-service never
+// authorised (#895 r1 F1). Only the authorisation answers it.
+const FENCED_ANSWER_PROTOCOL = PATCH_PROTOCOL.get('authorisation-order-fence-v1');
+const isFencedAnswer = (value) =>
+  isRecord(value) &&
+  value.fenced === true &&
+  typeof value.status === 'string' &&
+  value.status !== '' &&
+  typeof value.inDoubt === 'boolean' &&
+  Object.keys(value).length === 3;
 // The four calls that may answer `ObligationFinal`: true for their answers before it.
 const FINAL_ANSWER_CALLS = new Map([
   ['compensate', (value) => value === undefined],
@@ -265,7 +277,7 @@ const FINAL_ANSWER_CALLS = new Map([
   ],
   ['authoriseSettlement', (value) => value === undefined || isDisputedAnswer(value)],
 ]);
-// None of these has ever given a final answer, and one that does is refused.
+// None of these has ever given a final or a fenced answer, and one that does is refused.
 const OTHER_CALLS = new Set([
   'createObligation',
   'findObligation',
@@ -287,7 +299,9 @@ function resultProtocol(activity, value) {
   const earlier = FINAL_ANSWER_CALLS.get(activity);
   if (earlier?.(value)) return 0;
   if (earlier && isFinalAnswer(value)) return FINAL_ANSWER_PROTOCOL;
-  if (OTHER_CALLS.has(activity) && !(isRecord(value) && Object.hasOwn(value, 'final'))) return 0;
+  if (activity === 'authoriseSettlement' && isFencedAnswer(value)) return FENCED_ANSWER_PROTOCOL;
+  const claimsAnother = isRecord(value) && ['final', 'fenced'].some((f) => Object.hasOwn(value, f));
+  if (OTHER_CALLS.has(activity) && !claimsAnother) return 0;
   throw new Unverifiable('workflow history: unknown activity result');
 }
 

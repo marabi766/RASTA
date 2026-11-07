@@ -507,7 +507,7 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
     expect(s.calls).not.toContain('markCancelled');
   });
 
-  describe('a legacy watch, from before the fence (protocol 8)', () => {
+  describe('a legacy watch, from before the fence (protocol 9)', () => {
     const watching = async (order: string): Promise<Partial<OrderSagaInput>> => ({
       resume: {
         status: STATUS,

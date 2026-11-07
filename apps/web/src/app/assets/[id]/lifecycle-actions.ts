@@ -39,7 +39,7 @@ type State<V, F extends string> = LifecycleFormState<V, F>;
 
 export async function submitActivateAsset(
   assetId: string,
-  _previous: State<ActivateAssetFormValues, never>,
+  previous: State<ActivateAssetFormValues, never>,
   form: FormData,
 ): Promise<State<ActivateAssetFormValues, never>> {
   return runLifecycle(
@@ -52,13 +52,14 @@ export async function submitActivateAsset(
         activateAsset(session, baseline.assetId, baseline.version, submissionId),
     },
     assetId,
+    previous,
     form,
   );
 }
 
 export async function submitChangeStatus(
   assetId: string,
-  _previous: State<ChangeStatusFormValues, ChangeStatusField>,
+  previous: State<ChangeStatusFormValues, ChangeStatusField>,
   form: FormData,
 ): Promise<State<ChangeStatusFormValues, ChangeStatusField>> {
   return runLifecycle(
@@ -71,13 +72,14 @@ export async function submitChangeStatus(
         changeAssetStatus(session, baseline.assetId, body, baseline.version, submissionId),
     },
     assetId,
+    previous,
     form,
   );
 }
 
 export async function submitDecommission(
   assetId: string,
-  _previous: State<DecommissionFormValues, DecommissionField>,
+  previous: State<DecommissionFormValues, DecommissionField>,
   form: FormData,
 ): Promise<State<DecommissionFormValues, DecommissionField>> {
   return runLifecycle(
@@ -90,6 +92,7 @@ export async function submitDecommission(
         decommissionAsset(session, baseline.assetId, body, baseline.version, submissionId),
     },
     assetId,
+    previous,
     form,
   );
 }

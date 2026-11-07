@@ -7,6 +7,7 @@ import { InternalTokenService, RastaError } from '@rasta/nest-common';
 import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
+import { ORDER_HOLD_SEND_DEADLINE_MS } from '../config/operation-budgets';
 import { economicCallDuration, economicCallsTotal } from '../observability/metrics';
 
 /**
@@ -482,20 +483,29 @@ export class EconomicClient {
     }
   }
 
-  /** Marks the obligation ready to settle. Only reachable after receipt. */
+  /**
+   * Marks the obligation ready to settle. Only reachable after receipt.
+   *
+   * Sent with the order's row held (`OrderService.whileOrderHeld`), so it has the
+   * deadline of whatever waits behind that lock, not the deadline of other calls.
+   */
   async authoriseSettlement(input: {
     orderId: string;
     transactionId: string;
     buyerOrganizationId: string;
     correlationId: string;
   }): Promise<TransactionView> {
-    return this.call<TransactionView>('authoriseSettlement', {
-      method: 'POST',
-      path: `/v1/transactions/${input.transactionId}/authorise-settlement`,
-      organizationId: input.buyerOrganizationId,
-      idempotencyKey: idempotencyKeyFor.authorise(input.orderId),
-      correlationId: input.correlationId,
-    });
+    return this.call<TransactionView>(
+      'authoriseSettlement',
+      {
+        method: 'POST',
+        path: `/v1/transactions/${input.transactionId}/authorise-settlement`,
+        organizationId: input.buyerOrganizationId,
+        idempotencyKey: idempotencyKeyFor.authorise(input.orderId),
+        correlationId: input.correlationId,
+      },
+      Math.min(this.env.ECONOMIC_REQUEST_TIMEOUT_MS, ORDER_HOLD_SEND_DEADLINE_MS),
+    );
   }
 
   /** Moves the money and applies commission, in economic-service's own transaction. */

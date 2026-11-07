@@ -1,3 +1,4 @@
+import { sourceLines, trackedFiles, transportDirectives } from './source-inventory.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -122,7 +123,7 @@ function boundary(messages, file) {
  */
 function expectMarked(byFile, file, text) {
   const expected = new Map();
-  text.split('\n').forEach((line, index) => {
+  sourceLines(text).forEach((line, index) => {
     const mark = MARK.exec(line);
     if (mark) expected.set(index + 1, mark[1].trim().split(/\s+/));
   });
@@ -134,14 +135,14 @@ function expectMarked(byFile, file, text) {
     for (const id of ids) {
       assert.ok(
         actual.get(line)?.includes(id),
-        `${file}:${line} must report ${id}, got [${actual.get(line) ?? []}]: ${text.split('\n')[line - 1]}`,
+        `${file}:${line} must report ${id}, got [${actual.get(line) ?? []}]: ${sourceLines(text)[line - 1]}`,
       );
     }
   }
   for (const [line, ids] of actual) {
     assert.ok(
       expected.has(line),
-      `${file}:${line} reports [${ids}] on an unmarked line: ${text.split('\n')[line - 1]}`,
+      `${file}:${line} reports [${ids}] on an unmarked line: ${sourceLines(text)[line - 1]}`,
     );
   }
 }
@@ -395,7 +396,7 @@ test('economic-service: the real seed is linted with the rule', () => {
   const byFile = lintFixtures('services/economic-service', {}, { stdin: { file: seed, text } });
   // Text that is not on disk is linted without types, so its nest-common
   // import fails closed too; the appended line is refused for the header.
-  const last = text.trimEnd().split('\n').length;
+  const last = sourceLines(text.trimEnd()).length;
   assert.deepEqual(
     boundary(byFile.get(seed), seed).map((message) => [message.messageId, message.line === last]),
     [
@@ -819,7 +820,7 @@ const REVIEWED_UNRESOLVED = [
 function unreviewed(reports, read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8')) {
   const left = REVIEWED_UNRESOLVED.filter(({ report, source }) => {
     const [, file, line] = /^(\S+?):(\d+) /.exec(report);
-    return read(file).split('\n')[line - 1]?.trim() === source;
+    return sourceLines(read(file))[line - 1]?.trim() === source;
   }).map(({ report }) => report);
   return reports.filter((report) => {
     const at = left.indexOf(report);
@@ -834,11 +835,7 @@ function unreviewed(reports, read = (file) => fs.readFileSync(path.join(ROOT, fi
  * as each lint script sees them): linted with the rule on, linted with it off,
  * or reached by no lint script.
  */
-function coverage(
-  tracked = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
-    .stdout.split('\n')
-    .filter((file) => /\.[cm]?[jt]sx?$/.test(file)),
-) {
+function coverage(tracked = trackedFiles(ROOT).filter((file) => /\.[cm]?[jt]sx?$/.test(file))) {
   const owners = [{ workspace: '.', targets: ['scripts'] }];
   for (const { workspace, lint } of lintWorkspaces())
     owners.push({ workspace, targets: lintTargets(workspace, lint) });
@@ -1026,6 +1023,23 @@ test('R8-1: a reviewed allowance is one exact report on its reviewed line, used 
   assert.deepEqual(unreviewed([moved, header]), [moved, header]);
 });
 
+test('reviewed source lines use ECMAScript boundaries for every allowance', () => {
+  for (const { report, source } of REVIEWED_UNRESOLVED) {
+    for (const newline of ['\n', '\r\n', '\r', '\u2028', '\u2029']) {
+      const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+      assert.deepEqual(
+        unreviewed([report], (file) => read(file).replaceAll('\n', newline)),
+        [],
+      );
+      const shifted = (file) =>
+        read(file)
+          .replace(/\n(?=[^\r\n])/, newline)
+          .replace(source, `unreviewed();\n${source}`);
+      assert.deepEqual(unreviewed([report], shifted), [report]);
+    }
+  }
+});
+
 test('lint:scripts runs this file on its own, after every other script test', () => {
   const { scripts } = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   const steps = scripts['lint:scripts'].split('&&').map((step) => step.trim());
@@ -1036,23 +1050,29 @@ test('lint:scripts runs this file on its own, after every other script test', ()
   );
 });
 
-test('coverage: no inline directive switches the rule off outside test-only code', () => {
-  // A directive is a comment that starts with one of ESLint's fixed keywords;
-  // a blanket `eslint-disable` (no rule list) switches every rule off.
-  const DIRECTIVE =
-    /\/[/*]\s*(eslint-disable(?:-next-line|-line)?|eslint-enable|eslint)(?=\s|\*\/|$)([^\n]*?)(?:\*\/|$)/gm;
-  const offending = [];
-  const tracked = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
-    .stdout.split('\n')
-    .filter((file) => /\.[cm]?[jt]sx?$/.test(file) && !isTestOnlyPath(file));
-  for (const file of tracked) {
-    const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
-    for (const [, keyword, rest] of text.matchAll(DIRECTIVE)) {
-      const rules = rest.split('--')[0].trim();
-      const blanket = keyword.startsWith('eslint-disable') && rules === '';
-      if (blanket || /internal\//.test(rules)) offending.push(`${file}: ${keyword} ${rules}`);
+test('token directive coverage refuses multiline comments on verbatim Git paths', () => {
+  for (const file of ['scripts/café.mjs', 'scripts/line\nbreak.mjs']) {
+    for (const newline of ['\n', '\r\n', '\r']) {
+      const text = `/* ${'eslint'}-disable no-console,${newline} internal/token-source */`;
+      assert.equal(transportDirectives([file], () => text).length, 1);
     }
+    assert.deepEqual(
+      transportDirectives(
+        [file],
+        () => `const text = "// ${'eslint'}-disable internal/token-source";`,
+      ),
+      [],
+    );
   }
+});
+
+test('coverage: no inline directive switches the rule off outside test-only code', () => {
+  const tracked = trackedFiles(ROOT).filter(
+    (file) => /\.[cm]?[jt]sx?$/.test(file) && !isTestOnlyPath(file),
+  );
+  const offending = transportDirectives(tracked, (file) =>
+    fs.readFileSync(path.join(ROOT, file), 'utf8'),
+  );
   assert.ok(tracked.length > 1000, `only ${tracked.length} production files scanned`);
   assert.deepEqual(offending, []);
 });
