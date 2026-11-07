@@ -77,7 +77,7 @@ const forOrder =
 type State<V, F extends string> = RequestCommandFormState<V, F>;
 
 export async function submitStartRepair(
-  _previous: State<StartRepairFormValues, StartRepairField>,
+  previous: State<StartRepairFormValues, StartRepairField>,
   form: FormData,
 ): Promise<State<StartRepairFormValues, StartRepairField>> {
   return run(
@@ -89,12 +89,13 @@ export async function submitStartRepair(
       send: (session, _requestId, body, submissionId, order) =>
         startRepair(session, order.repairOrderId, body, submissionId),
     },
+    previous,
     form,
   );
 }
 
 export async function submitCompleteRepair(
-  _previous: State<CompleteRepairFormValues, CompleteRepairField>,
+  previous: State<CompleteRepairFormValues, CompleteRepairField>,
   form: FormData,
 ): Promise<State<CompleteRepairFormValues, CompleteRepairField>> {
   return run(
@@ -117,12 +118,13 @@ export async function submitCompleteRepair(
       lookAgain: (message) =>
         message === REPAIR_TOTAL_CHANGED_MESSAGE ? 'repairCostChanged' : undefined,
     },
+    previous,
     form,
   );
 }
 
 export async function submitCancelRepair(
-  _previous: State<CancelRepairFormValues, CancelRepairField>,
+  previous: State<CancelRepairFormValues, CancelRepairField>,
   form: FormData,
 ): Promise<State<CancelRepairFormValues, CancelRepairField>> {
   return run(
@@ -134,12 +136,13 @@ export async function submitCancelRepair(
       send: (session, _requestId, body, submissionId, order) =>
         cancelRepair(session, order.repairOrderId, body, submissionId),
     },
+    previous,
     form,
   );
 }
 
 export async function submitRecordPart(
-  _previous: State<RecordPartFormValues, RecordPartField>,
+  previous: State<RecordPartFormValues, RecordPartField>,
   form: FormData,
 ): Promise<State<RecordPartFormValues, RecordPartField>> {
   return run(
@@ -151,12 +154,13 @@ export async function submitRecordPart(
       send: (session, _requestId, body, submissionId, order) =>
         recordPart(session, order.repairOrderId, body, submissionId),
     },
+    previous,
     form,
   );
 }
 
 export async function submitRecordLabour(
-  _previous: State<RecordLabourFormValues, RecordLabourField>,
+  previous: State<RecordLabourFormValues, RecordLabourField>,
   form: FormData,
 ): Promise<State<RecordLabourFormValues, RecordLabourField>> {
   return run(
@@ -168,12 +172,13 @@ export async function submitRecordLabour(
       send: (session, _requestId, body, submissionId, order) =>
         recordLabour(session, order.repairOrderId, body, submissionId),
     },
+    previous,
     form,
   );
 }
 
 export async function submitRecordCost(
-  _previous: State<RecordCostFormValues, RecordCostField>,
+  previous: State<RecordCostFormValues, RecordCostField>,
   form: FormData,
 ): Promise<State<RecordCostFormValues, RecordCostField>> {
   return run(
@@ -185,6 +190,7 @@ export async function submitRecordCost(
       send: (session, _requestId, body, submissionId, order) =>
         recordCost(session, order.repairOrderId, body, submissionId),
     },
+    previous,
     form,
   );
 }

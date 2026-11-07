@@ -586,6 +586,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
   it('every economic step is asked once per scheduled activity', async () => {
     const { calls, economic } = stubEconomic();
     const { orderId, saga, transactionId } = await receiptConfirmed(economic);
+    // Before the dispute: a disputed order is not authorised at all (FU-178).
+    await saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId));
     await asBuyer(() =>
       wiring.orders.raiseDispute(orderId, { reason: 'still not what we ordered' }),
     );
@@ -680,9 +682,10 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       expect(econ.obligation.status).toBe('PENDING_SETTLEMENT');
       expect(await recordsOf(orderId)).not.toContainEqual({ activity: 'authoriseSettlement' });
 
-      // Attempt 2 arrives after the TTL: refused PENDING_SETTLEMENT ->
-      // PENDING_SETTLEMENT. It used to go on being refused until the attempts
-      // ran out, and the workflow failed with the funds held.
+      // Attempt 2 arrives after the TTL. Sent again, it would be refused
+      // PENDING_SETTLEMENT -> PENDING_SETTLEMENT, which once went on until the
+      // attempts ran out and failed the workflow with the funds held. In doubt it
+      // asks the obligation first, so it is not sent again at all (FU-178).
       await expect(
         saga.run(4, 2, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).resolves.toBeUndefined();
@@ -690,11 +693,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
       // Recorded: a third attempt asks nobody.
       await saga.run(4, 3, (a) => a.authoriseSettlement(orderId, transactionId));
-      expect(econ.calls.slice(2)).toEqual([
-        'authoriseSettlement',
-        'authoriseSettlement',
-        'readObligation',
-      ]);
+      expect(econ.calls.slice(2)).toEqual(['authoriseSettlement', 'readObligation']);
 
       // And the saga carries on to settle.
       await expect(saga.run(5, 1, (a) => a.markSettling(orderId))).resolves.toBe('SETTLING');
@@ -798,21 +797,17 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       // Someone with authority disputes the transaction in economic-service.
       econ.disputeThere(OBJECTION);
 
-      // Attempt 2, after the TTL: refused DISPUTED, read back DISPUTED — which
-      // used to be refused until the attempts ran out. economic-service's
-      // record says this order's own command authorised it: the dispute is
-      // the answer, and it is recorded.
+      // Attempt 2, after the TTL, in doubt: the obligation is asked first, not
+      // sent to. It reads DISPUTED, which sent again used to be refused until the
+      // attempts ran out. economic-service's record says this order's own command
+      // authorised it: the dispute is the answer, and it is recorded.
       await expect(
         saga.run(4, 2, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
       await expect(
         saga.run(4, 3, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
-      expect(econ.calls.slice(2)).toEqual([
-        'authoriseSettlement',
-        'authoriseSettlement',
-        'readObligation',
-      ]);
+      expect(econ.calls.slice(2)).toEqual(['authoriseSettlement', 'readObligation']);
 
       // The order takes the dispute, with economic-service's words, and the
       // step names it; its retry names the same one.

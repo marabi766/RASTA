@@ -15,6 +15,11 @@
 export interface UnconfirmedWriteState {
   readonly kind: 'UNCONFIRMED';
   readonly correlationId: string;
+  /**
+   * The key the unresolved request was sent under (PR-880 r1 F1): a retry must
+   * resend this one, which may not be the page's (`server/unconfirmed-retry.ts`).
+   */
+  readonly submissionId?: string;
 }
 
 /** What the person is told. No claim either way: we do not know. */

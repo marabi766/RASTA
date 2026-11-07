@@ -10,13 +10,19 @@ const NUMBER_INPUT_INNERS = new WeakMap<object, z.ZodNumber>();
  * text, radix prefixes or non-finite values. Non-integer fields accept exponent
  * notation, matching JSON numbers and JavaScript String(number). Integer fields
  * refuse exponents and fractional text, including fractions that floating-point conversion
- * would round to an integer. The inner schema still enforces bounds/finite values.
+ * would round to an integer. Nonzero text that would underflow to zero is refused;
+ * accepted negative zero (text or JSON number) is normalized to positive zero. The inner schema still enforces bounds/finite values.
  * Optional, nullable and default behaviour belongs to the outer wrappers.
  */
 export function numberInput<T extends z.ZodNumber>(schema: T) {
   const input = z.preprocess((value, ctx) => {
+    if (typeof value === 'number' && value === 0) return 0;
     if (typeof value !== 'string') return value;
-    if (schema.isInt ? INTEGER.test(value) : DECIMAL.test(value)) return Number(value);
+    if (schema.isInt ? INTEGER.test(value) : DECIMAL.test(value)) {
+      const numeric = Number(value);
+      // Exponents remain valid (FU-160), but must not erase a nonzero significand.
+      if (numeric !== 0 || !/^[+-]?[0-9.]*[1-9]/.test(value)) return numeric === 0 ? 0 : numeric;
+    }
     // A fixed issue preserves enclosing diagnostics in legacyParse without
     // exposing request text (S-09). No malformed value reaches the number schema.
     ctx.addIssue({

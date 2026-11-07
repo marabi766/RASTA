@@ -1,4 +1,12 @@
 import { z } from 'zod';
+import { unchangedCheck } from './pattern-refinement';
+
+const URL_CHECKS = new WeakMap<object, () => boolean>();
+
+/** Only the original, value-preserving URL helper grants converter trust. */
+export function isParsableUrlCheck(check: object): boolean {
+  return URL_CHECKS.get(check)?.() === true;
+}
 
 /**
  * zod 3's `.url()`, kept after the move to zod 4 (GHSA-mrhx-c7xc-m3w5): a
@@ -27,5 +35,6 @@ export function parsableUrl(params?: { message?: string }): z.core.$ZodCheck<str
       });
     }
   };
+  URL_CHECKS.set(check, unchangedCheck(check));
   return check;
 }

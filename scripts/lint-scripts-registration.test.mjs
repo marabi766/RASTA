@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
@@ -1368,6 +1369,7 @@ export const withFixtureRepo = (files, use) => {
         ['-c', 'user.name=guard', '-c', 'user.email=guard@example.invalid', ...args],
         {
           cwd: dir,
+          env: fixtureGitEnv(),
           stdio: ['ignore', 'pipe', 'pipe'],
         },
       );

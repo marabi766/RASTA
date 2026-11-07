@@ -9,7 +9,12 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { OrderService } from '../order/order.service';
-import { SagaCallSuperseded, type SagaActivity, type SagaStep } from '../order/order.repository';
+import {
+  SagaCallSuperseded,
+  type HeldOrderRow,
+  type SagaActivity,
+  type SagaStep,
+} from '../order/order.repository';
 import type { OrderStatus } from '../generated/prisma';
 import {
   fundsOf,
@@ -209,7 +214,35 @@ export const UNCONFIRMED_OPERATIONS = [
 export type UnconfirmedOperation = (typeof UNCONFIRMED_OPERATIONS)[number];
 
 /** What `authoriseSettlement` answers. Undefined: authorised. */
-export type AuthorisationResult = DisputedObligation | ObligationFinal | undefined;
+export type AuthorisationResult =
+  DisputedObligation | ObligationFinal | AuthorisationFenced | undefined;
+
+/** Where the saga may authorise, the same two its read checks. Any other status is fenced. */
+const AUTHORISABLE_STATUSES: readonly OrderStatus[] = ['RECEIPT_CONFIRMED', 'SETTLING'];
+
+/**
+ * The authorisation was not sent: the order, read under the lock the send would
+ * have held, does not allow it (D-138). The saga follows the order instead, and
+ * comes back to authorise only if the order returns to where it can.
+ */
+export interface AuthorisationFenced {
+  fenced: true;
+  status: OrderStatus;
+  /**
+   * An earlier attempt may have sent it, and the obligation shows no effect of
+   * that yet. It could still land, so the saga keeps the doubt (`unconfirmed`).
+   */
+  inDoubt: boolean;
+}
+
+/**
+ * The fence's own answer, not economic-service's (D-151): this attempt sent
+ * nothing, so it says nothing of an earlier send still on its way, and never
+ * confirms the call record — whatever its doubt, attempt or episode.
+ */
+function isAuthorisationFenced(result: AuthorisationResult): result is AuthorisationFenced {
+  return result !== undefined && 'fenced' in result && result.fenced === true;
+}
 
 /**
  * What `markObligationDisputed` answers: the order's status, and the dispute
@@ -394,11 +427,25 @@ export function createActivities(deps: ActivityDependencies) {
    * (`RECONCILIATION_READ_FAILED`), an unknown outcome, whatever code it got.
    *
    * With `confirmed`, for a call the saga waits on (`confirmedCall`), the only
-   * failure marked as proof is this step's own refusal, by `requires` or the send,
+   * failure marked as proof is this step's own refusal, by `fence` or the send,
    * on the first attempt of this scheduling. In doubt — a retry, or a round after
    * an unconfirmed attempt — a failed send asks the obligation, because a code
    * then says nothing of the attempts before it: its effect or a terminal status
    * is the answer (`finalFor`), and anything else stays unknown.
+   *
+   * ## No send past `fence` (D-138)
+   *
+   * Every send of such a call, on every attempt and round, goes out from inside
+   * `whileOrderHeld`, after `fence` has passed the row as it stands under that
+   * lock. The order read before this step is what the saga knew, and the
+   * idempotency key only stops a second effect, not a first one after a dispute.
+   * Fenced, nothing is sent, and `fence`'s answer is recorded like any other. The
+   * lock is released before anything else runs: the record, or a reconciliation.
+   *
+   * In doubt, the obligation is asked first. An earlier attempt's effect is
+   * answered from there and never by sending again. Only when it shows no effect
+   * yet, and `fence` still passes, does the same key go out again. A fenced
+   * attempt in doubt has therefore asked economic-service before the saga moves on.
    */
   async function economicStep<T>(
     orderId: string,
@@ -413,10 +460,11 @@ export function createActivities(deps: ActivityDependencies) {
         /** Terminal, for a caller that cannot take an {@link ObligationFinal}: a marked failure. */
         isFinal?: (transaction: TransactionDetailView) => boolean;
         /**
-         * What must hold before asking at all. Its refusal is never reconciled: the
+         * Whether the order, as it stands, lets the call be sent: null if so, or the
+         * step's answer in its place. A refusal it throws is never reconciled: the
          * obligation's state cannot stand in for a condition of this order's.
          */
-        requires?: (order: Awaited<ReturnType<OrderService['describe']>>) => void;
+        fence?: (order: HeldOrderRow, inDoubt: boolean) => { answer: T } | null;
       };
     },
   ): Promise<T> {
@@ -431,43 +479,90 @@ export function createActivities(deps: ActivityDependencies) {
         step,
         activity,
         async () => {
-          try {
-            confirmed?.requires?.(order);
-          } catch (refusal) {
-            throw unanswered(refusal);
-          }
-          try {
-            return await call(order);
-          } catch (refusal) {
-            if (!applied || !(inDoubt || refusedForState(refusal))) throw unanswered(refusal);
-            const transaction = await deps.economic
+          const askObligation = (transactionId: string) =>
+            deps.economic
               .readObligation({
                 orderId: order.id,
-                transactionId: applied.transactionId,
+                transactionId,
                 buyerOrganizationId: order.buyerOrganizationId,
                 correlationId: order.correlationId,
               })
               .catch((failure: unknown) => {
                 throw reconciliationReadFailed(activity, failure);
               });
-            const answer = transaction ? applied.answer(transaction) : null;
-            if (!answer) {
-              if (inDoubt && transaction && confirmed?.isFinal?.(transaction)) {
-                throw ApplicationFailure.create({
-                  message: `The obligation is ${transaction.status}: terminal, and nothing further can move it`,
-                  type: 'OBLIGATION_ALREADY_FINAL',
-                  nonRetryable: true,
-                  details: [OWNER_STATE_IS_FINAL],
-                });
+
+          let refusal: unknown;
+          const fence = confirmed?.fence;
+          if (applied && fence) {
+            const passes = (row: HeldOrderRow): { answer: T } | null => {
+              try {
+                return fence(row, inDoubt);
+              } catch (fenceRefusal) {
+                throw unanswered(fenceRefusal);
               }
-              throw unanswered(refusal);
+            };
+            if (inDoubt) {
+              // Its refusal comes first: an obligation is not asked for an order
+              // that may not ask. What it lets through is decided again below.
+              passes(order);
+              const transaction = await askObligation(applied.transactionId);
+              const answer = transaction ? applied.answer(transaction) : null;
+              if (answer) {
+                logger.warn(
+                  `Saga step ${activity} of order ${order.id} is in doubt, and the transaction's state ` +
+                    `(${transaction?.status}) answers it; answering from economic-service's record`,
+                );
+                return answer.result;
+              }
             }
-            logger.warn(
-              `Saga step ${activity} of order ${order.id} was refused, and the transaction's state ` +
-                `(${transaction?.status}) answers it; answering from economic-service's record`,
+            const held = await deps.orders.whileOrderHeld(
+              order.id,
+              async (row): Promise<{ answer: T } | { failure: unknown }> => {
+                const closed = passes(row);
+                if (closed) {
+                  logger.warn(
+                    `Saga step ${activity} of order ${order.id} was not sent: the order is ${row.status}`,
+                  );
+                  return closed;
+                }
+                try {
+                  return { answer: await call(order) };
+                } catch (failure) {
+                  // Returned, not thrown, so what the send said reaches the reads
+                  // below with the lock already released.
+                  return { failure };
+                }
+              },
             );
-            return answer.result;
+            if ('answer' in held) return held.answer;
+            refusal = held.failure;
+          } else {
+            try {
+              return await call(order);
+            } catch (failure) {
+              refusal = failure;
+            }
           }
+
+          if (!applied || !(inDoubt || refusedForState(refusal))) throw unanswered(refusal);
+          const transaction = await askObligation(applied.transactionId);
+          const answer = transaction ? applied.answer(transaction) : null;
+          if (!answer) {
+            if (inDoubt && transaction && confirmed?.isFinal?.(transaction)) {
+              throw ApplicationFailure.create({
+                message: `The obligation is ${transaction.status}: terminal, and nothing further can move it`,
+                type: 'OBLIGATION_ALREADY_FINAL',
+                nonRetryable: true,
+                details: [OWNER_STATE_IS_FINAL],
+              });
+            }
+            throw unanswered(refusal);
+          }
+          logger.warn(
+            `Saga step ${activity} of order ${order.id} was refused, and the transaction's state ` +
+              `(${transaction?.status}) answers it; answering from economic-service's record`,
+          );
+          return answer.result;
         },
       ),
     );
@@ -646,11 +741,12 @@ export function createActivities(deps: ActivityDependencies) {
     /**
      * Authorises settlement. Undefined once authorised; a
      * {@link DisputedObligation} when a retry finds its own authorisation
-     * disputed since in economic-service. `inDoubt` is the workflow's word that
-     * an earlier scheduling of this call went unconfirmed, which this attempt
-     * cannot see. Omitted, the workflow still ends nothing on a mark it did not
-     * ask for: it ignores the mark while in doubt (`outcomeUnknown`). An
-     * {@link ObligationFinal} when it can never be authorised.
+     * disputed since in economic-service; an {@link AuthorisationFenced} when the
+     * order, under the lock the send would hold, does not allow it. `inDoubt` is
+     * the workflow's word that an earlier scheduling of this call went unconfirmed,
+     * which this attempt cannot see. Omitted, the workflow still ends nothing on a
+     * mark it did not ask for: it ignores the mark while in doubt (`outcomeUnknown`).
+     * An {@link ObligationFinal} when it can never be authorised.
      */
     async authoriseSettlement(
       orderId: string,
@@ -658,8 +754,9 @@ export function createActivities(deps: ActivityDependencies) {
       inDoubt = false,
       contract?: string,
     ): Promise<AuthorisationResult> {
-      // Either answer is economic-service's: authorised, or disputed since this
-      // order's own authorisation. A refusal or no answer leaves the record open.
+      // Only economic-service's answer closes the record: authorised, disputed
+      // since this order's own authorisation, or final. A refusal, no answer or
+      // the fence's answer (nothing sent; D-151) leaves it open.
       const opening = await openCall(orderId, 'authoriseSettlement', transactionId);
       const authorisation = await economicStep<AuthorisationResult>(
         orderId,
@@ -694,26 +791,36 @@ export function createActivities(deps: ActivityDependencies) {
             ...(contract === FINAL_ANSWER_CONTRACT
               ? {}
               : { isFinal: ({ status }) => ['REFUNDED', 'CANCELLED', 'FAILED'].includes(status) }),
-            // The buyer's receipt is what authorises settlement; without it on
-            // the row, nothing is asked of economic-service. An order an older
-            // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
-            // otherwise authorise an obligation migration 20261103121000 put
-            // back in HELD (#625 round 2 self-review). Refused for good, with
-            // the funds held, for the runbook
-            // (docs/runbooks/marketplace-receipt-evidence.md): the saga stops on
-            // a first attempt, and in doubt it waits, never reading as authorised.
-            requires: (order) => {
-              if (!order.receiptConfirmed) {
+            fence: ({ status, receiptConfirmed }, doubt) => {
+              // Anything else is the order's own path now, not this call's: a
+              // dispute or a refund to wait on, or a settled dispute taken back
+              // before receipt. Listed by what may send, so a status added later
+              // sends nothing until it is named here.
+              if (!AUTHORISABLE_STATUSES.includes(status)) {
+                return { answer: { fenced: true, status, inDoubt: doubt } };
+              }
+              // The buyer's receipt is what authorises settlement; without it on
+              // the row, nothing is asked of economic-service. An order an older
+              // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
+              // otherwise authorise an obligation migration 20261103121000 put
+              // back in HELD (#625 round 2 self-review). Refused for good, with
+              // the funds held, for the runbook
+              // (docs/runbooks/marketplace-receipt-evidence.md): the saga stops on
+              // a first attempt, and in doubt it waits, never reading as authorised.
+              if (!receiptConfirmed) {
                 throw RastaError.businessRule(
                   'Settlement is authorised only for an order whose receipt the buyer confirmed',
-                  { orderId: order.id },
+                  { orderId },
                 );
               }
+              return null;
             },
           },
         },
       );
-      await confirmCall(orderId, 'authoriseSettlement', transactionId, opening);
+      if (!isAuthorisationFenced(authorisation)) {
+        await confirmCall(orderId, 'authoriseSettlement', transactionId, opening);
+      }
       return authorisation;
     },
 
