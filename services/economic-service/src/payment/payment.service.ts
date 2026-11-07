@@ -4,7 +4,7 @@ import { ERROR_CODES, ID_PREFIXES, MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
-import { WalletService } from '../wallet/wallet.service';
+import { HOLD_NOT_FUNDED, WalletService } from '../wallet/wallet.service';
 import {
   WALLET_BALANCE_LIMIT,
   WalletRepository,
@@ -944,7 +944,7 @@ export class PaymentService {
       // wallet is active again. Returning a declined refund's hold, above,
       // moves money back *into* the wallet and is still allowed.
       if (wallet.status !== 'ACTIVE') throw refundWalletNotActive(intentId, wallet);
-      await this.wallets.placeHold(tx, {
+      const { holdId } = await this.wallets.placeHold(tx, {
         wallet,
         amountMinor: row.amountMinor,
         reference: intentId,
@@ -952,6 +952,15 @@ export class PaymentService {
         transactionId: topUpTransactionOf(row),
         placedBy: actor,
       });
+      // Before the provider is asked for this currency: step 3 could not record a
+      // refund this hold does not secure, and by then the provider has acted.
+      const hold = await this.walletRepository.findHoldById(tx, holdId);
+      if (
+        hold?.currency !== row.currency ||
+        !(await this.walletRepository.isHoldFunded(tx, holdId))
+      ) {
+        throw RastaError.businessRule(HOLD_NOT_FUNDED, { holdId });
+      }
       await tx.paymentIntent.update({
         where: { id: intentId },
         data: { failureReason: REFUND_REQUESTED },
