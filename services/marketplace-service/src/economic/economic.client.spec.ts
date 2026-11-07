@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { CancelledFailure } from '@temporalio/activity';
+import { MockActivityEnvironment } from '@temporalio/testing';
 import { registry } from '@rasta/observability';
 import { withRedirectProbe } from '@rasta/testing';
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
@@ -739,7 +741,23 @@ describe('whether economic-service proves held funds (#824 r1, F3)', () => {
       { status: 200, body: { heldProven: true } },
       false,
     ],
-    ['a word for yes', { status: 200, body: { orderHoldDeadlineRequired: 1 } }, false],
+    // Review of #948 r1, L2: what no release of economic-service sends is no answer, never
+    // its no: only a boolean, or the older release's shape, is one.
+    ['a word for yes', { status: 200, body: { orderHoldDeadlineRequired: 1 } }, undefined],
+    ['a string for yes', { status: 200, body: { orderHoldDeadlineRequired: 'true' } }, undefined],
+    ['an empty object', { status: 200, body: {} }, undefined],
+    ['an array', { status: 200, body: [] }, undefined],
+    [
+      'an array holding the shape',
+      { status: 200, body: [{ orderHoldDeadlineRequired: true }] },
+      undefined,
+    ],
+    ['a null field', { status: 200, body: { orderHoldDeadlineRequired: null } }, undefined],
+    [
+      'the field absent, heldProven not true',
+      { status: 200, body: { heldProven: false } },
+      undefined,
+    ],
     ['a body that is no object', { status: 200, body: 'orderHoldDeadlineRequired' }, undefined],
     ['no body', { status: 204, body: null }, undefined],
     [
@@ -753,6 +771,19 @@ describe('whether economic-service proves held funds (#824 r1, F3)', () => {
     const client = new EconomicClient(ENV, recordingTokens().service as never);
     await expect(client.requiresOrderHoldDeadline()).resolves.toBe(requires);
     expect(calls[0]!.url).toMatch(/\/v1\/transactions\/capabilities$/);
+  });
+
+  // Review of #948 r1, L4: a cancelled activity's question is cancelled, not unanswered.
+  it('the hold-deadline rule, its activity cancelled: the cancellation, not an unanswered question', async () => {
+    globalThis.fetch = ((_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      })) as unknown as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    const activity = new MockActivityEnvironment();
+    const asked = activity.run(() => client.requiresOrderHoldDeadline());
+    activity.cancel();
+    await expect(asked).rejects.toBeInstanceOf(CancelledFailure);
   });
 
   it('the hold-deadline rule, unreachable: no answer, not a failure', async () => {

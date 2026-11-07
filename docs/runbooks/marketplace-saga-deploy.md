@@ -436,14 +436,20 @@ deadline again (above).
 refuses an `ORDER` hold without its deadline (the answer is asked of `refuseUnfencedOrderHold`
 itself). The saga asks it each time it would trust the row: before it counts and sends a hold,
 before a refusal or `HOLD_DEADLINE_PASSED` becomes proof, in `noHoldCanLand`, and when it reads a
-closed order with no obligation. Anything but an explicit `true` counts as no: a build before
-D-150, `heldProven` alone, an outage, or an answer it cannot read. On no, it sends nothing and
-counts nothing (`ECONOMIC_HOLD_RULE_UNCONFIRMED`, retried in the hold's wait with the
-`createObligation` alert on). It takes no refusal and no empty lookup as proof. On an explicit
-no it reads a closed order's row as if it were from before the fence, so it keeps watching and
-refunds a hold that lands. With no answer at all (a timeout), that read is retried until an
-answer comes, so a blip leaves nothing behind. So if economic-service is rolled back below D-150
-while this build runs, orders stall with the alert on, and no hold is left stranded (review of
+closed order with no obligation. It trusts the row on an explicit `true` only. An explicit no is
+`false`, or `heldProven: true` without the field (a build before D-150). An outage, a timeout or
+a body no release sends (`{}`, an array, a field that is not a boolean) is no answer, never a
+lasting no. Each question is asked three times, 250 ms and 1 s apart, inside the activity's
+heartbeat, before it counts as unanswered. Without a yes, it sends nothing and counts nothing
+(`ECONOMIC_HOLD_RULE_UNCONFIRMED`, not retried within the attempt's scheduling, so the hold's
+next round sends on a first attempt, with the `createObligation` alert on). It takes no refusal
+and no empty lookup as proof. A first send's refusal heard while the question goes unanswered
+is kept on the row (sends closed), and the next round's yes ends the order on it; an explicit no
+leaves the sends open (review of #948 r1, F1). On an explicit no it reads a closed order's row
+as if it were from before the fence, so it keeps watching and refunds a hold that lands. With no
+answer at all, that read is retried until an answer comes, so a blip leaves nothing behind. So
+if economic-service is rolled back below D-150 while this build runs, orders stall with the
+alert on, and no hold is left stranded (review of
 #812 r4, N1 trigger a). That is an outage, not a deploy step. A closed order read during it
 stays in `LATE_HOLD_WATCH` with no deadline even after economic-service is back: a person ends
 that saga once the lookup shows nothing held.
@@ -455,6 +461,10 @@ What this does not cover:
   is still prevented only by the deploy order below.
 - Unreleased heads at protocol 9–10 send a deadline without counting it (r4 N1 b). economic-service
   accepts their sends and truthfully answers yes, so only the gate's floor stops them.
+- A late-hold watch with a deadline ends at the deadline and margin without asking again (review
+  of #948 r1, L3): economic-service's fence on the deadline is what refuses a later counted send.
+  A send without a deadline landing after that needs economic-service rolled back below D-150
+  during the watch, which is the point-in-time case above.
 
 **Rollback order.** It is the reverse of the deploy order, and both halves are required:
 

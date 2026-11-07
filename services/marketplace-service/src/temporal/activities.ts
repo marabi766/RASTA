@@ -121,15 +121,20 @@ export interface HeldResult {
 
 /**
  * A hold not sent, as economic-service did not say it refuses one without its deadline
- * (FU-233). Retryable and never proof: nothing was counted or sent, and the saga's wait
- * asks again.
+ * (FU-233). Never proof: nothing was counted or sent, and the saga's wait asks again. Not
+ * retried within the hold's scheduling (its next round sends on a first attempt); in
+ * `readOrder`, retried until economic-service answers.
  */
 export const ECONOMIC_HOLD_RULE_UNCONFIRMED = 'ECONOMIC_HOLD_RULE_UNCONFIRMED';
 
-/** What a row says when it proves nothing: as from before the fence (D-144). */
-/** How often the hold's own attempt asks for the rule before it sends nothing. */
-const PRE_SEND_ASKS = 3;
+/**
+ * How long each further ask for the D-150 rule waits after one that went unanswered
+ * (FU-233): asked three times, so at most 4.25 s per question (the pauses and three of the
+ * client's one-second timeouts). The hold asks at most twice, before and after its send.
+ */
+const RULE_ASK_PAUSES_MS = [250, 1000] as const;
 
+/** What a row says when it proves nothing: as from before the fence (D-144). */
 const UNPROVEN_HOLD_ROW = { holdNotAfter: null, holdSendsClosed: false, holdMayHaveSent: true };
 
 /**
@@ -361,19 +366,38 @@ export function createActivities(deps: ActivityDependencies) {
 
   /**
    * economic-service's answer on the D-150 rule (FU-233): true only for its explicit yes,
-   * false for an answer without it (a release before the rule), undefined for none had.
-   * Asked up to `tries` times while none is had.
+   * false for its explicit no (a release before the rule), undefined for none had. Asked
+   * again after a pause while none is had (`RULE_ASK_PAUSES_MS`). Called only inside
+   * `asSystemFor`, whose heartbeat keeps the activity alive meanwhile; a cancelled activity
+   * is cancelled here, never an answer or a missing one (review of #948 r1, L4).
    */
-  async function ruleAnswer(tries = 1): Promise<boolean | undefined> {
-    for (let ask = 1; ; ask += 1) {
+  async function ruleAnswer(): Promise<boolean | undefined> {
+    let activity: Context | undefined;
+    try {
+      activity = Context.current();
+    } catch {
+      /* Direct domain test, outside a worker. */
+    }
+    const cancelled = () => {
+      if (activity?.cancellationSignal.aborted) {
+        throw new CancelledFailure('The financial activity was cancelled');
+      }
+    };
+    for (let ask = 0; ; ask += 1) {
       let answer: unknown;
       try {
         answer = await deps.economic.requiresOrderHoldDeadline();
-      } catch {
+      } catch (error) {
+        if (error instanceof CancelledFailure) throw error;
         answer = undefined;
       }
+      cancelled();
       if (typeof answer === 'boolean') return answer;
-      if (ask >= tries) return undefined;
+      const pause = RULE_ASK_PAUSES_MS[ask];
+      if (pause === undefined) return undefined;
+      if (activity) await activity.sleep(pause);
+      else await new Promise((resolve) => setTimeout(resolve, pause));
+      cancelled();
     }
   }
 
@@ -384,8 +408,8 @@ export function createActivities(deps: ActivityDependencies) {
    * first refusal, deadline and closed sends would say nothing of it. Asked afresh where
    * the row is trusted; no answer, or anything but yes, is no.
    */
-  async function rowIsProof(tries = 1): Promise<boolean> {
-    return (await ruleAnswer(tries)) === true;
+  async function rowIsProof(): Promise<boolean> {
+    return (await ruleAnswer()) === true;
   }
 
   /**
@@ -598,10 +622,12 @@ export function createActivities(deps: ActivityDependencies) {
         }
 
         // Before the row counts this send: without the rule nothing the row says is proof,
-        // so nothing goes out on it. Asked again on a blip here: a send left to a later
-        // attempt has a refusal that is no proof (`currentAttempt`).
-        if (!(await rowIsProof(PRE_SEND_ASKS))) {
-          throw ApplicationFailure.retryable(
+        // so nothing goes out on it. Not retried within this scheduling: the retry's send
+        // would be a later attempt's, whose refusal is no proof (`currentAttempt`), so a
+        // question that went unanswered would have cost the first send its proof (review
+        // of #948 r1, F1). The saga's next round schedules it afresh, a first attempt.
+        if (!(await rowIsProof())) {
+          throw ApplicationFailure.nonRetryable(
             `economic-service does not say it refuses an order's hold without its deadline; ` +
               `no hold is sent for order ${order.id}`,
             ECONOMIC_HOLD_RULE_UNCONFIRMED,
@@ -627,12 +653,15 @@ export function createActivities(deps: ActivityDependencies) {
             ...(deadline === null ? {} : { holdNotAfter: deadline }),
           })
           .catch(async (refusal: unknown) => {
+            // Asked once after the send, as the rule can have gone while it was out.
+            let asked: Promise<boolean | undefined> | undefined;
+            const ruleNow = () => (asked ??= ruleAnswer());
             // The key's own answer, whichever attempt hears it, to a request that set it.
             if (
               deadline !== null &&
               isRastaError(refusal) &&
               refusal.code === HOLD_DEADLINE_PASSED &&
-              (await rowIsProof())
+              (await ruleNow()) === true
             ) {
               throw ApplicationFailure.create({
                 message: refusal.message,
@@ -647,14 +676,20 @@ export function createActivities(deps: ActivityDependencies) {
             const taken = isRastaError(refusal) && refusal.code === 'ALREADY_EXISTS';
             // A send with no deadline to propose is a round of a wait from before the fence.
             const firstEver = holdNotAfter !== undefined && claim.claims === 1;
-            const proven =
-              currentAttempt() === 1 &&
-              firstEver &&
-              !taken &&
-              provenIfListed(refusal) !== refusal &&
-              (await rowIsProof()) &&
-              (await deps.orders.closeHoldSendsOnRefusal(own));
-            throw proven ? provenIfListed(refusal) : refusal;
+            const refusedFirst =
+              currentAttempt() === 1 && firstEver && !taken && provenIfListed(refusal) !== refusal;
+            if (!refusedFirst) throw refusal;
+            // The rule's explicit no, given after the send, says it is gone now, and may have
+            // been while the send was out: the sends stay open, the refusal unknown. No answer
+            // says nothing either way, so the row keeps what proof there is (closed: no send
+            // follows the refusal), and in this build only a later yes reads it
+            // (`claimHoldSend` → HOLD_SENDS_CLOSED, `noHoldCanLand`, `readOrder`). A question
+            // unanswered delays the proof, never loses it (review of #948 r1, F1). Closing
+            // only takes sends away; a build before FU-233 trusts any closed row, unasked.
+            const answer = await ruleNow();
+            if (answer === false) throw refusal;
+            const closed = await deps.orders.closeHoldSendsOnRefusal(own);
+            throw closed && answer === true ? provenIfListed(refusal) : refusal;
           });
         return { transactionId: transaction.id };
       });
@@ -759,12 +794,14 @@ export function createActivities(deps: ActivityDependencies) {
      * deadline and margin, the claim-time fence is what makes it so.
      */
     async noHoldCanLand(orderId: string): Promise<boolean> {
-      if (!(await rowIsProof())) return false;
-      return asSystemFor(orderId, (order) =>
-        deps.orders.closeHoldSendsIfNoneCanLand(
-          { id: order.id, organizationId: order.buyerOrganizationId },
-          HOLD_FENCE.clockMarginMs,
-        ),
+      return asSystemFor(
+        orderId,
+        async (order) =>
+          (await rowIsProof()) &&
+          deps.orders.closeHoldSendsIfNoneCanLand(
+            { id: order.id, organizationId: order.buyerOrganizationId },
+            HOLD_FENCE.clockMarginMs,
+          ),
       );
     },
 
@@ -777,28 +814,28 @@ export function createActivities(deps: ActivityDependencies) {
      * its explicit no the row reads as one from before the fence, which the saga watches.
      */
     async readOrder(orderId: string, mirroredDisputeId?: string): Promise<SagaOrderView> {
-      const view = await asSystemFor(orderId, () =>
-        deps.orders.sagaView(orderId, mirroredDisputeId),
-      );
-      const trusted =
-        ['COMPLETED', 'CANCELLED', 'FAILED'].includes(view.status) &&
-        !view.economicTransactionId &&
-        (view.holdSendsClosed !== false ||
-          view.holdMayHaveSent !== true ||
-          view.holdNotAfter != null);
-      if (!trusted) return view;
-      const answer = await ruleAnswer();
-      if (answer === true) return view;
-      // No answer: the read waits for one (retried until it comes). A view degraded on a
-      // blip would leave the saga watching for good once economic-service is back.
-      if (answer === undefined) {
-        throw ApplicationFailure.retryable(
-          `economic-service did not answer whether it refuses an order's hold without its ` +
-            `deadline; order ${orderId}'s row is read again once it does`,
-          ECONOMIC_HOLD_RULE_UNCONFIRMED,
-        );
-      }
-      return { ...view, ...UNPROVEN_HOLD_ROW };
+      return asSystemFor(orderId, async () => {
+        const view = await deps.orders.sagaView(orderId, mirroredDisputeId);
+        const trusted =
+          ['COMPLETED', 'CANCELLED', 'FAILED'].includes(view.status) &&
+          !view.economicTransactionId &&
+          (view.holdSendsClosed !== false ||
+            view.holdMayHaveSent !== true ||
+            view.holdNotAfter != null);
+        if (!trusted) return view;
+        const answer = await ruleAnswer();
+        if (answer === true) return view;
+        // No answer: the read waits for one (retried until it comes). A view degraded on a
+        // blip would leave the saga watching for good once economic-service is back.
+        if (answer === undefined) {
+          throw ApplicationFailure.retryable(
+            `economic-service did not answer whether it refuses an order's hold without its ` +
+              `deadline; order ${orderId}'s row is read again once it does`,
+            ECONOMIC_HOLD_RULE_UNCONFIRMED,
+          );
+        }
+        return { ...view, ...UNPROVEN_HOLD_ROW };
+      });
     },
 
     async markFundsHeld(orderId: string, transactionId: string): Promise<OrderStatus> {

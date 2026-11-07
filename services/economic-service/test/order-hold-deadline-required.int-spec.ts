@@ -1,6 +1,9 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
-import { runUnscoped } from '@rasta/nest-common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { runUnscoped, type JsonSchema } from '@rasta/nest-common';
+import { enrichOpenApiDocument } from '../src/openapi/document';
+import { schemaMismatches } from '../src/openapi/schema-mismatches';
 import { TransactionService } from '../src/transaction/transaction.service';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
@@ -139,6 +142,41 @@ describe('an order hold without its deadline (HTTP, real database)', () => {
     const orderId = id('ORD');
     refused(await hold(orderId));
     expect(await obligations(orderId)).toEqual([]);
+  });
+
+  // Review of #948 r1, L5: the answer is the documented one, both ways (API-first).
+  it('the capability answers what the OpenAPI document says, both ways', async () => {
+    const document = enrichOpenApiDocument(
+      SwaggerModule.createDocument(
+        harness.app,
+        new DocumentBuilder().setTitle('t').setVersion('0.0.0').build(),
+      ),
+    );
+    const responses = document.paths['/v1/transactions/capabilities']?.get?.responses ?? {};
+    const schema = (
+      responses['200'] as unknown as { content: Record<string, { schema: JsonSchema }> }
+    ).content['application/json']!.schema;
+    expect(schema).toEqual({ $ref: '#/components/schemas/TransactionCapabilities' });
+
+    const asked = await request(http)
+      .get('/v1/transactions/capabilities')
+      .set('x-internal-token', await internalToken('marketplace-service'))
+      .expect(200);
+    const components = (document.components?.schemas ?? {}) as Record<string, JsonSchema>;
+    const path = 'GET /v1/transactions/capabilities';
+    expect(schemaMismatches(schema, asked.body, path, components)).toEqual([]);
+    // Not vacuous: a field the document does not carry, or a word for a boolean, is refused.
+    expect(schemaMismatches(schema, { ...asked.body, extra: true }, 'x', components)).not.toEqual(
+      [],
+    );
+    expect(
+      schemaMismatches(
+        schema,
+        { ...asked.body, orderHoldDeadlineRequired: 'true' },
+        'x',
+        components,
+      ),
+    ).not.toEqual([]);
   });
 
   it('refused before anything is opened: a payer with no wallet still has none', async () => {

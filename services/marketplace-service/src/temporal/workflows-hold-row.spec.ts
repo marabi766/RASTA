@@ -1,6 +1,6 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
-import { ApplicationFailure } from '@temporalio/activity';
+import { ApplicationFailure, Context } from '@temporalio/activity';
 import type { WorkflowHandle } from '@temporalio/client';
 import { RastaError } from '@rasta/nest-common';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
@@ -265,7 +265,9 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     const { activities, sent } = activity(row, undefined, 1, advertises);
     const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
     expect(sent).toEqual([]);
-    expect(caught).toMatchObject({ type: ECONOMIC_HOLD_RULE_UNCONFIRMED, nonRetryable: false });
+    // Not retried within this scheduling (#948 r1, F1): a retry's send would be a later
+    // attempt's, whose refusal is no proof. The saga's next round sends on a first attempt.
+    expect(caught).toMatchObject({ type: ECONOMIC_HOLD_RULE_UNCONFIRMED, nonRetryable: true });
     expect(caught.details ?? []).toEqual([]);
     expect(row).toMatchObject({ claims: 0, holdNotAfter: null, closed: false });
   });
@@ -295,18 +297,35 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
 
   it('a closed order’s row, with no answer: the read waits for one, and a blip changes nothing', async () => {
     const row = freshRow({ status: 'FAILED', claims: 1, closed: true });
-    let answers = 0;
+    let down = true;
+    let asked = 0;
     const { activities } = activity(row, undefined, 1, async () => {
-      if ((answers += 1) === 1) throw new Error('timed out');
+      asked += 1;
+      if (down) throw new Error('timed out');
       return true;
     });
     await expect(failure(activities.readOrder(INPUT.orderId))).resolves.toMatchObject({
       type: ECONOMIC_HOLD_RULE_UNCONFIRMED,
       nonRetryable: false,
     });
+    // Asked again within the read before it gives up (review of #948 r1, F1).
+    expect(asked).toBe(3);
+    down = false;
     await expect(activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
       holdSendsClosed: true,
       holdMayHaveSent: true,
+    });
+  });
+
+  it('a closed order’s row, one blip: asked again within the read, which answers', async () => {
+    const row = freshRow({ status: 'FAILED', claims: 1, closed: true });
+    let asked = 0;
+    const { activities } = activity(row, undefined, 1, async () => {
+      if ((asked += 1) === 1) throw new Error('timed out');
+      return true;
+    });
+    await expect(activities.readOrder(INPUT.orderId)).resolves.toMatchObject({
+      holdSendsClosed: true,
     });
   });
 
@@ -360,6 +379,59 @@ describe('createObligation: what the row says of earlier sends (D-144)', () => {
     expect(sent).toHaveLength(1);
     expect(caught.details ?? []).toEqual([]);
     expect(row.closed).toBe(false);
+  });
+
+  /**
+   * Review of #948 r1, F1: a refusal that is proof once the rule says yes. Unanswered after
+   * the send, the proof is kept on the row (closed), and decided by the next yes, never lost.
+   */
+  it('its first refusal, the rule unanswered after the send: the row keeps the proof, and the next attempt ends on it without sending', async () => {
+    const row = freshRow();
+    let asked = 0;
+    const { activities, sent } = activity(row, undefined, 1, async () => {
+      if ((asked += 1) > 1) throw new Error('timed out');
+      return true;
+    });
+    const caught = await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(sent).toHaveLength(1);
+    // Not proof yet: the workflow waits, as for any refusal it cannot take at its word.
+    expect(caught.details ?? []).toEqual([]);
+    expect(row).toMatchObject({ claims: 1, closed: true });
+
+    const next = activity(row, undefined, 2);
+    const ended = await failure(next.activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(next.sent).toEqual([]);
+    expect(ended).toMatchObject({ type: HOLD_SENDS_CLOSED, details: [HOLD_SENDS_CLOSED] });
+  });
+
+  it('its first refusal, the rule unanswered after the send and then its explicit no: the kept proof decides nothing', async () => {
+    const row = freshRow();
+    let asked = 0;
+    const { activities } = activity(row, undefined, 1, async () => {
+      if ((asked += 1) > 1) throw new Error('timed out');
+      return true;
+    });
+    await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(row.closed).toBe(true);
+
+    const refused = activity(row, undefined, 1, async () => false);
+    const caught = await failure(refused.activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(refused.sent).toEqual([]);
+    expect(caught).toMatchObject({ type: ECONOMIC_HOLD_RULE_UNCONFIRMED });
+    expect(caught.details ?? []).toEqual([]);
+    await expect(refused.activities.noHoldCanLand(INPUT.orderId)).resolves.toBe(false);
+  });
+
+  it('a later attempt’s refusal, the rule unanswered: nothing is kept, the sends stay open', async () => {
+    // The first claim there has been, on attempt 2: only the attempt keeps this from proof.
+    const row = freshRow();
+    let asked = 0;
+    const { activities } = activity(row, undefined, 2, async () => {
+      if ((asked += 1) > 1) throw new Error('timed out');
+      return true;
+    });
+    await failure(activities.createObligation(INPUT.orderId, PROPOSED));
+    expect(row).toMatchObject({ claims: 1, closed: false });
   });
 });
 
@@ -610,6 +682,54 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
     expect(s.rounds).toEqual([]);
     expect(row).toMatchObject({ claims: 1, closed: true });
     expect(s.calls).not.toContain('noHoldCanLand');
+  });
+
+  /**
+   * Review of #948 r1, F1 (FU-233): the first send's refusal is proof once economic-service
+   * has said yes before it. A capability question that then goes unanswered only delays that
+   * proof: it does not leave the order waiting out the deadline and margin.
+   */
+  it('a first run, its first send refused and the rule unanswered right after: the order still closes before the deadline', async () => {
+    const row = freshRow();
+    let blip = false;
+    const s = saga(
+      row,
+      {
+        noteEconomicCallUnconfirmed: (_id: never, operation: never, _r: never, words: never) => {
+          blip = false;
+          s.rounds.push(`${String(operation)}: ${String(words)}`);
+        },
+      },
+      async (input) => {
+        blip = true;
+        return emptyWallet(input);
+      },
+      async () => {
+        if (blip) throw new Error('timed out');
+        return true;
+      },
+    );
+    const started = await env.currentTimeMs();
+    await expect(drive(s, resultOf)).resolves.toBe('FAILED');
+    expect(s.closedAt[0] - started).toBeLessThan(HOLD_FENCE.clockMarginMs);
+    expect(s.sent).toHaveLength(1);
+    expect(row).toMatchObject({ claims: 1, closed: true });
+  });
+
+  it('a first run, the rule unanswered before its first send: the send still goes on a first attempt, and its refusal closes the order', async () => {
+    const row = freshRow();
+    const s = saga(row, {}, emptyWallet, async () => {
+      // Unanswered on the first scheduling's first attempt only: back by its retry.
+      if (Context.current().info.attempt === 1 && s.sent.length === 0 && s.rounds.length === 0) {
+        throw new Error('connection refused');
+      }
+      return true;
+    });
+    const started = await env.currentTimeMs();
+    await expect(drive(s, resultOf)).resolves.toBe('FAILED');
+    expect(s.closedAt[0] - started).toBeLessThan(HOLD_FENCE.clockMarginMs);
+    expect(s.sent).toHaveLength(1);
+    expect(row).toMatchObject({ claims: 1, closed: true });
   });
 
   it('a first run, cancelled as its first send is refused: closes at once, with no doubt', async () => {
