@@ -20,15 +20,22 @@ export function trackedFiles(cwd) {
 
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 
+/** ECMAScript/ESLint line boundaries; CRLF is one terminator. */
+export function sourceLines(source) {
+  assert.equal(typeof source, 'string', 'source must be text');
+  return source.split(/\r\n|[\r\n\u2028\u2029]/);
+}
+
 const DIRECTIVE = /^\s*eslint(-disable(?:-next-line|-line)?|-enable)?(?=\s|$)([\s\S]*)/;
 /** Parse real comments, including their complete bodies; syntax failures refuse. */
 export function transportDirectives(files, read, pinnedFile) {
   const found = [];
   for (const file of files.filter(isExecutable)) {
     let comments;
-    let source;
+    let lines;
     try {
-      source = read(file).replace(/\r\n?/g, '\n');
+      const source = read(file);
+      lines = sourceLines(source);
       comments = tseslint.parser.parseForESLint(source, {
         filePath: file,
         project: false,
@@ -55,10 +62,16 @@ export function transportDirectives(files, read, pinnedFile) {
         file === pinnedFile ||
         !match[1] ||
         names.some((name) => !/^[@\w/-]+$/.test(name) || name.startsWith('internal/'))
-      )
+      ) {
+        const line = lines[comment.loc.end.line - (match[1] === '-disable-next-line' ? 0 : 1)];
+        if (line === undefined) {
+          found.push(`${file}: unclassifiable directive line`);
+          continue;
+        }
         found.push(
-          `${file}:${comment.loc.start.line}:${comment.loc.start.column} ${comment.type} eslint${match[1] ?? ''}: ${rules || '(all rules)'} sha256:${digest(comment.value)}:${digest(source.split('\n')[comment.loc.end.line - (match[1] === '-disable-next-line' ? 0 : 1)] ?? '')}`,
+          `${file}:${comment.loc.start.line}:${comment.loc.start.column} ${comment.type} eslint${match[1] ?? ''}: ${rules || '(all rules)'} sha256:${digest(sourceLines(comment.value).join('\n'))}:${digest(line)}`,
         );
+      }
     }
   }
   return found;

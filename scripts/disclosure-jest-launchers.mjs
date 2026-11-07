@@ -193,9 +193,9 @@ export const JEST_LAUNCHERS = {
       'Spawns Node ESLint config/fixture probes and scrubbed Git commands; subprocess API names in the AST guard are inspection fixtures, never Jest launches.',
     sha256: {
       'scripts/raw-http-boundary-rule.test.mjs':
-        'f8abb6ffee5969afbc6d01f3e718ef67a0792797f5eacb58aaa5ce0a062aa090',
+        '5eaa2ac9a55ef76d6cd2423f807de18c4303b8c81d0047cdac4713009a399b80',
       'scripts/source-inventory.mjs':
-        '9a939635b92c323471d8be45d5c34f86c16af9525c61c3a5976e6e23b4e5e61d',
+        'd130e1e0d7cfda45d547f088d6b1a8eb346a927d6c0c25fca5bdb675be3ba39c',
       'scripts/fixture-git-env.mjs':
         '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
     },

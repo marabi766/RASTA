@@ -1,4 +1,4 @@
-import { trackedFiles, transportDirectives } from './source-inventory.mjs';
+import { sourceLines, trackedFiles, transportDirectives } from './source-inventory.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -123,7 +123,7 @@ function boundary(messages, file) {
  */
 function expectMarked(byFile, file, text) {
   const expected = new Map();
-  text.split('\n').forEach((line, index) => {
+  sourceLines(text).forEach((line, index) => {
     const mark = MARK.exec(line);
     if (mark) expected.set(index + 1, mark[1].trim().split(/\s+/));
   });
@@ -135,14 +135,14 @@ function expectMarked(byFile, file, text) {
     for (const id of ids) {
       assert.ok(
         actual.get(line)?.includes(id),
-        `${file}:${line} must report ${id}, got [${actual.get(line) ?? []}]: ${text.split('\n')[line - 1]}`,
+        `${file}:${line} must report ${id}, got [${actual.get(line) ?? []}]: ${sourceLines(text)[line - 1]}`,
       );
     }
   }
   for (const [line, ids] of actual) {
     assert.ok(
       expected.has(line),
-      `${file}:${line} reports [${ids}] on an unmarked line: ${text.split('\n')[line - 1]}`,
+      `${file}:${line} reports [${ids}] on an unmarked line: ${sourceLines(text)[line - 1]}`,
     );
   }
 }
@@ -396,7 +396,7 @@ test('economic-service: the real seed is linted with the rule', () => {
   const byFile = lintFixtures('services/economic-service', {}, { stdin: { file: seed, text } });
   // Text that is not on disk is linted without types, so its nest-common
   // import fails closed too; the appended line is refused for the header.
-  const last = text.trimEnd().split('\n').length;
+  const last = sourceLines(text.trimEnd()).length;
   assert.deepEqual(
     boundary(byFile.get(seed), seed).map((message) => [message.messageId, message.line === last]),
     [
@@ -820,7 +820,7 @@ const REVIEWED_UNRESOLVED = [
 function unreviewed(reports, read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8')) {
   const left = REVIEWED_UNRESOLVED.filter(({ report, source }) => {
     const [, file, line] = /^(\S+?):(\d+) /.exec(report);
-    return read(file).split('\n')[line - 1]?.trim() === source;
+    return sourceLines(read(file))[line - 1]?.trim() === source;
   }).map(({ report }) => report);
   return reports.filter((report) => {
     const at = left.indexOf(report);
@@ -1021,6 +1021,23 @@ test('R8-1: a reviewed allowance is one exact report on its reviewed line, used 
   const moved = reviewed.replace(':253 ', ':254 ');
   const header = reviewed.replace(/ unresolved: .*/, ' header: internal-token header');
   assert.deepEqual(unreviewed([moved, header]), [moved, header]);
+});
+
+test('reviewed source lines use ECMAScript boundaries for every allowance', () => {
+  for (const { report, source } of REVIEWED_UNRESOLVED) {
+    for (const newline of ['\n', '\r\n', '\r', '\u2028', '\u2029']) {
+      const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
+      assert.deepEqual(
+        unreviewed([report], (file) => read(file).replaceAll('\n', newline)),
+        [],
+      );
+      const shifted = (file) =>
+        read(file)
+          .replace(/\n(?=[^\r\n])/, newline)
+          .replace(source, `unreviewed();\n${source}`);
+      assert.deepEqual(unreviewed([report], shifted), [report]);
+    }
+  }
 });
 
 test('lint:scripts runs this file on its own, after every other script test', () => {

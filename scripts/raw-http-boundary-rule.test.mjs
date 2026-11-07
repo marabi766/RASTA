@@ -709,6 +709,52 @@ for (const [name, mutate] of [
   });
 }
 
+// F1 round 2: the real parser and ESLint must agree with the pin's line table.
+for (const [name, newline] of [
+  ['LF', '\n'],
+  ['CRLF', '\r\n'],
+  ['CR', '\r'],
+  ['U+2028', '\u2028'],
+  ['U+2029', '\u2029'],
+]) {
+  test(`the browser-flow pin follows ESLint line boundaries: ${name}`, () => {
+    const source = readFileSync(`${ROOT}${PINNED_FILE}`, 'utf8');
+    // Replace one terminator above the directive, then insert a new suppressed call.
+    const shifted = source
+      .replace(/\n(?=[^\r\n])/, newline)
+      .replace(
+        'const response = await fetch(',
+        'await fetch("/extra");\n        const response = await fetch(',
+      );
+    const messages = check(shifted, { path: PINNED_FILE });
+    assert.ok(!messages.some(({ line }) => line === 109), 'ESLint suppresses the inserted call');
+    assert.ok(
+      messages.some(({ line }) => line === 110),
+      'the original call is now unsuppressed',
+    );
+    assert.notDeepEqual(
+      transportDirectives([PINNED_FILE], () => shifted),
+      [PINNED_DIRECTIVE],
+    );
+  });
+}
+
+test('the browser-flow pin preserves every ECMAScript line-ending spelling', () => {
+  const source = readFileSync(`${ROOT}${PINNED_FILE}`, 'utf8');
+  for (const newline of ['\n', '\r\n', '\r', '\u2028', '\u2029'])
+    assert.deepEqual(
+      transportDirectives([PINNED_FILE], () => source.replaceAll('\n', newline)),
+      [PINNED_DIRECTIVE],
+    );
+});
+
+test('a directive without a target line refuses instead of hashing absent text', () => {
+  assert.match(
+    transportDirectives([PINNED_FILE], () => `// ${LINT}-disable-next-line internal/raw-http`)[0],
+    /unclassifiable directive line/,
+  );
+});
+
 // FU-074 r2 F1: one file per entry-point family, in every executable extension.
 const FAMILIES = [
   'apps/web/src/server/fu074',
