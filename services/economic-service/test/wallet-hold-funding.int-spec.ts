@@ -518,6 +518,8 @@ describe('funding is money that is there, once, in the wallet’s currency (real
       owner.$transaction(
         async (tx) => {
           if (lifted) {
+            // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction,
+            // whose rollback restores the trigger.
             await tx.$executeRawUnsafe(
               'ALTER TABLE ledger_entry DISABLE TRIGGER trg_ledger_entry_hold_journal_closed',
             );

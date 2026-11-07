@@ -167,10 +167,13 @@ describe(`${FUNDED_HOLD}: down never drops a held_at the next deploy cannot put 
   it('once only a row with a hold of its own is stamped, down runs and up stamps it again', async () => {
     // An operator accepting the loss for the other two (in the suite: the stamp lifted).
     await db.$transaction([
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; it is this suite's scratch schema, in
+      // one transaction that enables the trigger again.
       db.$executeRawUnsafe(`ALTER TABLE "transaction" DISABLE TRIGGER "trg_transaction_held_at"`),
       db.$executeRawUnsafe(
         `UPDATE "transaction" SET held_at = NULL WHERE id IN ('TXN_HELD_AT_PAST', 'TXN_HELD_AT_NOW')`,
       ),
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
       db.$executeRawUnsafe(`ALTER TABLE "transaction" ENABLE TRIGGER "trg_transaction_held_at"`),
     ]);
     const result = down(url, FUNDED_HOLD);
