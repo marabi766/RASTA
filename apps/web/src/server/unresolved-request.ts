@@ -155,10 +155,11 @@ function keysFor(
   session: WebSession,
   scope: UnresolvedScope,
   organizationId: string | null = actingOrganizationId(session),
+  legacyLogin = false,
 ): RecordBinding {
   const org = encodeURIComponent(organizationId ?? 'none');
   const login =
-    policyOf(scope.purpose)?.identity === 'PERSON'
+    !legacyLogin && policyOf(scope.purpose)?.identity === 'PERSON'
       ? `person:${session.subject}`
       : `${session.subject}\n${session.csrfToken}`;
   const bind = sha256(`${login}\n${scopeLabel(scope)}`);
@@ -172,6 +173,13 @@ function keysFor(
     target: scope.target ?? '',
     bind,
   };
+}
+
+/** Expand phase: only this authenticated login's old binding can be proven. */
+function compatibilityKeys(session: WebSession, scope: UnresolvedScope): RecordBinding | null {
+  return policyOf(scope.purpose)?.identity === 'PERSON'
+    ? keysFor(session, scope, actingOrganizationId(session), true)
+    : null;
 }
 
 /**
@@ -328,6 +336,14 @@ export async function readUnresolved(
       if (!trusted(record, keys)) return unavailable('CORRUPT_RECORD');
       return { kind: 'PENDING', request: viewOf(record, now), now };
     }
+    const compatibility = compatibilityKeys(session, scope);
+    if (compatibility) {
+      const legacy = await defaultStore().read(compatibility);
+      if (legacy.record) {
+        if (!trusted(legacy.record, compatibility)) return unavailable('CORRUPT_RECORD');
+        return { kind: 'PENDING', request: viewOf(legacy.record, legacy.now), now: legacy.now };
+      }
+    }
     const former = await formerRecord(session, scope);
     if (former === null) return { kind: 'NONE' };
     if (former === 'UNTRUSTED') return unavailable('CORRUPT_RECORD');
@@ -349,6 +365,7 @@ export async function readUnresolved(
 /** What the caller must hand back to `settleUnresolved`. */
 export interface UnresolvedAttempt {
   readonly binding: RecordBinding;
+  readonly compatibility?: RecordBinding;
   readonly id: string;
   readonly attemptId: string;
 }
@@ -425,8 +442,10 @@ export async function reserveUnresolved(
     if (former !== null) return { kind: 'HELD', reason: 'RECONCILE_ONLY', request: former.request };
     const id = newId();
     const attemptId = newId();
+    const compatibility = compatibilityKeys(session, scope);
     const reply = await defaultStore().reserve({
       binding: keys,
+      compatibility: compatibility ?? undefined,
       cap: MAX_PENDING_PER_LOGIN,
       leaseMs: INFLIGHT_LEASE_MS,
       windowMs: input.windowMs,
@@ -453,7 +472,8 @@ export async function reserveUnresolved(
     });
     if (reply.kind === 'CAPACITY') return { kind: 'CAPACITY' };
     if (reply.record === null) return { kind: 'EXPIRED', request: null };
-    if (!trusted(reply.record, keys)) return { kind: 'UNAVAILABLE' };
+    if (!trusted(reply.record, keys) && !(compatibility && trusted(reply.record, compatibility)))
+      return { kind: 'UNAVAILABLE' };
     const request = viewOf(reply.record, reply.now);
     if (reply.kind === 'HELD') return { kind: 'HELD', reason: reply.reason, request };
     if (reply.kind === 'EXPIRED') return { kind: 'EXPIRED', request };
@@ -462,7 +482,12 @@ export async function reserveUnresolved(
       retry: reply.retry,
       deadline: deadlineOf(reply.record),
       now: reply.now,
-      attempt: { binding: keys, id: reply.record.id, attemptId: reply.record.attemptId },
+      attempt: {
+        binding: keys,
+        compatibility: compatibility ?? undefined,
+        id: reply.record.id,
+        attemptId: reply.record.attemptId,
+      },
     };
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
@@ -493,6 +518,15 @@ export async function settleUnresolved(
   outcome: SettleOutcome,
 ): Promise<boolean> {
   try {
+    // Settle the rollback-visible copy first; any partial failure leaves the person hold closed.
+    if (attempt.compatibility) {
+      await defaultStore().settle(
+        attempt.compatibility,
+        attempt.id,
+        attempt.attemptId,
+        MODE[outcome],
+      );
+    }
     const reply = await defaultStore().settle(
       attempt.binding,
       attempt.id,
@@ -553,17 +587,18 @@ export async function releaseUnresolved(
   const named = verifyPayload(session, RELEASE_PURPOSE, token, releaseSchema, tokenNow);
   if (named === null || named.scope !== scopeLabel(scope)) return 'STALE';
   try {
-    const released = await defaultStore().release(
-      keysFor(session, scope),
-      named.id,
-      INFLIGHT_LEASE_MS,
-    );
-    if (released !== 'GONE') return released;
-    // The record the form was drawn for may be the one an older cookie's copy keeps.
+    const bindings = [keysFor(session, scope), compatibilityKeys(session, scope)];
+    let result: ReleaseOutcome = 'GONE';
+    for (const binding of bindings) {
+      if (!binding) continue;
+      const reply = await defaultStore().release(binding, named.id, INFLIGHT_LEASE_MS);
+      if (reply === 'STALE' || reply === 'IN_PROGRESS') result = reply;
+      if (reply === 'RELEASED' && result === 'GONE') result = reply;
+    }
     const former = formerKeysFor(session, scope);
-    return former === null
-      ? released
-      : await defaultStore().release(former, named.id, INFLIGHT_LEASE_MS);
+    return result === 'GONE' && former !== null
+      ? await defaultStore().release(former, named.id, INFLIGHT_LEASE_MS)
+      : result;
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
     return 'UNAVAILABLE';

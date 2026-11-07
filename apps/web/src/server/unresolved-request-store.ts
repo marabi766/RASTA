@@ -262,6 +262,8 @@ export type ReserveReply =
 
 export interface ReserveInput {
   readonly binding: RecordBinding;
+  /** Atomic expand-phase guard and rollback-visible copy (PERSON/no-retry purposes only). */
+  readonly compatibility?: RecordBinding;
   readonly cap: number;
   readonly leaseMs: number;
   /** `issuedAt + windowMs` bounds a retry (the current configuration); null for a purpose without a deadline. */
@@ -423,13 +425,28 @@ local key, digest, attempt = ARGV[9], ARGV[10], ARGV[11]
 local windowMs, retention, skew = tonumber(ARGV[13]), tonumber(ARGV[14]), tonumber(ARGV[15])
 local now = nowMs()
 
+local compatibility = nil
+if #KEYS == 4 then
+  compatibility = decode(ARGV[16])
+  if compatibility == nil or policy.retry == true or policy.identity ~= 'PERSON'
+    or compatibility.org ~= c.org or compatibility.purpose ~= c.purpose or compatibility.target ~= c.target
+    or KEYS[3] ~= PREFIX .. ':org:' .. c.org .. ':pw:' .. compatibility.bind
+    or KEYS[4] ~= PREFIX .. ':org:' .. c.org .. ':pwl:' .. compatibility.login then return {'INVALID'} end
+  compatibility.policies = c.policies
+  local oldRaw = redis.call('GET', KEYS[3])
+  if oldRaw then
+    local old = decode(oldRaw)
+    if old == nil or not validate(old, compatibility) then return {'CORRUPT'} end
+    return {'COMPAT_HELD', oldRaw, stamp(now)}
+  end
+end
 local raw = redis.call('GET', KEYS[1])
 if not raw then
   local fresh = decode(ARGV[12])
   if fresh == nil then return {'INVALID'} end
   fresh.createdAt = now
   fresh.reservedAt = now
-  if not validate(fresh, c) or fresh.state ~= 'RESERVED' or fresh.wasUnresolved ~= false
+  if not validate(fresh, c) or fresh.v ~= 2 or fresh.state ~= 'RESERVED' or fresh.wasUnresolved ~= false
     or fresh.attemptId ~= attempt or fresh.key ~= key or fresh.digest ~= digest then
     return {'INVALID'}
   end
@@ -438,6 +455,10 @@ if not raw then
   end
   redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
   if redis.call('ZCARD', KEYS[2]) >= cap then return {'CAPACITY'} end
+  if compatibility then
+    redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', now)
+    if redis.call('ZCARD', KEYS[4]) >= cap then return {'CAPACITY'} end
+  end
   local base = now
   if policy.deadline == 'REQUIRED' then base = fresh.deadline end
   local expireAt = base + retention
@@ -446,6 +467,14 @@ if not raw then
   redis.call('ZADD', KEYS[2], expireAt, KEYS[1])
   local top = redis.call('ZRANGE', KEYS[2], -1, -1, 'WITHSCORES')
   redis.call('PEXPIREAT', KEYS[2], top[2])
+  if compatibility then
+    fresh.bind = compatibility.bind
+    fresh.login = compatibility.login
+    redis.call('SET', KEYS[3], cjson.encode(fresh), 'PXAT', expireAt)
+    redis.call('ZADD', KEYS[4], expireAt, KEYS[3])
+    local oldTop = redis.call('ZRANGE', KEYS[4], -1, -1, 'WITHSCORES')
+    redis.call('PEXPIREAT', KEYS[4], oldTop[2])
+  end
   return {'RESERVED', json, '0', stamp(now)}
 end
 
@@ -638,7 +667,7 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
       needPolicy(binding.purpose);
       const reply = await run(
         RESERVE_SCRIPT,
-        keysOf(binding),
+        [...keysOf(binding), ...(input.compatibility ? keysOf(input.compatibility) : [])],
         ...scopeArgs(binding),
         input.cap,
         input.leaseMs,
@@ -649,6 +678,7 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
         input.windowMs ?? -1,
         RECORD_RETENTION_AFTER_MS,
         MAX_CLOCK_SKEW_MS,
+        JSON.stringify(input.compatibility ?? null),
       );
       if (!Array.isArray(reply) || typeof reply[0] !== 'string') {
         throw new UnresolvedStoreUnavailable(new Error('unreadable reserve reply'));
@@ -668,6 +698,14 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
             kind: 'EXPIRED',
             // A fresh request past its deadline writes nothing.
             record: reply[1] === '' ? null : parseRecord(reply[1], binding),
+            now: serverTime(reply[2]),
+          };
+        case 'COMPAT_HELD':
+          if (!input.compatibility) throw new UnresolvedStoreUnavailable();
+          return {
+            kind: 'HELD',
+            reason: 'RECONCILE_ONLY',
+            record: parseRecord(reply[1], input.compatibility),
             now: serverTime(reply[2]),
           };
         case 'HELD':
@@ -824,12 +862,28 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       if (!keysMatch(binding)) throw new UnresolvedStoreUnavailable(new Error('keys'));
       const now = clock();
       prune(now);
+      const compatibility = input.compatibility;
+      if (compatibility) {
+        if (
+          !keysMatch(compatibility) ||
+          policy.identity !== 'PERSON' ||
+          policy.retry ||
+          compatibility.org !== binding.org ||
+          compatibility.purpose !== binding.purpose ||
+          compatibility.target !== binding.target
+        )
+          throw new UnresolvedStoreUnavailable();
+        const old = load(compatibility);
+        if (old === 'CORRUPT') throw new UnresolvedStoreUnavailable(undefined, 'CORRUPT_RECORD');
+        if (old) return { kind: 'HELD', reason: 'RECONCILE_ONLY', record: old, now };
+      }
       const existing = load(binding);
 
       if (existing === null) {
         const fresh = validateRecord({ ...input.fresh, createdAt: now, reservedAt: now }, binding);
         if (
           !fresh ||
+          fresh.v !== 2 ||
           fresh.state !== 'RESERVED' ||
           fresh.wasUnresolved ||
           fresh.attemptId !== input.attemptId ||
@@ -846,12 +900,19 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
         }
         const set = setOf(binding.setKey);
         if (set.size >= input.cap) return { kind: 'CAPACITY' };
+        if (compatibility && setOf(compatibility.setKey).size >= input.cap)
+          return { kind: 'CAPACITY' };
         const expireAt =
           (policy.deadline === 'REQUIRED' ? (fresh.deadline as number) : now) +
           RECORD_RETENTION_AFTER_MS;
         save(binding, fresh);
         expiries.set(binding.recordKey, expireAt);
         set.set(binding.recordKey, expireAt);
+        if (compatibility) {
+          save(compatibility, { ...fresh, bind: compatibility.bind, login: compatibility.login });
+          expiries.set(compatibility.recordKey, expireAt);
+          setOf(compatibility.setKey).set(compatibility.recordKey, expireAt);
+        }
         return { kind: 'RESERVED', record: { ...fresh }, retry: false, now };
       }
       if (existing === 'CORRUPT')

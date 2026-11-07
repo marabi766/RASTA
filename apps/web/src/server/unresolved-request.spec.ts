@@ -1,6 +1,7 @@
 /**
  * @jest-environment node
  */
+import { createHash } from 'node:crypto';
 import Redis from 'ioredis';
 
 import type { RedisLike } from './refresh-coordinator';
@@ -808,6 +809,106 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
       expect(retry).toEqual({ kind: 'UNAVAILABLE' });
       // Nothing was rebuilt, nothing was sent, nothing was written.
       expect(await backend.getRaw(key)).toBe(aged);
+    });
+  });
+
+  describe('F1 expand/contract wallet compatibility', () => {
+    const scope = { purpose: 'wallet-top-up', target: 'WLT_1' };
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    // The old code path: the exact pre-person binding, with no compatibility option.
+    const oldBinding = (s: WebSession) => {
+      const org = encodeURIComponent(s.organizationId!);
+      const login = hash(`${s.subject}\n${s.csrfToken}`);
+      const bind = hash(`${s.subject}\n${s.csrfToken}\nwallet-top-up\nWLT_1`);
+      return {
+        org,
+        login,
+        bind,
+        purpose: scope.purpose,
+        target: scope.target,
+        recordKey: `${PENDING_KEY_PREFIX}:org:${org}:pw:${bind}`,
+        setKey: `${PENDING_KEY_PREFIX}:org:${org}:pwl:${login}`,
+      };
+    };
+    const oldReserve = (s: WebSession) => {
+      const binding = oldBinding(s);
+      return backend.store.reserve({
+        binding,
+        cap: MAX_PENDING_PER_LOGIN,
+        leaseMs: INFLIGHT_LEASE_MS,
+        windowMs: null,
+        key: 'old-key',
+        digest: 'old-body',
+        attemptId: 'a'.repeat(32),
+        fresh: {
+          v: 2,
+          ...scope,
+          org: binding.org,
+          login: binding.login,
+          bind: binding.bind,
+          id: 'b'.repeat(32),
+          attemptId: 'a'.repeat(32),
+          key: 'old-key',
+          digest: 'old-body',
+          issuedAt: T(),
+          ref: null,
+          deadline: 'NONE',
+          state: 'RESERVED',
+          wasUnresolved: false,
+        },
+      });
+    };
+    const next = (s: WebSession) =>
+      reserveUnresolved(s, scope, stamp('new-key', { deadline: null, windowMs: null }));
+
+    it('old-written hold is seen by new reads and prevents dispatch until explicit release', async () => {
+      const s = login();
+      expect((await oldReserve(s)).kind).toBe('RESERVED');
+      await backend.store.settle(oldBinding(s), 'b'.repeat(32), 'a'.repeat(32), 'UNRESOLVED');
+      const read = await readUnresolved(s, scope);
+      expect(read.kind).toBe('PENDING');
+      expect((await next(s)).kind).toBe('HELD');
+      if (read.kind !== 'PENDING') throw new Error('missing legacy hold');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'RELEASED',
+      );
+      expect((await next(s)).kind).toBe('RESERVED');
+    });
+    it('new-written hold is visible to the old code on rollback, including after settle', async () => {
+      const s = login();
+      const first = await next(s);
+      if (first.kind !== 'RESERVED') throw new Error('missing reservation');
+      expect((await backend.store.read(oldBinding(s))).record?.id).toBe(first.attempt.id);
+      expect((await oldReserve(s)).kind).toBe('HELD');
+      expect(await settleUnresolved(first.attempt, 'UNRESOLVED')).toBe(true);
+      expect((await oldReserve(s)).kind).toBe('HELD');
+      expect((await next({ ...s, csrfToken: 'second-device' })).kind).toBe('HELD');
+      const read = await readUnresolved(s, scope);
+      if (read.kind !== 'PENDING') throw new Error('missing hold');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'RELEASED',
+      );
+      expect((await backend.store.read(oldBinding(s))).record).toBeNull();
+    });
+    it.each([true, false])(
+      'mixed replicas allow one dispatch only, old starts first=%s',
+      async (oldFirst) => {
+        const s = login();
+        const replies = await Promise.all(
+          oldFirst ? [oldReserve(s), next(s)] : [next(s), oldReserve(s)],
+        );
+        expect(replies.map((r) => r.kind).sort()).toEqual(['HELD', 'RESERVED']);
+        expect((await oldReserve(s)).kind).toBe('HELD');
+        expect((await next(s)).kind).toBe('HELD');
+      },
+    );
+    it('a corrupt legacy companion refuses a new dispatch and remains untouched', async () => {
+      const s = login();
+      await oldReserve(s);
+      await backend.setRaw(oldBinding(s).recordKey, '{broken');
+      expect((await readUnresolved(s, scope)).kind).toBe('UNAVAILABLE');
+      expect((await next(s)).kind).toBe('UNAVAILABLE');
+      expect(await backend.getRaw(oldBinding(s).recordKey)).toBe('{broken');
     });
   });
 
