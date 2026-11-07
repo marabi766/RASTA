@@ -305,8 +305,9 @@ test('a shell script a workflow calls pre-pulls every digest-pinned image it run
 
 test('the Kafka bootstrap pre-pulls its image by the digest it runs', () => {
   const text = readFileSync(resolve(ROOT, 'infrastructure/docker/kafka/ci-up.sh'), 'utf8');
-  assert.match(text, /^IMAGE="\$\{KAFKA_IMAGE:-[^"}]*@sha256:[0-9a-f]{64}\}"$/m);
-  assert.match(text, /^"\$\{ROOT\}\/scripts\/ci-pull-image\.sh" "\$\{IMAGE\}"$/m);
+  // FU-224: the one form the image-pin check reads - a literal, readonly, first after `set -euo pipefail`
+  assert.match(text, /^readonly IMAGE=[^"'$\s]*@sha256:[0-9a-f]{64}$/m);
+  assert.match(text, /^scripts\/ci-pull-image\.sh "\$\{IMAGE\}"$/m);
 });
 
 test('the pre-pull steps do not weaken pinning: none names a tag-only image', () => {

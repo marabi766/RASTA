@@ -48,8 +48,10 @@ const STDIN_FILE = /^(?:\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d
  * and a computed word may be an option, a body or a file: all of those are refused, never
  * read as "some other operand". A long option other than the listed inert ones can name a
  * file the shell runs (--rcfile, --init-file). `name` is the shell word, for the message.
+ * Task 368 F1: `startupState` (the image-pin check) also refuses what exports functions to what the shell starts
+ * (`-a`, `-o allexport`) or reads startup files (`-l`, `-i`, `--login`); the Jest-launch guard reads `bash -lc`.
  */
-export function shellInvocation(args, name = 'the shell') {
+export function shellInvocation(args, name = 'the shell', { startupState = false } = {}) {
   // csh, tcsh and fish do not share POSIX syntax: reading their text as sh would be a guess.
   if (/(?:^|\/)(?:c|tc|fi)sh$/.test(name))
     return { problem: `${name} is a shell whose syntax this check does not read` };
@@ -73,6 +75,15 @@ export function shellInvocation(args, name = 'the shell') {
     const cluster = value.startsWith('--') ? null : /^[-+]([A-Za-z]+)$/.exec(value);
     if (!cluster && !SHELL_LONG_OPTIONS.has(value))
       return { problem: `${name} option ${value} is not one this check reads` };
+    // Task 368 F1: allexport exports every function the text defines (`BASH_FUNC_*`) to what it starts, and a login or
+    // interactive shell reads startup files (`~/.bash_profile`, `~/.bashrc`): state this check does not read
+    if (
+      startupState &&
+      (value === '--login' || (value.startsWith('-') && /^-[A-Za-z]*[ail]/.test(value)))
+    )
+      return {
+        problem: `${name} option ${value} exports functions or reads startup files this check does not read`,
+      };
     for (const letter of cluster?.[1] ?? '') {
       if (letter === 'c') command = true;
       else if (letter === 's') stdin = true;
@@ -80,6 +91,8 @@ export function shellInvocation(args, name = 'the shell') {
         at++; // the option name: one word per o/O, also inside a cluster
         if (!args[at] || computed(args[at]))
           return { problem: `${name} option ${value} has a name this check cannot read` };
+        if (startupState && letter === 'o' && /^allexport$/i.test(args[at].value))
+          return { problem: `${name} -o allexport exports functions this check does not read` };
       }
     }
   }
@@ -396,11 +409,25 @@ export const computedProgram = (word) => {
 };
 
 /**
+ * FU-224 R4 + task 368 F2: a QUOTED expansion that is still any number of words: `"$@"`, `"${@:2}"`, any `${…[@]…}`,
+ * and EVERY indirection `${!…`: `"${!n}"` may name `a[@]`, and so may `"${!n:-}"`, `"${!n#}"`, `"${!n/x/y}"`,
+ * `"${!n:0}"`, a nested `"${u:-${!n:-}}"`; `${!prefix@}` lists names. The rule is the opener `${!`, whatever
+ * operator follows it: no list of operators. Single-quoted text is literal.
+ */
+const VECTOR = /\$@|\$\{@|\$\{!|\$\{[^}]*\[@\]/;
+// bash deletes backslash-newline before it reads the expansion: `"${arr[\<NL>@]}"` is `"${arr[@]}"`
+const joined = (text) => text.replace(/\\\n/g, '');
+export const vector = (word) =>
+  word.segments === undefined
+    ? VECTOR.test(joined(word.value))
+    : word.segments.some(({ kind, raw }) => kind !== 'sq' && VECTOR.test(joined(raw)));
+/**
  * A word whose expansion has an unknown number of words (or none): an unquoted `$x`, `$(…)` or glob.
  * Quoted expansions are one word. A word read by `parseCommands` has no `split`: `dynamic` stands in.
  */
 export const unsplit = (word) =>
   Boolean(word.split ?? (word.opaque || word.dynamic || /[$`*?[]/.test(word.value))) ||
+  vector(word) ||
   /\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(word.value); // `{a,b}` and `{1..3}`; a bare `{}` stays one word
 
 /**
