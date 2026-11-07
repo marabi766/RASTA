@@ -86,6 +86,11 @@ describe('organization-service published errors (D-121)', () => {
         expect(nearby).toHaveBeenLastCalledWith(expect.objectContaining({ [name]: 0.0000001 }));
         await request(app.getHttpServer())
           .get('/v1/organizations/nearby')
+          .query({ latitude: '0', longitude: '0', [name]: '1e-400' })
+          .expect(400);
+        expect(nearby).toHaveBeenCalledTimes(1);
+        await request(app.getHttpServer())
+          .get('/v1/organizations/nearby')
           .query({ latitude: '0', longitude: '0', [name]: '1e9999' })
           .expect(400);
         expect(nearby).toHaveBeenCalledTimes(1);
