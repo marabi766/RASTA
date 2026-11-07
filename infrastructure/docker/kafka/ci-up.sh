@@ -32,6 +32,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/../../.." && pwd)"
+# readonly: a later write to ROOT fails, so ${ROOT}/scripts/ci-pull-image.sh below is the file the
+# image-pin check approved (FU-159)
+readonly ROOT
 IMAGE="${KAFKA_IMAGE:-apache/kafka:3.9.0@sha256:fbc7d7c428e3755cf36518d4976596002477e4c052d1f80b5b9eafd06d0fff2f}"
 NAME="${KAFKA_CONTAINER_NAME:-rasta-ci-kafka}"
 TLS_DIR="${KAFKA_TLS_DIR:-${RUNNER_TEMP:-/tmp}/rasta-kafka-tls}"
