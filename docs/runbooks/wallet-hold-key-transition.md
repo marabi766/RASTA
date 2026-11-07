@@ -4,7 +4,8 @@ Expand: wallet holds read the person binding and the authenticated current login
 legacy binding, scoped to the acting organization and wallet. Reservation checks
 both and writes both atomically before dispatch, with the same generation and
 30-day expiry. Either hold refuses a second dispatch. Settle and explicit release
-handle both copies; an interrupted operation leaves a hold and refuses dispatch.
+handle both copies; release validates both atomically and deletes neither while
+either is reserved. An interrupted settle leaves a hold and refuses dispatch.
 Other people, organizations, wallets and former organization copies are not proofs
 of ownership. Do not scan or delete arbitrary login keys to unblock a wallet.
 

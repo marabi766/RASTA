@@ -902,6 +902,27 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
         expect((await next(s)).kind).toBe('HELD');
       },
     );
+    it('keeps the rollback hold when settling its copy succeeds but the person settle fails', async () => {
+      const s = login();
+      const first = await next(s);
+      if (first.kind !== 'RESERVED') throw new Error('missing reservation');
+      const settle = backend.store.settle.bind(backend.store);
+      const spy = jest
+        .spyOn(backend.store, 'settle')
+        .mockImplementationOnce(settle)
+        .mockRejectedValueOnce(new UnresolvedStoreUnavailable());
+      try {
+        expect(await settleUnresolved(first.attempt, 'UNRESOLVED')).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+      const read = await readUnresolved(s, scope);
+      if (read.kind !== 'PENDING') throw new Error('missing hold');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'IN_PROGRESS',
+      );
+      expect((await oldReserve(s)).kind).toBe('HELD');
+    });
     it('a corrupt legacy companion refuses a new dispatch and remains untouched', async () => {
       const s = login();
       await oldReserve(s);

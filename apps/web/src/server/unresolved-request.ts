@@ -587,14 +587,12 @@ export async function releaseUnresolved(
   const named = verifyPayload(session, RELEASE_PURPOSE, token, releaseSchema, tokenNow);
   if (named === null || named.scope !== scopeLabel(scope)) return 'STALE';
   try {
-    const bindings = [keysFor(session, scope), compatibilityKeys(session, scope)];
-    let result: ReleaseOutcome = 'GONE';
-    for (const binding of bindings) {
-      if (!binding) continue;
-      const reply = await defaultStore().release(binding, named.id, INFLIGHT_LEASE_MS);
-      if (reply === 'STALE' || reply === 'IN_PROGRESS') result = reply;
-      if (reply === 'RELEASED' && result === 'GONE') result = reply;
-    }
+    const result = await defaultStore().release(
+      keysFor(session, scope),
+      named.id,
+      INFLIGHT_LEASE_MS,
+      compatibilityKeys(session, scope) ?? undefined,
+    );
     const former = formerKeysFor(session, scope);
     return result === 'GONE' && former !== null
       ? await defaultStore().release(former, named.id, INFLIGHT_LEASE_MS)
