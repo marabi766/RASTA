@@ -3,15 +3,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -94,6 +86,9 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
   /** The fake `next` wrote `ran-<pid>`: it connected to its owner and got into its build. */
   const hasRun = (dir: string, writer: { child: ChildProcess }): boolean =>
     existsSync(join(dir, `ran-${writer.child.pid}`));
+  /** The fake `next` reached its owner at kernel level (`connected-`), or already got into its build. */
+  const connectedOrRan = (dir: string, writer: { child: ChildProcess }): boolean =>
+    existsSync(join(dir, `connected-${writer.child.pid}`)) || hasRun(dir, writer);
   /** The writer, started the way the build starts it: `next` in the package directory. */
   const startWriter = (dir: string): { child: ChildProcess; exited: Promise<number | null> } => {
     return owned.own(
@@ -280,16 +275,15 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     // the owner's `connection` callback is still pending. The sweep then runs before that callback.
     const dir = app({ holdUntilRelease: true, unresponsive: 'sync' });
     const writer = startWriter(dir);
-    const touched = (): string[] =>
-      readdirSync(dir).filter((f) => f.startsWith('connected-') || f.startsWith('ran-'));
+    const touched = (): boolean => connectedOrRan(dir, writer);
     const gate = new Int32Array(new SharedArrayBuffer(4));
     const patience = Date.now() + 30_000;
-    while (touched().length === 0 && Date.now() < patience) Atomics.wait(gate, 0, 0, 10);
-    expect(touched().length).toBeGreaterThan(0); // the writer is connected at kernel level
+    while (!touched() && Date.now() < patience) Atomics.wait(gate, 0, 0, 10);
+    expect(touched()).toBe(true); // the writer is connected at kernel level
     Atomics.wait(gate, 0, 0, 300); // long enough for a writer that did not wait to start its work
     // Same tick, before the pending `connection` callback can run: the end-of-case sweep.
     await releaseHold(dir, { lenient: true });
-    expect(readdirSync(dir).filter((f) => f.startsWith('ran-'))).toEqual([]); // no work unregistered
+    expect(hasRun(dir, writer)).toBe(false); // no work unregistered
     expect(await endsWithin(writer.exited, 5_000)).toBe(72); // refused, not left running
     expect(heldWriters()).toEqual([]);
   });
@@ -301,9 +295,7 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     const second = startWriter(dir);
     const gate = new Int32Array(new SharedArrayBuffer(4));
     const patience = Date.now() + 30_000;
-    const connected = (): boolean =>
-      existsSync(join(dir, `connected-${second.child.pid}`)) || hasRun(dir, second);
-    while (!connected() && Date.now() < patience) Atomics.wait(gate, 0, 0, 10); // blocks the owner
+    while (!connectedOrRan(dir, second) && Date.now() < patience) Atomics.wait(gate, 0, 0, 10); // blocks the owner
     Atomics.wait(gate, 0, 0, 300);
     await releaseHold(dir, { lenient: true }); // joins `first`; `second` is accepted only after the fence
     expect(hasRun(dir, second)).toBe(false);
