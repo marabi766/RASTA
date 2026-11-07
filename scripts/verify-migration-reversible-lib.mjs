@@ -4952,6 +4952,295 @@ $ledger$;`;
 }
 
 // ---------------------------------------------------------------------------
+// Down chains in a rollback against real data (FU-240)
+//
+// A step's `runDownScript` list is run as written, and nothing made it name
+// every migration it has to. One that rolls back a migration while a newer one
+// stays applied leaves that newer one's ledger row in place: the next
+// `migrate deploy` re-applies only what the chain removed, and an object the
+// newer migration had redefined — a column default, a function body — comes
+// back in its older form. #906's 20261106140000_utc_clock_defaults sat above
+// economic's chains that way, and the whole-chain reversal after them compared
+// its down against the same lost state, so the check stayed green and proved
+// nothing (found on #936).
+//
+// Two guards, one before anything runs and one against the database:
+//
+//   - `downChainProblems` walks the steps against the ledger they leave (every
+//     migration applied at first, a deploy re-applies whatever is pending) and
+//     refuses a chain that rolls back a migration while a newer one that
+//     redefines one of its objects stays applied — naming that newer migration
+//     — and every step whose effect on the ledger it cannot tell: a down of a
+//     migration that is not applied, a chain out of order, a deploy or a down
+//     while a failed deploy is unresolved, a SQL step that writes the ledger.
+//     The rollback must also end with every migration applied, which the
+//     whole-chain reversal starts from. A newer migration that redefines
+//     nothing the chain rolls back may stay applied: most probes take one old
+//     migration down under many unrelated ones, and that state is the point.
+//   - the runner then asserts that the rollback ends where it began: exactly
+//     the deployed schema, every migration in the ledger. What the name
+//     matching below cannot see — a redefinition inside dynamic SQL, a probe's
+//     leftover — fails there, naming the migrations the chains left applied.
+// ---------------------------------------------------------------------------
+
+const SQL_NAME = String.raw`((?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*))*)`;
+const SQL_KIND = String.raw`(?:TABLE|(?:UNIQUE\s+)?INDEX|TYPE|FUNCTION|PROCEDURE|(?:CONSTRAINT\s+)?TRIGGER|(?:MATERIALIZED\s+)?VIEW|SEQUENCE|DOMAIN|POLICY|RULE)`;
+
+/** The parts of a possibly qualified, possibly quoted name, unquoted; unquoted parts folded. */
+function nameParts(text) {
+  const parts = [];
+  for (const [, quoted, bare] of text.matchAll(/"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*)/g)) {
+    parts.push(quoted === undefined ? bare.toLowerCase() : quoted.replaceAll('""', '"'));
+  }
+  return parts;
+}
+/** An object's own name: the last part, its schema dropped (each service owns one). */
+const objectName = (text) => nameParts(text).at(-1);
+
+/**
+ * A forward migration's statements, read as Prisma's deploy ran it: with
+ * standard_conforming_strings on, so a backslash in a plain string is only a character
+ * (which `lexSql` reports, for the down files it vets). Anything else it cannot read
+ * throws: then nothing can be said about what the migration changes.
+ */
+function lexedStatements(sql, what) {
+  const lexed = lexSql(sql);
+  const problems = lexed.problems.filter(
+    (problem) => !problem.startsWith('a backslash inside an ordinary'),
+  );
+  if (problems.length > 0) {
+    throw new Error(`${what} cannot be read as SQL: ${problems.join('; ')}`);
+  }
+  return lexed.statements;
+}
+
+/**
+ * What a migration creates: every object a `CREATE [OR REPLACE] <kind>` names, every
+ * constraint an `ADD CONSTRAINT` names, and `table.column` for every `ADD COLUMN`.
+ */
+export function objectsCreated(sql, what = 'migration.sql') {
+  const created = new Set();
+  for (const statement of lexedStatements(sql, what)) {
+    const create = new RegExp(
+      String.raw`^CREATE\s+(?:OR\s+REPLACE\s+)?${SQL_KIND}\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (create) created.add(objectName(create[1]));
+    for (const [, name] of statement.matchAll(
+      new RegExp(String.raw`\bADD\s+CONSTRAINT\s+${SQL_NAME}`, 'gi'),
+    )) {
+      created.add(objectName(name));
+    }
+    const table = new RegExp(
+      String.raw`^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (table) {
+      for (const [, column] of statement.matchAll(
+        new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?${SQL_NAME}`, 'gi'),
+      )) {
+        created.add(`${objectName(table[1])}.${objectName(column)}`);
+      }
+    }
+  }
+  return created;
+}
+
+/**
+ * What a migration changes of objects that exist before it: every object a
+ * `CREATE OR REPLACE`, `ALTER`, `DROP` or `COMMENT ON` names, every table a trigger,
+ * index, policy or rule is created `ON`, every constraint named anywhere, and
+ * `table.column` for a column it alters, drops, renames or comments on.
+ */
+export function objectsRedefined(sql, what = 'migration.sql') {
+  const touched = new Set();
+  for (const statement of lexedStatements(sql, what)) {
+    const head = new RegExp(
+      String.raw`^(?:CREATE\s+OR\s+REPLACE|ALTER|DROP|COMMENT\s+ON)\s+${SQL_KIND}\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (head) touched.add(objectName(head[1]));
+    const column = new RegExp(String.raw`^COMMENT\s+ON\s+COLUMN\s+${SQL_NAME}`, 'i').exec(
+      statement,
+    );
+    if (column) {
+      const parts = nameParts(column[1]);
+      touched.add(parts.at(-2));
+      touched.add(`${parts.at(-2)}.${parts.at(-1)}`);
+    }
+    if (/^(?:CREATE|COMMENT)\b/i.test(statement)) {
+      for (const [, table] of statement.matchAll(
+        new RegExp(String.raw`\bON\s+(?:ONLY\s+)?${SQL_NAME}`, 'gi'),
+      )) {
+        touched.add(objectName(table));
+      }
+    }
+    for (const [, name] of statement.matchAll(
+      new RegExp(String.raw`\bCONSTRAINT\s+(?:IF\s+EXISTS\s+)?${SQL_NAME}`, 'gi'),
+    )) {
+      touched.add(objectName(name));
+    }
+    const table = new RegExp(
+      String.raw`^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (table) {
+      for (const [, name] of statement.matchAll(
+        new RegExp(
+          String.raw`\b(?:ALTER|DROP|RENAME)\s+COLUMN\s+(?:IF\s+EXISTS\s+)?${SQL_NAME}`,
+          'gi',
+        ),
+      )) {
+        touched.add(`${objectName(table[1])}.${objectName(name)}`);
+      }
+    }
+  }
+  return touched;
+}
+
+const LEDGER_WRITE =
+  /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?(?:"?[A-Za-z_][A-Za-z0-9_]*"?\s*\.\s*)?"?_prisma_migrations\b/gi;
+/** The one ledger write a probe may make: dropping the rows a resolved failure left. */
+const ROLLED_BACK_CLEANUP =
+  /^DELETE\s+FROM\s+"?_prisma_migrations"?\s+WHERE\s+(?:(?!\bOR\b)[\s\S])*\bAND\s+rolled_back_at\s+IS\s+NOT\s+NULL$/i;
+
+/** Whether a SQL step writes the ledger in any way but the rolled-back cleanup. */
+function writesLedger(sql) {
+  const written = [...sql.matchAll(LEDGER_WRITE)].length;
+  if (written === 0) return false;
+  const lexed = lexSql(sql);
+  if (lexed.problems.length > 0) return true;
+  // A write inside a DO body is invisible to the lexer, so counted on the raw text:
+  // every one must be a top-level cleanup statement.
+  return (
+    lexed.statements.filter((statement) => ROLLED_BACK_CLEANUP.test(statement)).length !== written
+  );
+}
+
+/**
+ * Every problem with a rollback's steps, as the ledger they leave tells it (see the
+ * section comment), and for each down step the newer migrations it leaves applied.
+ *
+ * `migrations` is the service's migration directory, sorted; `readSql(name)` returns a
+ * migration's migration.sql (and throws if there is none).
+ *
+ * @returns {{ problems: string[], keptApplied: Map<number, string[]> }}
+ */
+export function downChainProblems(dataRollback, migrations, readSql) {
+  const problems = [];
+  const keptApplied = new Map();
+  const known = new Set(migrations);
+  const applied = new Set(migrations);
+  let unresolvedFailure = false;
+  const sqlOf = new Map();
+  const read = (name) => {
+    if (!sqlOf.has(name)) sqlOf.set(name, readSql(name));
+    return sqlOf.get(name);
+  };
+  const created = (name) => objectsCreated(read(name), `${name}/migration.sql`);
+  const redefined = (name) => objectsRedefined(read(name), `${name}/migration.sql`);
+
+  for (const [index, step] of dataRollback.steps.entries()) {
+    const where = `step ${index + 1} ("${step.label}")`;
+    if (step.runDownScript) {
+      const chain = Array.isArray(step.runDownScript)
+        ? step.runDownScript
+        : [dataRollback.migration];
+      if (chain.length === 0) {
+        problems.push(`${where}: a down chain names no migration`);
+        continue;
+      }
+      if (unresolvedFailure) {
+        problems.push(
+          `${where}: a down while a failed deploy is unresolved — which migrations that deploy applied cannot be told`,
+        );
+        continue;
+      }
+      const unknown = chain.filter((name) => !known.has(name));
+      if (unknown.length > 0) {
+        problems.push(`${where}: no such migration: ${unknown.join(', ')}`);
+        continue;
+      }
+      const notApplied = chain.filter((name) => !applied.has(name));
+      if (notApplied.length > 0) {
+        problems.push(
+          `${where}: rolls back ${notApplied.join(', ')}, which is not applied at that point`,
+        );
+        continue;
+      }
+      if (chain.some((name, at) => at > 0 && chain[at - 1] <= name)) {
+        problems.push(`${where}: a down chain runs newest first: ${chain.join(', ')}`);
+        continue;
+      }
+      const oldest = chain.at(-1);
+      const kept = migrations.filter(
+        (name) => name > oldest && applied.has(name) && !chain.includes(name),
+      );
+      // A refusal must change nothing (the runner proves it), so it leaves the ledger as it was.
+      if (step.mustFail) continue;
+      keptApplied.set(index, kept);
+      for (const newer of kept) {
+        const rolledBelow = chain.filter((name) => name < newer);
+        const ours = new Set(rolledBelow.flatMap((name) => [...created(name)]));
+        const lost = [...redefined(newer)].filter((object) => ours.has(object)).sort();
+        if (lost.length > 0) {
+          problems.push(
+            `${where}: rolls back ${rolledBelow.join(', ')} while ${newer} stays applied, and ` +
+              `${newer} redefines ${lost.join(', ')}: the re-deploy would skip it and bring those back ` +
+              `in their older form. List ${newer} in the chain, before ${rolledBelow[0]}.`,
+          );
+        }
+      }
+      for (const name of chain) applied.delete(name);
+    } else if (step.reapply) {
+      if (unresolvedFailure) {
+        problems.push(
+          `${where}: a deploy while a failed deploy is unresolved is refused (P3009), not applied`,
+        );
+        continue;
+      }
+      for (const name of migrations) applied.add(name);
+    } else if (step.deployMustFail) {
+      if (unresolvedFailure) continue; // P3009: nothing is applied.
+      if (migrations.every((name) => applied.has(name))) {
+        problems.push(`${where}: a deploy that must fail, with no migration pending`);
+        continue;
+      }
+      unresolvedFailure = true;
+    } else if (step.resolveRolledBack) {
+      const name = step.resolveRolledBack;
+      if (!unresolvedFailure || !known.has(name) || applied.has(name)) {
+        problems.push(
+          `${where}: resolves ${name}, which is not a pending migration of a failed deploy`,
+        );
+        continue;
+      }
+      // The deploy applied, in order, everything pending before the one that failed.
+      for (const earlier of migrations) if (earlier < name) applied.add(earlier);
+      unresolvedFailure = false;
+    } else if (typeof step.sql === 'string') {
+      if (writesLedger(step.sql)) {
+        problems.push(
+          `${where}: writes _prisma_migrations other than by removing rolled-back rows, so what it leaves applied cannot be told`,
+        );
+      }
+    } else {
+      problems.push(`${where}: a step of no known kind`);
+    }
+  }
+  if (unresolvedFailure) {
+    problems.push('the rollback ends with a failed deploy unresolved');
+  }
+  const pending = migrations.filter((name) => !applied.has(name));
+  if (pending.length > 0) {
+    problems.push(
+      `the rollback ends with ${pending.join(', ')} rolled back; the whole-chain reversal starts from every migration applied`,
+    );
+  }
+  return { problems, keptApplied };
+}
+
+// ---------------------------------------------------------------------------
 // Scratch databases: one per run, marked, dropped only by the run that made it
 // ---------------------------------------------------------------------------
 
