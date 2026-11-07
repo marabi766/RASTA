@@ -969,7 +969,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -983,7 +983,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -1624,7 +1624,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -1641,7 +1641,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -2256,7 +2256,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -2273,7 +2273,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -2883,7 +2883,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -2900,7 +2900,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -4166,7 +4166,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then break; fi
@@ -4177,7 +4177,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents

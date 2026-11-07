@@ -45,7 +45,7 @@ if (workflows.length === 0) {
 const infraFiles = [read('docker-compose.yml', 'compose'), ...workflows, ...scripts];
 
 const { errors, digests } = validateDockerfilePins(dockerfiles);
-const infra = validateInfraImagePins(infraFiles);
+const infra = validateInfraImagePins(infraFiles, { complete: true });
 if (errors.length > 0 || infra.errors.length > 0) {
   if (errors.length > 0) {
     console.error(`dockerfile pins: ${errors.length} problem(s)`);

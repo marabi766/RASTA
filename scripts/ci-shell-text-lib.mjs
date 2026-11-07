@@ -396,11 +396,21 @@ export const computedProgram = (word) => {
 };
 
 /**
+ * FU-224 R4: a QUOTED expansion that is still any number of words: `"$@"`, `"${@:2}"`, `"${a[@]}"`,
+ * `"${!prefix@}"`, and an indirection (`"${!n}"`, which may name `a[@]`). Single-quoted text is literal.
+ */
+const VECTOR = /\$@|\$\{@|\$\{!?[A-Za-z_]\w*\[@\]|\$\{![A-Za-z_]\w*(?:@)?\}/;
+export const vector = (word) =>
+  word.segments === undefined
+    ? VECTOR.test(word.value)
+    : word.segments.some(({ kind, raw }) => kind !== 'sq' && VECTOR.test(raw));
+/**
  * A word whose expansion has an unknown number of words (or none): an unquoted `$x`, `$(…)` or glob.
  * Quoted expansions are one word. A word read by `parseCommands` has no `split`: `dynamic` stands in.
  */
 export const unsplit = (word) =>
   Boolean(word.split ?? (word.opaque || word.dynamic || /[$`*?[]/.test(word.value))) ||
+  vector(word) ||
   /\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(word.value); // `{a,b}` and `{1..3}`; a bare `{}` stays one word
 
 /**

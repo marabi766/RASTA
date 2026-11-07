@@ -26,7 +26,7 @@
  * broker, except where a case starts a second one on purpose.
  *
  * Malformed describe output, failing alters and a second writer come from a
- * wrapper `KAFKA_BIN` inside the container: it logs every call, then runs the
+ * wrapper `KAFKA_BIN` (set in a copy of the script directory) inside the container: it logs every call, then runs the
  * real tool — mangling a describe, refusing an alter, or running a hook
  * between the real call and its answer, when told to.
  */
@@ -161,12 +161,10 @@ async function provision(topicsFile, shim = {}) {
     'KAFKA_BOOTSTRAP=kafka:9094',
     '-e',
     `TOPICS_FILE=${topicsFile}`,
-    '-e',
-    `KAFKA_BIN=${BIN}`,
     ...env,
     CONTAINER,
     'bash',
-    '/bootstrap/create-topics.sh',
+    `${WORK}/bootstrap/create-topics.sh`,
   ]);
   return { ...run, calls: (await inContainer(`cat ${calls}`)).split('\n').filter(Boolean) };
 }
@@ -225,6 +223,12 @@ const WRAPPER = [
   .replaceAll('__REAL__', REAL);
 
 await inContainer(`mkdir -p ${BIN}`);
+// create-topics.sh declares `readonly KAFKA_BIN=/opt/kafka/bin` as a literal, the one form the image-pin check
+// reads (FU-224), so no environment can move it. The wrapped runs use a COPY of the directory whose declaration
+// names the wrapper directory; the siblings the script reads by its own path come with the copy.
+await inContainer(
+  `cp -r /bootstrap ${WORK}/bootstrap && sed -i 's#^readonly KAFKA_BIN=.*#readonly KAFKA_BIN=${BIN}#' ${WORK}/bootstrap/create-topics.sh && grep -c '^readonly KAFKA_BIN=${BIN}$' ${WORK}/bootstrap/create-topics.sh`,
+);
 for (const tool of ['kafka-configs.sh', 'kafka-topics.sh', 'kafka-consumer-groups.sh']) {
   await inContainer(`cat > ${BIN}/${tool} && chmod 755 ${BIN}/${tool}`, WRAPPER);
 }
@@ -315,7 +319,7 @@ async function writeHook(scenario, lines) {
 
 /** A second create-topics.sh, on the real tools, provisioning `topicsFile`. */
 const secondProvisioner = (topicsFile) =>
-  `TOPICS_FILE=${topicsFile} KAFKA_BIN=${REAL} bash /bootstrap/create-topics.sh`;
+  `TOPICS_FILE=${topicsFile} bash /bootstrap/create-topics.sh`;
 
 after(async () => {
   await docker(['exec', CONTAINER, 'rm', '-rf', WORK]);

@@ -316,6 +316,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--all-tags',
       '--cap-add',
       '--cap-drop',
+      '--compress-program',
       '--config',
       '--context',
       '--cpus',
