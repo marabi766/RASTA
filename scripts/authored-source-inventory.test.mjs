@@ -1645,6 +1645,7 @@ const OTHER_CAPABILITY = [
   'apps/web/src/server-action-build-ownership.spec.ts',
   'apps/web/src/test/server-action-boundary.ts',
   'apps/web/src/write-session-refusal.spec.ts',
+  'apps/web/src/unconfirmed-retry-guard.spec.ts', // loads each 'use server' module discovery found, like write-session-refusal (FU-173, #880)
   'packages/config/src/owner-credentials.spec.ts',
   'packages/contracts/src/common/legacy-refusal-boundary.spec.ts',
   'packages/contracts/src/common/zod-compat-patch.spec.ts',
