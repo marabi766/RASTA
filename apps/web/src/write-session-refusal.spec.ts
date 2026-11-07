@@ -87,6 +87,10 @@ const CASES = EXPORTS.filter(
  */
 const NO_SESSION_REDIRECTS = new Map<string, { args: () => unknown[]; to: string }>([
   [
+    actionKey('apps/web/src/app/wallet/actions.ts', 'releaseUnresolvedTopUp'),
+    { args: () => ['WLT_1', new FormData()], to: '/login?returnTo=/wallet' },
+  ],
+  [
     actionKey('apps/web/src/app/projects/actions.ts', 'releaseUnresolvedCreate'),
     { args: () => [new FormData()], to: '/login?returnTo=/projects' },
   ],

@@ -863,8 +863,10 @@ test('claim SQL retains the unqualified transaction clock required by the bounda
   const source = readFileSync(join(root, 'packages/nest-common/src/outbox/outbox-sql.ts'), 'utf8');
   const start = source.indexOf('export async function claimPendingSql');
   const claim = source.slice(start, source.indexOf('export async function', start + 1));
-  assert.ok(claim.includes('<= (jsonb_populate_record('), 'claim SQL must use typed UTC time');
-  assert.ok(claim.includes("now() AT TIME ZONE 'UTC'"), 'clock must use unqualified now()');
+  assert.ok(claim.includes('<= ${OUTBOX_NOW}'), 'claim SQL must use typed UTC time');
+  const clock = /export const OUTBOX_NOW = `([\s\S]*?)`;/.exec(source)?.[1] ?? '';
+  assert.ok(clock.includes('jsonb_populate_record('), 'typed through the table');
+  assert.ok(clock.includes("now() AT TIME ZONE 'UTC'"), 'clock must use unqualified now()');
   assert.doesNotMatch(
     claim,
     /pg_catalog\.now|CURRENT_TIMESTAMP|(?:transaction|statement|clock)_timestamp/i,

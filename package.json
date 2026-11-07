@@ -70,6 +70,8 @@
     "test:container-scope": "node --test --test-timeout=300000 scripts/container-scope.test.mjs",
     "test:dockerfile-pins": "node --test --test-timeout=300000 scripts/check-dockerfile-pins.test.mjs",
     "check:dockerfile-pins": "node scripts/check-dockerfile-pins.mjs",
+    "test:utc-clock-sites": "node --test --test-timeout=300000 scripts/utc-clock-sites-lib.test.mjs",
+    "check:utc-clock-sites": "node scripts/check-utc-clock-sites.mjs",
     "test:tenant-index-order": "node --test --test-timeout=300000 scripts/check-tenant-index-order.test.mjs",
     "check:tenant-index-order": "node scripts/check-tenant-index-order.mjs",
     "test:seed-guard": "node scripts/verify-seed-guard.mjs",

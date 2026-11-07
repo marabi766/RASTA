@@ -100,6 +100,11 @@ jobs:
       - name: Outbox test eligibility clock guard
         run: pnpm run test:outbox-test-clock
 
+      - name: No database clock reaches a timestamp(3) column in the session's zone (FU-188)
+        run: |
+          pnpm run test:utc-clock-sites
+          pnpm run check:utc-clock-sites
+
       - name: Disclosure guard reaches every Jest project and Playwright spec (#452)
         run: pnpm run test:disclosure-guard-wiring
 
