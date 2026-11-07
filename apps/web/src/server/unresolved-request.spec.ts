@@ -8,6 +8,7 @@ import type { WebSession } from './session';
 import {
   INFLIGHT_LEASE_MS,
   MAX_PENDING_PER_LOGIN,
+  MAX_REQUEST_REF_LENGTH,
   memoryUnresolvedStore,
   PENDING_KEY_PREFIX,
   RECORD_RETENTION_AFTER_MS,
@@ -383,6 +384,18 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
         ref: 'stamp-of-sub_1',
         deadline: T() + WIN,
         inFlight: true,
+      });
+    });
+
+    it('keeps a bounded encrypted form snapshot and refuses an oversized ref', async () => {
+      const s = login();
+      const ref = 'a'.repeat(MAX_REQUEST_REF_LENGTH);
+      const first = await reserveNoLimit(s, 'snapshot', { ref });
+      if (first.kind !== 'RESERVED') throw new Error(first.kind);
+      await settleUnresolved(first.attempt, 'UNRESOLVED');
+      expect(await held(s, NO_LIMIT)).toMatchObject({ key: 'snapshot', ref });
+      expect(await reserveNoLimit(login(), 'oversized', { ref: ref + 'a' })).toMatchObject({
+        kind: 'UNAVAILABLE',
       });
     });
 
