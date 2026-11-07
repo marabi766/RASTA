@@ -3,7 +3,11 @@ import { MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { createActivities, type OrderActivities } from '../src/temporal/activities';
+import {
+  createActivities,
+  type DisputedObligation,
+  type OrderActivities,
+} from '../src/temporal/activities';
 import type { EconomicClient } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
@@ -1145,7 +1149,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         a.authoriseSettlement(run.orderId, run.transactionId),
       );
       expect(answer).toEqual({ disputed: true, reason: A, economicDisputeId: 'TXD_1' });
-      return { econ, ...run, answer: answer! };
+      return { econ, ...run, answer: answer as DisputedObligation };
     }
 
     async function decide(orderId: string, resolution = DECIDED): Promise<void> {
