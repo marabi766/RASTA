@@ -17,28 +17,15 @@
 // A comparison of a DateTime column with a value whose origin cannot be
 // proved, and every clock use outside a comparison, assignment, VALUES list
 // or projection, throws unless a reviewed SITE entry classifies it.
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import ts from 'typescript';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { PLACEHOLDER, analyse, columnsIn, projectionAliases } from './eligibility-clock-sql.mjs';
 
+/** Every authored file under `dir` ([] when it does not exist); git-ignored output is never opened. */
 export function files(dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  return entries.flatMap((entry) => {
-    if (
-      ['node_modules', 'generated', 'dist', '.git', 'coverage', '.turbo', '.next'].includes(
-        entry.name,
-      )
-    )
-      return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? files(path) : [path];
-  });
+  return authoredFiles(dir, { optional: true });
 }
 
 export const SOURCE = /\.(?:[cm]?[jt]sx?)$/;

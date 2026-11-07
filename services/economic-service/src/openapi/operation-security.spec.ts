@@ -77,6 +77,6 @@ describe('published security equals the guard decision (FU-075)', () => {
       }
     }
     expect(seen.sort()).toEqual(Object.keys(SERVICE_ROUTES).sort());
-    expect(seen.length).toBe(12);
+    expect(seen.length).toBe(13);
   });
 });

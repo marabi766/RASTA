@@ -253,6 +253,23 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
+  // `git ls-files -co --exclude-standard -z`, `check-ignore --no-index -z --stdin`, `init -q --bare`, `--literal-pathspecs`: the one listing.
+  'scripts/authored-source-inventory.cjs': {
+    other: [
+      '--bare',
+      '--cached',
+      '--deleted',
+      '--exclude-standard',
+      '--literal-pathspecs',
+      '--no-index',
+      '--others',
+      '--stdin',
+      '-C',
+      '-c',
+      '-q',
+      '-z',
+    ],
+  },
   'scripts/backup-restore-drill-lib.mjs': {
     other: ['--encoding', '--format', '--quote-all-identifiers', '--schema-only', '-service'],
   },
@@ -321,6 +338,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--name',
       '--net',
       '--network',
+      '--output',
       '--platform',
       '--publish',
       '--pull',
@@ -352,6 +370,7 @@ export const CLI_CONTRACT = Object.freeze({
       '-m',
       '-p',
       '-q',
+      '-r',
       '-t',
       '-u',
       '-v',
@@ -482,6 +501,11 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
+  // The name of a DATABASE_URL_* variable, never its value, then the few flags it passes on to psql.
+  'scripts/psql-prisma-url.mjs': {
+    positionals: ['identifier', 'forwarded'],
+    other: ['--file', '--set', '-c', '-f', '-v'],
+  },
   'scripts/replay-dlq-lib.mjs': {
     accepts: {
       '--allow-stale': 'identifier',

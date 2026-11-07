@@ -6,13 +6,15 @@ import {
   WorkflowIdReusePolicy,
   WorkflowNotFoundError,
 } from '@temporalio/client';
-import { getOrganizationId, type OutboxStopOptions } from '@rasta/nest-common';
+import { getOrganizationId, withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
+import { EconomicClient } from '../economic/economic.client';
 import { SagaStartStore, type StartClaim } from './saga-start.store';
 import {
   sagaStartBacklogAge,
   sagaStartBacklogCount,
   sagaStartDeliveries,
 } from '../observability/metrics';
+import { STATE_READ_TIMEOUT_MS, STATE_SAMPLE_INTERVAL_MS, StateSample } from './saga-state-sample';
 import { SERVICE_NAME } from '../config/env';
 import { ENV } from '../tokens';
 import type { MarketplaceEnv } from '../config/env';
@@ -36,14 +38,35 @@ export class OrderSagaClient implements OnModuleDestroy {
   private connecting?: Promise<Client>;
 
   private timer?: NodeJS.Timeout;
+  private sampleTimer?: NodeJS.Timeout;
   private ticking?: Promise<void>;
   private stopped = false;
   private readonly abort = new AbortController();
   private readonly active = new Set<Promise<void>>();
 
+  /**
+   * State gauges (#770 r2 F3, #792 r1 F3), read by every replica whether or not
+   * it runs a worker, on a timer of their own: a claim or a delivery that hangs
+   * does not stop them. A read that fails, times out or
+   * stops answering withdraws its series rather than keeping the last value:
+   * the alerts read a missing series as unknown and fire.
+   */
+  private readonly samples = [
+    new StateSample(
+      [sagaStartBacklogCount, sagaStartBacklogAge],
+      () => this.store.backlog(),
+      ({ count, age }) => {
+        sagaStartBacklogCount.set({ service: SERVICE_NAME }, count);
+        sagaStartBacklogAge.set({ service: SERVICE_NAME }, age);
+      },
+      (outcome, error) => this.sampleFailed('backlog', outcome, error),
+    ),
+  ];
+
   constructor(
     @Inject(ENV) private readonly env: MarketplaceEnv,
     private readonly store: SagaStartStore,
+    @Inject(EconomicClient) private readonly economic: Pick<EconomicClient, 'provesHeldFunds'>,
   ) {}
 
   startPolling(): void {
@@ -51,12 +74,16 @@ export class OrderSagaClient implements OnModuleDestroy {
     void this.tick();
     this.timer = setInterval(() => void this.tick(), START_POLL_INTERVAL_MS);
     this.timer.unref();
+    void this.sampleState();
+    this.sampleTimer = setInterval(() => void this.sampleState(), STATE_SAMPLE_INTERVAL_MS);
+    this.sampleTimer.unref();
   }
 
   /** Fast path after commit; a failure never changes the placement response. */
   async start(orderId: string): Promise<void> {
     if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) return;
     await this.track(async () => {
+      if (!(await this.economicReady())) return;
       const claims = await this.store.claim({ id: orderId, organizationId: getOrganizationId() });
       await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
     });
@@ -67,16 +94,27 @@ export class OrderSagaClient implements OnModuleDestroy {
     if (this.stopped) return Promise.resolve();
     if (this.ticking) return this.ticking;
     this.ticking = this.track(async () => {
-      const claims = this.env.MARKETPLACE_TEMPORAL_ENABLED ? await this.store.claim() : [];
+      const claims =
+        this.env.MARKETPLACE_TEMPORAL_ENABLED && (await this.economicReady())
+          ? await this.store.claim()
+          : [];
       await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
-      if (this.stopped) return;
-      const backlog = await this.store.backlog();
-      sagaStartBacklogCount.set({ service: SERVICE_NAME }, backlog.count);
-      sagaStartBacklogAge.set({ service: SERVICE_NAME }, backlog.age);
     }).finally(() => {
       this.ticking = undefined;
     });
     return this.ticking;
+  }
+
+  /** One read of each, independently; answers once each is decided. */
+  async sampleState(): Promise<void> {
+    await Promise.all(this.samples.map((sample) => sample.take()));
+  }
+
+  private sampleFailed(read: string, outcome: 'failed' | 'timed out', error?: unknown): void {
+    this.logger.error(
+      { read, outcome, failure: error === undefined ? undefined : foreignFailure(error) },
+      'A saga state gauge could not be sampled; its series is withdrawn until the next sample',
+    );
   }
 
   private track(fn: () => Promise<void>): Promise<void> {
@@ -95,17 +133,42 @@ export class OrderSagaClient implements OnModuleDestroy {
     return task;
   }
 
+  /**
+   * The prerequisite of any order's work: against an economic-service that cannot prove a
+   * hold, a saga would place one and then wait on it (FU-138; ADR-040). Asked before the
+   * claim, which starts the clock on a possibly started workflow: an order held back here
+   * was provably not started, however long this lasts. The backlog metrics show the wait.
+   */
+  private async economicReady(): Promise<boolean> {
+    const ready = await this.economic.provesHeldFunds();
+    if (!ready) {
+      sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'economic_not_ready' });
+      this.logger.error('economic-service does not prove held funds; no order saga starts');
+    }
+    return ready && !this.stopped;
+  }
+
   private async dispatch(claim: StartClaim): Promise<void> {
     if (this.stopped) return;
     const accepted = await this.deliver(claim.id, claim.age_ms);
     if (!this.stopped) await this.store.finish(claim, accepted);
   }
 
-  async stop(_options?: OutboxStopOptions): Promise<void> {
+  async stop(options?: OutboxStopOptions): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
+    if (this.sampleTimer) clearInterval(this.sampleTimer);
+    // Nothing samples them any more: absent, not frozen at the last value, and
+    // a read still out publishes nothing.
+    for (const sample of this.samples) sample.close();
     this.abort.abort();
-    await Promise.all([...this.active]);
+    // A read is waited for up to its own bound, never longer: one that hangs is
+    // abandoned (its answer is dropped) rather than holding the shutdown.
+    const bound = Math.min(STATE_READ_TIMEOUT_MS, (options?.deadlineAt ?? Infinity) - Date.now());
+    await Promise.all([
+      ...this.active,
+      withinDeadline(Promise.all(this.samples.map((sample) => sample.idle())), bound),
+    ]);
   }
 
   private async getClient(): Promise<Client> {

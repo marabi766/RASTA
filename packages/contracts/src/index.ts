@@ -30,6 +30,8 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
+export { patternRefinement, publishedRefinementPattern } from './common/pattern-refinement';
+
 export { withMaxKeys } from './common/bounds';
 export {
   TRANSACTION_TEXT_BOUNDS,
@@ -94,7 +96,7 @@ export {
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
 
-export { numberInput } from './common/number-input';
+export { numberInput, numberInputInnerSchema } from './common/number-input';
 
 export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
 export type { BusinessLine } from './common/business-line';

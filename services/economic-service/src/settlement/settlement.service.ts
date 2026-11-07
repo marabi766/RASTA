@@ -241,10 +241,15 @@ export class SettlementService {
     // authorised rows in PENDING_SETTLEMENT (D-083; #623 round 1, F1). Read
     // under the row lock, before any journal or hold release; the database
     // refuses the same (`trg_wallet_hold_release_settlement_authority`).
-    assertSettlementReady(transactionId, {
-      settlementAuthorised: transaction.settlementAuthorised,
-      fundsHeld: transaction.fundsHeld || hold !== null,
-    });
+    assertSettlementReady(
+      transactionId,
+      {
+        settlementAuthorised: transaction.settlementAuthorised,
+        fundsHeld: transaction.fundsHeld || hold !== null,
+        settlementBarred: transaction.settlementBarred,
+      },
+      transaction.sourceType,
+    );
 
     // With no escrow behind it — the maintenance obligation of ADR-032 — the
     // payer's spendable balance has to cover it now. Checked under the lock,
