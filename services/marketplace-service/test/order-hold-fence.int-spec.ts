@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { withUtcSession } from '@rasta/config';
 import { runUnscoped } from '@rasta/nest-common';
+import { eligibilityClockWrite } from '@rasta/testing';
 import { Prisma, PrismaClient } from '../src/generated/prisma';
 import { asActor, cleanup, key, newPrisma, publishOffer, tenants, wire } from './helpers';
 
@@ -40,8 +41,6 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
         select: { holdNotAfter: true, holdSendClaims: true, holdSendsClosedAt: true },
       }),
     );
-  const write = (order: { id: string }, data: Prisma.OrderUpdateInput) =>
-    owner.order.update({ where: { id: order.id }, data });
   const fromNow = (ms: number) => new Date(Date.now() + ms).toISOString();
 
   describe('claimHoldSend', () => {
@@ -100,17 +99,18 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
       'an order %s claims nothing, and says not closed',
       async (status) => {
         const order = await place();
-        await write(
-          order,
-          status === 'FAILED'
-            ? { status, failureReason: 'refused' }
-            : {
-                status,
-                cancelledAt: new Date(),
-                cancellationReason: 'changed their mind',
-                cancellationCause: 'BUYER',
-              },
-        );
+        await owner.order.update({
+          where: { id: order.id },
+          data:
+            status === 'FAILED'
+              ? { status, failureReason: 'refused' }
+              : {
+                  status,
+                  cancelledAt: new Date(),
+                  cancellationReason: 'changed their mind',
+                  cancellationCause: 'BUYER',
+                },
+        });
         expect(await wiring.orders.claimHoldSend(order, fromNow(HOUR))).toEqual({ closed: false });
         expect((await row(order)).holdSendClaims).toBe(0);
       },
@@ -177,7 +177,7 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
 
     it('a send with no deadline: never, however old', async () => {
       const order = await place();
-      await write(order, { holdSendClaims: 1 });
+      await owner.order.update({ where: { id: order.id }, data: { holdSendClaims: 1 } });
       expect(await can(order)).toBe(false);
     });
 
@@ -208,18 +208,28 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
     it('a deadline moved or cleared is refused', async () => {
       const order = await place();
       await wiring.orders.claimHoldSend(order, fromNow(HOUR));
-      await expect(write(order, { holdNotAfter: fromNow(2 * HOUR) })).rejects.toThrow(
-        /only moves forward/,
-      );
-      await expect(write(order, { holdNotAfter: null })).rejects.toThrow(/only moves forward/);
+      await expect(
+        eligibilityClockWrite(
+          owner,
+        )`UPDATE "order" SET hold_not_after = now() + interval '2 hours' WHERE id = ${order.id}`,
+      ).rejects.toThrow(/only moves forward/);
+      await expect(
+        eligibilityClockWrite(
+          owner,
+        )`UPDATE "order" SET hold_not_after = NULL WHERE id = ${order.id}`,
+      ).rejects.toThrow(/only moves forward/);
     });
 
     it('closed sends reopened, or a count lowered, is refused', async () => {
       const order = await place();
       await wiring.orders.claimHoldSend(order, fromNow(HOUR));
       await wiring.orders.closeHoldSendsOnRefusal(order);
-      await expect(write(order, { holdSendsClosedAt: null })).rejects.toThrow(/only moves forward/);
-      await expect(write(order, { holdSendClaims: 0 })).rejects.toThrow(/only moves forward/);
+      await expect(
+        owner.order.update({ where: { id: order.id }, data: { holdSendsClosedAt: null } }),
+      ).rejects.toThrow(/only moves forward/);
+      await expect(
+        owner.order.update({ where: { id: order.id }, data: { holdSendClaims: 0 } }),
+      ).rejects.toThrow(/only moves forward/);
     });
   });
 
@@ -254,7 +264,7 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
             await tx.$executeRawUnsafe(
               `ALTER TABLE "order" DISABLE TRIGGER "trg_order_hold_fence_only_forward"`,
             );
-            await tx.$executeRawUnsafe(`UPDATE "order" SET hold_not_after = NULL`);
+            await eligibilityClockWrite(tx)`UPDATE "order" SET hold_not_after = NULL`;
             await tx.$executeRawUnsafe(
               `ALTER TABLE "order" ENABLE TRIGGER "trg_order_hold_fence_only_forward"`,
             );
@@ -270,17 +280,19 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
     const apply = async (tx: Prisma.TransactionClient, name: 'migration' | 'down') => {
       for (const statement of script(name)) await tx.$executeRawUnsafe(statement);
     };
-    const fence = (tx: Prisma.TransactionClient, id: string, status: string, deadline: string) =>
-      tx.$executeRawUnsafe(
-        `UPDATE "order" SET status = '${status}'::"OrderStatus", failure_reason = 'refused', hold_not_after = '${deadline}', hold_send_claims = 1 WHERE id = '${id}'`,
-      );
+    /** By the database's clock, as `down.sql` judges it: `age` is how far the deadline lies ahead. */
+    const fence = (tx: Prisma.TransactionClient, id: string, status: string, age: string) =>
+      eligibilityClockWrite(tx)`UPDATE "order"
+        SET status = ${status}::"OrderStatus", failure_reason = 'refused',
+            hold_not_after = now() + ${age}::interval, hold_send_claims = 1
+        WHERE id = ${id}`;
 
     it.each(['PENDING', 'CANCELLING'])(
       'down refuses to forget the deadline of an order %s',
       async (status) => {
         const order = await place();
         await undone(async (tx) => {
-          await fence(tx, order.id, status, fromNow(HOUR));
+          await fence(tx, order.id, status, '1 hour');
           await expect(apply(tx, 'down')).rejects.toThrow(/deadline still in use/);
         });
       },
@@ -289,7 +301,7 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
     it('down refuses even past the deadline, while the order has not ended', async () => {
       const order = await place();
       await undone(async (tx) => {
-        await fence(tx, order.id, 'PENDING', fromNow(-48 * HOUR));
+        await fence(tx, order.id, 'PENDING', '-48 hours');
         await expect(apply(tx, 'down')).rejects.toThrow(/deadline still in use/);
       });
     });
@@ -297,7 +309,7 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
     it('down refuses on a closed order a late hold can still reach', async () => {
       const order = await place();
       await undone(async (tx) => {
-        await fence(tx, order.id, 'FAILED', fromNow(-HOUR / 2));
+        await fence(tx, order.id, 'FAILED', '-30 minutes');
         await expect(apply(tx, 'down')).rejects.toThrow(/deadline still in use/);
       });
     });
@@ -306,7 +318,7 @@ describe('the hold fence on the order row (PostgreSQL)', () => {
       const ended = await place();
       const open = await place();
       await undone(async (tx) => {
-        await fence(tx, ended.id, 'FAILED', fromNow(-48 * HOUR));
+        await fence(tx, ended.id, 'FAILED', '-48 hours');
         await apply(tx, 'down');
         const gone = await tx.$queryRawUnsafe<unknown[]>(
           `SELECT 1 FROM information_schema.columns WHERE table_name = 'order' AND column_name LIKE 'hold_%'`,
