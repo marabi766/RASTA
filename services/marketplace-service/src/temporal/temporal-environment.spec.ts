@@ -18,7 +18,7 @@ import type { OrderActivities } from './activities';
  * deadline it hung the spec past its timeout in CI (#935, run 42391595495).
  */
 
-jest.setTimeout(240_000);
+jest.setTimeout(180_000);
 
 const grpcError = (code: number) =>
   Object.assign(new Error(`${code} grpc`), { code, details: 'grpc', metadata: {} });
@@ -99,7 +99,8 @@ describe('a query through the Temporal test environment', () => {
     let workflowBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
     beforeAll(async () => {
       workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
-      env = await createTemporalTestEnvironment();
+      // A 5 s attempt: the case waits one out on purpose.
+      env = await createTemporalTestEnvironment({ queryAttemptMs: 5_000 });
     }, 300_000);
     afterAll(async () => {
       await env?.teardown();
@@ -209,14 +210,14 @@ describe('a query through the Temporal test environment', () => {
           runs.add((await latest().describe()).runId);
         }
         await atRest();
-        // One attempt (30 s) answers a query the rollover dropped; the 60 s bound sits
+        // One attempt (5 s here) answers a query the rollover dropped; the 30 s bound sits
         // below the ~80 s at which the server's keepalive GOAWAY would free an unbounded
         // one, so only the interceptor can make it.
         let timer: NodeJS.Timeout | undefined;
         const phases = await Promise.race([
           Promise.all(queries),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('a query was never answered')), 60_000);
+            timer = setTimeout(() => reject(new Error('a query was never answered')), 30_000);
           }),
         ]).finally(() => clearTimeout(timer));
         await latest().terminate('test finished');

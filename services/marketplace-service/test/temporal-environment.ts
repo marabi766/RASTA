@@ -35,7 +35,10 @@ export const QUERY_ATTEMPTS = 3;
  * as it came, never asked again. So is any other failure (an unregistered query, a
  * missing workflow), and a saga that answers no attempt fails the test, named.
  */
-export function boundedQueries(connection: () => Connection): WorkflowClientInterceptor {
+export function boundedQueries(
+  connection: () => Connection,
+  attemptMs: number = QUERY_ATTEMPT_MS,
+): WorkflowClientInterceptor {
   return {
     async query(input, next) {
       const conn = connection();
@@ -43,7 +46,7 @@ export function boundedQueries(connection: () => Connection): WorkflowClientInte
       const callerDeadline =
         caller?.deadline === undefined ? Infinity : new Date(caller.deadline).getTime();
       for (let attempt = 1; ; attempt += 1) {
-        const deadline = Math.min(callerDeadline, Date.now() + QUERY_ATTEMPT_MS);
+        const deadline = Math.min(callerDeadline, Date.now() + attemptMs);
         try {
           return await conn.withDeadline(deadline, () => next(input));
         } catch (error) {
@@ -51,7 +54,7 @@ export function boundedQueries(connection: () => Connection): WorkflowClientInte
           if (!isGrpcDeadlineError(error) && !isGrpcCancelledError(error)) throw error;
           if (attempt >= QUERY_ATTEMPTS) {
             throw new Error(
-              `query ${input.queryType} on ${input.workflowExecution.workflowId} answered none of ${QUERY_ATTEMPTS} attempts of ${QUERY_ATTEMPT_MS} ms`,
+              `query ${input.queryType} on ${input.workflowExecution.workflowId} answered none of ${QUERY_ATTEMPTS} attempts of ${attemptMs} ms`,
               { cause: error },
             );
           }
@@ -61,7 +64,13 @@ export function boundedQueries(connection: () => Connection): WorkflowClientInte
   };
 }
 
-export async function createTemporalTestEnvironment(): Promise<TestWorkflowEnvironment> {
+/**
+ * `queryAttemptMs` only for the spec that proves the bound: it waits out one attempt on
+ * purpose, and the marketplace coverage gate's step budget is tight.
+ */
+export async function createTemporalTestEnvironment(
+  options: { queryAttemptMs?: number } = {},
+): Promise<TestWorkflowEnvironment> {
   const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
   if (process.env.CI && !downloadDir) {
     throw new Error('Temporal specs in CI require TEMPORAL_TEST_SERVER_DIR');
@@ -74,7 +83,7 @@ export async function createTemporalTestEnvironment(): Promise<TestWorkflowEnvir
       interceptors: {
         workflow: [
           // Read at the first query, once `env` is set.
-          boundedQueries(() => env.connection),
+          boundedQueries(() => env.connection, options.queryAttemptMs),
         ],
       },
     },
