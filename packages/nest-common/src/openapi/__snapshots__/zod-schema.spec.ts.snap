@@ -93,7 +93,6 @@ exports[`toJsonSchema publishes every construct the services use 1`] = `
     "text": {
       "maxLength": 10,
       "minLength": 1,
-      "pattern": "^[a-z]+$",
       "type": "string",
     },
     "transformed": {

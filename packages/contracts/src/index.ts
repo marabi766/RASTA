@@ -30,6 +30,8 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
+export { patternRefinement, publishedRefinementPattern } from './common/pattern-refinement';
+
 export { withMaxKeys } from './common/bounds';
 export {
   TRANSACTION_TEXT_BOUNDS,
