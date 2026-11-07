@@ -243,6 +243,8 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         confirmSagaCall: async () => undefined,
       } as unknown as OrderService,
       economic: {
+        // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+        requiresOrderHoldDeadline: async () => true,
         createObligation: failing,
         authoriseSettlement: failing,
         refund: failing,
@@ -782,6 +784,8 @@ describe('every guard of an economic step reads the order after the step looked'
         whileOrderHeld: (_id: string, fn: (held: unknown) => unknown) => fn({ ...row }),
       } as unknown as OrderService,
       economic: {
+        // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+        requiresOrderHoldDeadline: async () => true,
         createObligation: send,
         authoriseSettlement: send,
         readObligation: async () => ({ status: 'HELD', heldProven: true }),
@@ -878,6 +882,8 @@ describe('the deadline of a hold (D-132)', () => {
         closeHoldSendsOnRefusal: async () => true,
       } as unknown as OrderService,
       economic: {
+        // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+        requiresOrderHoldDeadline: async () => true,
         createObligation: send,
         readObligation: async () => ({ status: 'HELD', heldProven: true }),
       } as unknown as EconomicClient,

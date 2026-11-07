@@ -111,6 +111,8 @@ class EconomicLedger {
 
   client(): EconomicClient {
     return {
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       createObligation: async () => {
         this.effects.push('hold');
         return { id: this.transactionId };

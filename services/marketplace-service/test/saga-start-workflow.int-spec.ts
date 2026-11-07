@@ -38,7 +38,13 @@ it('a cancelled order recovered after missed start completes once without creati
   );
   const createObligation = jest.fn();
   const findObligations = jest.fn(async () => []);
-  const economic = { createObligation, findObligations } as unknown as EconomicClient;
+  // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+  const requiresOrderHoldDeadline = async () => true;
+  const economic = {
+    createObligation,
+    findObligations,
+    requiresOrderHoldDeadline,
+  } as unknown as EconomicClient;
   try {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asActor({ organizationId: org.buyer }, () =>
