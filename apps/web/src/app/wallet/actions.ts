@@ -17,10 +17,20 @@ import {
 
 import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import { restoreTopUp, topUpScope, topUpSnapshot } from '@/server/top-up-request';
-import { reserveUnresolved, requestDigest, settleUnresolved } from '@/server/unresolved-request';
+import {
+  releaseUnresolved,
+  reserveUnresolved,
+  requestDigest,
+  settleUnresolved,
+} from '@/server/unresolved-request';
 import { isProvenRefusal } from '@/server/write';
 
-import type { TopUpFormState } from './form-state';
+import {
+  CONFIRM_DUPLICATE_FIELD,
+  CONFIRM_DUPLICATE_VALUE,
+  RELEASE_FIELD,
+  type TopUpFormState,
+} from './form-state';
 
 /**
  * `/wallet`'s one server action.
@@ -138,4 +148,14 @@ async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpForm
       // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
+}
+
+/** Explicit reconciliation only; the signed record id prevents a stale tab releasing a newer hold. */
+export async function releaseUnresolvedTopUp(walletId: string, form: FormData): Promise<void> {
+  const session = await currentSession();
+  if (!session) redirect('/login?returnTo=/wallet');
+  if (!verifyCsrf(session, form).ok) redirect('/wallet');
+  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/wallet');
+  await releaseUnresolved(session, topUpScope(walletId), form.get(RELEASE_FIELD));
+  redirect('/wallet');
 }

@@ -6,7 +6,12 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import WalletPage from './page';
-import { IDLE_TOP_UP_FORM } from './form-state';
+import {
+  CONFIRM_DUPLICATE_FIELD,
+  CONFIRM_DUPLICATE_VALUE,
+  RELEASE_FIELD,
+  IDLE_TOP_UP_FORM,
+} from './form-state';
 import { restoreTopUp } from '@/server/top-up-request';
 import { useUnresolvedStore } from '@/server/unresolved-request';
 import {
@@ -60,7 +65,7 @@ jest.mock('@/server/wallet', () => {
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const actions = require('./actions') as typeof import('./actions');
-const { submitTopUp } = actions;
+const { submitTopUp, releaseUnresolvedTopUp } = actions;
 
 const SESSION = {
   subject: 'user-1',
@@ -253,6 +258,7 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
       const reloaded = await restoreTopUp(SESSION, WALLET_ID);
       expect(reloaded).toEqual({
         kind: 'HELD',
+        releaseToken: expect.any(String),
         submissionId: submission,
         values: { amountMinor: '1000' },
       });
@@ -382,6 +388,7 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     expect(await restoreTopUp(SESSION, WALLET_ID)).toEqual({
       kind: 'NOT_CHECKED',
       submissionId: '',
+      releaseToken: expect.any(String),
     });
     expect(
       await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '2000' })),
@@ -411,4 +418,47 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     ).toMatchObject({ kind: 'NOT_CHECKED' });
     expect(topUpWallet).not.toHaveBeenCalled();
   });
+});
+
+// prettier-ignore
+describe('F1: explicit reconciliation for every held top-up', () => {
+  it.each(['UNRESOLVED', 'AGED', 'LOST_CONFIRMATION', 'FORMER', 'CORRUPT'])(
+    'offers and releases %s only after duplicate-risk confirmation', async (cause) => {
+      let now = Date.now();
+      const store = memoryUnresolvedStore(() => now);
+      useUnresolvedStore(store);
+      if (cause === 'LOST_CONFIRMATION' || cause === 'AGED')
+        jest.spyOn(store, 'settle').mockRejectedValueOnce(new UnresolvedStoreUnavailable());
+      topUpWallet.mockResolvedValue({
+        kind: cause === 'LOST_CONFIRMATION' ? 'CREATED' : 'UNKNOWN_OUTCOME', correlationId: 'LOST',
+      });
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })).catch((error) => {
+        if (!String(error).includes('NEXT_REDIRECT')) throw error;
+      });
+      if (cause === 'AGED' || cause === 'LOST_CONFIRMATION') now += 3600000;
+      if (cause === 'CORRUPT') for (const [key, raw] of store.records)
+        store.records.set(key, JSON.stringify({ ...JSON.parse(raw), ref: 'unopenable' }));
+      const session = cause === 'FORMER' ? {
+        ...SESSION, organizationId: 'ORG_OTHER', accessToken: actingAccessToken('ORG_OTHER'),
+        formerOrganizationId: SESSION.organizationId,
+      } : SESSION;
+      currentSession.mockResolvedValue(session);
+      const held = await restoreTopUp(session, WALLET_ID);
+      expect(held.kind).toBe(cause === 'FORMER' || cause === 'CORRUPT' ? 'NOT_CHECKED' : 'HELD');
+      if (held.kind !== 'HELD' && held.kind !== 'NOT_CHECKED') throw new Error('missing hold');
+      expect(held.releaseToken).toEqual(expect.any(String));
+      const form = formData({ [RELEASE_FIELD]: held.releaseToken! });
+      const release = () => expect(releaseUnresolvedTopUp(WALLET_ID, form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
+      await release();
+      expect((await restoreTopUp(session, WALLET_ID)).kind).toBe(held.kind);
+      form.set(CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE);
+      await expect(releaseUnresolvedTopUp('WLT_OTHER', form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
+      await release();
+      if (cause === 'AGED' || cause === 'LOST_CONFIRMATION') {
+        expect((await restoreTopUp(session, WALLET_ID)).kind).toBe('HELD');
+        await release();
+      }
+      expect((await restoreTopUp(session, WALLET_ID)).kind).toBe('IDLE');
+    },
+  );
 });

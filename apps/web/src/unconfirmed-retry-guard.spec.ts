@@ -17,6 +17,42 @@
  * static and runtime export by name, including reconciliation exemptions.
  */
 
+import type { UnresolvedAttempt, UnresolvedRequest } from '@/server/unresolved-request';
+import type { SupplierBaseline } from '@/server/supplier-commands';
+import { mintCreateStamp } from '@/server/project-create-replay';
+import { mintDemandStamp } from '@/server/demand-replay';
+import { mintSubmissionId } from '@/server/submission';
+import { topUpSnapshot } from '@/server/top-up-request';
+import { actingAccessToken } from '@/test/session-token';
+import type { WebSession } from '@/server/session';
+
+jest.mock('@/server/unresolved-request', () => ({
+  ...jest.requireActual('@/server/unresolved-request'),
+}));
+jest.mock('@/server/project-commands', () => ({
+  ...jest.requireActual('@/server/project-commands'),
+}));
+jest.mock('@/server/demand-commands', () => ({
+  ...jest.requireActual('@/server/demand-commands'),
+}));
+jest.mock('@/server/supplier-commands', () => ({
+  ...jest.requireActual('@/server/supplier-commands'),
+}));
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+const pending =
+  require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
+const projects = require('@/server/project-commands') as typeof import('@/server/project-commands');
+const demands = require('@/server/demand-commands') as typeof import('@/server/demand-commands');
+const suppliers =
+  require('@/server/supplier-commands') as typeof import('@/server/supplier-commands');
+/* eslint-enable @typescript-eslint/no-require-imports */
+let storeSession: WebSession | null = null;
+jest.mock('@/server/current-session', () => ({
+  currentSession: async () => storeSession,
+  missingSessionReason: async () => 'NO_SESSION',
+}));
+
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -134,7 +170,9 @@ const SERVER_STORE: Readonly<
   },
   'apps/web/src/app/wallet/actions.ts': {
     writes: ['submitTopUp'],
-    exemptions: {},
+    exemptions: {
+      releaseUnresolvedTopUp: 'Explicit reconciliation; compare-and-delete, no domain write.',
+    },
     tests: 'app/wallet/actions.spec.ts',
   },
 };
@@ -145,6 +183,8 @@ function checkStoreExports(module: string, names: readonly string[]): void {
   const accounted = [...entry.writes, ...Object.keys(entry.exemptions)];
   expect(new Set(accounted).size).toBe(accounted.length);
   expect([...names].sort()).toEqual([...accounted].sort());
+  for (const write of entry.writes)
+    expect(Object.hasOwn(STORE_BEHAVIOURS[module] ?? {}, write)).toBe(true);
   for (const reason of Object.values(entry.exemptions)) expect(reason.trim()).not.toBe('');
 }
 
@@ -178,7 +218,7 @@ it('checks every SERVER_STORE module and every static/runtime export by name', (
     );
     for (const entry of CASES.filter((entry) => entry.module === module))
       expect(typeof entry.action).toBe('function');
-    // These suites exercise the store-backed dispatch/refusal paths; this guard checks inventory.
+    // Dedicated suites cover details; the matrix below also executes every named write.
     expect(existsSync(join(__dirname, SERVER_STORE[module].tests))).toBe(true);
   }
 });
@@ -190,12 +230,12 @@ it.each([
   'const x = async () => {}; export { x as performWrite };',
   'export * from "./other";',
 ])('refuses an unaccounted SERVER_STORE export: %s', (addition) => {
-  const module = 'apps/web/src/app/wallet/actions.ts';
+  const actionModule = 'apps/web/src/app/wallet/actions.ts';
   const names = exportedNames(
     `'use server'; export async function submitTopUp() {} ${addition}`,
     'actions.ts',
   );
-  expect(() => checkStoreExports(module, names)).toThrow();
+  expect(() => checkStoreExports(actionModule, names)).toThrow();
 });
 
 /**
@@ -254,5 +294,107 @@ describe.each(OWN_PREVIOUS)('$label (its own previous-state rule)', ({ action })
     expect(await retry(action, UNCONFIRMED)).toEqual(
       expect.objectContaining({ kind: 'UNCONFIRMED' }),
     );
+  });
+});
+
+// Explicit fixtures are independent of writes: a newly classified write has no behaviour exemption.
+type StoreMode = 'REPLAY' | 'RECONCILE' | 'PREVIOUS';
+// prettier-ignore
+const STORE_BEHAVIOURS: Readonly<Record<string, Readonly<Record<string, StoreMode>>>> = {
+  'apps/web/src/app/projects/actions.ts': { submitCreateProject: 'REPLAY' },
+  'apps/web/src/app/procurement/demands/demand-actions.ts': { submitDemandRequest: 'REPLAY' },
+  'apps/web/src/app/wallet/actions.ts': { submitTopUp: 'PREVIOUS' },
+  'apps/web/src/app/suppliers/supplier-actions.ts': {
+    submitRegisterSupplier: 'RECONCILE', submitQualificationRequest: 'RECONCILE',
+    submitApproveQualification: 'RECONCILE', submitRejectQualification: 'RECONCILE',
+    submitSuspendSupplier: 'RECONCILE', submitReinstateSupplier: 'RECONCILE',
+  },
+};
+const STORE_WRITES = CASES.filter(({ module, exported }) =>
+  SERVER_STORE[module]?.writes.includes(exported),
+);
+
+// prettier-ignore
+it.each(['submitEscape', 'toString', 'submitTopUp'])(
+  'FU-191: refuses a new writes entry without its own fixture: %s', (write) => {
+    const actionModule = 'apps/web/src/app/projects/actions.ts';
+    const entry = SERVER_STORE[actionModule];
+    const names = [...entry.writes, ...Object.keys(entry.exemptions), write];
+    (entry.writes as string[]).push(write);
+    try { expect(() => checkStoreExports(actionModule, names)).toThrow(); }
+    finally { (entry.writes as string[]).pop(); }
+  },
+);
+
+// Keep the gate/record fixtures together so every row's two behaviours are visible in one place.
+// prettier-ignore
+describe.each(STORE_WRITES)('$label (SERVER_STORE behaviour)', ({ action, exported, module }) => {
+  afterEach(() => { storeSession = null; jest.restoreAllMocks(); });
+  it.each(['UNCONFIRMED', 'IN_PROGRESS'])('retry of %s stays UNCONFIRMED; a held record sends nothing', async (kind) => {
+    const mode = STORE_BEHAVIOURS[module]?.[exported];
+    expect(mode).toBeDefined();
+    const session: WebSession = {
+      subject: 'guard-user', username: 'guard', organizationId: 'ORG_GUARD',
+      accessToken: actingAccessToken('ORG_GUARD'), accessTokenExpiresAt: 2000000000,
+      refreshToken: 'test-refresh', csrfToken: 'guard-csrf', issuedAt: 1900000000,
+    };
+    Object.assign(process.env, {
+      API_GATEWAY_URL: 'http://gateway.test:3000', OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+      OIDC_CLIENT_ID: 'rasta-web', WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+      WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+    });
+    storeSession = session;
+    const submissionId = mintSubmissionId(session);
+    const form = new FormData();
+    form.set('csrf', session.csrfToken);
+    form.set('submission', submissionId);
+    for (const [key, value] of new URLSearchParams(
+      'title=test&operationType=test&locationDescription=test&scopeOfWork=test&estimatedCost=1000&productId=PRD_01J00000000000000000000000&quantity=1&amountMinor=1000',
+    )) form.set(key, value);
+    form.set('replay', exported === 'submitCreateProject'
+      ? mintCreateStamp(session, submissionId) : mintDemandStamp(session, submissionId));
+    jest.spyOn(suppliers, 'openSupplierBaseline').mockImplementation((_session, _token, command) => ({
+      command, supplierId: 'ID_1',
+      qualificationId: /^(APPROVE|REJECT)/.test(command) ? 'QUA_1' : null,
+      suspensionId: command === 'REINSTATE' ? 'SSP_1' : null,
+    } as SupplierBaseline));
+    const record: UnresolvedRequest = {
+      id: 'a'.repeat(32), key: submissionId, digest: 'b'.repeat(64),
+      deadline: null, inFlight: false, ref: null,
+    };
+    const read = jest.spyOn(pending, 'readUnresolved').mockResolvedValue({
+      kind: 'PENDING', request: record, now: Date.now(),
+    });
+    const reserve = jest.spyOn(pending, 'reserveUnresolved').mockResolvedValue({
+      kind: 'RESERVED', retry: true, now: Date.now(), deadline: Date.now() + 60000,
+      attempt: {} as UnresolvedAttempt,
+    });
+    jest.spyOn(pending, 'settleUnresolved').mockResolvedValue(true);
+    const refusal = {
+      kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'COR-RETRY',
+    } as const;
+    const projectSend = jest.spyOn(projects, 'createProject').mockResolvedValue(refusal);
+    const demandSend = jest.spyOn(demands, 'submitDemand').mockResolvedValue(refusal);
+    const network = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unexpected dispatch'));
+    const ids = Array.from({ length: Math.max(0, action.length - 2) }, (_, i) => `ID_${i + 1}`);
+    const previous = { kind, submissionId, correlationId: 'COR-FIRST' };
+    // Store-native actions use the persisted retry marker/record; wallet also preserves previous state.
+    if (mode === 'PREVIOUS') storeSession = null;
+    expect(await action(...ids, previous, form)).toMatchObject({
+      kind: 'UNCONFIRMED', ...(mode === 'PREVIOUS' ? { correlationId: 'COR-FIRST' } : {}),
+    });
+    storeSession = session;
+    projectSend.mockClear(); demandSend.mockClear(); network.mockClear();
+    reserve.mockResolvedValue({ kind: 'HELD', reason: 'OTHER_REQUEST', request: record });
+    read.mockResolvedValue({
+      kind: 'PENDING', now: Date.now(),
+      request: { ...record, ref: topUpSnapshot(session, 'ID_1', submissionId, '1000') },
+    });
+    expect(await action(...ids, { kind: 'IDLE' }, form)).toMatchObject({
+      kind: mode === 'RECONCILE' ? 'UNCONFIRMED' : 'HELD',
+    });
+    expect(projectSend).not.toHaveBeenCalled();
+    expect(demandSend).not.toHaveBeenCalled();
+    expect(network).not.toHaveBeenCalled();
   });
 });

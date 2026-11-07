@@ -9,6 +9,7 @@ import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_TOP_UP_FORM } from '@/lib/wallet-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
+import { UnresolvedTopUpNotice } from './UnresolvedTopUpNotice';
 import { submitTopUp } from './actions';
 import { IDLE_TOP_UP_FORM, type TopUpFormState } from './form-state';
 
@@ -43,7 +44,7 @@ export function TopUpForm({
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
   const currentSubmissionId = state.kind === 'INVALID' || held ? state.submissionId : submissionId;
 
-  return (
+  const form = (
     <form action={action} className="flex flex-col gap-4">
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId ?? ''} />
@@ -71,6 +72,18 @@ export function TopUpForm({
         </Button>
       </div>
     </form>
+  );
+  return (
+    <>
+      {(state.kind === 'HELD' || state.kind === 'NOT_CHECKED') && state.releaseToken ? (
+        <UnresolvedTopUpNotice
+          walletId={walletId}
+          csrfToken={csrfToken}
+          releaseToken={state.releaseToken}
+        />
+      ) : null}
+      {form}
+    </>
   );
 }
 
