@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
-import type { Connection, WorkflowQueryInput } from '@temporalio/client';
+import type { CallContext, Connection, WorkflowQueryInput } from '@temporalio/client';
 import {
   boundedQueries,
   createTemporalTestEnvironment,
@@ -17,15 +18,23 @@ import type { OrderActivities } from './activities';
  * deadline it hung the spec past its timeout in CI (#935, run 42391595495).
  */
 
-jest.setTimeout(180_000);
+jest.setTimeout(240_000);
 
 const grpcError = (code: number) =>
   Object.assign(new Error(`${code} grpc`), { code, details: 'grpc', metadata: {} });
 const INPUT = {} as WorkflowQueryInput;
-const connection = { withDeadline: (_: number, fn: () => Promise<unknown>) => fn() } as Connection;
+/** The SDK's call context, as `Connection` keeps it: a deadline replaces, the rest stays. */
+const callContextStorage = new AsyncLocalStorage<CallContext>();
+const connection = {
+  callContextStorage,
+  withDeadline: (deadline: number | Date, fn: () => Promise<unknown>) =>
+    callContextStorage.run({ ...callContextStorage.getStore(), deadline }, fn),
+} as unknown as Connection;
+const asCaller = <T>(context: CallContext, fn: () => Promise<T>) =>
+  callContextStorage.run(context, fn);
 
 describe('a query through the Temporal test environment', () => {
-  describe('asks again only on a deadline or a cancelled call', () => {
+  describe('asks again only on a deadline or a cancelled call, never past the caller', () => {
     const query = boundedQueries(() => connection).query!;
 
     it('answers on a later attempt after a deadline and a cancelled call', async () => {
@@ -51,6 +60,37 @@ describe('a query through the Temporal test environment', () => {
         `query status on W answered none of ${QUERY_ATTEMPTS} attempts`,
       );
       expect(next).toHaveBeenCalledTimes(QUERY_ATTEMPTS);
+    });
+
+    it("throws the caller's abort as it came, never asked again", async () => {
+      const abort = new AbortController();
+      abort.abort();
+      const next = jest.fn().mockRejectedValue(grpcError(1));
+      await expect(
+        asCaller({ abortSignal: abort.signal }, () => query(INPUT, next)),
+      ).rejects.toThrow('1 grpc');
+      expect(next).toHaveBeenCalledTimes(1);
+    });
+
+    it("throws past the caller's deadline as it came, never asked again", async () => {
+      const next = jest.fn().mockRejectedValue(grpcError(4));
+      await expect(
+        asCaller({ deadline: Date.now() - 1 }, () => query(INPUT, next)),
+      ).rejects.toThrow('4 grpc');
+      expect(next).toHaveBeenCalledTimes(1);
+    });
+
+    it("never gives an attempt longer than the caller's deadline", async () => {
+      const callerDeadline = Date.now() + 1_000;
+      let seen: number | Date | undefined;
+      const next = jest.fn(async () => {
+        seen = callContextStorage.getStore()?.deadline;
+        return 'answer';
+      });
+      await asCaller({ deadline: callerDeadline }, () => query(INPUT, next));
+      expect(seen).toBe(callerDeadline);
+      await query(INPUT, next);
+      expect(Number(seen)).toBeGreaterThan(callerDeadline);
     });
   });
 
@@ -169,7 +209,9 @@ describe('a query through the Temporal test environment', () => {
           runs.add((await latest().describe()).runId);
         }
         await atRest();
-        // Never more than the bounded attempts: an unanswered query fails here, named.
+        // One attempt (30 s) answers a query the rollover dropped; the 60 s bound sits
+        // below the ~80 s at which the server's keepalive GOAWAY would free an unbounded
+        // one, so only the interceptor can make it.
         let timer: NodeJS.Timeout | undefined;
         const phases = await Promise.race([
           Promise.all(queries),

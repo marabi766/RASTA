@@ -7,10 +7,13 @@ import {
 } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 
-/** One query attempt's deadline: an answer slower than this only costs another attempt. */
-export const QUERY_ATTEMPT_MS = 5_000;
-/** Attempts before a query fails the test: 30 s, a quarter of a spec's timeout. */
-export const QUERY_ATTEMPTS = 6;
+/**
+ * One query attempt's deadline. A live worker answers well inside it even replaying a
+ * long history cacheless under coverage; only a query no task will answer reaches it.
+ */
+export const QUERY_ATTEMPT_MS = 30_000;
+/** Attempts before a query fails the test: 90 s, inside a spec's 120 s timeout. */
+export const QUERY_ATTEMPTS = 3;
 
 /**
  * Every query through the environment's client has a deadline, and a query the run
@@ -24,18 +27,27 @@ export const QUERY_ATTEMPTS = 6;
  * waiting at teardown, its gRPC retry then fired into the next spec file of the same
  * in-band run ("Channel has been shut down"). Asked again, it reaches the new run
  * (`getHandle(id)` follows the chain); a query writes nothing, so asking twice changes
- * nothing. No spec aborts a query through this client, so a `CANCELLED` here is the
- * server's. Any other failure (an unregistered query, a missing workflow) is thrown as
- * it came, and a saga that answers no attempt fails the test, named, well before the
- * test's timeout.
+ * nothing.
+ *
+ * The caller's own bound stays the caller's (`test/worker-deadline.ts`, FU-192): an
+ * attempt never outlives the caller's deadline, and once that deadline has passed or
+ * the caller's abort signal fired, the failure is the caller's answer and is thrown
+ * as it came, never asked again. So is any other failure (an unregistered query, a
+ * missing workflow), and a saga that answers no attempt fails the test, named.
  */
 export function boundedQueries(connection: () => Connection): WorkflowClientInterceptor {
   return {
     async query(input, next) {
+      const conn = connection();
+      const caller = conn.callContextStorage.getStore();
+      const callerDeadline =
+        caller?.deadline === undefined ? Infinity : new Date(caller.deadline).getTime();
       for (let attempt = 1; ; attempt += 1) {
+        const deadline = Math.min(callerDeadline, Date.now() + QUERY_ATTEMPT_MS);
         try {
-          return await connection().withDeadline(Date.now() + QUERY_ATTEMPT_MS, () => next(input));
+          return await conn.withDeadline(deadline, () => next(input));
         } catch (error) {
+          if (caller?.abortSignal?.aborted || Date.now() >= callerDeadline) throw error;
           if (!isGrpcDeadlineError(error) && !isGrpcCancelledError(error)) throw error;
           if (attempt >= QUERY_ATTEMPTS) {
             throw new Error(
