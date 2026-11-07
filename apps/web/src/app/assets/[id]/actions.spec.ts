@@ -413,6 +413,7 @@ describe('what the service refuses', () => {
     expect(await submit(formData(VALID))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
   });
@@ -422,6 +423,7 @@ describe('what the service refuses', () => {
     expect(await submit(formData(VALID))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
   });
