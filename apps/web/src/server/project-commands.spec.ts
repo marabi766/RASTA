@@ -458,17 +458,15 @@ describe('what is sent to the gateway', () => {
     expect((await call.run(gateway(200, { unexpected: true }).impl)).kind).toBe('UNKNOWN_OUTCOME');
   });
 
-  it.each(CALLS)('$name: a 504 is unconfirmed, a 503 and a 500 are unavailable', async (call) => {
-    expect((await call.run(gateway(504, problem('UPSTREAM_TIMEOUT', 'slow')).impl)).kind).toBe(
-      'UNKNOWN_OUTCOME',
-    );
-    expect(
-      await call.run(gateway(503, problem('UPSTREAM_UNAVAILABLE', 'down')).impl),
-    ).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
-    expect(await call.run(gateway(500, problem('INTERNAL_ERROR', 'boom')).impl)).toMatchObject({
-      kind: 'UNAVAILABLE',
-      status: 500,
-    });
+  it.each(CALLS)('$name: a 504, a 503 and a 500 are all unconfirmed (FU-189)', async (call) => {
+    // Each may come after the commit: none is proof that nothing was written.
+    for (const answer of [
+      gateway(504, problem('UPSTREAM_TIMEOUT', 'slow')),
+      gateway(503, problem('UPSTREAM_UNAVAILABLE', 'down')),
+      gateway(500, problem('INTERNAL_ERROR', 'boom')),
+    ]) {
+      expect((await call.run(answer.impl)).kind).toBe('UNKNOWN_OUTCOME');
+    }
   });
 
   it.each(CALLS)('$name: a dropped connection is unconfirmed', async (call) => {

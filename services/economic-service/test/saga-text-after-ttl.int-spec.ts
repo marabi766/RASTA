@@ -4,7 +4,7 @@ import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { SAGA_DISPUTE_RECOVERY } from '@rasta/testing';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * A dispute, and its resolution, that the order saga sent with CRLF or CR line
@@ -135,6 +135,7 @@ describe('saga text sent with CRLF, recovered after its stored answer expired by
         sourceType: 'ORDER',
         sourceReference: order,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     const transactionId = created.body.id as string;

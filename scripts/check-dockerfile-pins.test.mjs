@@ -1930,10 +1930,20 @@ test('FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path must be read-only be
     `( readonly ROOT=/a )\n${run}`,
     `ROOT=/a\necho hi\nreadonly ROOT\n${run}`,
     `export ROOT=/a\n${run}`,
+    // the declaration must run in this shell, by the builtin, in its plain form (FU-200 F4, first bullet)
+    `readonly ROOT=/a &\n${run}`,
+    `readonly ROOT=/a | cat\n${run}`,
+    `readonly() { :; }\nreadonly ROOT=/a\n${run}`,
+    `"readonly" ROOT=/a\n${run}`,
+    `ROOT=/a\nreadonly -f ROOT\n${run}`,
+    `ROOT=/a\ndeclare -nr ROOT\n${run}`,
+    // `export` is a function: ROOT was never assigned, and `readonly ROOT` would freeze the inherited value
+    `export() { :; }\nexport ROOT=/a\nreadonly ROOT\n${run}`,
   ])
     refusesWhy(body, frozen, policy, [lib]);
   acceptsShell(`readonly ROOT=/a\n${run}`, policy, [lib]);
-  acceptsShell(`declare -r ROOT=/a\n${run}`, policy, [lib]);
+  // task 365 F2: only the plain `readonly` builtin is a freeze this check can read (binding, value and attributes)
+  refusesWhy(`declare -r ROOT=/a\n${run}`, frozen, policy, [lib]);
   acceptsShell(`ROOT=/a\nreadonly ROOT\n${run}`, policy, [lib]);
   acceptsShell(`readonly ROOT=/a\nf() { ${run}; }\nf`, policy, [lib]);
   acceptsShell(`readonly ROOT=/a\nx="$(${run})"`, policy, [lib]);
@@ -2378,4 +2388,487 @@ test('FU-159 r3 F3: the producer counts only when its interpreter cannot be a fu
     `commands="$(sh infra/creds.sh tests)"\neval "$commands"`,
   ])
     evalAcceptedBoth(body);
+});
+
+// --- FU-196 + FU-202 (task 363): provenance is PROVEN, never read off the last visible assignment ---------------
+
+const IMGV = /assigned once, unconditionally/;
+const IMG = `IMG=${PINNED}`;
+const USE = 'docker run "$IMG" true';
+/** a workflow whose job `env` is `env` and whose one step runs `body` */
+const withJobEnv = (body, env) =>
+  workflowYaml(stringify({ jobs: { a: { 'runs-on': 'x', env, steps: [{ run: body }] } } }));
+
+test('FU-196: a variable named as an image is trusted only when it is assigned once and written nowhere else', () => {
+  const bad = 'alpine:latest';
+  for (const write of [
+    `if [ -n "$X" ]; then IMG=${bad}; fi`,
+    'read IMG',
+    'read -r IMG',
+    `for IMG in ${bad}; do :; done`,
+    `select IMG in ${bad}; do break; done`,
+    `IMG=${bad}`,
+    `IMG=${PINNED}`,
+    'IMG+=x',
+    `printf -v IMG %s ${bad}`,
+    'mapfile IMG <<<x',
+    'getopts a IMG -a',
+    '(( IMG=5 ))',
+    'let IMG=5',
+    `eval "IMG=${bad}"`,
+    'eval "$x"',
+    `export IMG=${bad}`,
+    `declare IMG=${bad}`,
+    'unset IMG',
+    `declare -n r=IMG; r=${bad}`,
+    `case "$X" in a) IMG=${bad};; esac`,
+    `f() { IMG=${bad}; }\nf`,
+    `( IMG=${bad} )`,
+    `[ -n "$X" ] && IMG=${bad}`,
+    `: "\${IMG:=${bad}}"`,
+    'IMG[0]=x',
+    'while read IMG; do :; done <<<x',
+    'source ./x.sh',
+    'read "$n"',
+    'printf -v "$n" x',
+    'export "$n"=x',
+    `: <<<"\${IMG:=${bad}}"`,
+    `: <<EOF\n\${IMG:=${bad}}\nEOF`,
+    `trap 'IMG=${bad}' EXIT`,
+    'n=1\n(( n < k ))',
+  ])
+    refusesWhy(`${IMG}\n${write}\n${USE}`, IMGV);
+  // a default does not make a written name the script's own
+  refusesWhy(`${IMG}\nread IMG\ndocker run "\${IMG:-${PINNED}}" true`, IMGV);
+  // and the chain: A is read where B is assigned
+  refusesWhy(`A=${PINNED}\nB=$A\nread A\ndocker run "$B" true`, IMGV);
+  refusesWhy(`A=${PINNED}\nB=$A\nB=x\ndocker run "$B" true`, IMGV);
+});
+
+test('FU-196: every docker verb that names an image reads it through the same proof', () => {
+  for (const verb of ['run', 'create', 'pull', 'container run', 'container create', 'image pull'])
+    refusesWhy(`${IMG}\nread IMG\ndocker ${verb} "$IMG" true`, IMGV);
+  refusesWhy(`${IMG}\nread IMG\ndocker run --rm --entrypoint sh "$IMG" -c true`, IMGV);
+  refusesWhy(`${IMG}\nread IMG\ndocker run -e A=1 --pull=always "$IMG"`, IMGV);
+});
+
+test('FU-196: ONE assignment is proof only where it certainly ran: top level, unconditional, in the shell that reads it', () => {
+  for (const body of [
+    `if [ -n "$X" ]; then\n  ${IMG}\nfi\n${USE}`,
+    `f() { ${IMG}; }\nf\n${USE}`,
+    `( ${IMG} )\n${USE}`,
+    `${IMG} &\n${USE}`,
+    `[ -n "$X" ] && ${IMG}\n${USE}`,
+    `[ -n "$X" ] || ${IMG}\n${USE}`,
+    `for i in 1 2; do\n  ${IMG}\ndone\n${USE}`,
+    `case "$X" in a) ${IMG};; esac\n${USE}`,
+    `${IMG} | cat\n${USE}`,
+    `${IMG} docker run "$IMG" true`,
+    `local ${IMG}\n${USE}`,
+    `"IMG"=${PINNED}\n${USE}`,
+    `IM""G=${PINNED}\n${USE}`,
+    // a function or alias named like the declarer consumes the words and assigns nothing
+    `export() { :; }\nexport ${IMG}\n${USE}`,
+    `declare() { :; }\ndeclare ${IMG}\n${USE}`,
+    `readonly() { :; }\nreadonly ${IMG}\n${USE}`,
+    `alias export=:\nexport ${IMG}\n${USE}`,
+    `"export" ${IMG}\n${USE}`,
+    `case "$X" in ${IMG}) :;; esac\n${USE}`,
+  ])
+    refusesWhy(body, /assigned once, unconditionally|variable (this check cannot|part)/);
+  for (const body of [`z="$(false)" && ${IMG}\n${USE}`, `x=1 && ${IMG}\n${USE}`])
+    refusesWhy(body, IMGV);
+  refusesWhy(`${IMG}\nn="$(printf 'IMG=x')"\n: $((n))\n${USE}`, IMGV);
+  refusesWhy(`${IMG}\neval "$x"\n${USE}`, IMGV);
+});
+
+test('FU-196: a name of the step env is replaced by a write in this script or in the one that runs it', () => {
+  const env = { IMG: PINNED };
+  const refusedWithEnv = (body, why = IMGV) =>
+    assert.ok(
+      validateInfraImagePins([withJobEnv(body, env)], bare).errors.some((e) => why.test(e)),
+      body,
+    );
+  for (const body of [
+    `read IMG\n${USE}`,
+    `for IMG in alpine:latest; do :; done\n${USE}`,
+    `if [ -n "$X" ]; then IMG=alpine:latest; fi\n${USE}`,
+    `export IMG=alpine:latest\nx=$(docker run "$IMG" true)`,
+    `IMG=alpine:latest\nx=$(docker run "$IMG" true)`,
+    `export "$n"=alpine:latest\n${USE}`,
+    `export "$n"=alpine:latest\nx=$(docker run "$IMG" true)`,
+    `export IMG=alpine:latest\nbash <<'EOF'\ndocker run "$IMG" true\nEOF`,
+    `export IMG=alpine:latest\necho "$(docker run "$IMG" true)"`,
+  ])
+    refusedWithEnv(body);
+  assert.ok(
+    validateInfraImagePins(
+      [withJobEnv(`if [ -n "$X" ]; then\n  ${IMG}\nfi\n${USE}`, { IMG: 'alpine:latest' })],
+      bare,
+    ).errors.some((e) => IMGV.test(e)),
+  );
+  assert.deepEqual(validateInfraImagePins([withJobEnv(USE, env)], bare).errors, []);
+  assert.deepEqual(
+    validateInfraImagePins([withJobEnv(`read other\n${USE}`, env)], bare).errors,
+    [],
+  );
+  assert.deepEqual(
+    validateInfraImagePins([withJobEnv('x=$(docker run "$IMG" true)', env)], bare).errors,
+    [],
+  );
+});
+
+test('FU-196: the shapes the real scripts use stay accepted', () => {
+  for (const body of [
+    `${IMG}\n${USE}`,
+    `export ${IMG}\n${USE}`,
+    `readonly ${IMG}\n${USE}`,
+    `typeset ${IMG}\n${USE}`,
+    `${IMG}\ndocker run "\${IMG}" true`,
+    `A=${PINNED}\nB=$A\ndocker run "$B" true`,
+    `A=${PINNED}\nB=${PINNED}\ndocker run "$A" true\ndocker run "$B" true`,
+    `${IMG}\nread other\n${USE}`,
+    `${IMG}\nfor f in 1 2; do :; done\n${USE}`,
+    `${IMG}\n( ${USE} )`,
+    `${IMG}\nif true; then\n  ${USE}\nfi`,
+    `${IMG}\nf() { ${USE}; }\nf`,
+    `${IMG}\nn=0\n(( n=5 ))\n${USE}`,
+    `docker run "\${IMG:-${PINNED}}" true`,
+  ])
+    acceptsBoth(body);
+});
+
+test('FU-196: `readonly` proves a variable whatever writes this check cannot read; `readonly X &` and a shadowed one prove nothing', () => {
+  // the shape of infrastructure/docker/kafka/ci-up.sh: a function exports a computed name
+  const unreadable = 'put() {\n  export "$1=$2"\n}\nput a b';
+  acceptsShell(`${IMG}\nreadonly IMG\n${unreadable}\n${USE}`);
+  acceptsShell(`readonly ${IMG}\n${unreadable}\n${USE}`);
+  refusesShell(`${IMG}\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`${IMG}\nreadonly IMG &\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`${IMG}\n"readonly" IMG\n${unreadable}\n${USE}`, IMGV);
+  // inside a loop the unreadable write below may run before the read of the next round
+  refusesShell(`${IMG}\nfor i in 1 2; do\n  ${USE}\n  export "$n"=x\ndone`, IMGV);
+  refusesShell(`${IMG}\nreadonly IMG | cat\n${unreadable}\n${USE}`, IMGV);
+  // `-f` makes a function readonly, `-n`/`-i` change what the name is
+  for (const declaration of [
+    'readonly -f IMG',
+    'readonly -n IMG',
+    'declare -nr IMG',
+    'declare -ir IMG',
+    'declare -f -r IMG',
+  ])
+    refusesShell(`${IMG}\n${declaration}\n${unreadable}\n${USE}`, IMGV);
+  acceptsShell(`${IMG}\nreadonly IMG\n${unreadable}\n${USE}`);
+  // task 365 F2: `declare -r` / `typeset -rx` are no freeze this check can read
+  refusesShell(`${IMG}\ndeclare -r IMG\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`${IMG}\ntypeset -rx IMG\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`readonly() { :; }\n${IMG}\nreadonly IMG\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`${IMG}\nif true; then\n  readonly IMG\nfi\n${unreadable}\n${USE}`, IMGV);
+  // a second assignment: the readonly one is whichever ran first, not the last visible
+  refusesShell(`readonly IMG=alpine:latest\nreadonly ${IMG}\n${USE}`, IMGV);
+  // the value read before the unreadable write is fine; the unreadable write must come BEFORE the read to matter
+  acceptsShell(`${IMG}\n${USE}\n${unreadable}`);
+  acceptsShell(`B="\${KAFKA_IMAGE:-${PINNED}}"\nreadonly B\n${unreadable}\ndocker run "$B" true`);
+  refusesShell(
+    `${unreadable}\nB="\${KAFKA_IMAGE:-${PINNED}}"\nreadonly B\ndocker run "$B" true`,
+    IMGV,
+  );
+});
+
+// FU-202 R1: a producer binding is proven by the syntax AS WRITTEN, one classifier for every binding.
+test('FU-202 R1: an assignment-like command name, a shadowed or failing declarer never binds the producer', () => {
+  const payload = 'do""cker run alpine:latest';
+  const run = (name) => `commands="$(${name} bash infra/creds.sh invalid)"`;
+  for (const name of ['"x=x"', 'x""=x', '"x"=x', "x'='x", 'x\\=x', "'x=x'", '\\x=x'])
+    evalRefusedBoth(
+      `function x=x { printf '%s\\n' '${payload}'; }\n${run(name)}\neval "$commands"`,
+    );
+  for (const declarer of ['export', 'declare', 'readonly', 'typeset']) {
+    const set = `commands="$(bash infra/creds.sh invalid)"`;
+    for (const body of [
+      `${declarer}() { :; }\n${declarer} ${set}\neval "$commands"`,
+      `eval '${declarer}() { :; }'\n${declarer} ${set}\neval "$commands"`,
+      `function ${declarer} { :; }\n${declarer} ${set}\neval "$commands"`,
+      `${declarer}() { :; }\n"${declarer}" ${set}\neval "$commands"`,
+      `\\${declarer} ${set}\neval "$commands"`,
+    ])
+      evalRefusedBoth(body);
+  }
+  for (const body of [
+    `local() { :; }\nlocal ${PRODUCER}\neval "$commands"`,
+    // `local` outside a function fails and assigns nothing; inside one the name dies with the call
+    `local ${PRODUCER}\neval "$commands"`,
+    `set +e\nlocal ${PRODUCER}\neval "$commands"`,
+    `f() {\n  local ${PRODUCER}\n  eval "$commands"\n}\nf`,
+    `shopt -s expand_aliases\nalias export=:\nexport ${PRODUCER}\neval "$commands"`,
+    `export -n ${PRODUCER}\neval "$commands"`,
+    `declare -n ${PRODUCER}\neval "$commands"`,
+    `command export ${PRODUCER}\neval "$commands"`,
+    `: export ${PRODUCER}\neval "$commands"`,
+  ])
+    evalRefusedBoth(body);
+  for (const body of [
+    `export ${PRODUCER}\neval "$commands"`,
+    `readonly ${PRODUCER}\neval "$commands"`,
+    `declare ${PRODUCER}\neval "$commands"`,
+    `typeset ${PRODUCER}\neval "$commands"`,
+    `commands="$(FOO=1 bash infra/creds.sh tests)"\neval "$commands"`,
+    `foo() { :; }\nexport ${PRODUCER}\neval "$commands"`,
+    `f() {\n  local x=1\n}\n${PRODUCER}\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+// FU-202 R2: every redirection is an expansion site, whoever owns it.
+test('FU-202 R2: an earlier here-string, a here-document or here-string of a command with no words writes too', () => {
+  const payload = 'do""cker run alpine:latest';
+  const E = 'eval "$commands"';
+  for (const body of [
+    `commands="$(bash infra/creds.sh invalid)"\n: <<<"\${commands:=${payload}}" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"\${commands=${payload}}" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"$((commands=5))" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"$((n))" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"\${commands:=x}" <<<a <<<b\n${E}`,
+    `${PRODUCER}\n: <<<"\${commands:=x}" <<EOF\nhello\nEOF\n${E}`,
+    `${PRODUCER}\n<<<"\${commands:=x}"\n${E}`,
+    `${PRODUCER}\n<<<"\${commands:=x}" <<<y\n${E}`,
+    `${PRODUCER}\n<<EOF\n\${commands:=${payload}}\nEOF\n${E}`,
+    `${PRODUCER}\n<<-EOF\n\t\${commands:=${payload}}\nEOF\n${E}`,
+    `${PRODUCER}\n<<EOF\n$((commands=5))\nEOF\n${E}`,
+    `${PRODUCER}\n<<EOF >/dev/null\n\${commands:=x}\nEOF\n${E}`,
+    `${PRODUCER}\n: <<A <<B\nhello\nA\n\${commands:=x}\nB\n${E}`,
+    `${PRODUCER}\n<<A <<B\nhello\nA\n\${commands:=x}\nB\n${E}`,
+    `${PRODUCER}\n3<<EOF\n\${commands:=x}\nEOF\n${E}`,
+    `${PRODUCER}\n{ <<EOF\n\${commands:=x}\nEOF\n}\n${E}`,
+    `${PRODUCER}\n<<EOF | cat\n\${commands:=x}\nEOF\n${E}`,
+    `${PRODUCER}\n> "\${commands:=/dev/null}"\n${E}`,
+    `${PRODUCER}\n2> "\${commands:=/dev/null}"\n${E}`,
+    `${PRODUCER}\n>&"\${commands:=2}"\n${E}`,
+    `${PRODUCER}\n( : <<<"\${commands:=x}" <<<y )\n${E}`,
+    `${PRODUCER}\ncat <<<"\${commands:=x}" <<<y | cat\n${E}`,
+  ])
+    evalRefusedBoth(body);
+  for (const body of [
+    `${PRODUCER}\ncat <<<a <<<b\n${E}`,
+    `${PRODUCER}\n<<EOF\nhello\nEOF\n${E}`,
+    `${PRODUCER}\n<<'EOF'\n\${commands:=x}\nEOF\n${E}`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+test('FU-202 R2: test -v / -R and [[ -v ]] name a variable by text, which bash evaluates as a subscript', () => {
+  const n = `n="$(printf 'other[\\044\\050do""cker run alpine:latest >&2; printf 0\\051]')"`;
+  for (const use of [
+    'test -v "$n"',
+    '[ -v "$n" ]',
+    '[[ -v "$n" ]]',
+    '[[ -v $n ]]',
+    'builtin test -v "$n"',
+    'command test -v "$n"',
+    'builtin [ -v "$n" ]',
+    'command [ -v "$n" ]',
+    'test ! -v "$n"',
+    'test -n x -a -v "$n"',
+    '[ -v other[$n] ]',
+    '[[ -n x && -v "$n" ]]',
+    '[[ -z x || -v "$n" ]]',
+    'test -R "$n"',
+    '[[ -R "$n" ]]',
+    'time test -v "$n"',
+    '! test -v "$n"',
+    'test -v "$(printf x)"',
+    'test -v "${n:-x}"',
+  ]) {
+    // as the provenance of an evaluated output
+    evalRefusedBoth(`${PRODUCER}\n${n}\n${use}\neval "$commands"`);
+    // and on its own: there may be nothing to evaluate but the command it runs
+    refusesWhy(`${n}\n${use}`, /test -v \/ -R .* computed text/);
+  }
+  for (const body of [
+    `${PRODUCER}\ntest -v HOME\neval "$commands"`,
+    `${PRODUCER}\n[[ -v HOME ]]\neval "$commands"`,
+    `${PRODUCER}\n[ -v HOME ]\neval "$commands"`,
+    `${PRODUCER}\ntest -n "$x"\neval "$commands"`,
+    `${PRODUCER}\n[ -z "$x" ]\neval "$commands"`,
+    `${PRODUCER}\n[[ -f "$x" ]]\neval "$commands"`,
+    `${PRODUCER}\ngrep -v "$x" /dev/null\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+// --- task 365 (PR #927 r2): the four proof boundaries the review of 627686d6 found open ---------------------------
+// Each row is a probe of the review (Bash 5.2 printed IMAGE=alpine:latest while the check recorded the pin).
+
+const BADIMG = 'alpine:latest';
+const refusedWithJobEnv = (body, env, why) =>
+  assert.ok(
+    validateInfraImagePins([withJobEnv(body, env)], bare).errors.some((e) => why.test(e)),
+    `${JSON.stringify(body)} should be refused (${why})`,
+  );
+
+test('task 365 F1: a variable bash writes by itself is never a proven image value, readonly or not', () => {
+  const MANAGED = /bash manages itself/;
+  for (const [name, writer] of [
+    ['REPLY', `read <<<${BADIMG}`],
+    ['REPLY', `select x in ${BADIMG}; do break; done`],
+    ['MAPFILE', `mapfile <<<${BADIMG}`],
+    ['MAPFILE', `readarray <<<${BADIMG}`],
+    ['OPTARG', 'getopts a x -a'],
+    ['BASH_REMATCH', `[[ ${BADIMG} =~ (.*) ]]`],
+    ['_', `echo ${BADIMG}`],
+    ['BASH_ARGV', `set -- ${BADIMG}`],
+    ['RANDOM', ':'],
+    ['SECONDS', ':'],
+    ['LINENO', ':'],
+    ['BASH_COMMAND', ':'],
+    ['PWD', 'cd /'],
+    ['OLDPWD', 'cd /'],
+  ]) {
+    const use = `docker run "$${name}" true`;
+    refusesWhy(`${name}=${PINNED}\n${writer}\n${use}`, MANAGED);
+    // `readonly` does not stop bash writing it: `readonly BASH_REMATCH=x` is replaced by the next match
+    refusesWhy(`readonly ${name}=${PINNED}\n${writer}\n${use}`, MANAGED);
+    refusesWhy(`${name}=${PINNED}\n${writer}\ndocker run "\${${name}:-${PINNED}}" true`, MANAGED);
+    refusesWhy(`${name}=${PINNED}\n${writer}\nx=$(${use})`, MANAGED);
+    refusedWithJobEnv(`${writer}\n${use}`, { [name]: PINNED }, MANAGED);
+  }
+  // the same table gates a program path: `readonly REPLY=…` does not stop `read` writing it
+  refusesWhy(
+    'readonly REPLY=/a\nread <<<x\n"${REPLY}/scripts/lib.sh"',
+    /EXECUTED_PROGRAMS|a file this check does not read/,
+    {
+      ...bare,
+      executedPrograms: new Map([
+        ['scripts/x.sh', { words: ['${REPLY}/scripts/lib.sh'], reason: 'r' }],
+      ]),
+    },
+    [scriptFile('scripts/lib.sh')],
+  );
+  // and the ordinary names around them stay provable
+  acceptsBoth(`IMG=${PINNED}\nread -r other <<<x\n${USE}`);
+  acceptsBoth(`readonly IMG=${PINNED}\n${USE}`);
+});
+
+test('task 365 F2: a readonly declaration freezes a proven value only in the one form this check can read', () => {
+  const frozenElse = `\n${USE}`;
+  // a write after the declaration that only a REAL freeze stops (a counted assignment would refuse anyway)
+  const later = `read IMG <<<${BADIMG}`;
+  for (const body of [
+    // a different value frozen than the one recorded
+    `${IMG}\nreadonly "IMG=${BADIMG}"${frozenElse}`,
+    `${IMG}\nreadonly IM""G=${BADIMG}${frozenElse}`,
+    `${IMG}\ndeclare -r IMG=${BADIMG}${frozenElse}`,
+    `${IMG}\ntypeset -rx IMG=${BADIMG}${frozenElse}`,
+    `IMG=${BADIMG}\ndeclare -r IMG${frozenElse}`,
+    `${IMG}\nIMG=${BADIMG} readonly IMG${frozenElse}`,
+    `${IMG}\nIMG=${BADIMG} declare -r IMG${frozenElse}`,
+    // the declaration never froze it
+    `${IMG}\nflag=-f\nreadonly "$flag" IMG\n${later}${frozenElse}`,
+    `${IMG}\nreadonly IMG < /dev/null/nope\n${later}${frozenElse}`,
+    `${IMG}\nreadonly IMG > /dev/null/nope\n${later}${frozenElse}`,
+    `${IMG}\nreadonly IMG && true &\n${later}${frozenElse}`,
+    `${IMG}\nreadonly IMG || true &\n${later}${frozenElse}`,
+    `${IMG}\ndeclare -r IMG && true &\n${later}${frozenElse}`,
+    `${IMG}\nreadonly IMG 2>/dev/null\n${later}${frozenElse}`,
+    `${IMG}\nreadonly IMG <<EOF\nx\nEOF\n${later}${frozenElse}`,
+    `${IMG}\nreadonly -p IMG\n${later}${frozenElse}`,
+    `${IMG}\ncommand readonly IMG\n${later}${frozenElse}`,
+    `${IMG}\n{ readonly IMG; }\n${later}${frozenElse}`,
+    `true && readonly IMG=${PINNED}\n${later}${frozenElse}`,
+    `${IMG}\n:\nreadonly IMG${frozenElse}`,
+    // `declare` and `export` without `-r` freeze nothing
+    // an arithmetic write inside the binding command itself
+    `IMG=${PINNED} X=$((IMG=5))\nreadonly IMG${frozenElse}`,
+    `${IMG}\ndeclare IMG\n${later}${frozenElse}`,
+    `${IMG}\nexport IMG\n${later}${frozenElse}`,
+    // the command is not the builtin
+    `source ./h.sh\n${IMG}\nreadonly IMG\n${later}${frozenElse}`,
+    `. ./h.sh\nreadonly IMG=${PINNED}${frozenElse}`,
+    `readonly() { :; }\n${IMG}\nreadonly IMG\n${later}${frozenElse}`,
+    `alias readonly=:\n${IMG}\nreadonly IMG\n${later}${frozenElse}`,
+    // something changed or froze the name before the binding
+    `${IMG}\nreadonly IMG <<<"$((IMG=5))"${frozenElse}`,
+    `${IMG}\nreadonly IMG X=$((IMG=5))${frozenElse}`,
+    `trap 'IMG=${BADIMG}' DEBUG\n${IMG}\nreadonly IMG${frozenElse}`,
+    `eval 'readonly IMG=${BADIMG}'\nreadonly IMG=${PINNED}${frozenElse}`,
+    `declare -n IMG=other\nreadonly IMG=${PINNED}\ndeclare -n IMG=evil\nevil=${BADIMG}${frozenElse}`,
+    `IMG=${BADIMG}\n${IMG}\nreadonly IMG${frozenElse}`,
+    `export "$n"=x\nreadonly IMG=${PINNED}${frozenElse}`,
+    `readonly IMG=${PINNED} IMG=${BADIMG}${frozenElse}`,
+  ])
+    refusesWhy(body, IMGV);
+  acceptsBoth(`readonly IMG=${PINNED}\n${USE}`);
+  acceptsBoth(`${IMG}\nreadonly IMG\n${USE}`);
+  acceptsBoth(`export ${IMG}\nreadonly IMG\n${USE}`);
+  acceptsBoth(`set -euo pipefail\nreadonly IMG=${PINNED}\nexport "$n"=x\n${USE}`);
+  // the same proof gates EXECUTED_PROGRAMS (a program named by a read-only variable)
+  const lib = scriptFile('scripts/lib.sh');
+  const policy = {
+    ...bare,
+    executedPrograms: new Map([
+      ['scripts/x.sh', { words: ['${ROOT}/scripts/lib.sh'], reason: 'r' }],
+    ]),
+  };
+  const run = '"${ROOT}/scripts/lib.sh"';
+  const frozen = /EXECUTED_PROGRAMS|a file this check does not read/;
+  for (const body of [
+    `ROOT=/a\nreadonly "ROOT=/tmp"\n${run}`,
+    `ROOT=/a\nROOT=/tmp readonly ROOT\n${run}`,
+    `ROOT=/a\nreadonly ROOT < /dev/null/nope\n${run}`,
+    `ROOT=/a\nreadonly ROOT && true &\n${run}`,
+    `eval 'readonly ROOT=/tmp'\nreadonly ROOT=/a\n${run}`,
+    `source ./h.sh\nreadonly ROOT=/a\n${run}`,
+    `ROOT=/a\nreadonly ROOT <<<"$((ROOT=5))"\n${run}`,
+    `typeset -rx ROOT=/a\n${run}`,
+    // a computed operand may be `-f`: the builtin then freezes no variable
+    `flag=-f\nreadonly "$flag" ROOT=/a\n${run}`,
+  ])
+    refusesWhy(body, frozen, policy, [lib]);
+  acceptsShell(`ROOT=/a\nreadonly ROOT\n${run}`, policy, [lib]);
+});
+
+test('task 365 F3: a chained variable is resolved with the variables of the moment it was assigned', () => {
+  const env = { A: BADIMG };
+  for (const body of [
+    `B=$A\nA=${PINNED}\ndocker run "$B" true`,
+    `B=$A A=${PINNED}\ndocker run "$B" true`,
+    // a declarer expands every operand before it assigns any
+    `export A=${PINNED} B=$A\ndocker run "$B" true`,
+    `readonly A=${PINNED} B=$A\ndocker run "$B" true`,
+    `declare A=${PINNED} B=$A\ndocker run "$B" true`,
+    `typeset A=${PINNED} B=$A\ndocker run "$B" true`,
+    `B="\${A:-x}"\nA=${PINNED}\ndocker run "$B" true`,
+  ])
+    refusedWithJobEnv(body, env, IMGV);
+  refusesWhy(`B=$A\nA=${PINNED}\ndocker run "$B" true`, /variable|assigned once/);
+  // the chain in order, and plain assignments go left to right
+  acceptsBoth(`A=${PINNED}\nB=$A\ndocker run "$B" true`);
+  acceptsBoth(`A=${PINNED} B=$A\ndocker run "$B" true`);
+  assert.deepEqual(
+    validateInfraImagePins([withJobEnv(`B=$A\ndocker run "$B" true`, { A: PINNED })], bare).errors,
+    [],
+  );
+});
+
+test('task 365 F4: an image argument must be one word: an unquoted expansion can split the digest away', () => {
+  const UNQUOTED = /unquoted expansion/;
+  for (const word of ['$IMG', '${IMG}', `\${IMG:-${PINNED}}`, '$IMG""', '"$IMG"$SUFFIX', '$IMG*']) {
+    refusesShell(`readonly IMG=${PINNED}\nIFS=@\ndocker run ${word} true`, UNQUOTED);
+    refusesShell(`readonly IMG=${PINNED}\ndocker pull ${word}`, UNQUOTED);
+  }
+  refusedWithJobEnv('IFS=@\ndocker run $IMG true', { IMG: PINNED }, UNQUOTED);
+  refusedWithJobEnv('IFS=@\ndocker run ${IMG} true', { IMG: PINNED }, UNQUOTED);
+  // a word in front of the image can split too and move which argument is the image
+  refusesShell(`readonly IMG=${PINNED}\ndocker run $OPTS "$IMG" true`, UNQUOTED);
+  refusesShell(`readonly IMG=${PINNED}\ndocker run -e "A=$B"$C "$IMG" true`, /before its image/);
+  // quoted, and a GitHub expression (pasted before the shell parses it), are one word
+  acceptsBoth(`readonly IMG=${PINNED}\ndocker run "$IMG" true`);
+  acceptsBoth(`readonly IMG=${PINNED}\ndocker run "\${IMG}" true`);
+  acceptsBoth(`docker run "\${IMG:-${PINNED}}" true`);
+  acceptsBoth(`readonly IMG=${PINNED}\ndocker run -e "A=$B" "$IMG" true`);
+  assert.deepEqual(
+    validateInfraImagePins([withJobEnv('docker run ${{ env.IMG }} true', { IMG: PINNED })], bare)
+      .errors,
+    [],
+  );
 });

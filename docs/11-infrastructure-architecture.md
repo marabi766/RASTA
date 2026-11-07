@@ -140,6 +140,17 @@ TimeZone=UTC` را هنگام Startup می‌فرستند (`withUtcSession`). Pg
 یعنی پشت Pooler فقط تنظیم سمت پایگاه داده اثر دارد، و برای همین تنظیمِ سمت پایگاه داده تضمین است و Option فقط لایهٔ دوم.
 `SET TimeZone` در نشست جایگزین هیچ‌کدام نیست: در Transaction Pooling روی Backend مشترک می‌ماند و به Client بعدی می‌رسد.
 
+لایهٔ سوم بررسی زمان اجراست و بسته می‌شکند (FU-188): `createSafePrismaClient` هر تراکنش و هر دستور خارج از تراکنش را، جز خواندن
+سادهٔ Model، با `UTC_SESSION_CHECK_SQL` آغاز می‌کند و اگر `TimeZone` نشست دقیقاً `UTC` نباشد، همان دستور خطا می‌دهد و کار اجرا
+نمی‌شود (`SessionTimeZoneRefusedError`). بررسی عمداً **داخل همان تراکنش** است: PgBouncer فقط یک تراکنش را روی یک Backend نگه
+می‌دارد، پس بررسی هنگام Boot یا هنگام اتصال فقط دربارهٔ یک Backend و یک لحظه حرف می‌زند. بررسی Boot هم هست
+(`assertRuntimeRole`) تا خطا زود دیده شود. سربار سنجیده: حدود ۱ میلی‌ثانیه برای هر دستور بررسی‌شده. خواندن سادهٔ Model از منطقهٔ
+زمانی نشست استفاده نمی‌کند و بررسی نمی‌شود.
+
+لایهٔ چهارم خود SQL است: هر ساعت پایگاه داده که به ستون `timestamp(3)` می‌رسد `AT TIME ZONE 'UTC'` دارد و
+`pnpm check:utc-clock-sites` ساعت بی‌منطقه را در SQL خام، بدنهٔ توابع و `INSERT`ی که ستون را به `DEFAULT` وابسته به نشست می‌سپارد رد
+می‌کند. ساعت Outbox یک ثابت است: `OUTBOX_NOW`.
+
 **Replication (Production).** یک Primary + حداقل یک Standby همزمان. خواندن‌های سنگین
 گزارشی به Standby می‌روند. `economic` و `audit` روی Cluster اختصاصی.
 
