@@ -1,5 +1,6 @@
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
-import { eventually, handOff, queryQuiet } from '../../test/legacy-handoff';
+import { handOff, pollWithin, queryQuiet } from '../../test/legacy-handoff';
+import { runBounded } from '../../test/worker-deadline';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ERROR_STATUS } from '@rasta/contracts';
@@ -308,6 +309,14 @@ class Party {
  * connection while Workers hold a reference", and every test after it too.
  */
 const STEP_DEADLINE_MS = 45_000;
+
+/**
+ * Asks until `predicate` holds, every ask raced against the step deadline: a
+ * request that is never answered ends the wait too, with the deadline's error
+ * (FU-192 r2).
+ */
+const eventually = (predicate: () => Promise<boolean>, what: string) =>
+  pollWithin(STEP_DEADLINE_MS, predicate, what);
 
 /** `promise`, or a rejection naming `what` once `ms` have passed. */
 async function within<T>(ms: number, promise: Promise<T>, what: string): Promise<T> {
@@ -2933,12 +2942,14 @@ describe('a saga the previous release started, replayed and then run live (#625 
       });
       // Stopped from a history with nothing in flight, not from the phase the
       // saga reported: that is read off a workflow task still running (FU-147).
-      await old.runUntil(
-        within(
-          STEP_DEADLINE_MS,
-          handOff(handle, () => previous({ party, handle })),
-          'the previous release to drive',
-        ),
+      await runBounded(
+        old,
+        {
+          what: 'the previous release to drive',
+          ms: STEP_DEADLINE_MS,
+          connection: env.client.connection,
+        },
+        (deadline) => handOff(handle, deadline, () => previous({ party, handle })),
       );
       const fresh = await Worker.create({
         connection: env.nativeConnection,
@@ -2999,8 +3010,10 @@ describe('a saga the previous release started, replayed and then run live (#625 
    * the saga has nothing in flight, which takes one query, not a poll.
    */
   const phaseIs = async (handle: WorkflowHandle, phase: string): Promise<void> => {
-    await eventually(
-      async () => (await queryQuiet<SagaStatus>(handle, 'status')).phase === phase,
+    await pollWithin(
+      STEP_DEADLINE_MS,
+      async (deadline) =>
+        (await queryQuiet<SagaStatus>(handle, deadline, 'status')).phase === phase,
       `the saga to wait in ${phase}`,
     );
   };

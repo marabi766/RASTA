@@ -1,6 +1,7 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
-import { handOff, queryQuiet } from '../../test/legacy-handoff';
+import { eventually as askUntil, handOff, queryQuiet } from '../../test/legacy-handoff';
+import { runBounded, type Deadline, type RunsUntil } from '../../test/worker-deadline';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MockActivityEnvironment } from '@temporalio/testing';
@@ -72,26 +73,36 @@ describe('history rollover on real Temporal', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   };
+  // Every wait inside a worker's callback goes through this deadline (FU-192
+  // r2): an unanswered request would otherwise leave the callback pending and
+  // the worker running past the test.
+  const bounded = <T>(worker: RunsUntil, body: (deadline: Deadline) => Promise<T>): Promise<T> =>
+    runBounded(
+      worker,
+      { what: 'the rollover test to finish', connection: env.client.connection },
+      body,
+    );
   // The saga waits with nothing in flight: its last commands are its timers,
   // or a task with no command at all, which is what answering a query leaves.
   // Skip time only from here, and land a signal between two rechecks, not on
   // one. The test server refuses a task that cancels a timer fired while the
   // task ran, and the saga then sits waiting for a retry.
-  const atRest = async (workflowId: string): Promise<void> => {
-    const handle = env.client.workflow.getHandle(workflowId);
-    for (let i = 0; i < 300; i++) {
-      const last = (await handle.fetchHistory()).events?.at(-1);
-      if (
-        last?.timerStartedEventAttributes ||
-        last?.timerCanceledEventAttributes ||
-        last?.workflowTaskCompletedEventAttributes
-      ) {
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    throw new Error(`${workflowId} did not come to rest`);
-  };
+  const atRest = (workflowId: string, deadline: Deadline): Promise<void> =>
+    askUntil(
+      deadline,
+      async () => {
+        const last = (await env.client.workflow.getHandle(workflowId).fetchHistory()).events?.at(
+          -1,
+        );
+        return Boolean(
+          last?.timerStartedEventAttributes ||
+          last?.timerCanceledEventAttributes ||
+          last?.workflowTaskCompletedEventAttributes,
+        );
+      },
+      `${workflowId} to come to rest`,
+      100,
+    );
   beforeAll(async () => {
     env = await createTemporalTestEnvironment();
   }, 300_000);
@@ -135,7 +146,7 @@ describe('history rollover on real Temporal', () => {
         maxCachedWorkflows: 0,
       };
       const legacy = await Worker.create({ ...options, workflowsPath: join(dir, 'workflows.ts') });
-      await legacy.runUntil(async () => {
+      await bounded(legacy, async (deadline) => {
         const handle = await env.client.workflow.start(orderSaga, {
           workflowId: taskQueue,
           taskQueue,
@@ -143,12 +154,12 @@ describe('history rollover on real Temporal', () => {
         });
         // The new worker takes over a history with nothing in flight: a phase
         // query replays a workflow task the cacheless worker may still run (FU-192).
-        await handOff(handle, async () => {
+        await handOff(handle, deadline, async () => {
           let status: SagaStatus | undefined;
           for (let i = 0; i < 100; i++) {
-            status = await queryQuiet<SagaStatus>(handle, 'status');
+            status = await queryQuiet<SagaStatus>(handle, deadline, 'status');
             if (status.phase === 'AWAITING_CONFIRMATION') break;
-            await env.sleep('1 second');
+            await deadline.call(() => env.sleep('1 second'));
           }
           expect(status).toMatchObject({ phase: 'AWAITING_CONFIRMATION' });
         });
@@ -162,11 +173,13 @@ describe('history rollover on real Temporal', () => {
           ...options,
           workflowsPath: require.resolve('./workflows'),
         });
-        await patchedWorker.runUntil(async () => {
+        await bounded(patchedWorker, async (deadline) => {
           await handle.signal('orderConfirmed');
           // Query is ordered after the signal; wait for its asynchronous read.
-          for (let i = 0; i < 100 && ids.length < 2; i++) await env.sleep('1 second');
-          await handle.query('status');
+          for (let i = 0; i < 100 && ids.length < 2; i++) {
+            await deadline.call(() => env.sleep('1 second'));
+          }
+          await deadline.call(() => handle.query('status'));
           expect(ids).toEqual(['1', 'saga-step-1']);
           const mixed = await handle.fetchHistory();
           expect(
@@ -213,7 +226,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async () => {
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
         taskQueue,
@@ -291,7 +304,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async () => {
       await expect(
         env.client.workflow.execute(orderSaga, {
           workflowId: taskQueue,
@@ -361,7 +374,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async () => {
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
         taskQueue,
@@ -414,7 +427,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async () => {
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
         taskQueue,
@@ -482,7 +495,7 @@ describe('history rollover on real Temporal', () => {
       const input = JSON.parse(Buffer.from(payload?.data as Uint8Array).toString());
       return (input as OrderSagaInput).resume;
     };
-    await worker.runUntil(async () => {
+    await bounded(worker, async (deadline) => {
       const dueAt = (await env.currentTimeMs()) + 30 * 24 * 60 * 60 * 1000;
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
@@ -537,16 +550,18 @@ describe('history rollover on real Temporal', () => {
         expect((await latest.query<SagaStatus>('status')).phase).toBe('RELEASE_UNCONFIRMED');
 
         recovered = true;
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         await latest.signal('retryDisputeRelease');
-        for (let i = 0; i < 100; i++) {
-          if ((await latest.query<SagaStatus>('status')).phase === 'AWAITING_CONFIRMATION') break;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
+        await askUntil(
+          deadline,
+          async () => (await latest.query<SagaStatus>('status')).phase === 'AWAITING_CONFIRMATION',
+          'the saga to wait for confirmation',
+          50,
+        );
         expect((await latest.query<SagaStatus>('status')).phase).toBe('AWAITING_CONFIRMATION');
 
         // Confirmed: the next ordinary rollover no longer claims a release wait.
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         await env.sleep('12 hours');
         const third = (await latest.describe()).runId;
         expect(third).not.toBe(second);
@@ -608,7 +623,7 @@ describe('history rollover on real Temporal', () => {
       const data = start?.input?.payloads?.[0]?.data as Uint8Array;
       return (JSON.parse(Buffer.from(data).toString()) as OrderSagaInput).resume;
     };
-    await worker.runUntil(async () => {
+    await bounded(worker, async (deadline) => {
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
         taskQueue,
@@ -633,7 +648,7 @@ describe('history rollover on real Temporal', () => {
       try {
         const first = (await handle.describe()).runId;
         await eventually(() => rounds.length > 0);
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         await env.sleep('8 hours');
         const second = (await latest.describe()).runId;
         expect(second).not.toBe(first);
@@ -650,11 +665,11 @@ describe('history rollover on real Temporal', () => {
         expect(sent.at(-1)?.[2]).toBe(true);
         expect((await latest.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
 
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         recovered = true;
         await latest.signal('retryDisputeRelease');
         await eventually(() => state.status === 'DISPUTED');
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         await env.sleep('12 hours');
         const third = (await latest.describe()).runId;
         expect(third).not.toBe(second);
@@ -697,7 +712,7 @@ describe('history rollover on real Temporal', () => {
         disputeObligation: async () => 'ECON_NEXT',
       } as unknown as Partial<OrderActivities>,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async (deadline) => {
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
         taskQueue,
@@ -723,7 +738,7 @@ describe('history rollover on real Temporal', () => {
       try {
         const first = (await handle.describe()).runId;
         await eventually(() => state.status === 'DISPUTED');
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         await env.sleep('12 hours');
         const next = (await latest.describe()).runId;
         expect(next).not.toBe(first);
@@ -732,7 +747,7 @@ describe('history rollover on real Temporal', () => {
         const data = start?.input?.payloads?.[0]?.data as Uint8Array;
         const resumed = (JSON.parse(Buffer.from(data).toString()) as OrderSagaInput).resume;
         expect(resumed).not.toHaveProperty('unconfirmedCall');
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
       } finally {
         await latest.terminate();
       }
@@ -775,7 +790,7 @@ describe('history rollover on real Temporal', () => {
         },
       } as unknown as Partial<OrderActivities>,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async (deadline) => {
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
         taskQueue,
@@ -800,7 +815,7 @@ describe('history rollover on real Temporal', () => {
       try {
         const first = (await handle.describe()).runId;
         await eventually(() => rounds.length > 0);
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         state.status = 'DISPUTED';
         state.dispute = { id: 'DSP_MOVED', reason: 'broken', resolution: null };
         const sent = sends;
@@ -810,14 +825,14 @@ describe('history rollover on real Temporal', () => {
         expect(filed).toEqual([]);
         expect((await latest.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
 
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         recovered = true;
         await latest.signal('retryDisputeRelease');
         await eventually(() => filed.length > 0);
         expect(filed).toEqual([[INPUT.orderId, 'TXN_MOVED', 'DSP_MOVED', 'broken']]);
         // Rolled over in the dispute's wait, the next run knows the call is still
         // in doubt, and that it left the wait.
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
         const beforeDispute = (await latest.describe()).runId;
         await env.sleep('8 hours');
         const { runId } = await latest.describe();
@@ -829,7 +844,7 @@ describe('history rollover on real Temporal', () => {
           unconfirmedCall: { operation: 'authoriseSettlement', movedOn: true },
         });
         // A terminated activity would stall the server's clock for the next test.
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
       } finally {
         await latest.terminate();
       }
@@ -879,7 +894,7 @@ describe('history rollover on real Temporal', () => {
         markSettling: async () => 'DISPUTED',
       } as unknown as Partial<OrderActivities>,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async (deadline) => {
       const handle = await env.client.workflow.start(orderSaga, {
         workflowId: taskQueue,
         taskQueue,
@@ -904,7 +919,7 @@ describe('history rollover on real Temporal', () => {
       try {
         await eventually(() => filed > 0);
         expect(asked).toBe(0);
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
 
         state.status = 'RECEIPT_CONFIRMED';
         state.dispute = null;
@@ -913,7 +928,7 @@ describe('history rollover on real Temporal', () => {
         expect(rounds[0]).toBe(4);
         expect(sent[0]).toEqual([INPUT.orderId, 'TXN_LEFT', true]);
         expect((await handle.query<SagaStatus>('status')).phase).toBe('AUTHORISATION_UNCONFIRMED');
-        await atRest(taskQueue);
+        await atRest(taskQueue, deadline);
       } finally {
         await handle.terminate();
       }
@@ -958,7 +973,7 @@ describe('history rollover on real Temporal', () => {
           },
         } as unknown as Partial<OrderActivities>,
       });
-      await worker.runUntil(async () => {
+      await bounded(worker, async (deadline) => {
         const handle = await env.client.workflow.start(orderSaga, {
           workflowId: taskQueue,
           taskQueue,
@@ -987,12 +1002,12 @@ describe('history rollover on real Temporal', () => {
           expect((await handle.query<SagaStatus>('status')).phase).toBe(
             'AUTHORISATION_UNCONFIRMED',
           );
-          await atRest(taskQueue);
+          await atRest(taskQueue, deadline);
           readable = true;
           await handle.signal('retryDisputeRelease');
           await eventually(() => went.length > 0);
           expect(went[0]).toBe(movedOn ? 'disputeObligation' : 'authoriseSettlement');
-          await atRest(taskQueue);
+          await atRest(taskQueue, deadline);
         } finally {
           await handle.terminate();
         }
@@ -1034,7 +1049,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async (deadline) => {
       // The window: six hours from the start. A fresh one on resuming after
       // about three hours would not be due before nine.
       await env.client.workflow.start(orderSaga, {
@@ -1043,7 +1058,7 @@ describe('history rollover on real Temporal', () => {
         args: [{ ...INPUT, fulfillmentWindowDays: 6 / 24 }],
       });
       const latest = env.client.workflow.getHandle(taskQueue);
-      await atRest(taskQueue);
+      await atRest(taskQueue, deadline);
       await env.sleep('65 minutes');
 
       state.status = 'DISPUTED';
@@ -1052,7 +1067,7 @@ describe('history rollover on real Temporal', () => {
       await eventually(() => disputed === 1);
       expect(disputed).toBe(1);
 
-      await atRest(taskQueue);
+      await atRest(taskQueue, deadline);
       const disputedRun = (await latest.describe()).runId;
       await env.sleep('125 minutes');
       expect((await latest.describe()).runId).not.toBe(disputedRun);
@@ -1064,7 +1079,7 @@ describe('history rollover on real Temporal', () => {
       await eventually(() => released === 1);
       expect(released).toBe(1);
 
-      await atRest(taskQueue);
+      await atRest(taskQueue, deadline);
       await env.sleep('155 minutes');
       expect(reminders).toBe(0);
       await env.sleep('20 minutes');
@@ -1105,7 +1120,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities,
     });
-    await worker.runUntil(async () => {
+    await bounded(worker, async (deadline) => {
       // As #573 wrote it: this wait's deadline, and no `reminderDue`.
       const now = await env.currentTimeMs();
       await env.client.workflow.start(orderSaga, {
@@ -1133,7 +1148,7 @@ describe('history rollover on real Temporal', () => {
         ],
       });
       const latest = env.client.workflow.getHandle(taskQueue);
-      await atRest(taskQueue);
+      await atRest(taskQueue, deadline);
       await env.sleep('90 minutes');
       expect(reminders).toBe(0);
       await env.sleep('40 minutes');
@@ -1224,7 +1239,7 @@ describe('history rollover on real Temporal', () => {
           ...options,
           workflowsPath: join(dir, 'workflows.ts'),
         });
-        await before.runUntil(async () => {
+        await bounded(before, async (deadline) => {
           await env.client.workflow.start(orderSaga, {
             workflowId: taskQueue,
             taskQueue,
@@ -1232,8 +1247,8 @@ describe('history rollover on real Temporal', () => {
           });
           // The passed deadline is met here, before the new worker takes over.
           const latest = env.client.workflow.getHandle(taskQueue);
-          await handOff(latest, async () => {
-            const seen = await queryQuiet<SagaStatus>(latest, 'status');
+          await handOff(latest, deadline, async () => {
+            const seen = await queryQuiet<SagaStatus>(latest, deadline, 'status');
             expect(seen.phase).toBe('AWAITING_CONFIRMATION');
           });
         });
@@ -1243,14 +1258,14 @@ describe('history rollover on real Temporal', () => {
           ...options,
           workflowsPath: require.resolve('./workflows'),
         });
-        await after.runUntil(async () => {
+        await bounded(after, async (deadline) => {
           const latest = env.client.workflow.getHandle(taskQueue);
           state.status = 'DISPUTED';
           state.dispute = dispute;
           await latest.signal('orderDisputed', 'ignored');
           await eventually(() => disputed === 1);
           expect(disputed).toBe(1);
-          await atRest(taskQueue);
+          await atRest(taskQueue, deadline);
           await env.sleep('90 minutes');
 
           dispute.resolution = 'the supplier has answered since';
@@ -1262,7 +1277,7 @@ describe('history rollover on real Temporal', () => {
 
           // The live deadline is six hours from the first arming, or from the
           // reminder met above: not behind us, and not six hours from resuming.
-          await atRest(taskQueue);
+          await atRest(taskQueue, deadline);
           await env.sleep('240 minutes');
           expect(reminders).toBe(remindersBeforeDeadline);
           await env.sleep('40 minutes');
