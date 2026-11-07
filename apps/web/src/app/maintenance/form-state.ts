@@ -37,7 +37,8 @@ export type ReportRequestFormState =
   | { readonly kind: 'REFUSED'; readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
-  | UnconfirmedWriteState
+  /** Sent, maybe committed, not confirmed — with what was sent, so a resend is that request (PR-880 r1 F1). */
+  | (UnconfirmedWriteState & { readonly values?: ReportRequestFormValues })
   /**
    * The same submission is still being processed (round 1 on PR 171): kept as
    * typed, with the same submission id, for a retry after `Retry-After`.

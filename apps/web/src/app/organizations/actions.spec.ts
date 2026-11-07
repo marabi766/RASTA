@@ -337,6 +337,28 @@ describe('changing a member’s roles', () => {
       submitUpdateMemberRoles(IDLE_UPDATE_MEMBER_ROLES_FORM, formData(ROLES_FORM)),
     ).resolves.toEqual({ kind: 'FAILED', status: 503, correlationId: 'c2' });
   });
+  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+    // The first answer was lost; the same form again meets the gateway's rate limit,
+    // which says nothing about the first send.
+    updateMemberRoles.mockReset();
+    updateMemberRoles
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData(ROLES_FORM);
+    const first = await submitUpdateMemberRoles(IDLE_UPDATE_MEMBER_ROLES_FORM, form);
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
+    expect(await submitUpdateMemberRoles(first, form)).toEqual(first);
+    expect(updateMemberRoles).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('revoking a membership', () => {
