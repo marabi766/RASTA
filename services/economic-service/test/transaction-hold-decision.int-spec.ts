@@ -6,8 +6,9 @@ import { PrismaClient } from '../src/generated/prisma';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id, ownerDatabaseUrl } from './helpers';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
+import { TransactionService } from '../src/transaction/transaction.service';
 import { WalletRepository } from '../src/wallet/wallet.repository';
-import { WalletService } from '../src/wallet/wallet.service';
+import { HOLD_NOT_FUNDED, WalletService } from '../src/wallet/wallet.service';
 
 /**
  * A decision read from a hold not its own proves nothing until a person has decided it
@@ -29,7 +30,7 @@ const UNRESOLVED = [
 ] as const;
 const RELEASE_REFUSED = /trg_wallet_hold_release_settlement_authority|released to the payee only/;
 const SETTLE_REFUSED = /settles only once an operator has decided it/;
-const PAYMENT_REFUSED = /authorises no payment/;
+const PAYMENT_REFUSED = /settles only from a funded hold/;
 
 describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real database)', () => {
   let harness: ApiHarness;
@@ -118,29 +119,35 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
     return transactionId;
   }
 
-  /** A hold written by hand: no service route places one on an existing transaction. */
-  const handHold = (transactionId: string, amount = AMOUNT, currency = 'IRR') =>
+  /** A hold written by hand: no service route places one on an existing transaction. Unfunded. */
+  const handHold = (
+    transactionId: string,
+    amount = AMOUNT,
+    currency = 'IRR',
+    journalId: string | null = null,
+  ) =>
     owner.$executeRawUnsafe(
       `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
-                                reference_type, placed_at, placed_by)
-       VALUES ($1, $2, $3, $4, $6, $5, 'TRANSACTION', now(), 'USR-THD')`,
+                                reference_type, placed_at, placed_by, placed_journal_id)
+       VALUES ($1, $2, $3, $4, $6, $5, 'TRANSACTION', now(), 'USR-THD', $7)`,
       `HLD_${ulid()}`,
       payer,
       walletId,
       amount,
       transactionId,
       currency,
+      journalId,
     );
 
   /** The service's own hold placement, journal and escrow included: what a fresh hold is. */
-  const fundedHold = (transactionId: string) =>
+  const fundedHold = (transactionId: string, amount = AMOUNT) =>
     runWithContext(createSystemContext({ correlationId: id('thd'), organizationId: payer }), () =>
       (harness.prisma.client as unknown as PrismaClient).$transaction(async (tx) => {
         const db = tx as unknown as ExtendedPrismaClient;
         const [wallet] = await harness.app.get(WalletRepository).lock(db, [walletId]);
         await harness.app.get(WalletService).placeHold(db, {
           wallet: wallet!,
-          amountMinor: AMOUNT,
+          amountMinor: amount,
           reference: transactionId,
           referenceType: 'TRANSACTION',
           transactionId,
@@ -236,6 +243,13 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         })
       ).map((hold) => hold.status),
       settlements: await client.settlement.count({ where: { transactionId } }),
+      journals: await client.journal.count({ where: { transactionId } }),
+      spendable: (
+        await client.wallet.findUniqueOrThrow({
+          where: { id: walletId },
+          select: { availableBalanceMinor: true },
+        })
+      ).availableBalanceMinor,
     }));
 
   /** A release as complete as settlement writes it, so only authority refuses it. */
@@ -270,7 +284,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
     const before = await money(transactionId);
     expect((await settle(transactionId)).status).toBe(409);
     await expect(settledAsRuntime(transactionId)).rejects.toThrow(
-      /authorises no payment|settles only once an operator/,
+      /settles only from a funded hold|settles only once an operator/,
     );
     expect(await money(transactionId)).toEqual(before);
   };
@@ -429,7 +443,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       const transactionId = await legacyAuthorisedWithHold();
       expect(await authorised(transactionId)).toBe(true);
       await settle(transactionId).expect(201);
-      expect(await money(transactionId)).toEqual({
+      expect(await money(transactionId)).toMatchObject({
         status: 'SETTLED',
         holds: ['RELEASED'],
         settlements: 1,
@@ -449,7 +463,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         const transactionId = await legacyAuthorisedWithHold();
         await listed(transactionId, outcome);
         const before = await money(transactionId);
-        expect(before).toEqual({
+        expect(before).toMatchObject({
           status: 'PENDING_SETTLEMENT',
           holds: ['ACTIVE'],
           settlements: 0,
@@ -525,7 +539,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       await decide(transactionId, 'CONFIRMED');
       expect((await settle(transactionId)).status).toBe(409);
       await expect(settledAsRuntime(transactionId)).rejects.toThrow(PAYMENT_REFUSED);
-      expect(await money(transactionId)).toEqual({
+      expect(await money(transactionId)).toMatchObject({
         status: 'PENDING_SETTLEMENT',
         holds: [],
         settlements: 0,
@@ -541,7 +555,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         .set('idempotency-key', id('thd-refund'))
         .send({ reason: 'The supplier returns the money.' })
         .expect(200);
-      expect(await money(transactionId)).toEqual({
+      expect(await money(transactionId)).toMatchObject({
         status: 'REFUNDED',
         holds: ['REFUNDED'],
         settlements: 0,
@@ -663,7 +677,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       await expect(releaseAsRuntime(transactionId)).rejects.toThrow(RELEASE_REFUSED);
       await authorise(transactionId);
       await settle(transactionId).expect(201);
-      expect(await money(transactionId)).toEqual({
+      expect(await money(transactionId)).toMatchObject({
         status: 'SETTLED',
         holds: ['RELEASED'],
         settlements: 1,
@@ -689,18 +703,21 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       const transactionId = await bare('PENDING_SETTLEMENT');
       await listed(transactionId, 'DISPUTE_RESOLVED_UNPROVEN');
       await decide(transactionId, 'VOIDED');
-      await owner.$executeRawUnsafe(
-        `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
-                                  reference_type, status, placed_at, placed_by, resolved_at,
-                                  resolved_by, resolved_journal_id)
-         SELECT $1, $2, $3, $4, 'IRR', $5, 'TRANSACTION', 'RELEASED', now(), 'USR-THD', now(),
-                'USR-THD', j.id
-           FROM journal j WHERE j.organization_id = $2 LIMIT 1`,
-        `HLD_${ulid()}`,
-        payer,
-        walletId,
-        AMOUNT,
-        transactionId,
+      // A row from before `trg_wallet_hold_inserted_only_funded`.
+      await lifted('wallet_hold', 'trg_wallet_hold_inserted_only_funded', (tx) =>
+        tx.$executeRawUnsafe(
+          `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
+                                    reference_type, status, placed_at, placed_by, resolved_at,
+                                    resolved_by, resolved_journal_id)
+           SELECT $1, $2, $3, $4, 'IRR', $5, 'TRANSACTION', 'RELEASED', now(), 'USR-THD', now(),
+                  'USR-THD', j.id
+             FROM journal j WHERE j.organization_id = $2 LIMIT 1`,
+          `HLD_${ulid()}`,
+          payer,
+          walletId,
+          AMOUNT,
+          transactionId,
+        ),
       );
       await expect(settledAsRuntime(transactionId)).rejects.toThrow(PAYMENT_REFUSED);
     });
@@ -715,19 +732,16 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         .set('idempotency-key', id('thd-void-refund'))
         .send({ reason: 'Nothing backs this obligation.' })
         .expect(200);
-      expect(await money(transactionId)).toEqual({
+      expect(await money(transactionId)).toMatchObject({
         status: 'REFUNDED',
         holds: [],
         settlements: 0,
       });
     });
 
-    it('control: a row on no list, and a restored one, still pay with nothing held (ADR-032)', async () => {
+    it('control: a row on no list that never claimed escrow still pays with nothing held (ADR-032)', async () => {
       const unlisted = await bare('PENDING_SETTLEMENT');
       await settle(unlisted).expect(201);
-      const restored = await bare('PENDING_SETTLEMENT');
-      await listed(restored, 'RESTORED_TO_PENDING_SETTLEMENT');
-      await settle(restored).expect(201);
     });
 
     it.each([
@@ -761,7 +775,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         expect((await detail(transactionId)).status).toBe(status);
 
         await expect(decide(transactionId, 'CONFIRMED')).rejects.toThrow(
-          /confirmed only by its own active hold/,
+          /confirmed only by its own active funded hold/,
         );
         expect((await settle(transactionId)).status).toBe(409);
 
@@ -771,11 +785,13 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       },
     );
 
-    it('a hold short of the gross has one way out, the runbook’s: refund, then CONFIRMED', async () => {
+    it('a funded hold short of the gross has one way out, the runbook’s: refund, then CONFIRMED', async () => {
       const transactionId = await bare('HELD');
       await listed(transactionId, 'HELD_UNPROVEN');
-      await handHold(transactionId, AMOUNT - 1n);
-      await expect(decide(transactionId, 'VOIDED')).rejects.toThrow(/active hold of its own/);
+      await fundedHold(transactionId, AMOUNT - 1n);
+      await expect(decide(transactionId, 'VOIDED')).rejects.toThrow(
+        /active funded hold of its own/,
+      );
       await request(http)
         .post(`/v1/transactions/${transactionId}/refund`)
         .set('authorization', asPayee())
@@ -828,7 +844,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       await decision;
       const refused = await attempt;
       expect(refused.status).toBe(409);
-      expect(await money(transactionId)).toEqual({
+      expect(await money(transactionId)).toMatchObject({
         status: 'PENDING_SETTLEMENT',
         holds: ['ACTIVE'],
         settlements: 0,
@@ -847,19 +863,19 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         'CONFIRMED with nothing held',
         'CONFIRMED',
         async () => {},
-        /confirmed only by its own active hold/,
+        /confirmed only by its own active funded hold/,
       ],
       [
         'CONFIRMED on a hold short of the gross',
         'CONFIRMED',
         (row) => handHold(row, AMOUNT - 1n),
-        /confirmed only by its own active hold/,
+        /confirmed only by its own active funded hold/,
       ],
       [
-        'VOIDED with a hold of its own',
+        'VOIDED with a funded hold of its own',
         'VOIDED',
-        (row) => handHold(row),
-        /has an active hold of its own/,
+        (row) => fundedHold(row),
+        /has an active funded hold of its own/,
       ],
       ['an unknown word', 'MAYBE', async () => {}, /ck_transaction_hold_decision_decision/],
     ])('refuses %s, and nothing is recorded', async (_case, decision, prepare, refusal) => {
@@ -928,6 +944,569 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         ),
       ).rejects.toThrow(/an operator|permission denied/);
       expect(await provenEverywhere(transactionId)).toBe(false);
+    });
+  });
+
+  describe('money moves only against a funded hold of its own (FU-163, FU-164, D-130)', () => {
+    const scalar = async (sql: string, ...args: unknown[]) => {
+      const [row] = await asRuntime((client) =>
+        client.$queryRawUnsafe<{ answer: boolean }[]>(`SELECT ${sql} AS answer`, ...args),
+      );
+      return row!.answer;
+    };
+    const holdIdsOf = async (transactionId: string) =>
+      (
+        await owner.$queryRawUnsafe<{ id: string; placed_journal_id: string | null }[]>(
+          `SELECT id, placed_journal_id FROM wallet_hold WHERE reference = $1 ORDER BY placed_at, id`,
+          transactionId,
+        )
+      ).map((hold) => ({ id: hold.id, journalId: hold.placed_journal_id }));
+
+    const account = async (organization: string, purpose: string, currency: string) => {
+      const found = await owner.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM ledger_account WHERE organization_id = $1 AND purpose = $2::"AccountPurpose" AND currency = $3`,
+        organization,
+        purpose,
+        currency,
+      );
+      if (found[0]) return found[0].id;
+      const accountId = `ACC_${ulid()}`;
+      await owner.$executeRawUnsafe(
+        `INSERT INTO ledger_account (id, organization_id, account_type, account_code, purpose, currency, created_by)
+         SELECT $1, $2, account_type, account_code, purpose, $3, 'USR-THD'
+           FROM ledger_account WHERE organization_id = $4 AND purpose = $5::"AccountPurpose" LIMIT 1`,
+        accountId,
+        organization,
+        currency,
+        payer,
+        purpose,
+      );
+      return accountId;
+    };
+
+    /** A journal as `placeHold` posts it, but for the one property a row changes. */
+    const journalFor = async (
+      transactionId: string,
+      {
+        type = 'FUNDS_HELD',
+        books = payer,
+        creditOrganization = payer,
+        credit = 'ESCROW',
+        debit = 'WALLET',
+        amount = AMOUNT,
+        currency = 'IRR',
+      } = {},
+    ) => {
+      const journalId = `JRN_${ulid()}`;
+      const [creditAccount, debitAccount] = [
+        await account(creditOrganization, credit, currency),
+        await account(payer, debit, currency),
+      ];
+      await owner.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at, posted_by, correlation_id)
+           VALUES ($1, $2, $3, $4::"JournalType", 'planted by the suite', now(), 'USR-THD', 'thd')`,
+          journalId,
+          books,
+          transactionId,
+          type,
+        );
+        for (const [accountId, organization, direction] of [
+          [creditAccount, creditOrganization, 'CREDIT'],
+          [debitAccount, payer, 'DEBIT'],
+        ] as const) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+             VALUES ($1, $2, $3, $4, $5::"EntryDirection", $6, $7, now())`,
+            `LGE_${ulid()}`,
+            journalId,
+            accountId,
+            organization,
+            direction,
+            amount,
+            currency,
+          );
+        }
+      });
+      return journalId;
+    };
+
+    const refund = (transactionId: string) =>
+      request(http)
+        .post(`/v1/transactions/${transactionId}/refund`)
+        .set('authorization', asPayee())
+        .set('idempotency-key', id('thd-fund-refund'))
+        .send({ reason: 'The supplier returns the money.' });
+
+    const refundedAsRuntime = (holdId: string, journalId: string) =>
+      asRuntime((client) =>
+        client.$executeRawUnsafe(
+          `UPDATE wallet_hold SET status = 'REFUNDED', resolved_at = now(), resolved_by = 'USR-THD',
+                  resolved_journal_id = $2 WHERE id = $1`,
+          holdId,
+          journalId,
+        ),
+      );
+
+    it('control: the journal a row below changes one thing of is what funds a hold, and pays', async () => {
+      const transactionId = await bare('HELD');
+      await handHold(transactionId, AMOUNT, 'IRR', await journalFor(transactionId));
+      const [hold] = await holdIdsOf(transactionId);
+      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(true);
+      expect(await provenEverywhere(transactionId)).toBe(true);
+      expect(await barred(transactionId)).toBe(false);
+      await authorise(transactionId);
+      await settle(transactionId).expect(201);
+    });
+
+    it('a hold through the service is funded', async () => {
+      const transactionId = await escrowed();
+      const [hold] = await holdIdsOf(transactionId);
+      expect(hold!.journalId).not.toBeNull();
+      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(true);
+      expect(await scalar(`wallet_hold_funded('HLD_NO_SUCH_HOLD')`)).toBe(false);
+    });
+
+    // Fail-first (D-130.1): each of these was proof, and paid.
+    describe.each<[string, (row: string) => Promise<string | null>]>([
+      ['no journal at all', async () => null],
+      ['text no journal has', async () => `JRN_NO_SUCH_${ulid()}`],
+      ['a journal of another kind', (row) => journalFor(row, { type: 'FUNDS_REFUNDED' })],
+      ['another obligation’s funding', async () => journalFor(await bare('HELD'))],
+      ['a journal on another organization’s books', (row) => journalFor(row, { books: payee })],
+      [
+        'a journal crediting something but escrow',
+        (row) => journalFor(row, { credit: 'WALLET', debit: 'ESCROW' }),
+      ],
+      [
+        'a journal crediting another organization’s escrow',
+        (row) => journalFor(row, { creditOrganization: payee }),
+      ],
+      ['a journal for less', (row) => journalFor(row, { amount: AMOUNT - 1n })],
+      ['a journal in another currency', (row) => journalFor(row, { currency: 'USD' })],
+      [
+        'a journal crediting and debiting its own escrow',
+        (row) => journalFor(row, { credit: 'ESCROW', debit: 'ESCROW' }),
+      ],
+    ])('a hold for exactly its terms naming %s', (_case, journal) => {
+      it.each(['on no list', 'HELD_UNPROVEN'])(
+        '%s: proves nothing, and is not settled or refunded',
+        async (listing) => {
+          const transactionId = await bare('HELD');
+          if (listing !== 'on no list') await listed(transactionId, listing);
+          await handHold(transactionId, AMOUNT, 'IRR', await journal(transactionId));
+          const [hold] = await holdIdsOf(transactionId);
+
+          expect(await provenEverywhere(transactionId)).toBe(false);
+          expect((await detail(transactionId, asPayee())).heldProven).toBe(false);
+          expect(await scalar('transaction_own_hold_for_terms($1)', transactionId)).toBe(false);
+          expect(await barred(transactionId)).toBe(true);
+          expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(false);
+          if (listing !== 'on no list') {
+            await expect(decide(transactionId, 'CONFIRMED')).rejects.toThrow(
+              /confirmed only by its own active funded hold/,
+            );
+          }
+
+          await authorise(transactionId);
+          if (listing !== 'on no list') await decide(transactionId, 'VOIDED');
+          const before = await money(transactionId);
+          expect(before.status).toBe('PENDING_SETTLEMENT');
+          const refused = await settle(transactionId);
+          expect(refused.status).toBe(409);
+          expect(refused.body.message).toContain('funded hold of its own');
+          await expect(releaseAsRuntime(transactionId)).rejects.toThrow(RELEASE_REFUSED);
+          await expect(settledAsRuntime(transactionId)).rejects.toThrow(PAYMENT_REFUSED);
+          const refundRefused = await refund(transactionId);
+          expect(refundRefused.status).toBeGreaterThanOrEqual(400);
+          expect(refundRefused.body.message).toContain('nothing moves until an operator');
+          expect(await money(transactionId)).toEqual(before);
+        },
+      );
+    });
+
+    it('still HELD, an unfunded hold does not refuse VOIDED: nothing is held, and it says so', async () => {
+      const transactionId = await bare('HELD');
+      await listed(transactionId, 'HELD_UNPROVEN');
+      await handHold(transactionId);
+      const before = await money(transactionId);
+      const [answer] = await decide(transactionId, 'VOIDED');
+      expect(answer!.status).toBe('HELD');
+      expect(await money(transactionId)).toEqual(before);
+      expect(await barred(transactionId)).toBe(true);
+    });
+
+    it('a retry trusts no unfunded hold', async () => {
+      const reference = id('thd-unfunded-refund-hold');
+      await owner.$executeRawUnsafe(
+        `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
+                                  reference_type, placed_at, placed_by)
+         VALUES ($1, $2, $3, $4, 'IRR', $5, 'PAYMENT_REFUND', now(), 'USR-THD')`,
+        `HLD_${ulid()}`,
+        payer,
+        walletId,
+        AMOUNT,
+        reference,
+      );
+
+      // As `PaymentService.refund` retries before it asks the provider: no answer to go on.
+      const before = await asRuntime((client) =>
+        client.journal.count({ where: { transactionId: reference } }),
+      );
+      await expect(
+        runWithContext(
+          createSystemContext({ correlationId: id('thd'), organizationId: payer }),
+          () =>
+            (harness.prisma.client as unknown as PrismaClient).$transaction(async (tx) => {
+              const db = tx as unknown as ExtendedPrismaClient;
+              const [wallet] = await harness.app.get(WalletRepository).lock(db, [walletId]);
+              return harness.app.get(WalletService).placeHold(db, {
+                wallet: wallet!,
+                amountMinor: AMOUNT,
+                reference,
+                referenceType: 'PAYMENT_REFUND',
+                transactionId: reference,
+                placedBy: 'USR-THD',
+              });
+            }),
+        ),
+      ).rejects.toThrow(HOLD_NOT_FUNDED);
+      expect(
+        await asRuntime((client) => client.journal.count({ where: { transactionId: reference } })),
+      ).toBe(before);
+    });
+
+    it('a funding journal reversed is no funding', async () => {
+      const transactionId = await bare('HELD');
+      const journalId = await journalFor(transactionId);
+      await handHold(transactionId, AMOUNT, 'IRR', journalId);
+      const [hold] = await holdIdsOf(transactionId);
+      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(true);
+      await owner.$transaction(async (tx) => {
+        const reversal = `JRN_${ulid()}`;
+        await tx.$executeRawUnsafe(
+          `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at, posted_by,
+                                correlation_id, reverses_id, reversal_reason)
+           SELECT $1, organization_id, transaction_id, 'REVERSAL', 'reversed by the suite', now(), posted_by,
+                  correlation_id, id, 'planted by the suite'
+             FROM journal WHERE id = $2`,
+          reversal,
+          journalId,
+        );
+        await tx.$executeRawUnsafe(
+          `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+           SELECT 'LGE_' || md5(id), $1, account_id, organization_id,
+                  (CASE direction WHEN 'CREDIT' THEN 'DEBIT' ELSE 'CREDIT' END)::"EntryDirection",
+                  amount_minor, currency, now()
+             FROM ledger_entry WHERE journal_id = $2`,
+          reversal,
+          journalId,
+        );
+      });
+      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(false);
+      expect(await barred(transactionId)).toBe(true);
+    });
+
+    describe('where the database refuses it', () => {
+      it.each(['TRANSACTION', 'PAYMENT_REFUND'])(
+        'nothing resolves an unfunded %s hold, whoever writes it',
+        async (purpose) => {
+          const row = await bare('HELD');
+          const reference = purpose === 'TRANSACTION' ? row : id('thd-refund-hold');
+          const holdId = `HLD_${ulid()}`;
+          await owner.$executeRawUnsafe(
+            `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
+                                      reference_type, placed_at, placed_by)
+             VALUES ($1, $2, $3, $4, 'IRR', $5, $6, now(), 'USR-THD')`,
+            holdId,
+            payer,
+            walletId,
+            AMOUNT,
+            reference,
+            purpose,
+          );
+          const journalId = await journalFor(row, { type: 'FUNDS_REFUNDED' });
+          await expect(refundedAsRuntime(holdId, journalId)).rejects.toThrow(
+            /trg_wallet_hold_resolved_only_funded|never funded moves no money/,
+          );
+          await expect(
+            owner.$executeRawUnsafe(
+              `UPDATE wallet_hold SET status = 'RELEASED', resolved_at = now(), resolved_by = 'USR-THD',
+                      resolved_journal_id = $2 WHERE id = $1`,
+              holdId,
+              journalId,
+            ),
+          ).rejects.toThrow(
+            purpose === 'TRANSACTION' ? RELEASE_REFUSED : /never funded moves no money/,
+          );
+        },
+      );
+
+      it('control: a funded hold still refunds, escrow back to the payer', async () => {
+        const transactionId = await escrowed();
+        const before = await money(transactionId);
+        await refund(transactionId).expect(200);
+        const after = await money(transactionId);
+        expect(after).toMatchObject({ status: 'REFUNDED', holds: ['REFUNDED'] });
+        expect(after.spendable).toBe(before.spendable + AMOUNT);
+      });
+
+      it('a RELEASED hold no journal funded does not speak for a settlement', async () => {
+        const transactionId = await bare('PENDING_SETTLEMENT');
+        const settlementJournal = await journalFor(transactionId, { type: 'SETTLEMENT' });
+        await expect(
+          owner.$transaction(async (tx) => {
+            // A row from before `trg_wallet_hold_inserted_only_funded`; the rollback restores it.
+            // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+            await tx.$executeRawUnsafe(
+              'ALTER TABLE wallet_hold DISABLE TRIGGER trg_wallet_hold_inserted_only_funded',
+            );
+            await tx.$executeRawUnsafe(
+              `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
+                                        reference_type, status, placed_at, placed_by, resolved_at,
+                                        resolved_by, resolved_journal_id)
+               VALUES ($1, $2, $3, $4, 'IRR', $5, 'TRANSACTION', 'RELEASED', now(), 'USR-THD', now(), 'USR-THD', $6)`,
+              `HLD_${ulid()}`,
+              payer,
+              walletId,
+              AMOUNT,
+              transactionId,
+              settlementJournal,
+            );
+            await tx.$executeRawUnsafe(
+              `INSERT INTO settlement (id, organization_id, transaction_id, journal_id, payer_organization_id,
+                                       payee_organization_id, gross_amount_minor, commission_amount_minor,
+                                       net_amount_minor, currency, settled_at, settled_by)
+               VALUES ($1, $2, $3, $4, $2, $5, $6, 0, $6, 'IRR', now(), 'USR-THD')`,
+              `STL_${ulid()}`,
+              payer,
+              transactionId,
+              settlementJournal,
+              payee,
+              AMOUNT,
+            );
+            await tx.$executeRawUnsafe(
+              `UPDATE "transaction" SET status = 'SETTLED', settled_at = now() WHERE id = $1`,
+              transactionId,
+            );
+          }),
+        ).rejects.toThrow(PAYMENT_REFUSED);
+      });
+    });
+
+    describe('what has claimed escrow never pays from spendable', () => {
+      // Fail-first (FU-164): this paid from the spendable balance.
+      it('HELD on no list with no hold, authorised: refused at settlement, by service and database', async () => {
+        const transactionId = await bare('HELD');
+        await authorise(transactionId);
+        expect((await detail(transactionId)).status).toBe('PENDING_SETTLEMENT');
+        expect(await scalar('transaction_settlement_authorised($1, true)', transactionId)).toBe(
+          true,
+        );
+        await expectPaysNothing(transactionId);
+        expect(await barred(transactionId)).toBe(true);
+      });
+
+      it('nor the way round through a dispute: it resolves to HELD, and still pays nothing', async () => {
+        const transactionId = await bare('HELD');
+        await request(http)
+          .post(`/v1/transactions/${transactionId}/dispute`)
+          .set('authorization', asPayer())
+          .set('idempotency-key', id('thd-164-dispute'))
+          .send({ reason: 'The invoice names another supplier.' })
+          .expect(200);
+        await expect(
+          asRuntime((client) =>
+            client.$executeRawUnsafe(
+              `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = $1`,
+              transactionId,
+            ),
+          ),
+        ).rejects.toThrow(/where its settlement authority stands/);
+        const resolved = await request(http)
+          .post(`/v1/transactions/${transactionId}/resolve-dispute`)
+          .set('authorization', `Bearer ${admin(apiTenant('THD-PLATFORM'), ['SYSTEM_ADMIN'])}`)
+          .set('idempotency-key', id('thd-164-resolve'))
+          .send({ resolution: 'The objection is unfounded.' })
+          .expect(200);
+        expect(resolved.body).toMatchObject({ status: 'HELD', heldProven: false });
+        await authorise(transactionId);
+        await expectPaysNothing(transactionId);
+      });
+
+      it('a resolved hold of its own bars it too: what was returned is not paid from spendable', async () => {
+        const transactionId = await bare('PENDING_SETTLEMENT');
+        const refunded = await journalFor(transactionId, { type: 'FUNDS_REFUNDED' });
+        // A row from before `trg_wallet_hold_inserted_only_funded`.
+        await lifted('wallet_hold', 'trg_wallet_hold_inserted_only_funded', (tx) =>
+          tx.$executeRawUnsafe(
+            `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
+                                      reference_type, status, placed_at, placed_by, resolved_at,
+                                      resolved_by, resolved_journal_id)
+             VALUES ($1, $2, $3, $4, 'IRR', $5, 'TRANSACTION', 'REFUNDED', now(), 'USR-THD', now(), 'USR-THD', $6)`,
+            `HLD_${ulid()}`,
+            payer,
+            walletId,
+            AMOUNT,
+            transactionId,
+            refunded,
+          ),
+        );
+        expect(await barred(transactionId)).toBe(true);
+        await expectPaysNothing(transactionId);
+      });
+
+      it('having been HELD is stamped whoever wrote it, and no writer takes it back or forges it', async () => {
+        const heldAt = async (transactionId: string) =>
+          (
+            await owner.$queryRawUnsafe<{ held_at: Date | null }[]>(
+              'SELECT held_at FROM "transaction" WHERE id = $1',
+              transactionId,
+            )
+          )[0]!.held_at;
+        const transactionId = await bare('HELD');
+        const stamped = await heldAt(transactionId);
+        expect(stamped).not.toBeNull();
+
+        const write = (sql: string, ...args: unknown[]) =>
+          asRuntime((client) => client.$executeRawUnsafe(sql, ...args));
+        await write(`UPDATE "transaction" SET held_at = NULL WHERE id = $1`, transactionId);
+        await owner.$executeRawUnsafe(
+          `UPDATE "transaction" SET held_at = NULL WHERE id = $1`,
+          transactionId,
+        );
+        await write(
+          `UPDATE "transaction" SET held_at = now() + interval '1 day', status = 'PENDING_SETTLEMENT' WHERE id = $1`,
+          transactionId,
+        );
+        expect(await heldAt(transactionId)).toEqual(stamped);
+        await expectPaysNothing(transactionId);
+
+        // Nor can a column write bar a row that never claimed escrow.
+        const never = await bare('PENDING_SETTLEMENT');
+        await write(`UPDATE "transaction" SET held_at = now() WHERE id = $1`, never);
+        expect(await heldAt(never)).toBeNull();
+        await settle(never).expect(201);
+      });
+
+      it('control: CREATED, authorised with no hold, pays from spendable: it never claimed escrow', async () => {
+        const transactionId = await bare('CREATED');
+        await authorise(transactionId);
+        const before = await money(transactionId);
+        await settle(transactionId).expect(201);
+        const after = await money(transactionId);
+        expect(after.spendable).toBe(before.spendable - AMOUNT);
+      });
+    });
+
+    describe('RESTORED_TO_PENDING_SETTLEMENT (D-130.2)', () => {
+      // Fail-first: this debited the spendable balance.
+      it('with nothing held debits nothing, authorised or not', async () => {
+        const unauthorised = await bare('PENDING_SETTLEMENT');
+        await listed(unauthorised, 'RESTORED_TO_PENDING_SETTLEMENT');
+        await expectPaysNothing(unauthorised);
+        expect(await barred(unauthorised)).toBe(true);
+
+        const authorisedRow = await bare('PENDING_SETTLEMENT');
+        await listed(authorisedRow, 'RESTORED_TO_PENDING_SETTLEMENT');
+        await recordedAuthorised(authorisedRow);
+        await expectPaysNothing(authorisedRow);
+      });
+
+      it('is still no decision an operator takes, and a refund ends it with no money moved', async () => {
+        const transactionId = await bare('PENDING_SETTLEMENT');
+        await listed(transactionId, 'RESTORED_TO_PENDING_SETTLEMENT');
+        await expect(decide(transactionId, 'VOIDED')).rejects.toThrow(
+          /no unresolved hold decision/,
+        );
+        const before = await money(transactionId);
+        await refund(transactionId).expect(200);
+        expect(await money(transactionId)).toMatchObject({
+          status: 'REFUNDED',
+          journals: before.journals,
+          spendable: before.spendable,
+        });
+      });
+
+      it('disputed, it resolves to HELD, and the database agrees', async () => {
+        const transactionId = await bare('PENDING_SETTLEMENT');
+        await listed(transactionId, 'RESTORED_TO_PENDING_SETTLEMENT');
+        await request(http)
+          .post(`/v1/transactions/${transactionId}/dispute`)
+          .set('authorization', asPayer())
+          .set('idempotency-key', id('thd-restored-dispute'))
+          .send({ reason: 'The invoice names another supplier.' })
+          .expect(200);
+        const resolved = await request(http)
+          .post(`/v1/transactions/${transactionId}/resolve-dispute`)
+          .set('authorization', `Bearer ${admin(apiTenant('THD-PLATFORM'), ['SYSTEM_ADMIN'])}`)
+          .set('idempotency-key', id('thd-restored-resolve'))
+          .send({ resolution: 'The objection is unfounded.' })
+          .expect(200);
+        expect(resolved.body.status).toBe('HELD');
+      });
+    });
+
+    describe('a statement’s obligation on the list (D-130.4)', () => {
+      const statementObligation = async () => {
+        const reference = id('thd-statement');
+        const { id: transactionId } = await runWithContext(
+          createSystemContext({ correlationId: id('thd'), organizationId: payer }),
+          () =>
+            (harness.prisma.client as unknown as PrismaClient).$transaction((tx) =>
+              harness.app
+                .get(TransactionService)
+                .recordAuthorisedObligation(tx as unknown as ExtendedPrismaClient, {
+                  organizationId: payer,
+                  counterpartyOrganizationId: payee,
+                  transactionType: 'CONSTRUCTION_STATEMENT',
+                  businessLine: null,
+                  grossAmountMinor: AMOUNT,
+                  currency: 'IRR',
+                  occurredAt: new Date(),
+                  sourceType: 'STATEMENT',
+                  sourceReference: reference,
+                  causationId: reference,
+                }),
+            ),
+        );
+        planted.push(transactionId);
+        return transactionId;
+      };
+
+      it.each(['VOIDED', 'CONFIRMED'])(
+        '%s: blocked with nothing moved, and the operator is told what blocks it',
+        async (decision) => {
+          const transactionId = await statementObligation();
+          await listed(transactionId, 'DISPUTE_RESOLVED_UNPROVEN');
+          await decide(transactionId, decision);
+          const before = await money(transactionId);
+
+          const refused = await settle(transactionId);
+          expect(refused.status).toBe(409);
+          expect(refused.body.code).toBe('INVALID_STATE_TRANSITION');
+          expect(refused.body.message).toContain('until the product owner decides');
+          await expect(settledAsRuntime(transactionId)).rejects.toThrow(PAYMENT_REFUSED);
+
+          const withdrawn = await refund(transactionId);
+          expect(withdrawn.status).toBeGreaterThanOrEqual(400);
+          expect(withdrawn.body.message).toContain('not refunded or cancelled');
+          expect(await money(transactionId)).toEqual(before);
+        },
+      );
+
+      it('RESTORED: the same, since a restored row pays only from a hold (D-130.2)', async () => {
+        const transactionId = await statementObligation();
+        await listed(transactionId, 'RESTORED_TO_PENDING_SETTLEMENT');
+        const refused = await settle(transactionId);
+        expect(refused.status).toBe(409);
+        expect(refused.body.message).toContain('until the product owner decides');
+      });
+
+      it('control: one on no list still pays from spendable', async () => {
+        const transactionId = await statementObligation();
+        expect(await barred(transactionId)).toBe(false);
+      });
     });
   });
 });

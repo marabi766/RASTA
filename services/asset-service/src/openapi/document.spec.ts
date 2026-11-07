@@ -80,6 +80,16 @@ describe('the served OpenAPI document', () => {
     expect(JSON.stringify(schema)).not.toContain('string');
   });
 
+  it('FU-160 accepts JS exponent serialization for both published coordinates', () => {
+    for (const name of ['latitude', 'longitude'] as const) {
+      expect(parameters[name]?.schema).toMatchObject({ type: 'number' });
+      const input = { latitude: '0', longitude: '0', [name]: String(0.0000001) };
+      const parsed = nearbyQuerySchema.parse(input);
+      expect(parsed[name]).toBe(0.0000001);
+      expect(nearbyQuerySchema.safeParse({ ...input, [name]: '1e9999' }).success).toBe(false);
+    }
+  });
+
   it('FU-131 publishes numeric transport types and bounds from the inner schema', () => {
     expect(
       nearbyQuerySchema.safeParse({ latitude: '', longitude: '', limit: '0x10' }).success,

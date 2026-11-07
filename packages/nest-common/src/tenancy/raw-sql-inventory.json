@@ -1127,6 +1127,13 @@
     "decision": "has bound organization predicate"
   },
   {
+    "file": "services/economic-service/src/wallet/wallet.repository.ts",
+    "line": 344,
+    "hash": "a05b8499e6c67b57da96b202f690f8f4458be74c7b5ca4844171a395bdac249a",
+    "occurrence": 0,
+    "decision": "platform-wide: by the id of a hold the caller's refund has already read, under that command's authority, payer or payee; answers only whether a journal funded that hold (wallet_hold_funded), which a refund decides from"
+  },
+  {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 341,
     "hash": "c34032d3ad4ed017ee261922279fe4bf6011924bd7ad453bcf9294851e7f54a6",
