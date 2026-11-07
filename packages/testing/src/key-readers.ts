@@ -1,6 +1,11 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the Jest specs
+const { authoredFiles } = require('../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 /**
  * Every place a service reads, compares or searches a uniqueness-compared field (FU-084 r2), so a
@@ -64,13 +69,10 @@ const EQUALITY = new Set([
 ]);
 
 function sourceFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return entry.name === 'generated' ? [] : sourceFiles(path);
-    return /\.ts$/.test(entry.name) && !/\.(spec|int-spec|test)\.ts$/.test(entry.name)
-      ? [path]
-      : [];
-  });
+  // authored files only: git-ignored output (the generated clients) is never opened (FU-102)
+  return authoredFiles(dir).filter(
+    (path) => /\.ts$/.test(path) && !/\.(spec|int-spec|test)\.ts$/.test(path),
+  );
 }
 
 function propertyName(node: ts.Node): string | undefined {

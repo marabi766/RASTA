@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stringify } from 'yaml';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import {
   DIGEST_VARIANTS,
   SOURCED_LIBRARIES,
@@ -1114,14 +1115,11 @@ test('FU-150 F1: the CLI reads every .bash file of infrastructure/ and scripts/'
   assert.match(cli, /\\\.\(\?:sh\|bash\)\$/);
   assert.match(cli, /'library'/);
   // and the committed libraries are exactly the listed ones, with the pinned contents
-  const found = readdirSync(join(root, 'infrastructure'), { recursive: true })
+  // Git's file list (the inventory), never a walk: repo-relative, '/'-separated.
+  const found = ['infrastructure', 'scripts']
+    .flatMap((dir) => authoredFiles(join(root, dir)))
     .filter((f) => f.endsWith('.bash'))
-    .map((f) => `infrastructure/${f}`)
-    .concat(
-      readdirSync(join(root, 'scripts'), { recursive: true })
-        .filter((f) => f.endsWith('.bash'))
-        .map((f) => `scripts/${f}`),
-    );
+    .map((f) => relative(root, f).split(sep).join('/'));
   assert.deepEqual([...SOURCED_LIBRARIES.keys()].sort(), found.sort());
 });
 
