@@ -14,10 +14,14 @@ import {
   TAGLESS,
   tokenizeShell,
   validateDockerfilePins,
-  validateInfraImagePins,
+  validateInfraImagePins as validateWholeTree,
 } from './check-dockerfile-pins-lib.mjs';
 import { continuedDollar, shellInvocation } from './ci-shell-text-lib.mjs';
 
+// Task 368 L3: the lib reads the whole tree unless told otherwise (`complete` defaults ON); these tests feed it a
+// few files, so they say `complete: false` once here. The default itself is pinned by its own test.
+const validateInfraImagePins = (files, policy = {}) =>
+  validateWholeTree(files, { complete: false, ...policy });
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const A = `sha256:${'a'.repeat(64)}`;
 const B = `sha256:${'b'.repeat(64)}`;
@@ -286,12 +290,12 @@ test('variables: ${{ env.X }} is read, a shell variable only as a preamble reado
   const minio = `cgr.dev/x/minio:1@${A}`;
   const env = { env: { MINIO_IMAGE: minio } };
   assert.deepEqual(
-    infra([workflow('docker run -d ${{ env.MINIO_IMAGE }} server', env)]).errors,
+    infra([workflow('docker run -d "${{ env.MINIO_IMAGE }}" server', env)]).errors,
     [],
   );
   assert.match(
     infra([
-      workflow('docker run -d ${{ env.MINIO_IMAGE }}', {
+      workflow('docker run -d "${{ env.MINIO_IMAGE }}"', {
         env: { MINIO_IMAGE: 'minio/minio:latest' },
       }),
     ]).errors[0],
@@ -1573,7 +1577,10 @@ test('FU-159 r2 F1: a program in no table refuses, whatever its arguments look l
   // the tables stay usable: builtins, data programs, wrappers around them
   acceptsBoth('echo "$a" | grep -q x && cat f | tail -n 1 > /dev/null');
   acceptsBoth('timeout 5 sleep 1; env -u X date; nice -n 1 mkdir -p d; command -v git');
-  acceptsBoth('curl -fsS "$url" -o /dev/null');
+  // task 368 F4: a word that starts with an expansion may BE an option (`"$a" "$b"` = `-o scripts/lib.sh`); a URL that
+  // starts with literal text and ends in an expansion is a URL
+  acceptsBoth('curl -fsS "http://localhost:$port/x" -o /dev/null');
+  refusesWhy('curl -fsS "$url" -o /dev/null', /curl option .* is not one this check reads/);
   // a reviewed entry names the script and the program, and goes stale when nothing runs it
   const reviewedPolicy = (programs) => ({
     ...bare,
@@ -1639,7 +1646,7 @@ test('FU-159 r2 F1: a GitHub expression is text of unknown words, never a litera
       /pasted into the script/.test(e),
     ),
   );
-  const images = validateInfraImagePins([asWorkflow(`docker pull \${{ env.CMD }}`)], bare).errors;
+  const images = validateInfraImagePins([asWorkflow(`docker pull "\${{ env.CMD }}"`)], bare).errors;
   assert.ok(images.some((e) => /not pinned/.test(e)));
 });
 
@@ -1823,7 +1830,7 @@ test('FU-159 r2 F4 + task 367: find -exec/-execdir/-okdir run another program; f
 
 test('FU-159 r2 F4: a write that can replace a file the script sources or runs refuses', () => {
   const lib = scriptFile('scripts/lib.sh');
-  const replaced = /writes scripts\/lib\.sh, a file this run sources or executes/;
+  const replaced = /writes scripts\/lib\.sh, a file this run sources or executes|curl option/;
   for (const writer of [
     'printf x > scripts/lib.sh',
     'printf x >> ./scripts/lib.sh',
@@ -1863,7 +1870,7 @@ test('FU-159 r2 F4: a write that can replace a file the script sources or runs r
   );
   refusesWhy(
     'curl -O https://x/y\nbash scripts/lib.sh',
-    /writes to a path this check cannot read/,
+    /curl option -O is not one this check reads/, // task 368 F4: an allowlist, not a list of writers
     bare,
     [lib],
   );
@@ -2545,9 +2552,10 @@ test('task 367: the allowed forms - a literal, ${{ env.NAME }}, or "$NAME" of a 
     infra([workflow('docker run -d "${{ env.MINIO_IMAGE }}" server', env)]).errors,
     [],
   );
-  assert.deepEqual(
-    infra([workflow('docker run -d ${{ env.MINIO_IMAGE }} server', env)]).errors,
-    [],
+  // Task 368 F3: an unquoted paste is zero or several words; only the quoted form is one word
+  assert.match(
+    infra([workflow('docker run -d ${{ env.MINIO_IMAGE }} server', env)]).errors.join('\n'),
+    /has an unquoted or vector expansion/,
   );
 });
 
@@ -2925,7 +2933,7 @@ test('task 367 (FU-200 F4): eval, nameref, curl, cp/mv and find cannot move, rep
   ])
     refusesShell(
       `${writer}\nsource scripts/lib.sh`,
-      /writes scripts\/lib\.sh|cannot read in a script that also sources/,
+      /writes scripts\/lib\.sh|cannot read in a script that also sources|curl option/,
       bare,
       [lib],
     );
@@ -2967,11 +2975,11 @@ test('task 367 (adversarial review): placeholders, trapped returns, grouped sour
     );
   // while a placeholder of the step's own expressions stays readable in the scripts nested in it
   assert.deepEqual(
-    infra([workflow('x="$(docker run ${{ env.IMG }} true)"\nbash -c \'true\'', env)]).errors,
+    infra([workflow('x="$(docker run "${{ env.IMG }}" true)"\nbash -c \'true\'', env)]).errors,
     [],
   );
   assert.deepEqual(
-    infra([workflow("eval f; trap 'docker run ${{ env.IMG }} true' EXIT", env)]).errors.filter(
+    infra([workflow('eval f; trap \'docker run "${{ env.IMG }}" true\' EXIT', env)]).errors.filter(
       (e) => /reserved/.test(e),
     ),
     [],
@@ -3022,7 +3030,7 @@ test('task 367 (adversarial review): placeholders, trapped returns, grouped sour
   ])
     refusesShell(
       `${writer}\nsource scripts/lib.sh`,
-      /writes scripts\/lib\.sh|cannot read in a script that also sources/,
+      /writes scripts\/lib\.sh|cannot read in a script that also sources|curl option/,
       bare,
       [lib],
     );
@@ -3060,6 +3068,467 @@ test('task 367 (adversarial review): placeholders, trapped returns, grouped sour
       ]).errors.some((e) => /command template/.test(e)),
       place,
     );
-  for (const shell of ['bash', 'sh', 'pwsh', 'python', undefined])
+  // task 368 L1: the run text is always read as bash, so a step in another shell is refused too
+  for (const shell of ['pwsh', 'powershell', 'python', 'cmd'])
+    assert.ok(
+      infra([step(shell)]).errors.some((e) => /shell: .* command template/.test(e)),
+      shell,
+    );
+  for (const shell of ['bash', 'sh', undefined])
     assert.deepEqual(infra([step(shell)]).errors, [], String(shell));
+});
+
+// --- task 368 (PR #941 review r1, claude-opus @ f2e6e998): inherited state, indirect vectors, scoped pastes, curl ----
+// Every row is a probe of ~/rasta-audit/reviews/PR-941.md: the checker accepted it while real bash 5.2 / curl 8.5
+// ran alpine:latest or overwrote a script it had read.
+const READ = 'docker run "$X_IMAGE" true';
+const NOT_FROZEN = /is not pinned by digest|names X_IMAGE|no preamble readonly literal/;
+
+test('task 368 F1: a shell that already ran has no preamble - substitutions, backticks and eval text inherit', () => {
+  // (a) the name is already readonly (any spelling), so the substitution's own `readonly` fails and the outer value stays
+  const inner = `readonly X_IMAGE=${PIN}\n${READ}`;
+  for (const before of [
+    'readonly X_IMAGE=alpine:latest',
+    'declare -r X_IMAGE=alpine:latest',
+    'typeset -r X_IMAGE=alpine:latest',
+    'X_IMAGE=alpine:latest\nreadonly X_IMAGE',
+  ]) {
+    refusesWhy(`set -euo pipefail\n${before}\nx="$(${inner})"`, NOT_FROZEN);
+    refusesWhy(`set -euo pipefail\n${before}\nx=\`${inner}\``, NOT_FROZEN); // (b) backticks
+  }
+  // text a substitution, a subshell or a trap reads gets what the outer shell froze, not its own declaration
+  refusesWhy(`x="$(set -euo pipefail\nreadonly X_IMAGE=${PIN}\n${READ})"`, NOT_FROZEN);
+  refusesWhy(`( set -euo pipefail; readonly X_IMAGE=${PIN}; ${READ} )`, NOT_FROZEN);
+  refusesWhy(
+    `trap 'set -euo pipefail; readonly X_IMAGE=${PIN}; ${READ}' EXIT`,
+    /trap runs a handler/,
+  );
+  // controls: what the outer shell froze is read inside, and a NEW shell (bash reading a here-document) has its own preamble
+  acceptsBoth(`${decl()}x="$(${READ})"\ny=\`${READ}\``);
+  acceptsBoth(`bash <<'EOF'\n${decl()}${READ}\nEOF`);
+  acceptsBoth(`${decl()}bash <<'EOF'\n${decl()}${READ}\nEOF`);
+});
+
+test('task 368 F1: a sourced file runs in a shell that already ran, so its preamble proves nothing (probe c)', () => {
+  const lib = scriptFile('scripts/lib.sh', `${decl()}${READ}`);
+  for (const source of [
+    'source scripts/lib.sh',
+    '. scripts/lib.sh',
+    'if true; then source scripts/lib.sh; fi',
+  ])
+    refusesShell(
+      `declare -r X_IMAGE=alpine:latest\n${source}\n`,
+      /sources scripts\/lib\.sh, which declares readonly names/,
+      bare,
+      [lib],
+    );
+  // the file itself, run as a program, is fine; a sourced file without a preamble is unchanged
+  acceptsShell('bash scripts/lib.sh', bare, [lib]);
+  acceptsShell('source scripts/defs.sh\nfn', bare, [
+    scriptFile('scripts/defs.sh', 'fn() { return 0; }'),
+  ]);
+});
+
+test('task 368 F1: a parent hands a child shell functions through the environment (probes d, e)', () => {
+  const child = scriptFile('scripts/x.sh', `${decl('IMAGE')}docker run "$IMAGE" true`);
+  const step = (env, stepEnv) =>
+    workflowYaml(
+      stringify({
+        ...(env ? { env } : {}),
+        jobs: {
+          j: { steps: [{ run: 'bash scripts/x.sh', ...(stepEnv ? { env: stepEnv } : {}) }] },
+        },
+      }),
+    );
+  for (const key of ['BASH_FUNC_readonly%%', 'BASH_FUNC_set%%', 'BASH_FUNC_x%%'])
+    for (const file of [
+      step({ IMAGE: 'alpine:latest', [key]: '() { :; }' }),
+      step(undefined, { [key]: '() { :; }' }),
+    ])
+      assert.ok(
+        infra([child, file]).errors.some((e) =>
+          /env sets BASH_FUNC_.*, which a shell evaluates at startup/.test(e),
+        ),
+        key,
+      );
+  for (const parent of [
+    'readonly() { :; }; export -f readonly; IMAGE=alpine:latest; export IMAGE; bash scripts/x.sh',
+    'readonly() { :; }\ndeclare -fx readonly\nbash scripts/x.sh',
+    'readonly() { :; }\ntypeset -f -x readonly\nbash scripts/x.sh',
+    'export -nf readonly',
+    'set -a\nreadonly() { :; }\nbash scripts/x.sh',
+    'set -ea\nreadonly() { :; }',
+    'set -o allexport\nreadonly() { :; }',
+    "env 'BASH_FUNC_readonly%%=() { :; }' bash scripts/x.sh",
+    'BASH_FUNC_readonly%%="() { :; }" bash scripts/x.sh',
+  ])
+    refusesShell(parent, /exports shell functions|evaluates at startup/, bare, [child]);
+  // the preamble's own `set -euo pipefail` and an ordinary `export NAME` stay
+  acceptsShell('set -euo pipefail\nexport KEY=1\nbash scripts/x.sh', bare, [child]);
+  // $GITHUB_ENV can define BASH_FUNC_* for every later step
+  refusesWhy('echo "BASH_FUNC_readonly%%=() { :; }" >> "$GITHUB_ENV"', /evaluates at startup/);
+  refusesWhy('echo "BASH_FUNC_x=1" >> "$GITHUB_ENV"', /appends BASH_FUNC_x to \$GITHUB_ENV/);
+});
+
+test('task 368 L2: bash expands a leading ~ in an assignment, so a preamble value with one is no literal', () => {
+  for (const value of ['~/img', 'a:~/b', '~root/x'])
+    imageRefused(`${decl('X_IMAGE', value)}${READ}`, NOT_FROZEN);
+  // an executed program named through such a value: bash runs $HOME/r/scripts/lib.sh, not the literal
+  const lib = scriptFile('scripts/lib.sh');
+  const policy = {
+    ...bare,
+    executedPrograms: new Map([
+      ['scripts/x.sh', { words: ['${TOOL_BIN}/scripts/lib.sh'], reason: 'r' }],
+    ]),
+  };
+  acceptsShell(`${decl('TOOL_BIN', '/r')}"\${TOOL_BIN}/scripts/lib.sh"`, policy, [lib]);
+  for (const value of ['~/r', '~root', 'a:~/r'])
+    refusesShell(
+      `${decl('TOOL_BIN', value)}"\${TOOL_BIN}/scripts/lib.sh"`,
+      /runs .*, a file this check does not read/,
+      policy,
+      [lib],
+    );
+});
+
+test('task 368 F2: every indirect expansion is a vector, whatever operator follows (not an operator list)', () => {
+  const run = (word) => `arr=(x=y alpine:latest); ref='arr[@]'\ndocker run -e ${word} ${PIN} true`;
+  for (const word of [
+    '"${!ref}"',
+    '"${!ref,}"',
+    '"${!ref:-}"',
+    '"${!ref:-x}"',
+    '"${!ref#}"',
+    '"${!ref%x}"',
+    '"${!ref/x/y}"',
+    '"${!ref:0}"',
+    '"${!ref^^}"',
+    '"${!ref@Q}"',
+    '"${!pre@}"',
+    '"${!pre*}"',
+    '"${u:-${!ref:-}}"',
+    '"${u:-${!ref}}"',
+    '"x${!ref:-}"',
+    '"${arr[@]:-y}"',
+    '"${arr[@]%x}"',
+  ])
+    refusesWhy(run(word), /before its image/);
+  // the same rule reads a wrapper's operands
+  refusesWhy(`arr=(a b); ref='arr[@]'\nenv "\${!ref:-}" docker run ${PIN} true`, /expansion|word/);
+  // controls: a plain name and a single-quoted text are one word
+  acceptsBoth(`u=x; docker run -e "\${u:-y}" -e '\${!ref:-}' ${PIN} true`);
+  acceptsBoth(`u=x; docker run -e "\${u#x}" -e "\${#u}" -e "$u" ${PIN} true`);
+});
+
+test('task 368 F3: a ${{ env }} paste is the env of THIS step, never empty, and always one quoted word', () => {
+  const wf = (steps, top) => workflowYaml(stringify({ ...top, jobs: { j: { steps } } }));
+  const sh = (run, env) => ({ run, ...(env ? { env } : {}) });
+  const refused = (files, why) => {
+    const { errors } = infra(Array.isArray(files) ? files : [files]);
+    assert.ok(
+      errors.some((e) => why.test(e)),
+      `${why}: ${errors.join('\n')}`,
+    );
+  };
+  const use = `docker run -e "\${{ env.N }}" ${PIN} alpine`;
+  // an empty value pastes nothing: `-e PIN alpine` runs alpine (latest)
+  for (const run of [
+    `docker run -e \${{ env.N }} ${PIN} alpine`,
+    `docker run --label \${{ env.N }} ${PIN} alpine`,
+    use,
+  ])
+    refused(wf([sh(run)], { env: { N: '' } }), /pasted into the script/);
+  // a name another step or another job defines is empty here
+  refused(wf([sh('true', { N: 'x=y' }), sh(use)]), /pasted into the script/);
+  refused(
+    workflowYaml(
+      stringify({ jobs: { a: { env: { N: 'x=y' }, steps: [] }, b: { steps: [sh(use)] } } }),
+    ),
+    /pasted into the script/,
+  );
+  // unquoted, the value is split by the shell: refused even when it is not empty
+  refused(
+    wf([sh(`docker run -e \${{ env.N }} ${PIN} alpine`)], { env: { N: 'x=y' } }),
+    /before its image/,
+  );
+  refused(
+    wf([sh('docker run ${{ env.N }} true')], { env: { N: PIN } }),
+    /unquoted or vector expansion/,
+  );
+  // the innermost value is the one pasted: a step env overrides the workflow's
+  refused(
+    wf([sh('docker run "${{ env.N }}" true', { N: 'alpine:latest' })], { env: { N: PIN } }),
+    /not pinned by digest/,
+  );
+  assert.deepEqual(
+    infra([wf([sh('docker run "${{ env.N }}" true', { N: PIN })], { env: { N: 'alpine:latest' } })])
+      .errors,
+    [],
+  );
+  // $GITHUB_ENV defines names for later steps (replacing the value this check read)
+  refused(
+    wf([sh('echo "N=alpine:latest" >> "$GITHUB_ENV"'), sh('docker run "${{ env.N }}" true')], {
+      env: { N: PIN },
+    }),
+    /\$\{\{ env\.N \}\} is pasted, but a step appends N to \$GITHUB_ENV/,
+  );
+  refused(
+    [
+      wf([sh('docker run "${{ env.N }}" true')], { env: { N: PIN } }),
+      scriptFile('scripts/w.sh', 'echo "N=alpine:latest" >> "${GITHUB_ENV}"'),
+    ],
+    /is pasted, but a step appends N to \$GITHUB_ENV/,
+  );
+  // a write whose name this check cannot read, or any other command naming the file, is refused
+  for (const body of [
+    'echo "$1=$2" >> "$GITHUB_ENV"',
+    'printf "N=x\\n" >> "$GITHUB_ENV"',
+    'cat >> "$GITHUB_ENV" <<EOF\nN=x\nEOF',
+    'tee -a "$GITHUB_ENV" < f',
+    'cp f "$GITHUB_ENV"',
+    'node w.js "$GITHUB_ENV"',
+    'echo N=x | tee "$GITHUB_ENV"',
+  ])
+    refusesWhy(body, /names \$GITHUB_ENV in a form this check does not read/);
+  // a reviewed entry may name the writes of a computed `echo "$1=$2"`; the names it lists are not pasteable
+  const writer = scriptFile('scripts/w.sh', 'echo "$1=$2" >> "${GITHUB_ENV}"');
+  const reviewed = {
+    ...bare,
+    reviewedPrograms: new Map([['scripts/w.sh', { programs: [], githubEnv: ['N'], reason: 'r' }]]),
+  };
+  assert.deepEqual(
+    infra([wf([sh('true')]), writer], reviewed).errors.filter((e) => /GITHUB_ENV/.test(e)),
+    [],
+  );
+  refused(
+    [wf([sh('docker run "${{ env.N }}" true')], { env: { N: PIN } }), writer],
+    /names \$GITHUB_ENV in a form/,
+  );
+  refused(
+    [wf([sh('docker run "${{ env.N }}" true')], { env: { N: PIN } }), writer],
+    /names \$GITHUB_ENV in a form/,
+  );
+  assert.ok(
+    infra(
+      [wf([sh('docker run "${{ env.N }}" true')], { env: { N: PIN } }), writer],
+      reviewed,
+    ).errors.some((e) => /is pasted, but a step appends N/.test(e)),
+  );
+  // controls: a test of the file, the real-tree shape
+  acceptsBoth('if [ -n "${GITHUB_ENV:-}" ]; then echo hi; fi');
+  assert.deepEqual(
+    infra([wf([sh('docker run -d "${{ env.N }}" server')], { env: { N: PIN } })]).errors,
+    [],
+  );
+});
+
+test('task 368 F4: curl has an allowlist of options; an abbreviation, a config or a format file cannot write a script', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const option of [
+    '--dump-head scripts/lib.sh',
+    '--dump-header scripts/lib.sh',
+    '--stde scripts/lib.sh',
+    '--stderr scripts/lib.sh',
+    '--cookie-j scripts/lib.sh',
+    '--cookie-jar scripts/lib.sh',
+    '--expand-output scripts/lib.sh',
+    '--outp scripts/lib.sh',
+    '--output-dir scripts',
+    '-w @scripts/fmt',
+    '--write-out @scripts/fmt',
+    '-w@scripts/fmt',
+    '--write-out=@scripts/fmt',
+    "-w '%output{scripts/lib.sh}x'",
+    "--write-out '%{http_code}%output{scripts/lib.sh}'",
+    "-H '%output{scripts/lib.sh}'",
+    '--conf scripts/cfg',
+    '--config scripts/cfg',
+    '-K scripts/cfg',
+    '-q',
+    '--next',
+    '--libcurl scripts/lib.sh',
+    '--trace scripts/lib.sh',
+    '--trace-ascii scripts/lib.sh',
+    '-O',
+    '-J',
+    '--remote-name',
+    '--hsts scripts/lib.sh',
+    '--etag-save scripts/lib.sh',
+    '--alt-svc scripts/lib.sh',
+    '--ssl-sessions scripts/lib.sh',
+    '--no-such-option',
+    '--silent=x',
+    '--',
+    '-c scripts/lib.sh',
+    '-D scripts/lib.sh',
+    '-fsSD scripts/lib.sh',
+    '-z scripts/lib.sh',
+  ])
+    refusesShell(
+      `curl ${option} https://x\nbash scripts/lib.sh`,
+      /curl option .* is not one this check reads/,
+      bare,
+      [lib],
+    );
+  // the control: -o to a script is a write of that file; -o elsewhere is fine
+  refusesShell(
+    'curl -o scripts/lib.sh https://x\nbash scripts/lib.sh',
+    /writes scripts\/lib\.sh/,
+    bare,
+    [lib],
+  );
+  acceptsShell('curl -fsS https://x -o /tmp/out\nbash scripts/lib.sh', bare, [lib]);
+  // what the real tree uses
+  for (const body of [
+    'curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1',
+    'curl -sfo /dev/null "http://localhost:8080/realms/rasta/.well-known/openid-configuration"',
+    "curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/health",
+    'curl --silent --show-error --fail --location --max-time 5 --header "Accept: x" --request POST http://x',
+    "curl -fsS -w '%{http_code}' -H 'A: b' -X GET -m 3 http://x",
+  ])
+    acceptsBoth(body);
+  // ~/.curlrc and the variables that find it name an output file by a path no script shows
+  for (const body of [
+    'CURL_HOME=. curl https://x',
+    'HOME=. curl https://x',
+    'XDG_CONFIG_HOME=. curl https://x',
+    'echo "output=scripts/lib.sh" > ~/.curlrc',
+    'cp c .curlrc',
+  ])
+    refusesShell(`${body}\nbash scripts/lib.sh`, /evaluates at startup/, bare, [lib]);
+});
+
+test('task 368 L1 + L3: only bash and sh read the run text as bash; the whole tree is read unless a caller says otherwise', () => {
+  for (const shellName of ['pwsh', 'powershell', 'python', 'cmd'])
+    assert.ok(
+      infra([
+        workflowYaml(stringify({ jobs: { j: { steps: [{ shell: shellName, run: 'true' }] } } })),
+      ]).errors.some((e) => /shell: .* command template/.test(e)),
+      shellName,
+    );
+  // L3: no `complete` in the policy is the gated behaviour: a listed file that is missing is an error ...
+  const listed = {
+    ...bare,
+    reviewedPrograms: new Map([['infra/gone.sh', { programs: ['awk'], reason: 'r' }]]),
+  };
+  const files = [scriptFile('scripts/x.sh', 'true')];
+  assert.ok(
+    validateWholeTree(files, listed).errors.some((e) =>
+      /REVIEWED_PROGRAMS lists infra\/gone\.sh/.test(e),
+    ),
+  );
+  assert.ok(
+    validateWholeTree(files, { ...listed, complete: undefined }).errors.some((e) =>
+      /REVIEWED_PROGRAMS lists/.test(e),
+    ),
+  );
+  // ... and only an explicit `complete: false` reads part of the tree
+  assert.deepEqual(validateWholeTree(files, { ...listed, complete: false }).errors, []);
+});
+
+// --- task 368: the siblings the fresh-context review of this round found (probes executed with real bash 5.2 / curl 8.5) ---
+test('task 368 review: shell options that export functions or read startup files (bash -a, -o allexport, -l, -i, #! options)', () => {
+  const child = scriptFile('scripts/x.sh', `${decl('IMAGE')}docker run "$IMAGE" true`);
+  for (const parent of [
+    "bash -a -c 'readonly() { :; }; bash scripts/x.sh'",
+    "bash -ea -c 'true'",
+    "sh -a -c 'true'",
+    'bash -a scripts/q.sh',
+    "bash -o allexport -c 'true'",
+    "bash -o AllExport -c 'true'",
+    'bash -l scripts/x.sh',
+    'bash --login scripts/x.sh',
+    'bash -i scripts/x.sh',
+    'bash -il scripts/x.sh',
+    'env bash -a scripts/x.sh',
+  ])
+    refusesShell(parent, /exports functions|startup files|not one this check reads/, bare, [child]);
+  // controls: the options the preamble and the reviewed scripts use
+  acceptsShell('bash -eu scripts/x.sh', bare, [child]);
+  acceptsShell('bash -o pipefail scripts/x.sh', bare, [child]);
+  acceptsShell('bash --noprofile --norc scripts/x.sh', bare, [child]);
+  // the #! line is an option list the file's own text never shows
+  for (const first of ['#!/bin/bash -a', '#!/usr/bin/env -S bash -a', '#!/bin/bash -eo allexport'])
+    refusesShell(`${first}\ntrue\n`, /#! line has an option/);
+  for (const first of ['#!/bin/bash', '#!/usr/bin/env bash', '#! /bin/sh'])
+    acceptsShell(`${first}\ntrue\n`);
+});
+
+test('task 368 review: backslash-newline inside ${…} does not hide a vector (bash deletes it first)', () => {
+  const run = (word) => `arr=(x=y alpine:latest)\ndocker run --label ${word} ${PIN} true`;
+  for (const word of [
+    '"${arr[\\\n@]}"',
+    '"${\\\n@}"',
+    '"${\\\n!ref}"',
+    '"${arr[@\\\n]}"',
+    '"${!\\\nref:-}"',
+  ])
+    refusesWhy(run(word), /before its image/);
+});
+
+test('task 368 review: curl cannot write through a URL-glob template, a computed word, a computed format or an env config', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const body of [
+    "curl -o 'scripts/#1' 'https://x.example/{lib.sh}'",
+    "curl --output 'scripts/#1' 'https://x.example/{lib.sh}'",
+    "curl -sSfLo 'scripts/#1' 'https://x.example/{lib.sh}'",
+    'f=\'%{url}%output{scripts/lib.sh}x\'; curl -sS -w "$f" https://x',
+    'curl -sS -w "${a}ut{scripts/lib.sh}" https://x',
+    'curl -o "$f" https://x',
+    'a=-o; b=scripts/lib.sh; curl -sS "$a" "$b" https://x',
+    'opts="-o scripts/lib.sh"; curl -sS $opts https://x',
+    'c() { curl "$@"; }\nc --output scripts/lib.sh https://x',
+    'c() { curl -K cfg "$1"; }\nc https://x',
+  ])
+    refusesShell(
+      `${body}\nbash scripts/lib.sh`,
+      /curl option .* is not one this check reads/,
+      bare,
+      [lib],
+    );
+  // the config-file variables as workflow/step/job env KEYS (the word form was refused already)
+  for (const key of ['CURL_HOME', 'HOME', 'XDG_CONFIG_HOME', 'curlrc'])
+    assert.ok(
+      infra([
+        workflowYaml(
+          stringify({ jobs: { j: { env: { [key]: '.' }, steps: [{ run: 'curl https://x' }] } } }),
+        ),
+      ]).errors.some((e) => /env sets .*, which a shell evaluates at startup/.test(e)),
+      key,
+    );
+});
+
+test('task 368 review: GITHUB_ENV writes define the names they write (one line), GITHUB_PATH by tee, env names ignore case', () => {
+  const wf = (steps, top) => workflowYaml(stringify({ ...top, jobs: { j: { steps } } }));
+  const sh = (run, env) => ({ run, ...(env ? { env } : {}) });
+  const use = sh('docker run "${{ env.X_IMAGE }}" true');
+  // a second line (a real newline, a \n of echo -e, a literal \n) defines another name
+  for (const body of [
+    'echo "A=1\nX_IMAGE=alpine:latest" >> "$GITHUB_ENV"',
+    'echo -e "A=1\\nX_IMAGE=alpine:latest" >> "$GITHUB_ENV"',
+    'echo -n "A=1" >> "$GITHUB_ENV"',
+    'echo A=1 B=2 >> "$GITHUB_ENV"',
+  ])
+    assert.ok(
+      infra([wf([sh(body), use], { env: { X_IMAGE: PIN } })]).errors.some((e) =>
+        /names \$GITHUB_ENV in a form this check does not read/.test(e),
+      ),
+      body,
+    );
+  // GITHUB_PATH through tee, not only a redirect
+  refusesWhy('echo /tmp/evil | tee -a "$GITHUB_PATH"', /appends to GITHUB_PATH/);
+  refusesWhy('echo /tmp/evil >> "$GITHUB_PATH"', /appends to GITHUB_PATH/);
+  // env names are case-insensitive in an expression: a lower-case step env replaces the workflow's
+  assert.ok(
+    infra([
+      wf([sh('docker run "${{ env.X_IMAGE }}" true', { x_image: 'alpine:latest' })], {
+        env: { X_IMAGE: PIN },
+      }),
+    ]).errors.some((e) => /not pinned by digest/.test(e)),
+  );
+  assert.ok(
+    infra([
+      wf([sh('echo "x_image=alpine:latest" >> "$GITHUB_ENV"'), use], { env: { X_IMAGE: PIN } }),
+    ]).errors.some((e) => /is pasted, but a step appends X_IMAGE to \$GITHUB_ENV/.test(e)),
+  );
 });
