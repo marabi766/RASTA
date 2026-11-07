@@ -104,6 +104,8 @@ const pins = {
     '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
     // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171), numberInputInnerSchema (FU-160, #831) and the FU-152 private pattern registry exports (#840): exact union.
     'ea1656bd023da6f0fddd9d24e1842aa628939bd610f77c5a7ad4f793e277c155',
+    // + MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS (FU-171, #879) on top of that union: exact union.
+    '0d7a692210ab8c4f739096703984e7253fa3019a63f7c99049666348f2835238',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',

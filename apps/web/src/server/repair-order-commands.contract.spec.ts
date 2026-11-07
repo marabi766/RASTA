@@ -170,13 +170,14 @@ describe('the Idempotency-Key the portal sends', () => {
       );
       expect(declaration).toBeDefined();
       const parameters = declaration!.parameters.map((parameter) => parameter.getText());
-      expect(parameters.some((text) => text.includes("@Headers('idempotency-key')"))).toBe(true);
+      expect(parameters.some((text) => text.includes('@Headers() headers'))).toBe(true);
     },
   );
 
   it('is demanded of every one of them, not only honoured when sent', () => {
-    expect(source).toContain('requiredIdempotencyKey(rawKey)');
-    expect(source).not.toContain('optionalIdempotencyKey');
+    // FU-171: the one entry point reads the key, and its replay deadline, from the headers.
+    expect(source).toContain('idempotentRequest(headers)');
+    expect(source).not.toContain('optionalIdempotentRequest');
   });
 });
 
