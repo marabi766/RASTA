@@ -513,7 +513,7 @@ export class OrganizationRepository {
       UPDATE organization o
       SET status = ${next}::"OrganizationStatus",
           updated_by = ${actor},
-          updated_at = now(),
+          updated_at = (now() AT TIME ZONE 'UTC'),
           version = o.version + 1
       FROM target
       WHERE o.id = target.id

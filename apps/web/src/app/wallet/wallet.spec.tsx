@@ -346,3 +346,24 @@ describe('accessibility', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+// prettier-ignore
+it('F1: remounts for a server-held record and after its release', () => {
+  const screen = (submissionId: string, held: boolean, providerOk = true) => <WalletScreen
+    wallet={{ kind: 'OK', data: WALLET }} holds={{ kind: 'OK', data: HOLDS }}
+    transactions={{ kind: 'OK', data: TRANSACTIONS }}
+    provider={providerOk ? { kind: 'OK', data: PROVIDER } : { kind: 'UNAVAILABLE', status: 503, correlationId: 'down' }}
+    query={{ context: TEST_CONTEXT }} csrfToken="csrf" submissionId={submissionId}
+    topUpState={held ? { kind: 'HELD', submissionId, values: { amountMinor: '1000' }, releaseToken: 'signed-record' } : { kind: 'IDLE' }}
+  />;
+  const view = render(screen('held-key', false));
+  view.rerender(screen('held-key', true));
+  expect(view.getByRole('button', { name: /افزایش موجودی نمایشی/ })).toBeDisabled();
+  expect(view.getByRole('checkbox', { name: /دوباره افزایش دهد/ })).toBeRequired();
+  expect(view.container.querySelector('form form')).toBeNull();
+  view.rerender(screen('held-key', true, false));
+  expect(view.getByRole('checkbox', { name: /دوباره افزایش دهد/ })).toBeRequired();
+  expect(view.container.querySelector('[name="amountMinor"]')).toBeNull();
+  view.rerender(screen('fresh-key', false));
+  expect(view.getByRole('button', { name: /افزایش موجودی نمایشی/ })).toBeEnabled();
+});

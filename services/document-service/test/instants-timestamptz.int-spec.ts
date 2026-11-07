@@ -264,10 +264,30 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
     updatedAt: row.updatedAt.toISOString(),
   });
 
+  /**
+   * A session moved to Tehran after it started. A session STARTED outside UTC is refused
+   * outright by the client (FU-188, `utc-session.ts`), so this is how the raw SQL of a
+   * replica in another zone can still be run: `SET LOCAL`, past the check, and committed.
+   */
+  const inTehran = <T>(work: (db: PrismaService) => Promise<T>): Promise<T> =>
+    utc.client.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL TimeZone = '${TEHRAN}'`);
+      const db = new Proxy(utc, {
+        get(target, key, receiver) {
+          if (key === 'client') return tx;
+          if (key === 'transaction') return (run: (client: unknown) => unknown) => run(tx);
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      });
+      return work(db);
+    }) as Promise<T>;
+
   /** The Tehran session's distance from UTC, in seconds, asked of the session itself. */
   const tehranOffsetSeconds = async (): Promise<number> => {
-    const [row] = await tehran.client.$queryRawUnsafe<{ zone: string; utc_offset: number }[]>(
-      `SELECT current_setting('TimeZone') AS zone, extract(timezone FROM now())::int AS utc_offset`,
+    const [row] = await inTehran((db) =>
+      db.client.$queryRawUnsafe<{ zone: string; utc_offset: number }[]>(
+        `SELECT current_setting('TimeZone') AS zone, extract(timezone FROM now())::int AS utc_offset`,
+      ),
     );
     // Guards the test: a session silently in UTC would make every contrast below vacuous.
     expect(row!.zone).toBe(TEHRAN);
@@ -282,11 +302,13 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
    * then releases it.
    */
   const leaseDrift = async (): Promise<number> => {
-    const claimed = await new ScanRepository(tehran).claim({
-      owner: 'tehran-worker',
-      limit: 10,
-      leaseSeconds: 60,
-    });
+    const claimed = await inTehran((db) =>
+      new ScanRepository(db).claim({
+        owner: 'tehran-worker',
+        limit: 10,
+        leaseSeconds: 60,
+      }),
+    );
     expect(claimed.map((d) => d.id)).toEqual(['DOC_C']);
     const doc = await runUnscoped('test: the scratch schema', () =>
       utc.client.document.findUniqueOrThrow({ where: { id: 'DOC_C' } }),
@@ -301,10 +323,12 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
   /** A column default (`CURRENT_TIMESTAMP`) filled in by a Tehran session, read back through Prisma. */
   const defaultDrift = async (): Promise<number> => {
     const id = `GRT_${ulid()}`;
-    await tehran.client.$executeRawUnsafe(
-      `INSERT INTO access_grant (id, organization_id, document_id, subject_type, subject_id, granted_by)
-       VALUES ($1, 'ORG_TZ', 'DOC_A', 'USER', $1, 'USR_TZ')`,
-      id,
+    await inTehran((db) =>
+      db.client.$executeRawUnsafe(
+        `INSERT INTO access_grant (id, organization_id, document_id, subject_type, subject_id, granted_by)
+         VALUES ($1, 'ORG_TZ', 'DOC_A', 'USER', $1, 'USR_TZ')`,
+        id,
+      ),
     );
     const grant = await runUnscoped('test: the scratch schema', () =>
       utc.client.accessGrant.findUniqueOrThrow({ where: { id } }),

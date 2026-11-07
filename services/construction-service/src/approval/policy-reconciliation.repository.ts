@@ -15,6 +15,9 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
  * it in that tenant's context. No method here reads or writes a task without an
  * organization predicate except the three that say so.
  *
+ * The columns are `timestamp(3)`, UTC wall time, so every clock says `AT TIME ZONE
+ * 'UTC'` (FU-188, `pnpm check:utc-clock-sites`).
+ *
  * Times come from the database's `now()`, never the application clock (D-5): a
  * lease and the due time it is compared with must be one clock's.
  */
@@ -114,14 +117,14 @@ export class PolicyReconciliationRepository {
       () =>
         this.prisma.client.$queryRawUnsafe<ClaimedTask[]>(
           `UPDATE policy_reconciliation_task
-              SET lease_until = now() + ($2::int * interval '1 second'),
+              SET lease_until = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($2::int * interval '1 second'),
                   lease_token = $3,
-                  updated_at = now()
+                  updated_at = (now() AT TIME ZONE 'UTC')
             WHERE id IN (
                   SELECT id FROM policy_reconciliation_task
                    WHERE status = 'PENDING'
-                     AND next_attempt_at <= now()
-                     AND (lease_until IS NULL OR lease_until <= now())
+                     AND next_attempt_at <= (now() AT TIME ZONE 'UTC')
+                     AND (lease_until IS NULL OR lease_until <= (now() AT TIME ZONE 'UTC'))
                    ORDER BY next_attempt_at, id
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
@@ -155,7 +158,7 @@ export class PolicyReconciliationRepository {
   ): Promise<number> {
     return tx.$executeRawUnsafe(
       `UPDATE policy_reconciliation_task
-          SET status = 'DONE', done_at = now(), updated_at = now(),
+          SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
               lease_until = NULL, lease_token = NULL, last_error_code = NULL
         WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'
           AND ($4::boolean = false OR generation = $5::int)`,
@@ -184,7 +187,7 @@ export class PolicyReconciliationRepository {
   async release(task: ClaimedTask): Promise<number> {
     return this.prisma.client.$executeRawUnsafe(
       `UPDATE policy_reconciliation_task
-          SET lease_until = NULL, lease_token = NULL, updated_at = now()
+          SET lease_until = NULL, lease_token = NULL, updated_at = (now() AT TIME ZONE 'UTC')
         WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
       task.organizationId,
       task.id,
@@ -223,8 +226,8 @@ export class PolicyReconciliationRepository {
   async retryLater(task: ClaimedTask, errorCode: string, backoffSeconds: number): Promise<number> {
     return this.prisma.client.$executeRawUnsafe(
       `UPDATE policy_reconciliation_task
-          SET attempts = attempts + 1, last_error_code = $4, updated_at = now(),
-              next_attempt_at = now() + ($5::int * interval '1 second'),
+          SET attempts = attempts + 1, last_error_code = $4, updated_at = (now() AT TIME ZONE 'UTC'),
+              next_attempt_at = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($5::int * interval '1 second'),
               lease_until = NULL, lease_token = NULL
         WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
       task.organizationId,
@@ -242,9 +245,9 @@ export class PolicyReconciliationRepository {
       () =>
         this.prisma.client.$queryRawUnsafe<{ open: bigint; due: bigint; oldest: number | null }[]>(
           `SELECT count(*) AS open,
-                  count(*) FILTER (WHERE next_attempt_at <= now()) AS due,
-                  extract(epoch FROM now() - min(next_attempt_at)
-                          FILTER (WHERE next_attempt_at <= now())) AS oldest
+                  count(*) FILTER (WHERE next_attempt_at <= (now() AT TIME ZONE 'UTC')) AS due,
+                  extract(epoch FROM (now() AT TIME ZONE 'UTC') - min(next_attempt_at)
+                          FILTER (WHERE next_attempt_at <= (now() AT TIME ZONE 'UTC'))) AS oldest
              FROM policy_reconciliation_task
             WHERE status = 'PENDING'`,
         ),
