@@ -66,11 +66,11 @@ export class ContractorStandingRepository {
       () =>
         client.$executeRawUnsafe(
           `INSERT INTO contractor_standing (organization_id, contracting_qualified_at, updated_at)
-           VALUES ($1, $2::timestamp, now())
+           VALUES ($1, $2::timestamp, (now() AT TIME ZONE 'UTC'))
            ON CONFLICT (organization_id) DO UPDATE
               SET contracting_qualified_at = GREATEST(
                     contractor_standing.contracting_qualified_at, EXCLUDED.contracting_qualified_at),
-                  updated_at = now()`,
+                  updated_at = (now() AT TIME ZONE 'UTC')`,
           organizationId,
           decidedAt,
         ),
@@ -165,7 +165,7 @@ export class ContractorStandingRepository {
   async beginBootstrap(client: ExtendedPrismaClient = this.prisma.client): Promise<void> {
     await runUnscoped('the bootstrap marker names no organization', () =>
       client.$executeRawUnsafe(
-        `INSERT INTO standing_bootstrap (id, started_at, updated_at) VALUES (1, now(), now())
+        `INSERT INTO standing_bootstrap (id, started_at, updated_at) VALUES (1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'))
          ON CONFLICT (id) DO NOTHING`,
       ),
     );
@@ -182,7 +182,7 @@ export class ContractorStandingRepository {
             SET cursor = $1,
                 suppliers_loaded = suppliers_loaded + $2,
                 source_snapshot_at = GREATEST(COALESCE(source_snapshot_at, $3::timestamp), $3::timestamp),
-                updated_at = now()
+                updated_at = (now() AT TIME ZONE 'UTC')
           WHERE id = 1 AND completed_at IS NULL`,
         page.cursor,
         page.loaded,
@@ -195,7 +195,7 @@ export class ContractorStandingRepository {
   async completeBootstrap(client: ExtendedPrismaClient): Promise<boolean> {
     const touched = await runUnscoped('the bootstrap marker names no organization', () =>
       client.$executeRawUnsafe(
-        `UPDATE standing_bootstrap SET completed_at = now(), updated_at = now()
+        `UPDATE standing_bootstrap SET completed_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC')
           WHERE id = 1 AND completed_at IS NULL AND source_snapshot_at IS NOT NULL`,
       ),
     );
@@ -217,10 +217,10 @@ export class ContractorStandingRepository {
           client.$executeRawUnsafe(
             `INSERT INTO contractor_suspension
                     (suspension_id, organization_id, ${column}, updated_at)
-             VALUES ($1, $2, $3::timestamp, now())
+             VALUES ($1, $2, $3::timestamp, (now() AT TIME ZONE 'UTC'))
              ON CONFLICT (suspension_id) DO UPDATE
                 SET ${column} = COALESCE(contractor_suspension.${column}, EXCLUDED.${column}),
-                    updated_at = now()
+                    updated_at = (now() AT TIME ZONE 'UTC')
               WHERE contractor_suspension.organization_id = EXCLUDED.organization_id`,
             suspensionId,
             organizationId,

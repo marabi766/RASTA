@@ -22,6 +22,7 @@ import { parse as parseYaml } from 'yaml';
 
 import {
   EXPECTED,
+  HOLD_UNPROVEN_SINCE_AT_COMMIT,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -3041,4 +3042,22 @@ test('the runbook gives exactly the verifier command: -X and --single-transactio
     assert.match(invocation, /-X -q -v ON_ERROR_STOP=1 --single-transaction/, invocation);
   }
   assert.doesNotMatch(runbook, /خودشان `BEGIN … COMMIT` دارند/);
+});
+
+test('the probe of 20261107120000 over used data asks what its WARNING counts, word for word', () => {
+  const up = readFileSync(
+    join(
+      ROOT,
+      'services',
+      'economic-service',
+      'prisma',
+      'migrations',
+      '20261107120000_hold_funded_at_commit',
+      'migration.sql',
+    ),
+    'utf8',
+  );
+  const warning = up.slice(up.lastIndexOf('DO $$'));
+  assert.match(warning, /RAISE WARNING 'wallet_hold: holds naming a journal/);
+  assert.ok(warning.includes(`WHERE ${HOLD_UNPROVEN_SINCE_AT_COMMIT}`), warning);
 });

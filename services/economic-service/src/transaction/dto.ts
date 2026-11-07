@@ -105,6 +105,15 @@ export const createTransactionSchema = z
      * (docs/10 § 10.5).
      */
     holdFunds: z.boolean().prefault(false),
+    /**
+     * The instant after which this hold may no longer be placed, fixed by the caller at
+     * its first send and the same on every retry: past it by this service's clock, 422
+     * `HOLD_DEADLINE_PASSED` with nothing recorded (`IdempotencyStore`, D-132). In the
+     * request's hash, so one key never answers two deadlines. Required for an `ORDER`:
+     * without it, 422 `HOLD_DEADLINE_REQUIRED` with nothing recorded (D-150,
+     * `TransactionService.create`); any other source may hold without one.
+     */
+    holdNotAfter: z.string().check(isoDateTime()).optional(),
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */
     idempotencyKey: identifier(z.string().trim().min(8).max(128)).optional(),
   })
@@ -117,6 +126,13 @@ export const createTransactionSchema = z
         code: z.ZodIssueCode.custom,
         path: ['sourceType'],
         message: RECORDED_SOURCE_REFUSAL,
+      });
+    }
+    if (dto.holdNotAfter !== undefined && !dto.holdFunds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['holdNotAfter'],
+        message: 'A hold deadline needs holdFunds',
       });
     }
   });

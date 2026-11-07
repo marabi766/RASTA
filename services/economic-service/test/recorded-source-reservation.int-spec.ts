@@ -11,7 +11,7 @@ import {
   startApi,
   type ApiHarness,
 } from './api-helpers';
-import { asActor, cleanup, id } from './helpers';
+import { asActor, cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 import { FakeSourceFacts } from './source-facts.fake';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { CONSUMED_EVENTS } from '../src/events/consumed';
@@ -503,6 +503,7 @@ describe('source types economic-service records itself — no caller pre-empts o
           sourceType: 'ORDER',
           sourceReference: orderId,
           holdFunds: true,
+          holdNotAfter: ORDER_HOLD_DEADLINE,
         });
 
     /** The attack: 1 rial to the accomplice, held, under the pending order's key. */

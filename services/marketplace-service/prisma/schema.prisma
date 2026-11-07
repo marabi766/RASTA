@@ -230,9 +230,18 @@ model Order {
   sagaStartRequestedAt DateTime? @map("saga_start_requested_at")
   sagaStartAttemptedAt DateTime? @map("saga_start_attempted_at")
   sagaStartDeliveredAt DateTime? @map("saga_start_delivered_at")
-  sagaStartNextAttemptAt DateTime @default(now()) @map("saga_start_next_attempt_at")
+  sagaStartNextAttemptAt DateTime @default(dbgenerated("timezone('UTC'::text, now())")) @map("saga_start_next_attempt_at")
   sagaStartClaimToken String? @db.Uuid @map("saga_start_claim_token")
   sagaStartClaimExpiresAt DateTime? @map("saga_start_claim_expires_at")
+
+  /// The hold's fence, which outlives any run of the saga (D-144). The deadline every
+  /// request under the hold's key carries, set once, before the first send.
+  holdNotAfter DateTime? @db.Timestamptz(3) @map("hold_not_after")
+  /// Sends begun, each counted before it leaves. Above zero: one may be on its way. By
+  /// default one: only `place` of a build that counts them can say there has been none.
+  holdSendClaims Int @default(1) @map("hold_send_claims")
+  /// No send can begin from here on, and none begun can still hold (`noHoldCanLand`).
+  holdSendsClosedAt DateTime? @db.Timestamptz(3) @map("hold_sends_closed_at")
 
   /// Recomputed from the lines, never accumulated (the maintenance-service
   /// lesson): a total that drifts from its lines is a total nobody can audit.

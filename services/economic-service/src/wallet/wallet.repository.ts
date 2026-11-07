@@ -124,7 +124,7 @@ export class WalletRepository {
              SET available_balance_minor = b.wallet_balance,
                  pending_balance_minor   = b.escrow_balance,
                  ledger_balance_minor    = b.wallet_balance + b.escrow_balance,
-                 updated_at              = now()
+                 updated_at              = (now() AT TIME ZONE 'UTC')
             FROM (
               SELECT
                 COALESCE(SUM(CASE WHEN a.purpose = 'WALLET' THEN s.balance ELSE 0 END), 0)

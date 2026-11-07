@@ -30,7 +30,9 @@ import { ENV } from '../tokens';
  *
  * Times come from the database's `now()`, never the application clock: a due
  * time and the lease it is later compared with must be one clock's (as in
- * #148's queue).
+ * #148's queue). These columns are `timestamp(3)`, UTC wall time, so every clock
+ * here says `AT TIME ZONE 'UTC'`: bare, it would write and compare the session's
+ * wall time (FU-188, `pnpm check:utc-clock-sites`).
  */
 @Injectable()
 export class PaymentReconciliationRepository {
@@ -55,11 +57,11 @@ export class PaymentReconciliationRepository {
               (id, organization_id, payment_intent_id, kind, next_attempt_at, last_outcome,
                correlation_id, created_at, updated_at)
          VALUES ($1, $2, $3, $4::"PaymentReconciliationKind",
-                 now() + ($5::int * interval '1 second'), $6, $7, now(), now())
+                 date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($5::int * interval '1 second'), $6, $7, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'))
          ON CONFLICT (payment_intent_id) WHERE status <> 'DONE'
          DO UPDATE SET next_attempt_at = EXCLUDED.next_attempt_at,
                        last_outcome = EXCLUDED.last_outcome,
-                       updated_at = now()
+                       updated_at = (now() AT TIME ZONE 'UTC')
                  WHERE payment_reconciliation_task.status = 'PENDING'
                    AND payment_reconciliation_task.organization_id = EXCLUDED.organization_id`,
         `PRT_${ulid()}`,
@@ -84,7 +86,7 @@ export class PaymentReconciliationRepository {
     return runUnscoped('a reconciliation task is closed for its intent, in its tenant', () =>
       tx.$executeRawUnsafe(
         `UPDATE payment_reconciliation_task
-            SET status = 'DONE', done_at = now(), updated_at = now(),
+            SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
                 resolution = $3, resolved_by = $4,
                 lease_until = NULL, lease_token = NULL
           WHERE organization_id = $1 AND payment_intent_id = $2 AND status <> 'DONE'`,
@@ -113,14 +115,14 @@ export class PaymentReconciliationRepository {
       () =>
         this.prisma.client.$queryRawUnsafe<ClaimedTask[]>(
           `UPDATE payment_reconciliation_task
-              SET lease_until = now() + ($2::int * interval '1 second'),
+              SET lease_until = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($2::int * interval '1 second'),
                   lease_token = $3,
-                  updated_at = now()
+                  updated_at = (now() AT TIME ZONE 'UTC')
             WHERE id IN (
                   SELECT id FROM payment_reconciliation_task
                    WHERE status = 'PENDING'
-                     AND next_attempt_at <= now()
-                     AND (lease_until IS NULL OR lease_until <= now())
+                     AND next_attempt_at <= (now() AT TIME ZONE 'UTC')
+                     AND (lease_until IS NULL OR lease_until <= (now() AT TIME ZONE 'UTC'))
                    ORDER BY next_attempt_at, id
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
@@ -165,7 +167,7 @@ export class PaymentReconciliationRepository {
         runUnscoped('a fenced write names the task and its tenant', () =>
           tx.$executeRawUnsafe(
             `UPDATE payment_reconciliation_task
-                SET status = 'DONE', done_at = now(), updated_at = now(),
+                SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
                     resolution = $4, resolved_by = $5,
                     lease_until = NULL, lease_token = NULL
               WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
@@ -180,7 +182,7 @@ export class PaymentReconciliationRepository {
         runUnscoped('a fenced write names the task and its tenant', () =>
           tx.$executeRawUnsafe(
             `UPDATE payment_reconciliation_task
-                SET status = 'ESCALATED', escalated_at = now(), updated_at = now(),
+                SET status = 'ESCALATED', escalated_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
                     attempts = attempts + $5::int, last_outcome = $4,
                     lease_until = NULL, lease_token = NULL
               WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
@@ -216,7 +218,7 @@ export class PaymentReconciliationRepository {
                 kind::text AS kind,
                 status::text AS status,
                 attempts,
-                (lease_until IS NOT NULL AND lease_until > now()) AS leased
+                (lease_until IS NOT NULL AND lease_until > (now() AT TIME ZONE 'UTC')) AS leased
            FROM payment_reconciliation_task
           WHERE organization_id = $1 AND payment_intent_id = $2 AND status <> 'DONE'
             FOR UPDATE`,
@@ -243,7 +245,7 @@ export class PaymentReconciliationRepository {
           tx.$queryRawUnsafe<{ id: string }[]>(
             `SELECT id FROM payment_reconciliation_task
               WHERE organization_id = $1 AND id = $2 AND status IN ('PENDING', 'ESCALATED')
-                AND (lease_until IS NULL OR lease_until <= now())
+                AND (lease_until IS NULL OR lease_until <= (now() AT TIME ZONE 'UTC'))
                 FOR UPDATE`,
             task.organizationId,
             task.id,
@@ -255,11 +257,11 @@ export class PaymentReconciliationRepository {
         runUnscoped('a guarded write names the task and its tenant', () =>
           tx.$executeRawUnsafe(
             `UPDATE payment_reconciliation_task
-                SET status = 'DONE', done_at = now(), updated_at = now(),
+                SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
                     resolution = $3, resolved_by = $4,
                     lease_until = NULL, lease_token = NULL
               WHERE organization_id = $1 AND id = $2 AND status IN ('PENDING', 'ESCALATED')
-                AND (lease_until IS NULL OR lease_until <= now())`,
+                AND (lease_until IS NULL OR lease_until <= (now() AT TIME ZONE 'UTC'))`,
             task.organizationId,
             task.id,
             resolution,
@@ -278,10 +280,10 @@ export class PaymentReconciliationRepository {
     return runUnscoped('a guarded write names the task and its tenant', () =>
       tx.$executeRawUnsafe(
         `UPDATE payment_reconciliation_task
-            SET status = 'PENDING', attempts = 0, next_attempt_at = now(),
-                last_outcome = 'REQUEUED', updated_at = now()
+            SET status = 'PENDING', attempts = 0, next_attempt_at = date_trunc('milliseconds', now() AT TIME ZONE 'UTC'),
+                last_outcome = 'REQUEUED', updated_at = (now() AT TIME ZONE 'UTC')
           WHERE organization_id = $1 AND id = $2 AND status IN ('PENDING', 'ESCALATED')
-            AND (lease_until IS NULL OR lease_until <= now())`,
+            AND (lease_until IS NULL OR lease_until <= (now() AT TIME ZONE 'UTC'))`,
         task.organizationId,
         task.id,
       ),
@@ -302,8 +304,8 @@ export class PaymentReconciliationRepository {
     return runUnscoped('a fenced write names the task and its tenant', () =>
       this.prisma.client.$executeRawUnsafe(
         `UPDATE payment_reconciliation_task
-            SET attempts = attempts + $6::int, last_outcome = $4, updated_at = now(),
-                next_attempt_at = now() + ($5::int * interval '1 second'),
+            SET attempts = attempts + $6::int, last_outcome = $4, updated_at = (now() AT TIME ZONE 'UTC'),
+                next_attempt_at = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + ($5::int * interval '1 second'),
                 lease_until = NULL, lease_token = NULL
           WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
         task.organizationId,
@@ -388,8 +390,8 @@ export class PaymentReconciliationRepository {
                   (id, organization_id, payment_intent_id, kind, next_attempt_at, last_outcome,
                    correlation_id, created_at, updated_at)
              SELECT m.id, m.organization_id, m.payment_intent_id, m.kind::"PaymentReconciliationKind",
-                    now() + (CASE WHEN m.unknown THEN $6::int ELSE 0 END * interval '1 second'),
-                    'MISSING_TASK', m.correlation_id, now(), now()
+                    date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + (CASE WHEN m.unknown THEN $6::int ELSE 0 END * interval '1 second'),
+                    'MISSING_TASK', m.correlation_id, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')
                FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::boolean[], $7::text[])
                     AS m(id, organization_id, payment_intent_id, kind, unknown, correlation_id)
              ON CONFLICT (payment_intent_id) WHERE status <> 'DONE' DO NOTHING`,
@@ -418,7 +420,7 @@ export class PaymentReconciliationRepository {
                  LIMIT $1),
                 closed AS (
                 UPDATE payment_reconciliation_task
-                   SET status = 'DONE', done_at = now(), updated_at = now(),
+                   SET status = 'DONE', done_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC'),
                        resolution = 'NOTHING_TO_RECONCILE', resolved_by = $4,
                        last_outcome = 'MARKER_GONE', lease_until = NULL, lease_token = NULL
                  WHERE id IN (
@@ -428,7 +430,7 @@ export class PaymentReconciliationRepository {
                          JOIN payment_intent pi
                            ON pi.organization_id = t.organization_id AND pi.id = t.payment_intent_id
                         WHERE t.status <> 'DONE'
-                          AND (t.lease_until IS NULL OR t.lease_until <= now())
+                          AND (t.lease_until IS NULL OR t.lease_until <= (now() AT TIME ZONE 'UTC'))
                           AND NOT ((t.kind = 'REFUND' AND pi.status = 'CAPTURED'
                                     AND pi.failure_reason IN ('REFUND_REQUESTED', 'REFUND_UNKNOWN',
                                                               'REFUNDED_NOT_REVERSED',
@@ -480,8 +482,8 @@ export class PaymentReconciliationRepository {
         >(
           `SELECT count(*) FILTER (WHERE status = 'PENDING') AS open,
                   count(*) FILTER (WHERE status = 'ESCALATED') AS escalated,
-                  extract(epoch FROM now() - min(next_attempt_at)
-                          FILTER (WHERE status = 'PENDING' AND next_attempt_at <= now()))::float8 AS oldest
+                  extract(epoch FROM (now() AT TIME ZONE 'UTC') - min(next_attempt_at)
+                          FILTER (WHERE status = 'PENDING' AND next_attempt_at <= (now() AT TIME ZONE 'UTC')))::float8 AS oldest
              FROM payment_reconciliation_task
             WHERE status <> 'DONE'`,
         ),

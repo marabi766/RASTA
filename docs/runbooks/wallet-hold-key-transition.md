@@ -14,12 +14,21 @@ hold and refuses dispatch.
 Other people, organizations, wallets and former organization copies are not proofs
 of ownership. Do not scan or delete arbitrary login keys to unblock a wallet.
 
-Deployment: the real predecessor is the `origin/main` build, whose
-`unresolved-request-policy.ts` has no `wallet-top-up` purpose, so it holds nothing.
-Login-keyed wallet holds exist only in the open #917/#928 stack; dual copies protect
-same-login compatibility with those builds, not with main. Neither main nor those
-login-keyed builds can discover another login's person hold. A rollback to main
-removes hold enforcement entirely.
+Deployment: the real predecessor is the `origin/main` build (#917/#928), whose
+`unresolved-request-policy.ts` already has a login-keyed `wallet-top-up` purpose.
+Dual copies keep a same-login hold visible to main during a mixed rollout or a
+rollback, but only while that login's session lasts: logout purges the login copy
+(`purgeUnresolved`), and a rollback to main afterwards no longer sees the person
+hold. Main cannot discover another login's person hold (as before), and a
+login-keyed hold written by main is not visible to a different login of the same
+person until it is released or expires (FU-211/FU-223). A top-up hold that main
+wrote under a pre-task-100 former-organization copy is not read by this build
+(`formerKeysFor` returns null for person purposes); it needs a sealed cookie from
+before task 100 and a hold created after #917, so it is accepted as a residual.
+A top-up snapshot is sealed under the acting organization in this build and under the
+login in main, so across a mixed rollout or a rollback the hold stays (and refuses
+dispatch) but its saved amount is unreadable: the screen shows "not checked" with the
+release control, never a resend.
 
 Before rollout or rollback, the operator must put the entire web deployment behind
 an upstream maintenance response (503 for all web traffic, including Server Action

@@ -3,7 +3,7 @@
 **شدت:** 🟠 هشدار — پولی گم نشده، ولی این تراکنش بی تصمیم و بی Hold خودش تسویه نمی‌شود و سفارشش در `FUNDS_HELD` ثبت نمی‌شود.
 **سیگنال محرک:** WARNING ـِ Migration ‏`20261105120000_settlement_creation_proof` («stand on a decision read from a hold not their own»)؛
 Saga سفارش با `OBLIGATION_NOT_HELD`، وضعیت `HELD` و `funds UNPROVEN`؛ تسویهٔ ردشده با `409 INVALID_STATE_TRANSITION` و متن
-«settles only from a funded hold»؛ بازپرداخت ردشده با متن «nothing moves until an operator has looked»؛ WARNING ـِ Migration ‏`20261106130000_transaction_funded_hold`؛ Saga با `SETTLEMENT_EXHAUSTED` روی چنین تراکنشی.
+«settles only from a funded hold»؛ بازپرداخت ردشده با متن «nothing moves until an operator has looked»؛ WARNING ـِ Migration ‏`20261106130000_transaction_funded_hold` و ‏`20261107120000_hold_funded_at_commit`؛ Saga با `SETTLEMENT_EXHAUSTED` روی چنین تراکنشی.
 **دامنه:** برای تصمیم: ردیف‌های `transaction_hold_reconciliation` با هر نتیجه‌ای جز `RESTORED_TO_PENDING_SETTLEMENT` که هنوز تصمیمی ندارند. برای بخش «Hold تأمین‌نشده» و «پرداخت‌نشدنی»: هر تراکنشی.
 **ابزار:** `decide_transaction_hold(id, decision, reason)` فقط با نقش migrator؛ نقش runtime سرویس نه EXECUTE دارد و نه می‌تواند ردیف تصمیم بنویسد.
 
@@ -104,3 +104,4 @@ Hold سازمانی دیگر که نام این تراکنش را می‌برد 
 
 - **ترتیب:** economic-service پیش از marketplace-service (ADR-040). اگر رعایت نشود سفارشی از دست نمی‌رود: marketplace تازه تا `GET /v1/transactions/capabilities` بله نگوید هیچ Saga تازه‌ای آغاز نمی‌کند (`rasta_marketplace_saga_start_deliveries_total` با `economic_not_ready`، و صف شروع Saga بالا می‌رود)، و Sagaی در جریان که `HELD` بی فیلد `heldProven` می‌بیند با `ECONOMIC_HELD_PROOF_UNAVAILABLE` منتظر می‌ماند. هر دو پس از ارتقای economic خودکار ادامه می‌دهند، و سفارش `CANCELLING` بی Saga هم تا آن زمان منتظر می‌ماند. هشدار صف شروع Saga (`rasta-marketplace-alerts`) همین حالت را هم نشان می‌دهد. `heldProven: false` پاسخ است و همچنان Saga را متوقف می‌کند.
 - **بازگشت:** به ترتیب marketplace-service، سپس economic-service، سپس `down.sql`. تا وقتی تصمیمی ثبت شده باشد `down.sql` رد می‌کند، چون تنها سابقهٔ آن تصمیم است.
+- **بازگشت ‏`20261106130000_transaction_funded_hold`:** تا وقتی ردیفی `held_at` دارد و Hold خودش را ندارد، `down.sql` رد می‌کند و چیزی را تغییر نمی‌دهد (FU-182): پس از اجرای دوبارهٔ Migration چنین ردیفی مانند تعهدی خوانده می‌شود که هرگز ادعای Escrow نکرده است و از موجودی قابل‌مصرف پرداخت می‌شود. به‌جای بازگشت، رو به جلو اصلاح کن.

@@ -7,7 +7,9 @@ import {
   mayRecordWithoutLine,
   OWNER_RECORDED_SOURCE_TYPES,
   RECORDED_SOURCE_REFUSAL,
+  refusesUnfencedOrderHold,
 } from './recorded-sources';
+import { TransactionController } from './transaction.controller';
 
 const body = (sourceType?: string) => ({
   transactionType: 'MAINTENANCE_SERVICE',
@@ -149,5 +151,16 @@ describe('recording without a business line while settlement fails closed (docs/
     ['anyone naming STATEMENT', saga, 'STATEMENT', 'CONSTRUCTION_STATEMENT'],
   ])('refuses %s', (_label, caller, sourceType, transactionType) => {
     expect(mayRecordWithoutLine(caller, sourceType, transactionType)).toBe(false);
+  });
+});
+
+describe('the capability the saga trusts its order row on (FU-233)', () => {
+  it('advertises orderHoldDeadlineRequired, asked of the D-150 rule itself', () => {
+    const controller = new TransactionController(null as never, null as never);
+    expect(refusesUnfencedOrderHold()).toBe(true);
+    expect(controller.capabilities()).toEqual({
+      heldProven: true,
+      orderHoldDeadlineRequired: true,
+    });
   });
 });

@@ -1,5 +1,7 @@
 # Runbook: هم‌راستایی عضویت‌ها با Keycloak (Projection)
 
+> **منطقهٔ زمانی:** پیش از هر SQL این Runbook، در همان نشست `SET TimeZone = 'UTC';` را اجرا کن: ستون‌های `timestamp(3)` ساعت دیواری UTC‌اند و `now()` را در منطقهٔ زمانی نشست می‌سنجند (FU-188).
+
 **شدت:** 🟠 هشدار (پس از ADR-060 گام ۳، 🔴 بحرانی — آن‌گاه توکن تنها منبع مجوز است)
 **سیگنال محرک:** افزایش `rasta_identity_keycloak_projections_total{outcome="failed"}`، یا پیام تازه در
 `rasta.identity.v1.dlq` از گروه `identity-service.keycloak-projection`، یا پیش از هر انتشارِ گام ۳ ADR-060.

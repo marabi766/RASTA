@@ -41,6 +41,9 @@ export {
 } from './tenant-scope';
 export type { DmmfModelLike, TenantScopeInput } from './tenant-scope';
 
+export { ZONE_SWITCHES, inSessionZone } from './session-zone';
+export type { SessionZone } from './session-zone';
+
 export { StubKafkaBroker, reserveFreePort } from './stub-kafka-broker';
 export type { StubKafkaBrokerOptions } from './stub-kafka-broker';
 
