@@ -518,6 +518,13 @@ export interface Plan {
   };
   /** Stays alive this long before it writes its output (to be signalled meanwhile). */
   holdMs?: number;
+  /**
+   * Stays alive until the test calls `releaseHold(dir)` (FU-199), never on a timer: a case
+   * that asserts a writer is STILL alive after waiting for something else must not race the
+   * writer's own clock against a loaded runner. Nothing leaks if the test never releases it:
+   * the writer also ends once the test process is gone.
+   */
+  holdUntilRelease?: boolean;
   unresponsive?: 'ignore' | 'sync';
   /** Exits with this code instead of writing the output. */
   exit?: number;
@@ -609,6 +616,13 @@ const worker = path.join(__dirname, '../build/worker.js');
   if (plan.unresponsive) fs.writeFileSync('unresponsive.ready', '');
   if (plan.unresponsive === 'sync') { for (;;) {} }
   if (plan.holdMs) await new Promise((r) => setTimeout(r, plan.holdMs));
+  if (plan.releaseFile) {
+    // Held by the test, not by a timer; ends early only if the test process itself is gone.
+    while (!fs.existsSync(plan.releaseFile)) {
+      try { process.kill(plan.ownerPid, 0); } catch (error) { if (error.code === 'ESRCH') process.exit(72); }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
   if (plan.exit) process.exit(plan.exit);
   fs.mkdirSync(path.join(dir, '.next/server'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.next/BUILD_ID'), 'fake-' + process.pid);
@@ -661,9 +675,24 @@ wt.Worker = class extends OriginalWorker {
   return { nextFrom: root, fault };
 }
 
+const HOLD_RELEASE = 'hold-release';
+
 /** A package directory for the fake `next`, with its plan. */
 export function plantFakeApp(dir: string, plan: Plan): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'package.json'), '{"name":"fixture","version":"0.0.0"}');
-  writeFileSync(join(dir, 'plan.json'), JSON.stringify(plan));
+  const hold = plan.holdUntilRelease
+    ? { releaseFile: join(dir, HOLD_RELEASE), ownerPid: process.pid }
+    : {};
+  writeFileSync(join(dir, 'plan.json'), JSON.stringify({ ...plan, ...hold }));
+}
+
+/**
+ * Lets the fake `next` of `dir` finish. A directory planted without `holdUntilRelease` is a
+ * test bug and throws, unless `lenient` (the end-of-case sweep over every directory).
+ */
+export function releaseHold(dir: string, lenient = false): void {
+  const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8')) as { releaseFile?: string };
+  if (plan.releaseFile) writeFileSync(plan.releaseFile, '');
+  else if (!lenient) throw new Error(`${dir}: planted without holdUntilRelease`);
 }
