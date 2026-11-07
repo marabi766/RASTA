@@ -46,15 +46,28 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
   const asPayer = () => `Bearer ${admin(payer)}`;
   const asPayee = () => `Bearer ${admin(payee)}`;
 
-  /** `act` with one trigger lifted, in one owner transaction, restored on every exit path. */
-  const lifted = (table: string, trigger: string, act: (tx: Tx) => Promise<unknown>) =>
+  /**
+   * `act` with triggers lifted, in one owner transaction, restored on every exit path. All are
+   * lifted before `act`: a table with a write's deferred trigger event pending takes no ALTER.
+   */
+  const lifted = (table: string, trigger: string | string[], act: (tx: Tx) => Promise<unknown>) =>
     owner.$transaction(async (tx) => {
-      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
-      await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+      const triggers = [trigger].flat();
+      for (const name of triggers) {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+        await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${name}`);
+      }
       await act(tx);
-      // ISOLATION-ALLOW-UNBOUNDED: as above.
-      await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
+      for (const name of triggers) {
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${name}`);
+      }
     });
+
+  /** Refuses at commit any hold naming a journal that does not fund it (FU-182). */
+  const AT_COMMIT = 'trg_wallet_hold_funded_at_commit';
+  /** A row from before `trg_wallet_hold_inserted_only_funded`, and from before {@link AT_COMMIT}. */
+  const BEFORE_FUNDED_GUARDS = ['trg_wallet_hold_inserted_only_funded', AT_COMMIT];
 
   const listed = (transactionId: string, outcome: string) =>
     lifted('transaction_hold_reconciliation', 'trg_transaction_hold_reconciliation_frozen', (tx) =>
@@ -119,24 +132,29 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
     return transactionId;
   }
 
-  /** A hold written by hand: no service route places one on an existing transaction. Unfunded. */
+  /**
+   * A hold written by hand: no service route places one on an existing transaction. One naming a
+   * journal is a row from before {@link AT_COMMIT}, which refuses it unless the journal funds it.
+   */
   const handHold = (
     transactionId: string,
     amount = AMOUNT,
     currency = 'IRR',
     journalId: string | null = null,
   ) =>
-    owner.$executeRawUnsafe(
-      `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
+    lifted('wallet_hold', AT_COMMIT, (tx) =>
+      tx.$executeRawUnsafe(
+        `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
                                 reference_type, placed_at, placed_by, placed_journal_id)
        VALUES ($1, $2, $3, $4, $6, $5, 'TRANSACTION', now(), 'USR-THD', $7)`,
-      `HLD_${ulid()}`,
-      payer,
-      walletId,
-      amount,
-      transactionId,
-      currency,
-      journalId,
+        `HLD_${ulid()}`,
+        payer,
+        walletId,
+        amount,
+        transactionId,
+        currency,
+        journalId,
+      ),
     );
 
   /** The service's own hold placement, journal and escrow included: what a fresh hold is. */
@@ -704,7 +722,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       await listed(transactionId, 'DISPUTE_RESOLVED_UNPROVEN');
       await decide(transactionId, 'VOIDED');
       // A row from before `trg_wallet_hold_inserted_only_funded`.
-      await lifted('wallet_hold', 'trg_wallet_hold_inserted_only_funded', (tx) =>
+      await lifted('wallet_hold', BEFORE_FUNDED_GUARDS, (tx) =>
         tx.$executeRawUnsafe(
           `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
                                     reference_type, status, placed_at, placed_by, resolved_at,
@@ -1176,13 +1194,8 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
       ).toBe(before);
     });
 
-    it('a funding journal reversed is no funding', async () => {
-      const transactionId = await bare('HELD');
-      const journalId = await journalFor(transactionId);
-      await handHold(transactionId, AMOUNT, 'IRR', journalId);
-      const [hold] = await holdIdsOf(transactionId);
-      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(true);
-      await owner.$transaction(async (tx) => {
+    it('a funding journal reversed is no funding, and once a hold names it, it is not reversed', async () => {
+      const reverse = async (tx: Tx, journalId: string) => {
         const reversal = `JRN_${ulid()}`;
         await tx.$executeRawUnsafe(
           `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at, posted_by,
@@ -1202,9 +1215,26 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
           reversal,
           journalId,
         );
-      });
-      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(false);
-      expect(await barred(transactionId)).toBe(true);
+      };
+      const transactionId = await bare('HELD');
+      const journalId = await journalFor(transactionId);
+      await handHold(transactionId, AMOUNT, 'IRR', journalId);
+      const [hold] = await holdIdsOf(transactionId);
+      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(true);
+      // FU-182: the hold goes back by its refund.
+      await expect(owner.$transaction((tx) => reverse(tx, journalId))).rejects.toThrow(
+        /A journal a hold names is never reversed/,
+      );
+      expect(await scalar('wallet_hold_funded($1)', hold!.id)).toBe(true);
+
+      // A row from before that guard: the journal reversed, then a hold naming it.
+      const reversed = await bare('HELD');
+      const reversedJournal = await journalFor(reversed);
+      await owner.$transaction((tx) => reverse(tx, reversedJournal));
+      await handHold(reversed, AMOUNT, 'IRR', reversedJournal);
+      const [unfunded] = await holdIdsOf(reversed);
+      expect(await scalar('wallet_hold_funded($1)', unfunded!.id)).toBe(false);
+      expect(await barred(reversed)).toBe(true);
     });
 
     describe('where the database refuses it', () => {
@@ -1338,7 +1368,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         const transactionId = await bare('PENDING_SETTLEMENT');
         const refunded = await journalFor(transactionId, { type: 'FUNDS_REFUNDED' });
         // A row from before `trg_wallet_hold_inserted_only_funded`.
-        await lifted('wallet_hold', 'trg_wallet_hold_inserted_only_funded', (tx) =>
+        await lifted('wallet_hold', BEFORE_FUNDED_GUARDS, (tx) =>
           tx.$executeRawUnsafe(
             `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency, reference,
                                       reference_type, status, placed_at, placed_by, resolved_at,
