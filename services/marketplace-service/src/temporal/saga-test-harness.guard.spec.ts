@@ -1,6 +1,10 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import * as ts from 'typescript';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- the shared CommonJS lister
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 /**
  * A test that drives a saga on a Temporal test server owns nothing past its
@@ -145,13 +149,9 @@ function offPin(
   });
 }
 
-function specs(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : specs(path);
-    return /\.(int-)?spec\.ts$/.test(entry.name) ? [path] : [];
-  });
-}
+/** The authored specs under `dir`, through the repository's one lister (FU-102). */
+const specs = (dir: string): string[] =>
+  authoredFiles(dir).filter((path) => /\.(int-)?spec\.ts$/.test(path));
 
 /**
  * It starts a Temporal test server or a real worker: what the rule is about.
