@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -521,8 +522,9 @@ export interface Plan {
   /**
    * Stays alive until the test calls `releaseHold(dir)` (FU-199), never on a timer: a case
    * that asserts a writer is STILL alive after waiting for something else must not race the
-   * writer's own clock against a loaded runner. Nothing leaks if the test never releases it:
-   * the writer also ends once the test process is gone.
+   * writer's own clock against a loaded runner. Its lifetime is a connection to its owner (FU-216):
+   * it ends the moment the owner's end closes, whatever became of the owner (exit, zombie, crash)
+   * — never a probe of the owner's pid, which a zombie or a reused pid still answers.
    */
   holdUntilRelease?: boolean;
   unresponsive?: 'ignore' | 'sync';
@@ -591,6 +593,18 @@ const plan = JSON.parse(fs.readFileSync(path.join(dir, 'plan.json'), 'utf8'));
 const load = () => require('../server/config.js').default('phase-production-build', dir);
 const worker = path.join(__dirname, '../build/worker.js');
 (async () => {
+  if (plan.releaseFile && !plan.ownerSocket) process.exit(73); // a hold without an owner: refuse
+  if (plan.ownerSocket) {
+    // The writer's lifetime is this connection (FU-216): the kernel closes the owner's end when the
+    // owner exits in any way, a zombie included, and a refused connection means no owner at all.
+    await new Promise((resolve) => {
+      const socket = require('net').connect(plan.ownerSocket);
+      socket.on('error', () => process.exit(72));
+      socket.on('close', () => process.exit(72));
+      socket.on('data', () => {});
+      socket.once('connect', () => { socket.unref(); resolve(); });
+    });
+  }
   fs.writeFileSync(path.join(dir, 'ran-' + process.pid), '');
   for (let i = 0; i < (plan.rootLoads ?? 1); i += 1) { try { await load(); } catch {} }
   for (const via of plan.workers ?? []) {
@@ -617,9 +631,10 @@ const worker = path.join(__dirname, '../build/worker.js');
   if (plan.unresponsive === 'sync') { for (;;) {} }
   if (plan.holdMs) await new Promise((r) => setTimeout(r, plan.holdMs));
   if (plan.releaseFile) {
-    // Held by the test, not by a timer; ends early only if the test process itself is gone.
+    // Held by the test, not by a timer; the owner connection above ends it if the owner is gone,
+    // and so does the fixture directory itself being removed.
     while (!fs.existsSync(plan.releaseFile)) {
-      try { process.kill(plan.ownerPid, 0); } catch (error) { if (error.code === 'ESRCH') process.exit(72); }
+      if (!fs.existsSync(dir)) process.exit(72);
       await new Promise((r) => setTimeout(r, 20));
     }
   }
@@ -675,24 +690,118 @@ wt.Worker = class extends OriginalWorker {
   return { nextFrom: root, fault };
 }
 
-const HOLD_RELEASE = 'hold-release';
+export const HOLD_RELEASE = 'hold-release';
+export const HOLD_SOCKET = 'hold.sock';
 
-/** A package directory for the fake `next`, with its plan. */
-export function plantFakeApp(dir: string, plan: Plan): void {
+/** The owner's side of one held writer: the test process serves the socket the writer connects to. */
+interface Hold {
+  server: Server;
+  /** Writers that ever connected, and those whose end is still open. */
+  seen: number;
+  live: Set<Socket>;
+  marker: string;
+  failure?: Error;
+  done: boolean;
+}
+const holds = new Map<string, Hold>();
+
+function openHold(dir: string): Hold {
+  const socket = join(dir, HOLD_SOCKET);
+  if (Buffer.byteLength(socket) > 100) throw new Error(`${socket}: too long for a unix socket`);
+  const hold: Hold = {
+    server: createServer(),
+    seen: 0,
+    live: new Set(),
+    marker: join(dir, HOLD_RELEASE),
+    done: false,
+  };
+  hold.server.on('connection', (connection) => {
+    hold.seen += 1;
+    hold.live.add(connection);
+    connection.on('error', () => {});
+    connection.on('data', () => {});
+    // The writer's end closing is the writer ending: the kernel closes it at exit.
+    connection.on('close', () => hold.live.delete(connection));
+  });
+  hold.server.on('error', (error) => {
+    hold.failure = error;
+  });
+  hold.server.unref();
+  hold.server.listen(socket);
+  return hold;
+}
+
+/**
+ * A package directory for the fake `next`, with its plan. With `holdUntilRelease` the test
+ * process becomes the writer's owner (`'test'`), or the case brings its own owner that serves
+ * `HOLD_SOCKET` in `dir` (`'external'`).
+ */
+export function plantFakeApp(dir: string, plan: Plan, owner: 'test' | 'external' = 'test'): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'package.json'), '{"name":"fixture","version":"0.0.0"}');
+  if (plan.holdUntilRelease && owner === 'test') holds.set(dir, openHold(dir));
   const hold = plan.holdUntilRelease
-    ? { releaseFile: join(dir, HOLD_RELEASE), ownerPid: process.pid }
+    ? { releaseFile: join(dir, HOLD_RELEASE), ownerSocket: join(dir, HOLD_SOCKET) }
     : {};
   writeFileSync(join(dir, 'plan.json'), JSON.stringify({ ...plan, ...hold }));
 }
 
+/** Directories whose writer is connected and has not ended: nothing may be removed under them. */
+export function heldWriters(): string[] {
+  return [...holds].filter(([, hold]) => hold.live.size > 0).map(([dir]) => dir);
+}
+
+const closeHold = (hold: Hold): Promise<void> =>
+  new Promise((resolve) => {
+    hold.done = true;
+    hold.server.close(() => resolve()); // also refuses a writer that starts late
+  });
+
 /**
- * Lets the fake `next` of `dir` finish. A directory planted without `holdUntilRelease` is a
- * test bug and throws, unless `lenient` (the end-of-case sweep over every directory).
+ * Lets the fake `next` of `dir` finish and JOINS it: returns only once the writer's end of its
+ * owner connection is closed (it ended), within `ms`, else throws and keeps the writer on
+ * `heldWriters()` — a release the writer has not acted on is not a release (FU-216), so the marker
+ * stays and nothing is removed under it. A directory planted without `holdUntilRelease` is a test
+ * bug and throws, unless `lenient` (the end-of-case sweep over every directory); a lenient release
+ * of a writer that never connected just closes the owner's end, which refuses a late writer.
  */
-export function releaseHold(dir: string, lenient = false): void {
-  const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8')) as { releaseFile?: string };
-  if (plan.releaseFile) writeFileSync(plan.releaseFile, '');
-  else if (!lenient) throw new Error(`${dir}: planted without holdUntilRelease`);
+export async function releaseHold(
+  dir: string,
+  options: { lenient?: boolean; ms?: number } = {},
+): Promise<void> {
+  const { lenient = false, ms = 15_000 } = options;
+  const hold = holds.get(dir);
+  if (!hold) {
+    if (lenient) return;
+    throw new Error(`${dir}: planted without holdUntilRelease`);
+  }
+  if (hold.done) return;
+  try {
+    writeFileSync(hold.marker, '');
+  } catch (error) {
+    if (!(lenient && (error as NodeJS.ErrnoException).code === 'ENOENT')) throw error;
+  }
+  if (!(lenient && hold.seen === 0)) {
+    const deadline = Date.now() + ms;
+    const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
+    while (hold.seen === 0 && !hold.failure && Date.now() < deadline) await tick();
+    if (hold.failure) throw hold.failure;
+    if (hold.seen === 0) throw new Error(`${dir}: no writer connected within ${ms} ms`);
+    while (hold.live.size > 0 && Date.now() < deadline) await tick();
+    if (hold.live.size > 0) throw new Error(`${dir}: writer still held ${ms} ms after its release`);
+  }
+  await closeHold(hold);
+}
+
+/** The end-of-case sweep: release and join every directory, reporting all that failed. */
+export async function releaseAll(dirs: Iterable<string>): Promise<void> {
+  const failures: Error[] = [];
+  for (const dir of dirs) {
+    try {
+      await releaseHold(dir, { lenient: true });
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  if (failures.length > 0) throw new AggregateError(failures, 'held writers not released');
 }
