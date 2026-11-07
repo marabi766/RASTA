@@ -47,6 +47,8 @@ it('an order whose hold exists waits out an older economic-service, then adopts 
     };
     const economic = {
       createObligation: async () => obligation,
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       readObligation: async () => answer(),
       findObligations: async () => [answer()],
     } as unknown as EconomicClient;

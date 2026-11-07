@@ -431,6 +431,55 @@ marketplace-service ahead of it fails each new order on its first send, nothing 
 roll economic-service back below this build either: an older one holds a send without a
 deadline again (above).
 
+**The row is proof only while economic-service says so (FU-233).** `GET
+/v1/transactions/capabilities` answers `orderHoldDeadlineRequired: true` only from a build that
+refuses an `ORDER` hold without its deadline (the answer is asked of `refuseUnfencedOrderHold`
+itself). The saga asks it each time it would trust the row: before it counts and sends a hold,
+before a refusal or `HOLD_DEADLINE_PASSED` becomes proof, in `noHoldCanLand`, and when it reads a
+closed order with no obligation. It trusts the row on an explicit `true` only. An explicit no is
+`false`, or `heldProven: true` without the field (a build before D-150). An outage, a timeout or
+a body no release sends (`{}`, an array, a field that is not a boolean) is no answer, never a
+lasting no. Each question is asked three times, 250 ms and 1 s apart, inside the activity's
+heartbeat, before it counts as unanswered. Without a yes, it sends nothing and counts nothing
+(`ECONOMIC_HOLD_RULE_UNCONFIRMED`, not retried within the attempt's scheduling, so the hold's
+next round sends on a first attempt, with the `createObligation` alert on). It takes no refusal
+and no empty lookup as proof. A first send's refusal heard while the question goes unanswered
+is kept on the row (sends closed), and the next round's yes ends the order on it; an explicit no
+leaves the sends open (review of #948 r1, F1). On an explicit no it reads a closed order's row
+as if it were from before the fence, so it keeps watching and refunds a hold that lands. With no
+answer at all, that read is retried until an answer comes, so a blip leaves nothing behind. So
+if economic-service is rolled back below D-150 while this build runs, orders stall with the
+alert on, and no hold is left stranded (review of
+#812 r4, N1 trigger a). That is an outage, not a deploy step. A closed order read during it
+stays in `LATE_HOLD_WATCH` with no deadline even after economic-service is back: a person ends
+that saga once the lookup shows nothing held.
+
+What this does not cover:
+
+- The answer is point-in-time, from one replica. A mixed-version economic-service, or both
+  services rolled back and forward again in the time between a saga's decision and a late send,
+  is still prevented only by the deploy order below.
+- Unreleased heads at protocol 9–10 send a deadline without counting it (r4 N1 b). economic-service
+  accepts their sends and truthfully answers yes, so only the gate's floor stops them.
+- A late-hold watch with a deadline ends at the deadline and margin without asking again (review
+  of #948 r1, L3): economic-service's fence on the deadline is what refuses a later counted send.
+  A send without a deadline landing after that needs economic-service rolled back below D-150
+  during the watch, which is the point-in-time case above.
+
+**Rollback order.** It is the reverse of the deploy order, and both halves are required:
+
+1. Roll marketplace-service back first, through this gate. The gate refuses a target below 11
+   once the stopped build reached 11 (the floor), so this applies only where that build never
+   served traffic. Otherwise roll forward.
+2. Roll economic-service back below D-150 only after that, once no marketplace-service build at
+   11 or above is running or can start. A build at 11 or above stalls on the missing capability
+   (above). A build below 11 is never safe beside an economic-service below D-150 once orders
+   counted on the row exist: that pair is the original r3 F1.
+
+The gate sees only marketplace-service's manifests, so it does not check step 2. A gate on
+economic-service deploys that reads marketplace-service's running protocol is proposed as a
+stacked follow-up (FU-233 STATUS).
+
 A saga whose first send predates protocol 10 carries no deadline, and economic-service now
 refuses such a request (above), so its hold never lands, but the saga cannot know that from its
 row: nothing can prove it will not land, so that saga never

@@ -100,6 +100,13 @@ ADR-032 نیمه اقتصادی این مرز را از پیش تصمیم گرف
 > (`ECONOMIC_HELD_PROOF_UNAVAILABLE`). اپراتور با
 > [`transaction-hold-decision`](../runbooks/transaction-hold-decision.md) تصمیم می‌گیرد؛ تصمیم فقط دربارهٔ مدرک است و
 > مجوز پرداخت نمی‌دهد (D-123).
+>
+> **`orderHoldDeadlineRequired`** (D-150، FU-233). همان `GET /v1/transactions/capabilities` می‌گوید آیا این نسخه Hold
+> سفارش (`ORDER`) بدون `holdNotAfter` را رد می‌کند؛ مقدار از خودِ قاعده خوانده می‌شود (`refusesUnfencedOrderHold`)، پس
+> از آن بیشتر عمر نمی‌کند. Saga ردیف سفارش را (شمار ارسال‌ها، بسته‌شدن ارسال‌ها، مهلت) فقط تا وقتی مدرکِ «هیچ Holdی
+> نمی‌نشیند» می‌گیرد که این پاسخ صریحاً `true` باشد. `false`، یا `heldProven: true` بی این فیلد (نسخه‌ای پیش از قاعده)،
+> «نه» است؛ نبودِ پاسخ یا بدنه‌ای که هیچ نسخه‌ای نمی‌فرستد «نه» نیست و فقط تصمیم را به تأخیر می‌اندازد. پاسخ لحظه‌ای است؛
+> ترتیب برگشت نسخه‌ها در [`marketplace-saga-deploy`](../runbooks/marketplace-saga-deploy.md) آمده است.
 
 ### ۳. توکن SERVICE با `org_id` امضاشده
 

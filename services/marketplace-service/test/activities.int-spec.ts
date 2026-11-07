@@ -92,6 +92,8 @@ describe('order saga activities (real database)', () => {
 
     const economic = {
       createObligation: method('createObligation', { id: `TXN_${ulid().slice(-8)}` }),
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       authoriseSettlement: method('authoriseSettlement', undefined),
       settle: method('settle', {
         settlementId: `STL_${ulid().slice(-8)}`,
@@ -939,6 +941,12 @@ describe('order saga activities (real database)', () => {
       globalThis.fetch = original;
     });
 
+    /** The capability question, answered as the D-150 release does (FU-233). */
+    const capabilities = (url: string): Response | undefined =>
+      new URL(url).pathname === '/v1/transactions/capabilities'
+        ? new Response(JSON.stringify({ heldProven: true, orderHoldDeadlineRequired: true }))
+        : undefined;
+
     /**
      * economic-service without the reservation (main before #334), over HTTP
      * to the real `EconomicClient`: the buyer's administrator's row already
@@ -954,6 +962,8 @@ describe('order saga activities (real database)', () => {
       const requests: string[] = [];
       const queries: Record<string, string>[] = [];
       globalThis.fetch = (async (url: string, init: RequestInit) => {
+        const capable = capabilities(url);
+        if (capable) return capable;
         const asked = new URL(url);
         requests.push(`${init.method} ${asked.pathname}`);
         const [status, body] =
@@ -1001,6 +1011,8 @@ describe('order saga activities (real database)', () => {
     function economicLostAnswer(rows: Record<string, unknown>[]) {
       const queries: Record<string, string>[] = [];
       globalThis.fetch = (async (url: string, init: RequestInit) => {
+        const capable = capabilities(url);
+        if (capable) return capable;
         if (init.method === 'POST') throw new TypeError('fetch failed');
         const body = listed(rows, Object.fromEntries(new URL(url).searchParams), queries);
         return new Response(JSON.stringify(body), { status: 200 });
