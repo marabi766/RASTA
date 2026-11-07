@@ -20,6 +20,7 @@ import {
   utcClockProblems,
 } from './utc-clock-sites-lib.mjs';
 import { lex } from './eligibility-clock-sql.mjs';
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 
 const { tables, functions } = replayMigrations([
   `CREATE TABLE "task" (
@@ -519,8 +520,8 @@ function scanOf(service, migration, source = '') {
     write(`services/${service}/prisma/migrations/1_init/migration.sql`, migration);
     write(`services/${service}/prisma/schema.prisma`, 'model Anything {\n  id String @id\n}\n');
     write(`services/${service}/src/site.ts`, source);
-    execFileSync('git', ['init', '-q'], { cwd: root });
-    execFileSync('git', ['add', '-A'], { cwd: root });
+    execFileSync('git', ['init', '-q'], { cwd: root, env: fixtureGitEnv() });
+    execFileSync('git', ['add', '-A'], { cwd: root, env: fixtureGitEnv() });
     // The reviewed entries name this repository's sites, which that one does not have.
     return utcClockProblems(root).filter((problem) => !problem.startsWith('stale reviewed entry'));
   } finally {
