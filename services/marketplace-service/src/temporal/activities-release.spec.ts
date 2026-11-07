@@ -884,3 +884,78 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
     expect(trace).toEqual(['hold', 'release']);
   });
 });
+
+/**
+ * D-151: only economic-service's answer closes an authorisation's call record.
+ * A fenced attempt sent nothing, so it never confirms it, whatever its doubt,
+ * attempt or episode: an earlier send of the episode may still land.
+ */
+describe('a fenced authorisation never confirms its call record (D-151)', () => {
+  function over(
+    row: { status: string },
+    opening: { generation: number; started: boolean },
+    attempt: number,
+  ) {
+    const records: string[] = [];
+    const sends: string[] = [];
+    const activities = createActivities({
+      orders: {
+        describe: async () => ({
+          id: 'ORD',
+          status: 'RECEIPT_CONFIRMED',
+          buyerOrganizationId: 'ORG',
+          correlationId: 'COR',
+          receiptConfirmed: true,
+        }),
+        onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        whileOrderHeld: async (_id: string, fn: (held: unknown) => unknown) =>
+          fn({ receiptConfirmed: true, ...row }),
+        openSagaCall: async () => {
+          records.push('open');
+          return opening;
+        },
+        confirmSagaCall: async () => {
+          records.push('confirm');
+        },
+      } as unknown as OrderService,
+      economic: {
+        authoriseSettlement: async () => {
+          sends.push('send');
+        },
+        readObligation: async () => ({ status: 'HELD' }),
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => attempt,
+    });
+    return { activities, records, sends };
+  }
+
+  it.each([
+    ['a retry in doubt, the episode begun earlier', 2, false, { generation: 2, started: false }],
+    ['a first attempt the workflow holds in doubt', 1, true, { generation: 2, started: false }],
+    ['a first attempt that began the episode', 1, false, { generation: 1, started: true }],
+  ] as const)(
+    '%s: opened, never confirmed, nothing sent',
+    async (_name, attempt, inDoubt, opening) => {
+      const { activities, records, sends } = over({ status: 'DISPUTED' }, opening, attempt);
+      await expect(activities.authoriseSettlement('ORD', 'TXN', inDoubt)).resolves.toEqual({
+        fenced: true,
+        status: 'DISPUTED',
+        inDoubt: attempt !== 1 || inDoubt,
+      });
+      expect(records).toEqual(['open']);
+      expect(sends).toEqual([]);
+    },
+  );
+
+  it("economic-service's answer still confirms it (control)", async () => {
+    const { activities, records, sends } = over(
+      { status: 'RECEIPT_CONFIRMED' },
+      { generation: 1, started: true },
+      1,
+    );
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toBeUndefined();
+    expect(records).toEqual(['open', 'confirm']);
+    expect(sends).toEqual(['send']);
+  });
+});

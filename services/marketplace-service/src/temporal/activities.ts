@@ -233,6 +233,15 @@ export interface AuthorisationFenced {
 }
 
 /**
+ * The fence's own answer, not economic-service's (D-151): this attempt sent
+ * nothing, so it says nothing of an earlier send still on its way, and never
+ * confirms the call record — whatever its doubt, attempt or episode.
+ */
+function isAuthorisationFenced(result: AuthorisationResult): result is AuthorisationFenced {
+  return result !== undefined && 'fenced' in result && result.fenced === true;
+}
+
+/**
  * What `markObligationDisputed` answers: the order's status, and the dispute
  * it filed for the one economic-service holds — null when it filed none.
  */
@@ -755,8 +764,9 @@ export function createActivities(deps: ActivityDependencies) {
       inDoubt = false,
       contract?: string,
     ): Promise<AuthorisationResult> {
-      // Either answer is economic-service's: authorised, or disputed since this
-      // order's own authorisation. A refusal or no answer leaves the record open.
+      // Only economic-service's answer closes the record: authorised, disputed
+      // since this order's own authorisation, or final. A refusal, no answer or
+      // the fence's answer (nothing sent; D-151) leaves it open.
       const opening = await openCall(orderId, 'authoriseSettlement', transactionId);
       const authorisation = await economicStep<AuthorisationResult>(
         orderId,
@@ -818,7 +828,9 @@ export function createActivities(deps: ActivityDependencies) {
           },
         },
       );
-      await confirmCall(orderId, 'authoriseSettlement', transactionId, opening);
+      if (!isAuthorisationFenced(authorisation)) {
+        await confirmCall(orderId, 'authoriseSettlement', transactionId, opening);
+      }
       return authorisation;
     },
 
