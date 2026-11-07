@@ -346,7 +346,8 @@ export const STEP_INVENTORY = Object.freeze({
       'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose',
     ),
     env: { ...KAFKA_TESTS, ...databases(...SERVICES), ...BUCKET, ...SCANNER },
-    timeout: 10,
+    // FU-165: ceil(1.5 x measured p95 587 s / 60) = 15 minutes.
+    timeout: 15,
   },
   'Outbox stream-sequence protocol (ADR-051 B3)': {
     run: ['pnpm run test:outbox-b3'],

@@ -938,7 +938,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'integration-construction': 25,
       'integration-economic': 24,
       'integration-contract': 23,
-      'integration-security': 37,
+      'integration-security': 42,
       'integration-coverage-critical': 35,
       'integration-coverage': 86,
       'integration-backup-drill': 8,

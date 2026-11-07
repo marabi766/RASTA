@@ -840,6 +840,8 @@ describe('work the saga owes (#796 r1)', () => {
             correlationId: 'COR',
           }),
           onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+          openSagaCall: async () => 1,
+          confirmSagaCall: async () => undefined,
         } as unknown as OrderService,
         economic: economic as unknown as EconomicClient,
         currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
