@@ -1944,6 +1944,86 @@ BEGIN
 END $$;`;
 
 /**
+ * The rows 20261107120000's WARNING counts (its own WHERE, word for word; the lib test holds the
+ * two together): a hold naming a journal the new predicate no longer calls funding.
+ */
+export const HOLD_UNPROVEN_SINCE_AT_COMMIT = `h."placed_journal_id" IS NOT NULL AND NOT wallet_hold_funded(h."id")`;
+
+/**
+ * 20261107120000 over used data (#936 r1, F3): a hold placed before it, whose FUNDS_HELD journal
+ * credits escrow from PAYMENT_CLEARING, funded by 20261106130000's predicate. After the upgrade
+ * the WARNING counts it, and it is not funded: `WalletService.refundHold` answers HOLD_NOT_FUNDED
+ * (`wallet_hold_funded`, wallet.service.ts), and the database refuses the refund itself.
+ */
+const FUNDED_FROM_ELSEWHERE_STEPS = [
+  {
+    label: 'funded from elsewhere: down to the predicate before',
+    runDownScript: [HOLD_FUNDED_AT_COMMIT],
+  },
+  {
+    label: 'funded from elsewhere: a hold whose journal credits escrow from PAYMENT_CLEARING',
+    sql: `${TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_CLEARING')}
+INSERT INTO "ledger_account" ("id", "organization_id", "account_type", "account_code", "purpose", "currency", "created_by")
+VALUES ('ACC_MIGCHECK_HD_ESCROW', 'ORG-MIGCHECK', 'LIABILITY', 'MIGCHECK-HD-ESCROW', 'ESCROW', 'IRR', 'USR-MIGCHECK'),
+       ('ACC_MIGCHECK_HD_CLEARING', 'ORG-MIGCHECK', 'ASSET', 'MIGCHECK-HD-CLEARING', 'PAYMENT_CLEARING', 'IRR', 'USR-MIGCHECK');
+INSERT INTO "journal" ("id", "organization_id", "transaction_id", "journal_type", "description", "posted_at",
+  "posted_by", "correlation_id")
+VALUES ('JRN_MIGCHECK_HD_CLEARING', 'ORG-MIGCHECK', 'TXN_MIGCHECK_HD_CLEARING', 'FUNDS_HELD', 'probe', now(),
+  'USR-MIGCHECK', 'COR-MIGCHECK');
+INSERT INTO "ledger_entry" ("id", "journal_id", "account_id", "organization_id", "direction", "amount_minor",
+  "currency", "posted_at")
+VALUES ('ENT_MIGCHECK_HD_CLEARING_D', 'JRN_MIGCHECK_HD_CLEARING', 'ACC_MIGCHECK_HD_CLEARING', 'ORG-MIGCHECK',
+        'DEBIT', 1000, 'IRR', now()),
+       ('ENT_MIGCHECK_HD_CLEARING_C', 'JRN_MIGCHECK_HD_CLEARING', 'ACC_MIGCHECK_HD_ESCROW', 'ORG-MIGCHECK',
+        'CREDIT', 1000, 'IRR', now());
+INSERT INTO "wallet_hold" ("id", "organization_id", "wallet_id", "amount_minor", "currency", "reference",
+  "reference_type", "placed_at", "placed_by", "placed_journal_id")
+VALUES ('HLD_MIGCHECK_HD_CLEARING_OWN', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYER', 1000, 'IRR',
+  'TXN_MIGCHECK_HD_CLEARING', 'TRANSACTION', now(), 'USR-MIGCHECK', 'JRN_MIGCHECK_HD_CLEARING');
+DO $$
+BEGIN
+  IF NOT wallet_hold_funded('HLD_MIGCHECK_HD_CLEARING_OWN') THEN
+    RAISE EXCEPTION 'the predicate before 20261107120000 does not call the probe hold funded';
+  END IF;
+END $$;`,
+  },
+  { label: 'funded from elsewhere: up', reapply: true },
+  {
+    label: 'funded from elsewhere: the WARNING counts it, and it is not funded (HOLD_NOT_FUNDED)',
+    sql: `DO $$
+BEGIN
+  IF (SELECT string_agg(h.id || ' ' || h.status, ', ') FROM "wallet_hold" h
+       WHERE h.id LIKE 'HLD_MIGCHECK_HD_%' AND ${HOLD_UNPROVEN_SINCE_AT_COMMIT})
+     IS DISTINCT FROM 'HLD_MIGCHECK_HD_CLEARING_OWN ACTIVE' THEN
+    RAISE EXCEPTION 'the WARNING does not count exactly the hold funded from PAYMENT_CLEARING';
+  END IF;
+  IF wallet_hold_funded('HLD_MIGCHECK_HD_CLEARING_OWN') IS NOT FALSE THEN
+    RAISE EXCEPTION 'a hold funded from PAYMENT_CLEARING is still funded';
+  END IF;
+END $$;`,
+  },
+  {
+    label: 'funded from elsewhere: its refund is refused',
+    sql: `UPDATE "wallet_hold" SET status = 'REFUNDED', resolved_at = now(), resolved_by = 'USR-MIGCHECK'
+           WHERE id = 'HLD_MIGCHECK_HD_CLEARING_OWN';`,
+    mustFail: 'A hold never funded moves no money',
+  },
+  {
+    label:
+      'funded from elsewhere: its rows removed, the owner lifting each guard in this transaction only',
+    sql: `ALTER TABLE "wallet_hold" DISABLE TRIGGER "trg_wallet_hold_reference_bound";
+ALTER TABLE "ledger_entry" DISABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" DISABLE TRIGGER "trg_journal_immutable";
+DELETE FROM "wallet_hold" WHERE id = 'HLD_MIGCHECK_HD_CLEARING_OWN';
+DELETE FROM "ledger_entry" WHERE journal_id = 'JRN_MIGCHECK_HD_CLEARING';
+DELETE FROM "journal" WHERE id = 'JRN_MIGCHECK_HD_CLEARING';
+ALTER TABLE "wallet_hold" ENABLE TRIGGER "trg_wallet_hold_reference_bound";
+ALTER TABLE "ledger_entry" ENABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" ENABLE TRIGGER "trg_journal_immutable";`,
+  },
+];
+
+/**
  * What 20261103121000's own backfill decides from another organization's hold, run for
  * real on rows from before it (#762 r2, F2): the one row provably put there is put back;
  * the rest are left where they are and listed; a row with a hold of its own, or with only
@@ -2130,6 +2210,7 @@ const HOLD_DECISION_STEPS = [
             END IF;
           END $$;`,
   },
+  ...FUNDED_FROM_ELSEWHERE_STEPS,
   {
     label: 'hold decisions: the stamps cleared again, before the probe rows go',
     sql: HELD_AT_UNHELD_CLEARED,

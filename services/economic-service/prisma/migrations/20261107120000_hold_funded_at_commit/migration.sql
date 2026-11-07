@@ -106,11 +106,14 @@ RETURNS BOOLEAN AS $$
 $$ LANGUAGE sql STABLE;
 
 -- A hold naming a journal and a reversal of that journal (`trg_journal_hold_funding_final`) take the
--- same transaction lock before they look, so one waits for the other and then sees it. READ
--- COMMITTED reads after the wait, SERIALIZABLE aborts one of two that cross, and REPEATABLE READ
--- would read a snapshot from before the wait: both refuse it, with a code no client retries. No
--- writer of this service uses it (its REPEATABLE READ reads are READ ONLY). Inline in both, so the
--- runtime role needs no EXECUTE.
+-- same transaction lock before they look, so one waits for the other and then sees it. Only READ
+-- COMMITTED reads after the wait. REPEATABLE READ and SERIALIZABLE read a snapshot from before it,
+-- and SERIALIZABLE aborts one of two that cross only when both are SERIALIZABLE: against a READ
+-- COMMITTED writer it commits a hold funded by a reversed journal, or the reversal of a journal a
+-- hold names (#936 r1 F1). So both refuse every level but READ COMMITTED, with a code no client
+-- retries (as `trg_settlement_reversal_cap`, 20261104120000). No writer of this service writes
+-- either under another (its REPEATABLE READ reads are READ ONLY). Inline in both, so the runtime
+-- role needs no EXECUTE.
 CREATE OR REPLACE FUNCTION assert_wallet_hold_funded_at_commit() RETURNS TRIGGER AS $$
 DECLARE pointer TEXT;
 BEGIN
@@ -122,8 +125,8 @@ BEGIN
   END IF;
   IF pointer IS NOT NULL THEN
     PERFORM pg_advisory_xact_lock(hashtextextended('wallet_hold_journal:' || pointer, 0));
-    IF current_setting('transaction_isolation') = 'repeatable read' THEN
-      RAISE EXCEPTION 'A hold naming a journal is written only under READ COMMITTED or SERIALIZABLE'
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'A hold naming a journal is written only under READ COMMITTED'
         USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_wallet_hold_funded_at_commit';
     END IF;
   END IF;
@@ -162,8 +165,8 @@ BEGIN
   -- Only a FUNDS_HELD journal funds a hold (`wallet_hold_funded`); the lock is the one above.
   IF EXISTS (SELECT 1 FROM "journal" j WHERE j."id" = NEW."reverses_id" AND j."journal_type" = 'FUNDS_HELD') THEN
     PERFORM pg_advisory_xact_lock(hashtextextended('wallet_hold_journal:' || NEW."reverses_id", 0));
-    IF current_setting('transaction_isolation') = 'repeatable read' THEN
-      RAISE EXCEPTION 'A FUNDS_HELD journal is reversed only under READ COMMITTED or SERIALIZABLE'
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'A FUNDS_HELD journal is reversed only under READ COMMITTED'
         USING ERRCODE = 'restrict_violation', CONSTRAINT = 'trg_journal_hold_funding_final';
     END IF;
   END IF;

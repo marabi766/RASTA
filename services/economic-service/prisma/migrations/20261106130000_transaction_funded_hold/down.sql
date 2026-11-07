@@ -13,6 +13,10 @@
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';
+-- The refusal scan below runs under these locks: bounded as the up migration's scans are.
+SELECT set_config('statement_timeout',
+                  COALESCE(NULLIF(current_setting('rasta.migration_statement_timeout', true), ''), '5s'),
+                  true);
 
 LOCK TABLE "wallet_hold", "transaction" IN SHARE ROW EXCLUSIVE MODE;
 

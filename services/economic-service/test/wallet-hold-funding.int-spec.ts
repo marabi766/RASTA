@@ -682,21 +682,61 @@ describe('funding is money that is there, once, in the wallet’s currency (real
       expect(raced.second?.message).toMatch(NEVER_REVERSED);
     });
 
-    it('under REPEATABLE READ, which reads from before the wait, neither is written', async () => {
-      const repeatable = { isolationLevel: 'RepeatableRead' } as const;
+    const WRITTEN_ONLY_RC = /A hold naming a journal is written only under READ COMMITTED/;
+    const REVERSED_ONLY_RC = /A FUNDS_HELD journal is reversed only under READ COMMITTED/;
+
+    // SERIALIZABLE reads the same snapshot from before the wait, and aborts one of two that cross
+    // only when both are SERIALIZABLE (#936 r1 F1): every level but READ COMMITTED is refused.
+    it.each(['RepeatableRead', 'Serializable'] as const)(
+      'under %s, which reads from before the wait, neither is written',
+      async (isolationLevel) => {
+        const reference = await obligation();
+        const journalId = await plantJournal(reference);
+        await expect(
+          owner.$transaction((tx) => plantHold(reference, journalId, {}, tx), { isolationLevel }),
+        ).rejects.toThrow(WRITTEN_ONLY_RC);
+        await expect(
+          owner.$transaction((tx) => reversalOf(tx, journalId), { isolationLevel }),
+        ).rejects.toThrow(REVERSED_ONLY_RC);
+        // Control: the same two under READ COMMITTED, one after the other.
+        await plantHold(reference, journalId);
+        await expect(owner.$transaction((tx) => reversalOf(tx, journalId))).rejects.toThrow(
+          NEVER_REVERSED,
+        );
+      },
+    );
+
+    const serializable = { isolationLevel: 'Serializable', timeout: 30_000 } as const;
+
+    it('a READ COMMITTED reversal first and a SERIALIZABLE hold naming its journal: the hold is refused', async () => {
       const reference = await obligation();
       const journalId = await plantJournal(reference);
-      await expect(
-        owner.$transaction((tx) => plantHold(reference, journalId, {}, tx), repeatable),
-      ).rejects.toThrow(/written only under READ COMMITTED or SERIALIZABLE/);
-      await expect(
-        owner.$transaction((tx) => reversalOf(tx, journalId), repeatable),
-      ).rejects.toThrow(/reversed only under READ COMMITTED or SERIALIZABLE/);
-      // Control: the same two under READ COMMITTED, one after the other.
-      await plantHold(reference, journalId);
-      await expect(owner.$transaction((tx) => reversalOf(tx, journalId))).rejects.toThrow(
-        NEVER_REVERSED,
+      const raced = await whileOpen(
+        (tx) => reversalOf(tx, journalId),
+        () => owner.$transaction((tx) => plantHold(reference, journalId, {}, tx), serializable),
       );
+      expect(raced.first).toBeNull();
+      expect(raced.second?.message).toMatch(WRITTEN_ONLY_RC);
+      expect(await committedHolds(reference)).toBe(0n);
+    });
+
+    it('a READ COMMITTED hold first and a SERIALIZABLE reversal of its journal: the reversal is refused', async () => {
+      const reference = await obligation();
+      const journalId = await plantJournal(reference);
+      const raced = await whileOpen(
+        async (tx) => {
+          await tx.$executeRawUnsafe('SET CONSTRAINTS trg_wallet_hold_funded_at_commit IMMEDIATE');
+          await plantHold(reference, journalId, {}, tx);
+        },
+        () => owner.$transaction((tx) => reversalOf(tx, journalId), serializable),
+      );
+      expect(raced.first).toBeNull();
+      expect(raced.second?.message).toMatch(REVERSED_ONLY_RC);
+      const [reversals] = await owner.$queryRawUnsafe<{ n: bigint }[]>(
+        'SELECT count(*) AS n FROM journal WHERE reverses_id = $1',
+        journalId,
+      );
+      expect(reversals!.n).toBe(0n);
     });
 
     it('control: a FUNDS_HELD journal no hold names is reversed like any other', async () => {
