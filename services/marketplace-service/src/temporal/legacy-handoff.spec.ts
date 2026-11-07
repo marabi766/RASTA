@@ -1,3 +1,4 @@
+import { WorkflowNotFoundError } from '@temporalio/client';
 import { Worker } from '@temporalio/worker';
 import {
   clearOfTimers,
@@ -6,6 +7,7 @@ import {
   isQuiet,
   pendingTimers,
   signalling,
+  stopQuietly,
   TIMER_MARGIN_MS,
   queryQuiet,
   type HandoffHandle,
@@ -573,5 +575,70 @@ describe('a signal never lands on a timer (FU-214)', () => {
     const { clock, handle } = saga(60_000);
     await expect(bounded(() => clearOfTimers(handle))).rejects.toThrow(/no clock/);
     await expect(clearOfTimers(signalling(clock, handle))).rejects.toThrow(/outside runBounded/);
+  });
+});
+
+describe('a workflow is stopped from a quiet history (FU-214)', () => {
+  const connection = {
+    withDeadline: <R>(_: number | Date, fn: () => Promise<R>) => fn(),
+    withAbortSignal: <R>(_: AbortSignal, fn: () => Promise<R>) => fn(),
+  };
+  /** A workflow whose history reads are answered in turn, the last one for good. */
+  function workflow(
+    histories: unknown[][],
+    { status = 'RUNNING', terminate = async () => undefined as unknown } = {},
+  ) {
+    const seen = { reads: 0, terminated: 0 };
+    const handle = {
+      workflowId: 'wf-1',
+      describe: async () => ({ status: { name: status } }),
+      fetchHistory: async () => ({
+        events: histories[Math.min((seen.reads += 1) - 1, histories.length - 1)] as Events,
+      }),
+      terminate: async () => {
+        seen.terminated += 1;
+        return terminate();
+      },
+    } as unknown as Parameters<typeof stopQuietly>[1];
+    return { handle, seen };
+  }
+
+  it('waits for the history to come quiet, then terminates: nothing to report', async () => {
+    const { handle, seen } = workflow([
+      [scheduled(5)],
+      [scheduled(5), completed(6, 5), taskDone(7)],
+    ]);
+    await expect(stopQuietly(connection, handle, 1_000)).resolves.toBeUndefined();
+    expect(seen.reads).toBe(2);
+    expect(seen.terminated).toBe(1);
+  });
+
+  it('not quiet within its window: terminated anyway, and named', async () => {
+    const { handle, seen } = workflow([[scheduled(5), taskDone(6)]]);
+    await expect(stopQuietly(connection, handle, 100)).resolves.toBe('wf-1');
+    expect(seen.terminated).toBe(1);
+  });
+
+  it('already finished: neither waited on nor terminated', async () => {
+    const { handle, seen } = workflow([[scheduled(5)]], { status: 'COMPLETED' });
+    await expect(stopQuietly(connection, handle, 100)).resolves.toBeUndefined();
+    expect(seen).toEqual({ reads: 0, terminated: 0 });
+  });
+
+  it('finished meanwhile is stopped; any other failure is not known to be, and says why', async () => {
+    const gone = workflow([[taskDone(4)]], {
+      terminate: async () => {
+        throw new WorkflowNotFoundError('gone', 'wf-1', undefined);
+      },
+    });
+    await expect(stopQuietly(connection, gone.handle, 100)).resolves.toBeUndefined();
+    const broken = workflow([[taskDone(4)]], {
+      terminate: async () => {
+        throw new Error('Channel has been shut down');
+      },
+    });
+    await expect(stopQuietly(connection, broken.handle, 100)).resolves.toBe(
+      'wf-1 (Error: Channel has been shut down)',
+    );
   });
 });

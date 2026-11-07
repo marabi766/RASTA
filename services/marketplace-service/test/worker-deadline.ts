@@ -24,7 +24,7 @@ export class WorkerDeadlineError extends Error {
   }
 }
 
-type DeadlineConnection = Pick<Connection, 'withDeadline' | 'withAbortSignal'>;
+export type DeadlineConnection = Pick<Connection, 'withDeadline' | 'withAbortSignal'>;
 
 export interface Deadline {
   /** Aborted when the deadline expires; handed to the SDK's calls. */

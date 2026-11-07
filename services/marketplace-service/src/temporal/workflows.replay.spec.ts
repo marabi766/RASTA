@@ -77,10 +77,13 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     // filing: the reason these sites have a marker of their own. With it, the wait.
     'pre-fu117-compensate-exhausted',
     'pre-fu117-dispute-exhausted',
+    // Protocol 5 (`38d0ca5d`) failed the order on an empty lookup, with no marker.
+    'pre-fu117-hold-empty',
     'fu103-wait-then-refund-exhausted',
     'fu103-wait-then-dispute-exhausted',
     'fu117-compensate-wait',
     'fu117-dispute-wait',
+    'fu117-hold-wait',
     // #796 r1: each exit below ended the run before the owed-work marker (`38d0ca5d`,
     // protocol 5), and must replay that end, or a filing sent without doubt. With it,
     // the waits and the owner's answer, to their ends.
@@ -99,10 +102,33 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     'fu117r2-filing-final-then-cancel',
     'fu117r2-settled-reconciliation',
     'fu117r2-settle-doubt-filing',
+    // #812 r1: the build before the exit went on waiting past the limit, its input
+    // already carrying the retention (the rollout's overlap), and must replay that wait.
+    // With it, the order closed, and the watch to its end or to a late hold's refund.
+    'pre-fu117r3-hold-refused-past-window',
+    'fu117r3-hold-exit-failed',
+    'fu117r3-hold-exit-cancelled',
+    'fu117r3-late-hold-refunded',
     // #796 r2 F5: what this build records. The marker commits with the call that may
     // answer final (above, it followed the answer, as no history in service does).
     'fu117r3-declared-filing-release-refund',
     'fu117r3-declared-authorise-final',
+    // #812 r1 (D-132): the fence, its marker with the first send; the exit from a run
+    // continued short of its limit. The `fu117r3` hold exits above took the retired exit,
+    // and must keep replaying it.
+    'fu117r4-fence-exit-failed',
+    'fu117r4-fence-exit-cancelled',
+    'fu117r4-fence-late-hold-refunded',
+    'fu117r4-fence-first-send-refused',
+    'fu117r4-fence-wait-then-held-cancelled',
+    // #812 r2 (D-144): the fence on the order row, from a run that found it, a legacy watch
+    // that no longer expires, and a terminal obligation ending the hold's recovery.
+    'fu117r5-row-first-refusal-then-fence',
+    'fu117r5-row-cancelling-waits',
+    'fu117r5-row-closed-watches',
+    'fu117r5-legacy-watch-stays-then-terminal',
+    'fu117r5-hold-refunded-cancelled',
+    'fu117r5-hold-refunded-failed',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(

@@ -1,3 +1,4 @@
+import { OUTBOX_NOW } from '@rasta/nest-common';
 import { PrismaOutboxStore } from './outbox.store';
 import type { PrismaService } from '../prisma/prisma.service';
 
@@ -147,9 +148,8 @@ describe('claimPending', () => {
       expect(sql).toContain(stream);
     }
     expect(sql).toContain('claim_expires_at IS NULL AND next_attempt_at IS NULL');
-    const deadlineClock = sql.match(
-      /\(jsonb_populate_record\(NULL::outbox_message,.*?\)\)\)\.claim_expires_at/,
-    )?.[0];
+    // One clock: the very constant the writes use, not a copy of it (FU-188).
+    const deadlineClock = OUTBOX_NOW.replace(/\s+/g, ' ');
     expect(deadlineClock).toContain("now() AT TIME ZONE 'UTC'");
     expect(deadlineClock).toContain('HH24:MI:SS.US"Z"');
     expect(sql).toContain(`claim_expires_at IS NOT NULL AND claim_expires_at <= ${deadlineClock}`);

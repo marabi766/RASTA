@@ -3,17 +3,16 @@ import {
   eventually as askUntil,
   handOff,
   clearOfTimers,
-  isQuiet,
   queryQuiet,
   quiet,
   signalling,
+  stopQuietly as stopWhenQuiet,
 } from '../../test/legacy-handoff';
 import {
   cleanUp,
   currentDeadline,
   runBounded,
   SETTLE_MS,
-  startDeadline,
   type Deadline,
 } from '../../test/worker-deadline';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
@@ -26,7 +25,6 @@ import {
   CancelledFailure,
   TimeoutFailure,
   WorkflowFailedError,
-  WorkflowNotFoundError,
   type WorkflowHandle,
 } from '@temporalio/client';
 import {
@@ -226,6 +224,7 @@ function recordingActivities(order: FakeOrder, overrides: Partial<OrderActivitie
     ),
     createObligation: recorded('createObligation', () => ({ transactionId: TRANSACTION })),
     findObligation: recorded('findObligation', () => null),
+    noHoldCanLand: recorded('noHoldCanLand', () => true),
     markFundsHeld: recorded('markFundsHeld', (_id: string, transactionId: string) => {
       order.economicTransactionId = transactionId;
       return order.step('FUNDS_HELD', ['PENDING'], ['CANCELLING']);
@@ -342,6 +341,15 @@ let budgetEndsAt = 0;
 beforeEach(() => {
   budgetEndsAt = Date.now() + TEST_BUDGET_MS;
 });
+
+/** The send's own refusal on its first attempt, as the activity marks it: nothing moved. */
+const provenRefusal = (): Error =>
+  ApplicationFailure.create({
+    message: 'Insufficient balance',
+    type: 'INSUFFICIENT_BALANCE',
+    nonRetryable: true,
+    details: [REFUSED_ON_FIRST_ATTEMPT],
+  });
 
 /**
  * Asks until `predicate` holds, under the deadline of the run this is called
@@ -519,27 +527,8 @@ async function stopQuietly(
   const loud: string[] = [];
   for (const handle of handles) {
     const window = Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
-    await cleanUp(
-      environment.connection,
-      async () => {
-        if ((await handle.describe()).status.name !== 'RUNNING') return;
-        const bound = startDeadline(`${handle.workflowId} to be quiet`, window);
-        try {
-          await askUntil(bound, async () => isQuiet((await handle.fetchHistory()).events), 'quiet');
-        } catch {
-          loud.push(handle.workflowId);
-        } finally {
-          bound.stop();
-        }
-        await handle.terminate('test finished');
-      },
-      window + QUIET_FLOOR_MS,
-    ).catch((error: unknown) => {
-      // Finished meanwhile is stopped; anything else is not known to be.
-      if (!(error instanceof WorkflowNotFoundError)) {
-        loud.push(`${handle.workflowId} (${String(error)})`);
-      }
-    });
+    const why = await stopWhenQuiet(environment.connection, handle, window, QUIET_FLOOR_MS);
+    if (why !== undefined) loud.push(why);
   }
   return loud;
 }
@@ -2112,6 +2101,11 @@ describe('the order saga', () => {
         'REPLAY_WINDOW_CLOSED',
         'OPTIMISTIC_LOCK_FAILED',
         'RATE_LIMIT_EXCEEDED',
+        // Has its own mark and rule instead (`sentPastHoldFence`), and never ends a wait alone.
+        'HOLD_DEADLINE_PASSED',
+        // Answers only a send that counted nothing, so it says nothing of the sends before it
+        // (D-150): never proof, whichever attempt hears it.
+        'HOLD_DEADLINE_REQUIRED',
       ];
       for (const [code, status] of Object.entries(ERROR_STATUS)) {
         const proof = status < 500 && !notProof.includes(code);
@@ -2446,7 +2440,7 @@ describe('the order saga', () => {
       /** One economic call failing with whatever `economic.failure` says until `recovered`. */
       function failingOn(
         order: FakeOrder,
-        operation: 'disputeObligation' | 'compensate',
+        operation: 'createObligation' | 'disputeObligation' | 'compensate',
         failure: () => Error = down,
       ) {
         const economic = { recovered: false, failure, sent: [] as unknown[][] };
@@ -2457,6 +2451,7 @@ describe('the order saga', () => {
           recording.calls.push(operation);
           economic.sent.push(args);
           if (!economic.recovered) throw economic.failure();
+          if (operation === 'createObligation') return { transactionId: TRANSACTION };
           return operation === 'disputeObligation' ? 'E' : undefined;
         };
         return { ...recording, economic };
@@ -2714,6 +2709,370 @@ describe('the order saga', () => {
         // Answered, the filing's doubt is gone: the refund goes as a first send.
         expect(refunded[0]?.[3]).toBe(false);
       });
+
+      describe('the hold', () => {
+        const HOLD_MARKER = 'economic-hold-call-durable-wait-v1';
+        /** The answer lost, nothing found: what used to record FAILED. */
+        function holdLost(order: FakeOrder, failure: () => Error = down) {
+          const lost = failingOn(order, 'createObligation', failure);
+          const owner = { committed: false, lookups: 0 };
+          lost.activities.findObligation = async () => {
+            owner.lookups += 1;
+            return owner.committed ? { transactionId: 'TXN_LATE' } : null;
+          };
+          return { ...lost, owner };
+        }
+        const inHoldWait = async (handle: WorkflowHandle, rounds: () => number): Promise<void> => {
+          await phaseIs(handle, 'HOLD_UNCONFIRMED');
+          await until(() => rounds() > 0, 'a round');
+          await atRest(handle);
+        };
+        const replay = async (handle: WorkflowHandle): Promise<void> =>
+          Worker.runReplayHistory(replayOptions(), await handle.fetchHistory(), handle.workflowId);
+
+        it('a request that commits after the empty lookup: never FAILED, and the late hold is adopted', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, owner } = holdLost(order);
+          let seen: WorkflowHandle | undefined;
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              seen = ctx.handle;
+              await inHoldWait(ctx.handle, () => rounds.length);
+              expect(owner.lookups).toBeGreaterThan(0);
+              expect(calls).not.toContain('markFailed');
+              expect(order.status).toBe('PENDING');
+              owner.committed = true; // The first request lands now.
+              await ctx.handle.signal(retryDisputeRelease);
+              await ctx.held();
+              await atRest(ctx.handle);
+            },
+            { keepRunning: true, input: NO_RECHECK },
+          );
+          expect(calls).not.toContain('markFailed');
+          expect(order.economicTransactionId).toBe('TXN_LATE');
+          expect(order.status).toBe('FUNDS_HELD');
+          const handle = seen as WorkflowHandle;
+          expect(await patchIds(handle)).toContain(HOLD_MARKER);
+          expect(await patchIds(handle)).not.toContain('economic-sibling-call-durable-wait-v1');
+          await replay(handle);
+        });
+
+        it('economic-service recovers: the same key is answered and the order goes on', async () => {
+          const order = new FakeOrder();
+          const { rounds, activities, economic } = holdLost(order);
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              await inHoldWait(ctx.handle, () => rounds.length);
+              economic.recovered = true;
+              await ctx.handle.signal(retryDisputeRelease);
+              await ctx.held();
+              await atRest(ctx.handle);
+            },
+            { keepRunning: true, input: NO_RECHECK },
+          );
+          expect(order.economicTransactionId).toBe(TRANSACTION);
+          expect(new Set(economic.sent.map((args) => JSON.stringify(args))).size).toBe(1);
+        });
+
+        it('cancelled during the wait: sent on as the fence, then refunded and cancelled', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, economic } = holdLost(order);
+          const outcome = await run(
+            order,
+            activities,
+            async (ctx) => {
+              await inHoldWait(ctx.handle, () => rounds.length);
+              await ctx.party.cancel('changed their mind');
+              await atRest(ctx.handle);
+              expect(calls).not.toContain('markCancelled');
+              economic.recovered = true;
+              await ctx.handle.signal(retryDisputeRelease);
+            },
+            { input: NO_RECHECK },
+          );
+          expect(outcome).toBe('CANCELLED');
+          expect(calls.indexOf('compensate')).toBeLessThan(calls.indexOf('markCancelled'));
+          expect(calls).not.toContain('markFailed');
+        });
+
+        it('a later attempt’s refusal with an empty lookup does not fail the order', async () => {
+          const order = new FakeOrder();
+          let sends = 0;
+          const { calls, rounds, activities } = holdLost(order);
+          activities.createObligation = async () => {
+            sends += 1;
+            if (sends === 1) throw down();
+            throw ApplicationFailure.nonRetryable('Insufficient balance', 'INSUFFICIENT_BALANCE');
+          };
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              await inHoldWait(ctx.handle, () => rounds.length);
+            },
+            { keepRunning: true, input: NO_RECHECK },
+          );
+          expect(sends).toBe(2);
+          expect(calls).not.toContain('markFailed');
+          expect(order.status).toBe('PENDING');
+        });
+
+        it('in doubt, a marked refusal and an empty lookup do not fail the order', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, economic } = holdLost(order);
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              await inHoldWait(ctx.handle, () => rounds.length);
+              economic.failure = () =>
+                ApplicationFailure.create({
+                  message: 'Insufficient balance',
+                  type: 'INSUFFICIENT_BALANCE',
+                  nonRetryable: true,
+                  details: [REFUSED_ON_FIRST_ATTEMPT],
+                });
+              await ctx.handle.signal(retryDisputeRelease);
+              await until(() => rounds.length > 1, 'a refused round to stay');
+              await atRest(ctx.handle);
+            },
+            { keepRunning: true, input: NO_RECHECK },
+          );
+          expect(calls).not.toContain('markFailed');
+          expect(order.status).toBe('PENDING');
+        });
+
+        it('a lookup that cannot finish, with the hold unanswered, waits too', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, economic } = holdLost(order);
+          activities.findObligation = async () => {
+            if (economic.recovered) return null;
+            throw ApplicationFailure.nonRetryable('more pages', 'OBLIGATION_LOOKUP_INCOMPLETE');
+          };
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              await inHoldWait(ctx.handle, () => rounds.length);
+              economic.recovered = true;
+              await ctx.handle.signal(retryDisputeRelease);
+              await ctx.held();
+              await atRest(ctx.handle);
+            },
+            { keepRunning: true, input: NO_RECHECK },
+          );
+          expect(calls).not.toContain('markFailed');
+        });
+
+        it('economic-service wholly down: rounds are counted though the lookup cannot answer', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, economic } = holdLost(order);
+          activities.findObligation = async () => {
+            if (!economic.recovered) throw down();
+            return null;
+          };
+          await run(
+            order,
+            activities,
+            async (ctx) => {
+              await inHoldWait(ctx.handle, () => rounds.length);
+              // A marked refusal in a round proves nothing, so its lookup counts too.
+              const reported = rounds.length;
+              economic.failure = provenRefusal;
+              await ctx.handle.signal(retryDisputeRelease);
+              await until(() => rounds.length > reported, 'the refused round to be counted');
+              await atRest(ctx.handle);
+              economic.recovered = true;
+              await ctx.handle.signal(retryDisputeRelease);
+              await ctx.held();
+              await atRest(ctx.handle);
+            },
+            { keepRunning: true, input: NO_RECHECK },
+          );
+          expect(calls).not.toContain('markFailed');
+          expect(order.economicTransactionId).toBe(TRANSACTION);
+        });
+
+        it('a proven refusal keeps its proof through a lookup that fails for a while', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities } = holdLost(order, provenRefusal);
+          let lookups = 0;
+          activities.findObligation = async () => {
+            // More attempts than a call in doubt is given.
+            if ((lookups += 1) <= 4) throw down();
+            return null;
+          };
+          let seen: WorkflowHandle | undefined;
+          const outcome = await run(order, activities, async (ctx) => {
+            seen = ctx.handle;
+          });
+          expect(outcome).toBe('FAILED');
+          expect(lookups).toBe(5);
+          expect(rounds).toEqual([]);
+          expect(calls).toContain('markFailed');
+          // No wait, no marker: the gate asks nothing of this history.
+          expect(await patchIds(seen as WorkflowHandle)).not.toContain(HOLD_MARKER);
+        });
+
+        it('an obligation not adopted found in a round stops the saga, deciding nothing', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, owner } = holdLost(order);
+          activities.findObligation = async () =>
+            owner.committed
+              ? ({ mismatch: true, transactionIds: ['TXN_OTHER'], differ: ['payee'] } as never)
+              : null;
+          await expect(
+            run(order, activities, async (ctx) => {
+              await inHoldWait(ctx.handle, () => rounds.length);
+              owner.committed = true;
+              await ctx.handle.signal(retryDisputeRelease);
+              // The status query names why it stopped, not the phase before the wait.
+              await phaseIs(ctx.handle, 'OBLIGATION_MISMATCH');
+            }),
+          ).rejects.toMatchObject({ cause: { type: 'OBLIGATION_TERMS_MISMATCH' } });
+          expect(calls).not.toContain('markFailed');
+          expect(calls).not.toContain('markFundsHeld');
+        });
+
+        it('a saga protocol 5 started, its hold unanswered at the deploy, waits on this build', async () => {
+          const order = new FakeOrder();
+          const { calls, rounds, activities, economic } = holdLost(order);
+          const taskQueue = `protocol-5-${(queues += 1)}`;
+          const workflow = env.client.workflow.getHandle(taskQueue);
+          await stoppedOnFailure(env, workflow, async () => {
+            const handle = signalling(
+              env,
+              await env.client.workflow.start(orderSaga, {
+                taskQueue,
+                workflowId: taskQueue,
+                args: [{ ...INPUT, ...NO_RECHECK }],
+              }),
+            );
+            const before = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+              maxCachedWorkflows: 0,
+              // What protocol 5 writes: every marker but this one.
+              patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
+            });
+            // Handed over with the send's retry pending, not from a quiet
+            // history: that comes only once protocol 5 has decided. No workflow
+            // task is in flight: the attempt ran, so the one that scheduled it
+            // was answered.
+            await onWorker(env, before, 'protocol 5 to send', async (_d, stops) => {
+              stops.onFailure(handle);
+              await until(() => economic.sent.length > 0, 'the first attempt');
+            });
+            expect(await patchIds(handle)).not.toContain(HOLD_MARKER);
+
+            const after = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+            });
+            await onWorker(env, after, 'this build to wait, then hold', async (_d, stops) => {
+              stops.always(handle);
+              await inHoldWait(handle, () => rounds.length);
+              expect(calls).not.toContain('markFailed');
+              economic.recovered = true;
+              await handle.signal(retryDisputeRelease);
+              await until(() => order.status === 'FUNDS_HELD', 'the hold');
+              await atRest(handle);
+            });
+          });
+          expect(await patchIds(workflow)).toContain(HOLD_MARKER);
+          await replay(workflow);
+        });
+
+        it('a saga past protocol 5’s decision keeps it on this build', async () => {
+          const order = new FakeOrder();
+          const { calls, activities } = holdLost(order);
+          const taskQueue = `protocol-5-${(queues += 1)}`;
+          const workflow = env.client.workflow.getHandle(taskQueue);
+          const recordFailed = activities.markFailed;
+          let tried = false;
+          activities.markFailed = async (...args) => {
+            if (!tried) {
+              tried = true;
+              throw down(); // Decided, and not yet recorded, when the deploy comes.
+            }
+            return recordFailed(...args);
+          };
+          const outcome = await stoppedOnFailure(env, workflow, async () => {
+            const handle = signalling(
+              env,
+              await env.client.workflow.start(orderSaga, {
+                taskQueue,
+                workflowId: taskQueue,
+                args: [{ ...INPUT, ...NO_RECHECK }],
+              }),
+            );
+            const before = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+              maxCachedWorkflows: 0,
+              patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
+            });
+            // Handed over with the decision's activity pending, by design: as
+            // in the case above, no workflow task is in flight.
+            await onWorker(env, before, 'protocol 5 to decide', async (_d, stops) => {
+              stops.onFailure(handle);
+              await until(() => tried, 'protocol 5 to decide');
+            });
+            const after = await Worker.create({
+              connection: env.nativeConnection,
+              taskQueue,
+              workflowBundle,
+              activities,
+            });
+            return onWorker(env, after, 'the saga to finish', async (_d, stops) => {
+              stops.always(handle);
+              return handle.result();
+            });
+          });
+          expect(outcome).toBe('FAILED');
+          expect(calls).toContain('markFailed');
+          expect(await patchIds(workflow)).not.toContain(HOLD_MARKER);
+          await replay(workflow);
+        });
+
+        it('a build that withholds the marker still ends as protocol 5 did, and that replays', async () => {
+          const order = new FakeOrder();
+          const { calls, activities } = holdLost(order);
+          const taskQueue = `protocol-5-${(queues += 1)}`;
+          const before = await Worker.create({
+            connection: env.nativeConnection,
+            taskQueue,
+            workflowBundle,
+            activities,
+            patchActivationCallback: ({ patchId }) => patchId !== HOLD_MARKER,
+          });
+          const workflow = env.client.workflow.getHandle(taskQueue);
+          const outcome = await onWorker(env, before, 'the saga to finish', async (_d, stops) => {
+            // Known before it is started: a start cut off may still have started it.
+            stops.always(workflow);
+            const handle = await env.client.workflow.start(orderSaga, {
+              taskQueue,
+              workflowId: taskQueue,
+              args: [{ ...INPUT, ...NO_RECHECK }],
+            });
+            return handle.result();
+          });
+          expect(outcome).toBe('FAILED');
+          expect(calls).toContain('markFailed');
+          expect(await patchIds(workflow)).not.toContain(HOLD_MARKER);
+          await replay(workflow);
+        });
+      });
     });
   });
 
@@ -2745,7 +3104,7 @@ describe('the order saga', () => {
     const order = new FakeOrder();
     const { calls, activities } = recordingActivities(order, {
       createObligation: async () => {
-        throw ApplicationFailure.nonRetryable('Insufficient balance', 'INSUFFICIENT_BALANCE');
+        throw provenRefusal();
       },
     });
 
@@ -2906,7 +3265,7 @@ describe('the order saga', () => {
       const { calls, activities } = recordingActivities(order, {
         createObligation: async () => {
           order.cancel('found a cheaper supplier');
-          throw ApplicationFailure.nonRetryable('economic-service timed out', 'UPSTREAM_TIMEOUT');
+          throw provenRefusal();
         },
         // Nothing yet when the hold is checked; a row by the time the
         // cancellation asks again.
@@ -2936,11 +3295,10 @@ describe('the order saga', () => {
     // the obligation — on exactly the order's terms — was moved on before the
     // saga looked. Recording it as held published ORDER_FUNDS_HELD for money
     // back with the buyer.
+    //
+    // Terminal with nothing to refund, the order ends instead (`workflows-hold-row.spec.ts`).
     it.each<[string, string]>([
-      ['REFUNDED', 'RETURNED'],
-      ['CANCELLED', 'NEVER_HELD'],
       ['CREATED', 'NEVER_HELD'],
-      ['FAILED', 'NEVER_HELD'],
       ['SETTLED', 'PAID_OUT'],
       ['PENDING_SETTLEMENT', 'UNPROVEN'],
       ['DISPUTED', 'UNPROVEN'],
@@ -2993,7 +3351,7 @@ describe('the order saga', () => {
       const { calls, activities } = recordingActivities(order, {
         createObligation: async () => {
           order.cancel('found a cheaper supplier');
-          throw ApplicationFailure.nonRetryable('economic-service timed out', 'UPSTREAM_TIMEOUT');
+          throw provenRefusal();
         },
         findObligation: async () =>
           (lookups += 1) === 1
@@ -3012,7 +3370,7 @@ describe('the order saga', () => {
       const { calls, activities } = recordingActivities(order, {
         createObligation: async () => {
           order.cancel('found a cheaper supplier');
-          throw ApplicationFailure.nonRetryable('Insufficient balance', 'INSUFFICIENT_BALANCE');
+          throw provenRefusal();
         },
       });
 

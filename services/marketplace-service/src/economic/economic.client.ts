@@ -288,7 +288,8 @@ export const OBLIGATION_LOOKUP_PAGES = 10;
 /**
  * The lookup did not reach the end of economic-service's answer. Nothing can
  * be concluded from part of it — not "nothing is held", not "only somebody
- * else's row" — so the saga stops instead (`OBLIGATION_LOOKUP_INCOMPLETE`).
+ * else's row" — so the saga stops instead (`OBLIGATION_LOOKUP_INCOMPLETE`), or
+ * stays in its wait with the hold unanswered (`placeHold`).
  */
 export class ObligationLookupIncomplete extends Error {
   constructor(readonly pagesRead: number) {
@@ -339,7 +340,7 @@ export class EconomicClient {
    * the hold the money can go.
    */
   async createObligation(
-    input: ObligationTerms & { correlationId: string },
+    input: ObligationTerms & { correlationId: string; holdNotAfter?: string },
   ): Promise<TransactionView> {
     return this.call<TransactionView>('createObligation', {
       method: 'POST',
@@ -355,6 +356,7 @@ export class EconomicClient {
         sourceType: OBLIGATION_SOURCE_TYPE,
         sourceReference: input.orderId,
         holdFunds: true,
+        ...(input.holdNotAfter === undefined ? {} : { holdNotAfter: input.holdNotAfter }),
       },
     });
   }

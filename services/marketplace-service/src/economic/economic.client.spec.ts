@@ -150,6 +150,27 @@ describe('creating the obligation', () => {
     expect(request.headers['idempotency-key']).toBe(idempotencyKeyFor.hold('ORD_1'));
   });
 
+  it.each([
+    ['carries the deadline it was given', '2026-11-07T00:00:00.000Z'],
+    ['carries none when it was given none', undefined],
+  ])('a hold %s', async (_name, holdNotAfter) => {
+    const { calls, impl } = stubFetch({ status: 201, body: { id: 'TXN_1' } });
+    globalThis.fetch = impl as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await client.createObligation({
+      orderId: 'ORD_1',
+      buyerOrganizationId: 'ORG-BUYER',
+      supplierOrganizationId: 'ORG-SUPPLIER',
+      totalAmountMinor: 1n,
+      currency: 'IRR',
+      correlationId: 'corr-1',
+      ...(holdNotAfter === undefined ? {} : { holdNotAfter }),
+    });
+    const body = calls[0]?.body as Record<string, unknown>;
+    expect(Object.hasOwn(body, 'holdNotAfter')).toBe(holdNotAfter !== undefined);
+    if (holdNotAfter !== undefined) expect(body.holdNotAfter).toBe(holdNotAfter);
+  });
+
   it('signs the buyer’s organization into the token and sends no tenant header', async () => {
     const { calls, impl } = stubFetch({ status: 201, body: { id: 'TXN_1' } });
     globalThis.fetch = impl as typeof fetch;

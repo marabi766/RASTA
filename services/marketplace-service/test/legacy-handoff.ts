@@ -1,9 +1,11 @@
-import type { WorkflowHandle } from '@temporalio/client';
+import { WorkflowNotFoundError, type WorkflowHandle } from '@temporalio/client';
 import {
+  cleanUp,
   currentDeadline,
   startDeadline,
   WorkerDeadlineError,
   type Deadline,
+  type DeadlineConnection,
 } from './worker-deadline';
 
 /**
@@ -54,20 +56,6 @@ function named(error: WorkerDeadlineError, what: string): WorkerDeadlineError {
   copy.message = `${error.message} (waiting for ${what})`;
   copy.cause = error;
   return copy;
-}
-
-/** {@link eventually} under a deadline of its own, for a poll that has no enclosing one. */
-export async function pollWithin(
-  ms: number,
-  predicate: (deadline: Deadline) => Promise<boolean>,
-  what: string,
-): Promise<void> {
-  const deadline = startDeadline(what, ms);
-  try {
-    await eventually(deadline, () => predicate(deadline), what);
-  } finally {
-    deadline.stop();
-  }
 }
 
 /**
@@ -146,6 +134,44 @@ export const quiet = (
     async () => isQuiet((await handle.fetchHistory()).events),
     'the saga to be quiet',
   );
+
+/**
+ * Terminates `handle` once its history is {@link isQuiet}, waiting for that at
+ * most `ms`, and `stopMs` more for the describe and terminate (FU-214):
+ * terminated with an activity in flight, a workflow stalls the time-skipping
+ * server's clock for every later test on it. Under a
+ * deadline and abort signal of its own, as the run's may have expired. Returns
+ * why it was not stopped quietly — terminated with something in flight, or
+ * not known to be stopped — and nothing when it was, or had already finished.
+ */
+export async function stopQuietly(
+  connection: DeadlineConnection,
+  handle: Pick<WorkflowHandle, 'describe' | 'fetchHistory' | 'terminate' | 'workflowId'>,
+  ms: number,
+  stopMs: number = ms,
+): Promise<string | undefined> {
+  let loud: string | undefined;
+  await cleanUp(
+    connection,
+    async () => {
+      if ((await handle.describe()).status.name !== 'RUNNING') return;
+      const bound = startDeadline(`${handle.workflowId} to be quiet`, ms);
+      try {
+        await eventually(bound, async () => isQuiet((await handle.fetchHistory()).events), 'quiet');
+      } catch {
+        loud = handle.workflowId;
+      } finally {
+        bound.stop();
+      }
+      await handle.terminate('test finished');
+    },
+    ms + stopMs,
+  ).catch((error: unknown) => {
+    // Finished meanwhile is stopped; anything else is not known to be.
+    if (!(error instanceof WorkflowNotFoundError)) loud = `${handle.workflowId} (${String(error)})`;
+  });
+  return loud;
+}
 
 /** A query asked only once the history is quiet: it takes one query, not a poll. */
 export async function queryQuiet<T>(

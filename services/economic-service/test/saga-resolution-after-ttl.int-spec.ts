@@ -4,7 +4,7 @@ import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { SAGA_DISPUTE_RECOVERY } from '@rasta/testing';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * economic-service's half of `SAGA_DISPUTE_RECOVERY` (@rasta/testing): what the
@@ -86,6 +86,7 @@ describe('a saga dispute resolution retried after its stored answer expired', ()
         sourceType: 'ORDER',
         sourceReference: order,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     const transactionId = created.body.id as string;

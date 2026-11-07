@@ -87,6 +87,14 @@ const CASES = EXPORTS.filter(
  */
 const NO_SESSION_REDIRECTS = new Map<string, { args: () => unknown[]; to: string }>([
   [
+    actionKey('apps/web/src/app/assets/actions.ts', 'releaseUnresolvedAssetRegistration'),
+    { args: () => [new FormData()], to: '/login?returnTo=/assets' },
+  ],
+  [
+    actionKey('apps/web/src/app/drivers/actions.ts', 'releaseUnresolvedDriverCreation'),
+    { args: () => [new FormData()], to: '/login?returnTo=/drivers' },
+  ],
+  [
     actionKey('apps/web/src/app/wallet/actions.ts', 'releaseUnresolvedTopUp'),
     { args: () => ['WLT_1', new FormData()], to: '/login?returnTo=/wallet' },
   ],
