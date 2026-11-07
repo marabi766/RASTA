@@ -38,6 +38,8 @@ export interface OpenUnconfirmedCall {
 /** ADR-050 fencing, on the order itself: intent and receipt are never purged.
  * The cross-tenant sweep is platform plumbing. Only persisted ownership is
  * returned; every subsequent mutation fences BOTH that buyer and the token.
+ * The columns are `timestamp(3)`, UTC wall time: every clock says `AT TIME ZONE
+ * 'UTC'` (FU-188), and `age_ms` against the Prisma-written `created_at` needs it.
  */
 @Injectable()
 export class SagaStartStore {
@@ -60,20 +62,20 @@ export class SagaStartStore {
       WITH due AS (
         SELECT id, organization_id FROM "order"
         WHERE saga_start_delivered_at IS NULL AND status IN ('PENDING', 'CANCELLING')
-          AND saga_start_next_attempt_at <= clock_timestamp()
-          AND (saga_start_claim_expires_at IS NULL OR saga_start_claim_expires_at <= clock_timestamp())
+          AND saga_start_next_attempt_at <= (clock_timestamp() AT TIME ZONE 'UTC')
+          AND (saga_start_claim_expires_at IS NULL OR saga_start_claim_expires_at <= (clock_timestamp() AT TIME ZONE 'UTC'))
           AND (${only?.id ?? null}::text IS NULL OR
             (id = ${only?.id ?? null} AND organization_id = ${only?.organizationId ?? null}))
         ORDER BY saga_start_next_attempt_at, id LIMIT ${only ? 1 : START_BATCH_SIZE}
         FOR UPDATE SKIP LOCKED
       )
       UPDATE "order" o SET saga_start_claim_token = ${token}::uuid,
-        saga_start_claim_expires_at = clock_timestamp() + ${START_LEASE_SECONDS} * interval '1 second',
+        saga_start_claim_expires_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') + ${START_LEASE_SECONDS} * interval '1 second',
         saga_start_attempted_at = COALESCE(o.saga_start_attempted_at,
-          CASE WHEN o.saga_start_requested_at IS NULL THEN o.created_at ELSE clock_timestamp() END)
+          CASE WHEN o.saga_start_requested_at IS NULL THEN o.created_at ELSE (clock_timestamp() AT TIME ZONE 'UTC') END)
       FROM due WHERE o.id = due.id AND o.organization_id = due.organization_id
       RETURNING o.id, o.organization_id, o.saga_start_attempted_at AS first_possible_start_at,
-        GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - o.saga_start_attempted_at)) * 1000)::float AS age_ms,
+        GREATEST(0, EXTRACT(EPOCH FROM ((clock_timestamp() AT TIME ZONE 'UTC') - o.saga_start_attempted_at)) * 1000)::float AS age_ms,
         o.saga_start_claim_token::text AS token
     `,
     );
@@ -83,12 +85,12 @@ export class SagaStartStore {
     return this.bounded(
       (tx) => tx.$executeRaw`
       UPDATE "order" SET
-        saga_start_delivered_at = CASE WHEN ${accepted} THEN clock_timestamp() ELSE NULL END,
+        saga_start_delivered_at = CASE WHEN ${accepted} THEN (clock_timestamp() AT TIME ZONE 'UTC') ELSE NULL END,
         saga_start_claim_token = NULL, saga_start_claim_expires_at = NULL,
-        saga_start_next_attempt_at = clock_timestamp() + ${START_RETRY_SECONDS} * interval '1 second'
+        saga_start_next_attempt_at = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') + ${START_RETRY_SECONDS} * interval '1 second'
       WHERE id = ${claim.id} AND organization_id = ${claim.organization_id}
         AND saga_start_claim_token = ${claim.token}::uuid
-        AND saga_start_claim_expires_at > clock_timestamp() AND saga_start_delivered_at IS NULL
+        AND saga_start_claim_expires_at > (clock_timestamp() AT TIME ZONE 'UTC') AND saga_start_delivered_at IS NULL
     `,
     );
   }

@@ -204,6 +204,9 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
     const closing = pool.stop({ deadlineAt: Date.now() + 5_000 });
     // New work is refused; the transaction's own statements are not.
     await expect(pool.client.$executeRawUnsafe('SELECT 3')).rejects.toThrow(PoolClosedError);
+    // The session check (FU-188), then the transaction's two statements.
+    engine.release();
+    await until(() => engine.held.length === 1);
     engine.release();
     await until(() => engine.held.length === 1);
     engine.release();

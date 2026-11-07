@@ -907,7 +907,7 @@ export class FleetRepository {
           )
           UPDATE asset_ref a
              SET insurance_cover = '{}'::jsonb, retained_coverages = '{}',
-                 insurance_epoch = a.insurance_epoch + 1, synced_at = now()
+                 insurance_epoch = a.insurance_epoch + 1, synced_at = (now() AT TIME ZONE 'UTC')
             FROM before
            WHERE a.id = before.id
           RETURNING a.organization_id AS "organizationId", before.holds AS "holdsInsurance"`,

@@ -344,50 +344,50 @@
   },
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
-    "line": 91,
+    "line": 94,
     "hash": "7a735cfe82f6bf4ea455d359177646ecbec3dd15beeb067d2d673c767befbd3e",
     "occurrence": 0,
     "decision": "platform-wide: hierarchy-change consumer schedules reconciliation for every affected tenant; tasks retain the event organization"
   },
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
-    "line": 115,
-    "hash": "3d965a890d1edfd67947299bb6ae1db6d30c4e21b30efd665badf0cf73ebb953",
+    "line": 118,
+    "hash": "829571358b114bc47db8825fbf8055cb25cbe9ca09bf13651a0e0649a32c4832",
     "occurrence": 0,
     "decision": "platform-wide: background policy-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
-    "line": 156,
-    "hash": "350ab4a2d29882bea596870c42ac1966994e91dd66eaa26a77e0ddcf4760914d",
+    "line": 159,
+    "hash": "e02abb63d5f6e9721c7e20045eab850b25dc92e3a8708ca0e97e1d5fbeec57d6",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
-    "line": 185,
-    "hash": "fc72e79ef18e033df74631d1ff6e5dd24924b574627d0da305f929ad85f7da04",
+    "line": 188,
+    "hash": "c21f00dc9e61338ccfae724a5267276406669fc8c00265098591d1265a0c2fe6",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
-    "line": 208,
+    "line": 211,
     "hash": "21831f265015d6f44ccc08d8f3d8f7d6134c06d5649ca495ea4de7c720e2168a",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
-    "line": 224,
-    "hash": "6897bab35965fcf70fb756c7610022353f8a4c31c93a57dbe9d131992ef9488c",
+    "line": 227,
+    "hash": "d67a73441987b256f0940077c36aaf9631b2fab15c93df026b126027c027c800",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/construction-service/src/approval/policy-reconciliation.repository.ts",
-    "line": 243,
-    "hash": "0a58eb02d273eeeda802bced8ef9a8b93e00874589ae222eb7deb53eacb0236b",
+    "line": 246,
+    "hash": "c4ae3d7362d8cb2769a6bc0f52b156eaf644b87fcc8d669a61e796dd70b2ee8e",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
   },
@@ -499,7 +499,7 @@
   {
     "file": "services/construction-service/src/tender/contractor-standing.repository.ts",
     "line": 67,
-    "hash": "8a81c7574fcbab1656bab7df03e0fb3a3a37b82a4f9d2ddde611c646ff5351af",
+    "hash": "45c9db48b2e0ac73695a5d1e5b6019141e665c2bff331257cca6bf85abc60cdc",
     "occurrence": 0,
     "decision": "platform-wide: recordQualified inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
   },
@@ -513,28 +513,28 @@
   {
     "file": "services/construction-service/src/tender/contractor-standing.repository.ts",
     "line": 167,
-    "hash": "02751ee568d3e5e1b04608ca789e6867a285d16378bd09683bd632f2569d246a",
+    "hash": "479c21f3272065730180bd185f4c55033e1bece6a1bb55b03f16e34777c47410",
     "occurrence": 0,
     "decision": "platform-wide: singleton contractor-standing bootstrap records consumer initialization across all suppliers"
   },
   {
     "file": "services/construction-service/src/tender/contractor-standing.repository.ts",
     "line": 180,
-    "hash": "67210727cbda9e9215003332405e0df00911d003538396baa05604e2edac9567",
+    "hash": "96b994468ff080cc4a2ac5a0ea5e6a15ae8fcb5de56a6cbc3665f15a440f91ab",
     "occurrence": 0,
     "decision": "platform-wide: singleton contractor-standing bootstrap advances its supplier snapshot cursor across all organizations"
   },
   {
     "file": "services/construction-service/src/tender/contractor-standing.repository.ts",
     "line": 197,
-    "hash": "fa68a4030d968732d7384a7b43b920b7a042d249a176f5cb79d98c5e9ea3272c",
+    "hash": "3a39328fec26d4966a0e4a43284d57ed773c86d80a9e199e50a24836ccb22f65",
     "occurrence": 0,
     "decision": "platform-wide: singleton contractor-standing bootstrap marks shared reference initialization complete"
   },
   {
     "file": "services/construction-service/src/tender/contractor-standing.repository.ts",
     "line": 217,
-    "hash": "ce638f61e5733ce44534cf25a7e748002fc67d6dba618c3880423815b8b9a794",
+    "hash": "a3fe40c3bda16d170531ad03c1b6e48c78fe42e9039aba46709420009df84f44",
     "occurrence": 0,
     "decision": "platform-wide: foldEpisode inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
   },
@@ -834,106 +834,106 @@
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 53,
-    "hash": "013974801aeabb9cfe915c2c3c2beee411759a385858b1e86b017cc2a544248c",
+    "line": 55,
+    "hash": "5423fd4312b6b7cf7a568855f36d0c649c32188167e2abd547a060c62ed533b9",
     "occurrence": 0,
     "decision": "platform-wide: open inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 85,
-    "hash": "f2acd0dae258a7e5fabb5f55bea3f55844a26fa679e4f01c5dee123876a81034",
+    "line": 87,
+    "hash": "5dfe8f0d4513b745010dfed27d2d839ae3b0c6e779643e8386731d59560927cb",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 114,
-    "hash": "e5373bd3a25ea54ae8a99c2637909a9192cfaf7cb5880e254dbc9540e412151f",
+    "line": 116,
+    "hash": "519babb8fc1debfb77509308ab5118fd630daeb1d274d5a831741d6f4eaa804e",
     "occurrence": 0,
     "decision": "platform-wide: background payment-reconciliation worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 153,
+    "line": 155,
     "hash": "612ca2ad1170bb5807b25c85b3e75469cc1fb78c94f651c87154f883c42dce5c",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 166,
-    "hash": "3c09a2004406327be16f65cd23201cf8a3ded967303cbd4063849f56c72928ce",
+    "line": 168,
+    "hash": "71a18ea07213a555c06800de9b9a2e2ca493dce50976ba0644b8bb355a4165fc",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 181,
-    "hash": "9ab32e58718327ebf95ad6920f1e72a0468f024b12dc5e653148c6c16f62e961",
+    "line": 183,
+    "hash": "5d190d26c0dec4de32041278ddc45b655edde2960a652bee8a4e98e25ff60ee6",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 212,
-    "hash": "2bc23e1c4b37496d33dbbdcc02e424ed09d3dcec59febf45a3a7d1c523ac0c9e",
+    "line": 214,
+    "hash": "7bd692b3378fefb4974bf6f808d97e3cefaba1923261b1147f9968c3f8edcad9",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 243,
-    "hash": "5ba2c43208614cd38962adb7fad2442c8ec715177627b521c0d152cad3fd9a6e",
+    "line": 245,
+    "hash": "48df634680df58816821e8977272f406062b91f8835a127cf800a6c1640f506e",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 256,
-    "hash": "b5c177d6820524eb8aa8dd1a5f2152179fbc48c587f53adbf48bf852bcea80c8",
+    "line": 258,
+    "hash": "a8436f5fbda722e568d1140d76fc8e1a60172e36f5c3b8ce1e9c2555962f7e36",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 279,
-    "hash": "20ae4e6f34c14b90da4fcf12a4ecab0ff041e7b80ba3c28ed0967ecdb5c0b85d",
+    "line": 281,
+    "hash": "e9eebdd886b3e9f05bc95f955fc57c38167098c26523c9815d9da8085d50ea1f",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 303,
-    "hash": "072ddc6384bd906ab10e8a3f4a7abaf4e27ac29a4a776763cac52a1d6c1e2296",
+    "line": 305,
+    "hash": "0b89d90f9c16fca47a7e1fd352168b3a8afbc565f85893e738530cd077bd4e02",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 348,
+    "line": 350,
     "hash": "7ff83f7601e35bdd6109d23a61f2966a5c7eb1b8140c555c9b6f17985af69b07",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler heals missing tasks across tenants from explicitly eligible payment markers"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 386,
-    "hash": "5394db8f2c53753b704d1585ce0de7250019fd9c4ed2066dd527ebd2f7b28ca3",
+    "line": 388,
+    "hash": "1b0622aa2a9b65f5c0a13cf168c3a0e548fc73aa0fb9b54fef027fccf208a9ba",
     "occurrence": 0,
     "decision": "platform-wide: heal inserts an explicitly bound organization from its authorized command or source event; no implicit tenant default in raw SQL"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 411,
-    "hash": "58052b662cb00ae83ca355c5b6a5c9011c703afbaf8799dca65dfa96a6c2bf79",
+    "line": 413,
+    "hash": "e67af55778befa5d70acddc7eb9d56293ab3e31d6a366228be23457a75743046",
     "occurrence": 0,
     "decision": "platform-wide: payment reconciler retires stale tasks across tenants under row locks when their marker and hold are absent"
   },
   {
     "file": "services/economic-service/src/payment/payment-reconciliation.repository.ts",
-    "line": 478,
-    "hash": "07cf8007f828a01ba198cc86431ab4e5d027ca688183558aa90a08b7005bc6c8",
+    "line": 480,
+    "hash": "0359ec214755d85e66b4cb84106b0e55edab84493b9c48742b11369a951024e3",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
   },
@@ -996,7 +996,7 @@
   {
     "file": "services/economic-service/src/reward/reward.service.ts",
     "line": 360,
-    "hash": "755ce69aacb3af12298f3816f892095b9e4e7860809db9cbb9156dce986ef672",
+    "hash": "749733bdaf9877fcfa64f44e766ab8f666a0fd20ea965d4749ffb7782f5c5432",
     "occurrence": 0,
     "decision": "platform-wide: creates the reward balance for the explicitly supplied organization and user; bound insert values and composite unique key prevent ambiguity"
   },
@@ -1114,15 +1114,15 @@
   },
   {
     "file": "services/economic-service/src/wallet/wallet.repository.ts",
-    "line": 53,
+    "line": 59,
     "hash": "60961b9dcb7f6e29a1b191d46a3518ab581143d6b452e4925c31cbc58348d705",
     "occurrence": 0,
     "decision": "platform-wide: wallet repository coordinates both parties of a settlement and platform rewards; caller supplies a previously authorized wallet or organization"
   },
   {
     "file": "services/economic-service/src/wallet/wallet.repository.ts",
-    "line": 116,
-    "hash": "07cbdc7f058732b130acfc5890f0aa641e5c9c8e6dcb3eb93e9703b839002d19",
+    "line": 122,
+    "hash": "f4c01294280489c2e8a2894ce4acfd825f8cf482c8885b5cf2d8a0d2b9c1755f",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
@@ -1262,7 +1262,7 @@
   {
     "file": "services/fleet-service/src/fleet/fleet.repository.ts",
     "line": 903,
-    "hash": "8d686e5ee9b28d7613eae30c51dbfde330dbdcf19396aa140a6a11aef2ae2077",
+    "hash": "f2a72b4142d34078064cca7766b2f1eed89c4221cf4293757667a7c91b945766",
     "occurrence": 0,
     "decision": "platform-wide: explicit insurance cutover command clears replicas transferred away from their recorded owner across tenants"
   },
@@ -1743,15 +1743,22 @@
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
+    "file": "services/identity-service/src/prisma/utc-session-boundary.spec.ts",
+    "line": 80,
+    "hash": "cdd3270368210e1b6941853dc0b07cd6e43ee901b3b5e4f88282ea0e0b1651dc",
+    "occurrence": 0,
+    "decision": "platform-wide: unit-test stub engine exercises the UTC session check only; never sends SQL to a database"
+  },
+  {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 258,
+    "line": 260,
     "hash": "05fbbd8849c9ee0377d438a7059660b4495318ad1e0ef4cdf06c0cbd18120a20",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 259,
+    "line": 261,
     "hash": "a502ae8cebe6099443bed2636316779a270b1b724d2502f898e7fadf75df3999",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
@@ -1765,8 +1772,8 @@
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 351,
-    "hash": "9e4d08f362c5d4ece23d65a2f37da7304f4220817a871184e868727dc8c1817a",
+    "line": 354,
+    "hash": "84589edf30c08f95e72a87cb3d2687d6f83e8f2e8d76b7e1c08ea4a040497a35",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
   },
@@ -1779,7 +1786,7 @@
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 410,
+    "line": 413,
     "hash": "30faef4383d334b4a1324dde39e34b392803542e6f3dfd440fcf73f4df70697d",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
@@ -1793,8 +1800,8 @@
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 453,
-    "hash": "09cebada265607ff1e1fadc6442ac5c55130a4c94173548a12e05e1cdb95d7a3",
+    "line": 457,
+    "hash": "9898855318c97abf7191771cfcf7feb865e3dee1555a5824c2281f83683bc860",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
   },
@@ -1807,7 +1814,7 @@
   },
   {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
-    "line": 478,
+    "line": 482,
     "hash": "753a19ab285b875152a9abc992dd82ce3992807031ef0cd8e6440372bc1a7e76",
     "occurrence": 0,
     "decision": "platform-wide: refusal audit capture and delivery covers all tenants including unaffiliated callers; rows carry their own optional tenant and lease token"
@@ -2451,56 +2458,56 @@
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 30,
+    "line": 51,
     "hash": "1d4d038793204dded7071b1a6ebc4d2698e73caf564b9848cdb3cdffcb2ec165",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local statement timeout bounds starter database work; no tenant data result"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 40,
-    "hash": "5b5d369d47528a345a11f2ec672fbb37edb89a6cdfcc7fad946f334f75e59e87",
+    "line": 61,
+    "hash": "b6f82ea98807c4e7fb0a12d99a2c82fba0518e82c3807669bbeab2fdc3a5928d",
     "occurrence": 0,
     "decision": "platform-wide: bounded durable-start queue claims across buyers; persisted organization and fresh lease token fence every later acknowledgment"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 65,
-    "hash": "f412a749f1d872b5102f9df8030ee8cf08a24009e1ee13d8bee06843c6fd4925",
+    "line": 86,
+    "hash": "e1e71b410ab1be1b0c8d706ca45db853f3d6cd0de27f77ca8c4d30c0aae4e5b2",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 109,
+    "line": 111,
     "hash": "351de64a0c6f7422a93c28d3db651ce4a0c71c93de02ddecf6272ae0c205eeae",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local lock timeout bounds the wait for the saga monitor reference row; no tenant data result"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 110,
+    "line": 112,
     "hash": "906795894ffe4847938838ac71b9a2eb7fca0463e81c9725a434f5c7e8be143c",
     "occurrence": 0,
     "decision": "platform-wide: advances the single-row saga_monitor_clock reference to GREATEST(itself, clock_timestamp()) (#792 r1 F2); platform table with no tenant, identifier or amount"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 124,
+    "line": 126,
     "hash": "f11e4af927c5fc54a56148032f12b985d4ff2cae9d3d7bc68bdaa97aa76f59d5",
     "occurrence": 0,
     "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database; aged in UTC against the forward-only saga_monitor_clock reference, and refuses when that row is missing"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 167,
+    "line": 169,
     "hash": "6334dc98d6e41bc68c7d21486825a58c45bdd54b683eba60b6e629f61b63a634",
     "occurrence": 0,
     "decision": "platform-wide: saga unresolved-financial-episode gauge exposes per-reason count, oldest age and overdue count only (#770 r2 F3, #792 r1 F1/F2); refuses without the saga_monitor_clock row; every child lookup joins on its row's organization and order; no tenant labels, identifiers or amounts leave the database"
   },
   {
     "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
-    "line": 116,
+    "line": 230,
     "hash": "d373004300b71097952e1d4769f2dd7b977aef99fc3941fc6cb81c82acd899e6",
     "occurrence": 0,
     "decision": "platform-wide: the open records of unconfirmed saga calls, for a platform reader never served to a party; identifiers and times only, each row carries its tenant, no amounts"
@@ -2584,14 +2591,14 @@
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 52,
+    "line": 57,
     "hash": "5b01e9caa3c32263dfb553de989235d5ef626132c72e414837d9919e0543078f",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 130,
+    "line": 135,
     "hash": "8a1e49d27272963b31ca321f3d3929e1d9982d9df17e107dd7bc091a9c7a982d",
     "occurrence": 0,
     "decision": "platform-wide: external codes are unique across the whole registry (ux_organization_external_code_key, FU-084); returns only the holder's id, and the caller is a write already authorized for its target"
@@ -2605,140 +2612,140 @@
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 195,
+    "line": 219,
     "hash": "80cf28fbed01c27f495bab35fef59444725c7a7cb74e5d143bfe36a1578314e5",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 209,
+    "line": 233,
     "hash": "c225e16c59d417e91814abbe091e6c831256aa30e142bfb90fe04b74f02591f9",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 216,
+    "line": 240,
     "hash": "284be308fd6b9bde0180e0242c123f462878c526bc1933dab85804759b98bcff",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 231,
+    "line": 255,
     "hash": "4d8c9af5e3bd93047b675ff89d048ac913462bb256e13a6e9b2d91f51ce982a4",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 249,
+    "line": 273,
     "hash": "440ed87c86bad68bea58f1771b41e8afb04f7e3d300101fd1cc34e8044be96c9",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 257,
+    "line": 281,
     "hash": "f9f9dd1ad7e5a693bd617d50b276909277aeeb831c1e7392b5a3cc71ab11c9fb",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 283,
+    "line": 307,
     "hash": "4a4744a8eca2f8c40481b1543cf6bb9f4822c825dc9edb0bb48592b9aaf78439",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 308,
+    "line": 332,
     "hash": "b9919041a02f78c042c4f55c764350327c2a649cf8a416cb98970435702acb7e",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 325,
+    "line": 349,
     "hash": "a62e1fbde10d0c9d01e4531d3374452afb0728ccb32c15fc91592ae7bcd9517e",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 348,
+    "line": 372,
     "hash": "b69faec081baac1a277ba2fe9a5e7a2c7d745cb06968396a1209888bb3a3faa0",
     "occurrence": 0,
     "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 363,
+    "line": 387,
     "hash": "c400d795f8cc3e747d673015a26fe5d9a16d2c713fd08122b3ee84b9053aa3cd",
     "occurrence": 0,
     "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 377,
+    "line": 401,
     "hash": "18e17c33127c6e5a71f27aa813aa6cac77f1127761232fc027ccb1170a3e681d",
     "occurrence": 0,
     "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 399,
+    "line": 423,
     "hash": "c3b0d2761eb70452f04e39d9c93922035ae5328cc7d3ae36c7dacb7c2be918d4",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 412,
+    "line": 436,
     "hash": "a8887046e6876b09cb191c4569f4e74bdb76247d6894e329dd2396b02877a280",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 423,
+    "line": 447,
     "hash": "4f0d9e5a861dd5b80d6e1442731717a602e45d39c166927850a9f11f059da92e",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 433,
+    "line": 457,
     "hash": "9181ef268fc14a43860a4fbe1f991a859be5b6037aa0e7fe4d2a17f84dec0673",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 479,
-    "hash": "534a72d99e08cbb702a187d13a3a8b84d20326710a02f0ac56c1bf7367e0a8f7",
+    "line": 503,
+    "hash": "178f8413d286f796fd5b3cd2acdc4687508696e6f7c42fa3cda36a86cdd47084",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 513,
+    "line": 537,
     "hash": "65f3353787ecda31017712fdc21dda946305f80ec355536f933b1b7b02b35198",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 524,
+    "line": 548,
     "hash": "01f6b67371dec79ed0e1f876f64138246505940a218dcf54dac94abdb04482d5",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/organization-service/src/organization/organization.repository.ts",
-    "line": 554,
+    "line": 578,
     "hash": "425482b72da6485265b797d071fe44e2901f163195ef53fdc9a30739b2552900",
     "occurrence": 0,
     "decision": "platform-wide: organization hierarchy is shared reference data; caller applies hierarchy authority and object access before use"
