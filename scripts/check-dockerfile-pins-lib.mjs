@@ -598,6 +598,8 @@ export function tokenizeShell(src) {
   // of `name() …`, or the whole `function name …` command); an unquoted keyword and name only.
   const definitions = [];
   const arithmetic = []; // FU-159 r3 F2: the text of every `((` command
+  const arithmeticLines = []; // task 365: the line of each (a prefix of the script keeps the ones before it)
+  const heredocHolders = []; // and the command that owns each expanding here-document body
   // FU-202 R2: every expansion site of a redirection, whoever owns it: ALL here-string words of a command
   // (`: <<<a <<<b` expands both) and the bodies of expanding here-documents, also of a command that has no
   // words of its own (`<<EOF` alone, `<<<"${v:=x}"` alone), which no command record holds.
@@ -769,7 +771,10 @@ export function tokenizeShell(src) {
         // the command that owns the here-document is where its body (and what it runs) belongs
         const holder = commands.findIndex((c) => c.words === owner);
         // FU-159 r3 F2 + FU-202 R2: an expanding body is an expansion site (`${v:=x}`, `$((n))`)
-        if (expands) heredocBodies.push(body.join('\n'));
+        if (expands) {
+          heredocBodies.push(body.join('\n'));
+          heredocHolders.push(holder);
+        }
         if (feedsShell)
           nested.push({ script: body.join('\n'), line: bodyLine, shell: true, holder });
         // FU-077 r2 F2: an unquoted delimiter expands the body, running its substitutions;
@@ -861,6 +866,7 @@ export function tokenizeShell(src) {
       if (c === '(' && src[i + 1] === '(') {
         const end = matchParen(src, i);
         arithmetic.push(end === -1 ? src.slice(i + 1) : src.slice(i + 1, end - 1));
+        arithmeticLines.push(line);
       }
       endCommand();
       if (c === '(') {
@@ -1000,8 +1006,10 @@ export function tokenizeShell(src) {
     functions,
     definitions,
     arithmetic,
+    arithmeticLines,
     hereStrings,
     heredocBodies,
+    heredocHolders,
   };
 }
 
@@ -1504,55 +1512,8 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   const maybe = new Set([...(ctx.maybe ?? []), ...writes.functions]);
   const aliasing = Boolean(ctx.aliasing) || writes.aliasing;
   const shadowed = (name) => aliasing || maybe.has(name);
-  // FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path is proved only by `readonly NAME=…` run at
-  // the top level before the command: bash refuses every later write to it (`NAME=`, `read`, `printf -v`,
-  // `unset`, `local`, `declare -n`), so no write analysis has to find them all.
+  // FU-159 r2 F4 + task 365 F2: the proven `readonly` declarations (filled once the write analysis below exists)
   const readonlyDecls = [];
-  for (const [index, command] of parsed.commands.entries()) {
-    const { chain, problem, bypass } = executionChain(command.words);
-    const at = chain.at(-1);
-    const program = command.words[at]?.value;
-    const rest = command.words.slice(at + 1);
-    // only the plain forms: `readonly -f NAME` makes a FUNCTION readonly, `declare -nr` a nameref, `-ir` an
-    // integer; the options of `declare` may be nothing but `r` (and `x`)
-    const options = rest.filter((w) => /^[-+]/.test(w.value));
-    const flagged =
-      (program === 'readonly' && options.length === 0) ||
-      (['declare', 'typeset'].includes(program) &&
-        options.length > 0 &&
-        options.every((w) => /^-[rx]+$/.test(w.value)) &&
-        options.some((w) => w.value.includes('r')));
-    // the declaration must run in THIS shell: not backgrounded or piped (`readonly X &`, `readonly X | cat`
-    // run in a subshell and declare nothing), and by the builtin (a function named `readonly` declares nothing)
-    const after = parsed.commands[index + 1];
-    if (
-      command.pattern ||
-      problem ||
-      bypass ||
-      !flagged ||
-      layout.outer[index] !== 0 ||
-      command.group !== 0 ||
-      !LIST_STARTS.has(command.sep) ||
-      ['&', '|', '|&'].includes(after?.sep === '(' ? after.lead : after?.sep) ||
-      !plainWord(command.words[at]) ||
-      shadowed(program)
-    )
-      continue;
-    // `readonly NAME=v`, or `NAME=v` as the command right before `readonly NAME` (nothing between)
-    const before = parsed.commands[index - 1];
-    for (const word of rest) {
-      const name = /^([A-Za-z_][A-Za-z0-9_]*)(=|$)/.exec(word.value);
-      if (!name) continue;
-      const adjacent =
-        name[2] === '' &&
-        before !== undefined &&
-        before.group === 0 &&
-        layout.outer[index - 1] === 0 &&
-        assignmentOnly(before.words, shadowed) &&
-        before.words.some((w) => w.value.startsWith(`${name[1]}=`));
-      if (name[2] === '=' || adjacent) readonlyDecls.push({ name: name[1], index });
-    }
-  }
   const readonlyAt = (position) =>
     new Set([
       ...(ctx.readonly ?? []),
@@ -1604,9 +1565,9 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   // FU-092: an evaluated variable's provenance is proved or the eval refuses (see `writes`, above).
   const provenanceBroken =
     writes.unresolved || writes.evals.some((words) => !trackedEval(words, fromAllowed));
-  const mentions = (name) =>
+  const mentionsIn = (texts, name) =>
     (
-      writes.texts
+      texts
         .join('\n')
         .match(
           new RegExp(
@@ -1615,6 +1576,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
           ),
         ) ?? []
     ).length;
+  const mentions = (name) => mentionsIn(writes.texts, name);
   // FU-196: what the scripts this one runs (a `$(…)` body, `bash -c` text, an eval) read of it: its writes count
   const outer = {
     broken: provenanceBroken || Boolean(ctx.outer?.broken),
@@ -1648,18 +1610,90 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
 
   // A write this check cannot read, BEFORE the command at `position`: at the top level nothing after it has run
   // yet; inside a compound command or function body the order is not the text order, so any such write counts.
-  const prefixBroken = new Map();
+  const prefixes = new Map();
+  /** the script cut before `position`: its commands and only the here-texts and `((` arithmetic that ran by then */
+  const prefixParsed = (position, from = 0) => {
+    const commands = parsed.commands.slice(from, position);
+    const cut = parsed.commands[position]?.startLine ?? Infinity;
+    return {
+      ...parsed,
+      commands,
+      hereStrings: commands.flatMap((c) =>
+        c.input.hereString?.value === undefined ? [] : [c.input.hereString],
+      ),
+      arithmetic: parsed.arithmetic.filter((_, k) => parsed.arithmeticLines[k] <= cut),
+      heredocBodies: parsed.heredocBodies.filter((_, k) => !(parsed.heredocHolders[k] >= position)),
+    };
+  };
+  /** what the commands BEFORE `position` write (the whole script's arithmetic and here-texts included) */
+  const prefixOf = (position) => {
+    if (!prefixes.has(position)) prefixes.set(position, shellWrites(prefixParsed(position)));
+    return prefixes.get(position);
+  };
   const brokenBefore = (position) => {
     if (nesting[position] !== 0) return provenanceBroken;
-    if (!prefixBroken.has(position)) {
-      const before = shellWrites({ ...parsed, commands: parsed.commands.slice(0, position) });
-      prefixBroken.set(
-        position,
-        before.unresolved || before.evals.some((words) => !trackedEval(words, fromAllowed)),
-      );
-    }
-    return prefixBroken.get(position);
+    const before = prefixOf(position);
+    return before.unresolved || before.evals.some((words) => !trackedEval(words, fromAllowed));
   };
+  /**
+   * Task 365 F2: a `readonly` declaration freezes a PROVEN value only in the one form whose binding, value,
+   * attributes, dispatch and success this check can all read: the plain `readonly` builtin as the first word
+   * (no `NAME=v readonly`, `command`, `declare -r`, option, quoted or computed operand), every operand a
+   * genuine assignment (the binding `assignmentsOf` records) or every operand a bare name set by the
+   * assignment-only command right before; no redirection or input (a failing one skips the builtin), run
+   * unconditionally at the top level of this shell (the list/subshell analysis, not the next separator);
+   * and NO write of the name before the binding (a prior `eval 'readonly N=…'`, nameref, trap, arithmetic or
+   * a write this check cannot read: the declaration would fail or freeze another value).
+   */
+  for (const [index, command] of parsed.commands.entries()) {
+    const { words } = command;
+    const operands = words.slice(1);
+    const assigned = assignmentsOf(words, shadowed);
+    const named = operands.every((w) => plainWord(w) && /^[A-Za-z_]\w*$/.test(w.value));
+    if (
+      command.pattern ||
+      words[0]?.value !== 'readonly' ||
+      !plainWord(words[0]) ||
+      shadowed('readonly') ||
+      !(named || (assigned && assigned.length === operands.length)) ||
+      operands.length === 0 ||
+      Object.keys(command.input).length > 0 ||
+      layout.outer[index] !== 0 ||
+      nesting[index] !== 0 ||
+      command.group !== 0 ||
+      !LIST_STARTS.has(command.sep) ||
+      !unconditional(index, -1)
+    )
+      continue;
+    const before = parsed.commands[index - 1];
+    for (const word of operands) {
+      const name = ASSIGNMENT.exec(word.value)?.[1] ?? word.value;
+      let bindsAt = index;
+      if (named) {
+        const setters = assignmentsOf(before?.words ?? [], shadowed)?.filter(
+          (w) => ASSIGNMENT.exec(w.value)[1] === name,
+        );
+        if (
+          setters?.length !== 1 ||
+          before.group !== 0 ||
+          layout.outer[index - 1] !== 0 ||
+          nesting[index - 1] !== 0 ||
+          !LIST_STARTS.has(before.sep)
+        )
+          continue;
+        bindsAt = index - 1;
+      }
+      const own = shellWrites(prefixParsed(index + 1, bindsAt));
+      if (
+        shellManaged(name) ||
+        brokenBefore(bindsAt) ||
+        mentionsIn(prefixOf(bindsAt).texts, name) > 0 ||
+        mentionsIn(own.texts, name) !== (named ? 2 : 1)
+      )
+        continue;
+      readonlyDecls.push({ name, index, bindsAt });
+    }
+  }
   /**
    * FU-196: the value of a variable an image word names is trusted only on PROOF, never as "the last visible
    * assignment". A variable this script assigns (`local`) needs ONE genuine assignment word, run at the top
@@ -1673,9 +1707,15 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
    */
   const variableProblem = (name, local, readAt) => {
     const why = `the variable ${name} is trusted as an image only when assigned once, unconditionally, with no other write anywhere in the script`;
+    // Task 365 F1: bash writes these itself (REPLY, BASH_REMATCH, `_`, RANDOM ...), readonly or not
+    if (shellManaged(name))
+      return `${name} is a variable bash manages itself (IMPLICIT_WRITES), never a proven image value`;
     if (ctx.outer?.broken || ctx.outer?.mentions(name) > 0)
       return `${why} (the script that runs this one writes it, or something this check cannot read)`;
-    if (brokenBefore(readAt) && !(local && readonlyAt(readAt).has(name)))
+    // the readonly declaration that froze THE binding of this assignment (task 365 F2), else none
+    const frozen = (position) =>
+      local && readonlyDecls.some((d) => d.name === name && d.index < table.timeOf(position));
+    if (brokenBefore(readAt) && !frozen(readAt))
       return `${why} (a write this check cannot read comes first)`;
     const written = mentions(name);
     if (!local)
@@ -1693,7 +1733,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       !unconditional(at, readAt)
     )
       return `${why} (the assignment is conditional, in a function, a group, a background or a pipe)`;
-    if (readonlyAt(readAt).has(name)) return undefined;
+    if (frozen(readAt)) return undefined;
     return written === 1 ? undefined : `${why} (${written} writes)`;
   };
 
@@ -1744,9 +1784,17 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     // the commands after it; assignments before a command are its environment, not this shell's variables.
     const alone = assignmentsOf(words, shadowed);
     if (alone) {
+      // Task 365 F3: a value is resolved with the variables as they were WHERE it was assigned. A declarer
+      // (`export A=1 B=$A`) expands every operand before it assigns any; plain `A=1 B=$A` goes left to right.
+      const declares = ASSIGNING_DECLARERS.has(words[0].value);
+      const before = new Map(vars);
       for (const { value, opaque, scripts } of alone) {
         const [, variable, assigned] = value.match(ASSIGNMENT);
-        vars.set(variable, opaque ? null : restore(assigned));
+        vars.set(variable, {
+          value: opaque ? null : restore(assigned),
+          at: position,
+          scope: declares ? before : new Map(vars),
+        });
         if (assigned === '$(…)' && scripts?.length === 1) {
           outputs.set(variable, { script: scripts[0], position });
         } else outputs.delete(variable);
@@ -1902,6 +1950,15 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         problem(`docker ${verb} ${found.problem}`);
         continue;
       }
+      // Task 365 F4: a word in front of the image that bash can split (`docker run $OPTS "$IMG"`) can move
+      // which argument is the image
+      const lead = args.slice(0, args.indexOf(found.word)).find(splits);
+      if (lead) {
+        problem(
+          `docker ${verb} has the unquoted expansion ${lead.value} before its image, which bash can split into several arguments`,
+        );
+        continue;
+      }
       if (state.localTags.has(found.word.value)) continue;
       const trusted = (name, local, readAt = position) => variableProblem(name, local, readAt);
       for (const ref of resolveImage(found.word, {
@@ -1911,7 +1968,6 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         where,
         errors,
         trusted,
-        assignedAt,
       })) {
         if (!state.localTags.has(ref)) images.push({ where, ref });
       }
@@ -2573,6 +2629,42 @@ function assignmentsOf(words, shadowed) {
   return rest.length > 0 && rest.every(isAssignment) ? rest : undefined;
 }
 const assignmentOnly = (words, shadowed) => assignmentsOf(words, shadowed) !== undefined;
+/**
+ * Task 365 F1: the ONE table of what bash writes by itself. A builtin writes these names with no word of
+ * the script naming them (`read` → REPLY, `[[ =~ ]]` → BASH_REMATCH, any command → `_`), and some the shell
+ * rewrites between commands; `readonly` does not stop that (`readonly BASH_REMATCH=x` is overwritten by the
+ * next match). Such a name is NEVER an image value this check can prove, wherever it is read from.
+ */
+const IMPLICIT_WRITES = new Map([
+  ['read', ['REPLY']],
+  ['select', ['REPLY']],
+  ['mapfile', ['MAPFILE']],
+  ['readarray', ['MAPFILE']],
+  ['getopts', ['OPTARG', 'OPTIND', 'OPTERR']],
+  ['coproc', ['COPROC']],
+  ['cd', ['PWD', 'OLDPWD']],
+  ['(every command)', ['_', 'PIPESTATUS', 'LINENO']],
+  ['(the clock)', ['RANDOM', 'SRANDOM', 'SECONDS', 'EPOCHSECONDS', 'EPOCHREALTIME']],
+  // `[[ =~ ]]` writes BASH_REMATCH, a call BASH_ARGV and FUNCNAME, every command BASH_COMMAND: the BASH* family
+]);
+const SHELL_MANAGED = new Set([...IMPLICIT_WRITES.values()].flat());
+const shellManaged = (name) =>
+  SHELL_MANAGED.has(name) ||
+  /^(?:BASH|COMP_|READLINE_|HIST)|^(?:DIRSTACK|EUID|UID|GROUPS|PPID|SHLVL|SHELLOPTS|HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|IFS)$/.test(
+    name,
+  );
+/**
+ * Task 365 F4: a word bash may split into several words or expand by pattern: an unquoted `$`/`${…}`/`$(…)`,
+ * a glob character, a brace list. `$__GHEXPRn__` is text GitHub pastes before the shell parses the step: it is
+ * not an expansion. A quoted empty suffix (`$IMG""`) does not quote the expansion in front of it.
+ */
+const splits = (word) =>
+  // a word with no quoting record cannot be shown to be one word: the generic test decides
+  (word.segments === undefined ? unsplit(word) : false) ||
+  (word.segments ?? []).some(
+    ({ kind, raw }) => kind !== 'sq' && kind !== 'dq' && /\$(?!__GHEXPR\d+__)|[*?[`]/.test(raw),
+  ) ||
+  /\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(word.value);
 const OPENERS = new Set('if while until for select case { function coproc'.split(' '));
 const CLOSERS = new Set('fi done esac }'.split(' '));
 const LIST_STARTS = new Set(['', '\n', ';', '(']);
@@ -2825,7 +2917,7 @@ function composeCommand(args, ctx, problem) {
 }
 
 /** Every reference an image word may stand for, or none with a problem recorded. */
-function resolveImage(word, { vars, env, restore, where, errors, trusted, assignedAt }) {
+function resolveImage(word, { vars, env, restore, where, errors, trusted }) {
   if (word.opaque) {
     errors.push(
       `${where}: image ${word.value} is a command substitution this check cannot resolve`,
@@ -2833,7 +2925,16 @@ function resolveImage(word, { vars, env, restore, where, errors, trusted, assign
     return [];
   }
   const value = restore(word.value);
-  const expand = (text, depth, readAt) => {
+  // Task 365 F4: the argument must be ONE word: bash splits and expands an unquoted `$IMG` (IFS=@ makes
+  // `alpine:3@sha256:…` two arguments, and the first is a moving tag)
+  if (splits(word)) {
+    errors.push(
+      `${where}: image ${value} has an unquoted expansion, which bash can split into several arguments or expand by pattern; quote it ("$name")`,
+    );
+    return [];
+  }
+  // `scope` holds the variables as they were where `text` was written (task 365 F3)
+  const expand = (text, depth, readAt, scope) => {
     if (depth > 8) return { problem: `image ${value} expands too deeply` };
     if (text.includes('${{')) {
       const resolved = resolveExpressions(text, env, where, errors);
@@ -2844,23 +2945,23 @@ function resolveImage(word, { vars, env, restore, where, errors, trusted, assign
     if (variable || withDefault) {
       const variableName = (variable ?? withDefault)[1];
       const candidates = [];
-      const isLocal = vars.has(variableName);
-      if (isLocal && vars.get(variableName) === null)
+      const entry = scope.get(variableName);
+      if (entry && entry.value === null)
         return { problem: `image ${value} is set from a command substitution` };
-      const problem = trusted(variableName, isLocal, readAt);
+      const problem = trusted(variableName, entry !== undefined, readAt);
       if (problem) return { problem: `image ${value}: ${problem}` };
-      if (isLocal) {
-        candidates.push(vars.get(variableName));
+      if (entry) {
+        candidates.push({ text: entry.value, at: entry.at, scope: entry.scope });
       } else if (env.has(variableName)) {
-        candidates.push(...env.get(variableName));
+        candidates.push(...[...env.get(variableName)].map((text) => ({ text, at: readAt, scope })));
       }
-      if (withDefault) candidates.push(withDefault[2]);
+      if (withDefault) candidates.push({ text: withDefault[2], at: readAt, scope });
       if (candidates.length === 0)
         return { problem: `image ${value} is a variable this check cannot resolve` };
       const refs = [];
       for (const candidate of candidates) {
-        // a local variable's value was expanded where it was assigned
-        const inner = expand(candidate, depth + 1, isLocal ? assignedAt.get(variableName) : readAt);
+        // a local variable's value was expanded where it was assigned, with the variables of that moment
+        const inner = expand(candidate.text, depth + 1, candidate.at, candidate.scope);
         if (inner.problem) return inner;
         refs.push(...inner.refs);
       }
@@ -2870,7 +2971,7 @@ function resolveImage(word, { vars, env, restore, where, errors, trusted, assign
       return { problem: `image ${value} has a variable part this check cannot resolve` };
     return { refs: [text] };
   };
-  const { refs, problem } = expand(value, 0, undefined);
+  const { refs, problem } = expand(value, 0, undefined, vars);
   if (problem) {
     errors.push(`${where}: ${problem}`);
     return [];
