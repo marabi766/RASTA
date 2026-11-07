@@ -339,7 +339,7 @@ export const STEP_INVENTORY = Object.freeze({
     env: { ...KAFKA_TESTS, ...databases('MAINTENANCE') },
     timeout: 8,
   },
-  'Tenant isolation and authorization tests': {
+  'Tenant isolation and financial invariant tests': {
     run: withKafka(
       'tests',
       'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose',
@@ -794,24 +794,43 @@ export function unitCoverageProblems(root = ROOT) {
     problems.push('unit coverage: test:unit:ci must run every workspace without filters');
   for (const file of workspaceManifestFiles(root)) {
     const { scripts = {} } = JSON.parse(readFileSync(join(root, file), 'utf8'));
-    if (!Object.hasOwn(scripts, 'test')) continue;
-    // Only the existing Jest forms are proved equivalent. Unknown commands,
-    // selectors, hooks or wrappers require review, never a guessed superset.
-    const normalize = (command) =>
-      typeof command === 'string' &&
-      /^jest(?: --selectProjects unit)?(?: --passWithNoTests)?$/.test(command)
-        ? command.replace(' --passWithNoTests', '')
+    // Every workspace needs test:unit, including those without test. There are
+    // no missing-unit exemptions. The Node workspace has an exact allowlist:
+    // broadening it requires review of the files the required gate will run.
+    const nodeUnit =
+      file === 'tests/e2e/package.json'
+        ? 'node --test --test-timeout=300000 src/target-guard.test.ts src/kafka-observer.test.ts src/actor.test.ts src/keycloak-transport.test.ts src/expect.test.ts src/guarded-http.test.ts'
         : null;
-    const unit = normalize(scripts['test:unit']);
+    // All current unit projects contain tests. Refuse passWithNoTests entirely
+    // so a config typo or removal of the last spec makes quality-unit fail.
+    // Legacy test may keep that flag; it cannot weaken the required unit task.
+    const normalize = (command) =>
+      typeof command === 'string' && /^jest(?: --selectProjects unit)?$/.test(command)
+        ? command
+        : null;
+    const unit =
+      nodeUnit === null
+        ? normalize(scripts['test:unit'])
+        : scripts['test:unit'] === nodeUnit
+          ? nodeUnit
+          : null;
     if (
       unit === null ||
-      unit !== normalize(scripts.test) ||
+      (Object.hasOwn(scripts, 'test') &&
+        unit !==
+          normalize(
+            typeof scripts.test === 'string'
+              ? scripts.test.replace(' --passWithNoTests', '')
+              : scripts.test,
+          )) ||
       scripts.pretest ||
       scripts.posttest ||
       scripts['pretest:unit'] ||
       scripts['posttest:unit']
     )
-      problems.push(`${file}: unit coverage requires equivalent test and test:unit Jest selection`);
+      problems.push(
+        `${file}: unit coverage requires an allowlisted test:unit without passWithNoTests and equivalent test selection when present`,
+      );
   }
   return problems;
 }

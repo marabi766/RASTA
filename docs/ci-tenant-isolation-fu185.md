@@ -164,16 +164,26 @@ Concrete additions between f33e613c0 and 3dc724eae explain the increased work:
 
 Removed only `pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"`.
 The integration selector, verbose output, stress orchestration, credentials and
-environment are unchanged. All 25 workspaces with a `test` script have the same
-Jest selection in `test:unit`, modulo `--passWithNoTests`. The new split guard
-checks all workspace manifests through the shared fail-closed workspace reader;
-missing, unknown or narrowed selection refuses. The old unbounded-unit exception
+environment are unchanged. All 26 workspace `test:unit` scripts are validated,
+including `tests/e2e`, which has no `test` script. Jest commands must use the
+allowlisted unfiltered selection; the Node unit workspace must use its exact
+reviewed command. Missing, unknown or narrowed unit commands and hooks refuse;
+there are no missing-unit exemptions. Where `test` exists its selection must
+also agree. `--passWithNoTests` is forbidden in every `test:unit`: all current
+unit projects contain tests, and forbidding the flag makes a config matching
+zero spec files fail in quality-unit. This is stronger than detecting existing
+spec files with another discovery implementation. Legacy `test` flags do not
+weaken the required unit task. The guard uses the shared fail-closed workspace
+reader. The old unbounded-unit exception
 is retired; the concurrency guard refuses reintroducing the filtered rerun. It also requires the unfiltered
 `quality-unit` / `Unit tests` step exactly once. The existing quality guard
 refuses skip/forgiveness and executes the aggregate verdict against non-success
 results. `test:unit:ci` runs `turbo run test:unit --concurrency=3` without filters.
 The branch-protection API confirms **Lint, types and unit tests** is required.
-Thus a unit failure still blocks merge. A real example is run 42202098189 attempt
+The integration step is now named "Tenant isolation and financial invariant
+tests"; unit-level tenant and authorization failures surface in quality-unit's
+"Unit tests" step. Thus a unit failure still blocks merge. Turbo environment and
+task parity is tracked separately as FU-195; this guard does not prove it. A real example is run 42202098189 attempt
 1: `Unit tests` failed, the quality aggregate failed, and isolation still passed.
 
 Sibling instances audited: all test/test:unit workspace scripts, all quality job

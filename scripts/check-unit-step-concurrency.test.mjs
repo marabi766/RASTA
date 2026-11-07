@@ -1105,7 +1105,7 @@ test('FU-185: no unbounded exception can restore the duplicate filtered unit run
   refused(
     problemsAfter((doc) => {
       doc.jobs['integration-security'].steps.find(
-        (step) => step.name === 'Tenant isolation and authorization tests',
+        (step) => step.name === 'Tenant isolation and financial invariant tests',
       ).run +=
         '\npnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"';
     }),

@@ -1075,7 +1075,7 @@ test('R1 every Node --test operand and pnpm exec file launcher is pre-checked', 
   }
 });
 
-test('R1 registry checks all three real launch paths and refuses executable/helper drift', async () => {
+test('R1 registry checks real launch paths and refuses executable/helper drift', async () => {
   const { JEST_LAUNCHERS } = await import('./disclosure-jest-launchers.mjs');
   const paths = everyFile.filter((path) => /(^|\/)package\.json$/.test(path));
   const control = '.github/workflows/registry-control.yml';
@@ -1084,6 +1084,7 @@ test('R1 registry checks all three real launch paths and refuses executable/help
     ['scripts/verify-test-independence.mjs', 'services/maintenance-service event-flow'],
     ['scripts/aggregation-evidence.mjs', 'report.txt'],
     ['scripts/run-test-phases.mjs', 'test:integration'],
+    ['scripts/ci-integration-split.test.mjs', ''],
   ]) {
     const read = (path) =>
       path === control
@@ -1106,6 +1107,26 @@ test('R1 registry checks all three real launch paths and refuses executable/help
       assert.equal(drifted.length, 1);
       assert.match(drifted[0].reason, /changed\/unreadable/);
     }
+  }
+});
+
+test('the empty-unit probe refuses forwarded configuration', async () => {
+  const { JEST_LAUNCHERS } = await import('./disclosure-jest-launchers.mjs');
+  const sources = Object.fromEntries(
+    Object.keys(JEST_LAUNCHERS['scripts/ci-integration-split.test.mjs'].sha256).map((file) => [
+      file,
+      readFileSync(join(root, file), 'utf8'),
+    ]),
+  );
+  for (const flag of ['--config', '--setupFilesAfterEnv', '--projects', '--preset', '-c']) {
+    const commands = launchControl(
+      `node scripts/ci-integration-split.test.mjs ${flag} alternate.cjs`,
+      'workflow',
+      sources,
+    );
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].opaque, true);
+    assert.match(commands[0].reason, /unsupported empty-unit probe/);
   }
 });
 

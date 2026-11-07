@@ -41,7 +41,7 @@ export const JEST_LAUNCHERS = {
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
+        '4c9fde73cd620b61e184ac77da19e331cdb55d13f2f8ed5bbab2ed5d9c1a5fbe',
     },
   },
   'scripts/aggregation-evidence-cli.test.mjs': {
@@ -86,7 +86,7 @@ export const JEST_LAUNCHERS = {
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
+        '4c9fde73cd620b61e184ac77da19e331cdb55d13f2f8ed5bbab2ed5d9c1a5fbe',
     },
   },
   'scripts/check-kafka-credential-scope.test.mjs': {
@@ -158,7 +158,7 @@ export const JEST_LAUNCHERS = {
       'scripts/ci-node-test-timeouts-lib.mjs':
         '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':
-        'acd8a153247a934824f49870fe658ff75d558c799d3438d79d37f2184a07fc4d',
+        '1f5e1279f6dd6a702e8ec3e69161324a486d6dba89b0a2ca1af85f4fe0aae81b',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
@@ -175,14 +175,14 @@ export const JEST_LAUNCHERS = {
     },
   },
   'scripts/ci-integration-split.test.mjs': {
-    kind: 'non-jest',
+    kind: 'empty-unit-probe',
     reaches:
-      'Spawns git status --porcelain and pnpm ls -r --json against temporary workspace fixtures; jest appears only as fixture script text, never executed.',
+      'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
     sha256: {
       'scripts/ci-integration-split.test.mjs':
-        '42823541ddad9b1b42dcd4138f6ad48e3e9aaab2bf4c3d2b51b626a9004def02',
+        '490331697a029e4a05b57092392819826908df5e370e38dd05334c7a46104ba3',
       'scripts/ci-integration-split-lib.mjs':
-        '99f131357ef538f594a64491bb2733f753299579fa6fa8b970d1660f81374b12',
+        '505015e53a632a25b286fc29eb3090150416878945c439750eb05492610c6c2d',
       'scripts/workspace-roots-lib.mjs':
         'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
     },
