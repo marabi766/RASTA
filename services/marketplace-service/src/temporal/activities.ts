@@ -120,6 +120,19 @@ export interface HeldResult {
 }
 
 /**
+ * A hold not sent, as economic-service did not say it refuses one without its deadline
+ * (FU-233). Retryable and never proof: nothing was counted or sent, and the saga's wait
+ * asks again.
+ */
+export const ECONOMIC_HOLD_RULE_UNCONFIRMED = 'ECONOMIC_HOLD_RULE_UNCONFIRMED';
+
+/** What a row says when it proves nothing: as from before the fence (D-144). */
+/** How often the hold's own attempt asks for the rule before it sends nothing. */
+const PRE_SEND_ASKS = 3;
+
+const UNPROVEN_HOLD_ROW = { holdNotAfter: null, holdSendsClosed: false, holdMayHaveSent: true };
+
+/**
  * economic-service holds a transaction naming this order as its source that
  * is not the obligation the saga records: some term differs (`differ`). Not
  * adopted; the saga stops (`OBLIGATION_TERMS_MISMATCH`).
@@ -347,6 +360,35 @@ export function createActivities(deps: ActivityDependencies) {
     );
 
   /**
+   * economic-service's answer on the D-150 rule (FU-233): true only for its explicit yes,
+   * false for an answer without it (a release before the rule), undefined for none had.
+   * Asked up to `tries` times while none is had.
+   */
+  async function ruleAnswer(tries = 1): Promise<boolean | undefined> {
+    for (let ask = 1; ; ask += 1) {
+      let answer: unknown;
+      try {
+        answer = await deps.economic.requiresOrderHoldDeadline();
+      } catch {
+        answer = undefined;
+      }
+      if (typeof answer === 'boolean') return answer;
+      if (ask >= tries) return undefined;
+    }
+  }
+
+  /**
+   * Whether the order row's fence (D-144) is proof: only while economic-service says it
+   * refuses an order's hold without its deadline (D-150, FU-233). A release before that
+   * holds a send from a build that counts nothing on the row, so the row's zero count,
+   * first refusal, deadline and closed sends would say nothing of it. Asked afresh where
+   * the row is trusted; no answer, or anything but yes, is no.
+   */
+  async function rowIsProof(tries = 1): Promise<boolean> {
+    return (await ruleAnswer(tries)) === true;
+  }
+
+  /**
    * An economic-service call, made at most once per scheduled activity
    * (D-053). A refusal or an outage records nothing, so the retry calls again.
    *
@@ -555,6 +597,16 @@ export function createActivities(deps: ActivityDependencies) {
           );
         }
 
+        // Before the row counts this send: without the rule nothing the row says is proof,
+        // so nothing goes out on it. Asked again on a blip here: a send left to a later
+        // attempt has a refusal that is no proof (`currentAttempt`).
+        if (!(await rowIsProof(PRE_SEND_ASKS))) {
+          throw ApplicationFailure.retryable(
+            `economic-service does not say it refuses an order's hold without its deadline; ` +
+              `no hold is sent for order ${order.id}`,
+            ECONOMIC_HOLD_RULE_UNCONFIRMED,
+          );
+        }
         const own = { id: order.id, organizationId: order.buyerOrganizationId };
         const claim = await deps.orders.claimHoldSend(own, holdNotAfter);
         if ('closed' in claim) {
@@ -579,7 +631,8 @@ export function createActivities(deps: ActivityDependencies) {
             if (
               deadline !== null &&
               isRastaError(refusal) &&
-              refusal.code === HOLD_DEADLINE_PASSED
+              refusal.code === HOLD_DEADLINE_PASSED &&
+              (await rowIsProof())
             ) {
               throw ApplicationFailure.create({
                 message: refusal.message,
@@ -599,6 +652,7 @@ export function createActivities(deps: ActivityDependencies) {
               firstEver &&
               !taken &&
               provenIfListed(refusal) !== refusal &&
+              (await rowIsProof()) &&
               (await deps.orders.closeHoldSendsOnRefusal(own));
             throw proven ? provenIfListed(refusal) : refusal;
           });
@@ -705,6 +759,7 @@ export function createActivities(deps: ActivityDependencies) {
      * deadline and margin, the claim-time fence is what makes it so.
      */
     async noHoldCanLand(orderId: string): Promise<boolean> {
+      if (!(await rowIsProof())) return false;
       return asSystemFor(orderId, (order) =>
         deps.orders.closeHoldSendsIfNoneCanLand(
           { id: order.id, organizationId: order.buyerOrganizationId },
@@ -716,9 +771,34 @@ export function createActivities(deps: ActivityDependencies) {
     /**
      * The order as the database has it now. What the saga decides on
      * (ADR-039). With `mirroredDisputeId`, also that dispute's resolution.
+     *
+     * A closed order with no obligation recorded, whose row says no earlier send can still
+     * land, says so only while economic-service refuses a send no row counted (FU-233). On
+     * its explicit no the row reads as one from before the fence, which the saga watches.
      */
     async readOrder(orderId: string, mirroredDisputeId?: string): Promise<SagaOrderView> {
-      return asSystemFor(orderId, () => deps.orders.sagaView(orderId, mirroredDisputeId));
+      const view = await asSystemFor(orderId, () =>
+        deps.orders.sagaView(orderId, mirroredDisputeId),
+      );
+      const trusted =
+        ['COMPLETED', 'CANCELLED', 'FAILED'].includes(view.status) &&
+        !view.economicTransactionId &&
+        (view.holdSendsClosed !== false ||
+          view.holdMayHaveSent !== true ||
+          view.holdNotAfter != null);
+      if (!trusted) return view;
+      const answer = await ruleAnswer();
+      if (answer === true) return view;
+      // No answer: the read waits for one (retried until it comes). A view degraded on a
+      // blip would leave the saga watching for good once economic-service is back.
+      if (answer === undefined) {
+        throw ApplicationFailure.retryable(
+          `economic-service did not answer whether it refuses an order's hold without its ` +
+            `deadline; order ${orderId}'s row is read again once it does`,
+          ECONOMIC_HOLD_RULE_UNCONFIRMED,
+        );
+      }
+      return { ...view, ...UNPROVEN_HOLD_ROW };
     },
 
     async markFundsHeld(orderId: string, transactionId: string): Promise<OrderStatus> {

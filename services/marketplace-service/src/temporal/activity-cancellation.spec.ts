@@ -22,6 +22,12 @@ it('real Temporal cancellation reaches a financial fetch through heartbeats with
   });
   let financialKey: string | undefined;
   const server = createServer((req, res) => {
+    // The capability question, answered as the D-150 release does (FU-233).
+    if (req.method === 'GET' && req.url === '/v1/transactions/capabilities') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ heldProven: true, orderHoldDeadlineRequired: true }));
+      return;
+    }
     financialKey = req.headers['idempotency-key'] as string | undefined;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.write('{"id":');

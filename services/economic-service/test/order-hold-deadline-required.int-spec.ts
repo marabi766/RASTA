@@ -130,6 +130,17 @@ describe('an order hold without its deadline (HTTP, real database)', () => {
     expect((await wallet()).availableBalanceMinor).toBe(before);
   });
 
+  it('the capability the saga reads says so, from the same release that refuses (FU-233)', async () => {
+    const asked = await request(http)
+      .get('/v1/transactions/capabilities')
+      .set('x-internal-token', await internalToken('marketplace-service'));
+    expect(asked.status).toBe(200);
+    expect(asked.body).toMatchObject({ orderHoldDeadlineRequired: true });
+    const orderId = id('ORD');
+    refused(await hold(orderId));
+    expect(await obligations(orderId)).toEqual([]);
+  });
+
   it('refused before anything is opened: a payer with no wallet still has none', async () => {
     const orderId = id('ORD');
     const wallets = () =>

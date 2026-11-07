@@ -463,8 +463,26 @@ export class EconomicClient {
    * older release's 404 and an outage alike; the start is retried.
    */
   async provesHeldFunds(): Promise<boolean> {
+    return (await this.capability('heldProven')) === true;
+  }
+
+  /**
+   * Whether economic-service refuses an order's hold sent without its deadline
+   * (`orderHoldDeadlineRequired`, D-150). Only then is every hold that can land counted
+   * on the order's row, so the saga asks this before it takes the row as proof (FU-233).
+   * Only its explicit yes is yes. An answer without it is no: a release before the rule.
+   * Undefined: no answer was had, an outage or one not understood; also not yes.
+   */
+  async requiresOrderHoldDeadline(): Promise<boolean | undefined> {
+    return this.capability('orderHoldDeadlineRequired');
+  }
+
+  /** The capability's answer: true only for an explicit true; undefined when none was had. */
+  private async capability(
+    name: 'heldProven' | 'orderHoldDeadlineRequired',
+  ): Promise<boolean | undefined> {
     try {
-      const answer = await this.call<{ heldProven?: unknown } | null>(
+      const answer = await this.call<unknown>(
         'capabilities',
         {
           method: 'GET',
@@ -473,13 +491,14 @@ export class EconomicClient {
         },
         CAPABILITY_TIMEOUT_MS,
       );
-      return answer?.heldProven === true;
+      if (typeof answer !== 'object' || answer === null) return undefined;
+      return Reflect.get(answer, name) === true;
     } catch (error) {
       this.logger.warn(
-        { failure: foreignFailure(error) },
+        { failure: foreignFailure(error), capability: name },
         'The capability question went unanswered',
       );
-      return false;
+      return undefined;
     }
   }
 

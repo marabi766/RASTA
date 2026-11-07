@@ -728,6 +728,40 @@ describe('whether economic-service proves held funds (#824 r1, F3)', () => {
     const client = new EconomicClient(ENV, recordingTokens().service as never);
     await expect(client.provesHeldFunds()).resolves.toBe(false);
   });
+
+  // FU-233: the D-150 rule the saga's order row depends on, asked the same way.
+  // Undefined: no answer was had. Never yes either.
+  it.each<[string, { status: number; body: unknown }, boolean | undefined]>([
+    ['its explicit yes', { status: 200, body: { orderHoldDeadlineRequired: true } }, true],
+    ['its explicit no', { status: 200, body: { orderHoldDeadlineRequired: false } }, false],
+    [
+      'a release before D-150: heldProven alone',
+      { status: 200, body: { heldProven: true } },
+      false,
+    ],
+    ['a word for yes', { status: 200, body: { orderHoldDeadlineRequired: 1 } }, false],
+    ['a body that is no object', { status: 200, body: 'orderHoldDeadlineRequired' }, undefined],
+    ['no body', { status: 204, body: null }, undefined],
+    [
+      'an outage',
+      { status: 503, body: { code: 'UPSTREAM_UNAVAILABLE', message: 'down' } },
+      undefined,
+    ],
+  ])('the hold-deadline rule: %s', async (_case, response, requires) => {
+    const { impl, calls } = stubFetch(response);
+    globalThis.fetch = impl as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.requiresOrderHoldDeadline()).resolves.toBe(requires);
+    expect(calls[0]!.url).toMatch(/\/v1\/transactions\/capabilities$/);
+  });
+
+  it('the hold-deadline rule, unreachable: no answer, not a failure', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.requiresOrderHoldDeadline()).resolves.toBeUndefined();
+  });
 });
 
 describe('what an obligation’s status says of its funds (review of #334 round 2, F1)', () => {
