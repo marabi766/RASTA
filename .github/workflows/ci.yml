@@ -2152,12 +2152,12 @@ jobs:
   integration-security:
     name: Tenant isolation, test independence and retry replay
     runs-on: ubuntu-latest
-    # FU-165: latest 20 completed CI runs (2026-11-06), 17 reached isolation:
-    # median 540 s, nearest-rank p95/max 587 s. Its 15-minute limit is
-    # ceil(1.5 x 587 / 60); keep the job budget aligned with all step limits.
-    # 42 = independence 8 + isolation 15 + retry replay 5 + PostgreSQL 3 x 2
-    # + the existing 8-minute setup allowance (scripts/ci-integration-split-lib.mjs).
-    timeout-minutes: 42
+    # FU-185: 20 successful main runs, 42091919570..42295730635 (Nov 5-6).
+    # Integration-only p95/max 349/352 s; 8 min gives >= 30% headroom.
+    # Setup plus job bookkeeping p95/max 324/328 s: ceil(1.3 * 328 / 60) = 8 min.
+    # Full run IDs, exclusions and command timings: docs/ci-tenant-isolation-fu185.md.
+    # 35 = independence 8 + isolation 8 + retry 5 + PostgreSQL 3 x 2 + setup 8.
+    timeout-minutes: 35
     needs: quality-types
 
     services:
@@ -2461,14 +2461,11 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
 
-      - name: Tenant isolation and authorization tests
-        # Called out separately from the rest of the suite so a failure names
-        # itself in the job list. A tenant-isolation failure is a data leak,
-        # not a flaky test, and must never be waved through (AGENTS.md § 5).
-        #
-        # Both projects, because the strongest isolation evidence now lives in
-        # the integration suites — they prove the guard against a real database
-        # rather than a mock that would assume the behaviour.
+      - name: Tenant isolation and financial invariant tests
+        # One integration command proves isolation and financial invariants
+        # against real infrastructure. Unit-level tenant and authorization
+        # failures surface in quality-unit's unfiltered "Unit tests" step;
+        # both required aggregates block merge on failure (AGENTS.md § 5).
         #
         # The integration pattern names the invariants the product document
         # makes mandatory, one word each: `exclusivity` is fleet's one-driver
@@ -2486,17 +2483,17 @@ jobs:
         # happen, and `cap` is the anti-fraud reward ceiling. A failure in any
         # of them is a financial defect, not a flaky test.
         #
-        # Both commands go through the orchestrator, but only
-        # `test:integration` has the exclusive phase — the aggregation stress
-        # spec needs a real PostgreSQL, and `pnpm test` (so `pnpm verify`) must
+        # The orchestrator runs the aggregation stress spec in an exclusive
+        # phase: it needs real PostgreSQL, and `pnpm test` (so `pnpm verify`) must
         # run without one. So the stress spec is filtered and run alone by the
-        # second command, where `concurren` selects its two 500-write proofs
-        # (`check:test-phases`). The first command is unit suites only.
-        timeout-minutes: 15
+        # command, where `concurren` selects its two 500-write proofs
+        # (`check:test-phases`). Unit tests run unfiltered in quality-unit's
+        # "Unit tests" step; the required quality aggregate fails on its failure.
+        # ci-integration-split validates every test:unit and refuses passWithNoTests.
+        timeout-minutes: 8
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
-          pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
           pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose
         env:
           TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server

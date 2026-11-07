@@ -2401,6 +2401,20 @@
     "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks; it also reads whether the buyer's receipt is recorded on that same row, which decides where an operator's SETTLE may return the order (D-083)"
   },
   {
+    "file": "services/marketplace-service/src/order/order.repository.ts",
+    "line": 178,
+    "hash": "d9168a8b345a44a51173fbea0170040fbb48bccb059a58e5702093304d91c6b9",
+    "occurrence": 0,
+    "decision": "platform-wide: the saga holds the order it drives by global id, read from that order under its buyer's context; returns only the row's status and whether its receipt is recorded (FU-178)"
+  },
+  {
+    "file": "services/marketplace-service/src/order/order.service.ts",
+    "line": 1239,
+    "hash": "1f9813e3acb98d6f59e103a4f2b7ab1a2e2dee1554ceef6e1722e1a3f8bb3cd2",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
+  },
+  {
     "file": "services/marketplace-service/src/prisma/prisma.service.ts",
     "line": 126,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",

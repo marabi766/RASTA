@@ -12,7 +12,7 @@
     "lint": "eslint src test dev prisma/seed.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit",
-    "test:unit": "jest --selectProjects unit --passWithNoTests",
+    "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration --runInBand",
     "db:generate": "prisma generate",
     "db:migrate": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate deploy",

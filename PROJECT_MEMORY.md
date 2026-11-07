@@ -3458,10 +3458,11 @@ not available» می‌گیرد و در پس‌زمینه Retry می‌کند �
    **تهی** است، پس سهم آن‌ها از مرحله Integration همچنان یعنی «چیزی نشکست».
    تنها `fleet-service` این Flag را ندارد. بستن این شکاف برای هر سرویس، کار
    همان سرویس است، نه فاز ناوگان.
-2. مرحله «Tenant isolation and authorization» دو فرمان اجرا می‌کند؛ فرمان اول
-   روی Project های Unit با Name Pattern فیلتر می‌شود و در بعضی سرویس‌ها صفر تست
-   می‌ماند (`11 skipped`). شاهد واقعی، فرمان دوم روی Project Integration ناوگان
-   است.
+2. مرحله «Tenant isolation and financial invariant tests» اکنون یک فرمان
+   Integration اجرا می‌کند. تست‌های Unit مستأجر و مجوزدهی بدون فیلتر در
+   `quality-unit` / `Unit tests` اجرا می‌شوند؛ شکست هرکدام دروازهٔ الزامی خودش
+   را می‌بندد. `test:unit` در همهٔ Workspaceها بررسی می‌شود و
+   `--passWithNoTests` در آن مجاز نیست (FU-185، بازبینی دور دوم).
 
 ---
 

@@ -12,7 +12,7 @@
     "lint": "eslint src test dev prisma/seed.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit",
-    "test:unit": "jest --selectProjects unit --passWithNoTests",
+    "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration --runInBand",
     "test:aggregation-stress": "jest --selectProjects aggregation-stress --runInBand",
     "test:keycloak-live": "jest --selectProjects keycloak-live --runInBand",
