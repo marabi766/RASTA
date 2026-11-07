@@ -4,6 +4,8 @@ import { ApplicationFailure, Context } from '@temporalio/activity';
 import type { WorkflowHandle } from '@temporalio/client';
 import { RastaError } from '@rasta/nest-common';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import { eventually as askUntil, signalling, stopQuietly } from '../../test/legacy-handoff';
+import { currentDeadline, runBounded, SETTLE_MS } from '../../test/worker-deadline';
 import {
   createActivities,
   ECONOMIC_HOLD_RULE_UNCONFIRMED,
@@ -34,7 +36,15 @@ import type { EconomicClient } from '../economic/economic.client';
  * spec against PostgreSQL (`order-hold-fence.int-spec.ts`).
  */
 
-jest.setTimeout(120_000);
+/**
+ * What the worker runs of one test may take, all of them together (FU-214):
+ * no less than jest's whole test took before, and inside jest's timeout, with
+ * room to stop what the test started.
+ */
+const TEST_BUDGET_MS = 120_000;
+jest.setTimeout(TEST_BUDGET_MS + 60_000);
+/** How long, at least, a saga is given to come quiet before it is terminated. */
+const QUIET_FLOOR_MS = SETTLE_MS / 4;
 
 const INPUT: OrderSagaInput = {
   orderId: 'ORD_ROW',
@@ -695,9 +705,23 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
   let workflowBundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
   let queues = 0;
 
+  /** Set when a test may have stalled the server's clock: the next test gets a new one. */
+  let stalled = false;
+  let budgetEndsAt = 0;
+
   beforeAll(async () => {
     workflowBundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
     env = await createTemporalTestEnvironment();
+  }, 300_000);
+  beforeEach(async () => {
+    if (stalled) {
+      // The new one first: `env` never names a server already torn down.
+      const fresh = await createTemporalTestEnvironment();
+      await env.teardown();
+      env = fresh;
+      stalled = false;
+    }
+    budgetEndsAt = Date.now() + TEST_BUDGET_MS;
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();
@@ -781,53 +805,63 @@ describe('a run that finds the row an earlier run left (#812 r2 F1)', () => {
       workflowBundle,
       activities,
     });
-    return running.runUntil(async () => {
-      const handle = await env.client.workflow.start(orderSaga, {
-        taskQueue,
-        workflowId: taskQueue,
-        args: [{ ...INPUT, ...input }],
-      });
-      try {
-        return await body(handle);
-      } finally {
+    // Under what is left of the test's budget (FU-214): every wait and SDK call
+    // in `body` ends with it, and `body` is awaited before the worker stops.
+    const ms = Math.max(budgetEndsAt - Date.now(), 0);
+    return runBounded(
+      running,
+      { what: 'the test to drive the saga', ms, connection: env.connection },
+      async (deadline) => {
+        const latest = env.client.workflow.getHandle(taskQueue);
+        let result: T;
+        try {
+          const handle = signalling(
+            env,
+            await env.client.workflow.start(orderSaga, {
+              taskQueue,
+              workflowId: taskQueue,
+              args: [{ ...INPUT, ...input }],
+            }),
+          );
+          result = await body(handle);
+        } catch (error) {
+          // Cut off, an awaited result may have left the clock unlocked, and
+          // what follows must fit in the settle window; otherwise the saga gets
+          // what is left of the budget to come quiet, as on success.
+          const cutOff = deadline.signal.aborted;
+          if (cutOff) stalled = true;
+          const window = cutOff
+            ? QUIET_FLOOR_MS
+            : Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+          if ((await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS)) !== undefined) {
+            stalled = true;
+          }
+          throw error;
+        }
         // Not with an activity running: the test server would not skip time again.
-        await atRest(handle).catch(() => undefined);
-        await handle.terminate('test finished').catch(() => undefined);
-      }
-    });
+        const window = Math.max(budgetEndsAt - Date.now(), QUIET_FLOOR_MS);
+        const loud = await stopQuietly(env.connection, latest, window, QUIET_FLOOR_MS);
+        if (loud !== undefined) {
+          stalled = true;
+          throw new Error(`${loud}: stopped with an activity in flight`);
+        }
+        return result;
+      },
+    );
   }
 
-  async function eventually(predicate: () => boolean | Promise<boolean>, what: string) {
-    for (let i = 0; i < 800; i += 1) {
-      if (await predicate()) return;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    throw new Error(`Timed out waiting for ${what}`);
-  }
-  async function atRest(handle: WorkflowHandle) {
-    await eventually(async () => {
-      if ((await handle.describe()).status.name !== 'RUNNING') return true;
-      const last = (await handle.fetchHistory()).events?.at(-1);
-      return Boolean(
-        last?.timerStartedEventAttributes ??
-        last?.timerCanceledEventAttributes ??
-        last?.workflowTaskCompletedEventAttributes,
-      );
-    }, 'the saga to come to rest');
-  }
+  /** Asks until `predicate` holds, under the run's deadline; refused outside a run (FU-214). */
+  const eventually = (predicate: () => boolean | Promise<boolean>, what: string): Promise<void> =>
+    askUntil(currentDeadline(what), async () => predicate(), what);
   const phase = async (handle: WorkflowHandle) =>
     (await handle.query<SagaStatus, []>('status')).phase;
-  async function resultOf(handle: WorkflowHandle): Promise<unknown> {
-    let timer: NodeJS.Timeout | undefined;
-    const stuck = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('The saga did not end')), 90_000);
-    });
-    try {
-      return await Promise.race([handle.result(), stuck]);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
+  /**
+   * `handle.result()`: the run's deadline ends it, and the body is awaited
+   * before the worker stops (FU-214); outside a run it is refused.
+   */
+  const resultOf = (handle: WorkflowHandle): Promise<unknown> =>
+    currentDeadline('the saga to end').call(() => handle.result());
+
   /** The row of a run whose first send was `ago`, its answer never heard, then reset. */
   const leftBy = async (over: Partial<Row> = {}, ago = 60_000) => {
     const holdNotAfter = holdDeadlineFrom((await env.currentTimeMs()) - ago);
