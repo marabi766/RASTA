@@ -3881,3 +3881,83 @@ test('task 370 FU1 + FU2: only the plain shell #! lines are read as bash; SSLKEY
   refusesShell('SSLKEYLOGFILE=scripts/lib.sh curl -fsS https://x', /startup/);
   refusesShell('export SSLKEYLOGFILE=x', /startup/);
 });
+
+test('task 372 R1: $GITHUB_OUTPUT and $GITHUB_STEP_SUMMARY are the runner files only while nothing in the run sets the name', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  const unread = /writes to a path this check cannot read/;
+  const write = (name) => `echo 'docker run alpine:latest true' >> "$${name}"\nbash scripts/lib.sh`;
+  for (const name of ['GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY']) {
+    // every way a shell sets a name: the write below then appends to scripts/lib.sh, which the run executes
+    for (const set of [
+      `${name}=scripts/lib.sh`,
+      `${name}+=x`,
+      `export ${name}=scripts/lib.sh`,
+      `declare ${name}=scripts/lib.sh`,
+      `typeset -x ${name}=scripts/lib.sh`,
+      `readonly ${name}=scripts/lib.sh`,
+      `f() { local ${name}=scripts/lib.sh; }\nf`,
+      `read -r ${name} <<< scripts/lib.sh`,
+      `printf -v ${name} %s scripts/lib.sh`,
+      `mapfile -t ${name} <<< scripts/lib.sh`,
+      `for ${name} in scripts/lib.sh; do :; done`,
+      `select ${name} in scripts/lib.sh; do break; done`,
+      `unset ${name}\n: "\${${name}:=scripts/lib.sh}"`,
+      `: "\${${name}=scripts/lib.sh}"`,
+      `f() { echo x; }\n${name}=scripts/lib.sh f`,
+      `n=${name}\n: "\${!n:=scripts/lib.sh}"`,
+      `a=${name.slice(0, 7)}; b=${name.slice(7)}; n=$a$b\n: "\${!n:=scripts/lib.sh}"`, // the name never whole in the text
+      `${name.slice(0, 8)}""${name.slice(8)}=scripts/lib.sh`, // the name split by quotes
+      `export "${name}=scripts/lib.sh"`,
+      `env ${name}=scripts/lib.sh true`,
+    ])
+      refusesShell(`${set}\n${write(name)}`, unread, bare, [lib]);
+    // ... in another script of the run: a sourced file, or the script that starts this one with the name in its env
+    refusesShell(`source scripts/b.sh\n${write(name)}`, unread, bare, [
+      lib,
+      scriptFile('scripts/b.sh', `${name}=scripts/lib.sh`),
+    ]);
+    refusesShell(write(name), unread, bare, [
+      lib,
+      scriptFile('scripts/a.sh', `export ${name}=scripts/lib.sh\nbash scripts/x.sh`),
+    ]);
+    // ... in the env of a workflow (key or value, any level)
+    const wf = (env, level) =>
+      infra(
+        [
+          workflowYaml(
+            stringify(
+              level === 'job'
+                ? { jobs: { j: { env, steps: [{ run: 'true' }] } } }
+                : { env, jobs: { j: { steps: [{ run: 'true' }] } } },
+            ),
+          ),
+          lib,
+          scriptFile('scripts/y.sh', write(name)),
+        ],
+        bare,
+      ).errors;
+    for (const level of ['workflow', 'job'])
+      for (const env of [{ [name]: 'scripts/lib.sh' }, { OUT: `${name}=scripts/lib.sh` }])
+        assert.ok(
+          wf(env, level).some((e) => unread.test(e)),
+          `${level} ${JSON.stringify(env)}`,
+        );
+    // the same run with the name only read stays accepted
+    assert.deepEqual(wf({ OTHER: 'x' }, 'job'), []);
+    acceptsShell(`echo "k=v" >> "$${name}"\ncat "\${${name}}" > /dev/null`, bare, [lib]);
+  }
+  // ... in a hash-pinned library the run sources (its hash is the reviewed one, so only the name decides)
+  const naming = `${libText}GITHUB_OUTPUT=scripts/lib.sh\n`;
+  refusesShell(
+    `source infrastructure/docker/postgres/lib/role-passwords.bash\n${write('GITHUB_OUTPUT')}`,
+    unread,
+    {
+      ...bare,
+      sourcedLibraries: new Map([[LIB, { sha256: sha(naming), reason: 'x' }]]),
+    },
+    [lib, library(naming)],
+  );
+  // controls: reading and appending in the runner's own form, in a script that runs a file
+  acceptsShell(`echo "## done" >> "$GITHUB_STEP_SUMMARY"\n${write('GITHUB_OUTPUT')}`, bare, [lib]);
+  acceptsShell(`echo x | tee -a "\${GITHUB_STEP_SUMMARY}"\nbash scripts/lib.sh`, bare, [lib]);
+});
