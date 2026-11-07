@@ -176,6 +176,19 @@ describe('Core (native) logs', () => {
     compiled.runtimeOptions.logExporter as { type: string; receiver?: (entries: string[]) => void };
   const close = (compiled: Compiled) => (compiled.logger as { close?: () => void }).close?.();
 
+  it('leave every signal to the service: the SDK does not stop the worker on SIGTERM', () => {
+    const compiled = compileOptions(temporalRuntimeOptions(stubLogger().logger));
+    // The SDK's default, as a control: SIGTERM among them.
+    const sdkDefault = compileOptions({ logger: new TemporalRuntimeLogger(stubLogger().logger) });
+    try {
+      expect(compiled.shutdownSignals).toEqual([]);
+      expect(sdkDefault.shutdownSignals).toContain('SIGTERM');
+    } finally {
+      close(compiled);
+      close(sdkDefault);
+    }
+  });
+
   it('are forwarded: the compiler selects the forwarding exporter, not the console one', () => {
     const forwarded = compileOptions(temporalRuntimeOptions(stubLogger().logger));
     // The configuration before this fix, as a control.

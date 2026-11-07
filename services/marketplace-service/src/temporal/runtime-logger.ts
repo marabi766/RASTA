@@ -88,6 +88,11 @@ export function temporalRuntimeOptions(base: Logger): RuntimeOptions {
   return {
     logger: new TemporalRuntimeLogger(base),
     telemetryOptions: { logging: { forward: {} } },
+    // The SDK would shut the worker down on SIGTERM (and SIGINT, SIGQUIT,
+    // SIGUSR2) by itself, before the service's shutdown calls `stop()`: the
+    // worker would read that as ending on its own and exit the process with
+    // an error (FU-104, #792 r2). The service's graceful shutdown alone stops it.
+    shutdownSignals: [],
   };
 }
 
