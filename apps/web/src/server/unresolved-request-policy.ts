@@ -109,6 +109,8 @@ export interface PurposePolicy {
 
 const PURPOSES: Readonly<Record<string, PurposePolicy>> = {
   'project-create': { retry: true, deadline: 'REQUIRED' },
+  // No replay fence in economic-service: an ambiguous top-up requires reconciliation, never resend.
+  'wallet-top-up': { retry: false, deadline: 'NONE' },
   // supplier-service has no Idempotency-Key and no expiry: never resent, no deadline.
   'supplier-write': { retry: false, deadline: 'NONE' },
   // procurement-service answers a repeated Idempotency-Key with the first result while it keeps the

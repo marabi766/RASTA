@@ -1654,7 +1654,14 @@ describe('the order saga', () => {
           // The saga sits in the dispute: no send, however long it waits.
           await phaseIs(ctx.handle, 'DISPUTED');
           await atRest(ctx.handle);
-          await env.sleep('3 days');
+          // Three and a half days: three 24-hour re-reads, and the sleep ends
+          // halfway to the fourth. Exactly three days ended on the third
+          // re-read's timer, which then fired in real time just after the sleep
+          // and could land in the same task as the signal below: the test
+          // server refuses a task cancelling a timer that fired while it ran
+          // ("invalid history builder state for action"), the saga stalls, and
+          // the terminated saga stops the server skipping for later cases.
+          await env.sleep('84 hours');
           expect(owner.sentWhile).toEqual([]);
           await atRest(ctx.handle);
           await ctx.party.resolve('SETTLE', 'the supplier replaced it');
