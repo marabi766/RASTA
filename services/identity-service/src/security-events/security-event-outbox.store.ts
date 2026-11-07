@@ -353,7 +353,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
     if (ids.length === 0) return 0;
     return this.prisma.client.$executeRawUnsafe(
       `UPDATE security_event_outbox
-          SET published_at     = now(),
+          SET published_at     = date_trunc('milliseconds', now() AT TIME ZONE 'UTC'),
               claim_token      = NULL,
               claim_owner      = NULL,
               claim_expires_at = NULL,
@@ -455,7 +455,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
 
   async oldestPendingAgeSeconds(): Promise<number> {
     const result = await this.prisma.client.$queryRawUnsafe<{ age: number | null }[]>(
-      `SELECT EXTRACT(EPOCH FROM (now() - MIN(created_at)))::float8 AS age
+      `SELECT EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - MIN(created_at)))::float8 AS age
          FROM security_event_outbox
         WHERE published_at IS NULL`,
     );

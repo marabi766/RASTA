@@ -1,5 +1,7 @@
 # Runbook: صف ردهای حسابرسی (`security_event_outbox`) گیر کرده یا ثبت ناموفق است
 
+> **منطقهٔ زمانی:** پیش از هر SQL این Runbook، در همان نشست `SET TimeZone = 'UTC';` را اجرا کن: ستون‌های `timestamp(3)` ساعت دیواری UTC‌اند و `now()` را در منطقهٔ زمانی نشست می‌سنجند (FU-188).
+
 **شدت:** 🟠 هشدار
 **متریک محرک:** `rasta_security_event_outbox_closed_backlog_age_seconds > 60` · افزایش
 `rasta_security_event_captures_total{outcome=~"failed|timeout"}` ·

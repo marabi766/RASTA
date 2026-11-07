@@ -26,6 +26,7 @@ const runtime: ConnectedRoleFacts = {
   createOnDatabase: false,
   createOnSchemas: [],
   memberOf: [],
+  timeZone: 'UTC',
 };
 
 const client = (facts: ConnectedRoleFacts | undefined): RuntimeRoleQueryClient => ({
