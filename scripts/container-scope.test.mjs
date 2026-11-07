@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -105,15 +106,6 @@ jobs:
     steps:
       - run: node scripts/container-scope.mjs
 `;
-
-// Never let a hook's repository/index or command-scope config escape into fixtures.
-function fixtureGitEnv() {
-  return {
-    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_NOSYSTEM: '1',
-  };
-}
 
 function fixture(t, head = WORKFLOW, base = WORKFLOW) {
   const dir = mkdtempSync(join(tmpdir(), 'container-scope-'));
@@ -709,6 +701,7 @@ function proofGuard(t, edit, { deleteTests = false } = {}) {
   const f = fixture(t);
   for (const name of [
     'container-scope.test.mjs',
+    'fixture-git-env.mjs',
     'container-scope-proof.mjs',
     'container-scope-buildx.mjs',
   ]) {
@@ -1252,7 +1245,11 @@ test('maySkipBuildKitProof: only a missing tool outside CI may skip', () => {
 // Run the real BuildKit test of this suite under a docker of our choosing.
 function buildKitProofUnder(t, dockerDir, ci) {
   const f = fixture(t);
-  for (const name of ['container-scope.test.mjs', 'container-scope-buildx.mjs']) {
+  for (const name of [
+    'container-scope.test.mjs',
+    'container-scope-buildx.mjs',
+    'fixture-git-env.mjs',
+  ]) {
     copyFileSync(join(root, 'scripts', name), join(f.dir, 'scripts', name));
   }
   copyFileSync(join(root, '.dockerignore'), join(f.dir, '.dockerignore'));

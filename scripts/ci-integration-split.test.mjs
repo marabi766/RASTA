@@ -22,6 +22,7 @@ import {
   QUALITY_GATE_JOB,
   QUALITY_JOBS,
   qualitySplitProblems,
+  unitCoverageProblems,
   JOB_FLOOR_MINUTES,
   JOB_SETUP_MINUTES,
   INTEGRATION_PARTITIONS,
@@ -186,7 +187,7 @@ test('FU-027: workflow suite steps cannot be renamed, added or removed independe
   }
   const outside = real();
   outside.jobs.quality.steps.push({
-    name: 'Tenant isolation and authorization tests',
+    name: 'Tenant isolation and financial invariant tests',
     run: 'pnpm run test:integration',
   });
   fails(outside, /integration execution must run in an integration-\* job/);
@@ -817,9 +818,9 @@ test('a test command made to pass regardless is refused', () => {
     fails(workflow, /"Integration tests" must run exactly/);
   }
   const lastLine = real();
-  const isolation = stepNamed(lastLine, 'Tenant isolation and authorization tests');
-  isolation.run = isolation.run.split('\n').slice(0, 3).join('\n');
-  fails(lastLine, /"Tenant isolation and authorization tests" must run exactly/);
+  const isolation = stepNamed(lastLine, 'Tenant isolation and financial invariant tests');
+  isolation.run = isolation.run.trimEnd().split('\n').slice(0, -1).join('\n');
+  fails(lastLine, /"Tenant isolation and financial invariant tests" must run exactly/);
 });
 
 test('comments and blank lines in a run are not commands', () => {
@@ -938,7 +939,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'integration-construction': 25,
       'integration-economic': 24,
       'integration-contract': 23,
-      'integration-security': 42,
+      'integration-security': 35,
       'integration-coverage-critical': 35,
       'integration-coverage': 86,
       'integration-backup-drill': 8,
@@ -1443,4 +1444,116 @@ test('every suite shard refuses no-op commands, changed filters, missing aggrega
       fails(changed, /must set/);
     }
   }
+});
+
+test('FU-185: every workspace unit selection survives removal of the filtered rerun', () => {
+  assert.deepEqual(unitCoverageProblems(), []);
+  withLiveWorkspaceCopy((root) => {
+    const file = resolve(root, 'services/identity-service/package.json');
+    const original = JSON.parse(readFileSync(file, 'utf8'));
+    for (const command of [
+      undefined,
+      'jest --selectProjects integration',
+      'jest --selectProjects unit --testNamePattern=tenant',
+      'true',
+    ]) {
+      const manifest = structuredClone(original);
+      manifest.scripts['test:unit'] = command;
+      writeFileSync(file, JSON.stringify(manifest));
+      assert.match(unitCoverageProblems(root).join('\n'), /identity-service.*unit coverage/);
+    }
+  });
+  for (const change of [
+    (w) => dropStep(w.jobs['quality-unit'], 'Unit tests'),
+    (w) => {
+      w.jobs['quality-unit'].steps.find((s) => s.name === 'Unit tests').run +=
+        ' -- --testNamePattern=tenant';
+    },
+  ]) {
+    const workflow = real();
+    change(workflow);
+    assert.match(qualitySplitProblems(workflow).join('\n'), /unfiltered Unit tests/);
+  }
+});
+
+test('FU-185 F1a: deleting test cannot hide a narrowed or missing unit selection', () => {
+  withLiveWorkspaceCopy((root) => {
+    const file = resolve(root, 'services/identity-service/package.json');
+    const manifest = JSON.parse(readFileSync(file, 'utf8'));
+    delete manifest.scripts.test;
+    for (const command of ['jest --selectProjects unit --testNamePattern=x', undefined]) {
+      manifest.scripts['test:unit'] = command;
+      writeFileSync(file, JSON.stringify(manifest));
+      assert.match(unitCoverageProblems(root).join('\n'), /identity-service.*unit coverage/);
+    }
+  });
+});
+
+test('FU-185 F1a: the Node unit workspace refuses a no-op or missing test:unit', () => {
+  withLiveWorkspaceCopy((root) => {
+    const file = resolve(root, 'tests/e2e/package.json');
+    const manifest = JSON.parse(readFileSync(file, 'utf8'));
+    for (const command of ['true', undefined]) {
+      manifest.scripts['test:unit'] = command;
+      writeFileSync(file, JSON.stringify(manifest));
+      assert.match(unitCoverageProblems(root).join('\n'), /tests\/e2e.*unit coverage/);
+    }
+  });
+});
+
+test('FU-185 F1b: every Jest unit entry refuses passWithNoTests even when test has it', () => {
+  for (const file of workspaceManifestFiles(ROOT)) {
+    const original = JSON.parse(readFileSync(resolve(ROOT, file), 'utf8'));
+    if (!original.scripts?.['test:unit']?.startsWith('jest')) continue;
+    withLiveWorkspaceCopy((root) => {
+      for (const hasTest of [true, false]) {
+        const manifest = structuredClone(original);
+        manifest.scripts['test:unit'] =
+          manifest.scripts['test:unit'].replace(' --passWithNoTests', '') + ' --passWithNoTests';
+        if (hasTest) manifest.scripts.test = manifest.scripts['test:unit'];
+        else delete manifest.scripts.test;
+        writeFileSync(resolve(root, file), JSON.stringify(manifest));
+        const problems = unitCoverageProblems(root);
+        assert.ok(
+          problems.some((p) => p.startsWith(`${file}: unit coverage`)),
+          `${file}: ${problems}`,
+        );
+      }
+    });
+  }
+});
+
+test('FU-185 F1b: asset unit command fails when its Jest config matches zero spec files', () => {
+  withLiveWorkspaceCopy((root) => {
+    const config = resolve(root, 'services/asset-service/jest.config.cjs');
+    const asset = resolve(ROOT, 'services/asset-service');
+    writeFileSync(
+      config,
+      `
+      const config = require(${JSON.stringify(resolve(asset, 'jest.config.js'))});
+      for (const project of config.projects) {
+        project.rootDir = require('node:path').resolve(${JSON.stringify(asset)}, project.rootDir);
+        if (project.displayName === 'unit') project.testRegex = 'FU185_NEVER_MATCHES_A_SPEC$';
+      }
+      module.exports = config;
+    `,
+    );
+    const manifest = JSON.parse(
+      readFileSync(resolve(root, 'services/asset-service/package.json'), 'utf8'),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        resolve(asset, 'node_modules/jest/bin/jest.js'),
+        ...manifest.scripts['test:unit'].split(' ').slice(1),
+        '--config',
+        config,
+        '--runInBand',
+      ],
+      { cwd: asset, encoding: 'utf8', timeout: 30000 },
+    );
+    assert.equal(result.error, undefined);
+    assert.match(result.stdout + result.stderr, /No tests found/);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+  });
 });

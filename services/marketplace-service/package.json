@@ -2,7 +2,7 @@
   "name": "@rasta/marketplace-service",
   "version": "0.1.0",
   "private": true,
-  "marketplaceSagaProtocol": 6,
+  "marketplaceSagaProtocol": 7,
   "description": "The fleet marketplace — products, supplier offers, and the order saga from placement to settlement.",
   "main": "dist/main.js",
   "scripts": {

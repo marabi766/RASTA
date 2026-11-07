@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 // The base CI compares the withheld-settings list with
 // (scripts/service-env-withheld-base.mjs), against real git histories: a
 // remote, and a shallow CI-like checkout of it. Codex r1 on #316: a push of
@@ -19,18 +20,14 @@ import {
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'service-env-withheld-base.mjs');
 
-const GIT_ENV = {
-  ...process.env,
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_AUTHOR_NAME: 'fixture',
-  GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
-  GIT_COMMITTER_NAME: 'fixture',
-  GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
-};
+const GIT_ENV = fixtureGitEnv();
 
 function git(cwd, ...args) {
-  const run = spawnSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
+  const run = spawnSync(
+    'git',
+    ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', ...args],
+    { cwd, encoding: 'utf8', env: fixtureGitEnv() },
+  );
   assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
   return run.stdout.trim();
 }
