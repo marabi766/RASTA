@@ -5,6 +5,8 @@ import {
   isTerminal,
   nextStatus,
   resolvedStatus,
+  SETTLEMENT_BARRED,
+  STATEMENT_SETTLEMENT_BARRED,
   reversedStatus,
   TERMINAL_STATUSES,
   type TransactionEvent,
@@ -192,10 +194,26 @@ describe('settlement checks its authority, not only its status (D-083, #623 r1 F
       ).toThrow(
         expect.objectContaining({
           code: 'INVALID_STATE_TRANSITION',
-          message: expect.stringContaining('settles only from its own hold'),
+          message: SETTLEMENT_BARRED,
         }),
       );
     }
+  });
+
+  it('tells the operator a barred statement obligation has no way forward, and no one else that', () => {
+    const authority = { settlementAuthorised: true, fundsHeld: false, settlementBarred: true };
+    expect(() => assertSettlementReady('TXN_1', authority, 'STATEMENT')).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_STATE_TRANSITION',
+        message: STATEMENT_SETTLEMENT_BARRED,
+      }),
+    );
+    expect(() => assertSettlementReady('TXN_1', authority, 'ORDER')).toThrow(
+      expect.objectContaining({ message: SETTLEMENT_BARRED }),
+    );
+    expect(() =>
+      assertSettlementReady('TXN_1', { ...authority, settlementBarred: false }, 'STATEMENT'),
+    ).not.toThrow();
   });
 
   it('agrees with where a resolution sends it: settlement-ready exactly when settleable', () => {

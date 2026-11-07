@@ -26,24 +26,13 @@
 // The command-line half (`commandLineSurface`, `namesCredential`) feeds the
 // explicit contract in cli-contract.mjs.
 // -----------------------------------------------------------------------------
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { extname, join, relative } from 'node:path';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 /** The trees scanned, relative to the repository root. */
 export const SCANNED_TREES = Object.freeze(['scripts', 'packages', 'services', 'apps', 'tests']);
-
-/** Directories never scanned: build output, installs, generated clients. */
-const SKIPPED_DIRECTORIES = new Set([
-  'node_modules',
-  'dist',
-  '.next',
-  '.turbo',
-  'coverage',
-  'generated',
-  'playwright-report',
-  'test-results',
-]);
 
 const SCRIPT_KINDS = Object.freeze({
   '.ts': ts.ScriptKind.TS,
@@ -58,18 +47,10 @@ const SCRIPT_KINDS = Object.freeze({
 
 /** Every scanned source file under `root`, as repository-relative paths, sorted. */
 export function sourceFiles(root) {
-  const found = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (!SKIPPED_DIRECTORIES.has(entry.name)) walk(join(dir, entry.name));
-      } else if (entry.isFile() && SCRIPT_KINDS[extname(entry.name)] !== undefined) {
-        if (!entry.name.endsWith('.d.ts')) found.push(relative(root, join(dir, entry.name)));
-      }
-    }
-  };
-  for (const tree of SCANNED_TREES) walk(join(root, tree));
-  return found.sort();
+  return SCANNED_TREES.flatMap((tree) => authoredFiles(join(root, tree), { base: root }))
+    .filter((path) => SCRIPT_KINDS[extname(path)] !== undefined && !path.endsWith('.d.ts'))
+    .map((path) => relative(root, path))
+    .sort();
 }
 
 const URL_MODULES = new Set(['url', 'node:url']);

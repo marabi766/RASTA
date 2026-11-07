@@ -48,6 +48,7 @@ const HOLD_TRANSACTION = /names a transaction of its own organization/;
 const HOLD_PURPOSE = /for anything else names no transaction/;
 const HOLD_FIXED = /Whose a hold is and what it is for never changes/;
 const HOLD_BOUND = 'trg_wallet_hold_reference_bound';
+const HOLD_FUNDED = 'trg_wallet_hold_inserted_only_funded';
 
 interface Leg {
   accountId: string;
@@ -76,6 +77,8 @@ interface Forgery {
   move?: boolean;
   /** Writes a hold released by this journal. */
   hold?: (journalId: string, tx: Tx) => Promise<unknown>;
+  /** The same, after the transaction has moved: the order `settle()` does not use. */
+  lateHold?: (journalId: string, tx: Tx) => Promise<unknown>;
 }
 
 describe('the proof of a settlement at its creation (real database, runtime role)', () => {
@@ -326,6 +329,7 @@ describe('the proof of a settlement at its creation (real database, runtime role
           REVENUE,
         );
       }
+      await forgery.lateHold?.(journalId, tx);
     });
   };
 
@@ -535,12 +539,13 @@ describe('the proof of a settlement at its creation (real database, runtime role
     });
 
     it.each([
-      ['HELD', 'HELD'],
-      ['CANCELLED', 'CANCELLED'],
-    ])('a whole settlement by hand from %s is refused at the move', async (_label, status) => {
+      // Having been HELD, it answers first that it has no funded hold of its own (FU-164).
+      ['HELD', /settles only from a funded hold/],
+      ['CANCELLED', /settled only from PENDING_SETTLEMENT/],
+    ])('a whole settlement by hand from %s is refused at the move', async (status, refusal) => {
       const transactionId = await pending();
       await update(transactionId, `status = '${status}'`, owner);
-      await expect(write(transactionId)).rejects.toThrow(/settled only from PENDING_SETTLEMENT/);
+      await expect(write(transactionId)).rejects.toThrow(refusal);
     });
 
     it('once settled it does not go back to be settled again', async () => {
@@ -1051,41 +1056,119 @@ describe('the proof of a settlement at its creation (real database, runtime role
       await refused(await pending(), { legs: escrowLegs }, HOLD);
     });
 
-    it.each([
-      ['released by another journal', (id: string) => ({ resolved_journal_id: `${id}X` })],
-      ['for another amount', () => ({ amount_minor: 1 })],
-      ['in another currency', () => ({ currency: 'USD' })],
-      ['refunded by this journal, not released', () => ({ status: 'REFUNDED' })],
-    ])('a hold %s', async (_label, changes) => {
-      const transactionId = await pending();
-      const now = new Date();
-      const [wallet] = await owner.$queryRawUnsafe<{ id: string }[]>(
-        `SELECT id FROM wallet WHERE organization_id = $1 AND currency = 'IRR'`,
-        payer,
-      );
-      await refused(
-        transactionId,
-        {
+    /**
+     * The commit proof on its own. Written after the move, so `trg_transaction_settlement_authority`
+     * has seen no hold, and funded, so `trg_wallet_hold_inserted_only_funded` lets it in: only the
+     * proof is left to tell these from the control, which commits.
+     */
+    describe('a funded hold written after the move', () => {
+      const fundingJournal = async (transactionId: string, amount: bigint, currency: string) => {
+        const account = async (purpose: string, type: string) => {
+          const [found] = await owner.$queryRawUnsafe<{ id: string }[]>(
+            `SELECT id FROM ledger_account
+              WHERE organization_id = $1 AND purpose = $2::"AccountPurpose" AND currency = $3`,
+            payer,
+            purpose,
+            currency,
+          );
+          return found?.id ?? newAccount(payer, purpose, type, currency);
+        };
+        const legs: Leg[] = [
+          {
+            accountId: await account('WALLET', 'LIABILITY'),
+            organizationId: payer,
+            direction: 'DEBIT',
+            amount,
+            currency,
+          },
+          {
+            accountId: await account('ESCROW', 'LIABILITY'),
+            organizationId: payer,
+            direction: 'CREDIT',
+            amount,
+            currency,
+          },
+        ];
+        return runtime.$transaction(async (tx) => {
+          const id = await insertJournal(tx, transactionId, { journal_type: 'FUNDS_HELD' });
+          await insertLegs(tx, id, legs);
+          return id;
+        });
+      };
+
+      interface HoldTerms {
+        amount: bigint;
+        currency: string;
+        changes: (journalId: string) => Row;
+      }
+
+      const lateHold = async (transactionId: string, terms: HoldTerms): Promise<Forgery> => {
+        const funding = await fundingJournal(transactionId, terms.amount, terms.currency);
+        const wallet = await asActor({ organizationId: payer }, () =>
+          wiring.wallets.getOrOpen(terms.currency),
+        );
+        const holdId = `HLD_${ulid()}`;
+        const now = new Date();
+        return {
           legs: escrowLegs,
-          hold: (journalId, tx) =>
-            insertRow(tx, 'wallet_hold', {
-              id: `HLD_${ulid()}`,
+          lateHold: async (journalId, tx) => {
+            await insertRow(tx, 'wallet_hold', {
+              id: holdId,
               organization_id: payer,
-              wallet_id: wallet!.id,
-              amount_minor: Number(GROSS),
-              currency: 'IRR',
+              wallet_id: wallet.id,
+              amount_minor: Number(terms.amount),
+              currency: terms.currency,
               status: 'RELEASED',
               reference: transactionId,
               reference_type: 'TRANSACTION',
+              placed_journal_id: funding,
               resolved_journal_id: journalId,
               placed_at: now,
               placed_by: 'itest',
               resolved_at: now,
-              ...changes(journalId),
-            }),
-        },
-        HOLD,
-      );
+              ...terms.changes(journalId),
+            });
+            const [row] = await tx.$queryRawUnsafe<{ funded: boolean }[]>(
+              'SELECT wallet_hold_funded($1) AS funded',
+              holdId,
+            );
+            expect(row!.funded).toBe(true);
+          },
+        };
+      };
+
+      const IN_TERMS: HoldTerms = { amount: GROSS, currency: 'IRR', changes: () => ({}) };
+
+      it('released by this journal, for these terms: the control', async () => {
+        const transactionId = await pending();
+        await write(transactionId, await lateHold(transactionId, IN_TERMS));
+        expect(await rowsOf(transactionId)).toMatchObject({ settlements: 1n, status: 'SETTLED' });
+      });
+
+      it.each<[string, HoldTerms]>([
+        [
+          'released by another journal',
+          { ...IN_TERMS, changes: (id) => ({ resolved_journal_id: `${id}X` }) },
+        ],
+        ['for another amount', { ...IN_TERMS, amount: 1n }],
+        ['in another currency', { ...IN_TERMS, currency: 'USD' }],
+        [
+          'refunded by this journal, not released',
+          { ...IN_TERMS, changes: () => ({ status: 'REFUNDED' }) },
+        ],
+      ])('a hold %s', async (_label, terms) => {
+        const transactionId = await pending();
+        await refused(transactionId, await lateHold(transactionId, terms), HOLD);
+      });
+
+      it('and one no journal funded is refused as it is written, before the proof', async () => {
+        const transactionId = await pending();
+        const forgery = await lateHold(transactionId, {
+          ...IN_TERMS,
+          changes: () => ({ placed_journal_id: null }),
+        });
+        await refused(transactionId, forgery, /A hold never funded moves no money/);
+      });
     });
   });
 
@@ -1121,7 +1204,13 @@ describe('the proof of a settlement at its creation (real database, runtime role
 
     const planted = async (transactionId: string, overrides: Row & { of?: string }) => {
       const row = await holdRow(transactionId, overrides);
-      await lifted('wallet_hold', HOLD_BOUND, (tx) => insertRow(tx, 'wallet_hold', row));
+      await lifted('wallet_hold', HOLD_BOUND, async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+        await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold DISABLE TRIGGER ${HOLD_FUNDED}`);
+        await insertRow(tx, 'wallet_hold', row);
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold ENABLE TRIGGER ${HOLD_FUNDED}`);
+      });
       return row.id;
     };
 
@@ -1383,6 +1472,23 @@ describe('the proof of a settlement at its creation (real database, runtime role
           wiring.transactions.refund(transactionId, 'itest'),
         );
 
+      /** The row a refund hold answers to, in this file's amount. */
+      const capturedIntent = async () => {
+        const reference = `PAY_${ulid()}`;
+        const transactionId = `TOP_${ulid()}`;
+        await owner.$executeRawUnsafe(
+          `INSERT INTO payment_intent (id, organization_id, wallet_id, transaction_id, amount_minor,
+                                       currency, provider, idempotency_key, correlation_id, created_by)
+           VALUES ($1, $2, $3, $4, $5, 'IRR', 'itest', $1, 'itest', 'itest')`,
+          reference,
+          payer,
+          walletId,
+          transactionId,
+          GROSS,
+        );
+        return { reference, transactionId };
+      };
+
       const placeHoldFor = (
         reference: string,
         referenceType: HoldPurpose,
@@ -1607,10 +1713,14 @@ describe('the proof of a settlement at its creation (real database, runtime role
         });
 
         it('its own, for the same purpose and amount, is still a replay', async () => {
-          const reference = `REF_${ulid()}`;
-          const own = await planted(reference, { reference_type: 'PAYMENT_REFUND' });
-          await expect(placeHoldFor(reference, 'PAYMENT_REFUND')).resolves.toMatchObject({
-            holdId: own,
+          // A refund hold is funded for a real intent's top-up (`wallet_hold_funded`).
+          const { reference, transactionId } = await capturedIntent();
+          const own = await placeHoldFor(reference, 'PAYMENT_REFUND', transactionId);
+          expect(own.replayed).toBe(false);
+          await expect(
+            placeHoldFor(reference, 'PAYMENT_REFUND', transactionId),
+          ).resolves.toMatchObject({
+            holdId: own.holdId,
             replayed: true,
           });
         });

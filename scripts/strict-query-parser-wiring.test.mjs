@@ -10,14 +10,18 @@
 // provider through Nest's own metadata. A new service fails here until it does.
 // -----------------------------------------------------------------------------
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 const servicesDir = join(import.meta.dirname, '..', 'services');
-const services = readdirSync(servicesDir).filter((name) =>
-  existsSync(join(servicesDir, name, 'src', 'main.ts')),
-);
+// A service is a directory with an authored src/main.ts: git's file list answers that, so a
+// generated or ignored tree is never opened.
+const services = authoredFiles(servicesDir).flatMap((file) => {
+  const [name, ...below] = relative(servicesDir, file).split(sep);
+  return below.join('/') === 'src/main.ts' ? [name] : [];
+});
 
 test('the scan finds the services (an empty scan is no gate)', () => {
   assert.ok(services.length >= 17, `found only ${services.length} services`);

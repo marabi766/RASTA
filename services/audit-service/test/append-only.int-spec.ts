@@ -1,6 +1,13 @@
 import { withUtcSession } from '@rasta/config';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { authoredFiles } = require('../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (
+    dir: string,
+    options?: { skip?: (name: string) => boolean; optional?: boolean },
+  ) => string[];
+};
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -196,21 +203,13 @@ describe('audit_event is append-only (real PostgreSQL)', () => {
       // Guards against a future method that does not name itself honestly.
 
       const offenders: string[] = [];
-      const walk = (dir: string): void => {
-        for (const entry of readdirSync(dir)) {
-          const full = join(dir, entry);
-          if (statSync(full).isDirectory()) {
-            if (entry !== 'generated') walk(full);
-            continue;
-          }
-          if (!full.endsWith('.ts') || full.endsWith('.spec.ts')) continue;
-          const source = readFileSync(full, 'utf8');
-          if (/auditEvent\s*\.\s*(delete|deleteMany|update|updateMany|upsert)\b/.test(source)) {
-            offenders.push(full);
-          }
+      for (const full of authoredFiles(join(__dirname, '..', 'src'))) {
+        if (!full.endsWith('.ts') || full.endsWith('.spec.ts')) continue;
+        const source = readFileSync(full, 'utf8');
+        if (/auditEvent\s*\.\s*(delete|deleteMany|update|updateMany|upsert)\b/.test(source)) {
+          offenders.push(full);
         }
-      };
-      walk(join(__dirname, '..', 'src'));
+      }
 
       expect(offenders).toEqual([]);
     });

@@ -1,5 +1,6 @@
 import { RastaError } from '@rasta/nest-common';
 import type { TransactionStatus } from '../generated/prisma';
+import { STATEMENT_SOURCE_TYPE } from './dto';
 
 /**
  * The transaction lifecycle, as an explicit state machine.
@@ -156,9 +157,11 @@ export interface SettlementAuthority {
   /** The payer's own ACTIVE hold for this transaction (`transaction_holds`): its funds are escrowed. */
   readonly fundsHeld: boolean;
   /**
-   * `transaction_settlement_barred`: it stands on a hold record, and is undecided
-   * or has no own hold for its terms. An operator's decision disposes of the
-   * evidence and authorises no payment (D-123). Anything but `false` is barred.
+   * `transaction_settlement_barred`: it has claimed escrow (a hold record, a hold
+   * of its own in any status, or having been `HELD`) and has no funded hold of its
+   * own for its terms, or its hold record is undecided. A decision or an
+   * authorisation pays nothing by itself (D-123, D-130). Anything but `false` is
+   * barred.
    */
   readonly settlementBarred: boolean;
 }
@@ -175,12 +178,12 @@ export interface SettlementAuthority {
  *   resolution sent to `PENDING_SETTLEMENT` with no authorisation, or that was
  *   authorised before 20260926120000 recorded the instant: settlement then
  *   needs an authorisation first, which is the side to err on with money.
- * - No escrow: `PENDING_SETTLEMENT`. A `DISPUTED` transaction with no active
- *   hold was never `HELD` — a hold is released only by settling or refunding,
- *   both terminal — so it is an ADR-032 obligation, authorised when recorded.
- * - Barred by its hold record: `HELD`, unproven, whatever else it says. It is
- *   not ready to settle, and from there it can take its own hold and an
- *   authorisation, or be refunded (D-123).
+ * - No escrow, and none ever claimed: `PENDING_SETTLEMENT`. It is an ADR-032
+ *   obligation, authorised when recorded.
+ * - Barred (`transaction_settlement_barred`): `HELD`, unproven, whatever else it
+ *   says. It has claimed escrow and has no funded hold of its own for its terms,
+ *   so it is not ready to settle. From there it can take that hold and an
+ *   authorisation, or be refunded (D-123, D-130).
  */
 export function resolvedStatus(
   authority: SettlementAuthority,
@@ -202,18 +205,34 @@ export function isSettlementReady(authority: SettlementAuthority): boolean {
   );
 }
 
+export const SETTLEMENT_BARRED =
+  'This transaction settles only from a funded hold of its own for its exact terms, with any hold record on it decided first; nothing pays it from the spendable balance';
+
+/**
+ * No hold can be placed on a statement's obligation and it refuses a refund
+ * (`refuseStatementWithdrawal`), so a barred one has no way forward: the owner's
+ * question (D-130). The operator is told that, and not sent to a decision that
+ * cannot help.
+ */
+export const STATEMENT_SETTLEMENT_BARRED =
+  "This statement's obligation is barred by a hold on record: it cannot be paid, refunded or cancelled until the product owner decides; see the transaction-hold-decision runbook";
+
 /**
  * Refuses to settle an escrowed transaction whose settlement was never
  * authorised, whatever its status says — before any journal or hold release.
  * `INVALID_STATE_TRANSITION` (409), as the state machine refuses: the
  * transaction has to be authorised first, and no retry changes that.
  */
-export function assertSettlementReady(transactionId: string, authority: SettlementAuthority): void {
+export function assertSettlementReady(
+  transactionId: string,
+  authority: SettlementAuthority,
+  sourceType: string | null = null,
+): void {
   if (authority.settlementBarred !== false) {
     throw new RastaError(
       'INVALID_STATE_TRANSITION',
-      'This transaction settles only from its own hold, once an operator has decided its hold record',
-      { internalContext: { transactionId, ...authority } },
+      sourceType === STATEMENT_SOURCE_TYPE ? STATEMENT_SETTLEMENT_BARRED : SETTLEMENT_BARRED,
+      { internalContext: { transactionId, sourceType, ...authority } },
     );
   }
   if (isSettlementReady(authority)) return;
