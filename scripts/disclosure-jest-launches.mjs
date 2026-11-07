@@ -455,6 +455,13 @@ export function jestCommands(paths, read) {
             'services/identity-service',
           );
           inspect('pnpm run test:aggregation-stress -- --json', name, '.', [...stack, path]);
+        } else if (entry.kind === 'empty-unit-probe') {
+          if (args.some((arg) => CONFIG_FLAG.test(arg))) {
+            refuse(name, 'unsupported empty-unit probe configuration arguments');
+            continue;
+          }
+          // The pinned probe copies this config without changing its setup.
+          add(['--selectProjects', 'unit', '--runInBand'], 'services/asset-service');
         } else if (entry.kind !== 'non-jest' || args.some((arg) => CONFIG_FLAG.test(arg)))
           refuse(name, `unsupported registered launcher ${path}`);
         continue;

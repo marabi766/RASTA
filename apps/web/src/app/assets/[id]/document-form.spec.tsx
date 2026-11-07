@@ -130,6 +130,27 @@ describe('the attach-document form', () => {
       expect(container.querySelector(`input[name="${SUBMISSION_FIELD}"]`)).toHaveValue(SUBMISSION);
     });
 
+    it.each(['UNCONFIRMED', 'FAILED'] as const)(
+      'resends a %s attach under the key its token is bound to, with what it sent (PR-880 r1 F1)',
+      (kind) => {
+        const sent = { kind: 'MANUAL', title: 'دفترچه', issuedAt: '', expiresAt: '' };
+        const held = {
+          correlationId: 'corr-b',
+          resume,
+          submissionId: 'sub_BBBBBBBBBBBBBBBBBBBB',
+          values: sent,
+        };
+        setState(kind === 'FAILED' ? { kind, status: 503, ...held } : { kind, ...held });
+        const { container } = render(<AttachDocumentForm {...IDENTITY} />);
+        expect(container.querySelector(`input[name="${SUBMISSION_FIELD}"]`)).toHaveValue(
+          'sub_BBBBBBBBBBBBBBBBBBBB',
+        );
+        expect(container.querySelector(`input[name="${UPLOAD_TOKEN_FIELD}"]`)).toHaveValue(resume);
+        expect(container.querySelector('select[name="kind"]')).toHaveValue('MANUAL');
+        expect(container.querySelector('input[name="title"]')).toHaveValue('دفترچه');
+      },
+    );
+
     it('says the file was uploaded when the attach failed, and never "nothing was attached" for an unknown outcome', () => {
       setState({ kind: 'FAILED', status: 503, correlationId: 'corr-503', resume });
       const failed = render(<AttachDocumentForm {...IDENTITY} />);

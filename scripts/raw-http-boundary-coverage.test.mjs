@@ -1,6 +1,6 @@
+import { trackedFiles } from './source-inventory.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -162,8 +162,7 @@ function unlinted(path) {
   return Object.hasOwn(UNLINTED, path) ? path : undefined;
 }
 
-const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' });
-const tracked = git('ls-files', '-z').split('\0').filter(Boolean);
+const tracked = trackedFiles(ROOT);
 
 function extensionOf(path) {
   const base = posix.basename(path);
@@ -207,11 +206,11 @@ function reacher(roots, path) {
 }
 
 const engines = new Map();
-/** The computed `internal/raw-http` entry for `rel` in workspace `dir`. */
-async function boundaryEntry(dir, rel) {
+/** ESLint must classify even files whose boundary is optional. */
+async function computedConfig(dir, rel) {
   if (!engines.has(dir)) engines.set(dir, new ESLint({ cwd: join(ROOT, dir) }));
   const config = await engines.get(dir).calculateConfigForFile(join(ROOT, dir, rel));
-  return config?.rules?.[RULE];
+  return config;
 }
 
 /**
@@ -225,8 +224,10 @@ async function coverageProblem(roots, path) {
   }
   const at = reacher(roots, path);
   if (at === null) return `${path}: no lint command reaches it`;
+  const config = await computedConfig(at.dir, at.rel);
+  if (config === undefined) return `${path}: ESLint ignores it`;
   if (required === null) return null;
-  const entry = await boundaryEntry(at.dir, at.rel);
+  const entry = config.rules?.[RULE];
   return boundaryHolds(entry, required)
     ? null
     : `${path}: ${RULE} is ${JSON.stringify(entry ?? null)}, needs ${JSON.stringify(required)}`;
@@ -340,5 +341,12 @@ test('configuration names never grant an exemption outside reviewed exact paths'
   for (const file of Object.keys(UNLINTED)) {
     assert.ok(tracked.includes(file), `stale exact exemption: ${file}`);
     assert.equal(unlinted(`unreviewed/${file}`), undefined, file);
+  }
+});
+
+test('ignored non-required executables still fail coverage', async () => {
+  for (const path of ['scripts/dist/fixture.test.mjs', 'scripts/coverage/fixture.test.js']) {
+    assert.equal(requiredBoundary(path), null);
+    assert.match(await coverageProblem(lintRoots(), path), /ESLint ignores it/);
   }
 });

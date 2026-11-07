@@ -15,7 +15,22 @@ import {
   topUpWallet,
 } from '@/server/wallet';
 
-import type { TopUpFormState } from './form-state';
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
+import { restoreTopUp, topUpScope, topUpSnapshot } from '@/server/top-up-request';
+import {
+  releaseUnresolved,
+  reserveUnresolved,
+  requestDigest,
+  settleUnresolved,
+} from '@/server/unresolved-request';
+import { isProvenRefusal } from '@/server/write';
+
+import {
+  CONFIRM_DUPLICATE_FIELD,
+  CONFIRM_DUPLICATE_VALUE,
+  RELEASE_FIELD,
+  type TopUpFormState,
+} from './form-state';
 
 /**
  * `/wallet`'s one server action.
@@ -29,9 +44,13 @@ import type { TopUpFormState } from './form-state';
  */
 export async function submitTopUp(
   walletId: string,
-  _previous: TopUpFormState,
+  previous: TopUpFormState,
   form: FormData,
 ): Promise<TopUpFormState> {
+  return keepUnconfirmed(previous, form, () => attemptTopUp(walletId, form));
+}
+
+async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
@@ -40,6 +59,9 @@ export async function submitTopUp(
 
   const submissionId = form.get(SUBMISSION_FIELD);
   if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+
+  const restored = await restoreTopUp(session, walletId);
+  if (restored.kind !== 'IDLE') return restored;
 
   const values = topUpFormValues(form);
   const parsed = parseTopUpForm(values);
@@ -58,7 +80,45 @@ export async function submitTopUp(
     return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
-  const result = await topUpWallet(session, walletId, parsed.request, submissionId);
+  const scope = topUpScope(walletId);
+  const ref = topUpSnapshot(session, walletId, submissionId, parsed.request.amountMinor);
+  if (ref.length > 800) return { kind: 'NOT_CHECKED' };
+  const reserved = await reserveUnresolved(session, scope, {
+    key: submissionId,
+    digest: requestDigest(session, scope.purpose, parsed.request),
+    ref,
+    issuedAt: Date.now(),
+    deadline: null,
+    windowMs: null,
+  });
+  if (reserved.kind !== 'RESERVED')
+    return restoreTopUp(session, walletId).then((state) =>
+      state.kind === 'IDLE' ? { kind: 'NOT_CHECKED' } : state,
+    );
+  let result;
+  try {
+    result = await topUpWallet(session, walletId, parsed.request, submissionId);
+  } catch (error) {
+    await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+    throw error;
+  }
+  const ambiguous =
+    result.kind === 'UNKNOWN_OUTCOME' ||
+    result.kind === 'IN_PROGRESS' ||
+    (result.kind === 'UNAVAILABLE' &&
+      !result.neverSent &&
+      !isProvenRefusal(result.status, result.code));
+  await settleUnresolved(
+    reserved.attempt,
+    result.kind === 'CREATED' ? 'CONFIRMED' : ambiguous ? 'UNRESOLVED' : 'REFUSED',
+  );
+  if (ambiguous)
+    return {
+      kind: 'UNCONFIRMED',
+      correlationId: result.correlationId,
+      submissionId,
+      values: { amountMinor: parsed.request.amountMinor },
+    };
 
   if (result.kind === 'CREATED') {
     // Nothing on the page reads a confirmation flag, so none is carried (PR 405 review 2, F2):
@@ -88,4 +148,14 @@ export async function submitTopUp(
       // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
+}
+
+/** Explicit reconciliation only; the signed record id prevents a stale tab releasing a newer hold. */
+export async function releaseUnresolvedTopUp(walletId: string, form: FormData): Promise<void> {
+  const session = await currentSession();
+  if (!session) redirect('/login?returnTo=/wallet');
+  if (!verifyCsrf(session, form).ok) redirect('/wallet');
+  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/wallet');
+  await releaseUnresolved(session, topUpScope(walletId), form.get(RELEASE_FIELD));
+  redirect('/wallet');
 }

@@ -192,8 +192,32 @@ describe('what the service refuses', () => {
     expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+    // The first answer was lost; the same form again meets the gateway's rate limit,
+    // which says nothing about the first send.
+    createDriver.mockReset();
+    createDriver
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData(VALID);
+    const first = await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, form);
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
+    expect(await submitCreateDriver(first, form)).toEqual(first);
+    expect(createDriver).toHaveBeenCalledTimes(2);
   });
 
   it('reports an outage with its status and correlation id', async () => {
@@ -277,7 +301,9 @@ describe('who may be registered: fleet-service decides on every POST (task 095)'
     expect(elsewhere).toMatchObject({ fieldErrors: { userId: actual.NOT_A_MEMBER_TEXT } });
   });
 
-  it('says "nothing was saved" when fleet-service could not ask identity-service (503)', async () => {
+  it('keeps a 503 unconfirmed, even when fleet-service could not ask identity-service (FU-189)', async () => {
+    // fleet-service's own "could not ask" and a reset after its commit reach this portal as the
+    // same status, and a 5xx body is never read: only a proven refusal says nothing was saved.
     const state = await send(
       gatewayAnswering(503, {
         code: 'UPSTREAM_UNAVAILABLE',
@@ -285,7 +311,7 @@ describe('who may be registered: fleet-service decides on every POST (task 095)'
       }).impl,
       formData(VALID),
     );
-    expect(state).toMatchObject({ kind: 'FAILED', status: 503 });
+    expect(state).toMatchObject({ kind: 'UNCONFIRMED' });
   });
 
   it('keeps a 504 unconfirmed — the gateway gave up, the write may have happened', async () => {

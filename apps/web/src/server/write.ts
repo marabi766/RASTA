@@ -12,6 +12,7 @@ import {
 } from './gateway';
 import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
+import { inheritUnconfirmed } from './unconfirmed-retry';
 import type { WebSession } from './session';
 import { ownValue, ownText } from '@/lib/own-key';
 
@@ -55,26 +56,27 @@ export type WriteResult<T, F extends string> =
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
   /**
-   * Any other refusal or failure the gateway answered with a status. A `4xx`
-   * here is always a **proven** refusal ({@link isProvenRefusal}: a documented
-   * code answered with its own status — any other `4xx` is `UNKNOWN_OUTCOME`);
-   * a `5xx` is **not** proof that nothing was written
-   * (a post-commit read can fail, an upstream reset after the commit surfaces
-   * as `503`). A keyed write may resend it under the same key, which replays
-   * rather than repeats; a key-less one (`idempotency: 'NONE'`) must treat a
-   * `5xx` as unconfirmed — `supplier-runner.ts` does (Codex review of PR 366,
-   * finding 3). `neverSent` is set when the request provably never left this
-   * portal (connection refused, DNS …): unlike a 503 the platform answered,
-   * which may follow a commit, that one is known not to have reached anything —
-   * a write need not remember it as unresolved.
+   * The write **provably did nothing** in this attempt (FU-189, PR-880 F2;
+   * checklist A1) — the one answer a form may render as "nothing changed":
+   *
+   *   - a refusal the platform proved ({@link isProvenRefusal}: a documented
+   *     `4xx` code answered with its own status) that no kind above names —
+   *     `429 RATE_LIMIT_EXCEEDED`, `401`, `409 REPLAY_WINDOW_CLOSED` …;
+   *   - `neverSent`: the request provably never left this portal (connection
+   *     refused, DNS …), so it reached nothing.
+   *
+   * Never a `5xx` the platform answered: a post-commit read can fail, and an
+   * upstream reset after the commit surfaces as `503`, so every such answer is
+   * `UNKNOWN_OUTCOME` — decided here, once, for every caller, so a caller that
+   * maps this kind to "failed, you can resend" is right by construction
+   * (`write-classifier.guard.spec.ts` holds every gateway write to this writer).
    */
   | {
       readonly kind: 'UNAVAILABLE';
       readonly status: number;
       readonly correlationId: string;
       /**
-       * The platform error `code` (docs/06 § 6.7). Present exactly when the status is a `4xx`, which
-       * is then a proven refusal; absent on a `5xx` and on `neverSent`.
+       * The platform error `code` (docs/06 § 6.7) of the proven refusal; absent on `neverSent`.
        */
       readonly code?: string;
       readonly neverSent?: true;
@@ -344,6 +346,16 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
   session: WebSession,
   call: WriteCall<S, F>,
 ): Promise<WriteResult<z.infer<S>, F>> {
+  // Sent while retrying a send whose outcome is unknown: only a success or "in
+  // progress" is about that send; every other answer is about this attempt only
+  // (`unconfirmed-retry.ts`, FU-173).
+  return inheritUnconfirmed(await dispatchWrite(session, call));
+}
+
+async function dispatchWrite<S extends z.ZodTypeAny, F extends string>(
+  session: WebSession,
+  call: WriteCall<S, F>,
+): Promise<WriteResult<z.infer<S>, F>> {
   try {
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
@@ -367,18 +379,18 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     const { status, correlationId, problem } = error;
     if (error instanceof GatewayOutcomeUnknownError)
       return { kind: 'UNKNOWN_OUTCOME', correlationId };
-    // UPSTREAM_TIMEOUT: the gateway forwarded the write and gave up waiting —
-    // the same unknown, one hop further on.
-    if (status === 504) return { kind: 'UNKNOWN_OUTCOME', correlationId };
     // No byte left this portal: known, and known to have done nothing.
     if (error instanceof GatewayNeverSentError) {
       return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
     }
-    // Before any status is mapped to a refusal: a `4xx` this portal cannot
-    // prove was the platform's refusal (a bodyless 403/404, an unknown or
-    // mismatched code) is unconfirmed (PR-830 r1 F1). Below this line every
-    // `4xx` carries a documented code.
-    if (status < 500 && !isProvenRefusal(status, problem?.code)) {
+    // The request reached the platform. Before any status is mapped to a
+    // refusal, everything that does not PROVE this attempt wrote nothing is
+    // unconfirmed (PR-830 r1 F1, FU-189): a bodyless 403/404, an unknown or
+    // mismatched code — and every `5xx`, whose body is never read: a 500 from a
+    // read after the commit, a 502/503 from a reset after it, a 504
+    // (UPSTREAM_TIMEOUT: the gateway forwarded it and gave up waiting). Below
+    // this line every answer is a `4xx` carrying a documented code.
+    if (!isProvenRefusal(status, problem?.code)) {
       return { kind: 'UNKNOWN_OUTCOME', correlationId };
     }
     if (status === 409 && problem?.code === 'CONFLICT' && error.retryAfterSeconds !== null) {
