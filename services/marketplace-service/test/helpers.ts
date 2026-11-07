@@ -254,8 +254,20 @@ export function key(prefix: string): string {
  * `scheduledAt` is when the workflow scheduled it: now, unless the case needs
  * the gap a real saga leaves between two steps.
  */
-export function sagaStep(scheduledAt: Date = new Date()): SagaStep {
+export function sagaStep(scheduledAt: Date = scheduledNow()): SagaStep {
   return { key: `order-test/run-test/${ulid()}`, scheduledAt };
+}
+
+/**
+ * Now, but later than any step this suite scheduled before, as Temporal
+ * schedules one workflow's activities: a call record is owned by the command
+ * scheduled last (#836 r1 R1), and two steps in one millisecond would be
+ * neither older nor newer.
+ */
+let lastScheduledMs = 0;
+function scheduledNow(): Date {
+  lastScheduledMs = Math.max(Date.now(), lastScheduledMs + 1);
+  return new Date(lastScheduledMs);
 }
 
 /**

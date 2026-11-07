@@ -363,6 +363,72 @@ describe('an authorisation against a concurrent dispute (FU-178, D-138)', () => 
     expect(sentWhile).toEqual(['RECEIPT_CONFIRMED']);
   });
 
+  /** The authorisation's call records on the order, as committed (#836, FU-145). */
+  const authorisationRecords = (orderId: string) =>
+    runUnscoped('the suite reads the call records the order has committed', () =>
+      prisma.client.sagaUnconfirmedCall.findMany({
+        where: { orderId, operation: 'authoriseSettlement' },
+        select: { confirmedAt: true },
+      }),
+    );
+
+  // #836 with #895: the record is opened behind the hold's own bounded wait, so
+  // neither guarantee gives way to the other.
+  it('behind a dispute in progress, the fenced authorisation leaves its record open (D-151)', async () => {
+    const { orderId, transactionId } = await receiptConfirmed();
+    const { activities, sentWhile } = authoriser(orderId);
+    const commit = gate();
+    const written = gate();
+    const dispute = asBuyer(() =>
+      wiring.orders.raiseDispute(orderId, { reason: 'it arrived broken' }, async () => {
+        written.open();
+        await commit.opened;
+      }),
+    );
+    await written.opened;
+
+    const authorisation = activities.authoriseSettlement(orderId, transactionId);
+    await waitFor('the authorisation to wait behind the dispute', async () =>
+      (await blockedOnOrders()) > 0 ? true : null,
+    );
+    commit.open();
+    await dispute;
+
+    await expect(authorisation).resolves.toMatchObject({ fenced: true, status: 'DISPUTED' });
+    expect(sentWhile).toEqual([]);
+    expect(await authorisationRecords(orderId)).toEqual([{ confirmedAt: null }]);
+  });
+
+  it('past the wait, the authorisation opens no record and sends nothing', async () => {
+    const { orderId, transactionId } = await receiptConfirmed();
+    const { activities, sentWhile } = authoriser(orderId);
+    const release = gate();
+    const holding = gate();
+    const holder = prisma.client.$transaction(
+      async (tx) => {
+        await wiring.repository.lockOrder(tx as ExtendedPrismaClient, orderId);
+        holding.open();
+        await Promise.race([
+          release.opened,
+          new Promise((resolve) => setTimeout(resolve, ORDER_HOLD_WAIT_MS + 2_000)),
+        ]);
+      },
+      { timeout: ORDER_HOLD_WAIT_MS + 5_000 },
+    );
+    await holding.opened;
+
+    const failed = await activities
+      .authoriseSettlement(orderId, transactionId)
+      .then(() => 'answered')
+      .catch((error: Error) => error);
+    release.open();
+    await holder;
+
+    expect(failed).toBeInstanceOf(Error);
+    expect(sentWhile).toEqual([]);
+    expect(await authorisationRecords(orderId)).toEqual([]);
+  });
+
   it('the hold on an order that does not exist is refused, and runs nothing', async () => {
     const fn = jest.fn();
     await expect(
