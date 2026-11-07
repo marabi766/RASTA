@@ -1,5 +1,5 @@
 import { builtinModules } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 
 import ts from 'typescript';
@@ -55,9 +55,29 @@ const PROCESS_LOADERS = new Set(['binding', '_linkedBinding', 'dlopen']);
  * The one non-code a module may import: a static import of a stylesheet from `src/`, which Next's
  * CSS loader turns into a stylesheet. Node's loader executes any other suffix as JavaScript, and
  * webpack parses a suffix it has no rule for as JavaScript too, so every other "asset" (`.svg`,
- * `.txt`, `.json` …) and every load of one is refused until classified (FU-219).
+ * `.txt`, `.json` …) and every load of one is refused until classified (FU-219). Decided on the
+ * file webpack loads, not on the text (PR-949 F1): see `stylesheet` below.
  */
 const ASSET = /\.css$/;
+/**
+ * Request syntax the bundler reads and TypeScript does not: a query or fragment (`x.txt?.css`,
+ * which Next's CSS rules, matching the path only, leave to the JavaScript parser), an inline
+ * loader or match resource (`!!l!./a.css`, `./x.js!=!./a.css`), a subpath import (`#x`). Refused
+ * wherever it appears, whatever the rest says (PR-949 F1).
+ */
+const REQUEST_SYNTAX = /[?#!]/;
+/** webpack's free variables (`__webpack_require__`, `__webpack_modules__` …) and magic comments. */
+const WEBPACK_NAME = /^__(non_)?webpack_/;
+/** …and pragmas the compiler turns into imports (`@jsxImportSource @/x` imports `@/x/jsx-runtime`). */
+const MAGIC_COMMENT = /\b(webpack|turbopack)[A-Z][A-Za-z]*\s*:|@jsx(ImportSource|Runtime|Frag)?\b/;
+/** Next's `resolve.extensions`, in its order (no `extensionAlias`): what webpack tries after the name. */
+const BUNDLER_EXTENSIONS = ['.js', '.mjs', '.tsx', '.ts', '.jsx', '.json', '.wasm'];
+/** What Next serves from `public/` as is, without compiling it: only files no browser executes. */
+const INERT_PUBLIC = /^public\/.+\.(png|jpe?g|gif|webp|avif|ico|woff2?)$/;
+
+/** A stylesheet on disk: a real file (a link to code is loaded as its target), named `.css`. */
+export const isStylesheetFile = (path: string): boolean =>
+  ASSET.test(path) && lstatSync(path).isFile();
 
 /**
  * The executable files directly in `apps/web/` outside `src/`. The two the portal
@@ -103,7 +123,7 @@ const kindOf = (path: string): ts.ScriptKind =>
         ? ts.ScriptKind.JSX
         : ts.ScriptKind.JS;
 
-const COMPILER_OPTIONS = (() => {
+export const COMPILER_OPTIONS = (() => {
   const parsed = ts.getParsedCommandLineOfConfigFile(join(WEB_ROOT, 'tsconfig.json'), undefined, {
     ...ts.sys,
     onUnRecoverableConfigFileDiagnostic: (d) => {
@@ -143,8 +163,38 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
     stems.set(stem, [...(stems.get(stem) ?? []), id]);
   }
   const twins = [...stems.values()].filter((ids) => ids.length > 1);
+  // What the bundler loads around the graph, and cannot be proven inert: refused (PR-949 F1).
+  const refused = [...new Set([...authored, ...virtual.keys()])]
+    .map(idOf)
+    .flatMap((id) =>
+      id.startsWith('public/') && !INERT_PUBLIC.test(id)
+        ? [`${id} is served as is from public/ and may execute: refused`]
+        : /(^|\/)package\.json$/.test(id) && id !== 'package.json'
+          ? [`${id} can remap what the bundler resolves (main, browser, imports): refused`]
+          : [],
+    );
+  // Only `name`, `scripts` and the like: no field that remaps a request (`browser`, `imports` …).
+  const manifest = JSON.parse(host.readFile(join(WEB_ROOT, 'package.json')) ?? '{}') as object;
+  for (const key of Object.keys(manifest))
+    if (!/^(name|version|private|description|scripts|dependencies|devDependencies)$/.test(key))
+      refused.push(`package.json sets ${key}, which the bundler may resolve by: refused`);
+  const stylesheets = new Set([
+    ...authored.filter(isStylesheetFile),
+    ...[...virtual.keys()].filter((path) => ASSET.test(path)),
+  ]);
+  /** `./a.css`, `../a.css` or `@/a.css` from `src/`, mapped exactly: webpack's own first try. */
+  const stylesheet = (specifier: string, from: string, how: Edge['how']): boolean => {
+    if (how === 'load' || !from.startsWith(`${SRC}/`) || !ASSET.test(specifier)) return false;
+    const target = specifier.startsWith('@/')
+      ? join(SRC, specifier.slice(2))
+      : /^\.\.?\//.test(specifier)
+        ? join(dirname(from), specifier)
+        : null;
+    return target !== null && stylesheets.has(target);
+  };
 
   const resolve = (specifier: string, from: string, how: Edge['how'], nodeLoad = false): string => {
+    if (REQUEST_SYNTAX.test(specifier)) return `unresolved:${specifier}`;
     const bare = specifier.replace(/^node:/, '');
     if (specifier.startsWith('node:') || builtinModules.includes(bare)) return `node:${bare}`;
     // A Node require does not use TypeScript's .js → .ts substitution or @/ alias.
@@ -162,13 +212,9 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
     const path = found?.resolvedFileName;
     // A package that is not installed: the package list decides, as if it were.
     if (path === undefined && !/^(\.|\/|@\/)/.test(specifier)) return `pkg:${specifier}`;
+    // A missing `x.css` is not an asset: webpack completes it with Next's extensions (`x.css.mjs`).
     if (path === undefined || ASSET.test(path))
-      return how !== 'load' &&
-        from.startsWith(`${SRC}/`) &&
-        ASSET.test(specifier) &&
-        /^[./@]/.test(specifier)
-        ? 'asset'
-        : `unresolved:${specifier}`;
+      return stylesheet(specifier, from, how) ? 'asset' : `unresolved:${specifier}`;
     // By the whole specifier: `next/navigation` is not `next/dist/compiled/undici`. A workspace
     // package (`@rasta/contracts`) resolves to its own source outside this app.
     if (
@@ -177,6 +223,16 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
       !path.startsWith(`${WEB_ROOT}/`)
     )
       return `pkg:${specifier}`;
+    // webpack tries the name as written, then each extension, then `index`: the first file it
+    // finds must be the one TypeScript chose (`./x` with `x` and `x.ts`, `./d` with `d/index`).
+    const base = specifier.startsWith('@/')
+      ? join(SRC, specifier.slice(2))
+      : join(specifier.startsWith('/') ? '' : dirname(from), specifier);
+    const first = ['', ...BUNDLER_EXTENSIONS]
+      .map((ext) => `${base}${ext}`)
+      .concat(['', ...BUNDLER_EXTENSIONS].map((ext) => join(base, `index${ext}`)))
+      .find((candidate) => host.fileExists(candidate));
+    if (first !== undefined && first !== path) return `unresolved:${specifier}`;
     // In `scripts/` or `e2e/`, or a declaration standing in for code: nothing this guard reads.
     return inventory.has(idOf(path)) ? idOf(path) : `unresolved:${specifier}`;
   };
@@ -189,6 +245,8 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
     const edges: Edge[] = [];
     const unprovable: string[] = [];
     const lineOf = (node: ts.Node) => file.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+    // `webpackIgnore`, `webpackInclude` …: the bundler loads something other than the text says.
+    if (MAGIC_COMMENT.test(text)) unprovable.push(`${id} carries a bundler magic comment`);
     const add = (
       node: ts.Node,
       specifier: string,
@@ -314,11 +372,30 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
           );
         else unprovable.push(`${id}:${lineOf(node)} escapes a loader factory or its base`);
       }
+      // `import.meta.webpackContext`, `.webpackHot`, `new URL(x, import.meta.url)`: only the
+      // modelled factory's base is read (PR-949 F1).
+      if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
+        const url = node.parent;
+        const call = url.parent;
+        if (
+          !ts.isPropertyAccessExpression(url) ||
+          url.name.text !== 'url' ||
+          !ts.isCallExpression(call) ||
+          call.arguments[0] !== url ||
+          !ts.isIdentifier(call.expression) ||
+          !factories.has(call.expression.text)
+        )
+          unprovable.push(`${id}:${lineOf(node)} uses import.meta other than as a factory's base`);
+      }
       // `const r = require`, `module.require`, `require.context`, `process.getBuiltinModule('http')`,
       // webpack's own loaders: a load with no specifier to resolve.
       if (
         ts.isIdentifier(node) &&
         (LOADERS.has(node.text) ||
+          WEBPACK_NAME.test(node.text) ||
+          // AMD (`define([...], f)`), which webpack's parser still reads in Next.
+          (node.text === 'define' &&
+            !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)) ||
           (node.text === 'require' &&
             !(ts.isCallExpression(node.parent) && node.parent.expression === node)))
       )
@@ -326,6 +403,14 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
       // The same capabilities by a string, and `process`'s own loaders by any name (FU-219).
       if (ts.isStringLiteralLike(node) && LOADER_NAMES.has(node.text))
         unprovable.push(`${id}:${lineOf(node)} names the loader ${node.text} as a string`);
+      // `module.hot.accept('./x')`, `module.constructor` …: only `module.exports` is modelled.
+      if (
+        (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'module' &&
+        !(ts.isPropertyAccessExpression(node) && node.name.text === 'exports')
+      )
+        unprovable.push(`${id}:${lineOf(node)} reaches module other than module.exports`);
       if (
         (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
         ts.isIdentifier(node.expression) &&
@@ -356,5 +441,5 @@ export function importGraph(virtual: ReadonlyMap<string, string> = new Map()) {
   ]
     .map(idOf)
     .filter((id) => EXECUTABLE.test(id));
-  return { facts, inventory, checked: [...checked].sort(), rootFiles, twins };
+  return { facts, inventory, checked: [...checked].sort(), rootFiles, twins, refused };
 }

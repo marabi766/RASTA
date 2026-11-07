@@ -36,13 +36,22 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { isMetadataRouteFile } from 'next/dist/lib/metadata/is-metadata-route';
 import ts from 'typescript';
 
-import { WEB_ROOT, WEB_ROOT_FILES, TEST_NAMED, importGraph, isRoot } from '@/test/import-graph';
+import {
+  COMPILER_OPTIONS,
+  WEB_ROOT,
+  WEB_ROOT_FILES,
+  TEST_NAMED,
+  importGraph,
+  isRoot,
+  isStylesheetFile,
+} from '@/test/import-graph';
 
 const GATEWAY = 'src/server/gateway.ts';
 /** The writer, and the module that defines `callGateway`. */
@@ -143,6 +152,7 @@ function findingsIn(graph: Graph): string[] {
   const findings: string[] = graph.twins
     .filter((ids) => ids.some((id) => graph.checked.includes(id)))
     .map((ids) => `${ids.join(' and ')} are one module to the bundler: which runs is unproven`);
+  findings.push(...graph.refused);
   for (const id of graph.checked) {
     // `internal/raw-http` (lint: global aliases, reflection, computed names, string execution)
     // covers `src/` without its tests, and the portal's root files: whatever else ships is refused.
@@ -578,6 +588,7 @@ describe('FU-219: what Next and Node actually load and execute', () => {
     ]),
     ...LOADER_ESCAPES.map((source, n) => [at(`src/zz-fu219-loader-${n}/a.mjs`), source] as const),
     [at('src/zz-fu219-css/a.ts'), "import './globals.css';"],
+    [at('src/zz-fu219-css/globals.css'), 'body {}'],
     // A tooling file beside src/ that a shipped module imports: checked, but never linted.
     [at('src/zz-fu219-tooling/a.ts'), "import '../../postcss.config.mjs';"],
   ]);
@@ -643,6 +654,156 @@ describe('FU-219: what Next and Node actually load and execute', () => {
         /escapes a loader factory|unclassified module loader|names the loader|loader of process|other than as a named load/,
       ),
     );
+  });
+});
+
+// PR-949 F1: the bundler reads request syntax and completes names that TypeScript does not, so a
+// stylesheet is decided on the file webpack loads, and every request the guard cannot model is
+// refused. Rows R1-R7 are the review's probes (each loaded and executed by a real webpack 5 build).
+describe('PR-949 F1: what webpack loads, not what the specifier says', () => {
+  const PAYLOAD = "fetch('/v1/x', { method: 'POST' });";
+  const ROWS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+    'R1 a query': { 'a.ts': "import './payload.txt?.css';", 'payload.txt': PAYLOAD },
+    // webpack still reads the query when a file of that literal name exists: the syntax decides.
+    'R1 a query, beside a file of that literal name': {
+      'a.ts': "import './payload.txt?.css';",
+      'payload.txt?.css': 'b {}',
+      'payload.txt': PAYLOAD,
+    },
+    'R2 a fragment': { 'a.ts': "import './payload.txt#.css';", 'payload.txt': PAYLOAD },
+    'R3 a query on a test module': { 'a.ts': "import '@/test/zz-949-send.ts?x.css';" },
+    'R4 a query re-exported': {
+      'a.ts': "export * from './payload.txt?.css';",
+      'payload.txt': PAYLOAD,
+    },
+    'R5 an inline loader': { 'a.ts': "import '../test/zz-949-l.cjs!./a.css';", 'a.css': 'b {}' },
+    'R6 a missing .css that webpack completes': { 'a.ts': "import '../test/zz-949.css';" },
+    'R7 import.meta.webpackContext': {
+      'a.ts':
+        "const c = import.meta.webpackContext('../test', { recursive: true }); c.keys().forEach(c);",
+    },
+    'loader prefix !!': { 'a.ts': "import '!!../test/zz-949-l.cjs!./a.css';", 'a.css': 'b {}' },
+    'loader prefix -!': { 'a.ts': "import '-!../test/zz-949-l.cjs!./a.css';", 'a.css': 'b {}' },
+    'a match resource': { 'a.ts': "import './x.js!=!./a.css';", 'a.css': PAYLOAD },
+    'a subpath import': { 'a.ts': "import '#send';" },
+    'a query on a module TypeScript resolves': {
+      'a.ts': "import './b?raw';",
+      'b.ts': 'export {};',
+    },
+    'a query by require': { 'a.cjs': "require('./b.cjs?x');", 'b.cjs': '' },
+    'require.context': {
+      'a.js': "const c = require.context('../test', true); c.keys().forEach(c);",
+    },
+    'import.meta.webpackHot': { 'a.ts': 'import.meta.webpackHot?.accept();' },
+    'a worker by new URL': { 'a.ts': "new Worker(new URL('../test/w.ts', import.meta.url));" },
+    'import.meta held': { 'a.mjs': 'const meta = import.meta; meta.webpackContext(dir);' },
+    'a webpack free variable': { 'a.ts': '__webpack_modules__[id]();' },
+    'a magic comment': { 'a.ts': "await import(/* webpackIgnore: true */ './b');", 'b.ts': '' },
+    // webpack's own order picks another file than TypeScript (#949 r2 self-review).
+    'a file webpack tries first, by its exact name': {
+      'a.ts': "import './payload';",
+      payload: PAYLOAD,
+      'payload.ts': 'export {};',
+    },
+    'a raw file beside its .ts completion': {
+      'a.ts': "import './payload.txt';",
+      'payload.txt': PAYLOAD,
+      'payload.txt.ts': 'export {};',
+    },
+    'a stylesheet beside its .ts completion': {
+      'a.ts': "import './p.css';",
+      'p.css': PAYLOAD,
+      'p.css.ts': 'export {};',
+    },
+    'an .mjs before a directory index': {
+      'a.ts': "import './x.test';",
+      'x.test.mjs': PAYLOAD,
+      'x.test/index.ts': 'export {};',
+    },
+    'an extensionless directory index': {
+      'a.ts': "import '@/zz-949-an-extensionless-directory-index/d';",
+      'd/index': PAYLOAD,
+      'd/index.ts': 'export {};',
+    },
+    'AMD define': { 'a.js': "define(['./payload.txt'], function () {});", 'payload.txt': PAYLOAD },
+    'a jsxImportSource pragma': {
+      'a.tsx': '/** @jsxImportSource @/test/zz-949-jsx */\nexport const x = <div />;',
+    },
+    'module.hot.accept': { 'a.js': "module.hot.accept('./payload.txt');", 'payload.txt': PAYLOAD },
+    'a stylesheet by require': { 'a.cjs': "require('./a.css');", 'a.css': 'b {}' },
+    'a stylesheet outside src/ by name': { 'a.ts': "import 'pkg/a.css';" },
+  };
+  const ALLOWED_ROWS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+    'a stylesheet that exists': { 'a.ts': "import './a.css';", 'a.css': 'b {}' },
+    'a directory index and a module.exports': {
+      'a.ts': "import './d';",
+      'd/index.ts': 'export {};',
+      'b.cjs': 'module.exports = {};',
+    },
+    'a stylesheet by @/': { 'a.ts': "import '@/zz-949-a-stylesheet-by-/a.css';", 'a.css': 'b {}' },
+  };
+  const dirOf = (label: string) => `src/zz-949-${label.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
+  const at = (id: string) => join(WEB_ROOT, id);
+  const virtual = new Map<string, string>([
+    [at('src/test/zz-949-send.ts'), PAYLOAD],
+    [at('src/test/zz-949-l.cjs'), `module.exports = () => ${JSON.stringify(PAYLOAD)};`],
+    [at('src/test/zz-949.css.mjs'), PAYLOAD],
+    [at('src/test/zz-949.css.cjs'), PAYLOAD],
+    [at('src/test/send.js'), PAYLOAD],
+    ...Object.entries({ ...ROWS, ...ALLOWED_ROWS }).flatMap(([label, files]) =>
+      Object.entries(files).map(
+        ([file, source]) => [at(`${dirOf(label)}/${file}`), source] as const,
+      ),
+    ),
+  ]);
+  const findings = findingsIn(importGraph(virtual));
+  const from = (label: string) => findings.filter((f) => f.startsWith(`${dirOf(label)}/`));
+
+  it.each(Object.keys(ROWS))('refuses %s', (label) => {
+    expect(from(label)).not.toEqual([]);
+  });
+
+  it.each(Object.keys(ALLOWED_ROWS))('lets through %s', (label) => {
+    expect(from(label)).toEqual([]);
+  });
+
+  it('takes a stylesheet only as a real file: a link is loaded as what it points to', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'w949-'));
+    try {
+      writeFileSync(join(dir, 'send.js'), PAYLOAD);
+      writeFileSync(join(dir, 'real.css'), 'b {}');
+      symlinkSync(join(dir, 'send.js'), join(dir, 'link.css'));
+      expect([
+        isStylesheetFile(join(dir, 'real.css')),
+        isStylesheetFile(join(dir, 'link.css')),
+      ]).toEqual([true, false]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('models the only alias Next adds to webpack from tsconfig: @/*, with no baseUrl', () => {
+    expect([COMPILER_OPTIONS.baseUrl, Object.keys(COMPILER_OPTIONS.paths ?? {})]).toEqual([
+      undefined,
+      ['@/*'],
+    ]);
+  });
+
+  it('refuses what the bundler serves or resolves around the graph', () => {
+    const graph = importGraph(
+      new Map([
+        [at('public/send.js'), PAYLOAD],
+        [at('public/icon.png'), ''],
+        [at('src/zz-949-dir/package.json'), '{ "browser": "./send.txt" }'],
+        [at('package.json'), '{ "name": "web", "browser": { "./src/a.ts": "./src/send.txt" } }'],
+      ]),
+    );
+    expect(findingsIn(graph)).toEqual(expect.arrayContaining(graph.refused));
+    expect(graph.refused).toEqual([
+      'public/send.js is served as is from public/ and may execute: refused',
+      'src/zz-949-dir/package.json can remap what the bundler resolves (main, browser, imports): refused',
+      'package.json sets browser, which the bundler may resolve by: refused',
+    ]);
   });
 });
 
