@@ -33,7 +33,7 @@ export async function submitTopUp(
   previous: TopUpFormState,
   form: FormData,
 ): Promise<TopUpFormState> {
-  return keepUnconfirmed(previous, () => attemptTopUp(walletId, form));
+  return keepUnconfirmed(previous, form, () => attemptTopUp(walletId, form));
 }
 
 async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpFormState> {

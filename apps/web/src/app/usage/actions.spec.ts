@@ -321,7 +321,11 @@ describe('what the service refuses', () => {
       });
     const form = formData(VALID);
     const first = await submitUsage(IDLE_USAGE_FORM, form);
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
     expect(await submitUsage(first, form)).toEqual(first);
     expect(recordUsage).toHaveBeenCalledTimes(2);
   });

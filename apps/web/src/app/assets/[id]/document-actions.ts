@@ -19,6 +19,7 @@ export async function submitAttachDocument(
 ): Promise<DocumentFormState> {
   return keepUnconfirmedWith(
     previous,
+    form,
     () => runAttachDocument(assetId, form),
     // A resend must not upload the file again: the token the retry came back with,
     // else the one the form already held (both are opened again on the next post).

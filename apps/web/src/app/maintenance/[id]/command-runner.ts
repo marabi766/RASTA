@@ -85,7 +85,7 @@ export async function run<V, B, F extends string, C = undefined>(
   previous: RequestCommandFormState<V, F>,
   form: FormData,
 ): Promise<RequestCommandFormState<V, F>> {
-  return keepUnconfirmed(previous, () => attempt(command, form));
+  return keepUnconfirmed(previous, form, () => attempt(command, form));
 }
 
 async function attempt<V, B, F extends string, C = undefined>(

@@ -42,7 +42,7 @@ export async function submitUsage(
   previous: UsageFormState,
   form: FormData,
 ): Promise<UsageFormState> {
-  return keepUnconfirmed(previous, () => attemptUsage(form));
+  return keepUnconfirmed(previous, form, () => attemptUsage(form));
 }
 
 async function attemptUsage(form: FormData): Promise<UsageFormState> {

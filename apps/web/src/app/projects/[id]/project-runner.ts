@@ -104,7 +104,7 @@ export async function runProjectCommand<V, B, F extends string>(
   previous: ProjectFormState<V, F>,
   form: FormData,
 ): Promise<ProjectFormState<V, F>> {
-  return keepUnconfirmed(previous, () => attempt(command, targetId, place, form));
+  return keepUnconfirmed(previous, form, () => attempt(command, targetId, place, form));
 }
 
 async function attempt<V, B, F extends string>(

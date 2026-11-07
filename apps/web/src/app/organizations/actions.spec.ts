@@ -351,7 +351,11 @@ describe('changing a member’s roles', () => {
       });
     const form = formData(ROLES_FORM);
     const first = await submitUpdateMemberRoles(IDLE_UPDATE_MEMBER_ROLES_FORM, form);
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
     expect(await submitUpdateMemberRoles(first, form)).toEqual(first);
     expect(updateMemberRoles).toHaveBeenCalledTimes(2);
   });

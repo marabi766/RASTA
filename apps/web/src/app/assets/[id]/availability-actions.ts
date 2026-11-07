@@ -18,7 +18,7 @@ export async function submitDeclareAvailability(
   previous: DeclareFormState,
   form: FormData,
 ): Promise<DeclareFormState> {
-  return keepUnconfirmed(previous, () => runDeclare(assetId, form));
+  return keepUnconfirmed(previous, form, () => runDeclare(assetId, form));
 }
 
 export async function submitRevokeAvailability(
@@ -27,5 +27,5 @@ export async function submitRevokeAvailability(
   previous: RevokeFormState,
   form: FormData,
 ): Promise<RevokeFormState> {
-  return keepUnconfirmed(previous, () => runRevoke(assetId, windowId, form));
+  return keepUnconfirmed(previous, form, () => runRevoke(assetId, windowId, form));
 }

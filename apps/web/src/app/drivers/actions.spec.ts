@@ -192,6 +192,7 @@ describe('what the service refuses', () => {
     expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
   });
@@ -210,7 +211,11 @@ describe('what the service refuses', () => {
       });
     const form = formData(VALID);
     const first = await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, form);
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
     expect(await submitCreateDriver(first, form)).toEqual(first);
     expect(createDriver).toHaveBeenCalledTimes(2);
   });

@@ -330,6 +330,8 @@ describe('what the service refuses', () => {
     expect(await submitReportRequest(IDLE_REPORT_REQUEST_FORM, formData(VALID))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
+      values: expect.objectContaining({ assetId: VALID.assetId, title: VALID.title }),
     });
     expect(redirect).not.toHaveBeenCalled();
   });
@@ -348,7 +350,12 @@ describe('what the service refuses', () => {
       });
     const form = formData(VALID);
     const first = await submitReportRequest(IDLE_REPORT_REQUEST_FORM, form);
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+      values: expect.objectContaining({ assetId: VALID.assetId, title: VALID.title }),
+    });
     expect(await submitReportRequest(first, form)).toEqual(first);
     expect(reportMaintenanceRequest).toHaveBeenCalledTimes(2);
   });
@@ -395,6 +402,50 @@ describe('what the service refuses', () => {
     const fresh = (state as { submissionId: string }).submissionId;
     expect(fresh).not.toBe(first);
     expect(isBoundSubmissionId(fresh, SESSION)).toBe(true);
+  });
+
+  it('keeps the request sent after "edit and send as new" unresolved under its own key and values, and lets no success for the page’s first settle it (PR-880 r1 F1)', async () => {
+    // The page's key A is in flight; the person edits and sends as new (key B); B is
+    // in flight too, and its retry is refused. Executed on a1bd6bac: the state lost
+    // B, the form fell back to A, and a later success for A redirected.
+    const pageKey = mintSubmissionId(SESSION);
+    const edited = { ...VALID, title: 'عنوانی دیگر' };
+    reportMaintenanceRequest
+      .mockResolvedValueOnce({ kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'corr-a' })
+      .mockResolvedValueOnce({ kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'corr-b' })
+      .mockResolvedValueOnce({
+        kind: 'INVALID',
+        fieldErrors: {},
+        message: 'رد شد',
+        correlationId: 'corr-b2',
+      });
+    const a = await submitReportRequest(
+      IDLE_REPORT_REQUEST_FORM,
+      formData(VALID, { submission: pageKey }),
+    );
+    const asNew = formData(edited, { submission: pageKey });
+    asNew.set(REPORT_INTENT_FIELD, EDIT_AS_NEW_INTENT);
+    const editing = await submitReportRequest(a, asNew);
+    const keyB = (editing as { submissionId: string }).submissionId;
+    expect(keyB).not.toBe(pageKey);
+    const b = await submitReportRequest(editing, formData(edited, { submission: keyB }));
+    expect(b).toMatchObject({ kind: 'IN_PROGRESS', submissionId: keyB });
+
+    const refused = await submitReportRequest(b, formData(edited, { submission: keyB }));
+    expect(refused).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-b',
+      submissionId: keyB,
+      values: expect.objectContaining({ title: edited.title }),
+    });
+
+    // A post under the page's key A is not B's retry: nothing is sent, so A's success
+    // (the default answer here) cannot redirect while B is unresolved.
+    expect(await submitReportRequest(refused, formData(VALID, { submission: pageKey }))).toEqual(
+      refused,
+    );
+    expect(reportMaintenanceRequest).toHaveBeenCalledTimes(3);
+    expect(redirect).not.toHaveBeenCalled();
   });
 
   it('still checks the session, CSRF and the submission id before "edit and send as new"', async () => {

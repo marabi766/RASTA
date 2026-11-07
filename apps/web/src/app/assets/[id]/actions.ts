@@ -49,7 +49,7 @@ export async function submitUpdateAsset(
   previous: UpdateAssetFormState,
   form: FormData,
 ): Promise<UpdateAssetFormState> {
-  return keepUnconfirmed(previous, () => attemptUpdateAsset(assetId, form));
+  return keepUnconfirmed(previous, form, () => attemptUpdateAsset(assetId, form));
 }
 
 async function attemptUpdateAsset(assetId: string, form: FormData): Promise<UpdateAssetFormState> {

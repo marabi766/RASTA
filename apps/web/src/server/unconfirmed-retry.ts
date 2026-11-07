@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+import { SUBMISSION_FIELD } from '@/lib/form-fields';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 
 /**
@@ -43,6 +44,22 @@ import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
  * The page read after a refresh is the reconciliation step: it draws a fresh
  * form (a new key) from what the service now holds.
  *
+ * ## Which request is unresolved (PR-880 r1 F1)
+ *
+ * An unresolved state names its request: every unresolved state this returns
+ * carries the `submissionId` it was sent under (stamped from the post when the
+ * action's own state does not say), and a retry turned `UNCONFIRMED` carries the
+ * held request's `submissionId` and `values` — not the retry's, and not the
+ * page's. A form whose key changed mid-way ("edit and send as new", a document
+ * started afresh) therefore resends **that** request, not the page's first one.
+ *
+ * And only that request can settle it: a retry whose posted `submissionId` is
+ * not the held one — or of a held state that names none — sends **nothing** and
+ * stays `UNCONFIRMED` (fail closed). A success under another key confirms
+ * another request, never this one. The body under the held key is the service's
+ * to compare (a changed body is `IDEMPOTENCY_KEY_REUSED`, which a retry answers
+ * as `UNCONFIRMED` like any refusal).
+ *
  * ## Why the previous state may be trusted for this
  *
  * It is the browser's, so it is only ever used to make the answer *less*
@@ -80,31 +97,62 @@ export function isUnresolvedState(previous: unknown): boolean {
   return kind !== null && UNRESOLVED.has(kind);
 }
 
+/** The request an unresolved state is about: its key and, where the form keeps them, its values. */
+function heldRequestOf(state: unknown): { submissionId: string; values?: unknown } | null {
+  if (typeof state !== 'object' || state === null) return null;
+  const { submissionId, values } = state as { submissionId?: unknown; values?: unknown };
+  if (typeof submissionId !== 'string' || submissionId === '') return null;
+  return values === undefined ? { submissionId } : { submissionId, values };
+}
+
+/** An unresolved `state` names the key it was sent under: its own, else the posted one. */
+function namingItsRequest<S>(state: S, posted: FormDataEntryValue | null): S {
+  if (!isUnresolvedState(state) || heldRequestOf(state) !== null) return state;
+  return typeof posted === 'string' && posted !== '' ? { ...state, submissionId: posted } : state;
+}
+
 /**
- * Runs `attempt`; when `previous` is unresolved, holds its answer to the rule
- * above, building the `UNCONFIRMED` state with `unconfirmed` (for a form whose
- * unconfirmed state carries more than the correlation id).
+ * Runs `attempt` for the post `form`; when `previous` is unresolved, holds its
+ * answer to the rules above, building the `UNCONFIRMED` state with `unconfirmed`
+ * (for a form whose unconfirmed state carries more than the correlation id).
  */
 export async function keepUnconfirmedWith<S extends { readonly kind: string }>(
   previous: S,
+  form: FormData,
   attempt: () => Promise<S>,
   unconfirmed: (correlationId: string, state: S, previous: S) => S,
 ): Promise<S> {
-  if (!isUnresolvedState(previous)) return attempt();
-  const state = await retrying.run(true, attempt);
+  const posted = form.get(SUBMISSION_FIELD);
+  if (!isUnresolvedState(previous)) return namingItsRequest(await attempt(), posted);
+  const held = heldRequestOf(previous);
+  const firstCorrelation = correlationOf(previous);
+  if (held === null || posted !== held.submissionId) {
+    // Not the held request: nothing is sent, nothing it answers could settle this one.
+    return { ...unconfirmed(firstCorrelation ?? '-', previous, previous), ...held };
+  }
+  const state = namingItsRequest(await retrying.run(true, attempt), posted);
   if (PASSED.has(state.kind)) return state;
-  return unconfirmed(correlationOf(previous) ?? correlationOf(state) ?? '-', state, previous);
+  return {
+    ...unconfirmed(firstCorrelation ?? correlationOf(state) ?? '-', state, previous),
+    ...held,
+  };
 }
 
 /** {@link keepUnconfirmedWith} for a form whose unconfirmed state is the shared one. */
 export function keepUnconfirmed<S extends { readonly kind: string }>(
   previous: S,
+  form: FormData,
   attempt: () => Promise<S>,
 ): Promise<S | UnconfirmedWriteState> {
-  return keepUnconfirmedWith<S | UnconfirmedWriteState>(previous, attempt, (correlationId) => ({
-    kind: 'UNCONFIRMED',
-    correlationId,
-  }));
+  return keepUnconfirmedWith<S | UnconfirmedWriteState>(
+    previous,
+    form,
+    attempt,
+    (correlationId) => ({
+      kind: 'UNCONFIRMED',
+      correlationId,
+    }),
+  );
 }
 
 /**

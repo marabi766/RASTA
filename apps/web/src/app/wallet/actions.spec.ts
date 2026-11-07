@@ -193,7 +193,11 @@ describe('topping up — the full order of checks', () => {
       });
     const form = formData({ amountMinor: '1000000' });
     const first = await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, form);
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
     expect(await submitTopUp(WALLET_ID, first, form)).toEqual(first);
     expect(topUpWallet).toHaveBeenCalledTimes(2);
   });

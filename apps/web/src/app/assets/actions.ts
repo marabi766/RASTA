@@ -31,7 +31,7 @@ export async function submitRegisterAsset(
   previous: RegisterAssetFormState,
   form: FormData,
 ): Promise<RegisterAssetFormState> {
-  return keepUnconfirmed(previous, () => attemptRegisterAsset(form));
+  return keepUnconfirmed(previous, form, () => attemptRegisterAsset(form));
 }
 
 async function attemptRegisterAsset(form: FormData): Promise<RegisterAssetFormState> {

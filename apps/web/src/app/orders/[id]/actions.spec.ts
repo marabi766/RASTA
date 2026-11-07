@@ -308,6 +308,7 @@ describe('what the service answers', () => {
       await expect(submit(formData(RECEIPT))).resolves.toEqual({
         kind: 'UNCONFIRMED',
         correlationId: 'c',
+        submissionId: expect.any(String),
       });
       expect(redirect).not.toHaveBeenCalled();
     },
@@ -327,7 +328,11 @@ describe('what the service answers', () => {
       });
     const form = formData(RECEIPT);
     const first = await submit(form);
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
     expect(await submitWith(first, form)).toEqual(first);
     expect(issueOrderCommand).toHaveBeenCalledTimes(2);
   });

@@ -38,7 +38,7 @@ export async function submitOrderCommand(
   previous: OrderCommandFormState,
   form: FormData,
 ): Promise<OrderCommandFormState> {
-  return keepUnconfirmed(previous, () => attemptOrderCommand(orderId, form));
+  return keepUnconfirmed(previous, form, () => attemptOrderCommand(orderId, form));
 }
 
 async function attemptOrderCommand(

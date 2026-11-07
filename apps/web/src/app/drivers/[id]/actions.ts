@@ -50,7 +50,7 @@ export async function submitUpdateDriver(
   previous: UpdateDriverFormState,
   form: FormData,
 ): Promise<UpdateDriverFormState> {
-  return keepUnconfirmed(previous, () => attemptUpdateDriver(driverId, form));
+  return keepUnconfirmed(previous, form, () => attemptUpdateDriver(driverId, form));
 }
 
 async function attemptUpdateDriver(
@@ -116,7 +116,7 @@ export async function submitChangeStatus(
   previous: ChangeStatusFormState,
   form: FormData,
 ): Promise<ChangeStatusFormState> {
-  return keepUnconfirmed(previous, () => attemptChangeStatus(driverId, form));
+  return keepUnconfirmed(previous, form, () => attemptChangeStatus(driverId, form));
 }
 
 async function attemptChangeStatus(
@@ -179,7 +179,7 @@ export async function submitAssign(
   previous: AssignFormState,
   form: FormData,
 ): Promise<AssignFormState> {
-  return keepUnconfirmed(previous, () => attemptAssign(driverId, form));
+  return keepUnconfirmed(previous, form, () => attemptAssign(driverId, form));
 }
 
 async function attemptAssign(driverId: string, form: FormData): Promise<AssignFormState> {
@@ -243,7 +243,7 @@ export async function submitEndAssignment(
   previous: EndAssignmentFormState,
   form: FormData,
 ): Promise<EndAssignmentFormState> {
-  return keepUnconfirmed(previous, () => attemptEndAssignment(driverId, assignmentId, form));
+  return keepUnconfirmed(previous, form, () => attemptEndAssignment(driverId, assignmentId, form));
 }
 
 async function attemptEndAssignment(

@@ -91,13 +91,23 @@ const OWN_MECHANISM: Readonly<
   ],
 };
 
-/** The action's own leading arguments (ids), then the previous state, then the form. */
-function retry(action: Action, previous: unknown): Promise<unknown> {
+/**
+ * The action's own leading arguments (ids), then the previous state, then the form —
+ * posting the held request's key, so the attempt runs (PR-880 r1 F1: another key
+ * sends nothing).
+ */
+function retry(action: Action, previous: { submissionId?: string }): Promise<unknown> {
   const ids = Array.from({ length: Math.max(0, action.length - 2) }, (_, i) => `ID_${i + 1}`);
-  return action(...ids, previous, new FormData());
+  const form = new FormData();
+  if (previous.submissionId) form.set('submission', previous.submissionId);
+  return action(...ids, previous, form);
 }
 
-const UNCONFIRMED = { kind: 'UNCONFIRMED', correlationId: 'COR-FIRST' };
+const UNCONFIRMED = {
+  kind: 'UNCONFIRMED',
+  correlationId: 'COR-FIRST',
+  submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',
+};
 const IN_PROGRESS = {
   kind: 'IN_PROGRESS',
   submissionId: 'sub_AAAAAAAAAAAAAAAAAAAA',

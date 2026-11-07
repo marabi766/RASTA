@@ -482,29 +482,29 @@ describe.each(CASES)('$command', (testCase) => {
       // A 4xx without a documented code proves nothing (PR-830 r1 F1).
       [
         { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
-        { kind: 'UNCONFIRMED', correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3', submissionId: expect.any(String) },
       ],
       // A 5xx may follow the commit (the answer is built by a read after it):
       // never "nothing changed".
       [
         { kind: 'UNAVAILABLE', status: 500, correlationId: 'c3' },
-        { kind: 'UNCONFIRMED', correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3', submissionId: expect.any(String) },
       ],
       [
         { kind: 'UNAVAILABLE', status: 502, correlationId: 'c3' },
-        { kind: 'UNCONFIRMED', correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3', submissionId: expect.any(String) },
       ],
       [
         { kind: 'UNAVAILABLE', status: 503, correlationId: 'c3' },
-        { kind: 'UNCONFIRMED', correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3', submissionId: expect.any(String) },
       ],
       [
         { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },
-        { kind: 'UNCONFIRMED', correlationId: 'c4' },
+        { kind: 'UNCONFIRMED', correlationId: 'c4', submissionId: expect.any(String) },
       ],
       [
         { kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'c5' },
-        { kind: 'UNCONFIRMED', correlationId: 'c5' },
+        { kind: 'UNCONFIRMED', correlationId: 'c5', submissionId: expect.any(String) },
       ],
     ])('answers %j with %j and sends exactly once', async (result, expected) => {
       testCase.send.mockResolvedValue(result);
@@ -547,7 +547,11 @@ describe.each(CASES)('$command: a retry of an unconfirmed send', (testCase) => {
     const form = formData(testCase);
     answers.push(problem(504, 'UPSTREAM_TIMEOUT'), retryAnswer);
     const first = (await testCase.submit('project', form)) as ProjectFormState<never, never>;
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: expect.any(String) });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: expect.any(String),
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
     return { first, second: testCase.submit('project', form, first) };
   }
 
@@ -578,8 +582,13 @@ describe.each(CASES)('$command: a retry of an unconfirmed send', (testCase) => {
       data: { id: PROJECT_ID },
       correlationId: 'c',
     });
-    const previous = { kind: 'UNCONFIRMED', correlationId: 'COR-FIRST' } as const;
-    await redirectedTo(testCase.submit('project', formData(testCase), previous));
+    const form = formData(testCase);
+    const previous = {
+      kind: 'UNCONFIRMED',
+      correlationId: 'COR-FIRST',
+      submissionId: String(form.get(SUBMISSION_FIELD)),
+    } as const;
+    await redirectedTo(testCase.submit('project', form, previous));
   });
 });
 

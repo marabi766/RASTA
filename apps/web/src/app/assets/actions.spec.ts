@@ -339,6 +339,7 @@ describe('what the service refuses', () => {
     expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
   });
@@ -350,6 +351,7 @@ describe('what the service refuses', () => {
     expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
   });
@@ -368,7 +370,11 @@ describe('what the service refuses', () => {
       });
     const form = formData(VALID);
     const first = await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, form);
-    expect(first).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
     expect(await submitRegisterAsset(first, form)).toEqual(first);
     expect(registerAsset).toHaveBeenCalledTimes(2);
   });

@@ -79,7 +79,7 @@ export async function runLifecycle<V, B, F extends string>(
   previous: LifecycleFormState<V, F>,
   form: FormData,
 ): Promise<LifecycleFormState<V, F>> {
-  return keepUnconfirmed(previous, () => attemptLifecycle(command, assetId, form));
+  return keepUnconfirmed(previous, form, () => attemptLifecycle(command, assetId, form));
 }
 
 async function attemptLifecycle<V, B, F extends string>(

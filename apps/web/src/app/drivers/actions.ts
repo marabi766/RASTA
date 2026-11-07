@@ -22,7 +22,7 @@ export async function submitCreateDriver(
   previous: CreateDriverFormState,
   form: FormData,
 ): Promise<CreateDriverFormState> {
-  return keepUnconfirmed(previous, () => attemptCreateDriver(form));
+  return keepUnconfirmed(previous, form, () => attemptCreateDriver(form));
 }
 
 async function attemptCreateDriver(form: FormData): Promise<CreateDriverFormState> {

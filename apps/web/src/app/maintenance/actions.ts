@@ -31,7 +31,7 @@ export async function submitReportRequest(
   previous: ReportRequestFormState,
   form: FormData,
 ): Promise<ReportRequestFormState> {
-  return keepUnconfirmed(previous, () => attemptReportRequest(form));
+  return keepUnconfirmed(previous, form, () => attemptReportRequest(form));
 }
 
 async function attemptReportRequest(form: FormData): Promise<ReportRequestFormState> {
@@ -100,7 +100,7 @@ async function attemptReportRequest(form: FormData): Promise<ReportRequestFormSt
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved".
-      return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
+      return { kind: 'UNCONFIRMED', correlationId: result.correlationId, submissionId, values };
     case 'IN_PROGRESS':
       // The first submission of this form is still being processed — a
       // double press, or a create slower than the service waits for. Same

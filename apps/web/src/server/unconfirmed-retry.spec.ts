@@ -30,11 +30,22 @@ type State =
   | { readonly kind: 'NOT_FOUND' }
   | { readonly kind: 'EDITING'; readonly submissionId: string }
   | { readonly kind: 'IN_PROGRESS'; readonly submissionId: string; readonly correlationId: string }
-  | { readonly kind: 'UNCONFIRMED'; readonly correlationId: string };
+  | {
+      readonly kind: 'UNCONFIRMED';
+      readonly correlationId: string;
+      readonly submissionId?: string;
+      readonly values?: unknown;
+    };
 
-const FIRST: State = { kind: 'UNCONFIRMED', correlationId: 'COR-FIRST' };
+const FIRST: State = { kind: 'UNCONFIRMED', correlationId: 'COR-FIRST', submissionId: 'sub_X' };
 const STILL: State = { kind: 'IN_PROGRESS', submissionId: 'sub_X', correlationId: 'COR-WAIT' };
-const keep = (previous: State, next: State) => keepUnconfirmed(previous, async () => next);
+const posting = (submissionId: string | null) => {
+  const form = new FormData();
+  if (submissionId !== null) form.set('submission', submissionId);
+  return form;
+};
+const keep = (previous: State, next: State, posted: string | null = 'sub_X') =>
+  keepUnconfirmed(previous, posting(posted), async () => next);
 
 describe('the rule', () => {
   const refusals: readonly State[] = [
@@ -56,7 +67,11 @@ describe('the rule', () => {
   it.each(refusals)(
     'a retry of a send still in progress answered $kind is UNCONFIRMED',
     async (next) => {
-      expect(await keep(STILL, next)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'COR-WAIT' });
+      expect(await keep(STILL, next)).toEqual({
+        kind: 'UNCONFIRMED',
+        correlationId: 'COR-WAIT',
+        submissionId: 'sub_X',
+      });
     },
   );
 
@@ -85,7 +100,7 @@ describe('the rule', () => {
   it('a success still redirects: the confirmation passes through', async () => {
     const confirmed = new Error('NEXT_REDIRECT:/done');
     await expect(
-      keepUnconfirmed(FIRST, async () => {
+      keepUnconfirmed(FIRST, posting('sub_X'), async () => {
         throw confirmed;
       }),
     ).rejects.toBe(confirmed);
@@ -96,10 +111,11 @@ describe('the rule', () => {
     expect(isUnresolvedState('UNCONFIRMED')).toBe(false);
     expect(isUnresolvedState({ kind: 7 })).toBe(false);
     // A correlation id that does not look like one is not shown back.
-    const odd = { kind: 'UNCONFIRMED', correlationId: '<b>x</b>' } as State;
+    const odd = { kind: 'UNCONFIRMED', correlationId: '<b>x</b>', submissionId: 'sub_X' } as State;
     expect(await keep(odd, { kind: 'FAILED', status: 429, correlationId: 'COR-RETRY' })).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'COR-RETRY',
+      submissionId: 'sub_X',
     });
   });
 
@@ -107,10 +123,72 @@ describe('the rule', () => {
     type Rich = State | { readonly kind: 'UNCONFIRMED'; correlationId: string; resume: string };
     const state = await keepUnconfirmedWith<Rich>(
       FIRST,
+      posting('sub_X'),
       async () => ({ kind: 'FAILED', status: 429, correlationId: 'COR-RETRY' }),
       (correlationId) => ({ kind: 'UNCONFIRMED', correlationId, resume: 'TOKEN' }),
     );
-    expect(state).toEqual({ kind: 'UNCONFIRMED', correlationId: 'COR-FIRST', resume: 'TOKEN' });
+    expect(state).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'COR-FIRST',
+      resume: 'TOKEN',
+      submissionId: 'sub_X',
+    });
+  });
+});
+
+describe('which request is unresolved (PR-880 r1 F1)', () => {
+  const VALUES = { title: 'B' };
+
+  it('an unresolved answer names the key it was sent under', async () => {
+    expect(
+      await keep({ kind: 'IDLE' }, { kind: 'UNCONFIRMED', correlationId: 'COR' }, 'sub_B'),
+    ).toEqual({ kind: 'UNCONFIRMED', correlationId: 'COR', submissionId: 'sub_B' });
+    // Its own key, when it says one, is kept.
+    expect(await keep({ kind: 'IDLE' }, STILL, 'sub_B')).toBe(STILL);
+  });
+
+  it('a refused retry keeps the held request — its key and its values — not the retry’s', async () => {
+    const held: State = {
+      kind: 'UNCONFIRMED',
+      correlationId: 'COR-B',
+      submissionId: 'sub_B',
+      values: VALUES,
+    };
+    const refused = {
+      kind: 'INVALID',
+      submissionId: 'sub_B',
+      values: { title: 'edited' },
+    } as State;
+    expect(await keep(held, refused, 'sub_B')).toEqual(held);
+  });
+
+  it.each([
+    ['another key (the page’s first)', 'sub_A'],
+    ['no key', null],
+  ])('a retry posting %s sends nothing and stays on the held request', async (_name, posted) => {
+    const held: State = {
+      kind: 'UNCONFIRMED',
+      correlationId: 'COR-B',
+      submissionId: 'sub_B',
+      values: VALUES,
+    };
+    const attempt = jest.fn(async (): Promise<State> => {
+      throw new Error('NEXT_REDIRECT:/maintenance/REQUEST-A');
+    });
+    expect(await keepUnconfirmed(held, posting(posted), attempt)).toEqual(held);
+    expect(attempt).not.toHaveBeenCalled();
+  });
+
+  it('a held state that names no request sends nothing (fail closed)', async () => {
+    const attempt = jest.fn(async (): Promise<State> => ({ kind: 'IDLE' }));
+    expect(
+      await keepUnconfirmed(
+        { kind: 'UNCONFIRMED', correlationId: 'COR' },
+        posting('sub_A'),
+        attempt,
+      ),
+    ).toEqual({ kind: 'UNCONFIRMED', correlationId: 'COR' });
+    expect(attempt).not.toHaveBeenCalled();
   });
 });
 
@@ -144,7 +222,7 @@ describe('what a write sent during the retry answers (the real writer)', () => {
     });
   const duringRetry = <T>(send: () => Promise<T>) => {
     let seen: T | undefined;
-    return keepUnconfirmed(FIRST, async () => {
+    return keepUnconfirmed(FIRST, posting('sub_X'), async () => {
       seen = await send();
       return { kind: 'IDLE' } as State;
     }).then(() => seen as T);

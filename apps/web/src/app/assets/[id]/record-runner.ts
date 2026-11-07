@@ -81,7 +81,7 @@ export async function runRecord<V, B, F extends string>(
   previous: RecordFormState<V, F>,
   form: FormData,
 ): Promise<RecordFormState<V, F>> {
-  return keepUnconfirmed(previous, () => attemptRecord(command, assetId, form));
+  return keepUnconfirmed(previous, form, () => attemptRecord(command, assetId, form));
 }
 
 async function attemptRecord<V, B, F extends string>(
