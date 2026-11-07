@@ -3,12 +3,7 @@ import { axe } from 'jest-axe';
 
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 
-import {
-  ActivateAssetForm,
-  ChangeStatusForm,
-  DecommissionAssetForm,
-  OPEN_WORK_CHECK_UNAVAILABLE_MESSAGE,
-} from './AssetLifecycleForms';
+import { ActivateAssetForm, ChangeStatusForm, DecommissionAssetForm } from './AssetLifecycleForms';
 import { LifecycleControls } from './LifecycleControls';
 import type { LifecycleFormState } from './lifecycle-form-state';
 
@@ -402,10 +397,12 @@ describe('LifecycleControls', () => {
   });
 });
 
-describe('when an owning service is unavailable (docs/24 Q-94, the carried-over LOW)', () => {
-  // asset-service answers 503 for the whole check when one owner did not
-  // answer — even if the other reported open work — so the portal says "try
-  // again later", never a definitive "blocked by open work".
+describe('when an owning service is unavailable (docs/24 Q-94; FU-189)', () => {
+  // asset-service answers 503 for the whole open-work check when one owner did
+  // not answer — but a 503 is also what a reset after the commit looks like, and
+  // the portal cannot tell the two apart. So the action answers it UNCONFIRMED
+  // (`app/first-send-unconfirmed.spec.ts`), and a FAILED 503 can only be a send
+  // that never left this portal: never blamed on an owning service.
   const ASKING = [
     [
       'change status',
@@ -414,32 +411,20 @@ describe('when an owning service is unavailable (docs/24 Q-94, the carried-over 
     ['decommission', () => render(<DecommissionAssetForm {...IDENTITY} assetName={NAME} />)],
   ] as const;
 
-  it.each(ASKING)(
-    '%s: a 503 says the open-work check could not be made, and nothing changed',
-    (_name, draw) => {
-      setState({ kind: 'FAILED', status: 503, correlationId: 'corr-503' });
-      draw();
-      const alert = screen.getByRole('alert');
-      expect(alert).toHaveTextContent(OPEN_WORK_CHECK_UNAVAILABLE_MESSAGE);
-      expect(alert).toHaveTextContent('چیزی تغییر نکرد');
-      expect(alert).toHaveTextContent('کمی بعد دوباره تلاش کنید');
-      expect(alert).toHaveTextContent('corr-503');
-      // Not the closed "blocked" wording of an owner that answered.
-      expect(alert).not.toHaveTextContent('تخصیص باز دارد');
-      expect(alert).not.toHaveTextContent('کار باز تعمیر دارد');
-    },
-  );
-
-  it.each(ASKING)('%s: any other failure keeps the general sentence', (_name, draw) => {
-    setState({ kind: 'FAILED', status: 500, correlationId: 'corr-500' });
+  it.each(ASKING)('%s: a FAILED 503 (never sent) is the general sentence', (_name, draw) => {
+    setState({ kind: 'FAILED', status: 503, correlationId: 'corr-503' });
     draw();
-    expect(screen.getByRole('alert')).not.toHaveTextContent(OPEN_WORK_CHECK_UNAVAILABLE_MESSAGE);
-    expect(screen.getByRole('alert')).toHaveTextContent('corr-500');
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('انجام نشد و چیزی تغییر نکرد');
+    expect(alert).toHaveTextContent('corr-503');
+    expect(alert).not.toHaveTextContent('سرویس‌های ناوگان یا تعمیرات');
   });
 
-  it('activation asks nobody, so its 503 is the general sentence', () => {
-    setState({ kind: 'FAILED', status: 503, correlationId: 'corr-503' });
-    render(<ActivateAssetForm {...IDENTITY} />);
-    expect(screen.getByRole('alert')).not.toHaveTextContent(OPEN_WORK_CHECK_UNAVAILABLE_MESSAGE);
+  it.each(ASKING)('%s: an UNCONFIRMED send never says nothing changed', (_name, draw) => {
+    setState({ kind: 'UNCONFIRMED', correlationId: 'corr-503' });
+    draw();
+    const alert = screen.getByRole('alert');
+    expect(alert).not.toHaveTextContent('چیزی تغییر نکرد');
+    expect(alert).toHaveTextContent('corr-503');
   });
 });
