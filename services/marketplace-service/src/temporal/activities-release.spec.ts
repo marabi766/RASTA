@@ -12,6 +12,7 @@ import {
 import { outcomeUnknown } from './workflows';
 import type { EconomicClient } from '../economic/economic.client';
 import type { OrderService } from '../order/order.service';
+import { OrderStatus } from '../generated/prisma';
 
 type Activities = ReturnType<typeof createActivities>;
 
@@ -177,6 +178,8 @@ it.each([
       describe: async () => order,
       onceForSaga: (_order: unknown, _step: unknown, _activity: unknown, call: () => unknown) =>
         call(),
+      whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
+        fn({ status: 'RECEIPT_CONFIRMED', receiptConfirmed: true }),
       openSagaCall: async () => 1,
       confirmSagaCall: async () => undefined,
     } as unknown as OrderService,
@@ -204,6 +207,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
   const refuse = (code: string): Error => new RastaError(code as never, 'answered');
   const order = {
     id: 'ORD',
+    status: 'RECEIPT_CONFIRMED',
     buyerOrganizationId: 'ORG',
     correlationId: 'COR',
     receiptConfirmed: true,
@@ -222,6 +226,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       orders: {
         describe: async () => order,
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) => fn(order),
         openSagaCall: async () => 1,
         confirmSagaCall: async () => undefined,
       } as unknown as OrderService,
@@ -632,5 +637,219 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
         type: 'RECONCILIATION_READ_FAILED',
       });
     });
+  });
+});
+
+/**
+ * FU-178, D-138: whether an authorisation goes out is decided on the row as the
+ * hold reads it, for every status there is, on every attempt. The order the
+ * activity read first is what it knew before the hold, and proves nothing.
+ */
+describe('no authorisation past the order as it stands (FU-178)', () => {
+  const ALL_STATUSES = Object.values(OrderStatus);
+  const AUTHORISABLE = ['RECEIPT_CONFIRMED', 'SETTLING'];
+  const CLOSED = ALL_STATUSES.filter((status) => !AUTHORISABLE.includes(status));
+
+  function over(
+    row: { status: string; receiptConfirmed?: boolean },
+    options: {
+      attempt?: number;
+      read?: () => unknown;
+      send?: () => unknown;
+      hold?: (fn: (row: unknown) => unknown) => unknown;
+    } = {},
+  ) {
+    const trace: string[] = [];
+    const activities = createActivities({
+      orders: {
+        // Stale on purpose: nothing may be decided from this read but the receipt.
+        describe: async () => ({
+          id: 'ORD',
+          status: 'RECEIPT_CONFIRMED',
+          buyerOrganizationId: 'ORG',
+          correlationId: 'COR',
+          receiptConfirmed: true,
+        }),
+        onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        whileOrderHeld: async (_id: string, fn: (held: unknown) => unknown) => {
+          trace.push('hold');
+          try {
+            const held = () => fn({ receiptConfirmed: true, ...row });
+            return await (options.hold ? options.hold(held) : held());
+          } finally {
+            trace.push('release');
+          }
+        },
+      } as unknown as OrderService,
+      economic: {
+        authoriseSettlement: async () => {
+          trace.push('send');
+          return options.send?.();
+        },
+        readObligation: async () => {
+          trace.push('read');
+          return (options.read ?? (() => ({ status: 'HELD' })))();
+        },
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => options.attempt ?? 1,
+    });
+    return { activities, trace };
+  }
+
+  it('covers every status of the schema, so a new one is fenced until it is named', () => {
+    expect(ALL_STATUSES.length).toBe(CLOSED.length + AUTHORISABLE.length);
+    expect(CLOSED).toEqual(expect.arrayContaining(['DISPUTED', 'CANCELLING', 'PENDING']));
+  });
+
+  it.each(CLOSED)('%s on a first attempt: nothing is sent or read', async (status) => {
+    const { activities, trace } = over({ status });
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toEqual({
+      fenced: true,
+      status,
+      inDoubt: false,
+    });
+    expect(trace).toEqual(['hold', 'release']);
+  });
+
+  it.each(AUTHORISABLE)('%s: sent, and only from inside the hold', async (status) => {
+    const { activities, trace } = over({ status });
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toBeUndefined();
+    expect(trace).toEqual(['hold', 'send', 'release']);
+  });
+
+  it.each([
+    ['a retry', 2, false],
+    ['a later round', 1, true],
+  ])(
+    '%s, the row disputed: the obligation answers, and nothing is sent',
+    async (_n, attempt, doubt) => {
+      const ours = over(
+        { status: 'DISPUTED' },
+        { attempt, read: () => ({ status: 'PENDING_SETTLEMENT' }) },
+      );
+      await expect(
+        ours.activities.authoriseSettlement('ORD', 'TXN', doubt),
+      ).resolves.toBeUndefined();
+      expect(ours.trace).toEqual(['read']);
+
+      const noEffect = over({ status: 'DISPUTED' }, { attempt });
+      await expect(noEffect.activities.authoriseSettlement('ORD', 'TXN', doubt)).resolves.toEqual({
+        fenced: true,
+        status: 'DISPUTED',
+        inDoubt: true,
+      });
+      expect(noEffect.trace).toEqual(['read', 'hold', 'release']);
+    },
+  );
+
+  it('in doubt with the row disputed, a failed read is a read failure: nothing is sent', async () => {
+    const { activities, trace } = over(
+      { status: 'DISPUTED' },
+      {
+        attempt: 2,
+        read: () => {
+          throw RastaError.upstreamUnavailable('economic-service');
+        },
+      },
+    );
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).rejects.toMatchObject({
+      type: 'RECONCILIATION_READ_FAILED',
+      nonRetryable: false,
+    });
+    expect(trace).toEqual(['read']);
+  });
+
+  it('in doubt with the row eligible: the effect answers, and no second send goes out', async () => {
+    const { activities, trace } = over(
+      { status: 'RECEIPT_CONFIRMED' },
+      { attempt: 2, read: () => ({ status: 'PENDING_SETTLEMENT' }) },
+    );
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toBeUndefined();
+    expect(trace).toEqual(['read']);
+  });
+
+  it('in doubt with no effect and the row eligible: the same call, under the hold, after the read', async () => {
+    const { activities, trace } = over({ status: 'RECEIPT_CONFIRMED' }, { attempt: 2 });
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toBeUndefined();
+    expect(trace).toEqual(['read', 'hold', 'send', 'release']);
+  });
+
+  it('a failed send is reconciled with the lock released', async () => {
+    const { activities, trace } = over(
+      { status: 'RECEIPT_CONFIRMED' },
+      {
+        send: () => {
+          throw new RastaError('INVALID_STATE_TRANSITION' as never, 'answered');
+        },
+        read: () => ({ status: 'PENDING_SETTLEMENT' }),
+      },
+    );
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toBeUndefined();
+    expect(trace).toEqual(['hold', 'send', 'release', 'read']);
+  });
+
+  it('the hold itself failing sends nothing, and the attempt is retried', async () => {
+    const { activities, trace } = over(
+      { status: 'RECEIPT_CONFIRMED' },
+      {
+        hold: () => {
+          throw new Error('lock_not_available');
+        },
+      },
+    );
+    const caught = await activities.authoriseSettlement('ORD', 'TXN').catch((e: Error) => e);
+    expect((caught as Error).message).toBe('lock_not_available');
+    expect(caught).not.toMatchObject({ nonRetryable: true });
+    expect(trace).toEqual(['hold', 'release']);
+  });
+
+  it('no receipt on the row under the hold: refused with nothing sent, whatever was read first', async () => {
+    const { activities, trace } = over({ status: 'RECEIPT_CONFIRMED', receiptConfirmed: false });
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).rejects.toMatchObject({
+      type: 'BUSINESS_RULE_VIOLATION',
+      nonRetryable: true,
+      details: [REFUSED_ON_FIRST_ATTEMPT],
+    });
+    expect(trace).toEqual(['hold', 'release']);
+  });
+
+  it('another economic step is not held', async () => {
+    const held = jest.fn();
+    const economic = createActivities({
+      orders: {
+        describe: async () => ({ id: 'ORD', buyerOrganizationId: 'ORG', correlationId: 'COR' }),
+        onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        whileOrderHeld: held,
+      } as unknown as OrderService,
+      economic: { refund: async () => undefined } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => 1,
+    });
+    await expect(economic.compensate('ORD', 'TXN', 'why')).resolves.toBeUndefined();
+    // Behind the wait too (FU-117): it waits on confirmation, but it authorises nothing.
+    await expect(
+      economic.compensate('ORD', 'TXN', 'why', false, FINAL_ANSWER_CONTRACT),
+    ).resolves.toBeUndefined();
+    expect(held).not.toHaveBeenCalled();
+  });
+
+  it('in doubt with the row disputed, a terminal obligation is the final answer: nothing is sent', async () => {
+    const { activities, trace } = over(
+      { status: 'DISPUTED' },
+      { attempt: 2, read: () => ({ status: 'REFUNDED', amountMinor: '1' }) },
+    );
+    await expect(
+      activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
+    ).resolves.toMatchObject({ final: true, status: 'REFUNDED' });
+    expect(trace).toEqual(['read']);
+  });
+
+  it('a caller declaring final answers is fenced all the same on a first attempt', async () => {
+    const { activities, trace } = over({ status: 'DISPUTED' });
+    await expect(
+      activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
+    ).resolves.toEqual({ fenced: true, status: 'DISPUTED', inDoubt: false });
+    expect(trace).toEqual(['hold', 'release']);
   });
 });
