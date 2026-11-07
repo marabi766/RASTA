@@ -182,6 +182,8 @@ test.describe.serial('the order saga as a service', () => {
         sourceType: 'ORDER',
         sourceReference: reference,
         holdFunds: true,
+        // The deadline marketplace-service fixes on the order before its first send (D-150).
+        holdNotAfter: '2999-01-01T00:00:00.000Z',
       },
     });
 
@@ -241,6 +243,7 @@ test.describe.serial('the order saga as a service', () => {
       sourceType: 'ORDER',
       sourceReference: key,
       holdFunds: true,
+      holdNotAfter: '2999-01-01T00:00:00.000Z',
     };
 
     const first = await tenantA.post('/v1/transactions', {

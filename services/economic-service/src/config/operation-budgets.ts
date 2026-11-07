@@ -34,6 +34,14 @@ export const WAIT_TRANSACTION_SLACK_MS = 2_000;
 export const CONTENTION_TRANSACTION_MAX_WAIT_MS = 30_000;
 export const CONTENTION_TRANSACTION_TIMEOUT_MS = 60_000;
 
+/**
+ * How long a transaction past its fence check (`IdempotencyStore`, `notAfter`) may sit idle
+ * before PostgreSQL ends it. A process frozen between that check and its COMMIT then
+ * commits nothing later. Far below the margin a caller allows after its deadline
+ * (marketplace-service's `HOLD_FENCE`); only a stall ever reaches it.
+ */
+export const FENCE_COMMIT_IDLE_MS = 30_000;
+
 /** One balance-audit page's snapshot waits this long for a connection, and lives this long. */
 export const AUDIT_TX_MAX_WAIT_MS = 30_000;
 export const AUDIT_TX_TIMEOUT_MS = 120_000;

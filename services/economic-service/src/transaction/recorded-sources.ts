@@ -1,3 +1,6 @@
+import { ERROR_CODES } from '@rasta/contracts';
+import { RastaError } from '@rasta/nest-common';
+
 /**
  * Source types economic-service records itself, from the owner's own record —
  * never from a caller's word.
@@ -158,3 +161,32 @@ export function mayRecordWithoutLine(
 /** The refusal's text: fixed, it never echoes what the caller sent. */
 export const BUSINESS_LINE_REQUIRED_MESSAGE =
   'A business line is required to record this obligation: settlement fails closed without a commission rule for it';
+
+/** The source of an order's obligation (`OWNER_RECORDED_SOURCE_TYPES`). */
+export const ORDER_SOURCE_TYPE = 'ORDER';
+
+/** The refusal's text: fixed, it never echoes what the caller sent. */
+export const HOLD_DEADLINE_REQUIRED_MESSAGE =
+  "An order's funds are held only with the deadline its order fixed for the hold (holdNotAfter); nothing was recorded or held";
+
+/**
+ * An order's hold must carry the order's deadline (D-150). marketplace-service counts
+ * every hold it sends on the order and gives each the order's `holdNotAfter`; a send without
+ * one is from a build that counts nothing, so the order's row cannot know of it, and a hold
+ * it placed would outlive the saga's proof that none can land (review of #812 r3, F1).
+ * Refused here, whoever sends it and whatever the order's row says, since nothing else can
+ * tell such a send apart: the order's fence no longer depends on the sender's build.
+ *
+ * Called inside the key's work (`TransactionService.create`), so an answer already stored
+ * under the key, a hold placed before this rule, is replayed, and this refusal, declared
+ * nowhere, frees the key: the same key with the deadline is then placed as ever.
+ */
+export function refuseUnfencedOrderHold(dto: {
+  holdFunds?: boolean;
+  sourceType?: string;
+  holdNotAfter?: string;
+}): void {
+  if (dto.holdFunds && dto.sourceType === ORDER_SOURCE_TYPE && dto.holdNotAfter === undefined) {
+    throw new RastaError(ERROR_CODES.HOLD_DEADLINE_REQUIRED, HOLD_DEADLINE_REQUIRED_MESSAGE);
+  }
+}

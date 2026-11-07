@@ -31,9 +31,13 @@ import {
 import { SERVICE_NAME } from '../config/env';
 import {
   FINAL_ANSWER_CONTRACT,
+  HOLD_DEADLINE_PASSED,
+  HOLD_FENCE,
+  HOLD_SENDS_CLOSED,
   OWNER_STATE_IS_FINAL,
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
+  REFUSED_PAST_HOLD_DEADLINE,
 } from './economic-refusal';
 import {
   economicCallsUnconfirmedTotal,
@@ -202,6 +206,7 @@ export interface ObligationFinal {
 
 /** The economic calls whose outcome the saga can owe beside the release (FU-103, FU-117). */
 export const UNCONFIRMED_OPERATIONS = [
+  'createObligation',
   'readOrder',
   'authoriseSettlement',
   'settle',
@@ -430,6 +435,12 @@ export function createActivities(deps: ActivityDependencies) {
    * then says nothing of the attempts before it: its effect or a terminal status
    * is the answer (`finalFor`), and anything else stays unknown.
    *
+   * The call's own guards read the order after the step's lookup
+   * awaited: a snapshot from before it can be of an order since closed (review of #812,
+   * F1). The closure holds only what cannot change, so no guard can reach the old read;
+   * `fence` reads the row under its lock.
+   * A failed read is no refusal of the call: it stays outside what `unanswered` marks.
+   *
    * ## No send past `fence` (D-138)
    *
    * Every send of such a call, on every attempt and round, goes out from inside
@@ -470,12 +481,13 @@ export function createActivities(deps: ActivityDependencies) {
     const inDoubt = confirmed !== undefined && (confirmed.inDoubt || currentAttempt() !== 1);
     const unanswered = (refusal: unknown): unknown =>
       confirmed && !inDoubt ? provenIfListed(refusal) : refusal;
-    return asSystemFor(orderId, (order) =>
+    return asSystemFor(orderId, ({ id, buyerOrganizationId }) =>
       deps.orders.onceForSaga(
-        { id: order.id, organizationId: order.buyerOrganizationId },
+        { id, organizationId: buyerOrganizationId },
         step,
         activity,
         async () => {
+          const order = await deps.orders.describe(id);
           const askObligation = (transactionId: string) =>
             deps.economic
               .readObligation({
@@ -583,50 +595,111 @@ export function createActivities(deps: ActivityDependencies) {
      * the workflow's recovery (`findObligation`) names the status and stops.
      * HELD from a release too old to say whether it is proven: retryable, and
      * that recovery waits for one that can (`heldProofUnavailable`).
+     *
+     * `holdNotAfter` is the deadline the workflow proposes at its first send; only a
+     * workflow from before the fence proposes none (`placeHold`). What goes out is the
+     * order row's (`claimHoldSend`), counted before it goes, because no run knows what an
+     * earlier run sent (D-144). So a refusal is proof only for the first send there has
+     * ever been, and only once the row has shut out any other (`closeHoldSendsOnRefusal`).
      */
-    async createObligation(orderId: string): Promise<HeldResult> {
-      // The hold's intent, keyed by the order, before anything is sent (#836 r1
-      // R2): a create that times out may commit after the saga stopped looking,
-      // so only its own answer, a refusal proving it held nothing, or a lookup
-      // that finds the obligation (`findObligation`) ends it. An empty lookup,
-      // the order's terminal status or the record's age never does: a create
-      // delayed before its claim can still commit, and economic-service's
+    async createObligation(orderId: string, holdNotAfter?: string): Promise<HeldResult> {
+      // The hold's intent, keyed by the order (#836 r1 R2): a create that times out may
+      // commit after the saga stopped looking, so only its own answer, a refusal proving
+      // it held nothing, or a lookup that finds the obligation (`findObligation`) ends it.
+      // An empty lookup, the order's terminal status or the record's age never does: a
+      // create delayed before its claim can still commit, and economic-service's
       // retention starts at the claim (#836 r2 N1, D-135; the fence is FU-161).
-      const opening = await openCall(orderId, 'createObligation', orderId);
+      //
+      // Opened after the row has counted the send (`claimHoldSend`) and before it leaves:
+      // what the record watches is a request, and a claim the row refuses sends none. An
+      // opening there would reopen a record a proven refusal had confirmed, for a call that
+      // never goes, and nothing could close it again. A count with no record after it (the
+      // opening failed, or was superseded) is a send that never left: it only keeps a
+      // later refusal from being proof.
+      const sending: { opening?: Opening } = {};
       const held = await economicStep(orderId, 'createObligation', async (order) => {
         if (order.economicTransactionId) {
           // A retry after the call succeeded but the recording did not. The
           // obligation exists; do not create a second one.
           return { transactionId: order.economicTransactionId };
         }
+        // An attempt that outlived its worker's timeout, running on past the end of the
+        // saga's wait: nobody would read its answer. Not proof: the saga learns nothing.
+        if (order.status === 'FAILED' || order.status === 'CANCELLED') {
+          throw ApplicationFailure.nonRetryable(
+            `Order ${order.id} is ${order.status}; no hold is placed for it`,
+            'ORDER_ALREADY_CLOSED',
+          );
+        }
 
-        try {
-          const transaction = await deps.economic.createObligation({
+        const own = { id: order.id, organizationId: order.buyerOrganizationId };
+        const claim = await deps.orders.claimHoldSend(own, holdNotAfter);
+        if ('closed' in claim) {
+          // Closed by the refusal or the deadline: proof. Closed as an order: as above, not.
+          throw ApplicationFailure.create({
+            message: `Order ${order.id} is closed to further holds`,
+            type: claim.closed ? HOLD_SENDS_CLOSED : 'ORDER_ALREADY_CLOSED',
+            nonRetryable: true,
+            details: claim.closed ? [HOLD_SENDS_CLOSED] : [],
+          });
+        }
+        const deadline = claim.holdNotAfter;
+        const sent = await openCall(orderId, 'createObligation', orderId);
+        sending.opening = sent;
+
+        const transaction = await deps.economic
+          .createObligation({
             ...obligationTermsOf(order),
             correlationId: order.correlationId,
+            ...(deadline === null ? {} : { holdNotAfter: deadline }),
+          })
+          .catch(async (refusal: unknown) => {
+            // The key's own answer, whichever attempt hears it, to a request that set it.
+            if (
+              deadline !== null &&
+              isRastaError(refusal) &&
+              refusal.code === HOLD_DEADLINE_PASSED
+            ) {
+              throw ApplicationFailure.create({
+                message: refusal.message,
+                type: HOLD_DEADLINE_PASSED,
+                nonRetryable: true,
+                details: [REFUSED_PAST_HOLD_DEADLINE],
+              });
+            }
+            // Only the send's own refusal on its first attempt is proof (`placeHold`).
+            // Not ALREADY_EXISTS: that says an obligation is there, the opposite of
+            // nothing having moved.
+            const taken = isRastaError(refusal) && refusal.code === 'ALREADY_EXISTS';
+            // A send with no deadline to propose is a round of a wait from before the fence.
+            const firstEver = holdNotAfter !== undefined && claim.claims === 1;
+            const proven =
+              currentAttempt() === 1 &&
+              firstEver &&
+              !taken &&
+              provenIfListed(refusal) !== refusal &&
+              (await deps.orders.closeHoldSendsOnRefusal(own));
+            // The record closes on a refusal only where both rules hold: the row's
+            // (`proven`: first attempt, first send there has ever been, the sends now shut)
+            // and the record's (#836 r2 N1, D-135): the opening began the episode here, and
+            // the refusal is one economic-service gives before any effect (`heldNothing`).
+            // A deadline refusal is not one: a send claimed before the deadline may still
+            // land, so the record stays open for the lookup (FU-161).
+            if (proven && sent.started && heldNothing(refusal)) {
+              await deps.orders.confirmSagaCall(own, 'createObligation', order.id, sent);
+            }
+            throw proven ? provenIfListed(refusal) : refusal;
           });
-          return { transactionId: transaction.id };
-        } catch (refusal) {
-          // Only for the send that began the episode: economic-service frees
-          // the key on a refusal, so an earlier send of this episode still on
-          // its way could claim it and commit after this one was refused.
-          // And only on the scheduling's first attempt (#836 r2 N1, D-135): a
-          // record that began here proves no earlier send only of attempts
-          // that record one, and an older worker's attempt sent unrecorded. A
-          // missing record, like an empty lookup or an old row, is absence,
-          // which never closes anything; unknown (no Temporal context) is not 1.
-          if (opening.started && currentAttempt() === 1 && heldNothing(refusal)) {
-            await deps.orders.confirmSagaCall(
-              { id: order.id, organizationId: order.buyerOrganizationId },
-              'createObligation',
-              order.id,
-              opening,
-            );
-          }
-          throw refusal;
-        }
+        return { transactionId: transaction.id };
       });
-      await confirmCall(orderId, 'createObligation', orderId, opening);
+      // Answered. An answer without a send of this attempt (the id already on the order,
+      // the step's own record) still answers the record an earlier attempt opened.
+      await confirmCall(
+        orderId,
+        'createObligation',
+        orderId,
+        sending.opening ?? (await openCall(orderId, 'createObligation', orderId)),
+      );
       await asSystemFor(orderId, async (order) => {
         const now = await deps.economic.readObligation({
           orderId: order.id,
@@ -728,6 +801,20 @@ export function createActivities(deps: ActivityDependencies) {
           throw asTemporalFailure(error);
         }
       });
+    },
+
+    /**
+     * Whether an empty lookup says no hold will land (D-144), asked of the order row so
+     * that no run depends on what it remembers. Once true, no send can begin. Past the
+     * deadline and margin, the claim-time fence is what makes it so.
+     */
+    async noHoldCanLand(orderId: string): Promise<boolean> {
+      return asSystemFor(orderId, (order) =>
+        deps.orders.closeHoldSendsIfNoneCanLand(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          HOLD_FENCE.clockMarginMs,
+        ),
+      );
     },
 
     /**
