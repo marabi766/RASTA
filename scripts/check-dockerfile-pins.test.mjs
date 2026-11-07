@@ -2157,3 +2157,227 @@ test('FU-159 r2 F3: only the word "$name" or "${name}" is a tracked eval', () =>
   ])
     assert.deepEqual(creds159(body), [], body);
 });
+
+// =============================================================================
+// FU-159 round 3 (PR #896 review r1, F1–F3). The review's probes, each as a shell file AND as a
+// workflow step. The trust in a tracked eval rests on what the parsed structure PROVES: one
+// double-quoted expansion of the producer's name, a genuine assignment from the approved script,
+// no write the check cannot read, and an interpreter that no function or alias can stand in for.
+// =============================================================================
+const evalRefusedBoth = (body, why = /eval runs text/) => {
+  for (const kind of ['shell', 'workflow']) {
+    const { errors } = validateInfraImagePins([credsFile, asInput(kind, body)], creds150);
+    assert.ok(
+      errors.some((e) => why.test(e)),
+      `${kind}: ${body}`,
+    );
+  }
+};
+const evalAcceptedBoth = (body) => {
+  for (const kind of ['shell', 'workflow'])
+    assert.deepEqual(
+      validateInfraImagePins([credsFile, asInput(kind, body)], creds150).errors,
+      [],
+      `${kind}: ${body}`,
+    );
+};
+const PRODUCER = 'commands="$(bash infra/creds.sh tests)"';
+const PAYLOAD = '\'do""cker run alpine:latest #\'';
+
+test('FU-159 r3 F1: a word that merely reads like "$commands" after quote removal is not the tracked expansion', () => {
+  const name = 'commands';
+  // every split point: bash expands `comm` and appends the literal `ands`
+  for (let k = 1; k < name.length; k += 1) {
+    const [head, tail] = [name.slice(0, k), name.slice(k)];
+    for (const argument of [
+      `"$${head}""${tail}"`,
+      `"\${${head}}""${tail}"`,
+      `"$${head}"${tail}`,
+      `"$${head}"'${tail}'`,
+    ])
+      evalRefusedBoth(`${PRODUCER}\n${head}=${PAYLOAD}\neval ${argument}`);
+  }
+  // a literal dollar is another text altogether
+  for (const argument of [
+    '"\\$commands"',
+    '"\\${commands}"',
+    '\'$commands\'""',
+    "'$commands'",
+    '"$commands"x',
+    '$commands"x"',
+    '"$commands""x"',
+    '"${commands}x"',
+    '"$commands"$x',
+    '"$com"mands',
+  ])
+    evalRefusedBoth(`${PRODUCER}\neval ${argument}`);
+});
+
+test('FU-159 r3 F1: only a genuine assignment word binds the producer', () => {
+  const output = '"$(bash infra/creds.sh tests)"';
+  for (const assignment of [
+    `comm""ands=${output}`,
+    `"commands"=${output}`,
+    `'commands'=${output}`,
+    `comm\\ands=${output}`,
+    `commands\\=${output}`,
+    `commands"="${output}`,
+    `commands'='${output}`,
+  ])
+    for (const body of [
+      `${assignment}\neval "$commands"`,
+      `commands=${PAYLOAD}\n${assignment}\neval "$commands"`,
+      `export ${assignment}\neval "$commands"`,
+    ])
+      evalRefusedBoth(body);
+});
+
+test('FU-159 r3 F1: the genuine shapes stay accepted', () => {
+  for (const body of [
+    `${PRODUCER}\neval "$commands"`,
+    `${PRODUCER}\neval "\${commands}"`,
+    `${PRODUCER}\neval "$commands"''`,
+    `export ${PRODUCER}\neval "$commands"`,
+    `( ${PRODUCER} && eval "$commands" )`,
+    `a_c="$(bash infra/creds.sh tests)"\nb_c="$(bash infra/creds.sh service x)"\neval "$a_c" && eval "$b_c"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+test('FU-159 r3 F2: every expansion site is a write site: here-strings, here-documents, redirection targets', () => {
+  const payload = 'do""cker run alpine:latest';
+  for (const operator of [':=', '=']) {
+    for (const body of [
+      `commands="$(bash infra/creds.sh invalid)"\n: <<<"\${commands${operator}${payload}}"\neval "$commands"`,
+      `${PRODUCER}\n: <<<\${commands${operator}${payload}}\neval "$commands"`,
+      `${PRODUCER}\n: <<EOF\n\${commands${operator}${payload}}\nEOF\neval "$commands"`,
+      `${PRODUCER}\n: <<-EOF\n\t\${commands${operator}${payload}}\nEOF\neval "$commands"`,
+      `${PRODUCER}\n: > "\${commands${operator}/dev/null}"\neval "$commands"`,
+      `${PRODUCER}\n: < "\${commands${operator}/dev/null}"\neval "$commands"`,
+    ])
+      evalRefusedBoth(body);
+  }
+  // arithmetic that assigns, in either input form
+  for (const body of [
+    `${PRODUCER}\n: <<<"$((commands=5))"\neval "$commands"`,
+    `${PRODUCER}\n: <<EOF\n$((commands=5))\nEOF\neval "$commands"`,
+    `${PRODUCER}\n: <<EOF\n$[commands=5]\nEOF\neval "$commands"`,
+  ])
+    evalRefusedBoth(body);
+  // a quoted here-document delimiter expands nothing
+  evalAcceptedBoth(`${PRODUCER}\ncat <<'EOF'\n\${commands:=x}\nEOF\neval "$commands"`);
+});
+
+test('FU-159 r3 F2: arithmetic this check cannot prove constant never keeps a producer trusted', () => {
+  // `n` holds the text `commands=42`: every arithmetic context below evaluates it, in this shell
+  const data = `n="$(printf '\\143ommands=42')"`;
+  for (const use of [
+    ': $((n))',
+    ': $[n]',
+    ': "$((n))"',
+    '(( n ))',
+    '(( (n) ))',
+    'for ((i=n;i<1;i++)); do :; done',
+    '[[ n -eq 42 ]]',
+    '[[ "$n" -eq 42 ]]',
+    '[[ -n y && 5 -eq n ]]',
+    '[[ -v other[n] ]]',
+    'a=(1 2); : ${a[n]}',
+    'a=(1); : ${#a[n]}',
+    's=xy; : ${s:n}',
+    's=xy; : ${s:0:n}',
+    'a[n]=1',
+    'a=([n]=1)',
+    'declare -A m; m[n]=1',
+    'declare -a other[n]',
+    "typeset -a 'other[n]'",
+    "read 'other[n]' <<<x",
+    "printf -v 'other[n]' x",
+    "unset 'other[n]'",
+    "test -v 'other[n]'",
+    "[ -v 'other[n]' ]",
+    'let n',
+    'let "n"',
+    'declare -i q; q=n',
+    'typeset -i q; q=n',
+    'f() { local -i q; q=n; }; f',
+    "eval ': $((n))'",
+    "trap ': $((n))' EXIT",
+  ])
+    evalRefusedBoth(`${PRODUCER}\n${data}\n${use}\neval "$commands"`);
+});
+
+test('FU-159 r3 F2: expansions that assign or run through a name this check cannot read', () => {
+  for (const use of [
+    `r="$(printf '\\143ommands')"; : \${!r:=zz}`,
+    'v=x; : "${v@P}"',
+    `r="$(printf 'a[%s]' x)"; : "\${!r}"`,
+    ': ${ x=1; }',
+    "PS4='$((n))'; set -x; true",
+    "PS4='${commands:=x}'; set -x; true",
+    `mapfile -C 'comm""ands=x' -c 1 <<<y`,
+    `mapfile -C'comm""ands=x' -c 1 <<<y`,
+    `compgen -W '\${commands:=x}'`,
+    'compgen -W "$n"',
+  ])
+    evalRefusedBoth(`${PRODUCER}\n${use}\neval "$commands"`);
+});
+
+test('FU-159 r3 F2: constant arithmetic, other names and literal subscripts leave the producer trusted', () => {
+  for (const body of [
+    `${PRODUCER}\n: $((1+2))\neval "$commands"`,
+    `${PRODUCER}\nn=0\n(( n=5 ))\neval "$commands"`,
+    `${PRODUCER}\na=(1 2)\n: "\${a[@]}" "\${a[0]}" "\${#a[@]}"\neval "$commands"`,
+    `${PRODUCER}\ns=abcd\n: \${s:1:2}\neval "$commands"`,
+    `${PRODUCER}\n[ "$x" -eq 1 ]\neval "$commands"`,
+    `${PRODUCER}\ncat <<<"hello"\neval "$commands"`,
+    `${PRODUCER}\ncat <<EOF\nhello \${x:-y}\nEOF\neval "$commands"`,
+    `${PRODUCER}\n: \${x:-default}\neval "$commands"`,
+    `${PRODUCER}\na=(1 2)\n: "\${!a[@]}" "\${!a[*]}" "\${!BASH*}"\neval "$commands"`,
+    `foo() { :; }\n${PRODUCER}\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+test('FU-159 r3 F3: the producer counts only when its interpreter cannot be a function or an alias', () => {
+  const fn = (name) => `${name}() { printf '%s\\n' 'do""cker run alpine:latest'; }`;
+  for (const body of [
+    `${fn('bash')}\n${PRODUCER}\neval "$commands"`,
+    `${fn('sh')}\ncommands="$(sh infra/creds.sh tests)"\neval "$commands"`,
+    `function bash { printf '%s\\n' x; }\n${PRODUCER}\neval "$commands"`,
+    `function bash() { printf '%s\\n' x; }\n${PRODUCER}\neval "$commands"`,
+    `${fn('bash')}\ncommands="$("bash" infra/creds.sh tests)"\neval "$commands"`,
+    `${fn('bash')}\ncommands="$(\\bash infra/creds.sh tests)"\neval "$commands"`,
+    `${fn('bash')}\ncommands="$(ba""sh infra/creds.sh tests)"\neval "$commands"`,
+    `"bash"() { printf '%s\\n' x; }\n${PRODUCER}\neval "$commands"`,
+    `eval 'bash() { printf "%s\\n" x; }'\n${PRODUCER}\neval "$commands"`,
+    `eval "bash() { printf '%s\\n' x; }"\n${PRODUCER}\neval "$commands"`,
+    `trap 'bash() { :; }' EXIT\n${PRODUCER}\neval "$commands"`,
+    `${PRODUCER}\n${fn('bash')}\neval "$commands"`,
+    `shopt -s expand_aliases\nalias bash='printf "%s\\n" x;:'\n${PRODUCER}\neval "$commands"`,
+    `BASH_ALIASES[bash]=x\n${PRODUCER}\neval "$commands"`,
+    // the same shell reached through a command substitution or a here-document
+    `${fn('bash')}\nx="$( ${PRODUCER}; eval "$commands" )"`,
+    `${fn('bash')}\nbash <<'EOF'\n${PRODUCER}\neval "$commands"\nEOF`,
+    `alias bash=true\nx="$( ${PRODUCER}; eval "$commands" )"`,
+  ])
+    evalRefusedBoth(body);
+  // a definition the splitter does not see at the head of a command is still refused (the shell
+  // word has nothing to run), not trusted
+  for (const body of [
+    `if true; then ${fn('bash')}; fi\n${PRODUCER}\neval "$commands"`,
+    `( ${fn('bash')} )\n${PRODUCER}\neval "$commands"`,
+  ])
+    for (const kind of ['shell', 'workflow'])
+      assert.notDeepEqual(
+        validateInfraImagePins([credsFile, asInput(kind, body)], creds150).errors,
+        [],
+        body,
+      );
+  // a function of another name, and the plain shapes, leave the producer trusted
+  for (const body of [
+    `${fn('other')}\n${PRODUCER}\neval "$commands"`,
+    `commands="$(sh infra/creds.sh tests)"\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
+});
