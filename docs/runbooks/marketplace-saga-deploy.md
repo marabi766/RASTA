@@ -33,6 +33,9 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
   را آغاز نمی‌کند، و آن سفارش هرگز از `PENDING` جلو نمی‌رود. نمونه باید متوقف باشد.
 - میان گام ۲ و ۴ marketplace-service در دسترس نیست (سفارشی ثبت نمی‌شود). این بهای Gate است.
 - خروجی گام ۳ (متن و کد خروج) و زمانش را در Change Record استقرار ثبت کن.
+- میان گام ۲ و ۴ هیچ نمونه‌ای گزارش نمی‌دهد و هیچ Worker ـی Poll نمی‌کند، پس `RastaMarketplaceSagaNoLiveWorker`
+  و `RastaMarketplaceSagaStartBacklogAging` فعال می‌شوند. این انتظار می‌رود:
+  فقط برای همین بازه، با شناسهٔ Change Record و پایانی معین، Silence کن ([`marketplace-saga-liveness`](marketplace-saga-liveness.md)).
 
 ### گام ۳ — Gate
 
@@ -143,7 +146,8 @@ that shortens retention after deleting older history also requires operator revi
 `rasta_marketplace_saga_start_backlog` and
 `rasta_marketplace_saga_start_backlog_age_seconds` expose counts/age only.
 `RastaMarketplaceSagaStartBacklogAging` fires after age exceeds five minutes for
-two minutes. An older economic-service causes it too: no saga starts until
+two minutes, or when no replica reports the backlog for two minutes: a failed
+sample withdraws the series rather than keeping its last value (#770 r2 F3). An older economic-service causes it too: no saga starts until
 `GET /v1/transactions/capabilities` says yes (outcome `economic_not_ready` on
 `rasta_marketplace_saga_start_deliveries_total`), and those orders stay unclaimed and
 start by themselves after the upgrade (ADR-040). Local Prometheus loads the rule; external notification routing remains
