@@ -44,7 +44,7 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 Retention تاریخچه و Visibility انجام شود؛ پس از آن، تطبیق عملیاتی لازم است.
 
 Gate همیشه از ریشهٔ مخزن **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout
-انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر پنج اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
+انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر شش اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
@@ -52,8 +52,19 @@ TEMPORAL_ADDRESS='<as the service>' TEMPORAL_NAMESPACE='<as the service>' \
   MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' \
   MARKETPLACE_TARGET_PACKAGE_JSON='<package.json extracted from target image>' \
   MARKETPLACE_SAGA_STOP_TIME='<recorded UTC time>' \
+  DATABASE_URL_MARKETPLACE='<as the service>' \
   node scripts/marketplace-saga-drain-check.mjs
 ```
+
+پس از همهٔ پرسش‌های Temporal، Gate جدول `saga_unconfirmed_call` را می‌خواند (FU-221، D-151): **هر** رکورد باز، با هر عملیات
+(`createObligation`، `authoriseSettlement`، `settle`، `compensate`، `resolveObligationDispute`)، استقرار را متوقف می‌کند. Temporal
+چنین رکوردی را نشان نمی‌دهد: مجوزی که سفارش حصارش کرده Saga را بی Activity ـِ در انتظار تمام می‌کند و رکوردش باز می‌ماند، و
+فراخوانی‌ای که economic-service هنوز پاسخش را نداده شاید فقط از نسخه‌ای که آن را فرستاده پاسخ بگیرد. خواندن با `psql` ـِ روی PATH
+است، از راه `scripts/psql-prisma-url.mjs` (گذرواژه در `PGPASSWORD`، نه در argv)، با همان نقش زمان اجرای سرویس که پایش سرویس
+همین جدول را با آن می‌خواند (جدول RLS ندارد؛ اگر روزی داشته باشد Gate رد می‌کند، چون پاسخ خالی آن‌گاه از Policy است نه از جدول).
+جدول با Schema ـِ نشانی (`?schema=`) نام برده می‌شود، پس Pooler ـی که `search_path` را دور بریزد Schema ـِ دیگری را نمی‌خواند.
+یک تراکنش `READ ONLY` با `statement_timeout` ده ثانیه و `lock_timeout` پنج ثانیه؛ ردیف‌ها از Index ـِ جزئی
+`ix_saga_unconfirmed_call_open` خوانده می‌شوند و تاریخچهٔ بسته‌شده پیموده نمی‌شود. `PGSERVICE` تنظیم‌شده رد می‌شود.
 
 Gate دقیقاً این‌ها را می‌پرسد (همان Query ـِ Visibility؛ Visibility فعالیت در انتظار را نمایه نمی‌کند، پس هر Workflow جدا
 `describe` می‌شود):
@@ -87,8 +98,8 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 
 | کد خروج | معنا                                                                                                                                                                                                                          | استقرار      |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `0`     | هیچ Poller روی Queue، هر دو شمار و فهرست یکی، اجرای جاری بررسی شده، هیچ Activity در انتظار                                                                                                                                    | مجاز (گام ۴) |
-| `1`     | Poller یا Activity در انتظار یافت شد؛ جزئیات خروجی CLI چاپ نمی‌شود                                                                                                                                                            | **متوقف**    |
+| `0`     | هیچ Poller روی Queue، هر دو شمار و فهرست یکی، اجرای جاری بررسی شده، هیچ Activity در انتظار، هیچ رکورد فراخوانی باز                                                                                                            | مجاز (گام ۴) |
+| `1`     | Poller، Activity در انتظار یا رکورد فراخوانی باز (`open saga call record: order …`) یافت شد؛ جزئیات خروجی CLI چاپ نمی‌شود                                                                                                     | **متوقف**    |
 | `1`     | `cannot verify — deployment blocked`: تنظیمی نیست، CLI نیست یا شکست خورد، پاسخی با شکلی جز جدول بالا، اجرایی دو بار فهرست شده، شمار و اجراهای یکتای فهرست نمی‌خوانند، شمار در حین بررسی عوض شد، Workflow ـی روی Queue ـی دیگر | **متوقف**    |
 
 ### اگر Gate متوقف کرد
@@ -104,6 +115,11 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 - **Protocol ناسازگار یا نشانهٔ ناشناس (کد ۱).** `requires saga protocol N` یعنی Image هدف Protocol لازم را اعلام نکرده است:
   Image سازگار بیاور یا اصلاحی روبه‌جلو منتشر کن. `unknown compatibility marker`، `unknown continuation state`، `invalid start input`، `unknown activity result`، `unreadable activity result` یا `an activity result without its scheduling`
   یعنی این Gate آن تاریخچه را نمی‌شناسد: Gate را از جدیدترین انتشار اجرا کن. Manifest را برای گذشتن از Gate هرگز دستی تغییر نده.
+- **رکورد فراخوانی باز (کد ۱، `open saga call record`).** نسخهٔ جدید را بالا **نیاور.** سطر سفارش، سازمان، عملیات، `subject`،
+  `generation` و سنّ رکورد را نام می‌برد. با economic-service تطبیقش بده، همان‌طور که
+  [`marketplace-saga-liveness`](marketplace-saga-liveness.md) § «The drain gate refuses: an open call record» می‌گوید؛ رکورد را
+  هرگز برای گذشتن از Gate، با گذشت زمان، نگه‌داری کلید یا وضعیت سفارش، دستی نبند (D-135، #836 N1). `unknown operation` یعنی
+  نسخه‌ای تازه‌تر از این Gate آن را نوشته است: Gate را از جدیدترین انتشار اجرا کن.
 - **بررسی ممکن نشد (کد ۱).** دسترسی را درست کن (CLI، نشانی، TLS، Namespace) و گام ۳ را تکرار کن. راه «با این حال مستقر کن»
   نیست و یادداشت استثنا جای Gate را نمی‌گیرد.
 
@@ -111,7 +127,7 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 
 مخزن اسکریپت یا Job استقراری برای marketplace-service ندارد (`.github/workflows/ci.yml` فقط می‌سازد و می‌آزماید؛ Manifest
 استقراری در مخزن نیست)، پس Gate فعلاً گامی دستی است. هر خط استقرار که ساخته شود باید همین اسکریپت را میان گام ۲ و ۴
-از جدیدترینِ انتشار در حال اجرا و انتشار هدف با هر چهار متغیر گام ۳ اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
+از جدیدترینِ انتشار در حال اجرا و انتشار هدف با همهٔ متغیرهای گام ۳ اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
 ـِ CI می‌آزماید (`pnpm run test:marketplace-saga-drain-check`).
 
 ## Durable start delivery (task 1214 A)
@@ -212,7 +228,7 @@ Durable history proves protocol requirements for a discovered run; it does not
 discover runs or establish visibility completeness. It adds no workflow commands.
 
 Always run the gate from the **newest of the running and target releases**;
-never use the target checkout when rolling back. Use the five-variable invocation
+never use the target checkout when rolling back. Use the six-variable invocation
 in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
 
 Extract `services/marketplace-service/package.json` from the **immutable target

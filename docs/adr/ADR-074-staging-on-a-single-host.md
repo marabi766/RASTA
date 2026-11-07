@@ -652,9 +652,9 @@ Manifest). ورودی Transparency Log عمومی است — برای مخزن �
 3. **Saga ـِ marketplace (D-053):** هر انتشار یا Rollback که Image ـِ `marketplace-service` را عوض کند — در **هر** جهت — توالی
    حصاردار را اجرا می‌کند (`marketplace-saga-deploy.md:25-35`): Migration؛ توقف **همه‌ی** نمونه‌ها (`stop` با مهلت کامل § ۱۵، نه
    Recreate ـِ تدریجی؛ نه `MARKETPLACE_TEMPORAL_ENABLED=false`)؛ `scripts/marketplace-saga-drain-check.mjs` از Container ـِ
-   یک‌بارمصرف روی شبکه‌ی `workflow`، همیشه از **جدیدترینِ انتشار در حال اجرا و انتشار هدف** (در Rollback هرگز از Checkout
-   انتشار هدف)، با چهار متغیر زیر؛ Manifest بدون ویرایش از Image ـِ هدف استخراج می‌شود. فقط کد `0` ادامه می‌دهد.
-   `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… MARKETPLACE_TARGET_PACKAGE_JSON=… node scripts/marketplace-saga-drain-check.mjs`
+   یک‌بارمصرف روی شبکه‌ی `workflow` و شبکه‌ای که به Postgres ـِ marketplace می‌رسد (رکوردهای فراخوانی باز، FU-221)، همیشه از **جدیدترینِ انتشار در حال اجرا و انتشار هدف** (در Rollback هرگز از Checkout
+   انتشار هدف)، با متغیرهای زیر؛ Manifest بدون ویرایش از Image ـِ هدف استخراج می‌شود. فقط کد `0` ادامه می‌دهد.
+   `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… MARKETPLACE_TARGET_PACKAGE_JSON=… MARKETPLACE_SAGA_STOP_TIME=… DATABASE_URL_MARKETPLACE=… node scripts/marketplace-saga-drain-check.mjs`
    کد `1` (Poller یا Activity ـِ در انتظار) و کد `2` (بررسی ناممکن،
    پاسخ ناشناخته) **استقرار را می‌بندند**؛ استثنا ندارد. هرگز `terminate` یا `reset` ـِ Workflow: وجه در Hold می‌ماند (`:83-88`).
 4. **آنچه برنمی‌گردد:** رویدادی که نسخه‌ی تازه منتشر کرده و Consumerها پردازش کرده‌اند؛ تغییر Config ـِ Topic (اسکریپت فقط سقف
