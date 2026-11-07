@@ -10,7 +10,7 @@ import {
   type ReadResult,
   type TransactionListQuery,
 } from '@/server/wallet';
-import { mintSubmissionId } from '@/server/submission';
+import { restoreTopUp } from '@/server/top-up-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { WalletScreen } from './WalletScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
@@ -62,6 +62,8 @@ export default async function WalletPage({
     fetchPaymentProvider(session),
   ]);
 
+  const topUp = wallet.kind === 'OK' ? await restoreTopUp(session, wallet.data.id) : undefined;
+
   return (
     <AppShell
       key={actingScope(session)}
@@ -84,7 +86,8 @@ export default async function WalletPage({
         provider={provider}
         query={{ ...query, context: pageContext(session) }}
         csrfToken={session.csrfToken}
-        submissionId={mintSubmissionId(session)}
+        submissionId={topUp?.submissionId ?? ''}
+        topUpState={topUp}
       />
     </AppShell>
   );
