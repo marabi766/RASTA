@@ -353,7 +353,8 @@ test('file names survive byte for byte: a leading U+FEFF is part of the name, no
     // ...and every listed path names the file that is there (the bytes git printed are the bytes on disk)
     for (const path of authoredFiles(dir)) assert.equal(fs.readFileSync(path, 'utf8'), 'x');
     // a deleted tracked file is subtracted by its exact name, not by its BOM-less twin
-    const run = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+    const run = (...args) =>
+      execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe', env: fixtureGitEnv() });
     run('init', '-q');
     run('add', '-f', '.');
     run('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'x');
