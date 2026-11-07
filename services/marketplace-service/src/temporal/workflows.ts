@@ -27,6 +27,7 @@ import {
   doubtOutlivesKeyMs,
   FINAL_ANSWER_CONTRACT,
   HOLD_DEADLINE_PASSED,
+  HOLD_SENDS_CLOSED,
   HOLD_FENCE,
   holdDeadlineFrom,
   OWNER_STATE_IS_FINAL,
@@ -381,6 +382,13 @@ export const HOLD_REFUSAL_EXIT_PATCH = 'economic-hold-refusal-exit-v1';
  */
 export const HOLD_FENCE_PATCH = 'economic-hold-send-fence-v1';
 
+/**
+ * Absence decided from the order row (D-144): an empty lookup asks `noHoldCanLand`, a
+ * watch with no deadline to pass does not expire, and a terminal obligation with nothing to
+ * refund ends the hold's recovery. A history without the marker replays what it did.
+ */
+export const HOLD_ROW_PATCH = 'economic-hold-fence-on-order-v1';
+
 /** On economic-service's record of a refund no party asked for. */
 const LATE_HOLD_REFUND_REASON = 'A hold arrived after the saga gave up on it';
 
@@ -502,6 +510,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   const {
     readOrder,
     findObligation,
+    noHoldCanLand,
     markFundsHeld,
     markFailed,
     markSettling,
@@ -572,6 +581,8 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   // One deadline for every request under the hold's key, and whether it is still to be fixed.
   let holdNotAfter = input.resume?.holdNotAfter;
   let holdFirstSend = !input.resume;
+  // The order's obligation was seen terminal with nothing to refund, so no hold can land.
+  let ownerAnswered = false;
   // For replaying the retired exit: how old a doubt had to be, and when the hold last went unanswered.
   const doubtLimitMs = doubtOutlivesKeyMs(input.economicKeyRetentionHours);
   let holdDoubtAt = input.resume?.holdCall
@@ -641,13 +652,11 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     ...(releaseRounds > 0 ? { releaseRounds } : {}),
     ...(unconfirmed ? { unconfirmedCall: unconfirmed } : {}),
     ...(sibling?.operation === 'createObligation'
-      ? {
-          holdCall: { rounds: sibling.rounds, doubtAt: holdDoubtAt },
-          ...(holdNotAfter === undefined ? {} : { holdNotAfter }),
-        }
+      ? { holdCall: { rounds: sibling.rounds, doubtAt: holdDoubtAt } }
       : sibling
         ? { siblingCall: sibling }
         : {}),
+    ...(holdNotAfter === undefined ? {} : { holdNotAfter }),
     ...(owedSoFar() ? { outstandingWork: outstanding } : {}),
     ...(lateHold ? { lateHoldWatch: lateHold } : {}),
   });
@@ -1146,16 +1155,19 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * deadline, so no request under this key can hold any more. A request that
    * carries no deadline, as in a history from before the fence, never ends it live:
    * economic-service cannot refuse that request, so nothing can prove it will not land.
+   *
+   * `persisted` is the deadline an earlier run left on the order: this run's requests carry
+   * that one, as the activity sends the row's, and its first refusal then proves nothing.
    */
-  async function placeHold(): Promise<
-    { held: true; transactionId: string } | { held: false; reason: string }
-  > {
+  async function placeHold(
+    persisted?: string | null,
+  ): Promise<{ held: true; transactionId: string } | { held: false; reason: string }> {
     let unanswered: unknown;
     let sentAt = 0;
     const place = async (inDoubt: boolean): Promise<string> => {
       if (holdFirstSend) {
         holdFirstSend = false;
-        if (patched(HOLD_FENCE_PATCH)) holdNotAfter = holdDeadlineFrom(Date.now());
+        if (patched(HOLD_FENCE_PATCH)) holdNotAfter = persisted ?? holdDeadlineFrom(Date.now());
       }
       sentAt = Date.now();
       try {
@@ -1193,6 +1205,12 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       const { answer } = await siblingCall({ operation: 'createObligation' }, place, fencedOut);
       return { held: true, transactionId: answer };
     } catch (error) {
+      // The order's one obligation is terminal with nothing to refund: no request can hold
+      // any more, and the order's end follows, adopting and refunding nothing.
+      if (ownerHoldsNothing(error) && patched(HOLD_ROW_PATCH)) {
+        sibling = undefined;
+        return { held: false, reason: 'The funds for this order are no longer held' };
+      }
       // A lookup that failed, or an obligation not adopted, is not the hold's refusal.
       if (error !== unanswered) throw error;
       const reason = describe(error);
@@ -1214,7 +1232,9 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * The order is closed on a hold given up on: for one more margin the saga stays and
    * asks, and refunds a hold that was already committing when the lookup found none. Past
    * that, economic-service's refusal is what fences any later request. A failed lookup or
-   * refund waits; a status no refund can reach stays for a person.
+   * refund waits; a status no refund can reach stays for a person. A hold sent with no
+   * deadline has no such fence: past `until` the watch goes on with the alert on, until a
+   * terminal obligation answers it or a person ends the saga.
    */
   async function watchForLateHold(closed: OrderStatus): Promise<void> {
     if (!lateHold) return;
@@ -1222,7 +1242,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     status.phase = 'LATE_HOLD_WATCH';
     for (let round = 1; ; round += 1) {
       const refunding = sibling?.operation === 'compensate' ? sibling.transactionId : undefined;
-      const transactionId = refunding ?? (await obligationToRefund(askEconomic));
+      const transactionId = refunding ?? (await obligationToRefund(askEconomic, true));
       if (transactionId) {
         const { answer } = await siblingCall<ObligationFinal | void>(
           { operation: 'compensate', transactionId },
@@ -1231,9 +1251,18 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         if (isFinal(answer) && !leftNothingToRefund(answer.funds)) {
           await staysForReconciliation('compensate', answer, (now) => now.status === closed);
         }
+        lateHold = undefined;
         return;
       }
-      if (Date.now() >= until) return;
+      if (Date.now() >= until) {
+        if (holdNotAfter !== undefined || ownerAnswered || !patched(HOLD_ROW_PATCH)) return;
+        await noteEconomicCallUnconfirmed(
+          orderId,
+          'createObligation',
+          round,
+          'A hold sent with no deadline cannot be proven not to land',
+        );
+      }
       // Asking may have named a status it then found nothing to do about.
       status.phase = 'LATE_HOLD_WATCH';
       const backoffMs = releaseBackoffMs(round);
@@ -1289,15 +1318,24 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * The transaction a cancelled order with none recorded must refund; null when there
    * is nothing to refund. Refused, unreadable, or naming an obligation the saga cannot
    * act on, it stays and asks again. Only money back with the buyer or never held
-   * closes the order unrefunded, and an empty lookup only with no hold of this saga on
-   * its way (`noHold`).
+   * closes the order unrefunded, and an empty lookup only if the order's row says no hold
+   * can land (`noHoldCanLand`; in a history from before it, `noHold`). `watching`: the
+   * caller decides for itself how long an empty lookup is to be asked again.
    */
   async function obligationToRefund(
     find: typeof findObligation = findObligation,
+    watching = false,
   ): Promise<string | null> {
     const ask = async (): Promise<string | null> => {
+      // Asked first: only a lookup begun once no hold can land covers every request.
+      const rowSays =
+        !watching && patched(HOLD_ROW_PATCH) ? await noHoldCanLand(orderId) : undefined;
       const found = await findOwnObligation(find);
-      if (found === null && input.resume && !noHold && patched(OWED_WORK_PATCH)) {
+      const proven =
+        found !== null ||
+        watching ||
+        (rowSays ?? !(input.resume && !noHold && patched(OWED_WORK_PATCH)));
+      if (!proven) {
         throw ApplicationFailure.nonRetryable(
           `An empty lookup does not show that a hold of order ${orderId} will not commit`,
           'OBLIGATION_LOOKUP_UNPROVEN',
@@ -1309,14 +1347,20 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       return await ask();
     } catch (error) {
       if (!lookupCanWait(error) || !patched(OWED_WORK_PATCH)) throw error;
-      if (ownerHoldsNothing(error)) return null;
+      if (ownerHoldsNothing(error)) {
+        ownerAnswered = true;
+        return null;
+      }
       return await waitForConfirmation(
         {
           ...waitOn(owe('compensate')),
           phase: status.phase === 'COMPENSATING' ? UNCONFIRMED_PHASE.compensate : status.phase,
           call: () =>
             ask().catch((failure: unknown) => {
-              if (ownerHoldsNothing(failure)) return null;
+              if (ownerHoldsNothing(failure)) {
+                ownerAnswered = true;
+                return null;
+              }
               throw failure;
             }),
           canWait: lookupCanWait,
@@ -1482,16 +1526,21 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     status.phase = 'CREATING_OBLIGATION';
     const hold = stillToFail
       ? { held: false as const, reason: (lateHold as LateHoldWatch).reason }
-      : await placeHold();
+      : await placeHold(order.holdNotAfter);
 
     if (!hold.held) {
+      // Given up on before the fence, with nothing to end the watch: the order stays open.
+      if (stillToFail && holdNotAfter === undefined && patched(HOLD_ROW_PATCH)) {
+        await watchForLateHold('PENDING');
+      }
       // economic-service holds nothing for this order. The order failed —
       // unless the buyer cancelled first, in which case it was cancelled, and
       // with nothing held there is nothing to refund.
       status.phase = 'FAILED';
-      const closed = lateHold
-        ? await recorded('compensate', 'markFailed', () => markFailed(orderId, hold.reason))
-        : await markFailed(orderId, hold.reason);
+      const closed =
+        lateHold || stillToFail
+          ? await recorded('compensate', 'markFailed', () => markFailed(orderId, hold.reason))
+          : await markFailed(orderId, hold.reason);
       if (closed === 'FAILED') {
         await watchForLateHold('FAILED');
         status.phase = 'FAILED';
@@ -1641,6 +1690,22 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       case 'COMPLETED':
       case 'CANCELLED':
       case 'FAILED':
+        // A run that finds the order closed: an earlier run's send may still land, until the
+        // deadline and margin, or with no deadline for as long as `watchForLateHold` says.
+        if (
+          !lateHold &&
+          !order.economicTransactionId &&
+          !order.holdSendsClosed &&
+          order.holdMayHaveSent &&
+          !(order.holdNotAfter && Date.now() >= fenceEnd(order.holdNotAfter)) &&
+          patched(HOLD_ROW_PATCH)
+        ) {
+          holdNotAfter = order.holdNotAfter ?? undefined;
+          lateHold = {
+            until: order.holdNotAfter ? fenceEnd(order.holdNotAfter) : Date.now(),
+            reason: 'A hold an earlier run sent may still land',
+          };
+        }
         await watchForLateHold(order.status);
         status.phase = order.status;
         return order.status;
@@ -1701,7 +1766,7 @@ export function outcomeUnknown(error: unknown, inDoubt: boolean): boolean {
   const cause = (error as ActivityFailure).cause;
   if (!(cause instanceof ApplicationFailure)) return true;
   const proof: unknown = cause.details?.[0];
-  if (proof === OWNER_STATE_IS_FINAL) return false;
+  if (proof === OWNER_STATE_IS_FINAL || proof === HOLD_SENDS_CLOSED) return false;
   return inDoubt || proof !== REFUSED_ON_FIRST_ATTEMPT || !PROVEN_REFUSALS.has(cause.type ?? '');
 }
 
@@ -1713,6 +1778,11 @@ function refusedPastHoldDeadline(error: unknown): boolean {
     cause.type === HOLD_DEADLINE_PASSED &&
     cause.details?.[0] === REFUSED_PAST_HOLD_DEADLINE
   );
+}
+
+/** When no request under that deadline can still hold. */
+function fenceEnd(holdNotAfter: string): number {
+  return Date.parse(holdNotAfter) + HOLD_FENCE.clockMarginMs;
 }
 
 /** The obligation an order past `PENDING` holds. The row constraint guarantees one. */

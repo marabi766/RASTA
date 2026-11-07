@@ -139,6 +139,7 @@ describe('a hold refused after a lost answer (#812)', () => {
         };
       })(),
       findObligation: () => null,
+      noHoldCanLand: () => true,
       compensate: () => undefined,
       markFundsHeld: (_id: string, transactionId: string) => {
         state.economicTransactionId = transactionId;
@@ -992,6 +993,8 @@ describe('a hold refused after a lost answer (#812)', () => {
           }
           const resume = await inputOf(id, (await latest.describe()).runId);
           expect(resume?.lateHoldWatch?.until).toEqual(expect.any(Number));
+          // Without it the next run would take this for a watch with nothing to end it.
+          expect(resume?.holdNotAfter).toEqual(s.sent.createObligation?.[0]?.[1]);
           await atRest(latest);
           landed.now = true;
           await latest.signal(retryDisputeRelease);
@@ -1017,6 +1020,7 @@ describe('a hold refused after a lost answer (#812)', () => {
           activitySequence: 40,
           outstandingWork: { operation: 'compensate', rounds: 0, noHold: true },
           lateHoldWatch: { until, reason: FENCE_WORDS },
+          holdNotAfter: holdDeadlineFrom(until - LIMIT_MS),
         } as SagaResume,
       });
       expect(result).toBe('FAILED');
@@ -1052,6 +1056,7 @@ describe('a hold refused after a lost answer (#812)', () => {
           activitySequence: 40,
           outstandingWork: { operation: 'compensate', rounds: 1, noHold: true },
           lateHoldWatch: { until, reason: 'Insufficient balance' },
+          holdNotAfter: holdDeadlineFrom(until - LIMIT_MS),
         } as SagaResume,
       });
       expect(result).toBe('FAILED');

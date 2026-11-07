@@ -1216,6 +1216,7 @@ describe('history rollover on real Temporal', () => {
       workflowsPath: require.resolve('./workflows'),
       activities: {
         readOrder: async () => state,
+        noHoldCanLand: async () => true,
         findObligation: async () => {
           lookups += 1;
           return { transactionId: 'TXN_FOUND' };

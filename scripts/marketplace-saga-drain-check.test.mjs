@@ -971,6 +971,7 @@ const PATCHES = {
   'economic-hold-call-durable-wait-v1': 7,
   'economic-hold-refusal-exit-v1': 8,
   'economic-hold-send-fence-v1': 9,
+  'economic-hold-fence-on-order-v1': 10,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);

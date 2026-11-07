@@ -178,6 +178,11 @@ it.each([
       describe: async () => order,
       onceForSaga: (_order: unknown, _step: unknown, _activity: unknown, call: () => unknown) =>
         call(),
+      claimHoldSend: async (_o: unknown, proposed?: string) => ({
+        holdNotAfter: proposed ?? null,
+        claims: 1,
+      }),
+      closeHoldSendsOnRefusal: async () => true,
       openSagaCall: async () => 1,
       confirmSagaCall: async () => undefined,
     } as unknown as OrderService,
@@ -224,6 +229,11 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       orders: {
         describe: async () => order,
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        claimHoldSend: async (_o: unknown, proposed?: string) => ({
+          holdNotAfter: proposed ?? null,
+          claims: 1,
+        }),
+        closeHoldSendsOnRefusal: async () => true,
         openSagaCall: async () => 1,
         confirmSagaCall: async () => undefined,
       } as unknown as OrderService,
@@ -656,6 +666,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
   });
 
   describe('createObligation behind the wait (FU-117)', () => {
+    const DEADLINE = '2026-11-08T00:00:00.000Z';
     const noTransaction = () => null;
     const refuses = (code: string) => () => {
       throw refuse(code);
@@ -663,7 +674,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
 
     it('the send’s own listed refusal on its first attempt is proof', async () => {
       const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction, () => 1);
-      const caught = await failure(activities.createObligation('ORD'));
+      const caught = await failure(activities.createObligation('ORD', DEADLINE));
       expect(caught.type).toBe('INSUFFICIENT_BALANCE');
       expect(caught.details).toEqual([REFUSED_ON_FIRST_ATTEMPT]);
     });
@@ -675,7 +686,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       ['a source already taken', 'ALREADY_EXISTS', 1],
     ] as const)('%s is no proof', async (_name, code, attempt) => {
       const { activities } = over(refuses(code), noTransaction, () => attempt);
-      const caught = await failure(activities.createObligation('ORD'));
+      const caught = await failure(activities.createObligation('ORD', DEADLINE));
       expect(caught.type).toBe(code);
       expect(caught.details ?? []).toEqual([]);
     });
@@ -722,7 +733,9 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
 
     it('no attempt known: no proof', async () => {
       const { activities } = over(refuses('INSUFFICIENT_BALANCE'), noTransaction);
-      expect((await failure(activities.createObligation('ORD'))).details ?? []).toEqual([]);
+      expect((await failure(activities.createObligation('ORD', DEADLINE))).details ?? []).toEqual(
+        [],
+      );
     });
   });
 });
@@ -755,6 +768,11 @@ describe('every guard of an economic step reads the order after the step looked'
           await lookup;
           return call();
         },
+        claimHoldSend: async (_o: unknown, proposed?: string) => ({
+          holdNotAfter: proposed ?? null,
+          claims: 1,
+        }),
+        closeHoldSendsOnRefusal: async () => true,
       } as unknown as OrderService,
       economic: {
         createObligation: send,
@@ -846,6 +864,11 @@ describe('the deadline of a hold (D-132)', () => {
           economicTransactionId: null,
         }),
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        claimHoldSend: async (_o: unknown, proposed?: string) => ({
+          holdNotAfter: proposed ?? null,
+          claims: 1,
+        }),
+        closeHoldSendsOnRefusal: async () => true,
       } as unknown as OrderService,
       economic: {
         createObligation: send,

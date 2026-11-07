@@ -209,6 +209,7 @@ function recordingActivities(order: FakeOrder, overrides: Partial<OrderActivitie
     ),
     createObligation: recorded('createObligation', () => ({ transactionId: TRANSACTION })),
     findObligation: recorded('findObligation', () => null),
+    noHoldCanLand: recorded('noHoldCanLand', () => true),
     markFundsHeld: recorded('markFundsHeld', (_id: string, transactionId: string) => {
       order.economicTransactionId = transactionId;
       return order.step('FUNDS_HELD', ['PENDING'], ['CANCELLING']);
@@ -2821,11 +2822,10 @@ describe('the order saga', () => {
     // the obligation — on exactly the order's terms — was moved on before the
     // saga looked. Recording it as held published ORDER_FUNDS_HELD for money
     // back with the buyer.
+    //
+    // Terminal with nothing to refund, the order ends instead (`workflows-hold-row.spec.ts`).
     it.each<[string, string]>([
-      ['REFUNDED', 'RETURNED'],
-      ['CANCELLED', 'NEVER_HELD'],
       ['CREATED', 'NEVER_HELD'],
-      ['FAILED', 'NEVER_HELD'],
       ['SETTLED', 'PAID_OUT'],
       ['PENDING_SETTLEMENT', 'UNPROVEN'],
       ['DISPUTED', 'UNPROVEN'],

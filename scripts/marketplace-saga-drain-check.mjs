@@ -185,6 +185,7 @@ const PATCH_PROTOCOL = new Map([
   ['economic-hold-call-durable-wait-v1', 7],
   ['economic-hold-refusal-exit-v1', 8],
   ['economic-hold-send-fence-v1', 9],
+  ['economic-hold-fence-on-order-v1', 10],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is
@@ -268,6 +269,7 @@ const FINAL_ANSWER_CALLS = new Map([
 const OTHER_CALLS = new Set([
   'createObligation',
   'findObligation',
+  'noHoldCanLand',
   'readOrder',
   'markFundsHeld',
   'markFailed',

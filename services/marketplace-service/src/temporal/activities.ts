@@ -26,6 +26,8 @@ import { SERVICE_NAME } from '../config/env';
 import {
   FINAL_ANSWER_CONTRACT,
   HOLD_DEADLINE_PASSED,
+  HOLD_FENCE,
+  HOLD_SENDS_CLOSED,
   OWNER_STATE_IS_FINAL,
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
@@ -449,8 +451,11 @@ export function createActivities(deps: ActivityDependencies) {
      * HELD from a release too old to say whether it is proven: retryable, and
      * that recovery waits for one that can (`heldProofUnavailable`).
      *
-     * `holdNotAfter` is the deadline the workflow fixed at its first send; only a
-     * workflow from before the fence sends none (`placeHold`).
+     * `holdNotAfter` is the deadline the workflow proposes at its first send; only a
+     * workflow from before the fence proposes none (`placeHold`). What goes out is the
+     * order row's (`claimHoldSend`), counted before it goes, because no run knows what an
+     * earlier run sent (D-144). So a refusal is proof only for the first send there has
+     * ever been, and only once the row has shut out any other (`closeHoldSendsOnRefusal`).
      */
     async createObligation(orderId: string, holdNotAfter?: string): Promise<HeldResult> {
       const held = await economicStep(orderId, 'createObligation', async (order) => {
@@ -468,16 +473,29 @@ export function createActivities(deps: ActivityDependencies) {
           );
         }
 
+        const own = { id: order.id, organizationId: order.buyerOrganizationId };
+        const claim = await deps.orders.claimHoldSend(own, holdNotAfter);
+        if ('closed' in claim) {
+          // Closed by the refusal or the deadline: proof. Closed as an order: as above, not.
+          throw ApplicationFailure.create({
+            message: `Order ${order.id} is closed to further holds`,
+            type: claim.closed ? HOLD_SENDS_CLOSED : 'ORDER_ALREADY_CLOSED',
+            nonRetryable: true,
+            details: claim.closed ? [HOLD_SENDS_CLOSED] : [],
+          });
+        }
+        const deadline = claim.holdNotAfter;
+
         const transaction = await deps.economic
           .createObligation({
             ...obligationTermsOf(order),
             correlationId: order.correlationId,
-            ...(holdNotAfter === undefined ? {} : { holdNotAfter }),
+            ...(deadline === null ? {} : { holdNotAfter: deadline }),
           })
-          .catch((refusal: unknown) => {
+          .catch(async (refusal: unknown) => {
             // The key's own answer, whichever attempt hears it, to a request that set it.
             if (
-              holdNotAfter !== undefined &&
+              deadline !== null &&
               isRastaError(refusal) &&
               refusal.code === HOLD_DEADLINE_PASSED
             ) {
@@ -492,7 +510,15 @@ export function createActivities(deps: ActivityDependencies) {
             // Not ALREADY_EXISTS: that says an obligation is there, the opposite of
             // nothing having moved.
             const taken = isRastaError(refusal) && refusal.code === 'ALREADY_EXISTS';
-            throw currentAttempt() === 1 && !taken ? provenIfListed(refusal) : refusal;
+            // A send with no deadline to propose is a round of a wait from before the fence.
+            const firstEver = holdNotAfter !== undefined && claim.claims === 1;
+            const proven =
+              currentAttempt() === 1 &&
+              firstEver &&
+              !taken &&
+              provenIfListed(refusal) !== refusal &&
+              (await deps.orders.closeHoldSendsOnRefusal(own));
+            throw proven ? provenIfListed(refusal) : refusal;
           });
         return { transactionId: transaction.id };
       });
@@ -589,6 +615,20 @@ export function createActivities(deps: ActivityDependencies) {
           throw asTemporalFailure(error);
         }
       });
+    },
+
+    /**
+     * Whether an empty lookup says no hold will land (D-144), asked of the order row so
+     * that no run depends on what it remembers. Once true, no send can begin. Past the
+     * deadline and margin, the claim-time fence is what makes it so.
+     */
+    async noHoldCanLand(orderId: string): Promise<boolean> {
+      return asSystemFor(orderId, (order) =>
+        deps.orders.closeHoldSendsIfNoneCanLand(
+          { id: order.id, organizationId: order.buyerOrganizationId },
+          HOLD_FENCE.clockMarginMs,
+        ),
+      );
     },
 
     /**

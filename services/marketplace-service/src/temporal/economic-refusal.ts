@@ -58,6 +58,12 @@ export const HOLD_DEADLINE_PASSED = 'HOLD_DEADLINE_PASSED';
 /** In a failure's details: that answer, to a request that carried a deadline. Any attempt. */
 export const REFUSED_PAST_HOLD_DEADLINE = 'REFUSED_PAST_HOLD_DEADLINE';
 
+/**
+ * In a failure's details: the order's own row says its sends are closed (`noHoldCanLand`),
+ * so this attempt sent nothing and no earlier one can still hold.
+ */
+export const HOLD_SENDS_CLOSED = 'HOLD_SENDS_CLOSED';
+
 /** The deadline of every request under a hold's key, from the moment of the first. */
 export function holdDeadlineFrom(firstSendAt: number): string {
   return new Date(firstSendAt + HOLD_FENCE.sendWindowMs).toISOString();

@@ -108,6 +108,7 @@ describe('work the saga owes (#796 r1)', () => {
     const base: Record<string, Fn> = {
       readOrder: () => ({ ...state, dispute: state.status === 'DISPUTED' ? state.dispute : null }),
       findObligation: () => null,
+      noHoldCanLand: () => true,
       authoriseSettlement: () => undefined,
       settle: () => SETTLED,
       disputeObligation: () => 'ECON_1',
@@ -349,7 +350,7 @@ describe('work the saga owes (#796 r1)', () => {
     });
 
     it('a continued run with no proof of its hold does not close on it', async () => {
-      const s = saga(cancelling(null));
+      const s = saga(cancelling(null), () => ({ noHoldCanLand: () => false }));
       await drive(s, (handle) => stays(s, handle, 'COMPENSATION_UNCONFIRMED'), resumedAt());
       expect(s.rounds[0]).toContain('does not show');
       expect(s.calls).not.toContain('markCancelled');

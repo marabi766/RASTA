@@ -230,7 +230,7 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**, `saga-owed-work-durable-v1` **6**, `economic-hold-call-durable-wait-v1` **7**, `economic-hold-refusal-exit-v1` **8**, `economic-hold-send-fence-v1` **9**. A marker the gate does not list blocks every target until the gate learns
+**5**, `saga-owed-work-durable-v1` **6**, `economic-hold-call-durable-wait-v1` **7**, `economic-hold-refusal-exit-v1` **8**, `economic-hold-send-fence-v1` **9**, `economic-hold-fence-on-order-v1` **10**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
 (`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 7, `lateHoldWatch`: 8, `holdNotAfter`: 9; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
@@ -358,11 +358,31 @@ lookup or refund counts as a `compensate` round, and a status no refund can reac
 `OBLIGATION_RECONCILIATION`. A closed order cannot move, so reconciliation on one does not
 clear by itself: once the obligation is settled by hand, terminate that saga. **Do not
 terminate or cancel a saga in this wait** to clear the alert: check the obligation at
-economic-service and escalate. **Do not reset such a saga to before its first send, or start
-another for the order, until its deadline and margin have passed.** The deadline lives in the
-workflow, so the new run forgets it and fixes another. With an empty wallet there is no key
-record to collide with, so its first refusal fails the order at once while the old run's stalled
-request can still hold, until the old deadline.
+economic-service and escalate.
+
+**The fence is on the order row, so no run has to remember it (protocol 10, D-144).** A run
+cannot know what an earlier run sent. Before each send the activity counts it in
+`hold_send_claims` and, on the first, fixes `hold_not_after`, one statement committed before the
+request exists; the deadline never moves, and a trigger refuses any writer that tries. Every
+request carries the row's deadline, whichever run sends it. So after a Temporal reset, or for
+any run that finds the row so:
+
+- A refusal is proof only for the first send there has ever been, on its first attempt, and only
+  once `hold_sends_closed_at` is set. An older run's attempt arriving after that sends nothing;
+  one that claimed in between keeps the refusal from being proof.
+- An empty lookup is proof only if `noHoldCanLand` says so from the row: no send ever began, the
+  sends are closed, or the database's clock is past `hold_not_after` plus the margin.
+- A run that first reads `CANCELLING` waits there, sending nothing, with the alert on, until then.
+  One that first reads `FAILED` or `CANCELLED` watches until then and refunds a hold that lands.
+
+Resetting a saga whose order this build placed is therefore safe for the money. It is still no way to clear an alert: the
+replacement waits out the same deadline.
+
+**Migrate marketplace-service before its new workers (`20261107120000_order_hold_fence`).** Only
+additive. An older worker sends without counting, so after a code rollback do not reset a saga on
+an order this build placed until its first send can no longer land. Its `down.sql` refuses while a deadline is still in use: on any order
+not ended, or on a closed order with no obligation whose sends are open and whose deadline and
+margin have not passed. Roll the code back first, and wait for those orders.
 
 **Deploy economic-service first.** Its request schema is strict, so a build without the
 fence refuses `holdNotAfter` with `400 VALIDATION_FAILED` rather than ignoring it. That
@@ -373,7 +393,15 @@ A saga whose first send predates protocol 9 carries no deadline, and economic-se
 for such a request as it always did: nothing can prove it will not land, so that saga never
 takes this exit and waits as protocol 7 did. This is safe only because the platform has not
 launched: no real money waits on such a run. Before launch, drain them, since an empty
-wallet leaves one waiting for good. Its input may still carry `economicKeyRetentionHours`
+wallet leaves one waiting for good. `hold_send_claims` defaults to 1 with no deadline, on every
+order the migration finds and any an older build places during the rollout (only `place` of this
+build writes 0), so a later run of such an order gets no deadline either, and nothing on its row
+proves absence: it waits with the alert on, and one that finds such an order closed stays in
+`LATE_HOLD_WATCH`. A protocol-8 `LATE_HOLD_WATCH`, which has no deadline to pass, no longer ends when its time is up:
+it stays with the alert on (`createObligation`, "A hold sent with no deadline"), and an order it
+had not yet closed stays open. It ends when a hold lands and is refunded, or the obligation is found
+terminal with nothing to refund; otherwise check the obligation at economic-service, then terminate
+it as part of the drain. Its input may still carry `economicKeyRetentionHours`
 from protocol 8; it decides nothing live. That exit is kept for replay alone, and a history
 that took it replays it. `HOLD_FENCE` decides what a live history does: changing it needs a new patch.
 

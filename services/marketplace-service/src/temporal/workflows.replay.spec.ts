@@ -121,6 +121,14 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     'fu117r4-fence-late-hold-refunded',
     'fu117r4-fence-first-send-refused',
     'fu117r4-fence-wait-then-held-cancelled',
+    // #812 r2 (D-144): the fence on the order row, from a run that found it, a legacy watch
+    // that no longer expires, and a terminal obligation ending the hold's recovery.
+    'fu117r5-row-first-refusal-then-fence',
+    'fu117r5-row-cancelling-waits',
+    'fu117r5-row-closed-watches',
+    'fu117r5-legacy-watch-stays-then-terminal',
+    'fu117r5-hold-refunded-cancelled',
+    'fu117r5-hold-refunded-failed',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(
