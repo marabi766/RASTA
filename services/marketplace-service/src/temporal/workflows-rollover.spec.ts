@@ -1,5 +1,6 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import { handOff, queryQuiet } from '../../test/legacy-handoff';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MockActivityEnvironment } from '@temporalio/testing';
@@ -140,13 +141,17 @@ describe('history rollover on real Temporal', () => {
           taskQueue,
           args: [{ ...INPUT, historyEventThreshold: 2000 }],
         });
-        let status: SagaStatus | undefined;
-        for (let i = 0; i < 100; i++) {
-          status = await handle.query<SagaStatus>('status');
-          if (status.phase === 'AWAITING_CONFIRMATION') break;
-          await env.sleep('1 second');
-        }
-        expect(status).toMatchObject({ phase: 'AWAITING_CONFIRMATION' });
+        // The new worker takes over a history with nothing in flight: a phase
+        // query replays a workflow task the cacheless worker may still run (FU-192).
+        await handOff(handle, async () => {
+          let status: SagaStatus | undefined;
+          for (let i = 0; i < 100; i++) {
+            status = await queryQuiet<SagaStatus>(handle, 'status');
+            if (status.phase === 'AWAITING_CONFIRMATION') break;
+            await env.sleep('1 second');
+          }
+          expect(status).toMatchObject({ phase: 'AWAITING_CONFIRMATION' });
+        });
       });
       const handle = env.client.workflow.getHandle(taskQueue);
       try {
@@ -1226,9 +1231,11 @@ describe('history rollover on real Temporal', () => {
             args: [input],
           });
           // The passed deadline is met here, before the new worker takes over.
-          await atRest(taskQueue);
-          const seen = await env.client.workflow.getHandle(taskQueue).query<SagaStatus>('status');
-          expect(seen.phase).toBe('AWAITING_CONFIRMATION');
+          const latest = env.client.workflow.getHandle(taskQueue);
+          await handOff(latest, async () => {
+            const seen = await queryQuiet<SagaStatus>(latest, 'status');
+            expect(seen.phase).toBe('AWAITING_CONFIRMATION');
+          });
         });
         expect(reminders).toBe(remindersBeforeDeadline);
 

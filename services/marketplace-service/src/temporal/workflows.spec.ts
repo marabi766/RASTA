@@ -1,4 +1,5 @@
 import { createTemporalTestEnvironment } from '../../test/temporal-environment';
+import { eventually, handOff, queryQuiet } from '../../test/legacy-handoff';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ERROR_STATUS } from '@rasta/contracts';
@@ -321,15 +322,6 @@ async function within<T>(ms: number, promise: Promise<T>, what: string): Promise
   }
 }
 
-/** `until`, for a condition only a query can answer. */
-async function eventually(predicate: () => Promise<boolean>, what: string): Promise<void> {
-  for (let i = 0; i < 400; i += 1) {
-    if (await predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`Timed out waiting for ${what}`);
-}
-
 /**
  * The saga has nothing in flight: the last thing it did was arm a timer, or
  * finish a task with no command. Time is skipped and a signal landed only from
@@ -345,42 +337,6 @@ async function atRest(handle: WorkflowHandle): Promise<void> {
       last?.workflowTaskCompletedEventAttributes,
     );
   }, 'the saga to come to rest');
-}
-
-/**
- * The saga has nothing in flight at all: every activity it scheduled has been
- * answered, and the last event of its history is the timer it armed or a
- * workflow task that has been answered — none scheduled or started. A test
- * that stops a worker and goes on with another must stop it from here
- * (FU-147). Not a phase query: it replays the events it was sent, answered or
- * not, so it reports the phase of a workflow task the worker is still running
- * (the history ended in WorkflowTaskStarted in 25 of 25 local runs when the
- * old test took that phase for rest). Not {@link atRest} alone either, which a
- * workflow task with no command satisfies while an activity is still running.
- */
-async function quiet(handle: WorkflowHandle): Promise<void> {
-  await eventually(async () => {
-    const events = (await handle.fetchHistory()).events ?? [];
-    const open = new Set<number>();
-    for (const e of events) {
-      if (e.activityTaskScheduledEventAttributes) open.add(Number(e.eventId));
-      const answered =
-        e.activityTaskCompletedEventAttributes ??
-        e.activityTaskFailedEventAttributes ??
-        e.activityTaskTimedOutEventAttributes ??
-        e.activityTaskCanceledEventAttributes;
-      if (answered) open.delete(Number(answered.scheduledEventId));
-    }
-    const last = events.at(-1);
-    return (
-      open.size === 0 &&
-      Boolean(
-        last?.timerStartedEventAttributes ??
-        last?.timerCanceledEventAttributes ??
-        last?.workflowTaskCompletedEventAttributes,
-      )
-    );
-  }, 'the saga to have nothing in flight');
 }
 
 async function until(predicate: () => boolean, what: string): Promise<void> {
@@ -2980,7 +2936,7 @@ describe('a saga the previous release started, replayed and then run live (#625 
       await old.runUntil(
         within(
           STEP_DEADLINE_MS,
-          previous({ party, handle }).then(() => quiet(handle)),
+          handOff(handle, () => previous({ party, handle })),
           'the previous release to drive',
         ),
       );
@@ -3043,9 +2999,8 @@ describe('a saga the previous release started, replayed and then run live (#625 
    * the saga has nothing in flight, which takes one query, not a poll.
    */
   const phaseIs = async (handle: WorkflowHandle, phase: string): Promise<void> => {
-    await quiet(handle);
     await eventually(
-      async () => (await handle.query<SagaStatus, []>('status')).phase === phase,
+      async () => (await queryQuiet<SagaStatus>(handle, 'status')).phase === phase,
       `the saga to wait in ${phase}`,
     );
   };
