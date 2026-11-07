@@ -1,5 +1,5 @@
 import { runUnscoped } from '@rasta/nest-common';
-import { PrismaService } from '../src/prisma/prisma.service';
+import { inSessionZone } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
 import { SagaStartStore } from '../src/temporal/saga-start.store';
@@ -53,16 +53,9 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   const asOperator = <T>(fn: () => Promise<T>) =>
     asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-F3-OPS' }, fn);
 
-  // A session whose TimeZone is not UTC: times without a zone are UTC wall
-  // time, so an age must not move with the session's zone.
-  const tehranUrl = new URL(process.env.DATABASE_URL_MARKETPLACE ?? process.env.DATABASE_URL ?? '');
-  tehranUrl.searchParams.set('options', '-c TimeZone=Asia/Tehran');
-  const tehran = new PrismaService(tehranUrl.toString());
-  const tehranStore = new SagaStartStore(tehran);
-
   afterAll(async () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
-    await Promise.all([prisma.onModuleDestroy(), tehran.onModuleDestroy()]);
+    await prisma.onModuleDestroy();
   });
 
   async function place(): Promise<string> {
@@ -236,13 +229,20 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   it('measures the same age whatever the session time zone (UTC wall time)', async () => {
     const orderId = await place();
     await age(orderId, 4000);
-    for (const from of [store, tehranStore]) {
-      const { days } = (await read(from)).PENDING!;
-      expect(days).toBeGreaterThan(3999.99);
-      expect(days).toBeLessThan(4000.01);
+    // A session outside UTC can no longer connect (FU-188, #906); inSessionZone switches
+    // the zone inside one rolled-back transaction, past that check, so the SQL itself is
+    // what keeps the age off the session's zone: times without a zone are UTC wall time.
+    const backlogUtc = await store.backlog();
+    for (const name of ['UTC', 'Asia/Tehran', 'America/Los_Angeles']) {
+      await inSessionZone(prisma, async ({ db, zone }) => {
+        await zone(name);
+        const inZone = new SagaStartStore(db);
+        const { days } = (await read(inZone)).PENDING!;
+        expect(days).toBeGreaterThan(3999.99);
+        expect(days).toBeLessThan(4000.01);
+        expect(Math.abs((await inZone.backlog()).age - backlogUtc.age)).toBeLessThan(60);
+      });
     }
-    const [backlogUtc, backlogTehran] = await Promise.all([store.backlog(), tehranStore.backlog()]);
-    expect(Math.abs(backlogUtc.age - backlogTehran.age)).toBeLessThan(60);
     await acts.markFundsHeld(orderId, `TXN_${ulid()}`);
   });
 
