@@ -30,7 +30,12 @@ export {
   withoutBidiControlDeep,
 } from './common/text';
 
-export { patternRefinement, publishedRefinementPattern } from './common/pattern-refinement';
+export {
+  patternRefinement,
+  publishedRefinementPattern,
+  publishablePattern,
+  unchangedCheck,
+} from './common/pattern-refinement';
 
 export { withMaxKeys } from './common/bounds';
 export {
@@ -41,7 +46,7 @@ export {
   textWithin,
   type TextBounds,
 } from './common/transaction-text';
-export { parsableUrl } from './common/parsable-url';
+export { parsableUrl, isParsableUrlCheck } from './common/parsable-url';
 export {
   isoDateTime,
   legacyDatetimeRegex,
