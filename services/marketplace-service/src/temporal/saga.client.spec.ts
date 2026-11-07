@@ -139,6 +139,8 @@ describe('the economic-service prerequisite (#824 r1, F3)', () => {
 
     await client.tick();
     await inContext(() => client.start('ORD_30'));
+    // Sampling runs on its own timer (#792), independent of the start gate.
+    await client.sampleState();
 
     expect(store.claim).not.toHaveBeenCalled();
     expect(temporal.start).not.toHaveBeenCalled();
