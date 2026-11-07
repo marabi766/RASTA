@@ -1930,6 +1930,15 @@ test('FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path must be read-only be
     `( readonly ROOT=/a )\n${run}`,
     `ROOT=/a\necho hi\nreadonly ROOT\n${run}`,
     `export ROOT=/a\n${run}`,
+    // the declaration must run in this shell, by the builtin, in its plain form (FU-200 F4, first bullet)
+    `readonly ROOT=/a &\n${run}`,
+    `readonly ROOT=/a | cat\n${run}`,
+    `readonly() { :; }\nreadonly ROOT=/a\n${run}`,
+    `"readonly" ROOT=/a\n${run}`,
+    `ROOT=/a\nreadonly -f ROOT\n${run}`,
+    `ROOT=/a\ndeclare -nr ROOT\n${run}`,
+    // `export` is a function: ROOT was never assigned, and `readonly ROOT` would freeze the inherited value
+    `export() { :; }\nexport ROOT=/a\nreadonly ROOT\n${run}`,
   ])
     refusesWhy(body, frozen, policy, [lib]);
   acceptsShell(`readonly ROOT=/a\n${run}`, policy, [lib]);
@@ -2376,6 +2385,310 @@ test('FU-159 r3 F3: the producer counts only when its interpreter cannot be a fu
   for (const body of [
     `${fn('other')}\n${PRODUCER}\neval "$commands"`,
     `commands="$(sh infra/creds.sh tests)"\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+// --- FU-196 + FU-202 (task 363): provenance is PROVEN, never read off the last visible assignment ---------------
+
+const IMGV = /assigned once, unconditionally/;
+const IMG = `IMG=${PINNED}`;
+const USE = 'docker run "$IMG" true';
+/** a workflow whose job `env` is `env` and whose one step runs `body` */
+const withJobEnv = (body, env) =>
+  workflowYaml(stringify({ jobs: { a: { 'runs-on': 'x', env, steps: [{ run: body }] } } }));
+
+test('FU-196: a variable named as an image is trusted only when it is assigned once and written nowhere else', () => {
+  const bad = 'alpine:latest';
+  for (const write of [
+    `if [ -n "$X" ]; then IMG=${bad}; fi`,
+    'read IMG',
+    'read -r IMG',
+    `for IMG in ${bad}; do :; done`,
+    `select IMG in ${bad}; do break; done`,
+    `IMG=${bad}`,
+    `IMG=${PINNED}`,
+    'IMG+=x',
+    `printf -v IMG %s ${bad}`,
+    'mapfile IMG <<<x',
+    'getopts a IMG -a',
+    '(( IMG=5 ))',
+    'let IMG=5',
+    `eval "IMG=${bad}"`,
+    'eval "$x"',
+    `export IMG=${bad}`,
+    `declare IMG=${bad}`,
+    'unset IMG',
+    `declare -n r=IMG; r=${bad}`,
+    `case "$X" in a) IMG=${bad};; esac`,
+    `f() { IMG=${bad}; }\nf`,
+    `( IMG=${bad} )`,
+    `[ -n "$X" ] && IMG=${bad}`,
+    `: "\${IMG:=${bad}}"`,
+    'IMG[0]=x',
+    'while read IMG; do :; done <<<x',
+    'source ./x.sh',
+    'read "$n"',
+    'printf -v "$n" x',
+    'export "$n"=x',
+    `: <<<"\${IMG:=${bad}}"`,
+    `: <<EOF\n\${IMG:=${bad}}\nEOF`,
+    `trap 'IMG=${bad}' EXIT`,
+    'n=1\n(( n < k ))',
+  ])
+    refusesWhy(`${IMG}\n${write}\n${USE}`, IMGV);
+  // a default does not make a written name the script's own
+  refusesWhy(`${IMG}\nread IMG\ndocker run "\${IMG:-${PINNED}}" true`, IMGV);
+  // and the chain: A is read where B is assigned
+  refusesWhy(`A=${PINNED}\nB=$A\nread A\ndocker run "$B" true`, IMGV);
+  refusesWhy(`A=${PINNED}\nB=$A\nB=x\ndocker run "$B" true`, IMGV);
+});
+
+test('FU-196: every docker verb that names an image reads it through the same proof', () => {
+  for (const verb of ['run', 'create', 'pull', 'container run', 'container create', 'image pull'])
+    refusesWhy(`${IMG}\nread IMG\ndocker ${verb} "$IMG" true`, IMGV);
+  refusesWhy(`${IMG}\nread IMG\ndocker run --rm --entrypoint sh "$IMG" -c true`, IMGV);
+  refusesWhy(`${IMG}\nread IMG\ndocker run -e A=1 --pull=always "$IMG"`, IMGV);
+});
+
+test('FU-196: ONE assignment is proof only where it certainly ran: top level, unconditional, in the shell that reads it', () => {
+  for (const body of [
+    `if [ -n "$X" ]; then\n  ${IMG}\nfi\n${USE}`,
+    `f() { ${IMG}; }\nf\n${USE}`,
+    `( ${IMG} )\n${USE}`,
+    `${IMG} &\n${USE}`,
+    `[ -n "$X" ] && ${IMG}\n${USE}`,
+    `[ -n "$X" ] || ${IMG}\n${USE}`,
+    `for i in 1 2; do\n  ${IMG}\ndone\n${USE}`,
+    `case "$X" in a) ${IMG};; esac\n${USE}`,
+    `${IMG} | cat\n${USE}`,
+    `${IMG} docker run "$IMG" true`,
+    `local ${IMG}\n${USE}`,
+    `"IMG"=${PINNED}\n${USE}`,
+    `IM""G=${PINNED}\n${USE}`,
+    // a function or alias named like the declarer consumes the words and assigns nothing
+    `export() { :; }\nexport ${IMG}\n${USE}`,
+    `declare() { :; }\ndeclare ${IMG}\n${USE}`,
+    `readonly() { :; }\nreadonly ${IMG}\n${USE}`,
+    `alias export=:\nexport ${IMG}\n${USE}`,
+    `"export" ${IMG}\n${USE}`,
+    `case "$X" in ${IMG}) :;; esac\n${USE}`,
+  ])
+    refusesWhy(body, /assigned once, unconditionally|variable (this check cannot|part)/);
+  for (const body of [`z="$(false)" && ${IMG}\n${USE}`, `x=1 && ${IMG}\n${USE}`])
+    refusesWhy(body, IMGV);
+  refusesWhy(`${IMG}\nn="$(printf 'IMG=x')"\n: $((n))\n${USE}`, IMGV);
+  refusesWhy(`${IMG}\neval "$x"\n${USE}`, IMGV);
+});
+
+test('FU-196: a name of the step env is replaced by a write in this script or in the one that runs it', () => {
+  const env = { IMG: PINNED };
+  const refusedWithEnv = (body, why = IMGV) =>
+    assert.ok(
+      validateInfraImagePins([withJobEnv(body, env)], bare).errors.some((e) => why.test(e)),
+      body,
+    );
+  for (const body of [
+    `read IMG\n${USE}`,
+    `for IMG in alpine:latest; do :; done\n${USE}`,
+    `if [ -n "$X" ]; then IMG=alpine:latest; fi\n${USE}`,
+    `export IMG=alpine:latest\nx=$(docker run "$IMG" true)`,
+    `IMG=alpine:latest\nx=$(docker run "$IMG" true)`,
+    `export "$n"=alpine:latest\n${USE}`,
+    `export "$n"=alpine:latest\nx=$(docker run "$IMG" true)`,
+    `export IMG=alpine:latest\nbash <<'EOF'\ndocker run "$IMG" true\nEOF`,
+    `export IMG=alpine:latest\necho "$(docker run "$IMG" true)"`,
+  ])
+    refusedWithEnv(body);
+  assert.ok(
+    validateInfraImagePins(
+      [withJobEnv(`if [ -n "$X" ]; then\n  ${IMG}\nfi\n${USE}`, { IMG: 'alpine:latest' })],
+      bare,
+    ).errors.some((e) => IMGV.test(e)),
+  );
+  assert.deepEqual(validateInfraImagePins([withJobEnv(USE, env)], bare).errors, []);
+  assert.deepEqual(
+    validateInfraImagePins([withJobEnv(`read other\n${USE}`, env)], bare).errors,
+    [],
+  );
+  assert.deepEqual(
+    validateInfraImagePins([withJobEnv('x=$(docker run "$IMG" true)', env)], bare).errors,
+    [],
+  );
+});
+
+test('FU-196: the shapes the real scripts use stay accepted', () => {
+  for (const body of [
+    `${IMG}\n${USE}`,
+    `export ${IMG}\n${USE}`,
+    `readonly ${IMG}\n${USE}`,
+    `typeset ${IMG}\n${USE}`,
+    `${IMG}\ndocker run "\${IMG}" true`,
+    `A=${PINNED}\nB=$A\ndocker run "$B" true`,
+    `A=${PINNED}\nB=${PINNED}\ndocker run "$A" true\ndocker run "$B" true`,
+    `${IMG}\nread other\n${USE}`,
+    `${IMG}\nfor f in 1 2; do :; done\n${USE}`,
+    `${IMG}\n( ${USE} )`,
+    `${IMG}\nif true; then\n  ${USE}\nfi`,
+    `${IMG}\nf() { ${USE}; }\nf`,
+    `${IMG}\nn=0\n(( n=5 ))\n${USE}`,
+    `docker run "\${IMG:-${PINNED}}" true`,
+  ])
+    acceptsBoth(body);
+});
+
+test('FU-196: `readonly` proves a variable whatever writes this check cannot read; `readonly X &` and a shadowed one prove nothing', () => {
+  // the shape of infrastructure/docker/kafka/ci-up.sh: a function exports a computed name
+  const unreadable = 'put() {\n  export "$1=$2"\n}\nput a b';
+  acceptsShell(`${IMG}\nreadonly IMG\n${unreadable}\n${USE}`);
+  acceptsShell(`readonly ${IMG}\n${unreadable}\n${USE}`);
+  refusesShell(`${IMG}\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`${IMG}\nreadonly IMG &\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`${IMG}\n"readonly" IMG\n${unreadable}\n${USE}`, IMGV);
+  // inside a loop the unreadable write below may run before the read of the next round
+  refusesShell(`${IMG}\nfor i in 1 2; do\n  ${USE}\n  export "$n"=x\ndone`, IMGV);
+  refusesShell(`${IMG}\nreadonly IMG | cat\n${unreadable}\n${USE}`, IMGV);
+  // `-f` makes a function readonly, `-n`/`-i` change what the name is
+  for (const declaration of [
+    'readonly -f IMG',
+    'readonly -n IMG',
+    'declare -nr IMG',
+    'declare -ir IMG',
+    'declare -f -r IMG',
+  ])
+    refusesShell(`${IMG}\n${declaration}\n${unreadable}\n${USE}`, IMGV);
+  acceptsShell(`${IMG}\ndeclare -r IMG\n${unreadable}\n${USE}`);
+  acceptsShell(`${IMG}\ntypeset -rx IMG\n${unreadable}\n${USE}`);
+  refusesShell(`readonly() { :; }\n${IMG}\nreadonly IMG\n${unreadable}\n${USE}`, IMGV);
+  refusesShell(`${IMG}\nif true; then\n  readonly IMG\nfi\n${unreadable}\n${USE}`, IMGV);
+  // a second assignment: the readonly one is whichever ran first, not the last visible
+  refusesShell(`readonly IMG=alpine:latest\nreadonly ${IMG}\n${USE}`, IMGV);
+  // the value read before the unreadable write is fine; the unreadable write must come BEFORE the read to matter
+  acceptsShell(`${IMG}\n${USE}\n${unreadable}`);
+  acceptsShell(`B="\${KAFKA_IMAGE:-${PINNED}}"\nreadonly B\n${unreadable}\ndocker run "$B" true`);
+  refusesShell(
+    `${unreadable}\nB="\${KAFKA_IMAGE:-${PINNED}}"\nreadonly B\ndocker run "$B" true`,
+    IMGV,
+  );
+});
+
+// FU-202 R1: a producer binding is proven by the syntax AS WRITTEN, one classifier for every binding.
+test('FU-202 R1: an assignment-like command name, a shadowed or failing declarer never binds the producer', () => {
+  const payload = 'do""cker run alpine:latest';
+  const run = (name) => `commands="$(${name} bash infra/creds.sh invalid)"`;
+  for (const name of ['"x=x"', 'x""=x', '"x"=x', "x'='x", 'x\\=x', "'x=x'", '\\x=x'])
+    evalRefusedBoth(
+      `function x=x { printf '%s\\n' '${payload}'; }\n${run(name)}\neval "$commands"`,
+    );
+  for (const declarer of ['export', 'declare', 'readonly', 'typeset']) {
+    const set = `commands="$(bash infra/creds.sh invalid)"`;
+    for (const body of [
+      `${declarer}() { :; }\n${declarer} ${set}\neval "$commands"`,
+      `eval '${declarer}() { :; }'\n${declarer} ${set}\neval "$commands"`,
+      `function ${declarer} { :; }\n${declarer} ${set}\neval "$commands"`,
+      `${declarer}() { :; }\n"${declarer}" ${set}\neval "$commands"`,
+      `\\${declarer} ${set}\neval "$commands"`,
+    ])
+      evalRefusedBoth(body);
+  }
+  for (const body of [
+    `local() { :; }\nlocal ${PRODUCER}\neval "$commands"`,
+    // `local` outside a function fails and assigns nothing; inside one the name dies with the call
+    `local ${PRODUCER}\neval "$commands"`,
+    `set +e\nlocal ${PRODUCER}\neval "$commands"`,
+    `f() {\n  local ${PRODUCER}\n  eval "$commands"\n}\nf`,
+    `shopt -s expand_aliases\nalias export=:\nexport ${PRODUCER}\neval "$commands"`,
+    `export -n ${PRODUCER}\neval "$commands"`,
+    `declare -n ${PRODUCER}\neval "$commands"`,
+    `command export ${PRODUCER}\neval "$commands"`,
+    `: export ${PRODUCER}\neval "$commands"`,
+  ])
+    evalRefusedBoth(body);
+  for (const body of [
+    `export ${PRODUCER}\neval "$commands"`,
+    `readonly ${PRODUCER}\neval "$commands"`,
+    `declare ${PRODUCER}\neval "$commands"`,
+    `typeset ${PRODUCER}\neval "$commands"`,
+    `commands="$(FOO=1 bash infra/creds.sh tests)"\neval "$commands"`,
+    `foo() { :; }\nexport ${PRODUCER}\neval "$commands"`,
+    `f() {\n  local x=1\n}\n${PRODUCER}\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+// FU-202 R2: every redirection is an expansion site, whoever owns it.
+test('FU-202 R2: an earlier here-string, a here-document or here-string of a command with no words writes too', () => {
+  const payload = 'do""cker run alpine:latest';
+  const E = 'eval "$commands"';
+  for (const body of [
+    `commands="$(bash infra/creds.sh invalid)"\n: <<<"\${commands:=${payload}}" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"\${commands=${payload}}" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"$((commands=5))" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"$((n))" <<<hello\n${E}`,
+    `${PRODUCER}\n: <<<"\${commands:=x}" <<<a <<<b\n${E}`,
+    `${PRODUCER}\n: <<<"\${commands:=x}" <<EOF\nhello\nEOF\n${E}`,
+    `${PRODUCER}\n<<<"\${commands:=x}"\n${E}`,
+    `${PRODUCER}\n<<<"\${commands:=x}" <<<y\n${E}`,
+    `${PRODUCER}\n<<EOF\n\${commands:=${payload}}\nEOF\n${E}`,
+    `${PRODUCER}\n<<-EOF\n\t\${commands:=${payload}}\nEOF\n${E}`,
+    `${PRODUCER}\n<<EOF\n$((commands=5))\nEOF\n${E}`,
+    `${PRODUCER}\n<<EOF >/dev/null\n\${commands:=x}\nEOF\n${E}`,
+    `${PRODUCER}\n: <<A <<B\nhello\nA\n\${commands:=x}\nB\n${E}`,
+    `${PRODUCER}\n<<A <<B\nhello\nA\n\${commands:=x}\nB\n${E}`,
+    `${PRODUCER}\n3<<EOF\n\${commands:=x}\nEOF\n${E}`,
+    `${PRODUCER}\n{ <<EOF\n\${commands:=x}\nEOF\n}\n${E}`,
+    `${PRODUCER}\n<<EOF | cat\n\${commands:=x}\nEOF\n${E}`,
+    `${PRODUCER}\n> "\${commands:=/dev/null}"\n${E}`,
+    `${PRODUCER}\n2> "\${commands:=/dev/null}"\n${E}`,
+    `${PRODUCER}\n>&"\${commands:=2}"\n${E}`,
+    `${PRODUCER}\n( : <<<"\${commands:=x}" <<<y )\n${E}`,
+    `${PRODUCER}\ncat <<<"\${commands:=x}" <<<y | cat\n${E}`,
+  ])
+    evalRefusedBoth(body);
+  for (const body of [
+    `${PRODUCER}\ncat <<<a <<<b\n${E}`,
+    `${PRODUCER}\n<<EOF\nhello\nEOF\n${E}`,
+    `${PRODUCER}\n<<'EOF'\n\${commands:=x}\nEOF\n${E}`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+test('FU-202 R2: test -v / -R and [[ -v ]] name a variable by text, which bash evaluates as a subscript', () => {
+  const n = `n="$(printf 'other[\\044\\050do""cker run alpine:latest >&2; printf 0\\051]')"`;
+  for (const use of [
+    'test -v "$n"',
+    '[ -v "$n" ]',
+    '[[ -v "$n" ]]',
+    '[[ -v $n ]]',
+    'builtin test -v "$n"',
+    'command test -v "$n"',
+    'builtin [ -v "$n" ]',
+    'command [ -v "$n" ]',
+    'test ! -v "$n"',
+    'test -n x -a -v "$n"',
+    '[ -v other[$n] ]',
+    '[[ -n x && -v "$n" ]]',
+    '[[ -z x || -v "$n" ]]',
+    'test -R "$n"',
+    '[[ -R "$n" ]]',
+    'time test -v "$n"',
+    '! test -v "$n"',
+    'test -v "$(printf x)"',
+    'test -v "${n:-x}"',
+  ]) {
+    // as the provenance of an evaluated output
+    evalRefusedBoth(`${PRODUCER}\n${n}\n${use}\neval "$commands"`);
+    // and on its own: there may be nothing to evaluate but the command it runs
+    refusesWhy(`${n}\n${use}`, /test -v \/ -R .* computed text/);
+  }
+  for (const body of [
+    `${PRODUCER}\ntest -v HOME\neval "$commands"`,
+    `${PRODUCER}\n[[ -v HOME ]]\neval "$commands"`,
+    `${PRODUCER}\n[ -v HOME ]\neval "$commands"`,
+    `${PRODUCER}\ntest -n "$x"\neval "$commands"`,
+    `${PRODUCER}\n[ -z "$x" ]\neval "$commands"`,
+    `${PRODUCER}\n[[ -f "$x" ]]\neval "$commands"`,
+    `${PRODUCER}\ngrep -v "$x" /dev/null\neval "$commands"`,
   ])
     evalAcceptedBoth(body);
 });

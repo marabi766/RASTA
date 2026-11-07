@@ -36,6 +36,7 @@ ROOT="$(cd "${HERE}/../../.." && pwd)"
 # image-pin check approved (FU-159)
 readonly ROOT
 IMAGE="${KAFKA_IMAGE:-apache/kafka:3.9.0@sha256:fbc7d7c428e3755cf36518d4976596002477e4c052d1f80b5b9eafd06d0fff2f}"
+readonly IMAGE
 NAME="${KAFKA_CONTAINER_NAME:-rasta-ci-kafka}"
 TLS_DIR="${KAFKA_TLS_DIR:-${RUNNER_TEMP:-/tmp}/rasta-kafka-tls}"
 SECRETS_DIR="${KAFKA_SECRETS_DIR:?KAFKA_SECRETS_DIR must name the secrets directory for services and the observer}"

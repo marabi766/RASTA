@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { LineCounter, parseDocument } from 'yaml';
 import {
-  DECLARERS,
   SHELL_WORD,
   continuedDollar,
   executionChain,
@@ -599,6 +598,11 @@ export function tokenizeShell(src) {
   // of `name() …`, or the whole `function name …` command); an unquoted keyword and name only.
   const definitions = [];
   const arithmetic = []; // FU-159 r3 F2: the text of every `((` command
+  // FU-202 R2: every expansion site of a redirection, whoever owns it: ALL here-string words of a command
+  // (`: <<<a <<<b` expands both) and the bodies of expanding here-documents, also of a command that has no
+  // words of its own (`<<EOF` alone, `<<<"${v:=x}"` alone), which no command record holds.
+  const hereStrings = [];
+  const heredocBodies = [];
   const opened = new Map(); // group -> the word before its ( and how many commands came before
   let pending = '';
   let pendingUsed = false; // a command already took this separator as its own
@@ -637,6 +641,7 @@ export function tokenizeShell(src) {
     // that input (FU-092), so a shell reading it is seen.
     if (word && hereStringWord) {
       input = { ...input, hereString: word };
+      hereStrings.push(word);
       hereStringWord = false;
     } else if (word) {
       if (words.length === 0 && keyword('case')) cases.push('subject');
@@ -763,9 +768,8 @@ export function tokenizeShell(src) {
           );
         // the command that owns the here-document is where its body (and what it runs) belongs
         const holder = commands.findIndex((c) => c.words === owner);
-        // FU-159 r3 F2: an expanding body is an expansion site (`${v:=x}`, `$((n))`) of its command
-        if (expands && holder >= 0)
-          commands[holder].heredocs = [...(commands[holder].heredocs ?? []), body.join('\n')];
+        // FU-159 r3 F2 + FU-202 R2: an expanding body is an expansion site (`${v:=x}`, `$((n))`)
+        if (expands) heredocBodies.push(body.join('\n'));
         if (feedsShell)
           nested.push({ script: body.join('\n'), line: bodyLine, shell: true, holder });
         // FU-077 r2 F2: an unquoted delimiter expands the body, running its substitutions;
@@ -988,7 +992,17 @@ export function tokenizeShell(src) {
   endCommand();
   if (cases.length > 0) throw new ShellSyntaxError('a case with no esac');
   if (heredocs.length > 0) throw new ShellSyntaxError('here-document is never closed');
-  return { commands, nested, parents, arrays, functions, definitions, arithmetic };
+  return {
+    commands,
+    nested,
+    parents,
+    arrays,
+    functions,
+    definitions,
+    arithmetic,
+    hereStrings,
+    heredocBodies,
+  };
 }
 
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
@@ -1473,6 +1487,23 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   }));
   const table = functionTable(parsed, layout, imports, ctx.functions ?? new Set());
   const callableAt = (position) => table.callable(position);
+  // FU-092: an evaluated variable's provenance cannot be proved inside a compound command or function
+  // body (`if`, loops, `{ }`: it may not run), or where this shell could write a variable under a name
+  // this check cannot read. FU-159 F2 + r3 F2: the writes are the CANONICAL words of every command, the
+  // text of every expansion site (here-strings, expanding here-documents), the text of `eval` and `trap`
+  // run in this shell, the implicit targets of read, select, mapfile and getopts, and any arithmetic that
+  // is not provably constant; no raw-source counting.
+  const writes = shellWrites(parsed);
+  // FU-159 r3 F3: the interpreter of a producer is external only where no function or alias can be
+  // called by that name: a definition anywhere in this shell (or one it was reached from) refuses.
+  // FU-202 R2: `test -v "$n"` evaluates n as an arithmetic subscript (`other[$(cmd)]` runs cmd)
+  if (writes.computedTest)
+    errors.push(
+      `${ctx.file}:${ctx.lineOf(0)}: test -v / -R (or [[ -v ]]) names a variable by computed text, which bash evaluates as an arithmetic subscript that can run a command`,
+    );
+  const maybe = new Set([...(ctx.maybe ?? []), ...writes.functions]);
+  const aliasing = Boolean(ctx.aliasing) || writes.aliasing;
+  const shadowed = (name) => aliasing || maybe.has(name);
   // FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path is proved only by `readonly NAME=…` run at
   // the top level before the command: bash refuses every later write to it (`NAME=`, `read`, `printf -v`,
   // `unset`, `local`, `declare -n`), so no write analysis has to find them all.
@@ -1482,9 +1513,18 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     const at = chain.at(-1);
     const program = command.words[at]?.value;
     const rest = command.words.slice(at + 1);
+    // only the plain forms: `readonly -f NAME` makes a FUNCTION readonly, `declare -nr` a nameref, `-ir` an
+    // integer; the options of `declare` may be nothing but `r` (and `x`)
+    const options = rest.filter((w) => /^[-+]/.test(w.value));
     const flagged =
-      program === 'readonly' ||
-      (['declare', 'typeset'].includes(program) && rest.some((w) => /^-[A-Za-z]*r/.test(w.value)));
+      (program === 'readonly' && options.length === 0) ||
+      (['declare', 'typeset'].includes(program) &&
+        options.length > 0 &&
+        options.every((w) => /^-[rx]+$/.test(w.value)) &&
+        options.some((w) => w.value.includes('r')));
+    // the declaration must run in THIS shell: not backgrounded or piped (`readonly X &`, `readonly X | cat`
+    // run in a subshell and declare nothing), and by the builtin (a function named `readonly` declares nothing)
+    const after = parsed.commands[index + 1];
     if (
       command.pattern ||
       problem ||
@@ -1492,7 +1532,10 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       !flagged ||
       layout.outer[index] !== 0 ||
       command.group !== 0 ||
-      !LIST_STARTS.has(command.sep)
+      !LIST_STARTS.has(command.sep) ||
+      ['&', '|', '|&'].includes(after?.sep === '(' ? after.lead : after?.sep) ||
+      !plainWord(command.words[at]) ||
+      shadowed(program)
     )
       continue;
     // `readonly NAME=v`, or `NAME=v` as the command right before `readonly NAME` (nothing between)
@@ -1505,7 +1548,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         before !== undefined &&
         before.group === 0 &&
         layout.outer[index - 1] === 0 &&
-        assignmentOnly(before.words) &&
+        assignmentOnly(before.words, shadowed) &&
         before.words.some((w) => w.value.startsWith(`${name[1]}=`));
       if (name[2] === '=' || adjacent) readonlyDecls.push({ name: name[1], index });
     }
@@ -1533,26 +1576,18 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   const vars = new Map();
   const outputs = new Map(); // variable -> the one command substitution it was assigned from
   const restore = (value) => value.replace(/\$__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
-  // FU-092: an evaluated variable's provenance cannot be proved inside a compound command or function
-  // body (`if`, loops, `{ }`: it may not run), or where this shell could write a variable under a name
-  // this check cannot read. FU-159 F2 + r3 F2: the writes are the CANONICAL words of every command, the
-  // text of every expansion site (here-strings, expanding here-documents), the text of `eval` and `trap`
-  // run in this shell, the implicit targets of read, select, mapfile and getopts, and any arithmetic that
-  // is not provably constant; no raw-source counting.
-  const writes = shellWrites(parsed);
-  // FU-159 r3 F3: the interpreter of a producer is external only where no function or alias can be
-  // called by that name: a definition anywhere in this shell (or one it was reached from) refuses.
-  const maybe = new Set([...(ctx.maybe ?? []), ...writes.functions]);
-  const aliasing = Boolean(ctx.aliasing) || writes.aliasing;
-  const shadowed = (name) => aliasing || maybe.has(name);
   // How many assignment-only commands of this script assign a variable one `$(…)`; the variables
   // whose every such assignment is the output of an EVALUATED_OUTPUTS script.
   const assignedFrom = new Map();
   const fromAllowed = new Map();
-  for (const { words } of parsed.commands) {
-    if (!assignmentOnly(words)) continue;
-    for (const { value, scripts } of withoutDeclarers(words)) {
+  // FU-196: every GENUINE assignment word of the script (any value): how many per name, and where
+  const assignments = new Map();
+  const assignedAt = new Map();
+  for (const [position, { words }] of parsed.commands.entries()) {
+    for (const { value, scripts } of assignmentsOf(words, shadowed) ?? []) {
       const [, variable, assigned] = value.match(ASSIGNMENT);
+      assignments.set(variable, (assignments.get(variable) ?? 0) + 1);
+      assignedAt.set(variable, position);
       if (assigned === '$(…)' && scripts?.length === 1) {
         assignedFrom.set(variable, (assignedFrom.get(variable) ?? 0) + 1);
         const file = evaluatedFile(scripts[0]);
@@ -1580,6 +1615,11 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
           ),
         ) ?? []
     ).length;
+  // FU-196: what the scripts this one runs (a `$(…)` body, `bash -c` text, an eval) read of it: its writes count
+  const outer = {
+    broken: provenanceBroken || Boolean(ctx.outer?.broken),
+    mentions: (name) => mentions(name) + (ctx.outer?.mentions(name) ?? 0),
+  };
   /**
    * The command at `position` runs whenever the command at `later` runs. A `&&` list that is
    * backgrounded or piped runs in a subshell: `later` must then be in that same list.
@@ -1600,9 +1640,61 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       const at = parsed.commands[k];
       if (at.group !== group) return false;
       if (LIST_STARTS.has(at.sep)) return true;
-      if (at.sep !== '&&' || !assignmentOnly(parsed.commands[k - 1]?.words ?? [])) return false;
+      if (at.sep !== '&&' || !assignmentOnly(parsed.commands[k - 1]?.words ?? [], shadowed))
+        return false;
     }
     return false;
+  };
+
+  // A write this check cannot read, BEFORE the command at `position`: at the top level nothing after it has run
+  // yet; inside a compound command or function body the order is not the text order, so any such write counts.
+  const prefixBroken = new Map();
+  const brokenBefore = (position) => {
+    if (nesting[position] !== 0) return provenanceBroken;
+    if (!prefixBroken.has(position)) {
+      const before = shellWrites({ ...parsed, commands: parsed.commands.slice(0, position) });
+      prefixBroken.set(
+        position,
+        before.unresolved || before.evals.some((words) => !trackedEval(words, fromAllowed)),
+      );
+    }
+    return prefixBroken.get(position);
+  };
+  /**
+   * FU-196: the value of a variable an image word names is trusted only on PROOF, never as "the last visible
+   * assignment". A variable this script assigns (`local`) needs ONE genuine assignment word, run at the top
+   * level unconditionally (not behind `&&`/`||`/`if`/a loop/a function, not backgrounded or piped, in a group
+   * the read is inside) and then either `readonly` (bash refuses every later write, whatever its spelling) or
+   * no other write anywhere: no mention in any text bash writes through (`read`, `for`, `printf -v`, `unset`,
+   * a nameref, `${v:=x}`, `eval`) and no write this check cannot read before the read. A name of the
+   * environment (the step's `env`, a default) is trusted only if this script never writes it and no unreadable
+   * write precedes the read. `readAt` is where the value is read: the command, or the assignment whose value
+   * names the variable. Returns the problem, or undefined.
+   */
+  const variableProblem = (name, local, readAt) => {
+    const why = `the variable ${name} is trusted as an image only when assigned once, unconditionally, with no other write anywhere in the script`;
+    if (ctx.outer?.broken || ctx.outer?.mentions(name) > 0)
+      return `${why} (the script that runs this one writes it, or something this check cannot read)`;
+    if (brokenBefore(readAt) && !(local && readonlyAt(readAt).has(name)))
+      return `${why} (a write this check cannot read comes first)`;
+    const written = mentions(name);
+    if (!local)
+      return written === 0
+        ? undefined
+        : `${why} (written here, so the step's env is not its value)`;
+    const at = assignedAt.get(name);
+    if (assignments.get(name) !== 1 || at === undefined)
+      return `${why} (${assignments.get(name) ?? 0} assignment(s))`;
+    const holder = parsed.commands[at];
+    if (
+      nesting[at] !== 0 ||
+      !LIST_STARTS.has(holder.sep) ||
+      !inGroup(parsed.commands[readAt].group, holder.group) ||
+      !unconditional(at, readAt)
+    )
+      return `${why} (the assignment is conditional, in a function, a group, a background or a pipe)`;
+    if (readonlyAt(readAt).has(name)) return undefined;
+    return written === 1 ? undefined : `${why} (${written} writes)`;
   };
 
   // the `name` of a `name() …` definition is the definition, not a call of it
@@ -1648,20 +1740,11 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
           `${where}: writes ${posix.normalize(target.value)}, a file this run sources or executes (its contents are the ones this check read)`,
         );
     }
-    // Assignments before a command, or alone (a variable for later commands).
-    let index = 0;
-    while (
-      index < words.length &&
-      ['export', 'local', 'readonly', 'declare'].includes(words[index].value)
-    )
-      index += 1;
-    const assignments = [];
-    while (index < words.length && isAssignment(words[index])) {
-      assignments.push(words[index]);
-      index += 1;
-    }
-    if (index === words.length) {
-      for (const { value, opaque, scripts } of assignments) {
+    // FU-202 R1: a command of assignments ALONE, in the one genuine form (assignmentsOf), sets variables for
+    // the commands after it; assignments before a command are its environment, not this shell's variables.
+    const alone = assignmentsOf(words, shadowed);
+    if (alone) {
+      for (const { value, opaque, scripts } of alone) {
         const [, variable, assigned] = value.match(ASSIGNMENT);
         vars.set(variable, opaque ? null : restore(assigned));
         if (assigned === '$(…)' && scripts?.length === 1) {
@@ -1670,7 +1753,10 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       }
       continue;
     }
+    let index = 0;
+    while (index < words.length && isAssignment(words[index])) index += 1;
     words = words.slice(index);
+    if (words.length === 0) continue;
     let isExempt = false;
     for (let line = command.startLine - 1; line <= command.endLine; line += 1) {
       if (exempt.has(line)) isExempt = true;
@@ -1817,7 +1903,16 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         continue;
       }
       if (state.localTags.has(found.word.value)) continue;
-      for (const ref of resolveImage(found.word, { vars, env: ctx.env, restore, where, errors })) {
+      const trusted = (name, local, readAt = position) => variableProblem(name, local, readAt);
+      for (const ref of resolveImage(found.word, {
+        vars,
+        env: ctx.env,
+        restore,
+        where,
+        errors,
+        trusted,
+        assignedAt,
+      })) {
         if (!state.localTags.has(ref)) images.push({ where, ref });
       }
     } else if (verb === 'tag') {
@@ -1847,6 +1942,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       inner,
       {
         ...ctx,
+        outer,
         maybe,
         aliasing,
         // the directory at the commands that hold it (a substitution has no position of its own)
@@ -2444,7 +2540,6 @@ function shellInput(
   };
 }
 
-const withoutDeclarers = (words) => words.filter(({ value }) => !DECLARERS.has(value));
 /**
  * FU-159 r3 F1: a genuine assignment word: `name=` is the unquoted, unescaped start of the word as written.
  * `comm""ands=x`, `"commands"=x`, `comm\ands=x` and `commands"="x` read the same after quote removal but are
@@ -2455,11 +2550,29 @@ const isAssignment = (word) => {
   const [first] = word.segments ?? [];
   return name !== undefined && first?.kind === 'bare' && first.raw.startsWith(`${name}=`);
 };
-/** An assignment-only command (`a=1`, `export a=$(x)`): it runs no program. */
-const assignmentOnly = (words) => {
-  const plain = withoutDeclarers(words);
-  return plain.length > 0 && plain.every(isAssignment);
-};
+/** A word written as one unquoted, unescaped piece of text: `export`, not `"export"` or `\\export`. */
+const plainWord = (word) => word.segments?.length === 1 && word.segments[0].kind === 'bare';
+// `local` is not one: outside a function it fails and assigns nothing, inside one the name dies with it
+const ASSIGNING_DECLARERS = new Set(['export', 'readonly', 'declare', 'typeset']);
+/**
+ * FU-202 R1: the assignment words of a command that assigns and runs nothing else, or undefined. ONE syntax-aware
+ * classifier for everything that binds a variable (image variables, producer bindings, readonly proofs): leading
+ * declarers must be plain words that no function or alias can replace (`shadowed`: a function named `export`
+ * consumes the words and assigns nothing), and every other word an assignment AS WRITTEN (`isAssignment`).
+ */
+function assignmentsOf(words, shadowed) {
+  let at = 0;
+  while (
+    at < words.length &&
+    ASSIGNING_DECLARERS.has(words[at].value) &&
+    plainWord(words[at]) &&
+    !shadowed(words[at].value)
+  )
+    at += 1;
+  const rest = words.slice(at);
+  return rest.length > 0 && rest.every(isAssignment) ? rest : undefined;
+}
+const assignmentOnly = (words, shadowed) => assignmentsOf(words, shadowed) !== undefined;
 const OPENERS = new Set('if while until for select case { function coproc'.split(' '));
 const CLOSERS = new Set('fi done esac }'.split(' '));
 const LIST_STARTS = new Set(['', '\n', ';', '(']);
@@ -2507,6 +2620,13 @@ function trackedEval(words, fromAllowed) {
   const name = evalSubject(words[at + 1]);
   return name !== undefined && fromAllowed.get(name) === true;
 }
+
+/**
+ * FU-202 R2: `test -v NAME` and `-R NAME` evaluate their operand like an arithmetic subscript
+ * (`other[$(cmd)]`, `other[commands=42]`): an operand this check cannot read is an evaluator of computed text.
+ */
+const namesComputed = (words) =>
+  words.some(({ value }, at) => /^-[vR]$/.test(value) && unsure(words[at + 1]));
 
 /** True when a name-writing builtin has an operand whose NAME this check cannot read. */
 function unresolvedTarget(program, rest) {
@@ -2582,7 +2702,14 @@ function evaluationsIn(text) {
  */
 function shellWrites(
   parsed,
-  out = { texts: [], unresolved: false, functions: new Set(), evals: [], aliasing: false },
+  out = {
+    texts: [],
+    unresolved: false,
+    computedTest: false,
+    functions: new Set(),
+    evals: [],
+    aliasing: false,
+  },
   depth = 0,
 ) {
   const arithmetic = (body) => {
@@ -2596,6 +2723,12 @@ function shellWrites(
     if (unreadable) out.unresolved = true;
   };
   parsed.arithmetic.forEach(arithmetic);
+  // FU-202 R2: every here-string word and expanding here-document body of the text, whoever owns it
+  for (const word of parsed.hereStrings) {
+    site(word.value);
+    (word.arith ?? []).forEach(arithmetic);
+  }
+  parsed.heredocBodies.forEach(site);
   for (const name of parsed.functions) out.functions.add(name);
   // `[[ … ]]` is split by the tokenizer at its `&&`: its operands are the commands up to the one with `]]`
   const operators = /^(?:\[\[|\]\]|!|=|==|!=|=~|<|>|\(|\)|-[A-Za-z]{1,2})$/;
@@ -2609,16 +2742,13 @@ function shellWrites(
       .flatMap((c) => c.words);
     if (range.some(({ value }) => ARITHMETIC_TESTS.has(value)))
       for (const { value } of range) if (!operators.test(value)) arithmetic(value);
+    if (namesComputed(range)) out.computedTest = out.unresolved = true;
   }
-  for (const { words, pattern, input, heredocs } of parsed.commands) {
-    for (const word of [
-      ...words,
-      ...(typeof input?.hereString === 'object' ? [input.hereString] : []),
-    ]) {
+  for (const { words, pattern } of parsed.commands) {
+    for (const word of words) {
       site(word.value);
       (word.arith ?? []).forEach(arithmetic);
     }
-    (heredocs ?? []).forEach(site);
     if (pattern) continue;
     const { chain, problem } = executionChain(words);
     if (problem) out.unresolved = true;
@@ -2645,6 +2775,8 @@ function shellWrites(
       if (handler && handler.value !== '-' && handler.value !== '') text(handler.value);
     } else if (program === 'let') rest.forEach(({ value }) => arithmetic(value));
     else if (program === 'alias') out.aliasing = true;
+    else if (['test', '['].includes(program) && namesComputed(rest))
+      out.computedTest = out.unresolved = true;
     else if (
       ['mapfile', 'readarray', 'compgen', 'complete'].includes(program) &&
       rest.some(({ value }) => /^-[A-Za-z]*[CFW]/.test(value))
@@ -2670,7 +2802,8 @@ function evaluatedFile(source, shadowed = () => false) {
   }
   if (parsed.commands.length !== 1 || parsed.nested.length > 0) return undefined;
   const all = parsed.commands[0].words;
-  const words = all.slice(all.findIndex(({ value }) => !ASSIGNMENT.test(value)));
+  // FU-202 R1: `"x=x" bash P` is a command named x=x, not an assignment before bash
+  const words = all.slice(all.findIndex((word) => !isAssignment(word)));
   if (words.length < 2 || !/^(?:ba)?sh$/.test(words[0].value) || words[1].opaque) return undefined;
   // FU-159 r3 F3: `bash` is the external interpreter only where no function (or alias) can be called that
   if (shadowed(words[0].value)) return undefined;
@@ -2692,7 +2825,7 @@ function composeCommand(args, ctx, problem) {
 }
 
 /** Every reference an image word may stand for, or none with a problem recorded. */
-function resolveImage(word, { vars, env, restore, where, errors }) {
+function resolveImage(word, { vars, env, restore, where, errors, trusted, assignedAt }) {
   if (word.opaque) {
     errors.push(
       `${where}: image ${word.value} is a command substitution this check cannot resolve`,
@@ -2700,7 +2833,7 @@ function resolveImage(word, { vars, env, restore, where, errors }) {
     return [];
   }
   const value = restore(word.value);
-  const expand = (text, depth) => {
+  const expand = (text, depth, readAt) => {
     if (depth > 8) return { problem: `image ${value} expands too deeply` };
     if (text.includes('${{')) {
       const resolved = resolveExpressions(text, env, where, errors);
@@ -2711,10 +2844,13 @@ function resolveImage(word, { vars, env, restore, where, errors }) {
     if (variable || withDefault) {
       const variableName = (variable ?? withDefault)[1];
       const candidates = [];
-      if (vars.has(variableName)) {
-        const local = vars.get(variableName);
-        if (local === null) return { problem: `image ${value} is set from a command substitution` };
-        candidates.push(local);
+      const isLocal = vars.has(variableName);
+      if (isLocal && vars.get(variableName) === null)
+        return { problem: `image ${value} is set from a command substitution` };
+      const problem = trusted(variableName, isLocal, readAt);
+      if (problem) return { problem: `image ${value}: ${problem}` };
+      if (isLocal) {
+        candidates.push(vars.get(variableName));
       } else if (env.has(variableName)) {
         candidates.push(...env.get(variableName));
       }
@@ -2723,7 +2859,8 @@ function resolveImage(word, { vars, env, restore, where, errors }) {
         return { problem: `image ${value} is a variable this check cannot resolve` };
       const refs = [];
       for (const candidate of candidates) {
-        const inner = expand(candidate, depth + 1);
+        // a local variable's value was expanded where it was assigned
+        const inner = expand(candidate, depth + 1, isLocal ? assignedAt.get(variableName) : readAt);
         if (inner.problem) return inner;
         refs.push(...inner.refs);
       }
@@ -2733,7 +2870,7 @@ function resolveImage(word, { vars, env, restore, where, errors }) {
       return { problem: `image ${value} has a variable part this check cannot resolve` };
     return { refs: [text] };
   };
-  const { refs, problem } = expand(value, 0);
+  const { refs, problem } = expand(value, 0, undefined);
   if (problem) {
     errors.push(`${where}: ${problem}`);
     return [];
