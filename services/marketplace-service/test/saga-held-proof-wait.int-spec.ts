@@ -3,6 +3,7 @@ import { installTemporalRuntimeLogger } from '../src/temporal/runtime-logger';
 import { createActivities } from '../src/temporal/activities';
 import type { EconomicClient } from '../src/economic/economic.client';
 import { createTemporalTestEnvironment } from './temporal-environment';
+import { runBounded } from './worker-deadline';
 import { asActor, cleanup, key, newPrisma, publishOffer, tenants, wire, testEnv } from './helpers';
 
 /**
@@ -56,32 +57,38 @@ it('an order whose hold exists waits out an older economic-service, then adopts 
       workflowsPath: require.resolve('../src/temporal/workflows'),
       activities: createActivities({ orders: wiring.orders, economic }),
     });
-    await worker.runUntil(async () => {
-      const handle = await temporal.client.workflow.start('orderSaga', {
-        taskQueue: queue,
-        workflowId: `order-${order.id}`,
-        args: [
-          {
-            orderId: order.id,
-            fulfillmentWindowDays: 7,
-            receiptWindowDays: 7,
-            reminderIntervalDays: 1,
-            recheckIntervalHours: 1,
-          },
-        ],
-      });
-      for (let i = 0; i < 600; i += 1) {
-        const seen = await wiring.orders.sagaView(order.id);
-        if (seen.economicTransactionId) break;
-        await temporal.sleep('5 seconds');
-      }
-      expect(await wiring.orders.sagaView(order.id)).toMatchObject({
-        economicTransactionId: obligation.id,
-        status: 'FUNDS_HELD',
-      });
-      expect(unprovenAnswers).toBeGreaterThanOrEqual(5);
-      await handle.terminate('the wait is what this asserts');
-    });
+    // Under one deadline inside the 300 s of the test: a read or sleep that is
+    // never answered stops the worker here instead of outliving the test (FU-192 r2).
+    await runBounded(
+      worker,
+      { what: 'the saga to adopt the hold', ms: 200_000, connection: temporal.client.connection },
+      async (deadline) => {
+        const handle = await temporal.client.workflow.start('orderSaga', {
+          taskQueue: queue,
+          workflowId: `order-${order.id}`,
+          args: [
+            {
+              orderId: order.id,
+              fulfillmentWindowDays: 7,
+              receiptWindowDays: 7,
+              reminderIntervalDays: 1,
+              recheckIntervalHours: 1,
+            },
+          ],
+        });
+        for (;;) {
+          const seen = await deadline.call(() => wiring.orders.sagaView(order.id));
+          if (seen.economicTransactionId) break;
+          await deadline.call(() => temporal.sleep('5 seconds'));
+        }
+        expect(await wiring.orders.sagaView(order.id)).toMatchObject({
+          economicTransactionId: obligation.id,
+          status: 'FUNDS_HELD',
+        });
+        expect(unprovenAnswers).toBeGreaterThanOrEqual(5);
+        await handle.terminate('the wait is what this asserts');
+      },
+    );
   } finally {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
     await prisma.onModuleDestroy();
