@@ -226,6 +226,21 @@ test('runtime-role-unverified: the preflight cannot ask the database', () => {
   );
 });
 
+test('session-time-zone: the service client refuses a session outside UTC', () => {
+  assertBuiltRefusal(
+    'session-time-zone',
+    `const { createSafePrismaClient } = require('./packages/nest-common/dist/index.js');
+    const raw = {
+      $extends() { return raw; },
+      $queryRawUnsafe() {},
+      async $transaction() {
+        throw Object.assign(new Error('session TimeZone is not UTC: ${SENTINELS[0]}'), { code: 'P2010' });
+      },
+    };
+    await createSafePrismaClient(() => raw, 'DATABASE_URL_DOCUMENT').$transaction(async () => {});`,
+  );
+});
+
 test('prisma-client-missing: B2 port for a service with no client', async () => {
   await assertRefusal('prisma-client-missing', () => prismaPort(SENTINELS[0], 'unused'));
 });

@@ -28,9 +28,10 @@
 //
 // Column types and defaults come from replaying each service's migrations, because
 // SQL-only tables exist; a type that disagrees with schema.prisma throws.
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { productionFiles, readSchemas, sqlLiterals } from './eligibility-clock-derive.mjs';
 import { lex, tableRefs } from './eligibility-clock-sql.mjs';
 
@@ -198,15 +199,6 @@ export function replayMigrations(texts) {
   return { tables, functions };
 }
 
-/** Every migration text of a service, in the order Prisma applies them. */
-function migrationTexts(directory) {
-  if (!existsSync(directory)) return [];
-  return readdirSync(directory)
-    .filter((name) => existsSync(join(directory, name, 'migration.sql')))
-    .sort()
-    .map((name) => readFileSync(join(directory, name, 'migration.sql'), 'utf8'));
-}
-
 /**
  * What is wrong with one SQL text, given table -> columns. `tables` is every table
  * this text may mean (one service's, or every service's for a shared package).
@@ -331,16 +323,16 @@ function isErrorMessage(node) {
   return ts.isNewExpression(parent) && /Error$/.test(parent.expression.getText());
 }
 
+/** Each service's migrations replayed, in the order Prisma applies them. */
 function collectTables(repository) {
-  const perService = new Map();
-  const servicesDir = join(repository, 'services');
-  for (const service of readdirSync(servicesDir)) {
-    const replayed = replayMigrations(
-      migrationTexts(join(servicesDir, service, 'prisma', 'migrations')),
-    );
-    perService.set(service, replayed);
+  const texts = new Map();
+  for (const path of authoredFiles(join(repository, 'services')).sort()) {
+    const service = /\/services\/([^/]+)\/prisma\/migrations\/[^/]+\/migration\.sql$/.exec(
+      path,
+    )?.[1];
+    if (service) texts.set(service, [...(texts.get(service) ?? []), readFileSync(path, 'utf8')]);
   }
-  return perService;
+  return new Map([...texts].map(([service, sql]) => [service, replayMigrations(sql)]));
 }
 
 /** schema.prisma and the replay must agree on every DateTime column's type, or this is blind. */
