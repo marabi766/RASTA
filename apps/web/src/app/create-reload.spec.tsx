@@ -205,7 +205,10 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
       const store = memoryUnresolvedStore();
       setUnresolvedStore(store);
       jest.spyOn(store, method).mockRejectedValue(new UnresolvedStoreUnavailable());
-      expect((await c.submit(form(c.valid))).kind).toBe('NOT_CHECKED');
+      expect(await c.submit(form(c.valid))).toMatchObject({
+        kind: 'NOT_CHECKED',
+        reason: 'STORE_UNAVAILABLE',
+      });
     }
     expect(c.dispatch).not.toHaveBeenCalled();
     const store = memoryUnresolvedStore();
@@ -214,7 +217,16 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
     await c.submit(form(c.valid));
     for (const [key, raw] of store.records)
       store.records.set(key, JSON.stringify({ ...JSON.parse(raw), ref: 'corrupt' }));
-    expect((await c.submit(form(c.edit))).kind).toBe('NOT_CHECKED');
+    expect(await c.submit(form(c.edit))).toMatchObject({
+      kind: 'NOT_CHECKED',
+      reason: 'SNAPSHOT_UNREADABLE',
+    });
+    for (const [key, raw] of store.records)
+      store.records.set(key, JSON.stringify({ ...JSON.parse(raw), state: 'BROKEN' }));
+    expect(await c.request.restore(session)).toMatchObject({
+      kind: 'NOT_CHECKED',
+      reason: 'CORRUPT_RECORD',
+    });
     expect(c.dispatch).toHaveBeenCalledTimes(1);
   });
   it.each(['UNRESOLVED', 'AGED', 'LOST_CONFIRMATION', 'FORMER', 'CORRUPT'])(
@@ -248,6 +260,7 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
           : session;
       currentSession.mockResolvedValue(acting);
       const held = await c.request.restore(acting);
+      if (cause === 'FORMER') expect(held).toMatchObject({ reason: 'FORMER_COPY' });
       expect(held.kind).toBe(cause === 'FORMER' || cause === 'CORRUPT' ? 'NOT_CHECKED' : 'HELD');
       if (!('releaseToken' in held) || !held.releaseToken)
         throw new Error('missing reconciliation exit');
@@ -313,6 +326,16 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
     await sending;
     expect(c.dispatch).toHaveBeenCalledTimes(1);
   });
+  it('distinguishes capacity before dispatch', async () => {
+    const store = memoryUnresolvedStore();
+    setUnresolvedStore(store);
+    jest.spyOn(store, 'reserve').mockResolvedValue({ kind: 'CAPACITY' });
+    expect(await c.submit(form(c.valid))).toMatchObject({
+      kind: 'NOT_CHECKED',
+      reason: 'CAPACITY',
+    });
+    expect(c.dispatch).not.toHaveBeenCalled();
+  });
   it('releases proven refusals and keeps snapshots bounded', async () => {
     c.dispatch.mockResolvedValue({
       kind: 'UNAVAILABLE',
@@ -337,7 +360,7 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
         {},
         dispatch,
       ),
-    ).toEqual({ kind: 'NOT_CHECKED' });
+    ).toEqual({ kind: 'NOT_CHECKED', reason: 'SNAPSHOT_TOO_LARGE' });
     expect(dispatch).not.toHaveBeenCalled();
   });
 });

@@ -120,7 +120,10 @@ export const INFLIGHT_LEASE_MS = 60_000;
 export const RECORD_RETENTION_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 
 export class UnresolvedStoreUnavailable extends Error {
-  constructor(cause?: unknown) {
+  constructor(
+    cause?: unknown,
+    readonly reason: 'STORE_UNAVAILABLE' | 'CORRUPT_RECORD' = 'STORE_UNAVAILABLE',
+  ) {
     super('The pending-request store cannot be reached or read', { cause });
     this.name = 'UnresolvedStoreUnavailable';
   }
@@ -259,6 +262,8 @@ export type ReserveReply =
 
 export interface ReserveInput {
   readonly binding: RecordBinding;
+  /** Atomic expand-phase guard and rollback-visible copy (PERSON/no-retry purposes only). */
+  readonly compatibility?: RecordBinding;
   readonly cap: number;
   readonly leaseMs: number;
   /** `issuedAt + windowMs` bounds a retry (the current configuration); null for a purpose without a deadline. */
@@ -302,7 +307,12 @@ export interface UnresolvedStore {
     attemptId: string,
     mode: SettleMode,
   ): Promise<SettleReply>;
-  release(binding: RecordBinding, id: string, leaseMs: number): Promise<ReleaseReply>;
+  release(
+    binding: RecordBinding,
+    id: string,
+    leaseMs: number,
+    compatibility?: RecordBinding,
+  ): Promise<ReleaseReply>;
   /** Deletes the login's records and set — or nothing, when any member is not valid. Returns whether it did. */
   purge(scope: PurgeScope): Promise<boolean>;
 }
@@ -420,13 +430,31 @@ local key, digest, attempt = ARGV[9], ARGV[10], ARGV[11]
 local windowMs, retention, skew = tonumber(ARGV[13]), tonumber(ARGV[14]), tonumber(ARGV[15])
 local now = nowMs()
 
+local compatibility = nil
+if #KEYS == 4 then
+  compatibility = decode(ARGV[16])
+  if compatibility == nil or policy.retry == true or policy.identity ~= 'PERSON'
+    or compatibility.org ~= c.org or compatibility.purpose ~= c.purpose or compatibility.target ~= c.target
+    or KEYS[3] ~= PREFIX .. ':org:' .. c.org .. ':pw:' .. compatibility.bind
+    or KEYS[4] ~= PREFIX .. ':org:' .. c.org .. ':pwl:' .. compatibility.login then return {'INVALID'} end
+  compatibility.policies = c.policies
+end
 local raw = redis.call('GET', KEYS[1])
 if not raw then
+  -- The person record is authoritative; consult legacy only before a fresh write.
+  if compatibility then
+    local oldRaw = redis.call('GET', KEYS[3])
+    if oldRaw then
+      local old = decode(oldRaw)
+      if old == nil or not validate(old, compatibility) then return {'CORRUPT'} end
+      return {'COMPAT_HELD', oldRaw, stamp(now)}
+    end
+  end
   local fresh = decode(ARGV[12])
   if fresh == nil then return {'INVALID'} end
   fresh.createdAt = now
   fresh.reservedAt = now
-  if not validate(fresh, c) or fresh.state ~= 'RESERVED' or fresh.wasUnresolved ~= false
+  if not validate(fresh, c) or fresh.v ~= 2 or fresh.state ~= 'RESERVED' or fresh.wasUnresolved ~= false
     or fresh.attemptId ~= attempt or fresh.key ~= key or fresh.digest ~= digest then
     return {'INVALID'}
   end
@@ -435,6 +463,10 @@ if not raw then
   end
   redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
   if redis.call('ZCARD', KEYS[2]) >= cap then return {'CAPACITY'} end
+  if compatibility then
+    redis.call('ZREMRANGEBYSCORE', KEYS[4], '-inf', now)
+    if redis.call('ZCARD', KEYS[4]) >= cap then return {'CAPACITY'} end
+  end
   local base = now
   if policy.deadline == 'REQUIRED' then base = fresh.deadline end
   local expireAt = base + retention
@@ -443,6 +475,14 @@ if not raw then
   redis.call('ZADD', KEYS[2], expireAt, KEYS[1])
   local top = redis.call('ZRANGE', KEYS[2], -1, -1, 'WITHSCORES')
   redis.call('PEXPIREAT', KEYS[2], top[2])
+  if compatibility then
+    fresh.bind = compatibility.bind
+    fresh.login = compatibility.login
+    redis.call('SET', KEYS[3], cjson.encode(fresh), 'PXAT', expireAt)
+    redis.call('ZADD', KEYS[4], expireAt, KEYS[3])
+    local oldTop = redis.call('ZRANGE', KEYS[4], -1, -1, 'WITHSCORES')
+    redis.call('PEXPIREAT', KEYS[4], oldTop[2])
+  end
   return {'RESERVED', json, '0', stamp(now)}
 end
 
@@ -531,28 +571,58 @@ redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'UNRESOLVED'
 `;
 
-/** KEYS: record, login set. ARGV: org, login, purpose, target, bind, policies, id, lease. */
+/** KEYS: record/index and optional compatibility pair. ARGV: scope, id, lease, compatibility JSON. */
 export const RELEASE_SCRIPT = `${LUA_PRELUDE}
 local c = context()
 if c == nil or not keysMatch(c) then return 'CORRUPT' end
-local raw = redis.call('GET', KEYS[1])
-if not raw then return 'GONE' end
-local rec = decode(raw)
-if rec == nil or not validate(rec, c) then return 'CORRUPT' end
-if rec.id ~= ARGV[7] then return 'STALE' end
--- Time never releases a hold. A reservation whose dispatcher has not settled it is not "free" because
--- the lease looks old (a clock that jumped looks the same as a dead process): it becomes UNRESOLVED and
--- stays; only a person's explicit release of an UNRESOLVED record deletes it.
-if rec.state == 'RESERVED' then
-  if nowMs() - rec.reservedAt > tonumber(ARGV[8]) then
-    rec.state = 'UNRESOLVED'
-    rec.wasUnresolved = true
-    redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
-  end
-  return 'IN_PROGRESS'
+local contexts = {c}
+if #KEYS == 4 then
+  local other = decode(ARGV[9])
+  local policy = c.policies[c.purpose]
+  if other == nil or policy.identity ~= 'PERSON' or policy.retry == true
+    or other.org ~= c.org or other.purpose ~= c.purpose or other.target ~= c.target
+    or KEYS[3] ~= PREFIX .. ':org:' .. c.org .. ':pw:' .. other.bind
+    or KEYS[4] ~= PREFIX .. ':org:' .. c.org .. ':pwl:' .. other.login then return 'CORRUPT' end
+  other.policies = c.policies
+  table.insert(contexts, other)
 end
-redis.call('DEL', KEYS[1])
-redis.call('ZREM', KEYS[2], KEYS[1])
+local entries = {}
+local inProgress = false
+local personPresent = false
+for i, ctx in ipairs(contexts) do
+  local k = (i - 1) * 2 + 1
+  local raw = redis.call('GET', KEYS[k])
+  if raw then
+    local rec = decode(raw)
+    if rec == nil or not validate(rec, ctx) then return 'CORRUPT' end
+    if rec.id == ARGV[7] then
+      if rec.state == 'RESERVED' then inProgress = true end
+      table.insert(entries, {k = k, rec = rec})
+    elseif not personPresent then
+      -- The authoritative copy (person; legacy only while person is absent) is another one.
+      return 'STALE'
+    end
+    if i == 1 then personPresent = true end
+  end
+end
+-- Validate both before mutation; a companion with another id is left untouched and
+-- read as its own hold later. If either matching copy is RESERVED, delete neither.
+local now = nowMs()
+for _, entry in ipairs(entries) do
+  local rec = entry.rec
+  if inProgress then
+    if rec.state == 'RESERVED' and now - rec.reservedAt > tonumber(ARGV[8]) then
+      rec.state = 'UNRESOLVED'
+      rec.wasUnresolved = true
+      redis.call('SET', KEYS[entry.k], cjson.encode(rec), 'KEEPTTL')
+    end
+  else
+    redis.call('DEL', KEYS[entry.k])
+    redis.call('ZREM', KEYS[entry.k + 1], KEYS[entry.k])
+  end
+end
+if inProgress then return 'IN_PROGRESS' end
+if #entries == 0 then return 'GONE' end
 return 'RELEASED'
 `;
 
@@ -597,7 +667,7 @@ function parseRecord(json: unknown, binding: RecordBinding): StoredRecord {
     if (!record) throw new Error('malformed or foreign record');
     return record;
   } catch (error) {
-    throw new UnresolvedStoreUnavailable(error);
+    throw new UnresolvedStoreUnavailable(error, 'CORRUPT_RECORD');
   }
 }
 
@@ -635,7 +705,7 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
       needPolicy(binding.purpose);
       const reply = await run(
         RESERVE_SCRIPT,
-        keysOf(binding),
+        [...keysOf(binding), ...(input.compatibility ? keysOf(input.compatibility) : [])],
         ...scopeArgs(binding),
         input.cap,
         input.leaseMs,
@@ -646,6 +716,7 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
         input.windowMs ?? -1,
         RECORD_RETENTION_AFTER_MS,
         MAX_CLOCK_SKEW_MS,
+        JSON.stringify(input.compatibility ?? null),
       );
       if (!Array.isArray(reply) || typeof reply[0] !== 'string') {
         throw new UnresolvedStoreUnavailable(new Error('unreadable reserve reply'));
@@ -665,6 +736,14 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
             kind: 'EXPIRED',
             // A fresh request past its deadline writes nothing.
             record: reply[1] === '' ? null : parseRecord(reply[1], binding),
+            now: serverTime(reply[2]),
+          };
+        case 'COMPAT_HELD':
+          if (!input.compatibility) throw new UnresolvedStoreUnavailable();
+          return {
+            kind: 'HELD',
+            reason: 'RECONCILE_ONLY',
+            record: parseRecord(reply[1], input.compatibility),
             now: serverTime(reply[2]),
           };
         case 'HELD':
@@ -698,7 +777,10 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
       if (reply[0] === 'OK') {
         return { record: parseRecord(reply[1], binding), now: serverTime(reply[2]) };
       }
-      throw new UnresolvedStoreUnavailable(new Error(`read answered ${String(reply[0])}`));
+      throw new UnresolvedStoreUnavailable(
+        new Error(`read answered ${String(reply[0])}`),
+        reply[0] === 'CORRUPT' ? 'CORRUPT_RECORD' : 'STORE_UNAVAILABLE',
+      );
     },
 
     async settle(binding, id, attemptId, mode) {
@@ -717,9 +799,16 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
       throw new UnresolvedStoreUnavailable(new Error(`settle answered ${String(reply)}`));
     },
 
-    async release(binding, id, leaseMs) {
+    async release(binding, id, leaseMs, compatibility) {
       needPolicy(binding.purpose);
-      const reply = await run(RELEASE_SCRIPT, keysOf(binding), ...scopeArgs(binding), id, leaseMs);
+      const reply = await run(
+        RELEASE_SCRIPT,
+        [...keysOf(binding), ...(compatibility ? keysOf(compatibility) : [])],
+        ...scopeArgs(binding),
+        id,
+        leaseMs,
+        JSON.stringify(compatibility ?? null),
+      );
       if (
         reply === 'RELEASED' ||
         reply === 'STALE' ||
@@ -818,12 +907,31 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       if (!keysMatch(binding)) throw new UnresolvedStoreUnavailable(new Error('keys'));
       const now = clock();
       prune(now);
+      const compatibility = input.compatibility;
+      if (compatibility) {
+        if (
+          !keysMatch(compatibility) ||
+          policy.identity !== 'PERSON' ||
+          policy.retry ||
+          compatibility.org !== binding.org ||
+          compatibility.purpose !== binding.purpose ||
+          compatibility.target !== binding.target
+        )
+          throw new UnresolvedStoreUnavailable();
+      }
       const existing = load(binding);
 
       if (existing === null) {
+        // Match Lua: legacy can hold a fresh write, but never overrides the person record.
+        if (compatibility) {
+          const old = load(compatibility);
+          if (old === 'CORRUPT') throw new UnresolvedStoreUnavailable(undefined, 'CORRUPT_RECORD');
+          if (old) return { kind: 'HELD', reason: 'RECONCILE_ONLY', record: old, now };
+        }
         const fresh = validateRecord({ ...input.fresh, createdAt: now, reservedAt: now }, binding);
         if (
           !fresh ||
+          fresh.v !== 2 ||
           fresh.state !== 'RESERVED' ||
           fresh.wasUnresolved ||
           fresh.attemptId !== input.attemptId ||
@@ -840,15 +948,23 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
         }
         const set = setOf(binding.setKey);
         if (set.size >= input.cap) return { kind: 'CAPACITY' };
+        if (compatibility && setOf(compatibility.setKey).size >= input.cap)
+          return { kind: 'CAPACITY' };
         const expireAt =
           (policy.deadline === 'REQUIRED' ? (fresh.deadline as number) : now) +
           RECORD_RETENTION_AFTER_MS;
         save(binding, fresh);
         expiries.set(binding.recordKey, expireAt);
         set.set(binding.recordKey, expireAt);
+        if (compatibility) {
+          save(compatibility, { ...fresh, bind: compatibility.bind, login: compatibility.login });
+          expiries.set(compatibility.recordKey, expireAt);
+          setOf(compatibility.setKey).set(compatibility.recordKey, expireAt);
+        }
         return { kind: 'RESERVED', record: { ...fresh }, retry: false, now };
       }
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
+      if (existing === 'CORRUPT')
+        throw new UnresolvedStoreUnavailable(new Error('CORRUPT'), 'CORRUPT_RECORD');
 
       const rec: StoredRecord = { ...existing };
       let dirty = false;
@@ -897,7 +1013,8 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       const now = clock();
       prune(now);
       const existing = load(binding);
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
+      if (existing === 'CORRUPT')
+        throw new UnresolvedStoreUnavailable(new Error('CORRUPT'), 'CORRUPT_RECORD');
       return { record: existing ? { ...existing } : null, now };
     },
 
@@ -906,7 +1023,8 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       if (!keysMatch(binding)) throw new UnresolvedStoreUnavailable(new Error('keys'));
       const existing = load(binding);
       if (existing === null) return 'GONE';
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
+      if (existing === 'CORRUPT')
+        throw new UnresolvedStoreUnavailable(new Error('CORRUPT'), 'CORRUPT_RECORD');
       const rec: StoredRecord = { ...existing };
       if (rec.id !== id || rec.attemptId !== attemptId || rec.state !== 'RESERVED') return 'STALE';
       if (mode === 'DONE' || (mode === 'REVERT' && !rec.wasUnresolved)) {
@@ -921,24 +1039,42 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       return 'UNRESOLVED';
     },
 
-    async release(binding, id, leaseMs) {
-      needPolicy(binding.purpose);
-      if (!keysMatch(binding)) throw new UnresolvedStoreUnavailable(new Error('keys'));
-      const existing = load(binding);
-      if (existing === null) return 'GONE';
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
-      if (existing.id !== id) return 'STALE';
-      // Time never releases a hold: an aged reservation turns UNRESOLVED and stays (see RELEASE_SCRIPT).
-      if (existing.state === 'RESERVED') {
-        if (clock() - existing.reservedAt > leaseMs) {
-          save(binding, { ...existing, state: 'UNRESOLVED', wasUnresolved: true });
-        }
-        return 'IN_PROGRESS';
+    async release(binding, id, leaseMs, compatibility) {
+      const policy = needPolicy(binding.purpose);
+      if (
+        compatibility &&
+        (policy.identity !== 'PERSON' ||
+          policy.retry ||
+          compatibility.org !== binding.org ||
+          compatibility.purpose !== binding.purpose ||
+          compatibility.target !== binding.target)
+      )
+        throw new UnresolvedStoreUnavailable();
+      const entries: { binding: RecordBinding; record: StoredRecord }[] = [];
+      let personPresent = false;
+      for (const candidate of compatibility ? [binding, compatibility] : [binding]) {
+        if (!keysMatch(candidate)) throw new UnresolvedStoreUnavailable(new Error('keys'));
+        const existing = load(candidate);
+        if (existing === 'CORRUPT')
+          throw new UnresolvedStoreUnavailable(undefined, 'CORRUPT_RECORD');
+        if (existing === null) continue;
+        // Match Lua: only the authoritative copy (person, else legacy) can make the token stale.
+        if (existing.id === id) entries.push({ binding: candidate, record: existing });
+        else if (!personPresent) return 'STALE';
+        if (candidate === binding) personPresent = true;
       }
-      records.delete(binding.recordKey);
-      expiries.delete(binding.recordKey);
-      sets.get(binding.setKey)?.delete(binding.recordKey);
-      return 'RELEASED';
+      const inProgress = entries.some(({ record }) => record.state === 'RESERVED');
+      for (const { binding: candidate, record } of entries) {
+        if (inProgress) {
+          if (record.state === 'RESERVED' && clock() - record.reservedAt > leaseMs)
+            save(candidate, { ...record, state: 'UNRESOLVED', wasUnresolved: true });
+        } else {
+          records.delete(candidate.recordKey);
+          expiries.delete(candidate.recordKey);
+          sets.get(candidate.setKey)?.delete(candidate.recordKey);
+        }
+      }
+      return inProgress ? 'IN_PROGRESS' : entries.length === 0 ? 'GONE' : 'RELEASED';
     },
 
     async purge(scope) {
