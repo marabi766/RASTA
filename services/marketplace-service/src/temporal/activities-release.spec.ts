@@ -47,6 +47,7 @@ it('counts each round from a series that starts at zero, and logs the order', as
  * The order of the calls is the point, so one log records them all.
  */
 describe('resolveObligationDispute on record', () => {
+  const STEP = { key: 'k', scheduledAt: new Date('2026-11-06T00:00:00.000Z') };
   function build(options: { resolveDispute: () => Promise<unknown>; recorded?: boolean }) {
     const log: string[] = [];
     const orders = {
@@ -59,7 +60,7 @@ describe('resolveObligationDispute on record', () => {
         options.recorded ? (log.push('answered from the record'), undefined) : call(),
       openSagaCall: async (...args: unknown[]) => {
         log.push(`open ${JSON.stringify(args)}`);
-        return 7;
+        return { generation: 7, started: true };
       },
       confirmSagaCall: async (...args: unknown[]) =>
         void log.push(`confirm ${JSON.stringify(args)}`),
@@ -78,18 +79,16 @@ describe('resolveObligationDispute on record', () => {
     const activities = createActivities({
       orders: orders as unknown as OrderService,
       economic: economic as unknown as EconomicClient,
-      currentStep: () => ({ key: 'k', scheduledAt: new Date() }),
+      currentStep: () => STEP,
     });
     const release = () => activities.resolveObligationDispute('ORD_R', 'TX', 'DSP', 'SETTLE');
     return { log, release, activities };
   }
-  const args = JSON.stringify([
-    { id: 'ORD_R', organizationId: 'ORG_B' },
-    'resolveObligationDispute',
-    'DSP',
-  ]);
-  // With the generation this attempt's own opening was given.
-  const confirmArgs = `${args.slice(0, -1)},7]`;
+  const call = [{ id: 'ORD_R', organizationId: 'ORG_B' }, 'resolveObligationDispute', 'DSP'];
+  // By the scheduled command that runs (#836 r1 R1).
+  const args = JSON.stringify([...call, STEP]);
+  // With the command and the generation its own opening was given.
+  const confirmArgs = JSON.stringify([...call, { command: STEP, generation: 7, started: true }]);
 
   it('opens before the call and confirms after it, under the buying tenant', async () => {
     const { log, release } = build({ resolveDispute: async () => ({}) });
@@ -180,7 +179,8 @@ it.each([
         call(),
       whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) =>
         fn({ status: 'RECEIPT_CONFIRMED', receiptConfirmed: true }),
-      openSagaCall: async () => 1,
+      // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+      openSagaCall: async () => ({ generation: 1, started: true }),
       confirmSagaCall: async () => undefined,
     } as unknown as OrderService,
     economic: {
@@ -219,16 +219,25 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
     send: () => unknown,
     read: () => unknown,
     currentAttempt?: () => number,
-  ): { activities: ReturnType<typeof createActivities>; reads: () => number } {
+  ): {
+    activities: ReturnType<typeof createActivities>;
+    reads: () => number;
+    answered: unknown[][];
+  } {
     let reads = 0;
+    const answered: unknown[][] = [];
     const failing = async () => send();
     const activities = createActivities({
       orders: {
         describe: async () => order,
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
         whileOrderHeld: (_id: string, fn: (row: unknown) => unknown) => fn(order),
-        openSagaCall: async () => 1,
+        // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
         confirmSagaCall: async () => undefined,
+        confirmSagaCallsOn: async (_o: unknown, operations: unknown, subject: unknown) => {
+          answered.push([operations, subject]);
+        },
       } as unknown as OrderService,
       economic: {
         authoriseSettlement: failing,
@@ -244,7 +253,7 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
       ...(currentAttempt ? { currentAttempt } : {}),
     });
-    return { activities, reads: () => reads };
+    return { activities, reads: () => reads, answered };
   }
   const failure = (attempted: Promise<unknown>): Promise<ApplicationFailure> =>
     attempted.then(
@@ -638,6 +647,21 @@ describe('what a failure says of where it came from (#770 r1 F2)', () => {
       });
     });
   });
+
+  // #836 sync with #796: only REFUNDED proves no authorisation or settlement of the
+  // obligation can land; another final status answers the refund, not those calls.
+  it('a refund answers the open authorisation and settlement records only once REFUNDED', async () => {
+    const refunded = over(refused, obligation('REFUNDED'), () => 2);
+    await refunded.activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT);
+    expect(refunded.answered).toEqual([[['authoriseSettlement', 'settle'], 'TXN']]);
+    for (const status of ['SETTLED', 'CANCELLED', 'FAILED']) {
+      const final = over(refused, obligation(status), () => 2);
+      await expect(
+        final.activities.compensate('ORD', 'TXN', 'why', true, FINAL_ANSWER_CONTRACT),
+      ).resolves.toMatchObject({ final: true, status });
+      expect(final.answered).toEqual([]);
+    }
+  });
 });
 
 /**
@@ -680,6 +704,9 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
             trace.push('release');
           }
         },
+        // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
       } as unknown as OrderService,
       economic: {
         authoriseSettlement: async () => {
@@ -821,6 +848,10 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
         describe: async () => ({ id: 'ORD', buyerOrganizationId: 'ORG', correlationId: 'COR' }),
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
         whileOrderHeld: held,
+        // The durable call record (#836, FU-145); a refund answers the open ones on it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
+        confirmSagaCallsOn: async () => undefined,
       } as unknown as OrderService,
       economic: { refund: async () => undefined } as unknown as EconomicClient,
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
@@ -851,5 +882,80 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
       activities.authoriseSettlement('ORD', 'TXN', false, FINAL_ANSWER_CONTRACT),
     ).resolves.toEqual({ fenced: true, status: 'DISPUTED', inDoubt: false });
     expect(trace).toEqual(['hold', 'release']);
+  });
+});
+
+/**
+ * D-151: only economic-service's answer closes an authorisation's call record.
+ * A fenced attempt sent nothing, so it never confirms it, whatever its doubt,
+ * attempt or episode: an earlier send of the episode may still land.
+ */
+describe('a fenced authorisation never confirms its call record (D-151)', () => {
+  function over(
+    row: { status: string },
+    opening: { generation: number; started: boolean },
+    attempt: number,
+  ) {
+    const records: string[] = [];
+    const sends: string[] = [];
+    const activities = createActivities({
+      orders: {
+        describe: async () => ({
+          id: 'ORD',
+          status: 'RECEIPT_CONFIRMED',
+          buyerOrganizationId: 'ORG',
+          correlationId: 'COR',
+          receiptConfirmed: true,
+        }),
+        onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
+        whileOrderHeld: async (_id: string, fn: (held: unknown) => unknown) =>
+          fn({ receiptConfirmed: true, ...row }),
+        openSagaCall: async () => {
+          records.push('open');
+          return opening;
+        },
+        confirmSagaCall: async () => {
+          records.push('confirm');
+        },
+      } as unknown as OrderService,
+      economic: {
+        authoriseSettlement: async () => {
+          sends.push('send');
+        },
+        readObligation: async () => ({ status: 'HELD' }),
+      } as unknown as EconomicClient,
+      currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
+      currentAttempt: () => attempt,
+    });
+    return { activities, records, sends };
+  }
+
+  it.each([
+    ['a retry in doubt, the episode begun earlier', 2, false, { generation: 2, started: false }],
+    ['a first attempt the workflow holds in doubt', 1, true, { generation: 2, started: false }],
+    ['a first attempt that began the episode', 1, false, { generation: 1, started: true }],
+  ] as const)(
+    '%s: opened, never confirmed, nothing sent',
+    async (_name, attempt, inDoubt, opening) => {
+      const { activities, records, sends } = over({ status: 'DISPUTED' }, opening, attempt);
+      await expect(activities.authoriseSettlement('ORD', 'TXN', inDoubt)).resolves.toEqual({
+        fenced: true,
+        status: 'DISPUTED',
+        inDoubt: attempt !== 1 || inDoubt,
+      });
+      expect(records).toEqual(['open']);
+      expect(sends).toEqual([]);
+    },
+  );
+
+  it("economic-service's answer still confirms it (control)", async () => {
+    const { activities, records, sends } = over(
+      { status: 'RECEIPT_CONFIRMED' },
+      { generation: 1, started: true },
+      1,
+    );
+    await expect(activities.authoriseSettlement('ORD', 'TXN')).resolves.toBeUndefined();
+    expect(records).toEqual(['open', 'confirm']);
+    expect(sends).toEqual(['send']);
   });
 });
