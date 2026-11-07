@@ -24,6 +24,7 @@ import {
   settleUnresolved,
 } from '@/server/unresolved-request';
 import { pageHref } from '@/server/page-context';
+import { walletReleaseFeedback } from '@/server/wallet-release-feedback';
 import { isProvenRefusal } from '@/server/write';
 
 import {
@@ -159,5 +160,7 @@ export async function releaseUnresolvedTopUp(walletId: string, form: FormData): 
   if (!verifyCsrf(session, form).ok) redirect('/wallet');
   if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/wallet');
   const outcome = await releaseUnresolved(session, topUpScope(walletId), form.get(RELEASE_FIELD));
-  redirect(pageHref(session, '/wallet', { release: outcome }));
+  redirect(
+    pageHref(session, '/wallet', { release: walletReleaseFeedback(session, walletId, outcome) }),
+  );
 }
