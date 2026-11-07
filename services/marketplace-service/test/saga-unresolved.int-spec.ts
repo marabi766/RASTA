@@ -1084,16 +1084,57 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       );
     });
 
-    it("ends with the create's own answer, or a refusal that proves nothing was held", async () => {
+    // FU-183 (#836 r3 F1): the reviewer's RESET. An older worker sent the create
+    // without a record; its request stalls before economic-service's claim. A
+    // reset schedules the hold as attempt 1 again, which opens a fresh record and
+    // is refused: the freed key is then claimed by the stalled send, which holds.
+    // The record must still be open then, for the lookup to find that hold.
+    it.each([
+      ['INSUFFICIENT_BALANCE', 422],
+      ['BUSINESS_RULE_VIOLATION', 422],
+      ['VALIDATION_FAILED', 400],
+    ] as const)(
+      'RESET: attempt 1 refused %s after an unrecorded older send keeps the intent open until the late hold is found',
+      async (code, status) => {
+        const orderId = await place();
+        attempt = 1;
+        creating = async () => {
+          throw refused(code, status);
+        };
+        await expect(hold.createObligation(orderId)).rejects.toThrow();
+        expect(await intentOpen(orderId)).toBe(true);
+        // The older worker's request now claims the freed key and holds.
+        const order = await runUnscoped('the suite reads the order terms', () =>
+          prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+        );
+        const late = {
+          ...own(orderId),
+          grossAmountMinor: order.totalAmountMinor.toString(),
+          currency: order.currency,
+          heldProven: true,
+        };
+        found = () => [late];
+        try {
+          await expect(hold.findObligation(orderId)).resolves.toEqual({ transactionId: late.id });
+        } finally {
+          found = () => [];
+        }
+        expect(await intentOpen(orderId)).toBe(false);
+      },
+    );
+
+    it("ends with the create's own answer only: no refusal closes the intent (FU-183)", async () => {
       const answered = await place();
       creating = async () => ({ id: `TXN_${ulid()}` });
       await hold.createObligation(answered);
       expect(await intentOpen(answered)).toBe(false);
 
       for (const [code, status, open] of [
-        ['INSUFFICIENT_BALANCE', 422, false],
-        ['BUSINESS_RULE_VIOLATION', 422, false],
-        ['VALIDATION_FAILED', 400, false],
+        // Work-level refusals too, on attempt 1 of a record that began there: a
+        // send the record cannot see may still claim the freed key (FU-183).
+        ['INSUFFICIENT_BALANCE', 422, true],
+        ['BUSINESS_RULE_VIOLATION', 422, true],
+        ['VALIDATION_FAILED', 400, true],
         // The replay guard answers these for a key that did commit.
         ['NOT_FOUND', 404, true],
         ['FORBIDDEN', 403, true],

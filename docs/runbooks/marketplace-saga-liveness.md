@@ -31,7 +31,7 @@ An **episode** is one of:
   by that attempt's own answer. A buyer's dispute and an operator's decision do not close one: they pause settlement and
   confirm nothing about a command already sent (#792 r2 F2). A confirmed refund also closes the authorisation and
   settlement rows of the same obligation (`REFUNDED` is terminal); a lookup that finds the order's own obligation closes
-  its hold row, an empty one never does (a late commit is invisible to it); a refusal that proves nothing was held (`INSUFFICIENT_BALANCE`, `BUSINESS_RULE_VIOLATION`, `VALIDATION_FAILED` under their own status) closes it too, but only on the send that began its episode: economic-service frees the key on a refusal, so an earlier unanswered send could still claim it and commit.
+  its hold row, an empty one never does (a late commit is invisible to it); a refusal never does, on any attempt (FU-183, #836 r3 F1): economic-service frees the key on a refusal, so a send the record cannot see (an older worker's, unrecorded, before a reset scheduled attempt 1 again) can still claim it and commit.
 - each row names the **scheduled command** that owns it (`command`, `command_scheduled_at`: the saga step key and when
   Temporal scheduled it, #836 r1 R1). Only the owner or a command scheduled later opens it again; an attempt of an older
   command is refused before it calls (`SAGA_CALL_SUPERSEDED`, non-retryable: the saga has moved past it), so its
@@ -150,7 +150,8 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
    its state shows it. Close a row only on an answer economic-service shows, never on absence, the order's status or
    age (D-135); the same way and with the `generation` you read.
 7. `UNCONFIRMED_CALL` `createObligation` (`subject` is the order) on an order `FAILED` or `CANCELLED`: the hold was
-   sent, never answered, and a lookup found nothing. **Never close this row by hand** (D-135). Nothing available today
+   sent and never answered, or refused (`INSUFFICIENT_BALANCE` and every other code: a refusal closes nothing, FU-183),
+   and a lookup found nothing. **Never close this row by hand** (D-135). Nothing available today
    proves the create will not still commit: a request delayed before it claims its key can claim it at any later time,
    and economic-service starts the key's retention (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`) at that claim, so no timeout,
    empty lookup, terminal status or waiting margin is proof. Instead:
@@ -189,11 +190,12 @@ receipt_confirmed_at IS NOT NULL AND status IN ('RECEIPT_CONFIRMED', 'SETTLING',
 - A refusal before anything is sent (an order with no recorded receipt) also leaves its authorisation row open: fail
   closed, the operator reconciles it. So does every refusal of an authorisation, settlement or refund, and a create
   refused `NOT_FOUND`, `FORBIDDEN`, `TENANT_MISMATCH` or `CONFLICT` (economic-service's replay guard answers the first
-  three for a key that did commit), and a create refused on any attempt but the first of its scheduling: an older
-  worker's attempt sent without a record, so a record that began on a retry proves no earlier send (#836 r2 N1). In a
-  rolling deploy a buyer refused for balance on a retry is therefore step 7, never closed by hand. A saga **reset** to
-  before its hold is a new scheduling at attempt 1, which cannot see a send of an older worker: while workers older
-  than #836 run, never reset a saga before its hold.
+  three for a key that did commit), and every refused create, whatever its code or attempt (FU-183, #836 r3 F1): a send the record cannot see — an older
+  worker's, unrecorded — can still claim the freed key, and a reset that scheduled attempt 1 again cannot see it either.
+  A buyer refused for balance is therefore step 7, never closed by hand. Resets before the hold need no restriction for
+  this record any more (the former rule "never reset while older workers run" is removed: no attempt closes on a
+  refusal, so a reset cannot close one). Closing a refused create waits for economic-service's claim-time fence (D-132,
+  #812) and the deadline #812 persists on the order: FU-161.
 - Rows opened before #836 name no command: the first command to open one takes it, as every opening did before.
 - Command order is Temporal's scheduling time of each activity (`scheduledTimestampMs`). Two commands of one operation
   on one subject are never scheduled in the same millisecond (the saga awaits each); a tie, or a Temporal clock that ran
