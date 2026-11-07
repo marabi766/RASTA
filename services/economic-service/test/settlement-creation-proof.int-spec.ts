@@ -49,6 +49,8 @@ const HOLD_PURPOSE = /for anything else names no transaction/;
 const HOLD_FIXED = /Whose a hold is and what it is for never changes/;
 const HOLD_BOUND = 'trg_wallet_hold_reference_bound';
 const HOLD_FUNDED = 'trg_wallet_hold_inserted_only_funded';
+/** FU-182: refuses at commit a resolved hold, or one naming a journal, that nothing funded. */
+const HOLD_FUNDED_AT_COMMIT = 'trg_wallet_hold_funded_at_commit';
 
 interface Leg {
   accountId: string;
@@ -1205,11 +1207,16 @@ describe('the proof of a settlement at its creation (real database, runtime role
     const planted = async (transactionId: string, overrides: Row & { of?: string }) => {
       const row = await holdRow(transactionId, overrides);
       await lifted('wallet_hold', HOLD_BOUND, async (tx) => {
-        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
-        await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold DISABLE TRIGGER ${HOLD_FUNDED}`);
+        // Both lifted before the write: one leaving a deferred event pending blocks the ALTERs.
+        for (const trigger of [HOLD_FUNDED, HOLD_FUNDED_AT_COMMIT]) {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+          await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold DISABLE TRIGGER ${trigger}`);
+        }
         await insertRow(tx, 'wallet_hold', row);
-        // ISOLATION-ALLOW-UNBOUNDED: as above.
-        await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold ENABLE TRIGGER ${HOLD_FUNDED}`);
+        for (const trigger of [HOLD_FUNDED, HOLD_FUNDED_AT_COMMIT]) {
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(`ALTER TABLE wallet_hold ENABLE TRIGGER ${trigger}`);
+        }
       });
       return row.id;
     };
@@ -1704,8 +1711,8 @@ describe('the proof of a settlement at its creation (real database, runtime role
             { of: stranger, reference_type: 'PAYMENT_REFUND' },
           ],
         ] as const)('a payment refund’s over %s: placed, no replay', async (_l, row) => {
-          const reference = `PIN_${ulid()}`;
-          const transactionId = await pending();
+          // A real intent's top-up: a refund hold of no intent is refused at commit (FU-182).
+          const { reference, transactionId } = await capturedIntent();
           const other = await planted(reference, { ...row, wallet_id: walletId });
           const placed = await placeHoldFor(reference, 'PAYMENT_REFUND', transactionId);
           expect(placed.replayed).toBe(false);
