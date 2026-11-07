@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { unchangedCheck } from './pattern-refinement';
 
 /**
  * zod 3's ISO datetime rule, kept after the move to zod 4 (GHSA-mrhx-c7xc-m3w5).
@@ -67,11 +68,12 @@ function zoneOf(options: IsoDateTimeOptions): IsoDateTimeZone {
   };
 }
 
-const ZONES = new WeakMap<object, IsoDateTimeZone>();
+const ZONES = new WeakMap<object, { zone: IsoDateTimeZone; unchanged: () => boolean }>();
 
 /** The zone an `isoDateTime()` check accepts, or `undefined` for any other check. */
 export function publishedIsoDateTimeZone(check: object): IsoDateTimeZone | undefined {
-  return ZONES.get(check);
+  const registered = ZONES.get(check);
+  return registered?.unchanged() ? { ...registered.zone } : undefined;
 }
 
 /** The legacy datetime syntax, with numeric offsets bounded to ±14:00. */
@@ -104,6 +106,6 @@ export function isoDateTime(options: IsoDateTimeOptions = {}): z.core.$ZodCheck<
       continue: true,
     });
   };
-  ZONES.set(check, zoneOf(options));
+  ZONES.set(check, { zone: zoneOf(options), unchanged: unchangedCheck(check) });
   return check;
 }

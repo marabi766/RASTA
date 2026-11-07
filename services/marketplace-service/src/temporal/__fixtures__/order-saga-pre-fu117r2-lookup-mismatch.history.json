@@ -1,0 +1,359 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-11-06T00:50:33.032Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "orderSaga"
+        },
+        "taskQueue": {
+          "name": "capture-pre-fu117r2-lookup-mismatch",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJvcmRlcklkIjoiT1JEX0ZJWFRVUkUiLCJmdWxmaWxsbWVudFdpbmRvd0RheXMiOjcsInJlY2VpcHRXaW5kb3dEYXlzIjozLCJyZW1pbmRlckludGVydmFsRGF5cyI6MywicmVjaGVja0ludGVydmFsSG91cnMiOjI0fQ=="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "315360000s",
+        "workflowRunTimeout": "315360000s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "237bcfd1-201c-4ffa-a4f4-e834554e44c4",
+        "identity": "fixture",
+        "firstExecutionRunId": "237bcfd1-201c-4ffa-a4f4-e834554e44c4",
+        "attempt": 1,
+        "firstWorkflowTaskBackoff": "0s",
+        "header": {}
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-11-06T00:50:33.032Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "capture-pre-fu117r2-lookup-mismatch",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-11-06T00:50:33.033Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "fixture",
+        "historySizeBytes": "420"
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-11-06T00:50:33.177Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "fixture",
+        "binaryChecksum": "@temporalio/worker@1.25.0+45f6335fe8716e82734eabab1ab5c20e18af9a9e4283a4850efb997fa272c1e0",
+        "sdkMetadata": {
+          "coreUsedFlags": [2, 1, 4, 3],
+          "sdkName": "temporal-typescript",
+          "sdkVersion": "1.25.0"
+        },
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-11-06T00:50:33.177Z",
+      "eventType": "EVENT_TYPE_MARKER_RECORDED",
+      "markerRecordedEventAttributes": {
+        "markerName": "core_patch",
+        "details": {
+          "patch-data": {
+            "payloads": [
+              {
+                "metadata": {
+                  "encoding": "anNvbi9wbGFpbg=="
+                },
+                "data": "eyJpZCI6Im9yZGVyLXNhZ2EtZHVyYWJsZS1yb2xsb3Zlci12MSIsImRlcHJlY2F0ZWQiOmZhbHNlfQ=="
+              }
+            ]
+          }
+        },
+        "workflowTaskCompletedEventId": "3"
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-11-06T00:50:33.177Z",
+      "eventType": "EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES",
+      "upsertWorkflowSearchAttributesEventAttributes": {
+        "workflowTaskCompletedEventId": "3",
+        "searchAttributes": {
+          "indexedFields": {
+            "TemporalChangeVersion": {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg==",
+                "type": "S2V5d29yZExpc3Q="
+              },
+              "data": "WyJvcmRlci1zYWdhLWR1cmFibGUtcm9sbG92ZXItdjEiXQ=="
+            }
+          }
+        }
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-11-06T00:50:33.177Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "saga-step-1",
+        "activityType": {
+          "name": "readOrder"
+        },
+        "taskQueue": {
+          "name": "capture-pre-fu117r2-lookup-mismatch",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "Ik9SRF9GSVhUVVJFIg=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "30s",
+        "heartbeatTimeout": "10s",
+        "workflowTaskCompletedEventId": "3",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "300s",
+          "nonRetryableErrorTypes": [
+            "BUSINESS_RULE_VIOLATION",
+            "VALIDATION_FAILED",
+            "TENANT_MISMATCH",
+            "FORBIDDEN",
+            "NOT_FOUND"
+          ]
+        }
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-11-06T00:50:33.177Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "7",
+        "identity": "fixture",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-11-06T00:50:33.188Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJlY29ub21pY1RyYW5zYWN0aW9uSWQiOm51bGwsImNhbmNlbGxhdGlvblJlYXNvbiI6ImNoYW5nZWQgdGhlaXIgbWluZCIsImRpc3B1dGUiOm51bGwsInN0YXR1cyI6IkNBTkNFTExJTkcifQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "7",
+        "startedEventId": "8",
+        "identity": "fixture"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-11-06T00:50:33.188Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "capture-pre-fu117r2-lookup-mismatch",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-11-06T00:50:33.188Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "10",
+        "identity": "fixture",
+        "historySizeBytes": "1454"
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-11-06T00:50:33.204Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "10",
+        "identity": "fixture",
+        "binaryChecksum": "@temporalio/worker@1.25.0+45f6335fe8716e82734eabab1ab5c20e18af9a9e4283a4850efb997fa272c1e0",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-11-06T00:50:33.204Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "saga-step-2",
+        "activityType": {
+          "name": "findObligation"
+        },
+        "taskQueue": {
+          "name": "capture-pre-fu117r2-lookup-mismatch",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "header": {},
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "Ik9SRF9GSVhUVVJFIg=="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "315360000s",
+        "scheduleToStartTimeout": "315360000s",
+        "startToCloseTimeout": "30s",
+        "heartbeatTimeout": "10s",
+        "workflowTaskCompletedEventId": "11",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "300s",
+          "nonRetryableErrorTypes": [
+            "BUSINESS_RULE_VIOLATION",
+            "VALIDATION_FAILED",
+            "TENANT_MISMATCH",
+            "FORBIDDEN",
+            "NOT_FOUND"
+          ]
+        }
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-11-06T00:50:33.204Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "13",
+        "identity": "fixture",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-11-06T00:50:33.207Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJtaXNtYXRjaCI6dHJ1ZSwidHJhbnNhY3Rpb25JZHMiOlsiVFhOX1giXSwiZGlmZmVyIjpbImFtb3VudCJdfQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "13",
+        "startedEventId": "14",
+        "identity": "fixture"
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-11-06T00:50:33.207Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "capture-pre-fu117r2-lookup-mismatch",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-11-06T00:50:33.207Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "16",
+        "identity": "fixture",
+        "historySizeBytes": "2141"
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2026-11-06T00:50:33.215Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "16",
+        "identity": "fixture",
+        "binaryChecksum": "@temporalio/worker@1.25.0+45f6335fe8716e82734eabab1ab5c20e18af9a9e4283a4850efb997fa272c1e0",
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2026-11-06T00:50:33.215Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED",
+      "workflowExecutionFailedEventAttributes": {
+        "failure": {
+          "message": "economic-service holds a transaction for order ORD_FIXTURE on terms the order did not set (amount); it is not adopted, and funds remain held for a human decision",
+          "source": "TypeScriptSDK",
+          "stackTrace": "ApplicationFailure: economic-service holds a transaction for order ORD_FIXTURE on terms the order did not set (amount); it is not adopted, and funds remain held for a human decision\n    at Function.nonRetryable (/home/rasta/work/fix/saga-economic-sites-durable-fu117/node_modules/.pnpm/@temporalio+common@1.25.0_long@5.3.2_protobufjs@8.8.1/node_modules/@temporalio/common/src/failure.ts:254:11)\n    at nonRetryable (/home/rasta/work/fix/saga-economic-sites-durable-fu117/services/marketplace-service/src/temporal/workflows.ts:933:31)",
+          "applicationFailureInfo": {
+            "type": "OBLIGATION_TERMS_MISMATCH",
+            "nonRetryable": true,
+            "details": {
+              "payloads": [
+                {
+                  "metadata": {
+                    "encoding": "anNvbi9wbGFpbg=="
+                  },
+                  "data": "WyJUWE5fWCJd"
+                }
+              ]
+            }
+          }
+        },
+        "workflowTaskCompletedEventId": "17"
+      }
+    }
+  ]
+}
