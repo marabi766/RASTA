@@ -18,16 +18,20 @@ import { orgId, queryWindow } from './fixtures';
  */
 
 /** Recorded under zod 3 on main 745d0434 (r2 F1 cases: 5c88ae21); never written by a test run. */
-// FU-131 intentionally corrects the four query-text cases marked below.
+// FU-160 replaces the FU-131 transport refusal while keeping enclosing diagnostics.
 const ZOD3: Record<string, unknown> = {
-  // FU-131: malformed numeric text is refused before bounds/refinements.
+  // FU-160: malformed numeric text has a fixed, non-disclosing transport issue.
   'SYSTEM_ADMIN limit=1e999': {
     code: 'VALIDATION_FAILED',
-    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
+    details: [
+      { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
+    ],
   },
   'SYSTEM_ADMIN limit=nope': {
     code: 'VALIDATION_FAILED',
-    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
+    details: [
+      { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
+    ],
   },
   'SYSTEM_ADMIN limit=201': {
     code: 'VALIDATION_FAILED',
@@ -51,20 +55,39 @@ const ZOD3: Record<string, unknown> = {
       { path: '(root)', message: 'Unrecognized key(s) in object (1)', code: 'unrecognized_keys' },
     ],
   },
-  // FU-131: malformed numeric text is refused before bounds/refinements.
+  // FU-160: malformed numeric text has a fixed, non-disclosing transport issue.
   'SYSTEM_ADMIN limit=0.5, a resource id without its type, a bad cursor': {
     code: 'VALIDATION_FAILED',
-    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
+    details: [
+      { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
+      {
+        path: 'resourceType',
+        message: '`resourceId` may only be used together with `resourceType`',
+        code: 'custom',
+      },
+      { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
+    ],
   },
-  // FU-131: malformed numeric text is refused before bounds/refinements.
+  // FU-160: malformed numeric text has a fixed, non-disclosing transport issue.
   'SYSTEM_ADMIN the same, window reversed': {
     code: 'VALIDATION_FAILED',
-    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
+    details: [
+      { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
+      { path: 'to', message: '`to` must not be earlier than `from`', code: 'custom' },
+      {
+        path: 'resourceType',
+        message: '`resourceId` may only be used together with `resourceType`',
+        code: 'custom',
+      },
+      { path: 'cursor', message: 'The cursor is not valid', code: 'custom' },
+    ],
   },
-  // FU-131: malformed numeric text is refused before bounds/refinements.
+  // FU-160: malformed numeric text has a fixed, non-disclosing transport issue.
   'UNION_ADMIN limit=1e999': {
     code: 'VALIDATION_FAILED',
-    details: [{ path: 'limit', message: 'Expected number, received nan', code: 'invalid_type' }],
+    details: [
+      { path: 'limit', message: 'Expected an integer in decimal notation', code: 'custom' },
+    ],
   },
 };
 

@@ -94,6 +94,22 @@ describe('toJsonSchema', () => {
     });
   });
 
+  it('FU-160 accepts JS exponent serialization under the published coordinate bounds', () => {
+    const field = numberInput(z.number().min(-90).max(90)).describe('Latitude').optional();
+    expect(toJsonSchema(field)).toEqual({
+      type: 'number',
+      minimum: -90,
+      maximum: 90,
+      description: 'Latitude',
+    });
+    for (const value of [1e-7, -1e-7, Number.MIN_VALUE, 91, -91]) {
+      const parsed = field.safeParse(String(value));
+      expect(parsed.success).toBe(field.safeParse(value).success);
+      if (parsed.success) expect(parsed.data).toBe(value);
+    }
+    expect(field.safeParse('1e9999').success).toBe(false);
+  });
+
   it('FU-131 does not publish a different schema piped from a registered transform', () => {
     const input = numberInput(z.number().int().min(1));
     const forged = z.pipe(input.in, z.number().max(100));

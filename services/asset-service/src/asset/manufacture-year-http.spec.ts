@@ -20,7 +20,7 @@ import { IdempotencyStore } from './idempotency';
  * and nothing is registered or changed.
  */
 describe('an asset’s manufacture year (HTTP)', () => {
-  it.each(['', '0x10', '1e1', ' 16 '])(
+  it.each(['', '0x10', '1e', ' 16 '])(
     'FU-131 HTTP refuses non-decimal latitude %j',
     async (value) => {
       const response = await request(app.getHttpServer())
