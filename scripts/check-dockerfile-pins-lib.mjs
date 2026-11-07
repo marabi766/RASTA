@@ -324,6 +324,8 @@ export const REVIEWED_PROGRAMS = new Map([
     {
       programs: ['node', 'pnpm', 'go', 'psql', 'openssl'],
       paths: ['$RUNNER_TEMP/trivy-db-check-bin'], // the `go build -o` directory of the trivy-db job
+      // the run secrets of the two `Generate run secrets` steps: `openssl rand -hex` output, one line of hex
+      envValues: ['keycloak_password', 'internal_secret', 'web_session_secret'],
       reason: `${TOOLING}; psql and openssl take SQL / key material from the job’s own services`,
     },
   ],
@@ -339,17 +341,20 @@ export const REVIEWED_PROGRAMS = new Map([
     'infrastructure/docker/kafka/ci-up.sh',
     {
       programs: ['node', 'openssl'],
-      writes: ['${GITHUB_ENV}', '${directory}/${variable}', '${TLS_DIR}/broker.env'],
+      writes: ['${directory}/${variable}', '${TLS_DIR}/broker.env'],
       // the names `publish NAME value` appends to $GITHUB_ENV (`echo "$1=$2"`: the name is a parameter, not readable here)
       githubEnv: ['KAFKA_BROKERS', 'KAFKA_SSL', 'KAFKA_SSL_CA_FILE'],
+      assigns: ['$1=$2', '${variable}=${value}'], // publish NAME value, and the loop over the principals' variables
+      envValues: ['1', '2'], // publish's NAME and value: the callers pass a broker list, `true` and a path
       reason:
-        'node runs scripts/kafka-acl.mjs (Kafka ACLs over the wire); openssl x509 reads the generated CA; neither starts an image. The writes are the runner’s env file and one secret file per principal in the secrets directories, and the list of variable NAMES for `docker run --env-file` in the run’s own TLS directory, never a script',
+        'node runs scripts/kafka-acl.mjs (Kafka ACLs over the wire); openssl x509 reads the generated CA; neither starts an image. The writes are one secret file per principal in the secrets directories, and the list of variable NAMES for `docker run --env-file` in the run’s own TLS directory, never a script',
     },
   ],
   [
     'infrastructure/docker/kafka/tls.sh',
     {
       programs: ['keytool', 'openssl'],
+      writes: ['${CA_EXPORT_DIR}/ca.pem', 'ca.pem', 'keystore.password'], // the CA copy in the caller's export directory; the files of its own TLS_DIR (the script changes into it): never a script
       reason: 'generate the development CA and broker keystores in the working directory; no image',
     },
   ],
@@ -382,6 +387,7 @@ export const REVIEWED_PROGRAMS = new Map([
     'scripts/ci-pull-image.sh',
     {
       programs: ['sed'],
+      writes: ['$out'], // its own mktemp file, which holds the output of one docker pull
       reason: 'a literal `s///` script over a reference printed by docker pull',
     },
   ],
@@ -1017,6 +1023,9 @@ const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
 // the run text is always read as bash: another shell reads it as something else (task 368 L1)
 const SHELL_NAMES = /^(?:bash|sh)$/;
 const GH_EXPRESSION = /\$\{\{\s*(.*?)\s*\}\}/g;
+// `github` NOT followed by `.property` for a property that is not env, path, output or state (runner.temp is only a
+// directory: a write below it is a computed write target, refused as any)
+const FILE_COMMAND_CONTEXT = /\bgithub\b(?!\s*\.\s*(?!(?:env|path|output|state)\b)\w)/i;
 /** a value GitHub may paste into a script: the characters of a reference, at least one (an empty paste is zero words) */
 const SAFE_PASTE = /^[A-Za-z0-9_@:./=+,-]+$/;
 
@@ -1072,6 +1081,14 @@ export function validateInfraImagePins(files, policy = {}) {
     has: (file, name) => Boolean(reviewedPrograms.get(file)?.programs.includes(name)),
     // the names a reviewed entry says a computed `echo "$1=$2" >> "$GITHUB_ENV"` defines (task 368 F3)
     githubEnv: (file) => reviewedPrograms.get(file)?.githubEnv,
+    // the exact words (`$1=$2`) a reviewed script may pass to export, declare, ... as a variable with a computed name
+    assigns: (file, word) => {
+      if (!reviewedPrograms.get(file)?.assigns?.includes(word)) return false;
+      reviewedUsed.add(`${file} ASSIGN ${word}`);
+      return true;
+    },
+    // the variables whose value a reviewed `echo "NAME=$value" >> "$GITHUB_ENV"` may expand (task 370 B1: no newline in them)
+    githubEnvValues: (file) => reviewedPrograms.get(file)?.envValues ?? [],
     // a redirect / copy target this check cannot read, named by its exact word in a reviewed entry
     writes: (file, word) => {
       if (!reviewedPrograms.get(file)?.writes?.includes(word)) return false;
@@ -1081,12 +1098,7 @@ export function validateInfraImagePins(files, policy = {}) {
     // `echo <one listed path> >> "$GITHUB_PATH"`: the only way a reviewed entry changes PATH
     pathEntry: (file, words) => {
       const at = executionChain(words).chain.at(-1);
-      const operands = [];
-      for (let k = at + 1; k < words.length; k++) {
-        const width = redirectWidth(words, k);
-        if (width > 0) k += width - 1;
-        else operands.push(words[k]);
-      }
+      const operands = operandsAfter(words, at);
       const path = operands[0]?.value;
       if (words[at]?.value !== 'echo' || operands.length !== 1) return false;
       if (!reviewedPrograms.get(file)?.paths?.includes(path)) return false;
@@ -1232,6 +1244,15 @@ export function validateInfraImagePins(files, policy = {}) {
         errors.push(
           `REVIEWED_PROGRAMS lists the write ${word} in ${file}, which nothing writes any more`,
         );
+  for (const [file, { assigns = [], reason }] of reviewedPrograms)
+    for (const word of assigns)
+      if (
+        files.some((f) => f.name === file) &&
+        (!reason || !reviewedUsed.has(`${file} ASSIGN ${word}`))
+      )
+        errors.push(
+          `REVIEWED_PROGRAMS lists the assignment ${word} in ${file}, which nothing sets any more`,
+        );
   for (const [file, { paths = [], reason }] of reviewedPrograms)
     for (const path of paths)
       if (
@@ -1350,6 +1371,14 @@ function composeImages({ name, text }, images, errors) {
 
 function workflowImages({ name, text }, images, errors, shared) {
   const { doc, js, lineAt } = parseYaml(text);
+  // Task 370 B1: the context that names the runner's env, path and output files (`${{ github.env }}`, `github.path`,
+  // `github['env']`, `toJSON(github)`) hands a step a spelling of $GITHUB_ENV this check cannot see;
+  // any other property of `github` is fine
+  for (const [match, inner] of text.matchAll(GH_EXPRESSION))
+    if (FILE_COMMAND_CONTEXT.test(inner))
+      errors.push(
+        `${name}: ${match} names a runner file-command path (the env or path file) under another spelling, which this check does not follow`,
+      );
   // Local tags carry across steps, in document order, as they do on the runner.
   const state = { localTags: new Set() };
   if (!isObject(js)) throw new Error('not a mapping');
@@ -1498,14 +1527,16 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     // and may name a program, so it is read as an expansion (`$NAME`), never as a literal word.
     return `$__GHEXPR${expressions.length - 1}__`;
   });
-  // Task 368 F1: `#!/bin/bash -a` hands the file to a shell with options (allexport) that no command line shows
+  // Task 368 F1 + task 370 FU1: `#!/bin/bash -a` hands the file to a shell with options (allexport) that no command line
+  // shows, and `#!/bin/bash evil.txt` or `#!/usr/bin/env python3` runs another file or another language: only these
+  // whole lines start the script as bash text
   if (
     ctx.self !== undefined &&
     /^#!/.test(script) &&
-    !/^#!\s*\S+(?:[ \t]+[A-Za-z][\w.-]*)?[ \t]*(?:\n|$)/.test(script)
+    !/^#![ \t]*(?:\/bin\/(?:ba)?sh|\/usr\/bin\/env[ \t]+(?:ba)?sh)[ \t]*(?:\n|$)/.test(script)
   )
     errors.push(
-      `${ctx.file}:${ctx.lineOf(0)}: the #! line has an option, which this check does not read; start the shell in the script`,
+      `${ctx.file}:${ctx.lineOf(0)}: the #! line is not #!/bin/bash, #!/bin/sh or #!/usr/bin/env bash|sh, so the kernel may run another program or file with the script; start the shell in the script`,
     );
   const exempt = new Map();
   src.split('\n').forEach((text, index) => {
@@ -1585,6 +1616,14 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       `${ctx.file}:${ctx.lineOf(0)}: test -v / -R (or [[ -v ]]) names a variable by computed text, which bash evaluates as an arithmetic subscript that can run a command`,
     );
   const maybe = new Set([...(ctx.maybe ?? []), ...writes.functions]);
+  // Task 370 B1: a function named after a builtin or a program this check reads as itself (`echo() { … }`) answers the
+  // command instead: what the check read as `echo "NAME=1" >> "$GITHUB_ENV"` is the function's text. Read from the text, not
+  // the tokens: a definition after `{`, `(`, `then` or `do` is not one the tokenizer reports. A string that imitates a
+  // definition is a false refusal, which is the safe side.
+  for (const match of src.matchAll(SHADOWING))
+    errors.push(
+      `${ctx.file}:${ctx.lineOf(src.slice(0, match.index).split('\n').length - 1)}: defines a function or alias named ${match[1] ?? match[2] ?? match[3]}, which replaces the program of that name that this check read`,
+    );
   const aliasing = Boolean(ctx.aliasing) || writes.aliasing;
   const shadowed = (name) => aliasing || maybe.has(name);
   // Task 367 (FU-224): the variables an image or program word may name: the preamble's `readonly NAME=<literal>`
@@ -1690,7 +1729,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         `${where}: sets a variable a shell evaluates at startup (BASH_ENV, ENV, BASH_FUNC_* ...)`,
       );
     // Task 368 F3: `echo "NAME=…" >> "$GITHUB_ENV"` with a literal NAME is the only write read; its name is recorded
-    const envWrite = githubEnvWrite(command.words);
+    const envWrite = githubEnvWrite(command.words, ctx.reviewed.githubEnvValues(ctx.file));
     const envNames = envWrite?.computed
       ? ctx.reviewed.githubEnv(ctx.file)
       : envWrite?.name && [envWrite.name];
@@ -1702,7 +1741,12 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
           `${where}: appends ${envName} to $GITHUB_ENV, which a shell evaluates at startup`,
         );
     }
-    const curlWrong = curlProblem(command.words);
+    for (const word of computedNames(command.words))
+      if (!ctx.reviewed.assigns(ctx.file, word.value))
+        errors.push(
+          `${where}: sets a variable under the name ${word.value}, which this check cannot read (it may be BASH_ENV, PATH, HOME, an image variable; REVIEWED_PROGRAMS assigns)`,
+        );
+    const curlWrong = curlProblem(command.words) ?? writerProblem(command.words);
     if (curlWrong) errors.push(`${where}: ${curlWrong}`);
     if (exportsFunctions(command.words))
       errors.push(
@@ -1729,7 +1773,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
         );
     for (const target of written) {
       // an absolute path outside the scratch directories may be the checkout under another spelling
-      if (unreadArgument(target) || ABSOLUTE_ELSEWHERE.test(posix.normalize(target.value))) {
+      if (unreadTarget(target) || (movedAt(position) && !target.value.startsWith('/'))) {
         if (!ctx.reviewed.writes(ctx.file, target.value))
           unknownWrites.push(`${where} (${target.value})`);
       } else if (ctx.sourced?.has(posix.normalize(target.value)))
@@ -1965,12 +2009,12 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       );
     }
   }
-  // FU-159 r2 F4: a write to a path this check cannot read may replace a file the same script runs
-  if (unknownWrites.length > 0 && runsFile(parsed.commands))
-    for (const where of unknownWrites)
-      errors.push(
-        `${where}: writes to a path this check cannot read in a script that also sources or runs a file (the write may replace that file; REVIEWED_PROGRAMS writes)`,
-      );
+  // FU-159 r2 F4 + task 370 B1: a write to a path this check cannot read may replace a file this or a LATER step runs, and
+  // the runner's env and path files (read between steps) are such paths under any spelling: refused wherever the script stands
+  for (const where of unknownWrites)
+    errors.push(
+      `${where}: writes to a path this check cannot read (it may be $GITHUB_ENV, $GITHUB_PATH, a curl config or a file a later step runs; REVIEWED_PROGRAMS writes)`,
+    );
   for (const { script: inner, line, shell, holder } of parsed.nested) {
     const at = holder !== undefined && holder >= 0 ? holder : undefined;
     shellImages(
@@ -1997,38 +2041,87 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
 }
 
 // PR #805 r2 F1: variables whose value a shell runs at startup or between commands.
-const ABSOLUTE_ELSEWHERE = /^\/(?!(?:dev|tmp|proc\/self)(?:\/|$))/;
+const ABSOLUTE_ELSEWHERE = /^\/(?!(?:dev|tmp)(?:\/|$))/;
 /**
- * Task 368 F3: a write to $GITHUB_ENV defines an env name for every later step, and `${{ env.NAME }}` pastes the
- * defined value. The only write read is `echo "NAME=value" >> "$GITHUB_ENV"` with a literal NAME (returned);
- * any other command that names GITHUB_ENV, but a test of it, is a problem.
+ * Task 370 B1: a write target this check cannot place in the checkout or in a scratch directory: computed, a pattern,
+ * absolute elsewhere (the runner's `_temp/_runner_file_commands`), under `~`, or climbing out with `..`.
  */
-function githubEnvWrite(words) {
-  if (!words.some(({ value }) => value.includes('GITHUB_ENV'))) return null;
-  const at = executionChain(words).chain.at(-1);
-  if (['[', '[[', 'test'].includes(words[at]?.value)) return null; // a test of it writes nothing
+const unreadTarget = (target) =>
+  !OWN_FORM_TARGET.test(target.value) &&
+  (unreadArgument(target) ||
+    ABSOLUTE_ELSEWHERE.test(posix.normalize(target.value)) ||
+    target.value.startsWith('~') ||
+    posix.normalize(target.value).split('/')[0] === '..');
+// the runner files a step may append to by name: ENV and PATH are read by their own forms (githubEnvWrite, pathEntry),
+// the summary and the step outputs change no env name and no program
+const OWN_FORM_TARGET = /^\$\{?GITHUB_(?:ENV|PATH|STEP_SUMMARY|OUTPUT)\}?$/;
+/** The words after the program (index `at`) that are not redirections: its operands and options. */
+function operandsAfter(words, at) {
   const operands = [];
   for (let k = at + 1; k < words.length; k++) {
     const width = redirectWidth(words, k);
     if (width > 0) k += width - 1;
     else operands.push(words[k]);
   }
+  return operands;
+}
+/**
+ * Task 368 F3: a write to $GITHUB_ENV defines an env name for every later step, and `${{ env.NAME }}` pastes the
+ * defined value. The only write read is `echo "NAME=value" >> "$GITHUB_ENV"` with a literal NAME (returned);
+ * any other command that names GITHUB_ENV, but a test of it, is a problem.
+ */
+function githubEnvWrite(words, values = []) {
+  if (!words.some(({ value }) => value.includes('GITHUB_ENV'))) return null;
+  const at = executionChain(words).chain.at(-1);
+  if (['[', '[[', 'test'].includes(words[at]?.value)) return null; // a test of it writes nothing
+  const operands = operandsAfter(words, at);
   const name = /^([A-Za-z_]\w*)(?:=|<<)/.exec(
     operands.find(({ value }) => !value.startsWith('-'))?.value ?? '',
   )?.[1];
   const target = outputRedirects(words).some(({ value }) => value.includes('GITHUB_ENV'));
   const problem =
     'names $GITHUB_ENV in a form this check does not read; append with `echo "NAME=value" >> "$GITHUB_ENV"` and a literal NAME (or a REVIEWED_PROGRAMS githubEnv entry), because the names it defines decide which ${{ env.NAME }} pastes can be trusted';
-  // one operand, no newline, no backslash: `echo "A=1<NL>NAME=…"` and `echo -e "A=1\nNAME=…"` define more names
+  // one operand, no newline, no backslash: `echo "A=1<NL>NAME=…"` and `echo -e "A=1\nNAME=…"` define more names.
+  // Task 370 B1: nor an expansion whose value may hold a newline (`$(…)`, a backtick, a variable no reviewed entry
+  // lists in `envValues`): the runner reads every line of the file as one `NAME=value`.
+  const unlisted = operands[0]?.value.replace(/\$\{?([A-Za-z_]\w*|\d)\}?/g, (m, n) =>
+    values.includes(n) ? '' : m,
+  );
   if (
     words[at]?.value !== 'echo' ||
     !target ||
     operands.length !== 1 ||
     /[\n\\]/.test(operands[0].value) ||
+    /[$`]/.test(unlisted) ||
     operands.some(({ value }) => value.includes('GITHUB_ENV'))
   )
     return { problem };
   return name ? { name } : { computed: true, problem };
+}
+/**
+ * Task 370 B3: the long options the programs that write a named file may have here, by an EXACT allowlist. GNU getopt
+ * takes unambiguous prefixes (`cp --targ=scripts` is `--target-directory=scripts`), so no list of the options that
+ * name a target can be complete; writeTargets reads the exact spelling, and any other `--option` is refused.
+ */
+const WRITER_LONG = {
+  cp: ['force', 'verbose', 'recursive', 'target-directory'],
+  mv: ['force', 'verbose', 'target-directory'],
+  ln: ['symbolic', 'force', 'verbose', 'target-directory'],
+  tee: ['append'],
+  touch: [],
+  uniq: [],
+};
+function writerProblem(words) {
+  const at = executionChain(words).chain.at(-1);
+  const name = (words[at]?.value ?? '').split('/').at(-1);
+  if (!Object.hasOwn(WRITER_LONG, name)) return null;
+  for (const { value } of operandsAfter(words, at)) {
+    if (value === '--') break;
+    const option = /^--([^=]*)/.exec(value)?.[1];
+    if (option !== undefined && !WRITER_LONG[name].includes(option))
+      return `${name} option ${value} is not one this check reads (allowed: ${WRITER_LONG[name].map((o) => `--${o}`).join(' ') || 'none'}); GNU getopt takes abbreviations, so it can name a target this check does not see`;
+  }
+  return null;
 }
 /**
  * Task 368 F4: the options curl may have here, by an ALLOWLIST of exact names: curl takes unambiguous prefixes
@@ -2045,12 +2138,7 @@ const CURL_LONG_VALUES = new Set(
 function curlProblem(words) {
   const at = executionChain(words).chain.at(-1);
   if ((words[at]?.value ?? '').split('/').at(-1) !== 'curl') return null;
-  const operands = [];
-  for (let k = at + 1; k < words.length; k++) {
-    const width = redirectWidth(words, k);
-    if (width > 0) k += width - 1;
-    else operands.push(words[k]);
-  }
+  const operands = operandsAfter(words, at);
   const refuse = (option) =>
     `curl option ${option} is not one this check reads (allowed: -${[...CURL_SHORT_FLAGS].join('')}, -${[...CURL_SHORT_VALUES].join(' -')}, --${[...CURL_LONG_FLAGS, ...CURL_LONG_VALUES].join(' --')}); it can write a file this check cannot see`;
   if (operands.some(({ value }) => value.includes('%output{'))) return refuse('%output{'); // a format that writes
@@ -2093,23 +2181,68 @@ function curlProblem(words) {
   return null;
 }
 /**
+ * Task 370 B1/B2: the words of a builtin that sets a variable under a NAME this check cannot read: `export "$n=/tmp/e"`,
+ * `declare -x "${n}_ENV=…"`, `printf -v "$n" …`, `read -r "$n"`, `mapfile "$n"`, `getopts s "$n"`, a nameref (`declare -n`).
+ * The name may be BASH_ENV, BASH_FUNC_…, PATH (already exported), HOME or the image variable itself.
+ */
+const NAME_TAKERS = new Set(
+  'read readarray mapfile getopts printf declare typeset local export readonly for select'.split(
+    ' ',
+  ),
+);
+function computedNames(words) {
+  const at = executionChain(words).chain.at(-1);
+  const name = words[at]?.value;
+  const operands = operandsAfter(words, at);
+  // the variables curl finds its configuration by, named without an `=` (`read HOME`, `printf -v HOME`, `for HOME in`)
+  const startup = operands.filter(({ value }) =>
+    /^(?:HOME|CURL_HOME|XDG_CONFIG_HOME)$/.test(value),
+  );
+  if (startup.length > 0 && NAME_TAKERS.has(name)) return startup;
+  if (name === 'printf')
+    return operands[0]?.value === '-v' && operands[1]
+      ? operands.slice(1, 2).filter(unreadArgument)
+      : [];
+  if (name === 'getopts') return operands.slice(1, 2).filter(unreadArgument);
+  if (['read', 'readarray', 'mapfile'].includes(name)) return operands.filter(unreadArgument);
+  if (!['declare', 'typeset', 'local', 'export', 'readonly'].includes(name)) return [];
+  return operands.filter(
+    ({ value }) =>
+      /^-[A-Za-z]*n/.test(value) ||
+      (!value.startsWith('-') && value.includes('=') && /[$`*?[{]/.test(value.split('=')[0])),
+  );
+}
+/**
  * Task 368 F1: a function a parent exports reaches every shell it starts (`BASH_FUNC_name%%`) and can answer
  * `readonly` or `set` there, so a child's preamble proves nothing. `export -f`, `declare -fx` and `set -a`
  * (which exports every function defined after it) are refused wherever they stand.
  */
 function exportsFunctions(words) {
   const at = executionChain(words).chain.at(-1);
-  const rest = words.slice(at + 1).map(({ value }) => value);
+  const rest = operandsAfter(words, at);
   const name = words[at]?.value;
+  // Task 370 B2: an option word of these builtins that this check cannot read (`set -$x`, `export -$f`, `declare "${o}"`,
+  // `set -o "$o"`) may be `-a` or `-f` once expanded. bash refuses `-…=` as an option cluster, so a word with a literal
+  // `=` (`export "$1=$2"`) is a name; a word after `--` is a name or a positional parameter (`set -- "$@"`).
+  if (['set', 'export', 'declare', 'typeset', 'local'].includes(name)) {
+    const options = rest.slice(
+      0,
+      rest.findIndex(({ value }) => value === '--') < 0
+        ? undefined
+        : rest.findIndex(({ value }) => value === '--'),
+    );
+    if (options.some((word) => unreadArgument(word) && !word.value.includes('='))) return true;
+  }
+  const values = rest.map(({ value }) => value);
   if (['export', 'declare', 'typeset'].includes(name))
-    return rest.some((v) => /^-[A-Za-z]*f/.test(v));
-  return name === 'set' && rest.some((v) => /^[-+][A-Za-z]*a|^allexport$/.test(v));
+    return values.some((v) => /^-[A-Za-z]*f/.test(v));
+  return name === 'set' && values.some((v) => /^[-+][A-Za-z]*a|^allexport$/.test(v));
 }
 const LOOKUP_TEXT = /^(?:PATH|CDPATH)(?:\+?=.*)?$/;
 // task 368 F1: `BASH_FUNC_name%%` is how a parent hands a shell a function (`export -f`): it answers `readonly` and `set`
 // and curl reads a config file (`~/.curlrc`, found through CURL_HOME, XDG_CONFIG_HOME or HOME) that can name an output file
 const STARTUP_TEXT =
-  /^(?:(?:BASH_ENV|ENV|PROMPT_COMMAND|PS0|PS1|PS4|SHELLOPTS|BASHOPTS)(?:\+?=.*)?|(?:CURL_HOME|XDG_CONFIG_HOME|HOME)\+?=.*|BASH_FUNC_.*|.*curlrc.*)$/s;
+  /^(?:(?:BASH_ENV|ENV|SSLKEYLOGFILE|PROMPT_COMMAND|PS0|PS1|PS4|SHELLOPTS|BASHOPTS)(?:\+?=.*)?|(?:CURL_HOME|XDG_CONFIG_HOME|HOME)\+?=.*|BASH_FUNC_.*|.*curlrc.*)$/s;
 /**
  * Names that take text wherever they stand in a command (not `source` and `.`: those are arguments too).
  * FU-159 r2 F1: `su`, `ssh`, `watch`, `parallel`, `script`, `at`, `sg`, `runuser` ... run a string or an
@@ -2187,6 +2320,14 @@ const DATA_PROGRAMS = new Set(
     'HTTP client: an operand is a URL, an option a header, a path or a request; curl has no way to run a program':
       'curl',
   }).flatMap((names) => names.split(' ')),
+);
+/** Task 370 B1: `name()`, `function name` and `alias name=` for a name this check reads as the builtin or program it is. */
+const SHADOWED_NAMES = [...new Set([...BUILTINS, ...DATA_PROGRAMS, ...WRAPPER_NAMES])]
+  .filter((name) => /^[A-Za-z_][\w-]*$/.test(name))
+  .join('|');
+const SHADOWING = new RegExp(
+  `(?<![\\w./$-])(?:function\\s+)?(${SHADOWED_NAMES})\\s*\\(\\s*\\)|(?<![\\w./$-])function\\s+(${SHADOWED_NAMES})(?![\\w-])|(?<![\\w./$-])alias\\s+(?:-p\\s+)?(${SHADOWED_NAMES})=`,
+  'g',
 );
 /** An argument whose value this check cannot read: an expansion, a pattern, a substitution. */
 const unreadArgument = (word) => unsplit(word) || word.value.includes('$');
@@ -2302,16 +2443,16 @@ function readsText(words, ctx) {
 
 /** The words a command line writes to: redirections, and what `cp` / `mv` / `ln` / `tee` / `touch` / `curl -o` name. */
 function writeTargets(words) {
-  const targets = outputRedirects(words);
   const { chain } = executionChain(words);
   const at = chain.at(-1);
+  // `[[ "$a" > "$b" ]]` compares strings: only a redirection after its `]]` writes
+  const conditional = words[at]?.value === '[[' && !words[at].quoted;
+  const closing = words.findLastIndex(({ value, quoted }) => value === ']]' && !quoted);
+  const targets = outputRedirects(
+    conditional ? (closing < 0 ? [] : words.slice(closing + 1)) : words,
+  );
   const name = (words[at]?.value ?? '').split('/').at(-1);
-  const operands = [];
-  for (let k = at + 1; k < words.length; k++) {
-    const width = redirectWidth(words, k);
-    if (width > 0) k += width - 1;
-    else operands.push(words[k]);
-  }
+  const operands = operandsAfter(words, at);
   // `time -o FILE` (also `--output`) writes its report to a file
   for (const index of chain) {
     if (nameOfWord(words[index]) !== 'time') continue;
@@ -2327,7 +2468,9 @@ function writeTargets(words) {
     targets.push(...operands.filter(({ value }) => !value.startsWith('-')));
   // `uniq IN OUT` writes its second operand
   if (name === 'uniq')
-    targets.push(...operands.filter(({ value }) => !value.startsWith('-')).slice(1));
+    targets.push(
+      ...operands.filter(({ value }) => value === '-' || !value.startsWith('-')).slice(1),
+    );
   // `cp --target-directory=DIR`, `cp -tDIR` (attached; `-t DIR` leaves DIR as an operand above)
   if (['cp', 'mv', 'ln'].includes(name))
     for (const { value } of operands) {
@@ -2346,22 +2489,6 @@ function writeTargets(words) {
         targets.push(short[1] === '' ? (operands[k + 1] ?? unknown) : { value: short[1] });
     }
   return targets;
-}
-
-/** True when the script sources a file, runs a path, or hands a script file to a shell. */
-function runsFile(commands) {
-  return commands.some(({ words, pattern }) => {
-    if (pattern) return false;
-    const { chain, problem } = executionChain(words);
-    const word = words[chain.at(-1)];
-    if (problem || !word) return false;
-    if (word.value === 'source' || word.value === '.' || filePath(word.value)) return true;
-    return (
-      SHELL_WORD.test(word.value) &&
-      shellInvocation(words.slice(chain.at(-1) + 1), word.value, { startupState: true }).file !==
-        undefined
-    );
-  });
 }
 
 /** `eval` and `trap` run their text in THIS shell, so its functions are there; nothing else does. */

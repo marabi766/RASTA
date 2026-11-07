@@ -366,7 +366,8 @@ const words = (text) => text?.split(' ') ?? [];
  * A redirection word (`>f`, `2>f`, `>>`, `<`, `&>f`, `>&2`): bash applies it and passes no operand,
  * wherever it stands in the command line. Alone (`>`, `2>`) it takes the next word as its target.
  */
-const REDIRECT = /^(?:\d+|&)?(?:<<<|<<-|<<|<>|>>|>\||<|>)(.*)$/;
+// task 370: `{fd}>file` opens file on a descriptor bash picks and names in $fd; it writes like `>file`
+const REDIRECT = /^(?:\d+|&|\{[A-Za-z_]\w*\})?(?:<<<|<<-|<<|<>|>>|>\||<|>)(.*)$/;
 export const redirectWidth = (list, at) => {
   const match = REDIRECT.exec(list[at].value);
   return match ? (match[1] === '' ? 2 : 1) : 0;
@@ -379,7 +380,7 @@ export const redirectWidth = (list, at) => {
 export function outputRedirects(list) {
   const found = [];
   for (let at = 0; at < list.length; at++) {
-    const match = /^(?:\d+|&)?(<>|>>|>\||>)(.*)$/.exec(list[at].value);
+    const match = /^(?:\d+|&|\{[A-Za-z_]\w*\})?(<>|>>|>\||>)(.*)$/.exec(list[at].value);
     if (!match) continue;
     // `>& f` (stdout and stderr to f) takes the next word like a bare `>`
     const bare = match[2] === '' || match[2] === '&';
