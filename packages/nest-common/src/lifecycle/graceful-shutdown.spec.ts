@@ -248,9 +248,14 @@ describe('installGracefulShutdown', () => {
     'refuses duplicate default sources (explicit undefined: %s then %s)',
     async (first, second) => {
       const listeners = new Map<string | symbol, () => void>();
-      const on = jest.spyOn(process, 'on').mockImplementation((signal, listener) => {
+      // `on` returns the emitter it was called on: `this` is process here, so no bare `process` escapes.
+      const on = jest.spyOn(process, 'on').mockImplementation(function (
+        this: NodeJS.Process,
+        signal,
+        listener,
+      ) {
         listeners.set(signal, listener);
-        return process;
+        return this;
       });
       const close = jest.fn(async () => undefined);
       const exit = jest.fn();
