@@ -1,6 +1,8 @@
 /**
  * @jest-environment node
  */
+import { useUnresolvedStore } from '@/server/unresolved-request';
+import { memoryUnresolvedStore } from '@/server/unresolved-request-store';
 import { CSRF_FIELD } from '@/server/csrf';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
@@ -70,8 +72,9 @@ function formData(
 }
 
 beforeEach(() => {
+  useUnresolvedStore(memoryUnresolvedStore());
   currentSession.mockResolvedValue(SESSION);
-  createDriver.mockResolvedValue({
+  createDriver.mockReset().mockResolvedValue({
     kind: 'CREATED',
     data: { id: 'DRV_1' },
     correlationId: 'corr-sample',
@@ -189,7 +192,7 @@ describe('what the service refuses', () => {
     // The service may have created the driver; "nothing was saved" would
     // invite a retry that reports a duplicate.
     createDriver.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-sample' });
-    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toEqual({
+    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toMatchObject({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
       submissionId: expect.any(String),
@@ -197,7 +200,7 @@ describe('what the service refuses', () => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
-  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+  it('keeps the first unknown outcome without replaying (FU-173/FU-190)', async () => {
     // The first answer was lost; the same form again meets the gateway's rate limit,
     // which says nothing about the first send.
     createDriver.mockReset();
@@ -211,24 +214,26 @@ describe('what the service refuses', () => {
       });
     const form = formData(VALID);
     const first = await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, form);
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-first',
       submissionId: form.get(SUBMISSION_FIELD),
     });
-    expect(await submitCreateDriver(first, form)).toEqual(first);
-    expect(createDriver).toHaveBeenCalledTimes(2);
+    expect(await submitCreateDriver(first, form)).toMatchObject({
+      ...first,
+      releaseToken: expect.any(String),
+    });
+    expect(createDriver).toHaveBeenCalledTimes(1);
   });
 
-  it('reports an outage with its status and correlation id', async () => {
+  it('treats an ambiguous 503 as unconfirmed', async () => {
     createDriver.mockResolvedValue({
       kind: 'UNAVAILABLE',
       status: 503,
       correlationId: 'corr-sample',
     });
-    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toEqual({
-      kind: 'FAILED',
-      status: 503,
+    expect(await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).toMatchObject({
+      kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
     });
   });

@@ -12,12 +12,18 @@ import {
   RELEASE_FIELD,
   IDLE_TOP_UP_FORM,
 } from './form-state';
-import { restoreTopUp } from '@/server/top-up-request';
-import { useUnresolvedStore } from '@/server/unresolved-request';
+import { restoreTopUp, topUpScope } from '@/server/top-up-request';
+import {
+  purgeUnresolved,
+  releaseUnresolved,
+  useUnresolvedStore,
+} from '@/server/unresolved-request';
 import {
   memoryUnresolvedStore,
   UnresolvedStoreUnavailable,
 } from '@/server/unresolved-request-store';
+import { pageContext } from '@/server/page-context';
+import { readWalletReleaseFeedback, walletReleaseFeedback } from '@/server/wallet-release-feedback';
 import { actingAccessToken } from '@/test/session-token';
 
 /**
@@ -37,6 +43,14 @@ Object.assign(process.env, {
 const currentSession = jest.fn();
 const topUpWallet = jest.fn();
 const mayDispatch = jest.fn();
+let snapshotOverride: string | undefined;
+jest.mock('@/server/top-up-request', () => {
+  const actual = jest.requireActual('@/server/top-up-request');
+  return {
+    ...actual,
+    topUpSnapshot: (...args: unknown[]) => snapshotOverride ?? actual.topUpSnapshot(...args),
+  };
+});
 const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
 });
@@ -95,6 +109,7 @@ function formData(
 }
 
 beforeEach(() => {
+  snapshotOverride = undefined;
   useUnresolvedStore(memoryUnresolvedStore());
   mayDispatch.mockReset().mockResolvedValue(true);
   currentSession.mockResolvedValue(SESSION);
@@ -348,7 +363,7 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     expect(await restoreTopUp(SESSION, WALLET_ID)).toEqual(held);
   });
 
-  it('keeps the hold after an unexpected exception and isolates organization, person and login', async () => {
+  it('keeps the hold after an unexpected exception and isolates organization and person', async () => {
     topUpWallet.mockRejectedValueOnce(new Error('lost response'));
     await expect(
       submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })),
@@ -356,7 +371,6 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     expect((await restoreTopUp(SESSION, WALLET_ID)).kind).toBe('HELD');
     for (const other of [
       { ...SESSION, subject: 'other' },
-      { ...SESSION, csrfToken: 'another-login' },
       { ...SESSION, organizationId: 'ORG_OTHER', accessToken: actingAccessToken('ORG_OTHER') },
     ])
       expect((await restoreTopUp(other, WALLET_ID)).kind).toBe('IDLE');
@@ -378,17 +392,25 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     expect(topUpWallet).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses a corrupt snapshot and an unavailable reservation without sending', async () => {
+  // prettier-ignore
+  it.each(['SNAPSHOT_UNREADABLE', 'CORRUPT_RECORD'] as const)('refuses %s and an unavailable reservation without sending', async (reason) => {
     const store = memoryUnresolvedStore();
     useUnresolvedStore(store);
     topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
     await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
     for (const [key, raw] of store.records)
-      store.records.set(key, JSON.stringify({ ...JSON.parse(raw), ref: 'corrupt' }));
+      store.records.set(
+        key,
+        JSON.stringify({
+          ...JSON.parse(raw),
+          ...(reason === 'CORRUPT_RECORD' ? { state: 'BROKEN' } : { ref: 'corrupt' }),
+        }),
+      );
     expect(await restoreTopUp(SESSION, WALLET_ID)).toEqual({
       kind: 'NOT_CHECKED',
+      reason,
       submissionId: '',
-      releaseToken: expect.any(String),
+      ...(reason === 'SNAPSHOT_UNREADABLE' ? { releaseToken: expect.any(String) } : {}),
     });
     expect(
       await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '2000' })),
@@ -411,6 +433,7 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     useUnresolvedStore(store);
     expect(await restoreTopUp(SESSION, WALLET_ID)).toEqual({
       kind: 'NOT_CHECKED',
+      reason: 'STORE_UNAVAILABLE',
       submissionId: '',
     });
     expect(
@@ -422,7 +445,7 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
 
 // prettier-ignore
 describe('F1: explicit reconciliation for every held top-up', () => {
-  it.each(['UNRESOLVED', 'AGED', 'LOST_CONFIRMATION', 'FORMER', 'CORRUPT'])(
+  it.each(['UNRESOLVED', 'AGED', 'LOST_CONFIRMATION', 'CORRUPT'])(
     'offers and releases %s only after duplicate-risk confirmation', async (cause) => {
       let now = Date.now();
       const store = memoryUnresolvedStore(() => now);
@@ -461,4 +484,139 @@ describe('F1: explicit reconciliation for every held top-up', () => {
       expect((await restoreTopUp(session, WALLET_ID)).kind).toBe('IDLE');
     },
   );
+});
+
+describe('FU-209 person/org/wallet holds', () => {
+  it.each(['re-login', 'second-device', 'logout'])(
+    'survives %s; isolates person, org and wallet',
+    async (event) => {
+      topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+      if (event === 'logout') expect(await purgeUnresolved(SESSION)).toBe(true);
+      const original = await restoreTopUp(SESSION, WALLET_ID);
+      expect(original.kind).toBe('HELD');
+      for (const csrfToken of [event === 'logout' ? SESSION.csrfToken : event]) {
+        const next = { ...SESSION, csrfToken };
+        currentSession.mockResolvedValue(next);
+        const held = await restoreTopUp(next, WALLET_ID);
+        expect(held).toMatchObject({ ...original, releaseToken: expect.any(String) });
+        const data = formData(
+          { amountMinor: '2000' },
+          { csrf: csrfToken, submission: mintSubmissionId(next) },
+        );
+        expect(await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, data)).toMatchObject({
+          kind: 'HELD',
+        });
+        expect(await purgeUnresolved(next)).toBe(true);
+        expect((await restoreTopUp(next, WALLET_ID)).kind).toBe('HELD');
+      }
+      if (!('releaseToken' in original)) throw new Error('missing hold');
+      for (const other of [
+        { ...SESSION, subject: 'other-person' },
+        {
+          ...SESSION,
+          organizationId: 'OTHER',
+          accessToken: actingAccessToken('OTHER'),
+          formerOrganizationId: SESSION.organizationId,
+        },
+      ]) {
+        expect((await restoreTopUp(other, WALLET_ID)).kind).toBe('IDLE');
+        expect(await releaseUnresolved(other, topUpScope(WALLET_ID), original.releaseToken)).toBe(
+          'STALE',
+        );
+      }
+      expect((await restoreTopUp(SESSION, 'OTHER_WALLET')).kind).toBe('IDLE');
+      expect((await restoreTopUp(SESSION, WALLET_ID)).kind).toBe('HELD');
+      expect(topUpWallet).toHaveBeenCalledTimes(1);
+      const next = { ...SESSION, csrfToken: 'fresh-login' };
+      const held = await restoreTopUp(next, WALLET_ID);
+      if (!('releaseToken' in held)) throw new Error('missing hold');
+      expect(await releaseUnresolved(next, topUpScope(WALLET_ID), original.releaseToken)).toBe(
+        'STALE',
+      );
+      expect(await releaseUnresolved(next, topUpScope(WALLET_ID), held.releaseToken)).toBe(
+        'RELEASED',
+      );
+    },
+  );
+});
+
+describe('FU-217 release feedback', () => {
+  it.each(['IN_PROGRESS', 'STALE', 'UNAVAILABLE', 'RELEASED', 'GONE'] as const)(
+    'redirects with %s',
+    async (outcome) => {
+      const store = memoryUnresolvedStore();
+      useUnresolvedStore(store);
+      topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+      const held = await restoreTopUp(SESSION, WALLET_ID);
+      if (!('releaseToken' in held)) throw new Error('missing hold');
+      if (outcome === 'UNAVAILABLE')
+        jest.spyOn(store, 'release').mockRejectedValue(new UnresolvedStoreUnavailable());
+      else jest.spyOn(store, 'release').mockResolvedValue(outcome);
+      await expect(
+        releaseUnresolvedTopUp(
+          WALLET_ID,
+          formData({
+            release: held.releaseToken!,
+            confirmDuplicate: 'yes',
+          }),
+        ),
+      ).rejects.toThrow('NEXT_REDIRECT:/wallet');
+      const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
+      expect(
+        readWalletReleaseFeedback(SESSION, WALLET_ID, url.searchParams.get('release'), true),
+      ).toBe(outcome);
+    },
+  );
+});
+
+describe('FU-210 top-up pre-dispatch refusals', () => {
+  it.each(['CAPACITY', 'SNAPSHOT_TOO_LARGE'] as const)('%s sends nothing', async (reason) => {
+    const store = memoryUnresolvedStore();
+    useUnresolvedStore(store);
+    if (reason === 'CAPACITY') jest.spyOn(store, 'reserve').mockResolvedValue({ kind: 'CAPACITY' });
+    else snapshotOverride = 'x'.repeat(801);
+    expect(
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })),
+    ).toMatchObject({ kind: 'NOT_CHECKED', reason });
+    expect(topUpWallet).not.toHaveBeenCalled();
+  });
+});
+
+describe('F4 server-derived wallet release feedback', () => {
+  const page = async (release: string) =>
+    WalletPage({ searchParams: Promise.resolve({ ctx: pageContext(SESSION), release }) });
+  it('ignores an unsigned RELEASED query even with the organization context', async () => {
+    expect((await page('RELEASED')).props.children.props.releaseOutcome).toBeUndefined();
+  });
+  it('accepts a signed outcome only for this login, organization, wallet and TTL', async () => {
+    const token = walletReleaseFeedback(SESSION, WALLET_ID, 'RELEASED');
+    expect((await page(token)).props.children.props.releaseOutcome).toBe('RELEASED');
+    for (const other of [
+      { ...SESSION, csrfToken: 'other' },
+      { ...SESSION, subject: 'other' },
+      { ...SESSION, organizationId: 'other', accessToken: actingAccessToken('other') },
+    ]) {
+      expect(readWalletReleaseFeedback(other, WALLET_ID, token, true)).toBeUndefined();
+    }
+    expect(readWalletReleaseFeedback(SESSION, 'WLT_OTHER', token, true)).toBeUndefined();
+    expect(readWalletReleaseFeedback(SESSION, WALLET_ID, token + 'x', true)).toBeUndefined();
+    const time = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
+    try {
+      expect(readWalletReleaseFeedback(SESSION, WALLET_ID, token, true)).toBeUndefined();
+    } finally {
+      time.mockRestore();
+    }
+  });
+  it('suppresses a signed success when a newer hold exists or the store is unavailable', async () => {
+    const token = walletReleaseFeedback(SESSION, WALLET_ID, 'RELEASED');
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    expect((await page(token)).props.children.props.releaseOutcome).toBeUndefined();
+    const store = memoryUnresolvedStore();
+    jest.spyOn(store, 'read').mockRejectedValue(new UnresolvedStoreUnavailable());
+    useUnresolvedStore(store);
+    expect((await page(token)).props.children.props.releaseOutcome).toBeUndefined();
+  });
 });

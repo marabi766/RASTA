@@ -1,13 +1,19 @@
 'use server';
 
 import { redirect } from 'next/navigation';
+import {
+  CONFIRM_DUPLICATE_FIELD,
+  CONFIRM_DUPLICATE_VALUE,
+  RELEASE_FIELD,
+} from '@/app/projects/form-state';
 
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { createDriver, createDriverFormValues, parseCreateDriverForm } from '@/server/drivers';
 
-import { keepUnconfirmed } from '@/server/unconfirmed-retry';
+import { driverCreationRequest } from '@/server/create-request';
+import { keepUnconfirmedWith } from '@/server/unconfirmed-retry';
 import type { CreateDriverFormState } from './form-state';
 
 /**
@@ -22,7 +28,21 @@ export async function submitCreateDriver(
   previous: CreateDriverFormState,
   form: FormData,
 ): Promise<CreateDriverFormState> {
-  return keepUnconfirmed(previous, form, () => attemptCreateDriver(form));
+  return keepUnconfirmedWith(
+    previous,
+    form,
+    () => attemptCreateDriver(form),
+    (correlationId, state, held) => ({
+      kind: 'UNCONFIRMED',
+      correlationId,
+      releaseToken:
+        'releaseToken' in state
+          ? state.releaseToken
+          : 'releaseToken' in held
+            ? held.releaseToken
+            : undefined,
+    }),
+  );
 }
 
 async function attemptCreateDriver(form: FormData): Promise<CreateDriverFormState> {
@@ -35,7 +55,10 @@ async function attemptCreateDriver(form: FormData): Promise<CreateDriverFormStat
   const submissionId = form.get(SUBMISSION_FIELD);
   if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
-  const values = createDriverFormValues(form);
+  const restored = await driverCreationRequest.restore(session);
+  if (restored.kind !== 'IDLE') return restored;
+
+  const values = driverCreationRequest.values(createDriverFormValues(form));
   const parsed = parseCreateDriverForm(values);
   if (!parsed.ok) {
     return {
@@ -47,7 +70,11 @@ async function attemptCreateDriver(form: FormData): Promise<CreateDriverFormStat
     };
   }
 
-  const result = await createDriver(session, parsed.request, submissionId);
+  const sent = await driverCreationRequest.send(session, submissionId, values, parsed.request, () =>
+    createDriver(session, parsed.request, submissionId),
+  );
+  if (sent.kind !== 'RESULT') return sent;
+  const result = sent.result;
 
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
@@ -80,4 +107,14 @@ async function attemptCreateDriver(form: FormData): Promise<CreateDriverFormStat
       // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
+}
+
+/** Reconciliation only: compare-and-delete of the signed record, never a domain write. */
+export async function releaseUnresolvedDriverCreation(form: FormData): Promise<void> {
+  const session = await currentSession();
+  if (!session) redirect('/login?returnTo=/drivers');
+  if (!verifyCsrf(session, form).ok) redirect('/drivers');
+  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/drivers');
+  await driverCreationRequest.release(session, form.get(RELEASE_FIELD));
+  redirect('/drivers');
 }
