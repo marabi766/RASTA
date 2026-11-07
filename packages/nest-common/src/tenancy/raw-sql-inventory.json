@@ -2409,9 +2409,16 @@
   },
   {
     "file": "services/marketplace-service/src/order/order.service.ts",
-    "line": 1248,
+    "line": 1254,
     "hash": "1f9813e3acb98d6f59e103a4f2b7ab1a2e2dee1554ceef6e1722e1a3f8bb3cd2",
     "occurrence": 0,
+    "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
+  },
+  {
+    "file": "services/marketplace-service/src/order/order.service.ts",
+    "line": 1285,
+    "hash": "1f9813e3acb98d6f59e103a4f2b7ab1a2e2dee1554ceef6e1722e1a3f8bb3cd2",
+    "occurrence": 1,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
