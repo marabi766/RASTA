@@ -438,15 +438,18 @@ if #KEYS == 4 then
     or KEYS[3] ~= PREFIX .. ':org:' .. c.org .. ':pw:' .. compatibility.bind
     or KEYS[4] ~= PREFIX .. ':org:' .. c.org .. ':pwl:' .. compatibility.login then return {'INVALID'} end
   compatibility.policies = c.policies
-  local oldRaw = redis.call('GET', KEYS[3])
-  if oldRaw then
-    local old = decode(oldRaw)
-    if old == nil or not validate(old, compatibility) then return {'CORRUPT'} end
-    return {'COMPAT_HELD', oldRaw, stamp(now)}
-  end
 end
 local raw = redis.call('GET', KEYS[1])
 if not raw then
+  -- The person record is authoritative; consult legacy only before a fresh write.
+  if compatibility then
+    local oldRaw = redis.call('GET', KEYS[3])
+    if oldRaw then
+      local old = decode(oldRaw)
+      if old == nil or not validate(old, compatibility) then return {'CORRUPT'} end
+      return {'COMPAT_HELD', oldRaw, stamp(now)}
+    end
+  end
   local fresh = decode(ARGV[12])
   if fresh == nil then return {'INVALID'} end
   fresh.createdAt = now
@@ -585,18 +588,25 @@ if #KEYS == 4 then
 end
 local entries = {}
 local inProgress = false
+local personPresent = false
 for i, ctx in ipairs(contexts) do
   local k = (i - 1) * 2 + 1
   local raw = redis.call('GET', KEYS[k])
   if raw then
     local rec = decode(raw)
     if rec == nil or not validate(rec, ctx) then return 'CORRUPT' end
-    if rec.id ~= ARGV[7] then return 'STALE' end
-    if rec.state == 'RESERVED' then inProgress = true end
-    table.insert(entries, {k = k, rec = rec})
+    if rec.id == ARGV[7] then
+      if rec.state == 'RESERVED' then inProgress = true end
+      table.insert(entries, {k = k, rec = rec})
+    elseif not personPresent then
+      -- The authoritative copy (person; legacy only while person is absent) is another one.
+      return 'STALE'
+    end
+    if i == 1 then personPresent = true end
   end
 end
--- Validate both generations before any mutation. If either is RESERVED, delete neither.
+-- Validate both before mutation; a companion with another id is left untouched and
+-- read as its own hold later. If either matching copy is RESERVED, delete neither.
 local now = nowMs()
 for _, entry in ipairs(entries) do
   local rec = entry.rec
@@ -908,13 +918,16 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
           compatibility.target !== binding.target
         )
           throw new UnresolvedStoreUnavailable();
-        const old = load(compatibility);
-        if (old === 'CORRUPT') throw new UnresolvedStoreUnavailable(undefined, 'CORRUPT_RECORD');
-        if (old) return { kind: 'HELD', reason: 'RECONCILE_ONLY', record: old, now };
       }
       const existing = load(binding);
 
       if (existing === null) {
+        // Match Lua: legacy can hold a fresh write, but never overrides the person record.
+        if (compatibility) {
+          const old = load(compatibility);
+          if (old === 'CORRUPT') throw new UnresolvedStoreUnavailable(undefined, 'CORRUPT_RECORD');
+          if (old) return { kind: 'HELD', reason: 'RECONCILE_ONLY', record: old, now };
+        }
         const fresh = validateRecord({ ...input.fresh, createdAt: now, reservedAt: now }, binding);
         if (
           !fresh ||
@@ -1038,14 +1051,17 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       )
         throw new UnresolvedStoreUnavailable();
       const entries: { binding: RecordBinding; record: StoredRecord }[] = [];
+      let personPresent = false;
       for (const candidate of compatibility ? [binding, compatibility] : [binding]) {
         if (!keysMatch(candidate)) throw new UnresolvedStoreUnavailable(new Error('keys'));
         const existing = load(candidate);
         if (existing === 'CORRUPT')
           throw new UnresolvedStoreUnavailable(undefined, 'CORRUPT_RECORD');
         if (existing === null) continue;
-        if (existing.id !== id) return 'STALE';
-        entries.push({ binding: candidate, record: existing });
+        // Match Lua: only the authoritative copy (person, else legacy) can make the token stale.
+        if (existing.id === id) entries.push({ binding: candidate, record: existing });
+        else if (!personPresent) return 'STALE';
+        if (candidate === binding) personPresent = true;
       }
       const inProgress = entries.some(({ record }) => record.state === 'RESERVED');
       for (const { binding: candidate, record } of entries) {

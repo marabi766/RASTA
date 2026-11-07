@@ -902,6 +902,79 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
         expect((await next(s)).kind).toBe('HELD');
       },
     );
+    it('two logins clear device A after two releases, with the person hold authoritative', async () => {
+      const a = login();
+      const b = { ...a, csrfToken: 'device-b' };
+      const x = await next(a);
+      if (x.kind !== 'RESERVED') throw new Error('missing X');
+      expect(await settleUnresolved(x.attempt, 'UNRESOLVED')).toBe(true);
+      const onB = await readUnresolved(b, scope);
+      if (onB.kind !== 'PENDING') throw new Error('missing X on B');
+      expect(await releaseUnresolved(b, scope, releaseToken(b, scope, onB.request))).toBe(
+        'RELEASED',
+      );
+      expect((await next(a)).kind).toBe('HELD'); // Legacy-A X still blocks a fresh dispatch.
+      const y = await next(b);
+      if (y.kind !== 'RESERVED') throw new Error('missing Y');
+      expect(await settleUnresolved(y.attempt, 'UNRESOLVED')).toBe(true);
+      const onA = await readUnresolved(a, scope);
+      if (onA.kind !== 'PENDING') throw new Error('missing Y on A');
+      expect(onA.request.id).toBe(y.attempt.id);
+      const refused = await next(a);
+      expect(refused.kind).toBe('HELD');
+      if (refused.kind !== 'HELD') throw new Error('expected hold');
+      const legacyX = await backend.getRaw(oldBinding(a).recordKey);
+      expect(await releaseUnresolved(a, scope, releaseToken(a, scope, onA.request))).toBe(
+        'RELEASED',
+      );
+      expect(refused.request.id).toBe(y.attempt.id); // Reserve agrees with read.
+      expect(await backend.getRaw(oldBinding(a).recordKey)).toBe(legacyX);
+      const remaining = await readUnresolved(a, scope);
+      if (remaining.kind !== 'PENDING') throw new Error('missing remaining X');
+      expect(remaining.request.id).toBe(x.attempt.id);
+      expect(await releaseUnresolved(a, scope, releaseToken(a, scope, remaining.request))).toBe(
+        'RELEASED',
+      );
+      expect(await readUnresolved(a, scope)).toEqual({ kind: 'NONE' });
+      expect((await next(a)).kind).toBe('RESERVED');
+    });
+    it('a different legacy reservation cannot override or wedge the person hold', async () => {
+      const s = login();
+      const person = await next(s);
+      if (person.kind !== 'RESERVED') throw new Error('missing person hold');
+      expect(await settleUnresolved(person.attempt, 'UNRESOLVED')).toBe(true);
+      // A login-keyed rollback build releases only its copy, then reserves another id.
+      expect(await backend.store.release(oldBinding(s), person.attempt.id, INFLIGHT_LEASE_MS)).toBe(
+        'RELEASED',
+      );
+      expect((await oldReserve(s)).kind).toBe('RESERVED');
+      const legacy = await backend.getRaw(oldBinding(s).recordKey);
+      const read = await readUnresolved(s, scope);
+      if (read.kind !== 'PENDING') throw new Error('missing person hold');
+      expect(read.request.id).toBe(person.attempt.id);
+      const refused = await next(s);
+      if (refused.kind !== 'HELD') throw new Error('expected hold');
+      expect(refused.request.id).toBe(person.attempt.id);
+      // A stale companion token cannot delete the authoritative person hold.
+      expect(
+        await releaseUnresolved(
+          s,
+          scope,
+          releaseToken(s, scope, { ...read.request, id: 'b'.repeat(32) }),
+        ),
+      ).toBe('STALE');
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe(
+        'RELEASED',
+      );
+      expect(await backend.getRaw(oldBinding(s).recordKey)).toBe(legacy);
+      const remaining = await readUnresolved(s, scope);
+      if (remaining.kind !== 'PENDING') throw new Error('missing legacy reservation');
+      expect(remaining.request.id).toBe('b'.repeat(32));
+      // With the person copy absent, the legacy copy is the authority: an old token is stale.
+      expect(await releaseUnresolved(s, scope, releaseToken(s, scope, read.request))).toBe('STALE');
+      expect(await backend.getRaw(oldBinding(s).recordKey)).toBe(legacy);
+      expect((await next(s)).kind).toBe('HELD');
+    });
     it('keeps the rollback hold when settling its copy succeeds but the person settle fails', async () => {
       const s = login();
       const first = await next(s);
