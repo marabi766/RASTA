@@ -1,6 +1,12 @@
 import { inspect } from 'node:util';
 import { clientFailureCode } from './client-failure';
 import { createSafePrismaClient, DatabaseConnectionError } from './safe-prisma-client';
+import {
+  SessionTimeZoneRefusedError,
+  UTC_SESSION_CHECK_SQL,
+  isZoneFreeOperation,
+  runsInTransaction,
+} from './utc-session';
 
 const leaky = () =>
   Object.assign(new Error('private-sentinel-79'), {
@@ -100,7 +106,100 @@ test('transaction query/domain failures and options pass through unchanged', asy
   const work = () => Promise.resolve();
   const options = { timeout: 1234, maxWait: 567 };
   await expect(guarded.$transaction(work, options)).rejects.toBe(refusal);
-  expect(raw.$transaction).toHaveBeenCalledWith(work, options);
+  expect(raw.$transaction).toHaveBeenCalledWith(expect.any(Function), options);
+});
+
+describe('the session check inside every transaction (FU-188)', () => {
+  const REFUSAL = Object.assign(
+    new Error(
+      'Raw query failed. Message: `invalid input syntax: "session TimeZone is not UTC: X"`',
+    ),
+    { code: 'P2010' },
+  );
+
+  function checking() {
+    const raw = client() as TestClient & { $queryRawUnsafe: jest.Mock };
+    raw.$queryRawUnsafe = jest.fn(() => 'check-statement');
+    raw.$transaction.mockImplementation(async (work: unknown, options?: unknown) => {
+      void options;
+      if (typeof work === 'function') {
+        return (work as (tx: unknown) => unknown)({ $queryRawUnsafe: raw.$queryRawUnsafe });
+      }
+      return (work as unknown[]).map((_, index) => `result-${index}`);
+    });
+    return { raw, guarded: createSafePrismaClient(() => raw, 'DATABASE_URL_ASSET') };
+  }
+
+  test('an interactive transaction runs the check before its own first statement', async () => {
+    const { raw, guarded } = checking();
+    const order: string[] = [];
+    raw.$queryRawUnsafe.mockImplementation((sql: string) => {
+      order.push(sql === UTC_SESSION_CHECK_SQL ? 'check' : sql);
+      return Promise.resolve([]);
+    });
+    await guarded.$transaction(async () => {
+      order.push('work');
+      return 'done';
+    });
+    expect(order).toEqual(['check', 'work']);
+  });
+
+  test('a refused check runs no work and surfaces no driver text', async () => {
+    const { raw, guarded } = checking();
+    raw.$queryRawUnsafe.mockRejectedValue(REFUSAL);
+    const work = jest.fn(async () => 'done');
+    const refused: unknown = await guarded.$transaction(work).catch((error: unknown) => error);
+    expect(work).not.toHaveBeenCalled();
+    expect(refused).toBeInstanceOf(SessionTimeZoneRefusedError);
+    expect(inspect(refused, { depth: 10, showHidden: true })).not.toMatch(/invalid input|P2010/);
+  });
+
+  test('a batch gets the check first, and answers only its own statements', async () => {
+    const { raw, guarded } = checking();
+    const statements = ['a', 'b'];
+    await expect(guarded.$transaction(statements)).resolves.toEqual(['result-1', 'result-2']);
+    expect(raw.$transaction).toHaveBeenCalledWith(['check-statement', 'a', 'b']);
+  });
+
+  test('a query error that is not the refusal stays what it is', async () => {
+    const { raw, guarded } = checking();
+    const other = Object.assign(new Error('session TimeZone is not UTC'), { code: 'P2002' });
+    raw.$queryRawUnsafe.mockRejectedValue(other);
+    await expect(guarded.$transaction(async () => 'done')).rejects.toBe(other);
+  });
+
+  test('every client carries the check as its LAST extension', () => {
+    const raw = client();
+    const applied: string[] = [];
+    const chain = (names: string[]): TestClient => ({
+      ...raw,
+      $extends: (extension: unknown): TestClient => {
+        const name = (extension as { name?: string }).name ?? 'theirs';
+        applied.push([...names, name].join(' > '));
+        return chain([...names, name]);
+      },
+    });
+    createSafePrismaClient(() => chain([]), 'DATABASE_URL_ASSET').$extends({});
+    expect(applied.at(-1)).toBe('database-connection-diagnostics > theirs > utc-session-check');
+  });
+});
+
+test('a Prisma that stops naming the transaction refuses, it does not guess', () => {
+  expect(() => runsInTransaction({})).toThrow(/refused/);
+  expect(runsInTransaction({ __internalParams: {} })).toBe(false);
+  expect(runsInTransaction({ __internalParams: { transaction: { kind: 'itx' } } })).toBe(true);
+});
+
+test.each([
+  [undefined, '$queryRaw', false],
+  [undefined, '$executeRawUnsafe', false],
+  ['Order', 'create', false],
+  ['Order', 'updateMany', false],
+  ['Order', 'somethingNew', false],
+  ['Order', 'findMany', true],
+  ['Order', 'count', true],
+])('only a plain model read skips the check: %s.%s', (model, operation, free) => {
+  expect(isZoneFreeOperation(model, operation)).toBe(free);
 });
 
 // Connection acquisition can fail after a pool was initialized successfully.

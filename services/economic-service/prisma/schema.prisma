@@ -583,7 +583,7 @@ model TransactionSourceQuarantine {
   sourceReference String?  @map("source_reference")
   decision        String
   quarantinedBy   String   @map("quarantined_by")
-  quarantinedAt   DateTime @default(now()) @map("quarantined_at")
+  quarantinedAt   DateTime @default(dbgenerated("timezone('UTC'::text, now())")) @map("quarantined_at")
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 

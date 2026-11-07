@@ -86,6 +86,7 @@
         "check:service-boundaries": "sha256:a3ff9efdb4c8c3cf180f58b6757c5a55f11f56eef64c0f7e5bad53b38f284d6d",
         "check:tenant-index-order": "sha256:12a907771fd176fb74358d00abcbaa403983965db3cc0053c6617146f0e884a7",
         "check:test-phases": "sha256:e5ae22b5996550cfd20c23498bb3502a1116496f59efc88b0bb28a72c232339d",
+        "check:utc-clock-sites": "sha256:7f59b536bc364d0eb82e44f9506a99258e0941a9fa8c907a643f05af330352a5",
         "ci:image-matrix": "sha256:07f9b8d574134ee5f8209ce133b6b297c5d20fa3d5c4a3ffb6995649d18be88a",
         "clean": "sha256:3befa3e26e1a1740db7b14ab1fea28dbabf8d16a4c4e0aaa70a59a1cf9514f3d",
         "compare:aggregation-campaign-retrievals": "sha256:f23a451b2ad9ad8a944eb6e17e49d923d2b092e75ae1cc93fd1412641ade2ec0",
@@ -184,6 +185,7 @@
         "test:unit-step-concurrency": "sha256:50d40dc0e62702fc1a7e41de07a84164cb9e2b98500bef5f293ebf6acddda7b3",
         "test:unit:ci": "sha256:2ad764cd1368342719b9bc83421fd822e7c48e574653dacb6188e304f6a34909",
         "test:url-parsing-guard": "sha256:bf8b4b1716dc265041d394a46eaf734636196845a395171b3bc9f1099a87a3e8",
+        "test:utc-clock-sites": "sha256:be3d5b5d300d96aac9b7b85a2907422128a4796fbee5e0c18129cedd993a3489",
         "typecheck": "sha256:c11ce2263c6ed6d022f4e6582b7b3634a56c228f005eac91b9e7abf3a0ea0845",
         "verify": "sha256:495ba8369ba7025adb292298f9856de9452cd6d956fa875992adb3e9be321d28"
       }
@@ -276,6 +278,14 @@
       "ci": {
         "name": "Outbox test eligibility clock guard",
         "run": "pnpm run test:outbox-test-clock"
+      },
+      "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
+    },
+    {
+      "job": "quality-guards",
+      "ci": {
+        "name": "No database clock reaches a timestamp(3) column in the session's zone (FU-188)",
+        "run": "pnpm run test:utc-clock-sites\npnpm run check:utc-clock-sites\n"
       },
       "reason": "Slice C: integrate this deterministic static check with its declared prerequisites and controlled environment; excluded from the B parity-only runner."
     },

@@ -11,6 +11,7 @@ import { databaseUrl } from './helpers';
 // migrated TIMESTAMP(3) columns. Nonzero milliseconds kill second truncation.
 const INSTANT = "TIMESTAMPTZ '2100-01-01T00:00:00.123927Z'";
 const AT = Date.parse('2100-01-01T00:00:00.123Z');
+const before100 = () => new Date(AT - 100_000);
 const clock = (sql: string): string =>
   sql
     .replaceAll('clock_timestamp()', INSTANT)
@@ -139,7 +140,9 @@ describe('TIMESTAMP(3) deadline bounds (FU-162/FU-170, real PostgreSQL)', () => 
         await owner.client.$executeRawUnsafe(
           `ALTER TABLE "${schema}".outbox_message
            ALTER COLUMN claim_expires_at TYPE ${type}(3) USING claim_expires_at AT TIME ZONE 'UTC',
-           ALTER COLUMN next_attempt_at TYPE ${type}(3) USING next_attempt_at AT TIME ZONE 'UTC'`,
+           ALTER COLUMN next_attempt_at TYPE ${type}(3) USING next_attempt_at AT TIME ZONE 'UTC',
+           ALTER COLUMN published_at TYPE ${type}(3) USING published_at AT TIME ZONE 'UTC',
+           ALTER COLUMN created_at TYPE ${type}(3) USING created_at AT TIME ZONE 'UTC'`,
         );
       }
       const id = ulid();
@@ -240,6 +243,112 @@ describe('TIMESTAMP(3) deadline bounds (FU-162/FU-170, real PostgreSQL)', () => 
         expect(await store.markPublished([id], due.token!)).toBe(1);
         await tx.$executeRawUnsafe(`DELETE FROM ${table} WHERE id = $1`, id);
         // Clock .123 plus 60.0006 floors to .123: never beyond the interval.
+      });
+    },
+  );
+
+  // FU-188: the stamp, the age gauge and the purge, in both zones around UTC and both
+  // column types: a bare clock would be off by the offset here.
+  it.each(
+    ['Asia/Tehran', 'America/Los_Angeles'].flatMap((zone) =>
+      [false, true].map((aware) => ({ zone, aware })),
+    ),
+  )('outbox stamp, gauge and purge in $zone, aware=$aware', async ({ zone, aware }) => {
+    const type = aware ? 'timestamptz' : 'timestamp';
+    await owner.client.$executeRawUnsafe(
+      `ALTER TABLE "${schema}".outbox_message
+       ALTER COLUMN claim_expires_at TYPE ${type}(3) USING claim_expires_at AT TIME ZONE 'UTC',
+       ALTER COLUMN next_attempt_at TYPE ${type}(3) USING next_attempt_at AT TIME ZONE 'UTC',
+       ALTER COLUMN published_at TYPE ${type}(3) USING published_at AT TIME ZONE 'UTC',
+       ALTER COLUMN created_at TYPE ${type}(3) USING created_at AT TIME ZONE 'UTC'`,
+    );
+    const row = (id: string, createdAt: Date, publishedAt?: Date) => ({
+      id,
+      aggregateType: 'Test',
+      aggregateId: id,
+      eventName: 'test',
+      topic: 'test',
+      partitionKey: id,
+      payload: {},
+      headers: {},
+      correlationId: id,
+      createdAt,
+      publishedAt: publishedAt ?? null,
+    });
+    const [pending, stale, kept] = [ulid(), ulid(), ulid()];
+    const before = (seconds: number) => new Date(AT - seconds * 1000);
+    await prisma.client.outboxMessage.createMany({
+      data: [
+        row(pending, before(100)),
+        row(stale, before(3601), before(3601)),
+        row(kept, before(3599), before(3599)),
+      ],
+    });
+    await prisma.transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL TimeZone='${zone}'`);
+      const local = new Proxy(prisma, {
+        get(target, key, receiver) {
+          if (key === 'client') return tx;
+          if (key === 'transaction')
+            return (work: (client: ExtendedPrismaClient) => unknown) => work(tx);
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const store = new PrismaOutboxStore(local);
+      expect(await store.oldestPendingAgeSeconds()).toBeCloseTo(100, 0);
+      const claim = await store.claimPending({ limit: 1000, owner: 'stamp', leaseSeconds: 60 });
+      expect(await store.markPublished([pending], claim.token!)).toBe(1);
+      const published = await tx.outboxMessage.findUniqueOrThrow({ where: { id: pending } });
+      expect(published.publishedAt!.getTime()).toBe(AT);
+      const purged = await store.purgePublished({
+        retentionSeconds: 3600,
+        limit: 1000,
+        statementTimeoutMs: 5000,
+        maxWaitMs: 1000,
+      });
+      expect(purged).toEqual({ deleted: 1, busy: false });
+      const left = await tx.outboxMessage.findMany({ select: { id: true } });
+      expect(left.map(({ id }) => id).sort()).toEqual([pending, kept].sort());
+    });
+  });
+
+  it.each(['Asia/Tehran', 'America/Los_Angeles'])(
+    'security-event stamp and gauge in %s',
+    async (zone) => {
+      const id = ulid();
+      const past = before100();
+      await prisma.client.securityEventOutbox.create({
+        data: {
+          id,
+          actorType: 'SYSTEM',
+          actorId: id,
+          action: 'test.stamp',
+          resourceType: 'Test',
+          errorCode: 'FORBIDDEN',
+          correlationId: id,
+          producerVersion: 'test',
+          occurredAt: past,
+          createdAt: past,
+          windowStartedAt: past,
+          windowEndsAt: new Date(past.getTime() + 1000),
+        },
+      });
+      await prisma.transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL TimeZone='${zone}'`);
+        const local = new Proxy(prisma, {
+          get(target, key, receiver) {
+            if (key === 'client') return tx;
+            if (key === 'transaction')
+              return (work: (client: ExtendedPrismaClient) => unknown) => work(tx);
+            return Reflect.get(target, key, receiver);
+          },
+        });
+        const store = new SecurityEventOutboxStore(local);
+        expect(await store.oldestPendingAgeSeconds()).toBeCloseTo(100, 0);
+        const claim = await store.claimPending({ limit: 1000, owner: 'stamp', leaseSeconds: 60 });
+        expect(await store.markPublished([id], claim.token!)).toBe(1);
+        const row = await tx.securityEventOutbox.findUniqueOrThrow({ where: { id } });
+        expect(row.publishedAt!.getTime()).toBe(AT);
       });
     },
   );

@@ -279,6 +279,7 @@ export {
   STREAM_SEQUENCE_TABLE,
   purgePublishedSql,
   MANUALLY_SKIPPED_PREFIX,
+  OUTBOX_NOW,
 } from './outbox/outbox-sql';
 export type {
   OutboxSqlClient,
@@ -388,6 +389,7 @@ export type {
 
 export { clientFailureCode } from './database/client-failure';
 export { DatabaseConnectionError, createSafePrismaClient } from './database/safe-prisma-client';
+export { SessionTimeZoneRefusedError, UTC_SESSION_CHECK_SQL } from './database/utc-session';
 export type { RuntimeDatabaseSetting } from './database/safe-prisma-client';
 export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';
 
