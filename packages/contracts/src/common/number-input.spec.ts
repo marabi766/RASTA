@@ -86,16 +86,39 @@ describe('numberInput', () => {
       expect(decimal.parse(text)).toBe(JSON.parse(text));
       expect(after.safeParse(text).success).toBe(false);
     }
-    for (const text of ['1e+1', '-5E-1', '1e-9999']) {
+    for (const text of ['1e+1', '-5E-1', '0e-9999']) {
       expect(decimal.parse(text)).toBe(JSON.parse(text));
     }
-    for (const text of ['1e9999', '-1e9999', '1e', '1e+', '1e-7 ', ' 1e-7', '0x1e7']) {
+    for (const text of [
+      '1e-400',
+      '1e-9999',
+      '1e9999',
+      '-1e9999',
+      '1e',
+      '1e+',
+      '1e-7 ',
+      ' 1e-7',
+      '0x1e7',
+    ]) {
       expect(decimal.safeParse(text).success).toBe(false);
     }
     const latitude = numberInput(z.number().min(-90).max(90));
     expect(latitude.safeParse('9.1e1').success).toBe(false);
     expect(latitude.safeParse('-9.1e1').success).toBe(false);
   });
+
+  it.each([z.number(), z.number().int()])('FU-184 normalizes every accepted zero', (inner) => {
+    for (const value of [-0, '-0', '-00', '+0', '0']) {
+      expect(Object.is(numberInput(inner).parse(value), 0)).toBe(true);
+    }
+  });
+
+  it.each(['1e-400', '-1e-400', '0.000' + '0'.repeat(400) + '1'])(
+    'FU-184 refuses nonzero decimal text rounded to zero: %s',
+    (value) => {
+      expect(numberInput(z.number()).safeParse(value).success).toBe(false);
+    },
+  );
 
   it('FU-131 preserves inner bounds and rejects conversion overflow', () => {
     expect(after.safeParse('3651').success).toBe(false);
@@ -113,7 +136,6 @@ describe('numberInput', () => {
     Number.POSITIVE_INFINITY,
     '7',
     '+7',
-    '-0',
     '07',
     '7.5',
     'abc',

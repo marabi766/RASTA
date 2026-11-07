@@ -87,6 +87,8 @@ describe('the served OpenAPI document', () => {
       const parsed = nearbyQuerySchema.parse(input);
       expect(parsed[name]).toBe(0.0000001);
       expect(nearbyQuerySchema.safeParse({ ...input, [name]: '1e9999' }).success).toBe(false);
+      expect(nearbyQuerySchema.safeParse({ ...input, [name]: '1e-400' }).success).toBe(false);
+      expect(Object.is(nearbyQuerySchema.parse({ ...input, [name]: '-0' })[name], 0)).toBe(true);
     }
   });
 
