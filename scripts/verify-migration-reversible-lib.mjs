@@ -678,6 +678,9 @@ const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
 const SETTLEMENT_CREATION_PROOF = '20261105120000_settlement_creation_proof';
 const TRANSACTION_HOLD_DECISION = '20261106120000_transaction_hold_decision';
 const TRANSACTION_FUNDED_HOLD = '20261106130000_transaction_funded_hold';
+// Between the two (#906, FU-188): it redefines 20261106130000's held_at stamp and the decision
+// default, so any rollback below it takes it down first, or the re-deploy would skip it.
+const UTC_CLOCK_DEFAULTS = '20261106140000_utc_clock_defaults';
 const HOLD_FUNDED_AT_COMMIT = '20261107120000_hold_funded_at_commit';
 
 /**
@@ -776,6 +779,7 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
     label: 'commission: down to the schema before business lines (empty)',
     runDownScript: [
       HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
       TRANSACTION_HOLD_DECISION,
       SETTLEMENT_CREATION_PROOF,
@@ -1153,6 +1157,7 @@ const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_disput
 const RESOLVED_DISPUTE_DOWNS = [
   // These probes move a transaction to SETTLED with no settlement behind it.
   HOLD_FUNDED_AT_COMMIT,
+  UTC_CLOCK_DEFAULTS,
   TRANSACTION_FUNDED_HOLD,
   TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
@@ -1602,6 +1607,7 @@ const SETTLEMENT_REVERSAL_STEPS = [
     label: 'settlement reversal: the proof of creation goes first, these probes are bare rows',
     runDownScript: [
       HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
       TRANSACTION_HOLD_DECISION,
       SETTLEMENT_CREATION_PROOF,
@@ -1665,6 +1671,7 @@ const SETTLEMENT_REVERSAL_STEPS = [
     label: 'settlement reversal: the proof of creation goes again, before the probe rows do',
     runDownScript: [
       HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
       TRANSACTION_HOLD_DECISION,
       SETTLEMENT_CREATION_PROOF,
@@ -1876,6 +1883,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
     label: 'creation proof: down over them refuses nothing, and leaves every row',
     runDownScript: [
       HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
       TRANSACTION_HOLD_DECISION,
       SETTLEMENT_CREATION_PROOF,
@@ -1911,6 +1919,7 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
 
 const HOLD_DECISION_DOWNS = [
   HOLD_FUNDED_AT_COMMIT,
+  UTC_CLOCK_DEFAULTS,
   TRANSACTION_FUNDED_HOLD,
   TRANSACTION_HOLD_DECISION,
   SETTLEMENT_CREATION_PROOF,
@@ -2109,6 +2118,7 @@ const HOLD_DECISION_STEPS = [
     label: 'hold decisions: down',
     runDownScript: [
       HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
       TRANSACTION_FUNDED_HOLD,
       TRANSACTION_HOLD_DECISION,
       SETTLEMENT_CREATION_PROOF,
@@ -2197,7 +2207,7 @@ const HOLD_DECISION_STEPS = [
   },
   {
     label: 'funded holds: down, over a row with a hold of its own',
-    runDownScript: [TRANSACTION_FUNDED_HOLD],
+    runDownScript: [UTC_CLOCK_DEFAULTS, TRANSACTION_FUNDED_HOLD],
   },
   { label: 'funded holds: up again', reapply: true },
   {
