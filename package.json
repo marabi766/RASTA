@@ -76,7 +76,7 @@
     "test:seed-guard:db": "node scripts/verify-seed-guard.mjs --with-database",
     "test:keycloak-dev-realm": "node --test --test-timeout=300000 scripts/check-keycloak-dev-realm.test.mjs",
     "check:keycloak-dev-realm": "node scripts/check-keycloak-dev-realm.mjs",
-    "test:test-phases": "node --test --test-timeout=300000 scripts/test-phases.test.mjs",
+    "test:test-phases": "node --test --test-timeout=300000 scripts/test-phases.test.mjs scripts/authored-source-inventory.test.mjs",
     "check:test-phases": "node scripts/check-test-phases.mjs",
     "test:ci-integration-split": "node --test --test-timeout=300000 scripts/ci-integration-split.test.mjs",
     "test:ci-pull-image": "node --test --test-timeout=300000 scripts/ci-pull-image.test.mjs",

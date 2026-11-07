@@ -13,11 +13,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { authoredFiles } from './authored-source-inventory.cjs';
+
+// Lists authored files only: generated output (src/generated) may be regenerating meanwhile.
+const authoredUnder = (url) => {
+  const dir = fileURLToPath(url);
+  return authoredFiles(dir).map((path) => relative(dir, path));
+};
 import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./marketplace-saga-drain-check.mjs', import.meta.url));
@@ -980,7 +987,7 @@ const scannedFiles = (files) =>
       return file;
     });
 const sagaSources = () =>
-  scannedFiles(readdirSync(SAGA_SOURCE, { recursive: true })).map((file) =>
+  scannedFiles(authoredUnder(SAGA_SOURCE)).map((file) =>
     readFileSync(new URL(file, SAGA_SOURCE), 'utf8'),
   );
 const parsed = (source) => ts.createSourceFile('saga.ts', source, ts.ScriptTarget.Latest, true);
@@ -1263,7 +1270,7 @@ function assertServiceAddsNothing(listing, read) {
 
 test('nothing in the service adds to a scanned interface from outside the scan', () => {
   const service = new URL('../', SAGA_SOURCE);
-  assertServiceAddsNothing(readdirSync(service, { recursive: true }), (file) =>
+  assertServiceAddsNothing(authoredUnder(service), (file) =>
     readFileSync(new URL(file, service), 'utf8'),
   );
   for (const file of ['test/a.spec.ts', 'src/generated/a.ts', 'dev/a.ts']) {

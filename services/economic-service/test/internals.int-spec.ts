@@ -560,16 +560,6 @@ describe('economic internals', () => {
       const deviations = await audit().run();
       const found = deviations.find((row) => row.walletId === walletId);
       expect(found?.kind).toBe('PENDING_VS_HOLDS');
-
-      await runUnscoped('the suite restores the hold it resolved', () =>
-        prisma.client.$executeRawUnsafe(
-          `UPDATE wallet_hold
-              SET status = 'ACTIVE', resolved_at = NULL, resolved_journal_id = NULL
-            WHERE wallet_id = $1 AND reference = $2`,
-          walletId,
-          transactionId,
-        ),
-      );
     });
 
     it('pages through the wallets, one snapshot per page', async () => {

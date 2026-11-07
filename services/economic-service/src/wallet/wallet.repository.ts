@@ -337,6 +337,15 @@ export class WalletRepository {
     );
   }
 
+  /** Whether a journal really moved this hold's amount into escrow (`wallet_hold_funded`). */
+  async isHoldFunded(tx: ExtendedPrismaClient, holdId: string): Promise<boolean> {
+    const rows = await runUnscoped(
+      'a hold is resolved on the authority of either party, and this asks only about that hold',
+      () => tx.$queryRaw<{ funded: boolean }[]>`SELECT wallet_hold_funded(${holdId}) AS funded`,
+    );
+    return rows[0]?.funded === true;
+  }
+
   /** The hold a `FUNDS_HELD` journal placed, in the caller's organization. */
   findHoldPlacedBy(journalId: string) {
     return this.client.walletHold.findFirst({ where: { placedJournalId: journalId } });

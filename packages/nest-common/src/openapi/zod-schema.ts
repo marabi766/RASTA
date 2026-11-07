@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
-import { numberInputInnerSchema, publishedIsoDateTimeZone } from '@rasta/contracts';
+import {
+  numberInputInnerSchema,
+  publishedIsoDateTimeZone,
+  publishedRefinementPattern,
+} from '@rasta/contracts';
 
 /**
  * Converts the Zod schemas a service validates with into JSON Schema, so its
@@ -40,9 +44,6 @@ export type JsonSchema = Record<string, unknown>;
 const defOf = (schema: z.ZodType): any => (schema as any)._zod.def;
 const checkDefs = (def: any): any[] =>
   ((def.checks ?? []) as any[]).map((check) => ({ check, def: check._zod.def }));
-
-/** The anchored pattern a refinement applies, set on the check (`@rasta/contracts` identifiers). */
-const PUBLISHED_PATTERN = Symbol.for('rasta.openapi.publishedPattern');
 
 /** The bounds of each `codePointLength` refinement, by its check. */
 const CODE_POINT_BOUNDS = new WeakMap<object, { minLength: number; maxLength: number }>();
@@ -296,7 +297,7 @@ function rawChecks(def: any): { checks: ReturnType<typeof checkDefs>; changed: b
   const barrier = checks.findIndex(
     ({ check, def: definition }) =>
       !CODE_POINT_BOUNDS.has(check) &&
-      !(check[PUBLISHED_PATTERN] instanceof RegExp) &&
+      !publishedRefinementPattern(check) &&
       !VALUE_PRESERVING_CHECKS.has(definition.check as string),
   );
   return {
@@ -342,6 +343,11 @@ const STRING_FORMATS: Record<string, string> = {
   url: 'uri',
 };
 
+/** Consumers must compile published patterns with `u`; other flags cannot be carried by OpenAPI. */
+function publishPattern(out: JsonSchema, pattern: { source: string; flags: string }): void {
+  if (pattern.flags === '' || pattern.flags === 'u') out.pattern = pattern.source;
+}
+
 function stringSchema(def: any): JsonSchema {
   // Coercion happens before every check, including the string type check.
   if (def.coerce === true) return transformedConstraints();
@@ -351,20 +357,16 @@ function stringSchema(def: any): JsonSchema {
   for (const { check: instance, def: check } of checks) {
     const bounds = CODE_POINT_BOUNDS.get(instance);
     if (bounds) Object.assign(out, bounds);
-    // Identifier refinements validate without rewriting the value (FU-073).
-    // Publish their pattern only while checks still apply to the raw input.
-    // Flags cannot be represented faithfully by JSON Schema's `pattern`.
-    const published = instance[PUBLISHED_PATTERN];
-    if (published instanceof RegExp && published.flags === '') out.pattern = published.source;
+    // Registered refinements preserve the value; publish only inside the raw prefix.
+    const published = publishedRefinementPattern(instance);
+    if (published) publishPattern(out, published);
     if (check.check === 'min_length') out.minLength = check.minimum;
     if (check.check === 'max_length') out.maxLength = check.maximum;
     if (check.check !== 'string_format') continue;
     const format = STRING_FORMATS[check.format as string];
     if (format) out.format = format;
-    // The source's own flags, so the published pattern matches what actually
-    // runs rather than a re-spelling of it. Only a `.regex()` publishes its
-    // pattern: a format's pattern is zod's implementation of it.
-    if (check.format === 'regex') out.pattern = (check.pattern as RegExp).source;
+    // A format's implementation regex is not its public contract.
+    if (check.format === 'regex') publishPattern(out, check.pattern as RegExp);
     // `format: date-time` admits offsets the platform's `isoDateTime()` refuses (RFC 3339 allows
     // ±23:59; the UTC-only form takes none), so its accepted zone is published with it (FU-035).
     const zone = publishedIsoDateTimeZone(instance);
