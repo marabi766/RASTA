@@ -1,3 +1,4 @@
+import type { RequestNotChecked } from '@/lib/request-not-checked';
 import type { ProviderRefusal } from '@/lib/demo-mode';
 import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
@@ -16,7 +17,7 @@ import type { TopUpFormField, TopUpFormValues } from '@/lib/wallet-fields';
  */
 export type TopUpFormState =
   | { readonly kind: 'IDLE' }
-  | { readonly kind: 'NOT_CHECKED'; readonly releaseToken?: string }
+  | RequestNotChecked
   | {
       readonly kind: 'HELD';
       readonly releaseToken?: string;

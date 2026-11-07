@@ -120,7 +120,10 @@ export const INFLIGHT_LEASE_MS = 60_000;
 export const RECORD_RETENTION_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 
 export class UnresolvedStoreUnavailable extends Error {
-  constructor(cause?: unknown) {
+  constructor(
+    cause?: unknown,
+    readonly reason: 'STORE_UNAVAILABLE' | 'CORRUPT_RECORD' = 'STORE_UNAVAILABLE',
+  ) {
     super('The pending-request store cannot be reached or read', { cause });
     this.name = 'UnresolvedStoreUnavailable';
   }
@@ -597,7 +600,7 @@ function parseRecord(json: unknown, binding: RecordBinding): StoredRecord {
     if (!record) throw new Error('malformed or foreign record');
     return record;
   } catch (error) {
-    throw new UnresolvedStoreUnavailable(error);
+    throw new UnresolvedStoreUnavailable(error, 'CORRUPT_RECORD');
   }
 }
 
@@ -698,7 +701,10 @@ export function redisUnresolvedStore(redis: RedisLike): UnresolvedStore {
       if (reply[0] === 'OK') {
         return { record: parseRecord(reply[1], binding), now: serverTime(reply[2]) };
       }
-      throw new UnresolvedStoreUnavailable(new Error(`read answered ${String(reply[0])}`));
+      throw new UnresolvedStoreUnavailable(
+        new Error(`read answered ${String(reply[0])}`),
+        reply[0] === 'CORRUPT' ? 'CORRUPT_RECORD' : 'STORE_UNAVAILABLE',
+      );
     },
 
     async settle(binding, id, attemptId, mode) {
@@ -848,7 +854,8 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
         set.set(binding.recordKey, expireAt);
         return { kind: 'RESERVED', record: { ...fresh }, retry: false, now };
       }
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
+      if (existing === 'CORRUPT')
+        throw new UnresolvedStoreUnavailable(new Error('CORRUPT'), 'CORRUPT_RECORD');
 
       const rec: StoredRecord = { ...existing };
       let dirty = false;
@@ -897,7 +904,8 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       const now = clock();
       prune(now);
       const existing = load(binding);
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
+      if (existing === 'CORRUPT')
+        throw new UnresolvedStoreUnavailable(new Error('CORRUPT'), 'CORRUPT_RECORD');
       return { record: existing ? { ...existing } : null, now };
     },
 
@@ -906,7 +914,8 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       if (!keysMatch(binding)) throw new UnresolvedStoreUnavailable(new Error('keys'));
       const existing = load(binding);
       if (existing === null) return 'GONE';
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
+      if (existing === 'CORRUPT')
+        throw new UnresolvedStoreUnavailable(new Error('CORRUPT'), 'CORRUPT_RECORD');
       const rec: StoredRecord = { ...existing };
       if (rec.id !== id || rec.attemptId !== attemptId || rec.state !== 'RESERVED') return 'STALE';
       if (mode === 'DONE' || (mode === 'REVERT' && !rec.wasUnresolved)) {
@@ -926,7 +935,8 @@ export function memoryUnresolvedStore(clock: () => number = Date.now): MemoryUnr
       if (!keysMatch(binding)) throw new UnresolvedStoreUnavailable(new Error('keys'));
       const existing = load(binding);
       if (existing === null) return 'GONE';
-      if (existing === 'CORRUPT') throw new UnresolvedStoreUnavailable(new Error('CORRUPT'));
+      if (existing === 'CORRUPT')
+        throw new UnresolvedStoreUnavailable(new Error('CORRUPT'), 'CORRUPT_RECORD');
       if (existing.id !== id) return 'STALE';
       // Time never releases a hold: an aged reservation turns UNRESOLVED and stays (see RELEASE_SCRIPT).
       if (existing.state === 'RESERVED') {

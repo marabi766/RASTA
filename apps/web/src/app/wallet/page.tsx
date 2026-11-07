@@ -88,6 +88,7 @@ export default async function WalletPage({
         csrfToken={session.csrfToken}
         submissionId={topUp?.submissionId ?? ''}
         topUpState={topUp}
+        releaseOutcome={one(params.release)}
       />
     </AppShell>
   );

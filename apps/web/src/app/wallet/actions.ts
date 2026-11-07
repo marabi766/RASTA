@@ -23,6 +23,7 @@ import {
   requestDigest,
   settleUnresolved,
 } from '@/server/unresolved-request';
+import { pageHref } from '@/server/page-context';
 import { isProvenRefusal } from '@/server/write';
 
 import {
@@ -82,7 +83,7 @@ async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpForm
 
   const scope = topUpScope(walletId);
   const ref = topUpSnapshot(session, walletId, submissionId, parsed.request.amountMinor);
-  if (ref.length > 800) return { kind: 'NOT_CHECKED' };
+  if (ref.length > 800) return { kind: 'NOT_CHECKED', reason: 'SNAPSHOT_TOO_LARGE' };
   const reserved = await reserveUnresolved(session, scope, {
     key: submissionId,
     digest: requestDigest(session, scope.purpose, parsed.request),
@@ -91,9 +92,10 @@ async function attemptTopUp(walletId: string, form: FormData): Promise<TopUpForm
     deadline: null,
     windowMs: null,
   });
+  if (reserved.kind === 'CAPACITY') return { kind: 'NOT_CHECKED', reason: 'CAPACITY' };
   if (reserved.kind !== 'RESERVED')
     return restoreTopUp(session, walletId).then((state) =>
-      state.kind === 'IDLE' ? { kind: 'NOT_CHECKED' } : state,
+      state.kind === 'IDLE' ? { kind: 'NOT_CHECKED', reason: 'STORE_UNAVAILABLE' } : state,
     );
   let result;
   try {
@@ -156,6 +158,6 @@ export async function releaseUnresolvedTopUp(walletId: string, form: FormData): 
   if (!session) redirect('/login?returnTo=/wallet');
   if (!verifyCsrf(session, form).ok) redirect('/wallet');
   if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/wallet');
-  await releaseUnresolved(session, topUpScope(walletId), form.get(RELEASE_FIELD));
-  redirect('/wallet');
+  const outcome = await releaseUnresolved(session, topUpScope(walletId), form.get(RELEASE_FIELD));
+  redirect(pageHref(session, '/wallet', { release: outcome }));
 }

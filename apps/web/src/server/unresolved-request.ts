@@ -149,7 +149,7 @@ const sha256 = (text: string) => createHash('sha256').update(text).digest('hex')
 /**
  * Every key names the organization the session acts for (ADR-007) — or, for
  * `organizationId`, the copy an older cookie kept — and is bound to this
- * person's login; the record carries the same binding.
+ * person's login, or the person for money purposes; the record carries the same binding.
  */
 function keysFor(
   session: WebSession,
@@ -157,7 +157,10 @@ function keysFor(
   organizationId: string | null = actingOrganizationId(session),
 ): RecordBinding {
   const org = encodeURIComponent(organizationId ?? 'none');
-  const login = `${session.subject}\n${session.csrfToken}`;
+  const login =
+    policyOf(scope.purpose)?.identity === 'PERSON'
+      ? `person:${session.subject}`
+      : `${session.subject}\n${session.csrfToken}`;
   const bind = sha256(`${login}\n${scopeLabel(scope)}`);
   const loginDigest = sha256(login);
   return {
@@ -266,6 +269,8 @@ function viewOf(record: StoredRecord, now: number): UnresolvedRequest {
 
 /** The binding under the copy an older cookie of this login kept, if there is one. */
 function formerKeysFor(session: WebSession, scope: UnresolvedScope): RecordBinding | null {
+  // A money hold belongs only to the acting organization, never a former copy.
+  if (policyOf(scope.purpose)?.identity === 'PERSON') return null;
   const former = formerOrganizationCopy(session);
   return former === undefined ? null : keysFor(session, scope, former);
 }
@@ -301,7 +306,7 @@ export type UnresolvedRead =
   /** `now` is the store's time at the read: what `inFlight` and `mayResend` are judged by. */
   | { readonly kind: 'PENDING'; readonly request: UnresolvedRequest; readonly now: number }
   /** The store could not say (error, timeout, malformed or unverifiable record): never "no hold". */
-  | { readonly kind: 'UNAVAILABLE' };
+  | { readonly kind: 'UNAVAILABLE'; readonly reason?: 'STORE_UNAVAILABLE' | 'CORRUPT_RECORD' };
 
 /**
  * The request still held for `scope` by this person, acting for this
@@ -312,17 +317,20 @@ export type UnresolvedRead =
 export async function readUnresolved(
   session: WebSession,
   scope: UnresolvedScope,
+  includeRefusalReason = false,
 ): Promise<UnresolvedRead> {
+  const unavailable = (reason: UnresolvedStoreUnavailable['reason']): UnresolvedRead =>
+    includeRefusalReason ? { kind: 'UNAVAILABLE', reason } : { kind: 'UNAVAILABLE' };
   try {
     const keys = keysFor(session, scope);
     const { record, now } = await defaultStore().read(keys);
     if (record !== null) {
-      if (!trusted(record, keys)) return { kind: 'UNAVAILABLE' };
+      if (!trusted(record, keys)) return unavailable('CORRUPT_RECORD');
       return { kind: 'PENDING', request: viewOf(record, now), now };
     }
     const former = await formerRecord(session, scope);
     if (former === null) return { kind: 'NONE' };
-    if (former === 'UNTRUSTED') return { kind: 'UNAVAILABLE' };
+    if (former === 'UNTRUSTED') return unavailable('CORRUPT_RECORD');
     return { kind: 'PENDING', request: former.request, now: former.now };
   } catch (error) {
     if (!(error instanceof UnresolvedStoreUnavailable)) throw error;
@@ -330,7 +338,7 @@ export async function readUnresolved(
       'RASTA_WEB_PENDING_UNAVAILABLE',
       'The pending-request store is unavailable: writes that need it are refused.',
     );
-    return { kind: 'UNAVAILABLE' };
+    return unavailable(error.reason);
   }
 }
 
