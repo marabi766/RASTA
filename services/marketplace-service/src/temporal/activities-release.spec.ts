@@ -704,6 +704,9 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
             trace.push('release');
           }
         },
+        // The durable call record (#836, FU-145): opened before the call, confirmed after it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
       } as unknown as OrderService,
       economic: {
         authoriseSettlement: async () => {
@@ -845,6 +848,10 @@ describe('no authorisation past the order as it stands (FU-178)', () => {
         describe: async () => ({ id: 'ORD', buyerOrganizationId: 'ORG', correlationId: 'COR' }),
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
         whileOrderHeld: held,
+        // The durable call record (#836, FU-145); a refund answers the open ones on it.
+        openSagaCall: async () => ({ generation: 1, started: true }),
+        confirmSagaCall: async () => undefined,
+        confirmSagaCallsOn: async () => undefined,
       } as unknown as OrderService,
       economic: { refund: async () => undefined } as unknown as EconomicClient,
       currentStep: () => ({ key: 'K', scheduledAt: new Date(0) }),
