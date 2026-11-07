@@ -29,6 +29,13 @@ import { sealAvailabilityBaseline } from '@/server/fleet-availability';
 import { sealProjectBaseline } from '@/server/project-commands';
 import type { WebSession } from '@/server/session';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
+import {
+  readUnresolved,
+  reserveUnresolved,
+  settleUnresolved,
+  useUnresolvedStore,
+} from '@/server/unresolved-request';
+import { memoryUnresolvedStore } from '@/server/unresolved-request-store';
 import { actingAccessToken } from '@/test/session-token';
 
 Object.assign(process.env, {
@@ -107,6 +114,9 @@ const originalFetch = globalThis.fetch;
 beforeEach(() => {
   reads = {};
   sent = [];
+  // A fresh unresolved-request store for every case (PR-921 F2): a case whose send stays
+  // unresolved must not hold the next case's form, whichever case runs first.
+  useUnresolvedStore(memoryUnresolvedStore());
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     const method = init?.method ?? 'GET';
@@ -126,7 +136,8 @@ beforeEach(() => {
   }) as typeof fetch;
 });
 
-afterAll(() => {
+afterEach(() => {
+  useUnresolvedStore();
   globalThis.fetch = originalFetch;
 });
 
@@ -386,5 +397,27 @@ describe.each(AREAS)('$name', (area) => {
       body: { code: 'RATE_LIMIT_EXCEEDED', message: 'slow down' },
     });
     expect(state).toEqual(expect.objectContaining({ kind: 'FAILED', status: 429 }));
+  });
+});
+
+describe('every case starts with nothing held (PR-921 F2)', () => {
+  const scope = { purpose: 'supplier-write', target: 'PR-921-F2' };
+
+  it('a case may leave a request unresolved …', async () => {
+    const reserved = await reserveUnresolved(SESSION, scope, {
+      key: mintSubmissionId(SESSION),
+      digest: 'd'.repeat(64),
+      ref: null,
+      issuedAt: Date.now(),
+      deadline: null,
+      windowMs: null,
+    });
+    if (reserved.kind !== 'RESERVED') throw new Error(`not reserved: ${reserved.kind}`);
+    await settleUnresolved(reserved.attempt, 'UNRESOLVED');
+    expect((await readUnresolved(SESSION, scope)).kind).toBe('PENDING');
+  });
+
+  it('… and the next case does not see it', async () => {
+    expect((await readUnresolved(SESSION, scope)).kind).toBe('NONE');
   });
 });
