@@ -6,7 +6,7 @@ import { PaymentService } from '../src/payment/payment.service';
 import { PaymentReconciliationRepository } from '../src/payment/payment-reconciliation.repository';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
 import { WalletRepository } from '../src/wallet/wallet.repository';
-import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, cleanup, newPrisma, tenants, testEnv, wire, type Wiring } from './helpers';
 
 /**
@@ -180,15 +180,14 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
   });
 
   it.each(ZONE_SWITCHES)('the ledger stamps written in %s', async (zoneName) => {
-    await inSessionZone(prisma, async ({ tx, zone, secondsFromNow, db }) => {
+    await inSessionZone(prisma, async ({ tx, zone, secondsFromNow }) => {
       await zone(zoneName);
       const organizationId = org.a;
       const userId = `U_${ulid()}`;
-      const rewards = new (
-        wiring.rewards.constructor as new (...args: never[]) => {
-          ensureBalanceRow(client: unknown, organization: string, user: string): Promise<unknown>;
-        }
-      )(db as never);
+      // Private, and it writes only through the transaction it is given.
+      const rewards = wiring.rewards as unknown as {
+        ensureBalanceRow(client: unknown, organization: string, user: string): Promise<unknown>;
+      };
       await runUnscoped('the suite stamps its own balance', () =>
         rewards.ensureBalanceRow(tx, organizationId, userId),
       );
@@ -205,9 +204,7 @@ describe('payment_reconciliation_task deadlines in any session zone (real databa
     async (name) => {
       const url = process.env.DATABASE_URL_ECONOMIC_MIGRATOR;
       if (!url) throw new Error('DATABASE_URL_ECONOMIC_MIGRATOR is required');
-      const owner = new (prisma.constructor as new (databaseUrl: string) => PrismaService)(
-        withUtcSession(url),
-      );
+      const owner = new PrismaService(withUtcSession(url));
       try {
         await inSessionZone(owner, async ({ tx, zone, secondsFromNow }) => {
           await tx.$executeRawUnsafe(
