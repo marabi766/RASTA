@@ -445,7 +445,7 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         .set('x-internal-token', await internalToken(caller));
     const answer = await asked('marketplace-service');
     expect(answer.status).toBe(200);
-    expect(answer.body).toEqual({ heldProven: true });
+    expect(answer.body).toEqual({ heldProven: true, orderHoldDeadlineRequired: true });
     expect((await asked('contract-service')).status).toBe(403);
   });
 

@@ -463,8 +463,33 @@ export class EconomicClient {
    * older release's 404 and an outage alike; the start is retried.
    */
   async provesHeldFunds(): Promise<boolean> {
+    return (await this.capability('heldProven')) === true;
+  }
+
+  /**
+   * Whether economic-service refuses an order's hold sent without its deadline
+   * (`orderHoldDeadlineRequired`, D-150). Only then is every hold that can land counted
+   * on the order's row, so the saga asks this before it takes the row as proof (FU-233).
+   * Only its explicit yes is yes. Its explicit no is no, and so is the shape a release
+   * before the rule sends: `heldProven: true` and no such field. Undefined for anything
+   * else — an outage, or a body no release sends (`{}`, an array, a field that is not a
+   * boolean), which is no answer and never a lasting no (review of #948 r1, L2).
+   */
+  async requiresOrderHoldDeadline(): Promise<boolean | undefined> {
+    return this.capability('orderHoldDeadlineRequired');
+  }
+
+  /**
+   * The capability's answer: the field's own boolean; false when it is absent from a release
+   * that answers `heldProven: true` (one from before the field); undefined otherwise, when
+   * none was had or the body is not one economic-service sends. A cancelled activity's
+   * question is cancelled, not unanswered.
+   */
+  private async capability(
+    name: 'heldProven' | 'orderHoldDeadlineRequired',
+  ): Promise<boolean | undefined> {
     try {
-      const answer = await this.call<{ heldProven?: unknown } | null>(
+      const answer = await this.call<unknown>(
         'capabilities',
         {
           method: 'GET',
@@ -473,13 +498,24 @@ export class EconomicClient {
         },
         CAPABILITY_TIMEOUT_MS,
       );
-      return answer?.heldProven === true;
+      if (typeof answer !== 'object' || answer === null) return undefined;
+      const value: unknown = Reflect.get(answer, name);
+      if (typeof value === 'boolean') return value;
+      if (
+        value === undefined &&
+        name !== 'heldProven' &&
+        Reflect.get(answer, 'heldProven') === true
+      ) {
+        return false;
+      }
+      return undefined;
     } catch (error) {
+      if (error instanceof CancelledFailure) throw error;
       this.logger.warn(
-        { failure: foreignFailure(error) },
+        { failure: foreignFailure(error), capability: name },
         'The capability question went unanswered',
       );
-      return false;
+      return undefined;
     }
   }
 

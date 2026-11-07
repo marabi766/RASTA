@@ -2,6 +2,7 @@ import { createTemporalTestEnvironment } from '../../test/temporal-environment';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { MockActivityEnvironment } from '@temporalio/testing';
+import { CancelledFailure, Context } from '@temporalio/activity';
 import { Worker } from '@temporalio/worker';
 import { InternalTokenService } from '@rasta/nest-common';
 import { createActivities } from './activities';
@@ -22,6 +23,12 @@ it('real Temporal cancellation reaches a financial fetch through heartbeats with
   });
   let financialKey: string | undefined;
   const server = createServer((req, res) => {
+    // The capability question, answered as the D-150 release does (FU-233).
+    if (req.method === 'GET' && req.url === '/v1/transactions/capabilities') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ heldProven: true, orderHoldDeadlineRequired: true }));
+      return;
+    }
     financialKey = req.headers['idempotency-key'] as string | undefined;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.write('{"id":');
@@ -142,4 +149,64 @@ it('activity heartbeat interval is cleaned up on a failed owner read', async () 
   } finally {
     jest.useRealTimers();
   }
+});
+
+/**
+ * Review of #948 r1, L4: the D-150 question (FU-233) is asked inside the activity's
+ * heartbeat and cancellation handling. A cancelled activity is cancelled: never an
+ * answer of `false`, never a retryable "no answer".
+ */
+describe('the hold-deadline question in a cancelled activity', () => {
+  const closedOrder = {
+    describe: async () => ({ id: 'ORD_Q', buyerOrganizationId: 'ORG_BUY', correlationId: 'c' }),
+    sagaView: async () => ({
+      status: 'FAILED',
+      economicTransactionId: null,
+      cancellationReason: null,
+      dispute: null,
+      holdNotAfter: null,
+      holdSendsClosed: true,
+      holdMayHaveSent: true,
+    }),
+    closeHoldSendsIfNoneCanLand: async () => true,
+  } as unknown as OrderService;
+  /**
+   * Unanswered twice, then asked a last time, which waits; cancelled, that request fails as
+   * an aborted fetch does. The last ask has no pause after it to notice the cancellation.
+   */
+  const hanging = (lastAsk: () => void) => {
+    let asks = 0;
+    return {
+      requiresOrderHoldDeadline: () =>
+        new Promise((_resolve, reject) => {
+          if ((asks += 1) < 3) {
+            reject(new Error('timed out'));
+            return;
+          }
+          lastAsk();
+          const { cancellationSignal } = Context.current();
+          cancellationSignal.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    } as unknown as EconomicClient;
+  };
+
+  it.each([
+    ['noHoldCanLand', (a: ReturnType<typeof createActivities>) => a.noHoldCanLand('ORD_Q')],
+    ['readOrder', (a: ReturnType<typeof createActivities>) => a.readOrder('ORD_Q')],
+  ])('%s: cancelled, and heartbeating while it asks', async (_name, run) => {
+    const env = new MockActivityEnvironment({ heartbeatTimeoutMs: 10_000 });
+    const heartbeat = jest.fn();
+    env.on('heartbeat', heartbeat);
+    let lastAsk: () => void = () => undefined;
+    const asked = new Promise<void>((resolve) => {
+      lastAsk = resolve;
+    });
+    const activities = createActivities({ orders: closedOrder, economic: hanging(lastAsk) });
+    const running = env.run(() => run(activities));
+    await asked;
+    // Past the pauses between the asks: the activity's own heartbeat ran through them.
+    expect(heartbeat.mock.calls.length).toBeGreaterThan(1);
+    env.cancel();
+    await expect(running).rejects.toBeInstanceOf(CancelledFailure);
+  });
 });

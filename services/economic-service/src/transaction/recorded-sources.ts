@@ -190,3 +190,19 @@ export function refuseUnfencedOrderHold(dto: {
     throw new RastaError(ERROR_CODES.HOLD_DEADLINE_REQUIRED, HOLD_DEADLINE_REQUIRED_MESSAGE);
   }
 }
+
+/**
+ * Whether this release refuses an order's hold without its deadline, as
+ * `GET /v1/transactions/capabilities` says it (`orderHoldDeadlineRequired`, FU-233). The
+ * saga takes its order row as proof only while this says yes: a release before D-150 holds
+ * such a send, which no row counted. Asked of the rule itself, so the answer cannot stay
+ * yes once the rule is gone.
+ */
+export function refusesUnfencedOrderHold(): boolean {
+  try {
+    refuseUnfencedOrderHold({ holdFunds: true, sourceType: ORDER_SOURCE_TYPE });
+    return false;
+  } catch (refusal) {
+    return refusal instanceof RastaError && refusal.code === ERROR_CODES.HOLD_DEADLINE_REQUIRED;
+  }
+}

@@ -39,6 +39,9 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   const economic = {
     dispute: async () => ({ disputeId: `TXD_${ulid()}` }),
     resolveDispute: async () => undefined,
+    // economic-service with the D-150 rule, which the row's proof needs (FU-233, #948):
+    // every stub below spreads this one, so a hold is sent and its record opened.
+    requiresOrderHoldDeadline: async () => true,
   } as unknown as EconomicClient;
   const acts: OrderActivities = createActivities({
     orders: wiring.orders,
