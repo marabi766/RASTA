@@ -167,11 +167,10 @@ export function createSafePrismaClient<T extends object>(
           if (identity) {
             const transaction = params.__internalParams?.transaction;
             const isCheck = isSessionCheck(operation, args);
-            // A batch was proven when it was built: what comes first must still BE the check.
+            // Proven: a batch built with the check, whose first statement must still BE the check,
+            // or an interactive transaction whose check passed. Unproven, only the check runs.
             if (proven.has(identity) && (transaction?.index !== 0 || isCheck)) return query(args);
-            if (transaction?.kind !== 'itx' || !isCheck) {
-              return Promise.reject(uncheckedTransactionRefusal());
-            }
+            if (!isCheck) return Promise.reject(uncheckedTransactionRefusal());
             return Promise.resolve(query(args)).then((result) => {
               proven.add(identity);
               return result;
@@ -203,8 +202,6 @@ export function createSafePrismaClient<T extends object>(
     };
     const protect = (unchecked: object): T =>
       new Proxy(extended(unchecked, sessionCheck) as T, {
-        // The prototype of an extended client is the original client, without the check.
-        getPrototypeOf: () => Object.prototype,
         get(client, key, receiver) {
           refuseUncheckedPredecessor(key);
           const value: unknown = Reflect.get(client, key, receiver);

@@ -198,6 +198,8 @@ const INERT_ALTER_ACTION =
 const INERT_HEADS =
   /^(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX|ALTER\s+INDEX|CREATE\s+TYPE|ALTER\s+TYPE|DROP\s+TYPE|CREATE\s+EXTENSION|CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER|DROP\s+TRIGGER|COMMENT|GRANT|REVOKE|SET|RESET|LOCK|BEGIN|COMMIT|ALTER\s+DEFAULT\s+PRIVILEGES|CREATE\s+POLICY|ALTER\s+POLICY|DROP\s+POLICY|CREATE\s+SEQUENCE|ALTER\s+SEQUENCE|DROP\s+SEQUENCE|CREATE\s+SCHEMA|ANALYZE|TRUNCATE)\b/i;
 const ONE_SHOT_HEADS = /^(?:INSERT|UPDATE|DELETE|SELECT|WITH)\b/i;
+const TRIGGER_BINDING =
+  /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b[\s\S]*?\bON\s+(?:"?public"?\.)?"?(\w+)"?[\s\S]*?\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(?:"?public"?\.)?"?(\w+)"?/i;
 const LIVE_DDL =
   /\b(?:CREATE|ALTER|DROP)\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE|ROUTINE|VIEW|MATERIALIZED|TABLE|TRIGGER)\b/i;
 
@@ -308,11 +310,13 @@ function readRoutine({ tokens, text }) {
   let i = tokens.findIndex((t, at) => at > 0 && isWord(t, 'function', 'procedure')) + 1;
   if (!header || i === 0) return null;
   if (isOp(tokens[i + 1], '.')) {
-    if (nameOf(tokens[i]) !== 'public') return { refused: `a routine outside public: ${text}` };
+    if (nameOf(tokens[i]) !== 'public')
+      return { refused: `a routine outside public: ${tokens[i].value}` };
     i += 2;
   }
   const name = nameOf(tokens[i]);
-  if (!name || !isOp(tokens[i + 1], '(')) return { refused: `a routine not read: ${text}` };
+  if (!name || !isOp(tokens[i + 1], '('))
+    return { refused: `a routine not read: ${tokens[i]?.value}` };
   const close = closing(tokens, i + 1);
   const language = tokens.findIndex((t, at) => at > close && isWord(t, 'language'));
   const spoken = tokens[language + 1]?.value.replaceAll("'", '').toLowerCase();
@@ -369,7 +373,8 @@ function readCreateTable({ tokens, text }, columns) {
 
 /**
  * Replays migration texts, in order: table -> column -> {type: 'ts'|'tz'|'other',
- * sessionDefault}, each routine's and view's last definition, and what it could not model.
+ * sessionDefault}, each routine's and view's last definition, the tables each trigger routine
+ * fires on, and what it could not model.
  */
 export function replayMigrations(texts) {
   const tables = new Map();
@@ -377,6 +382,7 @@ export function replayMigrations(texts) {
   const views = new Map();
   const unmodelled = [];
   const doBlocks = [];
+  const triggers = new Map();
   const firstLine = (text) => text.split('\n', 1)[0].slice(0, 100);
   const refuse = (what) => unmodelled.push(what);
   for (const raw of texts) {
@@ -430,13 +436,16 @@ export function replayMigrations(texts) {
         if (body && LIVE_DDL.test(body.value))
           doBlocks.push({ head: firstLine(text), body: body.value });
       } else if (INERT_HEADS.test(text)) {
+        if ((m = TRIGGER_BINDING.exec(text))) {
+          triggers.set(m[2], [...(triggers.get(m[2]) ?? []), m[1]]);
+        }
         if (hasBareClock(text)) refuse(`a clock in a definition not modelled: ${firstLine(text)}`);
       } else if (!ONE_SHOT_HEADS.test(text)) {
         refuse(`a migration statement not modelled: ${firstLine(text)}`);
       }
     }
   }
-  return { tables, functions, views, unmodelled, doBlocks };
+  return { tables, functions, views, unmodelled, doBlocks, triggers };
 }
 
 /** The tables a text writes: INSERT INTO, MERGE INTO, UPDATE … SET. */
@@ -457,8 +466,7 @@ function writesIn(tokens) {
     }
     if (!kind) continue;
     if (tokens[at]?.type === 'placeholder' && !isOp(tokens[at + 1], '.')) {
-      if (kind !== 'update' || isWord(tokens[at + 1], 'set'))
-        writes.push({ kind, table: null, at });
+      if (kind !== 'update' || isWord(tokens[at + 1], 'set')) writes.push({ kind, table: null });
       continue;
     }
     let table = nameOf(tokens[at]);
@@ -542,7 +550,7 @@ export function problemsIn(text, tables) {
       problems.push(`R1 bare ${bare[0].name} on a spliced table`);
     } else if (unresolved.length > 0) {
       problems.push(`R1 bare ${bare[0].name} on unresolved table ${unresolved[0].table}`);
-    } else if (refs.length === 0 && !reading) {
+    } else if (named.length === 0 && !reading) {
       problems.push(`R3 bare ${bare[0].name} in a fragment naming no table`);
     }
   }
@@ -600,6 +608,18 @@ export const REVIEWED_LITERALS = [
 ];
 export const REVIEWED_FUNCTIONS = [
   {
+    service: 'construction-service',
+    name: 'bid_guard',
+    sha256: 'b7715c3d036b764b0a3899c898959c990afb47c368e50b00bdb0e18f5d789f0a',
+    why: 'clocks are compared with its timestamptz locals; submitted_at, timestamp(3), is compared only with OLD.submitted_at',
+  },
+  {
+    service: 'procurement-service',
+    name: 'rfq_guard',
+    sha256: 'ba81705db9f9fe929cef54a6656da14aafad9e8d57be4f5fbc7fe3964e205301',
+    why: 'clocks are compared with quotation_closing_at and closed_at, both timestamptz',
+  },
+  {
     service: 'analytics-service',
     name: 'fact_recorded_at_now',
     sha256: '54a5f821b7503ba5df69419c498d7742e77ed1514dfb1329e4a36e321292e3cb',
@@ -653,11 +673,24 @@ export function localVariableProblems(body, header = '') {
 }
 
 /** What is wrong with a live routine or view, whatever its clocks. */
-export function definitionProblems({ body, header }, tables) {
-  const dynamic = lex(body).some((t) => isWord(t, 'execute'));
+export function definitionProblems({ body, header }, tables, firesOn = []) {
+  const tokens = lex(body);
+  const dynamic = tokens.some((t) => isWord(t, 'execute'));
+  const words = new Set(tokens.map(nameOf));
+  // `NEW.col := now()` names the table it fires on nowhere in its body.
+  const rowColumns = firesOn.flatMap((table) =>
+    (tables.get(table) ?? []).flatMap((columns) =>
+      [...columns]
+        .filter(([column, facts]) => facts.type === 'ts' && words.has(column.toLowerCase()))
+        .map(([column]) => `${table}.${column}`),
+    ),
+  );
   return [
     ...problemsIn(body, tables),
     ...localVariableProblems(body, header),
+    ...(rowColumns.length > 0 && hasBareClock(body)
+      ? [`R1 a bare clock beside timestamp(3) ${rowColumns.join(', ')} of its trigger's table`]
+      : []),
     ...(dynamic ? ['dynamic SQL (EXECUTE): the guard cannot read it'] : []),
   ];
 }
@@ -746,7 +779,10 @@ export function utcClockProblems(repository) {
       for (const problem of found) problems.push(`${local}:${line}: ${problem}`);
     }
   }
-  for (const [service, { functions, views, tables, unmodelled, doBlocks }] of perService) {
+  for (const [
+    service,
+    { functions, views, tables, unmodelled, doBlocks, triggers },
+  ] of perService) {
     for (const what of unmodelled) problems.push(`services/${service} migrations: ${what}`);
     for (const { head, body } of doBlocks) {
       const reviewed = REVIEWED_DO_BLOCKS.find(
@@ -763,7 +799,7 @@ export function utcClockProblems(repository) {
           entry.name === definition.name &&
           entry.sha256 === contentHash(definition.body),
       );
-      const found = definitionProblems(definition, scoped);
+      const found = definitionProblems(definition, scoped, triggers.get(definition.name));
       if (reviewed && found.length > 0) {
         reviewedUsed.add(reviewed);
         continue;

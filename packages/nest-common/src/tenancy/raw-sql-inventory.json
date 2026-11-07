@@ -1743,6 +1743,13 @@
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
+    "file": "services/identity-service/src/prisma/utc-session-boundary.spec.ts",
+    "line": 80,
+    "hash": "cdd3270368210e1b6941853dc0b07cd6e43ee901b3b5e4f88282ea0e0b1651dc",
+    "occurrence": 0,
+    "decision": "platform-wide: unit-test stub engine exercises the UTC session check only; never sends SQL to a database"
+  },
+  {
     "file": "services/identity-service/src/security-events/security-event-outbox.store.ts",
     "line": 260,
     "hash": "05fbbd8849c9ee0377d438a7059660b4495318ad1e0ef4cdf06c0cbd18120a20",

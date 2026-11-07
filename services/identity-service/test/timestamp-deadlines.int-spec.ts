@@ -96,10 +96,30 @@ describe('TIMESTAMP(3) deadline bounds (FU-162/FU-170, real PostgreSQL)', () => 
         .mockImplementation((work, options) =>
           transaction((tx) => work(onClock(tx, raw)), options),
         );
-      const frozen = onClock(db.client, raw);
-      jest.spyOn(db.client, '$executeRaw').mockImplementation(frozen.$executeRaw);
-      jest.spyOn(db.client, '$queryRawUnsafe').mockImplementation(frozen.$queryRawUnsafe);
-      jest.spyOn(db.client, '$executeRawUnsafe').mockImplementation(frozen.$executeRawUnsafe);
+      // On the client the call is made on: a transaction's client inherits these spies, and
+      // bound to `db.client` its statements (the UTC check among them) would leave the
+      // transaction, which the session check refuses (PR #906 r1 F1).
+      jest.spyOn(db.client, '$executeRaw').mockImplementation(function (
+        this: ExtendedPrismaClient,
+        query,
+        ...values
+      ) {
+        return onClock(this, raw).$executeRaw(query, ...values);
+      });
+      jest.spyOn(db.client, '$queryRawUnsafe').mockImplementation(function (
+        this: ExtendedPrismaClient,
+        sql,
+        ...values
+      ) {
+        return onClock(this, raw).$queryRawUnsafe(sql, ...values);
+      });
+      jest.spyOn(db.client, '$executeRawUnsafe').mockImplementation(function (
+        this: ExtendedPrismaClient,
+        sql,
+        ...values
+      ) {
+        return onClock(this, raw).$executeRawUnsafe(sql, ...values);
+      });
     }
   });
   afterEach(async () => {

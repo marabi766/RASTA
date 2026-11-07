@@ -76,11 +76,14 @@ function open() {
 
 type Client = ReturnType<typeof open>['safe'];
 
+/** The one raw statement of this spec, through whichever client a probe holds. */
+const write = (client: unknown) => (client as Client).$executeRawUnsafe(WRITE);
+
 /** The three ways to run a statement, through any client. */
 const WAYS: ReadonlyArray<[string, (client: Client) => PromiseLike<unknown>]> = [
-  ['autocommit', (client) => client.$executeRawUnsafe(WRITE)],
-  ['batch', (client) => client.$transaction([client.$executeRawUnsafe(WRITE)])],
-  ['interactive', (client) => client.$transaction((tx) => tx.$executeRawUnsafe(WRITE))],
+  ['autocommit', (client) => write(client)],
+  ['batch', (client) => client.$transaction([write(client)])],
+  ['interactive', (client) => client.$transaction((tx) => write(tx))],
 ];
 
 const parentOf = (client: Client) => (client as unknown as { $parent: Client }).$parent;
@@ -143,8 +146,8 @@ describe('every client this boundary exposes runs the UTC check (PR #906 r1 F1)'
       const { backend, safe } = open();
       const extended = safe.$extends({
         client: {
-          write(this: Client) {
-            return run(this);
+          write() {
+            return run(Prisma.getExtensionContext(this) as unknown as Client);
           },
         },
       });
@@ -184,12 +187,13 @@ describe('every client this boundary exposes runs the UTC check (PR #906 r1 F1)'
     },
   );
 
+  // Prisma's own composite proxy answers Object.prototype; `__proto__` read through it does not.
   it('the prototype of a client, which is the original client: not handed out', () => {
     const { raw, safe } = open();
     const extended = safe.$extends({});
     expect(Object.getPrototypeOf(extended)).not.toBe(raw);
     expect(Object.getPrototypeOf(extended)).toBe(Object.prototype);
-    expect(Reflect.get(extended, '__proto__')).toBe(Object.prototype);
+    expect(() => Reflect.get(extended, '__proto__')).toThrow(/refused/);
   });
 
   it.each([null, undefined, 1, 'extension'])('$extends(%s) is refused', (form) => {
@@ -200,7 +204,7 @@ describe('every client this boundary exposes runs the UTC check (PR #906 r1 F1)'
   describe('being in a transaction is not proof it was checked', () => {
     it('a checked statement in a batch of a client without the check: refused, not written', async () => {
       const { backend, raw, safe } = open();
-      await expect(raw.$transaction([safe.$executeRawUnsafe(WRITE)])).rejects.toThrow(/refused/);
+      await expect(raw.$transaction([write(safe)])).rejects.toThrow(/refused/);
       expect(backend).toEqual({ checks: 0, writes: 0 });
     });
 
@@ -209,7 +213,7 @@ describe('every client this boundary exposes runs the UTC check (PR #906 r1 F1)'
       await expect(
         raw.$transaction([
           safe.registrationIntake.deleteMany({ where: { id: 'none' } }),
-          safe.$executeRawUnsafe(WRITE),
+          write(safe),
         ]),
       ).rejects.toThrow(/refused/);
       expect(backend).toEqual({ checks: 0, writes: 0 });
@@ -222,9 +226,7 @@ describe('every client this boundary exposes runs the UTC check (PR #906 r1 F1)'
           $queryRawUnsafe: () => Promise.resolve([{ utc: 1 }]),
         },
       });
-      await expect(swallowing.$transaction((tx) => tx.$executeRawUnsafe(WRITE))).rejects.toThrow(
-        /refused/,
-      );
+      await expect(swallowing.$transaction((tx) => write(tx))).rejects.toThrow(/refused/);
       expect(backend).toEqual({ checks: 0, writes: 0 });
     });
 
@@ -236,18 +238,14 @@ describe('every client this boundary exposes runs the UTC check (PR #906 r1 F1)'
             query(['SELECT 1']),
         },
       });
-      await expect(rewriting.$transaction([rewriting.$executeRawUnsafe(WRITE)])).rejects.toThrow(
-        /refused/,
-      );
+      await expect(rewriting.$transaction([write(rewriting)])).rejects.toThrow(/refused/);
       expect(backend).toEqual({ checks: 0, writes: 0 });
     });
 
     it('an interactive client’s $parent stays inside the transaction that was checked', async () => {
       const { backend, safe } = open();
       await expect(
-        safe.$transaction((tx) =>
-          (tx as unknown as { $parent: Client }).$parent.$executeRawUnsafe(WRITE),
-        ),
+        safe.$transaction((tx) => write((tx as unknown as { $parent: Client }).$parent)),
       ).rejects.toThrow(/not in UTC/);
       expect(backend).toEqual({ checks: 1, writes: 0 });
     });
@@ -271,11 +269,11 @@ describe('every client this boundary exposes runs the UTC check (PR #906 r1 F1)'
           : { data: { executeRaw: 1 } },
       );
     };
-    await safe.$executeRawUnsafe(WRITE);
-    await expect(safe.$transaction([safe.$executeRawUnsafe(WRITE)])).resolves.toHaveLength(1);
+    await write(safe);
+    await expect(safe.$transaction([write(safe)])).resolves.toHaveLength(1);
     await safe.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(WRITE);
-      await tx.$executeRawUnsafe(WRITE);
+      await write(tx);
+      await write(tx);
     });
     expect(seen).toEqual([
       UTC_SESSION_CHECK_SQL,

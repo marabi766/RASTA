@@ -5,7 +5,7 @@ import {
 } from '@rasta/nest-common';
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
-import { PrismaClient } from '../src/generated/prisma';
+import { Prisma, PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl } from './helpers';
 
@@ -170,6 +170,69 @@ describe('a database session outside UTC (FU-188)', () => {
     } finally {
       await outside.stop();
     }
+  });
+
+  describe('no exposed client runs without the check (PR #906 r1 F1, on a real backend)', () => {
+    const insert = (client: { $executeRawUnsafe: PrismaClient['$executeRawUnsafe'] }, id: string) =>
+      client.$executeRawUnsafe(
+        `INSERT INTO registration_intake (id, submission, actor_type, correlation_id)
+         VALUES ($1, $2::jsonb, 'ANONYMOUS', $1)`,
+        id,
+        JSON.stringify({ scope }),
+      );
+    const afterRefusal = async () => {
+      await backToUtc();
+      expect(await count()).toBe(0);
+    };
+
+    it('$parent is refused, on a client and on a model', async () => {
+      await toZone('Asia/Tehran');
+      const client = db.client as unknown as { $parent: PrismaClient };
+      const model = db.client.registrationIntake as unknown as { $parent: PrismaClient };
+      expect(() => client.$parent).toThrow(/refused/);
+      expect(() => model.$parent).toThrow(/refused/);
+      await afterRefusal();
+    });
+
+    it('the function form of $extends is refused', async () => {
+      await toZone('Asia/Tehran');
+      let captured: PrismaClient | undefined;
+      const form = (client: PrismaClient) => {
+        captured = client;
+        return client;
+      };
+      expect(() => (db.client.$extends as (extension: unknown) => unknown)(form)).toThrow(
+        /refused/,
+      );
+      expect(captured).toBeUndefined();
+      await afterRefusal();
+    });
+
+    it('a statement in a batch of a client without the check is refused, also in UTC', async () => {
+      const bare = new PrismaClient({ datasources: { db: { url: databaseUrl() } } });
+      try {
+        await expect(bare.$transaction([insert(db.client, ulid())])).rejects.toThrow(/refused/);
+      } finally {
+        await bare.$disconnect();
+      }
+      expect(await count()).toBe(0);
+    });
+
+    it('a client method of an extension is refused like any other statement', async () => {
+      const extended = db.client.$extends({
+        client: {
+          write(id: string) {
+            const self = Prisma.getExtensionContext(this) as unknown as PrismaClient;
+            return self.$transaction((tx) =>
+              insert(tx as unknown as Pick<PrismaClient, '$executeRawUnsafe'>, id),
+            );
+          },
+        },
+      });
+      await toZone('Asia/Tehran');
+      await expect(extended.write(ulid())).rejects.toBeInstanceOf(SessionTimeZoneRefusedError);
+      await afterRefusal();
+    });
   });
 
   it('a service in UTC passes the boot check', async () => {

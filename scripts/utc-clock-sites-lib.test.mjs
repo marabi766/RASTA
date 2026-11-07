@@ -2,7 +2,10 @@
 // column in the session's zone, and the tree as it stands passes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dirname, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   REVIEWED_DO_BLOCKS,
@@ -75,14 +78,12 @@ for (const [name, sql] of [
   ['a bare fragment', `clock_timestamp()`],
   ['an insert left to the default', `INSERT INTO task (id) VALUES ($1)`],
   ['an insert without a list', `INSERT INTO task SELECT * FROM task`],
-  // PR #906 r1 F2, the reviewer's four.
-  ['explicit DEFAULT in VALUES', `INSERT INTO task (id,due_at) VALUES ($1,DEFAULT)`],
-  ['explicit DEFAULT in SET', `UPDATE task SET due_at=DEFAULT`],
-  ['a quoted, qualified clock', `UPDATE task SET due_at=pg_catalog."now"()`],
-  ['an unresolved table', `UPDATE unknown_table SET due_at=now()`],
   // The class: other spellings of an explicit default.
   ['DEFAULT VALUES', `INSERT INTO task DEFAULT VALUES`],
-  ['DEFAULT in a second row', `INSERT INTO task (id,due_at) VALUES ($1,$2),($3,DEFAULT)`],
+  [
+    'DEFAULT in a second row',
+    `INSERT INTO task (id,due_at,added_at) VALUES ($1,$2,$3),($4,DEFAULT,$5)`,
+  ],
   ['DEFAULT in a tuple SET', `UPDATE task SET (id,due_at) = ($1,DEFAULT)`],
   [
     'DEFAULT on conflict',
@@ -194,6 +195,14 @@ for (const [name, sql] of [
   });
 }
 
+test('R4 reads the signature: a timestamptz parameter or result is no conversion', () => {
+  const sql = (signature) =>
+    `CREATE TABLE aware (at timestamptz(3)); CREATE FUNCTION f(${signature} LANGUAGE plpgsql AS $$BEGIN PERFORM 1 FROM aware; RETURN now(); END$$;`;
+  assert.deepEqual(live(sql('x timestamptz) RETURNS timestamptz(3)')), []);
+  assert.deepEqual(live(sql('x timestamp with time zone) RETURNS boolean')), []);
+  assert.notEqual(live(sql('x timestamp(3)) RETURNS boolean')).length, 0);
+});
+
 test('R4: a timestamp variable beside a bare clock is refused, a timestamptz one is not', () => {
   const body = (type) =>
     `DECLARE opens ${type}; BEGIN IF clock_timestamp() < opens THEN RETURN NEW; END IF; END`;
@@ -206,6 +215,34 @@ test('R4: a timestamp variable beside a bare clock is refused, a timestamptz one
 
 test('a trigger assigning a bare clock names no table, and is still refused', () => {
   assert.notEqual(problemsIn(`BEGIN NEW."due_at" := now(); RETURN NEW; END`, scope).length, 0);
+});
+
+// PR #906 r1 F2, the reviewer's four, on the reviewer's table: its only default is due_at's.
+const reviewers = replayMigrations([
+  `CREATE TABLE task (id text, due_at timestamp(3) DEFAULT CURRENT_TIMESTAMP)`,
+]).tables;
+const reviewersScope = new Map([['task', [reviewers.get('task')]]]);
+for (const sql of [
+  `INSERT INTO task (id,due_at) VALUES ($1,DEFAULT)`,
+  `UPDATE task SET due_at=DEFAULT`,
+  `UPDATE task SET due_at=pg_catalog."now"()`,
+  `UPDATE unknown_table SET due_at=now()`,
+  // The same, spelled otherwise.
+  `INSERT INTO task (id,due_at) VALUES ($1,$2),($3,DEFAULT)`,
+  `INSERT INTO task (id,due_at) VALUES ($1,$2) ON CONFLICT (id) DO UPDATE SET due_at = DEFAULT`,
+]) {
+  test(`the reviewer's probe is refused: ${sql}`, () => {
+    assert.notEqual(problemsIn(sql, reviewersScope).length, 0);
+  });
+}
+
+test('explicit DEFAULT on a column whose default is safe stays allowed', () => {
+  const { tables: t } = replayMigrations([
+    `CREATE TABLE s (id text, made_at timestamp(3) DEFAULT timezone('UTC', now()), n int DEFAULT 1)`,
+  ]);
+  const only = new Map([['s', [t.get('s')]]]);
+  assert.deepEqual(problemsIn(`INSERT INTO s (id, made_at) VALUES ($1, DEFAULT)`, only), []);
+  assert.deepEqual(problemsIn(`UPDATE s SET made_at = DEFAULT, n = DEFAULT`, only), []);
 });
 
 const replaying = (sql) => replayMigrations([sql]);
@@ -251,11 +288,11 @@ for (const [name, sql] of [
   ],
   [
     'a timestamp parameter',
-    `CREATE FUNCTION f(at timestamp) RETURNS boolean LANGUAGE plpgsql AS $$BEGIN RETURN at < now(); END$$;`,
+    `CREATE TABLE aware (at timestamptz(3)); CREATE FUNCTION f(x timestamp) RETURNS boolean LANGUAGE plpgsql AS $$BEGIN PERFORM 1 FROM aware; RETURN x < now(); END$$;`,
   ],
   [
     'a timestamp result',
-    `CREATE FUNCTION f() RETURNS timestamp(3) LANGUAGE plpgsql AS $$BEGIN RETURN now(); END$$;`,
+    `CREATE TABLE aware (at timestamptz(3)); CREATE FUNCTION f() RETURNS timestamp(3) LANGUAGE plpgsql AS $$BEGIN PERFORM 1 FROM aware; RETURN now(); END$$;`,
   ],
   [
     'dynamic SQL',
@@ -274,6 +311,32 @@ for (const [name, sql] of [
     assert.notEqual(live(sql).length, 0, sql);
   });
 }
+
+test('a trigger routine is read against the table it fires on', () => {
+  const {
+    tables: t,
+    functions: f,
+    triggers,
+  } = replaying(
+    `CREATE TABLE task (due_at timestamp(3)); CREATE TABLE aware (at timestamptz(3));
+     CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN
+       PERFORM 1 FROM aware; NEW."due_at" := now(); RETURN NEW; END$$;
+     CREATE TRIGGER x BEFORE INSERT ON "task" FOR EACH ROW EXECUTE FUNCTION stamp();`,
+  );
+  const s = new Map([...t].map(([table, columns]) => [table, [columns]]));
+  const [stamp] = f.values();
+  assert.deepEqual(definitionProblems(stamp, s), []);
+  assert.match(definitionProblems(stamp, s, triggers.get('stamp')).join(), /task\.due_at/);
+});
+
+test('a routine with a RAISE or SELECT INTO still names no table for its bare clock', () => {
+  for (const body of [
+    `BEGIN NEW."due_at" := now(); RAISE EXCEPTION 'x' USING ERRCODE = 'y'; RETURN NEW; END`,
+    `BEGIN NEW."due_at" := now(); SELECT 1 INTO v; RETURN NEW; END`,
+  ]) {
+    assert.match(problemsIn(body, scope).join(), /R3/, body);
+  }
+});
 
 test('a definition replaced or dropped is no longer read', () => {
   const unsafe = `${TS} CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$BEGIN UPDATE task SET due_at = now(); END$$;`;
@@ -430,6 +493,9 @@ test('a partition has the columns of its parent', () => {
 test('a reviewed exemption is bound to the reviewed content', () => {
   assert.equal(contentHash(`BEGIN  x; -- note\r\nEND`), contentHash(`BEGIN x;\nEND`));
   assert.notEqual(contentHash(`BEGIN x; END`), contentHash(`BEGIN y; END`));
+  // Inside a string a line ending is a token's content: canonical, so CRLF = LF (checklist 16).
+  assert.equal(contentHash(`RAISE 'a\r\nb'`), contentHash(`RAISE 'a\nb'`));
+  assert.notEqual(contentHash(`RAISE 'a b'`), contentHash(`RAISE 'a\nb'`));
   for (const entry of [...REVIEWED_FUNCTIONS, ...REVIEWED_DO_BLOCKS]) {
     assert.match(entry.sha256, /^[0-9a-f]{64}$/);
     assert.ok(entry.why.length > 0);
@@ -440,6 +506,67 @@ test('a reviewed exemption is bound to the reviewed content', () => {
 test('clocksIn reports each clock on its own', () => {
   const clocks = (sql) => clocksIn(lex(sql)).map((clock) => clock.utc);
   assert.deepEqual(clocks(`SELECT now(), now() AT TIME ZONE 'UTC'`), [false, true]);
+});
+
+/** The whole scan over a repository of one service, in a git checkout of its own. */
+function scanOf(service, migration, source = '') {
+  const root = mkdtempSync(join(tmpdir(), 'utc-clock-sites-'));
+  try {
+    const write = (path, text) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), text);
+    };
+    write(`services/${service}/prisma/migrations/1_init/migration.sql`, migration);
+    write(`services/${service}/prisma/schema.prisma`, 'model Anything {\n  id String @id\n}\n');
+    write(`services/${service}/src/site.ts`, source);
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    execFileSync('git', ['add', '-A'], { cwd: root });
+    // The reviewed entries name this repository's sites, which that one does not have.
+    return utcClockProblems(root).filter((problem) => !problem.startsWith('stale reviewed entry'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('the scan reads a clock-free DEFAULT in production source', () => {
+  const migration = `CREATE TABLE task (id text, due_at timestamp(3) DEFAULT CURRENT_TIMESTAMP);`;
+  const source = 'export const sql = `UPDATE task SET due_at = DEFAULT WHERE id = $1`;';
+  assert.deepEqual(scanOf('x-service', migration), []);
+  assert.match(scanOf('x-service', migration, source).join(), /R2 update leaves task\.due_at/);
+});
+
+test('the scan refuses what the replay could not model', () => {
+  assert.match(scanOf('x-service', `CREATE DOMAIN d AS int;`).join(), /not modelled/);
+  assert.match(
+    scanOf('x-service', `DO $$BEGIN EXECUTE 'CREATE TABLE t (id int)'; END$$;`).join(),
+    /DDL in a DO block/,
+  );
+});
+
+test('an exemption covers the reviewed content only, by service and by content', () => {
+  const entry = REVIEWED_FUNCTIONS.find(({ name }) => name === 'fact_recorded_at_now');
+  const fn = (body) =>
+    `CREATE FUNCTION fact_recorded_at_now() RETURNS trigger LANGUAGE plpgsql AS $$${body}$$;`;
+  const reviewed = `
+BEGIN
+  NEW."recorded_at" := clock_timestamp();
+  RETURN NEW;
+END;
+`;
+  const changed = `BEGIN NEW."recorded_at" := clock_timestamp(); NEW."other" := now(); RETURN NEW; END;`;
+  assert.deepEqual(scanOf(entry.service, fn(reviewed)), []);
+  // Spelled otherwise: the same tokens, so the same review.
+  assert.deepEqual(scanOf(entry.service, fn(reviewed.replaceAll('\n', '\r\n  '))), []);
+  assert.match(scanOf(entry.service, fn(changed)).join(), /fact_recorded_at_now: R3/);
+  assert.match(scanOf('other-service', fn(reviewed)).join(), /fact_recorded_at_now: R3/);
+});
+
+test('a reviewed DO block covers its reviewed content only', () => {
+  const [entry] = REVIEWED_DO_BLOCKS;
+  assert.match(
+    scanOf(entry.service, `DO $$BEGIN EXECUTE 'CREATE VIEW v AS SELECT 1'; END$$;`).join(),
+    /DDL in a DO block/,
+  );
 });
 
 test('the repository passes', () => {
