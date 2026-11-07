@@ -25,7 +25,10 @@ const { TextDecoder } = require('node:util');
 const { join, relative, resolve, sep, isAbsolute } = require('node:path');
 
 const REPO_ROOT = resolve(__dirname, '..');
-const DECODER = new TextDecoder('utf-8', { fatal: true }); // from node:util: a jsdom Jest environment has no global
+// `ignoreBOM: true` KEEPS a leading U+FEFF: by default TextDecoder drops it as a byte-order mark, which
+// turned the valid names `<U+FEFF>a.ts` and `a.ts` into the same path (FU-130, PR #772 r2 F3).
+// From node:util: a jsdom Jest environment has no global TextDecoder.
+const DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 const inside = (base, path) => {
   const rel = relative(base, path);

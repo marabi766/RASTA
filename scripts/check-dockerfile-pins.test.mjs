@@ -9,6 +9,7 @@ import { stringify } from 'yaml';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import {
   DIGEST_VARIANTS,
+  REVIEWED_PROGRAMS,
   SOURCED_LIBRARIES,
   TAGLESS,
   tokenizeShell,
@@ -78,6 +79,8 @@ const NO_EXEMPTIONS = {
   digestVariants: new Map(),
   tagless: new Map(),
   evaluatedOutputs: new Map(),
+  executedPrograms: new Map(),
+  reviewedPrograms: new Map(),
 };
 const compose = (text) => ({ name: 'docker-compose.yml', kind: 'compose', text });
 const workflowYaml = (text) => ({ name: '.github/workflows/ci.yml', kind: 'workflow', text });
@@ -455,7 +458,13 @@ const SHAPES = {
   'pipeline into sh': (v) => `echo 'docker ${v} alpine:latest' | sh`,
   'env-prefixed quoted here-document': (v) => `env bash <<'EOF'\ndocker ${v} alpine:latest\nEOF`,
 };
-const bare = { evaluatedOutputs: new Map(), digestVariants: new Map(), tagless: new Map() };
+const bare = {
+  evaluatedOutputs: new Map(),
+  digestVariants: new Map(),
+  tagless: new Map(),
+  executedPrograms: new Map(),
+  reviewedPrograms: new Map(),
+};
 const asInput = (kind, body) =>
   kind === 'shell'
     ? { kind, name: 'scripts/x.sh', text: body }
@@ -802,21 +811,26 @@ test('PR #805 r2 F1: a workflow env that a shell evaluates at startup refuses', 
     );
   }
 });
-test('PR #805 r2 F1: string runners keep the command string they carry', () => {
+test('PR #805 r2 F1: text a program runs is read where this check models it, refused elsewhere', () => {
+  // FU-159 r2: a string runner is no longer "modeled by its strings": it is a program in no table
   for (const script of [
-    `flock /tmp/l -c 'docker run alpine:latest'`,
     `su -c 'docker run alpine:latest' nobody`,
     `script -qc 'docker run alpine:latest' /dev/null`,
     `ssh host 'docker run alpine:latest'`,
     `watch -n1 'docker run alpine:latest'`,
-    `trap 'docker run alpine:latest' EXIT`,
+    `flock /tmp/l -c 'docker run alpine:latest'`,
   ])
-    assert.ok(outcome('shell', script).found, script);
+    assert.ok(
+      outcome('shell', script).errors.some((e) =>
+        /does not model|not one this check reads/.test(e),
+      ),
+      script,
+    );
+  // a trap handler is read as the script it is
+  assert.ok(outcome('shell', `trap 'docker run alpine:latest' EXIT`).found);
 });
 test('PR #805 r2 F1: the harmless controls stay readable', () => {
   for (const body of [
-    "flock /tmp/l -c 'echo hi'",
-    "ssh host 'uptime'",
     "trap 'echo bye' EXIT",
     'trap - EXIT\ntrap -l',
     'bash <<EOF\necho hi\nEOF',
@@ -1018,12 +1032,11 @@ test('FU-150 F1: source resolves the exact path of a verified library', () => {
     sourceErrors(sourcing(`"$(dirname "\${BASH_SOURCE[0]}")/lib/role-passwords.bash"`)),
     [],
   );
-  assert.deepEqual(sourceErrors(sourcing('"$(dirname "$0")/lib/role-passwords.bash"')), []);
   // `..` is normalised: the path that results is the exact one
   assert.deepEqual(
     sourceErrors(
       sourcing(
-        '"$(dirname "$0")/../postgres/lib/role-passwords.bash"',
+        '"$(dirname "${BASH_SOURCE[0]}")/../postgres/lib/role-passwords.bash"',
         'infrastructure/docker/other/init.sh',
       ),
     ),
@@ -1038,8 +1051,10 @@ test('FU-150 F1: source resolves the exact path of a verified library', () => {
     [`"$HOME/${LIB}"`, undefined],
     // a suffix of the listed path is not the path
     [`evil/${LIB}`, 'scripts/x.sh'],
-    ['"$(dirname "$0")/lib/role-passwords.bash"', 'scripts/x.sh'],
-    ['"$(dirname "$0")/../postgres/lib/role-passwords.bash"', 'scripts/x.sh'],
+    ['"$(dirname "${BASH_SOURCE[0]}")/lib/role-passwords.bash"', 'scripts/x.sh'],
+    ['"$(dirname "${BASH_SOURCE[0]}")/../postgres/lib/role-passwords.bash"', 'scripts/x.sh'],
+    // FU-159 F3: `$0` is the sourcing shell's name once another script sources this one
+    ['"$(dirname "$0")/lib/role-passwords.bash"', undefined],
     ['"$(pwd)/lib/role-passwords.bash"', undefined],
     ['"$(dirname "$1")/lib/role-passwords.bash"', undefined],
     ['"$(cd x; dirname "$0")/lib/role-passwords.bash"', undefined],
@@ -1178,4 +1193,1189 @@ test('FU-150 F2: writers after control words, in functions and with attached opt
     `${producer}\nn="$(printf '\\143')"\n(( n=5 ))\neval "\${c}"`,
   ])
     assert.deepEqual(evaluate(body), [], body);
+});
+
+// =============================================================================
+// FU-159: the execution boundary fails CLOSED. Every probe of the PR #832 round-1 review is a row
+// here; each was approved (no error, no image) on 711852a3.
+// =============================================================================
+const R = 'run alpine:latest';
+const refusedBoth = (script, policy = bare, extra = []) => {
+  for (const kind of ['shell', 'workflow']) {
+    const { errors, images } = validateInfraImagePins([...extra, asInput(kind, script)], policy);
+    assert.ok(
+      errors.length > 0 || images.some(({ ref }) => ref === 'alpine:latest'),
+      `${kind}: ${script}`,
+    );
+  }
+};
+test('FU-159 F1: case patterns are parsed apart from case bodies', () => {
+  refusedBoth('case x in x) {docker,run,alpine:latest};; esac');
+  refusedBoth(`c=docker\ncase x in\n  a | b) $c ${R};;\nesac`);
+  refusedBoth('case x in (x) {docker,run,alpine:latest};; esac');
+  // the patterns themselves, however they look, are not commands
+  for (const body of [
+    'case "$x" in\n  *-service | other) true ;;\n  #*) true ;;\n  [a-z]*) true ;;\n  {a,b}) true ;;\n  $y) true ;;\nesac',
+    'case x in x) case y in y) true;; esac;; z) true;; esac',
+  ])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+  // a quoted `case` is a command, not the keyword: nothing after it is a pattern
+  refusedBoth(`"case" x in\n docker ${R}\n)`);
+  assert.deepEqual(
+    tokenizeShell('"case" x in y').commands.map((c) => Boolean(c.pattern)),
+    [false],
+  );
+  assert.ok(outcome('shell', 'case x in x) true').errors.length > 0, 'a case with no esac');
+  assert.deepEqual(
+    tokenizeShell('case x in a|b) echo hi;; esac').commands.map((c) => Boolean(c.pattern)),
+    [false, true, false, false],
+  );
+});
+test('FU-159 F1: only a genuine NAME= token is an assignment', () => {
+  for (const body of [
+    "c='docker run alpine:latest echo'\n$c=x",
+    "c='docker run alpine:latest echo'\n${c}=x",
+    `c=docker\nenv $c=x ${R}`,
+  ])
+    refusedBoth(body);
+  for (const body of ['a=1', 'a+=1 true', 'a[1]=1', 'export a=1 b=2', 'env A=1 true'])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+});
+test('FU-159 F1: after `--` the wrapper still takes its positional operands', () => {
+  for (const wrapper of ['timeout -- 5', 'chroot -- /', 'flock -- /tmp/l', 'timeout -s TERM -- 5'])
+    refusedBoth(`c=docker\n${wrapper} $c ${R}`);
+  for (const body of ['timeout -- 5 sleep 1', 'chroot -- / true', 'env -- A=1 true'])
+    assert.deepEqual(
+      outcome('shell', body).errors.filter((e) => !/chroot/.test(e)),
+      [],
+      body,
+    );
+});
+test('FU-159 F1: xargs input and unquoted operands cannot choose the program', () => {
+  for (const wrapper of ['env', 'nice', 'timeout 5', 'stdbuf -o L']) {
+    refusedBoth(`printf 'docker ${R}\\n' | xargs ${wrapper}`);
+    for (const replace of ['-I {}', '-i', '--replace', '-I X', '-IX', '--replace=X'])
+      refusedBoth(
+        `printf 'doc%s' ker | xargs ${replace} ${wrapper} ${replace.endsWith('X') ? 'X' : '{}'} ${R}`,
+      );
+  }
+  refusedBoth("printf 'doc%s' ker | xargs -I CMD env CMD run alpine:latest");
+  // the replace string may be the name of a harmless program: it is still replaced
+  refusedBoth(`printf 'doc%s' ker | xargs -I echo env echo ${R}`);
+  refusedBoth("printf 'doc%s' ker | xargs taskset 1");
+  refusedBoth("printf 'doc%s' ker | xargs frob");
+  for (const wrapper of ['env -u $x', 'sudo -u $x', 'nice -n $x', 'timeout $x', 'timeout -s $x 5'])
+    refusedBoth(`x='A docker'\n${wrapper} echo ${R}`);
+  for (const body of [
+    'xargs -n1 -I{} echo {}',
+    'xargs -0 rm -f',
+    'xargs',
+    'env -u "$x" true',
+    'timeout "$t" true',
+  ])
+    assert.deepEqual(outcome('shell', body).errors, [], body);
+});
+test('FU-159 F1: an executable this run did not read refuses', () => {
+  const read = { kind: 'shell', name: 'tools/ok.sh', text: 'true' };
+  for (const body of [
+    './tools/evil.sh',
+    './tools/evil.bash',
+    '"${UNTRUSTED}/evil.sh"',
+    'taskset 1 ./tools/evil.sh',
+    'echo x | xargs ./tools/evil.sh',
+    'find . -exec ./tools/evil.sh {} \\;',
+    './env true',
+    'env ./tools/evil.sh',
+    '/home/x/evil.sh',
+  ])
+    refusedBoth(body, bare, [read]);
+  assert.deepEqual(
+    validateInfraImagePins([read, asInput('shell', './tools/ok.sh')], bare).errors,
+    [],
+  );
+  assert.deepEqual(
+    validateInfraImagePins([read, asInput('shell', 'env -u X ./tools/ok.sh')], bare).errors,
+    [],
+  );
+  // a computed path is not the file, however it ends or normalises
+  for (const body of ['"${ROOT}/tools/ok.sh"', '"$x/../tools/ok.sh"', '${x}/../tools/ok.sh'])
+    refusedBoth(body, bare, [read]);
+  // EXECUTED_PROGRAMS: exact script and word; a word nothing runs is stale
+  const policy = {
+    ...bare,
+    executedPrograms: new Map([
+      ['scripts/x.sh', { words: ['${ROOT}/tools/ok.sh'], reason: 'ROOT is the root' }],
+    ]),
+  };
+  assert.deepEqual(
+    validateInfraImagePins(
+      [read, asInput('shell', 'readonly ROOT=/r\n"${ROOT}/tools/ok.sh"')],
+      policy,
+    ).errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins([read, asInput('shell', 'true')], policy).errors.some((e) =>
+      /nothing runs any more/.test(e),
+    ),
+  );
+  assert.ok(
+    validateInfraImagePins(
+      [read, { ...asInput('shell', '"${ROOT}/tools/ok.sh"'), name: 'scripts/y.sh' }],
+      policy,
+    ).errors.some((e) => /does not read/.test(e)),
+  );
+});
+
+const P159 = (name) => `${name}="$(bash infra/creds.sh)"`;
+const creds159 = (body) =>
+  validateInfraImagePins([credsFile, asInput('shell', body)], creds150).errors;
+const evalRefused = (body) =>
+  assert.ok(
+    creds159(body).some((e) => /^scripts\/x\.sh:\d+: eval runs text/.test(e)),
+    body,
+  );
+test('FU-159 F2: writes are read from canonical words, however the name is spelled', () => {
+  const spell = {
+    plain: (n) => n,
+    'quote inside': (n) => `${n.slice(0, 4)}""${n.slice(4)}`,
+    escape: (n) => `${n.slice(0, 4)}\\${n.slice(4)}`,
+    quoted: (n) => `"${n}"`,
+    single: (n) => `'${n}'`,
+    continued: (n) => `${n.slice(0, 4)}\\\n${n.slice(4)}`,
+  };
+  const text = "'docker run alpine:latest'";
+  const writers = {
+    'printf -v': (n) => `printf -v ${n} '%s' ${text}`,
+    'printf -vNAME': (n) => `printf -v${n} '%s' ${text}`,
+    read: (n) => `read ${n} <<<${text}`,
+    'IFS= read -a': (n) => `IFS= read -a ${n} <<<${text}`,
+    mapfile: (n) => `mapfile ${n} <<<${text}`,
+    readarray: (n) => `readarray ${n} <<<${text}`,
+    typeset: (n) => `typeset ${n}=${text}`,
+    'declare --': (n) => `declare -- ${n}=${text}`,
+    'export --': (n) => `export -- ${n}=${text}`,
+    'readonly --': (n) => `readonly -- ${n}=${text}`,
+  };
+  for (const write of Object.values(writers))
+    for (const name of Object.values(spell))
+      evalRefused(`${P159('commands')}\n${write(name('commands'))}\neval "$commands"`);
+});
+test('FU-159 F2: implicit targets, loop variables, eval/trap text and arithmetic invalidate provenance', () => {
+  for (const [name, writer] of [
+    ['REPLY', 'read <<<x'],
+    ['REPLY', 'select i in a; do break; done <<<1'],
+    ['MAPFILE', 'mapfile <<<x'],
+    ['MAPFILE', 'readarray <<<x'],
+    ['OPTARG', 'getopts a: o -a docker'],
+    ['OPTIND', 'getopts a: o -a docker'],
+    ['commands', 'for comm\\\nands in x; do :; done'],
+    ['commands', 'for "commands" in x; do :; done'],
+    ['commands', `eval 'printf -v comm""ands %s x'`],
+    ['commands', `eval 'commands=x'`],
+    ['commands', `trap 'printf -v comm""ands %s x' EXIT`],
+    ['commands', `trap 'commands=x' EXIT`],
+    ['commands', "printf '%n' commands"],
+    ['c', 'n="$(printf \'\\143\')"\nprintf \'%n\' "$n"'],
+    ['commands', 'let "comm""ands=5"'],
+    ['commands', 'unset comm""ands'],
+    ['commands', 'echo $(( commands = 5 ))'],
+    ['commands', '(( commands = 5 ))'],
+    ['commands', ': ${commands:=x}'],
+    // an eval or handler whose text is computed may write anything (exempted, so only the
+    // trusted eval below can refuse)
+    ['commands', 'q=x\neval "$q" # image-pin-exempt: r\ntrue'],
+    ['commands', 'q=x\ntrap "$q" EXIT # image-pin-exempt: r\ntrue'],
+    ['commands', 'q=x\neval "printf -v $q %s x" # image-pin-exempt: r\ntrue'],
+    // the name is built from a substitution: no text of the script says which variable it is
+    ['c', 'q="$(printf \'\\143\')"\ntrap "printf -v $q %s x" EXIT # image-pin-exempt: r\ntrue'],
+    // a variable that is NOT an approved producer's output is not a trusted eval
+    ['commands', 'd="$(bash infra/other.sh)"\neval "$d" # image-pin-exempt: r\ntrue'],
+  ])
+    evalRefused(`${P159(name)}\n${writer}\neval "$${name}"`);
+  // harmless writers of other names, in every spelling, leave the producer trusted
+  for (const body of [
+    `${P159('commands')}\nprintf -v other '%s' x\nread line <<<x\neval "$commands"`,
+    `${P159('commands')}\nprintf -v ot""her '%s' x\neval "$commands"`,
+    `${P159('commands')}\nfor i in 1 2; do :; done\neval "$commands"`,
+    `${P159('commands')}\neval 'other=1'\ntrap 'echo bye' EXIT\neval "$commands"`,
+    `${P159('commands')}\n( eval "\${commands}" && true & )`,
+  ])
+    assert.deepEqual(creds159(body), [], body);
+});
+
+// FU-159 F3: a relative file is the file only while the directory is the one the script started in.
+test('FU-159 F3: a directory change refuses the approval of a source or a script that follows', () => {
+  const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  const other = { kind: 'shell', name: 'scripts/other.sh', text: 'true' };
+  const errors = (body) =>
+    validateInfraImagePins(
+      [
+        library(),
+        other,
+        {
+          kind: 'shell',
+          name: 'infrastructure/docker/postgres/init.sh',
+          text: body.replace('LIB', lib),
+        },
+      ],
+      withLibrary,
+    ).errors;
+  for (const body of [
+    'cd /tmp\nsource LIB',
+    'pushd /tmp\n. LIB',
+    'popd\nsource LIB',
+    "eval 'cd /tmp'\nsource LIB",
+    'f() { cd /tmp; }\nsource LIB\nf',
+    'for i in 1 2; do source LIB; cd /tmp; done',
+    "trap 'cd /tmp' EXIT\nsource LIB",
+    "trap 'source LIB' EXIT\ncd /tmp",
+    'cd /tmp\nx="$(bash scripts/other.sh)"',
+    'cd /tmp\nx="$(source LIB)"',
+    'cd /tmp\nbash scripts/other.sh',
+    'cd /tmp\nscripts/other.sh',
+    'env -C /tmp bash scripts/other.sh',
+    'env --chdir=/tmp bash scripts/other.sh',
+    'sudo -D /tmp bash scripts/other.sh',
+    'sudo --chdir=/tmp scripts/other.sh',
+    'chroot / bash scripts/other.sh',
+    'env -C /tmp scripts/other.sh',
+  ])
+    assert.ok(
+      errors(body).some((e) => /does not read/.test(e)),
+      body,
+    );
+  for (const body of [
+    'source LIB\ncd /tmp',
+    '( cd /tmp )\nsource LIB',
+    'x="$(cd /tmp && pwd)"\nsource LIB',
+    'bash scripts/other.sh\ncd /tmp',
+    'env -u X scripts/other.sh',
+  ])
+    assert.deepEqual(errors(body), [], body);
+});
+
+test('FU-159 F1: a function is a definition read from tokens; a string or comment that imitates one is not', () => {
+  assert.deepEqual(
+    [...tokenizeShell('f() { :; }\nfunction g { :; }\nh ( ) { :; }\nk=(a b)').functions].sort(),
+    ['f', 'g', 'h'],
+  );
+  assert.deepEqual([...tokenizeShell(`echo ';taskset() {'\n# chrt() {\nx "$(y)"`).functions], []);
+  assert.deepEqual([...tokenizeShell('taskset ( true )').functions], []);
+  refusedBoth(`echo ';taskset() {'\n# taskset() {\nc=docker\ntaskset 1 $c ${R}`);
+  // a function of the file, or of a file it sources, is its own program
+  assert.deepEqual(outcome('shell', 'taskset() { "$@"; }\nc=true\ntaskset 1 $c').errors.length, 1);
+  assert.deepEqual(outcome('shell', 'f() { echo "$1"; }\nf "$a"').errors, []);
+});
+test('FU-159 F2: coproc and `exec {fd}>` name variables they write', () => {
+  evalRefused(`${P159('commands')}\ncoproc commands { :; }\neval "$commands"`);
+  evalRefused(`${P159('commands')}\nexec {commands}>/dev/null\neval "$commands"`);
+  evalRefused(`${P159('COPROC')}\ncoproc { :; }\neval "$COPROC"`);
+});
+test('FU-159 F3: a sourced file that changes directory moves the shell that sources it', () => {
+  const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  const files = (mover) => [
+    library(),
+    { kind: 'shell', name: 'scripts/other.sh', text: 'true' },
+    { kind: 'shell', name: 'scripts/mover.sh', text: mover },
+    {
+      kind: 'shell',
+      name: 'infrastructure/docker/postgres/init.sh',
+      text: `source scripts/mover.sh\nsource ${lib}\n`,
+    },
+  ];
+  assert.ok(
+    validateInfraImagePins(files('cd /tmp\n'), withLibrary).errors.some((e) =>
+      /does not read/.test(e),
+    ),
+  );
+  assert.deepEqual(validateInfraImagePins(files('true\n'), withLibrary).errors, []);
+});
+
+// =============================================================================
+// FU-159 round 2 (PR #874 review r1): DEFAULT DENY. The probes of the review, each of which was
+// approved on aa45dd88, are rows here. Where a probe could be refused for another reason, the row
+// names the reason that has to refuse it (`why`), so disabling one mechanism fails its own test.
+// =============================================================================
+const asWorkflow = (body) =>
+  workflowYaml(
+    stringify({
+      jobs: { a: { 'runs-on': 'x', env: { CMD: 'docker' }, steps: [{ run: body }] } },
+    }),
+  );
+/** every error of `body` run as a CI script and as a workflow step */
+const errorsBoth = (body, policy = bare, extra = []) =>
+  ['shell', 'workflow'].map(
+    (kind) =>
+      validateInfraImagePins(
+        [...extra, kind === 'shell' ? asInput('shell', body) : asWorkflow(body)],
+        policy,
+      ).errors,
+  );
+const refusesWhy = (body, why, policy = bare, extra = []) => {
+  for (const errors of errorsBoth(body, policy, extra))
+    assert.ok(
+      errors.some((e) => why.test(e)),
+      `${JSON.stringify(body)} should be refused (${why}); got ${JSON.stringify(errors)}`,
+    );
+};
+const acceptsBoth = (body, policy = bare, extra = []) => {
+  for (const errors of errorsBoth(body, policy, extra)) assert.deepEqual(errors, [], body);
+};
+const refusesShell = (body, why, policy = bare, extra = []) => {
+  const { errors } = validateInfraImagePins([...extra, asInput('shell', body)], policy);
+  assert.ok(
+    errors.some((e) => why.test(e)),
+    `${JSON.stringify(body)} should be refused (${why}); got ${JSON.stringify(errors)}`,
+  );
+};
+/** a CI script only: a workflow step has no path of its own to source from or be listed by */
+const acceptsShell = (body, policy = bare, extra = []) =>
+  assert.deepEqual(
+    validateInfraImagePins([...extra, asInput('shell', body)], policy).errors,
+    [],
+    body,
+  );
+const NOT_MODELED = /a program this check does not model/;
+const scriptFile = (name, text = 'true') => ({ kind: 'shell', name, text });
+
+test('FU-159 r2 F1: a program in no table refuses, whatever its arguments look like', () => {
+  // the review’s probes
+  refusesWhy('taskset 1 tools/unchecked', NOT_MODELED);
+  refusesWhy(`node -e 'require("child_process").execSync("doc"+"ker ${R}")'`, NOT_MODELED);
+  // wrappers the table does not model, with literal executable operands
+  for (const wrapper of [
+    'taskset 1',
+    'chrt 1',
+    'unshare -m',
+    'nsenter -t 1',
+    'strace',
+    'gosu root',
+    'su-exec root',
+    'eatmydata',
+    'busybox',
+    'setpriv --reuid=1',
+    'setarch x86_64',
+    'runcon ctx',
+    'numactl -N0',
+    'chpst -u x',
+    'tini --',
+    'dumb-init',
+    'bwrap --bind / /',
+  ])
+    refusesWhy(`${wrapper} tools/unchecked`, NOT_MODELED);
+  // interpreters with code strings or unread files, and options that run a program
+  for (const program of [
+    'python3 -c "import os"',
+    'perl -e 1',
+    'ruby -e 1',
+    'make -f tools/Makefile',
+    "sed -n '1e docker run' f",
+    'awk \'BEGIN{system("x")}\'',
+    "psql -c '\\! docker run'",
+    'psql -f tools/x.sql',
+    'node tools/x.js',
+    'go run tools/x.go',
+    'sort --compress-program=tools/x f',
+    'tar -cf a --to-command tools/x b',
+  ])
+    refusesWhy(program, NOT_MODELED);
+  // a relative path without ./ is a file, not a name
+  refusesWhy('tools/unchecked', /a file this check does not read/);
+  // the tables stay usable: builtins, data programs, wrappers around them
+  acceptsBoth('echo "$a" | grep -q x && cat f | tail -n 1 > /dev/null');
+  acceptsBoth('timeout 5 sleep 1; env -u X date; nice -n 1 mkdir -p d; command -v git');
+  acceptsBoth('curl -fsS "$url" -o /dev/null');
+  // a reviewed entry names the script and the program, and goes stale when nothing runs it
+  const reviewedPolicy = (programs) => ({
+    ...bare,
+    reviewedPrograms: new Map([['scripts/x.sh', { programs, reason: 'r' }]]),
+  });
+  assert.deepEqual(
+    validateInfraImagePins([asInput('shell', 'node tools/x.js')], reviewedPolicy(['node'])).errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins([asInput('shell', 'true')], reviewedPolicy(['node'])).errors.some((e) =>
+      /REVIEWED_PROGRAMS lists node in scripts\/x\.sh, which nothing runs/.test(e),
+    ),
+  );
+  // by name only: a path is a file, and the entry does not reach another script
+  refusesWhy('./node tools/x.js', /a file this check does not read/, reviewedPolicy(['node']));
+  refusesWhy('timeout 5 node x.js', NOT_MODELED, {
+    ...bare,
+    reviewedPrograms: new Map([['scripts/y.sh', { programs: ['node'], reason: 'r' }]]),
+  });
+});
+
+test('FU-159 r2 F1: xargs replacement is read by one option parser at every nesting level', () => {
+  const feed = "printf 'doc%s' ker |";
+  // clustered options, however they are spelled
+  for (const options of ['-I', '-rI', '-tI', '-pI', '-0I', '-rtI', '-r0I'])
+    refusesWhy(`${feed} xargs ${options} echo env echo ${R}`, /xargs substitutes its input/);
+  // `-i` and `--replace` without a string replace `{}`
+  for (const options of ['-iZ', '-riZ', '--replace=Z'])
+    refusesWhy(`${feed} xargs ${options} env Z ${R}`, /xargs substitutes its input/);
+  // `-IS` and `--replace=S` carry the string with the option
+  refusesWhy(`${feed} xargs -Iecho env echo ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs -rIecho env echo ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs --replace=echo env echo ${R}`, /xargs substitutes its input/);
+  // an inner xargs does not hide the outer replacement context
+  refusesWhy(`${feed} xargs -I% xargs -r env % ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs -rI% xargs -I@ env % ${R}`, /xargs substitutes its input/);
+  refusesWhy(`${feed} xargs -I% xargs -I@ env @ ${R}`, /xargs substitutes its input/);
+  // the replace string away from the program position is only an argument
+  acceptsBoth('printf "a\\nb" | xargs -rI% echo %');
+  acceptsBoth('printf "a\\nb" | xargs -n 1 echo');
+  // the program an xargs hands its input to must be in a table
+  refusesWhy('printf x | xargs taskset 1', NOT_MODELED);
+  refusesWhy('printf x | xargs env', NOT_MODELED);
+});
+
+test('FU-159 r2 F1: a GitHub expression is text of unknown words, never a literal word', () => {
+  // in the command position, as a wrapper operand, an option value, an eval or -c body
+  for (const body of [
+    `\${{ env.CMD }} ${R}`,
+    `timeout \${{ env.CMD }} docker ${R}`,
+    `sudo -u \${{ env.CMD }} true`,
+    `nice -n \${{ env.CMD }} true`,
+    `env \${{ env.CMD }} ${R}`,
+    `eval "\${{ env.CMD }} ${R}"`,
+    'eval ${{ env.CMD }}',
+    `bash -c "\${{ env.CMD }} ${R}"`,
+  ]) {
+    const errors = errorsBoth(body)[1];
+    assert.ok(errors.length > 0, `workflow: ${body}`);
+  }
+  // an expression among data stays readable, and an image word still resolves through it
+  assert.deepEqual(errorsBoth('echo "${{ github.sha }}" >> /dev/null')[1], []);
+  const images = validateInfraImagePins([asWorkflow(`docker pull \${{ env.CMD }}`)], bare).errors;
+  assert.ok(images.some((e) => /not pinned/.test(e)));
+});
+
+test('FU-159 r2 F2: a function exempts a call only if it is certainly the function there', () => {
+  // the control: a function defined once at the top level, before its calls
+  acceptsBoth('f() { echo hi; }\nf\ng() { f; }\ng');
+  acceptsBoth('g() { f; }\nf() { :; }\ng'); // a call in a body counts from the first time g runs
+  acceptsBoth('function f { :; }\nf');
+  acceptsBoth('f() ( :; )\nf');
+  // unset (also in eval and trap text, or by a computed name) ends the exemption
+  for (const body of [
+    'f() { :; }\nunset -f f\nf',
+    'f() { :; }\nunset f\nf',
+    "f() { :; }\neval 'unset -f f'\nf",
+    "f() { :; }\ntrap 'unset -f f' EXIT\nf",
+    'f() { :; }\nunset -f "$n"\nf',
+  ])
+    refusesWhy(body, NOT_MODELED);
+  // a definition after the call, in a branch, in a list, in the background, in a body, in a subshell
+  for (const body of [
+    'f\nf() { :; }',
+    'if false; then f() { :; }; fi\nf',
+    'true && f() { :; }\nf',
+    'f() { :; } &\nf',
+    'g() { f() { :; }; }\ng\nf',
+    '( f() { :; } )\nf',
+    'f() { :; }\nf() { echo hi; }\nf',
+    // in a group, a loop, a branch or a case arm of its own lines: the body may never run
+    '{\n  f() { :; }\n}\nf',
+    'if true; then\n  f() { :; }\nfi\nf',
+    'while false; do\n  f() { :; }\ndone\nf',
+    'case x in\n  x) f() { :; };;\nesac\nf',
+    'echo hi | cat\nf() { :; } | cat\nf',
+  ])
+    refusesWhy(body, NOT_MODELED);
+  // a call that goes around the function lookup runs the external program
+  for (const call of ['command f', 'env f', 'nohup f', '/usr/bin/f', 'timeout 5 f', 'builtin f'])
+    refusesWhy(`f() { :; }\n${call}`, NOT_MODELED);
+  // a child shell does not have the parent's functions
+  refusesWhy("f() { :; }\nbash <<'EOF'\nf\nEOF", NOT_MODELED);
+  refusesWhy("f() { :; }\nbash -c 'f'", NOT_MODELED);
+  // the same shell does: a substitution, eval and trap text
+  acceptsBoth('f() { :; }\nx="$(f)"\neval f\ntrap f EXIT');
+  // a quoted keyword and a name inside a string are no definition
+  refusesWhy('"function" f { :; }\nf', NOT_MODELED);
+  refusesWhy('function "f" { :; }\nf', NOT_MODELED);
+  refusesWhy('"function" f || :\nf', NOT_MODELED);
+  refusesWhy("echo 'f() { :; }'\nf", NOT_MODELED);
+  refusesWhy('echo f() { :; }\nf', NOT_MODELED);
+});
+
+test('FU-159 r2 F2: functions of a sourced file come from the parsed source command, one path', () => {
+  const defs = scriptFile('scripts/defs.sh', 'fn() { :; }');
+  acceptsShell('source scripts/defs.sh\nfn', bare, [defs]);
+  acceptsShell('. scripts/defs.sh\nfn', bare, [defs]);
+  // a workflow step has no file of its own: it imports nothing, though the same text passes as a script
+  assert.ok(
+    errorsBoth('source scripts/defs.sh\nfn', bare, [defs])[1].some((e) => NOT_MODELED.test(e)),
+  );
+  // a call before the source, a source in a branch, after a directory change, by a string or comment
+  for (const body of [
+    'fn\nsource scripts/defs.sh',
+    'if true; then source scripts/defs.sh; fi\nfn',
+    'true && source scripts/defs.sh\nfn',
+    'cd /x\nsource scripts/defs.sh\nfn',
+    "echo 'x\nsource scripts/defs.sh'\nfn",
+    '# source scripts/defs.sh\nfn',
+    'echo source scripts/defs.sh\nfn',
+    'command source scripts/defs.sh\nfn',
+  ])
+    refusesWhy(body, NOT_MODELED, bare, [defs]);
+  // ONE resolved path: `source lib.sh` is ./lib.sh, never scripts/lib.sh as well
+  refusesWhy('source lib.sh\nfn', NOT_MODELED, bare, [scriptFile('scripts/lib.sh', 'fn() { :; }')]);
+  // a source that unsets or redefines
+  for (const text of [
+    'fn() { :; }\nunset -f fn',
+    'fn() { :; }\nunset fn',
+    'fn() { :; }\nfn() { x; }',
+  ])
+    refusesWhy('source scripts/defs.sh\nfn', NOT_MODELED, bare, [
+      scriptFile('scripts/defs.sh', text),
+    ]);
+  // a source whose unset name is computed may have removed any function
+  refusesShell('fn() { :; }\nsource scripts/b.sh\nfn', NOT_MODELED, bare, [
+    scriptFile('scripts/b.sh', 'unset -f "$name"'),
+  ]);
+  // a source that unsets a name another file defined takes it from the file that defined it
+  refusesShell('fn() { :; }\nsource scripts/b.sh\nfn', NOT_MODELED, bare, [
+    scriptFile('scripts/b.sh', 'unset -f fn'),
+  ]);
+  refusesShell('source scripts/defs.sh\nsource scripts/b.sh\nfn', NOT_MODELED, bare, [
+    defs,
+    scriptFile('scripts/b.sh', 'unset fn'),
+  ]);
+  refusesShell('source scripts/b.sh\nfn', NOT_MODELED, bare, [
+    scriptFile('scripts/b.sh', 'source scripts/defs.sh\nunset -f "$name"'),
+    defs,
+  ]);
+  // a hash-pinned library gives only the names its entry lists
+  const lib = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  const entry = (functions) => ({
+    ...bare,
+    sourcedLibraries: new Map([
+      [lib, { sha256: createHash('sha256').update('x\n').digest('hex'), reason: 'r', functions }],
+    ]),
+  });
+  const libFile = { kind: 'library', name: lib, text: 'x\n' };
+  const call = (name) => ({ kind: 'shell', name: 'scripts/y.sh', text: `source ${lib}\n${name}` });
+  assert.deepEqual(validateInfraImagePins([libFile, call('listed')], entry(['listed'])).errors, []);
+  assert.ok(
+    validateInfraImagePins([libFile, call('other')], entry(['listed'])).errors.some((e) =>
+      NOT_MODELED.test(e),
+    ),
+  );
+});
+
+test('FU-159 r2 F4: a function body is not ordered by the text: a directory change refuses its sources', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const body of [
+    'f() { source scripts/lib.sh; }\ncd /x\nf',
+    'f() { . scripts/lib.sh; }\ncd /x\nf',
+    'f() { bash scripts/lib.sh; }\ncd /x\nf',
+    'f() { scripts/lib.sh; }\ncd /x\nf',
+    'f() { source scripts/lib.sh; }; cd /x; f',
+    'function f { source scripts/lib.sh; }\ncd /x\nf',
+    'f() { cd /x; scripts/lib.sh; }\nf',
+    'if true; then cd /x; fi\nif true; then bash scripts/lib.sh; fi',
+  ])
+    refusesWhy(body, /does not read/, bare, [lib]);
+  acceptsBoth('f() { source scripts/lib.sh; }\nf', bare, [lib]);
+  acceptsBoth('(cd /x; true)\nsource scripts/lib.sh', bare, [lib]);
+});
+
+test('FU-159 r2 F4: what a sourced file does is read from its tokens, not its raw text', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const mover of [
+    'c""d /x',
+    'c\\d /x',
+    'c\\\nd /x',
+    "'cd' /x",
+    'pushd /x',
+    'chroot /x true',
+    'env -C /x true',
+  ])
+    refusesWhy('source scripts/mv.sh\nsource scripts/lib.sh', /does not read/, bare, [
+      lib,
+      scriptFile('scripts/mv.sh', mover),
+    ]);
+  // through a quoted source, and through a source of a source
+  refusesWhy('"source" scripts/mv.sh\nsource scripts/lib.sh', /does not read/, bare, [
+    lib,
+    scriptFile('scripts/mv.sh', 'cd /x'),
+  ]);
+  refusesWhy('source scripts/a.sh\nsource scripts/lib.sh', /does not read/, bare, [
+    lib,
+    scriptFile('scripts/a.sh', 'source scripts/b.sh'),
+    scriptFile('scripts/b.sh', 'c""d /x'),
+  ]);
+  // a source that cannot be resolved may move
+  refusesWhy('source scripts/a.sh\nsource scripts/lib.sh', /does not read/, bare, [
+    lib,
+    scriptFile('scripts/a.sh', 'source "$x"'),
+  ]);
+  // words that only mention `cd` do not move anything
+  acceptsShell('source scripts/mv.sh\nsource scripts/lib.sh', bare, [
+    lib,
+    scriptFile('scripts/mv.sh', '# cd /y\nprintf "%s" cd'),
+  ]);
+});
+
+test('FU-159 r2 F4: find -execdir and -okdir run from another directory', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  refusesWhy('find . -execdir scripts/lib.sh {} \\;', /does not read/, bare, [lib]);
+  refusesWhy('find . -okdir ./scripts/lib.sh {} \\;', /does not read/, bare, [lib]);
+  refusesWhy('find . -execdir env scripts/lib.sh {} \\;', /does not read/, bare, [lib]);
+  acceptsBoth('find . -exec scripts/lib.sh {} \\;', bare, [lib]);
+  acceptsBoth('find . -execdir cat {} \\;');
+});
+
+test('FU-159 r2 F4: a write that can replace a file the script sources or runs refuses', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  const replaced = /writes scripts\/lib\.sh, a file this run sources or executes/;
+  for (const writer of [
+    'printf x > scripts/lib.sh',
+    'printf x >> ./scripts/lib.sh',
+    'printf x >scripts/lib.sh',
+    'printf x 2> scripts/lib.sh',
+    'printf x &> scripts/lib.sh',
+    'printf x >| scripts/lib.sh',
+    'printf x >& scripts/lib.sh',
+    'cp tools/evil.sh scripts/lib.sh',
+    'mv tools/evil.sh scripts/lib.sh',
+    'ln -sf tools/evil.sh scripts/lib.sh',
+    'echo x | tee scripts/lib.sh',
+    'echo x | tee -a scripts/lib.sh',
+    'touch scripts/lib.sh',
+    'curl -o scripts/lib.sh https://x/y',
+    'curl -sSLo scripts/lib.sh https://x/y',
+    'curl --output=scripts/lib.sh https://x/y',
+    'curl --output scripts/lib.sh https://x/y',
+    'curl -c scripts/lib.sh https://x/y',
+    'curl --cookie-jar scripts/lib.sh https://x/y',
+    'curl -D scripts/lib.sh https://x/y',
+  ])
+    for (const runner of ['bash scripts/lib.sh', 'source scripts/lib.sh', 'scripts/lib.sh'])
+      refusesWhy(`${writer}\n${runner}`, replaced, bare, [lib]);
+  // a target this check cannot read, in a script that runs a file, needs a reviewed entry
+  refusesWhy(
+    'printf x > "$t"\nbash scripts/lib.sh',
+    /writes to a path this check cannot read/,
+    bare,
+    [lib],
+  );
+  refusesWhy(
+    'cp a "${d}/b"\nbash scripts/lib.sh',
+    /writes to a path this check cannot read/,
+    bare,
+    [lib],
+  );
+  refusesWhy(
+    'curl -O https://x/y\nbash scripts/lib.sh',
+    /writes to a path this check cannot read/,
+    bare,
+    [lib],
+  );
+  const entry = {
+    ...bare,
+    reviewedPrograms: new Map([['scripts/x.sh', { programs: [], writes: ['$t'], reason: 'r' }]]),
+  };
+  assert.deepEqual(
+    validateInfraImagePins([lib, asInput('shell', 'printf x > "$t"\nbash scripts/lib.sh')], entry)
+      .errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins([lib, asInput('shell', 'bash scripts/lib.sh')], entry).errors.some((e) =>
+      /lists the write \$t/.test(e),
+    ),
+  );
+  // an absolute path may be this checkout under another spelling: unreadable, like a computed one
+  for (const target of ['/home/runner/work/r/r/scripts/lib.sh', '/etc/x', '//work/lib.sh'])
+    refusesWhy(
+      `printf x > ${target}\nbash scripts/lib.sh`,
+      /writes to a path this check cannot read/,
+      bare,
+      [lib],
+    );
+  acceptsBoth('printf x > /tmp/x\nprintf x > /dev/null\nbash scripts/lib.sh', bare, [lib]);
+  // harmless writes: other literal files, descriptors, and computed targets where nothing runs a file
+  acceptsBoth(
+    'printf x > out.txt\nprintf x >&2\necho y 2>&1\nbash scripts/lib.sh >/dev/null 2>&1',
+    bare,
+    [lib],
+  );
+  acceptsBoth('printf x > "$t"\ncp a "$b"');
+});
+
+test('FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path must be read-only before the command', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  const policy = {
+    ...bare,
+    executedPrograms: new Map([
+      ['scripts/x.sh', { words: ['${ROOT}/scripts/lib.sh'], reason: 'r' }],
+    ]),
+  };
+  const run = '"${ROOT}/scripts/lib.sh"';
+  const frozen = /EXECUTED_PROGRAMS|a file this check does not read/;
+  for (const body of [
+    `ROOT=/tmp\n${run}`,
+    `ROOT=/a\n${run}\nROOT=/tmp`,
+    `read ROOT <<< /tmp\n${run}`,
+    `printf -v ROOT %s /tmp\n${run}`,
+    `f() { ROOT=/tmp; ${run}; }\nf`,
+    run,
+    `${run}\nreadonly ROOT=/a`,
+    `if true; then readonly ROOT=/a; fi\n${run}`,
+    `true && readonly ROOT=/a\n${run}`,
+    `( readonly ROOT=/a )\n${run}`,
+    `ROOT=/a\necho hi\nreadonly ROOT\n${run}`,
+    `export ROOT=/a\n${run}`,
+  ])
+    refusesWhy(body, frozen, policy, [lib]);
+  acceptsShell(`readonly ROOT=/a\n${run}`, policy, [lib]);
+  acceptsShell(`declare -r ROOT=/a\n${run}`, policy, [lib]);
+  acceptsShell(`ROOT=/a\nreadonly ROOT\n${run}`, policy, [lib]);
+  acceptsShell(`readonly ROOT=/a\nf() { ${run}; }\nf`, policy, [lib]);
+  acceptsShell(`readonly ROOT=/a\nx="$(${run})"`, policy, [lib]);
+});
+
+test('FU-159 r2 F4: PATH, CDPATH and hash decide which file a command name is', () => {
+  for (const body of [
+    'hash -p tools/unchecked cat\ncat',
+    'PATH=tools:$PATH\ncat',
+    'export PATH="tools:$PATH"\ncat',
+    'env PATH=tools cat',
+    'read PATH <<< tools\ncat',
+    'unset PATH\ncat',
+    'CDPATH=x\ncat',
+    'declare -x PATH=tools\ncat',
+    'echo "PATH=tools" >> "$GITHUB_ENV"',
+  ])
+    refusesWhy(body, /names PATH or CDPATH|hash binds/);
+  refusesWhy('echo tools >> "$GITHUB_PATH"', /appends to GITHUB_PATH/);
+  refusesWhy('printf "%s\\n" tools >> "$GITHUB_PATH"', /appends to GITHUB_PATH/);
+  acceptsBoth('hash -r\necho "$PATH" > /dev/null\necho "A=b" >> "$GITHUB_ENV"');
+  // a reviewed entry names the one directory a job may append
+  const entry = {
+    ...bare,
+    reviewedPrograms: new Map([
+      ['scripts/x.sh', { programs: [], paths: ['$RUNNER_TEMP/bin'], reason: 'r' }],
+    ]),
+  };
+  assert.deepEqual(
+    validateInfraImagePins([asInput('shell', 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"')], entry)
+      .errors,
+    [],
+  );
+  assert.ok(
+    validateInfraImagePins(
+      [asInput('shell', 'echo "$RUNNER_TEMP/other" >> "$GITHUB_PATH"')],
+      entry,
+    ).errors.some((e) => /appends to GITHUB_PATH/.test(e)),
+  );
+});
+
+test('FU-159 r2 F4: the real tree is read with the reviewed tables (no stale entry, no exception left over)', () => {
+  // every REVIEWED_PROGRAMS / EXECUTED_PROGRAMS entry is used by the CLI run (its stale check)
+  for (const [file, entry] of REVIEWED_PROGRAMS) {
+    assert.ok(entry.reason.length > 20, file);
+    assert.ok(
+      entry.programs.length + (entry.writes ?? []).length + (entry.paths ?? []).length > 0,
+      file,
+    );
+  }
+});
+
+test('FU-159 r2 F1: a dispatcher whose argv this check does not rebuild is a program in no table', () => {
+  for (const call of [
+    'watch tools/unchecked',
+    'watch taskset 1 x',
+    'parallel tools/unchecked ::: x',
+    'parallel {} run alpine:latest ::: docker',
+    'su -c tools/unchecked',
+    'script -qc tools/unchecked /dev/null',
+    'at -f tools/unchecked now',
+    'runuser -u x tools/unchecked',
+    'sg grp tools/unchecked',
+    'ssh host tools/unchecked',
+    'ssh host taskset 1 x',
+  ])
+    refusesWhy(call, NOT_MODELED);
+  // flock -c hands its operand to `sh -c`
+  refusesWhy("flock l -c 'tools/unchecked'", /flock option -c is not one this check reads/);
+  // the wrapper forms whose argv IS rebuilt stay readable
+  acceptsBoth('flock /tmp/l sleep 1; sudo -u x true; doas true; setsid -w true');
+  // sudo -i / -s / -e run a shell or an editor no operand names
+  for (const option of ['-i', '-s', '-e', '--login', '--shell'])
+    refusesWhy(`sudo ${option} true`, /sudo option .* is not one this check reads/);
+});
+
+test('FU-159 r2 F1: text that an arithmetic evaluation would run as a command substitution refuses', () => {
+  refusesWhy('let x=1', NOT_MODELED);
+  const payload = "'a[$(tools/unchecked)]'";
+  for (const body of [
+    `let ${payload}`,
+    `[[ ${payload} -eq 1 ]]`,
+    `test ${payload} -eq 1`,
+    `x=${payload}; echo $((x))`,
+    `declare -i x=${payload}`,
+    `typeset -i x`,
+    `local -i x`,
+    `export -i x=1`,
+    'echo "\\$(tools/unchecked)"',
+    "echo `echo hi` '`x`'",
+  ])
+    refusesWhy(body, /holds the text \$\( or a backtick|evaluates its value as arithmetic/);
+  // an awk program of a reviewed entry may use `$(NF-1)`
+  assert.deepEqual(
+    validateInfraImagePins([asInput('shell', "awk '{ print $(NF-1) }' f")], {
+      ...bare,
+      reviewedPrograms: new Map([['scripts/x.sh', { programs: ['awk'], reason: 'r' }]]),
+    }).errors,
+    [],
+  );
+  // a substitution that is a command of its own is read as one
+  acceptsBoth('x="$(date)"\necho "$((x + 1))"');
+});
+
+test('FU-159 r2 F4: time -o writes its report to a file', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  for (const timer of [
+    'time -o scripts/lib.sh',
+    'time -oscripts/lib.sh',
+    'time --output=scripts/lib.sh',
+    'time --output scripts/lib.sh',
+  ])
+    refusesWhy(`${timer} true\nbash scripts/lib.sh`, /writes scripts\/lib\.sh/, bare, [lib]);
+});
+
+test('FU-159 r2 F2: the splitter keeps a definition at the top level (descriptors, pipelines, nested case)', () => {
+  // `>&2` is a redirection, not a background `&`; a pipeline's last stage does not pipe the next line
+  acceptsBoth('f() { echo x >&2; }\nf');
+  acceptsBoth('f() { echo x 2>&1; }\nf');
+  acceptsBoth('echo a | cat\nf() { :; }\nf');
+  acceptsBoth('echo a || true\nf() { :; }\nf');
+  // an inner `esac` before `;;` ends the inner case: the outer pattern list continues
+  assert.deepEqual(
+    tokenizeShell('case x in x) case y in y) true;; esac;; z) true;; esac').commands.map(
+      (c) => `${c.words.map((w) => w.value).join(' ')}${c.pattern ? ' (pattern)' : ''}`,
+    ),
+    [
+      'case x in',
+      'x (pattern)',
+      'case y in',
+      'y (pattern)',
+      'true',
+      'esac',
+      'z (pattern)',
+      'true',
+      'esac',
+    ],
+  );
+  // `>&2` stays in its command; `>|` is the clobbering redirection, `|` alone a pipe
+  assert.deepEqual(
+    tokenizeShell('echo x >&2').commands.map((c) => c.words.map((w) => w.value)),
+    [['echo', 'x', '>&2']],
+  );
+  assert.deepEqual(
+    tokenizeShell('printf x >| f').commands.map((c) => c.words.map((w) => w.value)),
+    [['printf', 'x', '>|', 'f']],
+  );
+});
+
+// =============================================================================
+// FU-159 round 2 F3 (PR #874 review r1): a tracked eval trusts the VALUE of one ordinary variable,
+// quoted, assigned once from the approved producer. Bash writes its own variables (`BASH_REMATCH`,
+// `_`, `IFS`, `REPLY` ...) without naming them, and an unquoted expansion is split and globbed.
+// =============================================================================
+test('FU-159 r2 F3: the review’s probes: BASH_REMATCH, _ and an unquoted expansion under IFS', () => {
+  const producer = (name) => `${name}="$(bash infra/creds.sh)"`;
+  evalRefused(
+    `${producer('BASH_REMATCH')}\n[[ 'do""cker run alpine:latest' =~ .+ ]]\neval "$BASH_REMATCH"`,
+  );
+  evalRefused(`${producer('_')}\necho 'do""cker run alpine:latest'\neval "$_"`);
+  evalRefused(`${producer('commands')}; IFS="'"; eval $commands`);
+  evalRefused(`${producer('commands')}\nIFS="'"\neval \${commands}`);
+});
+
+test('FU-159 r2 F3: a name bash writes by itself is not an ordinary variable', () => {
+  for (const name of [
+    'BASH_REMATCH',
+    'BASH_COMMAND',
+    '_',
+    'IFS',
+    'REPLY',
+    'MAPFILE',
+    'OPTARG',
+    'OPTIND',
+    'COPROC',
+    'RANDOM',
+    'LINENO',
+    'SECONDS',
+    'PIPESTATUS',
+    'OLDPWD',
+    'COMMANDS',
+    'Commands',
+  ])
+    for (const argument of [`"$${name}"`, `"\${${name}}"`])
+      evalRefused(`${P159(name)}\neval ${argument}`);
+});
+
+test('FU-159 r2 F3: only the word "$name" or "${name}" is a tracked eval', () => {
+  for (const argument of [
+    '$commands',
+    '${commands}',
+    "'$commands'",
+    '\\$commands',
+    // an unquoted expansion with a quote glued on is still split
+    '$commands""',
+    '${commands}""',
+    "$commands''",
+    '"$commands"x',
+    '"${commands}x"',
+    '"$commands}"',
+    '"${commands"',
+    '"$commands$commands"',
+    '"${commands:-x}"',
+    '"${commands%x}"',
+    '"$(echo $commands)"',
+    '-- "$commands"',
+    '"$commands" "$commands"',
+    '"$commands" extra',
+  ])
+    evalRefused(`${P159('commands')}\neval ${argument}`);
+  // the quoted forms are the one shape, whatever the quoting is wrapped in
+  for (const body of [
+    `${P159('commands')}\neval "$commands"`,
+    `${P159('commands')}\neval "\${commands}"`,
+    `${P159('commands')}\neval "$commands"''`,
+    `${P159('commands')}\nIFS="'"\neval "$commands"`,
+    `${P159('kafka_credentials')}\neval "\${kafka_credentials}" && true`,
+    `${P159('c2_x')}\n( eval "$c2_x" )`,
+  ])
+    assert.deepEqual(creds159(body), [], body);
+});
+
+// =============================================================================
+// FU-159 round 3 (PR #896 review r1, F1–F3). The review's probes, each as a shell file AND as a
+// workflow step. The trust in a tracked eval rests on what the parsed structure PROVES: one
+// double-quoted expansion of the producer's name, a genuine assignment from the approved script,
+// no write the check cannot read, and an interpreter that no function or alias can stand in for.
+// =============================================================================
+const evalRefusedBoth = (body, why = /eval runs text/) => {
+  for (const kind of ['shell', 'workflow']) {
+    const { errors } = validateInfraImagePins([credsFile, asInput(kind, body)], creds150);
+    assert.ok(
+      errors.some((e) => why.test(e)),
+      `${kind}: ${body}`,
+    );
+  }
+};
+const evalAcceptedBoth = (body) => {
+  for (const kind of ['shell', 'workflow'])
+    assert.deepEqual(
+      validateInfraImagePins([credsFile, asInput(kind, body)], creds150).errors,
+      [],
+      `${kind}: ${body}`,
+    );
+};
+const PRODUCER = 'commands="$(bash infra/creds.sh tests)"';
+const PAYLOAD = '\'do""cker run alpine:latest #\'';
+
+test('FU-159 r3 F1: a word that merely reads like "$commands" after quote removal is not the tracked expansion', () => {
+  const name = 'commands';
+  // every split point: bash expands `comm` and appends the literal `ands`
+  for (let k = 1; k < name.length; k += 1) {
+    const [head, tail] = [name.slice(0, k), name.slice(k)];
+    for (const argument of [
+      `"$${head}""${tail}"`,
+      `"\${${head}}""${tail}"`,
+      `"$${head}"${tail}`,
+      `"$${head}"'${tail}'`,
+    ])
+      evalRefusedBoth(`${PRODUCER}\n${head}=${PAYLOAD}\neval ${argument}`);
+  }
+  // a literal dollar is another text altogether
+  for (const argument of [
+    '"\\$commands"',
+    '"\\${commands}"',
+    '\'$commands\'""',
+    "'$commands'",
+    '"$commands"x',
+    '$commands"x"',
+    '"$commands""x"',
+    '"${commands}x"',
+    '"$commands"$x',
+    '"$com"mands',
+  ])
+    evalRefusedBoth(`${PRODUCER}\neval ${argument}`);
+});
+
+test('FU-159 r3 F1: only a genuine assignment word binds the producer', () => {
+  const output = '"$(bash infra/creds.sh tests)"';
+  for (const assignment of [
+    `comm""ands=${output}`,
+    `"commands"=${output}`,
+    `'commands'=${output}`,
+    `comm\\ands=${output}`,
+    `commands\\=${output}`,
+    `commands"="${output}`,
+    `commands'='${output}`,
+  ])
+    for (const body of [
+      `${assignment}\neval "$commands"`,
+      `commands=${PAYLOAD}\n${assignment}\neval "$commands"`,
+      `export ${assignment}\neval "$commands"`,
+    ])
+      evalRefusedBoth(body);
+});
+
+test('FU-159 r3 F1: the genuine shapes stay accepted', () => {
+  for (const body of [
+    `${PRODUCER}\neval "$commands"`,
+    `${PRODUCER}\neval "\${commands}"`,
+    `${PRODUCER}\neval "$commands"''`,
+    `export ${PRODUCER}\neval "$commands"`,
+    `( ${PRODUCER} && eval "$commands" )`,
+    `a_c="$(bash infra/creds.sh tests)"\nb_c="$(bash infra/creds.sh service x)"\neval "$a_c" && eval "$b_c"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+test('FU-159 r3 F2: every expansion site is a write site: here-strings, here-documents, redirection targets', () => {
+  const payload = 'do""cker run alpine:latest';
+  for (const operator of [':=', '=']) {
+    for (const body of [
+      `commands="$(bash infra/creds.sh invalid)"\n: <<<"\${commands${operator}${payload}}"\neval "$commands"`,
+      `${PRODUCER}\n: <<<\${commands${operator}${payload}}\neval "$commands"`,
+      `${PRODUCER}\n: <<EOF\n\${commands${operator}${payload}}\nEOF\neval "$commands"`,
+      `${PRODUCER}\n: <<-EOF\n\t\${commands${operator}${payload}}\nEOF\neval "$commands"`,
+      `${PRODUCER}\n: > "\${commands${operator}/dev/null}"\neval "$commands"`,
+      `${PRODUCER}\n: < "\${commands${operator}/dev/null}"\neval "$commands"`,
+    ])
+      evalRefusedBoth(body);
+  }
+  // arithmetic that assigns, in either input form
+  for (const body of [
+    `${PRODUCER}\n: <<<"$((commands=5))"\neval "$commands"`,
+    `${PRODUCER}\n: <<EOF\n$((commands=5))\nEOF\neval "$commands"`,
+    `${PRODUCER}\n: <<EOF\n$[commands=5]\nEOF\neval "$commands"`,
+  ])
+    evalRefusedBoth(body);
+  // a quoted here-document delimiter expands nothing
+  evalAcceptedBoth(`${PRODUCER}\ncat <<'EOF'\n\${commands:=x}\nEOF\neval "$commands"`);
+});
+
+test('FU-159 r3 F2: arithmetic this check cannot prove constant never keeps a producer trusted', () => {
+  // `n` holds the text `commands=42`: every arithmetic context below evaluates it, in this shell
+  const data = `n="$(printf '\\143ommands=42')"`;
+  for (const use of [
+    ': $((n))',
+    ': $[n]',
+    ': "$((n))"',
+    '(( n ))',
+    '(( (n) ))',
+    'for ((i=n;i<1;i++)); do :; done',
+    '[[ n -eq 42 ]]',
+    '[[ "$n" -eq 42 ]]',
+    '[[ -n y && 5 -eq n ]]',
+    '[[ -v other[n] ]]',
+    'a=(1 2); : ${a[n]}',
+    'a=(1); : ${#a[n]}',
+    's=xy; : ${s:n}',
+    's=xy; : ${s:0:n}',
+    'a[n]=1',
+    'a=([n]=1)',
+    'declare -A m; m[n]=1',
+    'declare -a other[n]',
+    "typeset -a 'other[n]'",
+    "read 'other[n]' <<<x",
+    "printf -v 'other[n]' x",
+    "unset 'other[n]'",
+    "test -v 'other[n]'",
+    "[ -v 'other[n]' ]",
+    'let n',
+    'let "n"',
+    'declare -i q; q=n',
+    'typeset -i q; q=n',
+    'f() { local -i q; q=n; }; f',
+    "eval ': $((n))'",
+    "trap ': $((n))' EXIT",
+  ])
+    evalRefusedBoth(`${PRODUCER}\n${data}\n${use}\neval "$commands"`);
+});
+
+test('FU-159 r3 F2: expansions that assign or run through a name this check cannot read', () => {
+  for (const use of [
+    `r="$(printf '\\143ommands')"; : \${!r:=zz}`,
+    'v=x; : "${v@P}"',
+    `r="$(printf 'a[%s]' x)"; : "\${!r}"`,
+    ': ${ x=1; }',
+    "PS4='$((n))'; set -x; true",
+    "PS4='${commands:=x}'; set -x; true",
+    `mapfile -C 'comm""ands=x' -c 1 <<<y`,
+    `mapfile -C'comm""ands=x' -c 1 <<<y`,
+    `compgen -W '\${commands:=x}'`,
+    'compgen -W "$n"',
+  ])
+    evalRefusedBoth(`${PRODUCER}\n${use}\neval "$commands"`);
+});
+
+test('FU-159 r3 F2: constant arithmetic, other names and literal subscripts leave the producer trusted', () => {
+  for (const body of [
+    `${PRODUCER}\n: $((1+2))\neval "$commands"`,
+    `${PRODUCER}\nn=0\n(( n=5 ))\neval "$commands"`,
+    `${PRODUCER}\na=(1 2)\n: "\${a[@]}" "\${a[0]}" "\${#a[@]}"\neval "$commands"`,
+    `${PRODUCER}\ns=abcd\n: \${s:1:2}\neval "$commands"`,
+    `${PRODUCER}\n[ "$x" -eq 1 ]\neval "$commands"`,
+    `${PRODUCER}\ncat <<<"hello"\neval "$commands"`,
+    `${PRODUCER}\ncat <<EOF\nhello \${x:-y}\nEOF\neval "$commands"`,
+    `${PRODUCER}\n: \${x:-default}\neval "$commands"`,
+    `${PRODUCER}\na=(1 2)\n: "\${!a[@]}" "\${!a[*]}" "\${!BASH*}"\neval "$commands"`,
+    `foo() { :; }\n${PRODUCER}\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
+});
+
+test('FU-159 r3 F3: the producer counts only when its interpreter cannot be a function or an alias', () => {
+  const fn = (name) => `${name}() { printf '%s\\n' 'do""cker run alpine:latest'; }`;
+  for (const body of [
+    `${fn('bash')}\n${PRODUCER}\neval "$commands"`,
+    `${fn('sh')}\ncommands="$(sh infra/creds.sh tests)"\neval "$commands"`,
+    `function bash { printf '%s\\n' x; }\n${PRODUCER}\neval "$commands"`,
+    `function bash() { printf '%s\\n' x; }\n${PRODUCER}\neval "$commands"`,
+    `${fn('bash')}\ncommands="$("bash" infra/creds.sh tests)"\neval "$commands"`,
+    `${fn('bash')}\ncommands="$(\\bash infra/creds.sh tests)"\neval "$commands"`,
+    `${fn('bash')}\ncommands="$(ba""sh infra/creds.sh tests)"\neval "$commands"`,
+    `"bash"() { printf '%s\\n' x; }\n${PRODUCER}\neval "$commands"`,
+    `eval 'bash() { printf "%s\\n" x; }'\n${PRODUCER}\neval "$commands"`,
+    `eval "bash() { printf '%s\\n' x; }"\n${PRODUCER}\neval "$commands"`,
+    `trap 'bash() { :; }' EXIT\n${PRODUCER}\neval "$commands"`,
+    `${PRODUCER}\n${fn('bash')}\neval "$commands"`,
+    `shopt -s expand_aliases\nalias bash='printf "%s\\n" x;:'\n${PRODUCER}\neval "$commands"`,
+    `BASH_ALIASES[bash]=x\n${PRODUCER}\neval "$commands"`,
+    // the same shell reached through a command substitution or a here-document
+    `${fn('bash')}\nx="$( ${PRODUCER}; eval "$commands" )"`,
+    `${fn('bash')}\nbash <<'EOF'\n${PRODUCER}\neval "$commands"\nEOF`,
+    `alias bash=true\nx="$( ${PRODUCER}; eval "$commands" )"`,
+  ])
+    evalRefusedBoth(body);
+  // a definition the splitter does not see at the head of a command is still refused (the shell
+  // word has nothing to run), not trusted
+  for (const body of [
+    `if true; then ${fn('bash')}; fi\n${PRODUCER}\neval "$commands"`,
+    `( ${fn('bash')} )\n${PRODUCER}\neval "$commands"`,
+  ])
+    for (const kind of ['shell', 'workflow'])
+      assert.notDeepEqual(
+        validateInfraImagePins([credsFile, asInput(kind, body)], creds150).errors,
+        [],
+        body,
+      );
+  // a function of another name, and the plain shapes, leave the producer trusted
+  for (const body of [
+    `${fn('other')}\n${PRODUCER}\neval "$commands"`,
+    `commands="$(sh infra/creds.sh tests)"\neval "$commands"`,
+  ])
+    evalAcceptedBoth(body);
 });

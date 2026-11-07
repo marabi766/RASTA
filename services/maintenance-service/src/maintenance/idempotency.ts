@@ -6,7 +6,11 @@ import { isUniqueViolation } from './maintenance.repository';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type MaintenanceEnv } from '../config/env';
-import { IN_FLIGHT_WAIT_MS, WAIT_TRANSACTION_SLACK_MS } from '../config/operation-budgets';
+import {
+  IN_FLIGHT_WAIT_MS,
+  WAIT_TRANSACTION_SLACK_MS,
+  replayFenceBudgetMs,
+} from '../config/operation-budgets';
 
 export { IN_FLIGHT_WAIT_MS };
 
@@ -54,6 +58,35 @@ function claimLost(endpoint: string): RastaError {
   );
 }
 
+/**
+ * Proven refusal: the deadline has passed, and this attempt wrote nothing. Fixed
+ * message, nothing of the key's state.
+ */
+function windowClosed(endpoint: string): RastaError {
+  return new RastaError(
+    'REPLAY_WINDOW_CLOSED',
+    'The time allowed for this request has passed; this attempt did nothing',
+    { internalContext: { endpoint } },
+  );
+}
+
+/**
+ * Proven refusal, before anything is read or written: the deadline is later than
+ * the retention can guarantee. Fixed message, depending on nothing stored.
+ */
+function deadlineBeyondRetention(endpoint: string): RastaError {
+  return new RastaError('VALIDATION_FAILED', `${REPLAY_DEADLINE_HEADER} is invalid`, {
+    details: [
+      {
+        path: REPLAY_DEADLINE_HEADER,
+        code: 'beyond_retention',
+        message: 'is later than this service can guarantee; this attempt did nothing',
+      },
+    ],
+    internalContext: { endpoint },
+  });
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -71,8 +104,9 @@ export interface ClaimFence<T> {
   hold(tx: ExtendedPrismaClient): Promise<void>;
   /**
    * Stores `result` as the response to replay, on the row `hold` locked, and
-   * starts the key's lifetime from now. Returns the stored JSON, which is
-   * what this caller and every replay receive.
+   * starts the key's lifetime from now (never less than the replay fence's
+   * floor). Returns the stored JSON, which is what this caller and every replay
+   * receive.
    */
   complete(tx: ExtendedPrismaClient, result: T): Promise<T>;
 }
@@ -130,6 +164,101 @@ export function requiredIdempotencyKey(value: string | undefined): string {
   return optionalIdempotencyKey(value) as string;
 }
 
+/** The header the replay fence reads: epoch milliseconds, canonical. */
+export const REPLAY_DEADLINE_HEADER = 'Idempotency-Replay-Deadline';
+
+const CANONICAL_EPOCH_MS = /^[1-9][0-9]{0,15}$/;
+
+/**
+ * Reads `Idempotency-Replay-Deadline` (procurement's parser, FU-156). Absent →
+ * `undefined`. Present → exactly one canonical safe-integer epoch-ms value (no
+ * sign, leading zero, space or exponent; a duplicated header arrives comma-joined
+ * or as an array and fails). Anything else is `400 VALIDATION_FAILED` before any
+ * claim.
+ */
+export function parseReplayDeadline(raw: string | string[] | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const refuse = (message: string): never => {
+    throw RastaError.validation(
+      [{ path: REPLAY_DEADLINE_HEADER, code: 'invalid', message }],
+      `${REPLAY_DEADLINE_HEADER} is invalid`,
+    );
+  };
+  if (typeof raw !== 'string') return refuse('must be sent once');
+  if (!CANONICAL_EPOCH_MS.test(raw)) {
+    return refuse('must be one canonical integer: milliseconds since the epoch');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) return refuse('must be a safe integer');
+  return value;
+}
+
+declare const idempotentRequestBrand: unique symbol;
+
+/**
+ * A keyed command's identity as the caller sent it: the key and, when sent, its
+ * replay deadline. Made only by {@link idempotentRequest} and
+ * {@link optionalIdempotentRequest}, and the only thing
+ * {@link IdempotencyStore.execute} accepts — so no command can pass a key without
+ * its deadline having been read (FU-171: the fence is the store's, not each
+ * controller's).
+ */
+export interface IdempotentRequest {
+  readonly key: string;
+  readonly replayDeadlineMs: number | undefined;
+  readonly [idempotentRequestBrand]: true;
+}
+
+/** The request headers a keyed command reads, as Nest's `@Headers()` hands them over. */
+export type IdempotencyHeaders = Record<string, string | string[] | undefined>;
+
+const rawKeyOf = (headers: IdempotencyHeaders): string | undefined => {
+  const raw = headers['idempotency-key'];
+  return Array.isArray(raw) ? raw.join(', ') : raw;
+};
+
+const deadlineOf = (headers: IdempotencyHeaders): number | undefined =>
+  parseReplayDeadline(headers[REPLAY_DEADLINE_HEADER.toLowerCase()]);
+
+/** The key ({@link requiredIdempotencyKey}) and deadline of a command that must have a key. */
+export function idempotentRequest(headers: IdempotencyHeaders): IdempotentRequest {
+  const key = requiredIdempotencyKey(rawKeyOf(headers));
+  return { key, replayDeadlineMs: deadlineOf(headers) } as IdempotentRequest;
+}
+
+/**
+ * The same, for a command whose key is optional: `undefined` only when neither
+ * header came, which keeps that path as it was. A deadline with no key is refused,
+ * never ignored: a caller that sent one relies on it, and nothing could hold a
+ * keyless request to it.
+ */
+export function optionalIdempotentRequest(
+  headers: IdempotencyHeaders,
+): IdempotentRequest | undefined {
+  const key = optionalIdempotencyKey(rawKeyOf(headers));
+  const replayDeadlineMs = deadlineOf(headers);
+  if (key === undefined && replayDeadlineMs === undefined) return undefined;
+  return { key: key ?? requiredIdempotencyKey(undefined), replayDeadlineMs } as IdempotentRequest;
+}
+
+/**
+ * When a completed response stops being replayed: its retention from completion,
+ * and never before `B` past the caller's replay deadline (FU-171). Completion can
+ * be read on another replica than the claim, whose clock may be `2·skew` behind;
+ * this floor keeps the fence's proof independent of that.
+ */
+export function completedExpiryMs(
+  completedAtMs: number,
+  ttlHours: number,
+  replayDeadlineMs: number | undefined,
+  budgetMs: number,
+): number {
+  const retained = completedAtMs + ttlHours * 60 * 60 * 1000;
+  return replayDeadlineMs === undefined
+    ? retained
+    : Math.max(retained, replayDeadlineMs + budgetMs);
+}
+
 /**
  * Idempotent creation of maintenance requests (docs/06 § 6.8, #157) — the
  * shape marketplace-service uses since #147, in this service's own copy
@@ -142,6 +271,8 @@ export function requiredIdempotencyKey(value: string | undefined): string {
  * | same key, same body, same caller        | the stored 201 body, nothing runs again     |
  * | same key, different body or caller      | `409 IDEMPOTENCY_KEY_REUSED`                |
  * | key in flight, still after {@link IN_FLIGHT_WAIT_MS} | `409 CONFLICT` + `Retry-After: 1` |
+ * | past its replay deadline, a replay too  | `409 REPLAY_WINDOW_CLOSED`, nothing written |
+ * | a replay deadline beyond the retention  | `400 VALIDATION_FAILED`, nothing claimed    |
  *
  * Keys are the tenant's (`organization_id` leads the primary key): the same
  * key in two organizations is two requests. The caller's user id is part of
@@ -188,6 +319,54 @@ export function requiredIdempotencyKey(value: string | undefined): string {
  * That wait — like the insert's, behind an uncommitted removal — lasts only
  * what is left of the request's {@link IN_FLIGHT_WAIT_MS}, and running out is
  * the retryable `409 CONFLICT`, never a hang (#194).
+ *
+ * ## The replay fence (FU-171, PM decision D-133 — procurement's, FU-156, with PR-844 r1 F1 closed)
+ *
+ * An expired key is reusable, which is right for a caller that never asked for
+ * more — and wrong for one that retries a request which may have committed: a cost
+ * line has no other backstop, so after the response is purged the same request
+ * adds it to the bill again. No caller can close that alone — a pause between its
+ * own check and this service's claim is unbounded — so the store closes it with
+ * its own clocks, for every keyed command.
+ *
+ * A command may carry `Idempotency-Replay-Deadline` `H` (epoch ms,
+ * {@link parseReplayDeadline}): the last instant it may be admitted under its key,
+ * or answered from its stored response. With `C` this replica's clock at the
+ * attempt, `T` the database clock, `TTL` the retention and
+ * `B = 2·MAINTENANCE_CLOCK_SKEW_SECONDS + margin` ({@link replayFenceBudgetMs}):
+ *
+ *   - `C > H` → `409 REPLAY_WINDOW_CLOSED`, before anything is read or written —
+ *     the order the request names included ({@link IdempotencyStore.assertAdmissible}),
+ *     so the answer depends on nothing stored; equality is allowed;
+ *   - `H > C + TTL − B` → `400 VALIDATION_FAILED` (`beyond_retention`), just as
+ *     early; never clamped. An honest client never meets it: this service is tied
+ *     to `MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS` and refuses to boot when its
+ *     settings break it;
+ *   - **one decision on `T` for both ways through a claim**
+ *     ({@link IdempotencyStore.assertWindowOpen}), read fresh after every wait: a
+ *     new claim's insert and `T` are ONE transaction, so `T > H` rolls the claim
+ *     back; a stored response is selected only after `T` is read past the insert
+ *     that lost and the read of the row, and nothing waits between that reading
+ *     and the response leaving (the caller's right to the order is asked before the
+ *     claim, not after it);
+ *   - a completed response is kept until `max(completion + TTL, H + B)`
+ *     ({@link completedExpiryMs}).
+ *
+ * Why an accepted `H` can never run twice: every clock (replicas', the database's)
+ * is within `s` of true time `t`, `B = 2s + m`, `m > 0`. Executing needs `T ≤ H`
+ * after the insert, so `t ≤ H + s`. The completed response may be removed (by a
+ * takeover or the purge, both `expires_at ≤ now` on some replica) only at
+ * `t ≥ expiresAt − s ≥ H + B − s = H + s + m`. So the only time a retry carrying
+ * `H` can be admitted is while the first execution's response still exists: it is
+ * replayed, not run. A lapsed in-flight claim that is taken over committed nothing
+ * (its work's `hold` fails), so re-admitting under it is a first execution.
+ *
+ * Not covered, stated: a request without the header behaves as before (D-133: the
+ * header becomes required later); a caller that sends a NEW, later deadline for the
+ * same key — or a first deadline on a retry whose first attempt had none — is not
+ * held to a floor nobody stored, and after that response is purged it makes a new
+ * request; a claim admitted at `H` may finish its work after `H`, for at most its
+ * lease, and that one execution is still the only one.
  */
 @Injectable()
 export class IdempotencyStore {
@@ -198,7 +377,9 @@ export class IdempotencyStore {
     @Inject(ENV)
     private readonly env: Pick<
       MaintenanceEnv,
-      'MAINTENANCE_IDEMPOTENCY_TTL_HOURS' | 'MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS'
+      | 'MAINTENANCE_IDEMPOTENCY_TTL_HOURS'
+      | 'MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS'
+      | 'MAINTENANCE_CLOCK_SKEW_SECONDS'
     >,
   ) {}
 
@@ -212,12 +393,13 @@ export class IdempotencyStore {
    */
   async execute<T>(
     endpoint: string,
-    key: string,
+    request: IdempotentRequest,
     body: unknown,
     successStatus: number,
     work: (fence: ClaimFence<T>) => Promise<T>,
   ): Promise<{ result: T; executed: boolean }> {
-    const claim = await this.claim(endpoint, key, body);
+    const { key, replayDeadlineMs } = request;
+    const claim = await this.claim(endpoint, key, body, replayDeadlineMs);
     if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
 
     let stored: { value: T } | undefined;
@@ -225,7 +407,15 @@ export class IdempotencyStore {
       hold: (tx) => this.hold(tx, endpoint, key, claim.token),
       complete: async (tx, result) => {
         const value = JSON.parse(JSON.stringify(result)) as T;
-        await this.storeResponse(tx, endpoint, key, claim.token, successStatus, value);
+        await this.storeResponse(
+          tx,
+          endpoint,
+          key,
+          claim.token,
+          successStatus,
+          value,
+          replayDeadlineMs,
+        );
         stored = { value };
         return value;
       },
@@ -273,8 +463,9 @@ export class IdempotencyStore {
    * {@link ClaimFence.complete}: the response for replay, on the row `hold`
    * locked, in the work's own transaction. The key lives
    * `MAINTENANCE_IDEMPOTENCY_TTL_HOURS` from now — from the response, not the
-   * claim, which only ever held a lease — so a retry that waited on the lock
-   * finds it live and replays it.
+   * claim, which only ever held a lease — and never less than `B` past the replay
+   * deadline ({@link completedExpiryMs}), so a retry that waited on the lock finds
+   * it live and replays it.
    */
   async storeResponse(
     tx: ExtendedPrismaClient,
@@ -283,6 +474,7 @@ export class IdempotencyStore {
     token: string,
     status: number,
     body: unknown,
+    replayDeadlineMs: number | undefined,
   ): Promise<void> {
     const organizationId = getOrganizationId();
     const { count } = await tx.idempotencyKey.updateMany({
@@ -291,16 +483,66 @@ export class IdempotencyStore {
         state: 'COMPLETED',
         responseStatus: status,
         responseBody: body as object,
-        expiresAt: this.expiry(new Date()),
+        expiresAt: new Date(
+          completedExpiryMs(
+            Date.now(),
+            this.env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS,
+            replayDeadlineMs,
+            this.budgetMs(),
+          ),
+        ),
       },
     });
     // Held since the transaction began, so never 0 — unless `hold` was skipped.
     if (count !== 1) throw claimLost(endpoint);
   }
 
-  /** When a **completed** response stops being replayed. */
-  private expiry(from: Date): Date {
-    return new Date(from.getTime() + this.env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000);
+  /** B, the replay fence's budget ({@link replayFenceBudgetMs}). */
+  private budgetMs(): number {
+    return replayFenceBudgetMs(this.env.MAINTENANCE_CLOCK_SKEW_SECONDS);
+  }
+
+  /**
+   * The fence's early refusals, on this replica's clock: they depend on nothing
+   * stored, so they disclose nothing — whatever the key or the order named. Asked
+   * by every attempt at a claim, and by a command that reads before it claims, so
+   * a request refused here read nothing.
+   */
+  assertAdmissible(endpoint: string, request: Pick<IdempotentRequest, 'replayDeadlineMs'>): void {
+    const { replayDeadlineMs } = request;
+    if (replayDeadlineMs === undefined) return;
+    const nowMs = Date.now();
+    if (nowMs > replayDeadlineMs) throw windowClosed(endpoint);
+    const retentionMs = this.env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000;
+    if (replayDeadlineMs > nowMs + retentionMs - this.budgetMs()) {
+      throw deadlineBeyondRetention(endpoint);
+    }
+  }
+
+  /**
+   * The one deadline decision, for a new claim and a stored response alike: a fresh
+   * reading of the database clock, on the connection given, past `H` is
+   * `REPLAY_WINDOW_CLOSED`. Called after every wait; no deadline, no reading. A
+   * reading that fails throws, and nothing is admitted or replayed.
+   */
+  private async assertWindowOpen(
+    db: ExtendedPrismaClient,
+    endpoint: string,
+    replayDeadlineMs: number | undefined,
+  ): Promise<void> {
+    if (replayDeadlineMs === undefined) return;
+    const databaseNow = await this.readDatabaseClock(db);
+    if (!(databaseNow.getTime() <= replayDeadlineMs)) throw windowClosed(endpoint);
+  }
+
+  /** `clock_timestamp()`, the fence's last word; a bad reading aborts, never this replica's clock. */
+  protected async readDatabaseClock(db: ExtendedPrismaClient): Promise<Date> {
+    const rows = await db.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
+    const now = rows[0]?.now;
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+      throw new Error('clock_timestamp() did not return a timestamp; refusing to admit');
+    }
+    return now;
   }
 
   /**
@@ -319,14 +561,20 @@ export class IdempotencyStore {
 
   /**
    * Reserves the key, waits on it while another request holds it, or reports
-   * the stored response to replay. The two conflicts throw.
+   * the stored response to replay. The two conflicts and the replay fence's
+   * refusals throw.
    */
-  async claim(endpoint: string, key: string, body: unknown): Promise<Claim> {
+  async claim(
+    endpoint: string,
+    key: string,
+    body: unknown,
+    replayDeadlineMs: number | undefined,
+  ): Promise<Claim> {
     const requestHash = this.hash(body);
     const deadline = Date.now() + IN_FLIGHT_WAIT_MS;
     let retries = 0;
     for (;;) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline, replayDeadlineMs);
       if (outcome === RETRY_CLAIM) {
         retries += 1;
         if (retries >= CLAIM_ATTEMPTS) throw inFlight(endpoint);
@@ -357,16 +605,20 @@ export class IdempotencyStore {
     key: string,
     requestHash: string,
     deadline: number,
+    replayDeadlineMs: number | undefined,
   ): Promise<Claim | typeof RETRY_CLAIM | typeof IN_FLIGHT> {
     const organizationId = getOrganizationId();
+    // Before anything is read or written; every attempt re-reads the clock (a wait
+    // on a holder is one).
+    this.assertAdmissible(endpoint, { replayDeadlineMs });
     const now = new Date();
     // The lease, not the response's lifetime: `storeResponse` moves it to that.
     const expiresAt = this.lease(now);
 
     const token = randomUUID();
     try {
-      await this.withinBudget(endpoint, deadline, (tx) =>
-        tx.idempotencyKey.create({
+      await this.withinBudget(endpoint, deadline, async (tx) => {
+        await tx.idempotencyKey.create({
           data: {
             organizationId,
             endpoint,
@@ -376,8 +628,11 @@ export class IdempotencyStore {
             state: 'IN_PROGRESS',
             expiresAt,
           },
-        }),
-      );
+        });
+        // After the insert and any lock wait it made: a request suspended since the
+        // check above is refused, and throwing rolls the claim back.
+        await this.assertWindowOpen(tx, endpoint, replayDeadlineMs);
+      });
       return { kind: 'PROCEED', token };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
@@ -386,6 +641,10 @@ export class IdempotencyStore {
     const existing = await this.prisma.client.idempotencyKey.findFirst({
       where: { organizationId, endpoint, key },
     });
+    // Both the insert that lost and this read may have waited (PR-844 r1 F1). Before
+    // anything about the row: a late request removes nothing, replays nothing and
+    // learns nothing of it.
+    await this.assertWindowOpen(this.prisma.client, endpoint, replayDeadlineMs);
     if (!existing) return RETRY_CLAIM;
 
     if (existing.expiresAt <= now) {

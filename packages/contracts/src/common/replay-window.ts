@@ -45,3 +45,13 @@ export const PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS = 3_300;
  * leaves 3 503 s. The portal's side of the bound arrives with the portal sending the header.
  */
 export const INVENTORY_MAX_REPLAY_WINDOW_SECONDS = 3_300;
+
+/**
+ * The same bound for maintenance-service's keyed commands (FU-171, PM decision D-133):
+ * maintenance-service refuses a deadline later than `claim time + TTL − B` (its
+ * `maintenance/idempotency.ts`), with B = 2 · MAINTENANCE_CLOCK_SKEW_SECONDS + 7 s, and refuses to
+ * boot unless TTL − B − service skew ≥ K (`config/env.ts`). 3 300 s, the same number: its shortest
+ * legal retention, 1 h with the default skew, leaves 3 503 s. The portal's side of the bound arrives
+ * with the portal sending the header.
+ */
+export const MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS = 3_300;

@@ -7,7 +7,12 @@ import {
   continuedDollar,
   executionChain,
   findCommands,
+  outputRedirects,
+  redirectWidth,
   shellInvocation,
+  SYSTEM_PATH,
+  WRAPPER_NAMES,
+  unsplit,
   shellTextProblem,
 } from './ci-shell-text-lib.mjs';
 
@@ -218,18 +223,25 @@ export const EVALUATED_OUTPUTS = new Map([
  * tokenizer) is listed here with the sha256 of the contents a reviewer read: it starts no
  * container (no docker, eval, `sh -c` or xargs outside comments). The CLI passes each of them as
  * kind 'library'; an unlisted one, a changed one, or a source of any other path refuses.
+ * `functions` are the names a script that sources the library may call as shell functions: the
+ * ones the library defines (or sources) unconditionally at its top level and never unsets.
  * To change a library: edit it, read it again, and paste the sha256 the error prints.
  */
-const library = (sha256, reason) => ({ sha256, reason });
+const library = (sha256, reason, functions = []) => ({ sha256, reason, functions });
 const PSQL = 'init-time psql library; starts no container';
 export const SOURCED_LIBRARIES = new Map([
   [
     'infrastructure/docker/postgres/lib/disposable-marker.bash',
-    library('f05bc76561ebe1bf28e56795497be0ab39a7d58e9f907c127ba01d41cb1f3895', PSQL),
+    library('f05bc76561ebe1bf28e56795497be0ab39a7d58e9f907c127ba01d41cb1f3895', PSQL, [
+      'mark_disposable_database',
+    ]),
   ],
   [
     'infrastructure/docker/postgres/lib/role-passwords.bash',
-    library('465a53878d187075ce8f8900dee4d442749f2780cab16fd6595c38600db3aa3b', PSQL),
+    library('465a53878d187075ce8f8900dee4d442749f2780cab16fd6595c38600db3aa3b', PSQL, [
+      'privilege_split_grants_mode',
+      'resolve_role_passwords',
+    ]),
   ],
   [
     'infrastructure/docker/postgres/lib/rotate-role-passwords.bash',
@@ -237,7 +249,10 @@ export const SOURCED_LIBRARIES = new Map([
   ],
   [
     'infrastructure/docker/postgres/lib/service-privilege-split.bash',
-    library('d711b13ec42b4f44ef8a3c8d7a31b28c30514408d79f5c7f6ac8eafa8f9dafbb', PSQL),
+    library('d711b13ec42b4f44ef8a3c8d7a31b28c30514408d79f5c7f6ac8eafa8f9dafbb', PSQL, [
+      'split_service_privileges',
+      'split_audit_database_privileges',
+    ]),
   ],
   [
     'infrastructure/docker/postgres/lib/session-statement-timeout.bash',
@@ -257,6 +272,133 @@ export const SOURCED_LIBRARIES = new Map([
       'c52673c73019f71323c49d8953f263dfd27a06ac2e5f3e23342791cd4e4b8cec',
       '`docker compose exec` in the already running compose postgres service; starts no image',
     ),
+  ],
+]);
+
+/**
+ * FU-159 F1: files a CI script executes by a path this check cannot resolve to a CI script it
+ * reads (`${VAR}/x.sh`, an absolute path inside a container). Per script: the exact words, and why
+ * running that file starts no unpinned image. A word nothing uses any more is refused. A variable
+ * in a word must be `readonly` at the top level of the script before the command (FU-159 r2 F4):
+ * bash refuses every later write to it, so no search for the writes can miss one.
+ */
+export const EXECUTED_PROGRAMS = new Map([
+  [
+    'infrastructure/docker/kafka/create-topics.sh',
+    {
+      words: [
+        '${KAFKA_BIN}/kafka-topics.sh',
+        '${KAFKA_BIN}/kafka-configs.sh',
+        '${KAFKA_BIN}/kafka-consumer-groups.sh',
+      ],
+      reason:
+        'runs inside the pinned broker image; KAFKA_BIN is that image’s Apache Kafka bin directory, declared `readonly` before the first use so no later write can change it',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/broker-entrypoint.sh',
+    {
+      words: ['/opt/kafka/bin/kafka-storage.sh', '/etc/kafka/docker/run'],
+      reason: 'the broker image’s own tools, run inside that pinned image',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/ci-up.sh',
+    {
+      words: ['${ROOT}/scripts/ci-pull-image.sh'],
+      reason:
+        'ROOT is the repository root (the script’s own directory, two levels up), made readonly right after it is set so no later write can change it; scripts/ci-pull-image.sh is a CI script this check reads',
+    },
+  ],
+]);
+
+/**
+ * FU-159 r2 F1: programs a script runs that are neither in DATA_PROGRAMS nor modeled by this check.
+ * Per script: the exact program names (no path), and why running them there starts no unpinned
+ * image. This is a REVIEWED exception, not a proof: each of these can run an operand, a script text
+ * or a file the shell check does not read. A name nothing uses any more is refused.
+ */
+const TOOLING =
+  'the repository’s own Node/pnpm/Go tooling and tests (their sources are reviewed in their own PRs and ' +
+  'start no image by a name this check could read); not a proof, a reviewed exception';
+export const REVIEWED_PROGRAMS = new Map([
+  [
+    '.github/workflows/ci.yml',
+    {
+      programs: ['node', 'pnpm', 'go', 'psql', 'openssl'],
+      paths: ['$RUNNER_TEMP/trivy-db-check-bin'], // the `go build -o` directory of the trivy-db job
+      reason: `${TOOLING}; psql and openssl take SQL / key material from the job’s own services`,
+    },
+  ],
+  [
+    '.github/workflows/backup-drill-monthly.yml',
+    {
+      programs: ['node', 'pnpm'],
+      writes: ['${dir}/stdout.json', '${dir}/stderr.log', '${dir}/exit-code'],
+      reason: `${TOOLING}; the writes go into the step’s own \`mkdir -m 700\` directory under RUNNER_TEMP, where no file of this run lives`,
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/ci-up.sh',
+    {
+      programs: ['node', 'openssl'],
+      writes: ['${GITHUB_ENV}', '${directory}/${variable}'],
+      reason:
+        'node runs scripts/kafka-acl.mjs (Kafka ACLs over the wire); openssl x509 reads the generated CA; neither starts an image. The writes are the runner’s env file and one secret file per principal in the secrets directories, never a script',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/tls.sh',
+    {
+      programs: ['keytool', 'openssl'],
+      reason: 'generate the development CA and broker keystores in the working directory; no image',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/create-topics.sh',
+    {
+      programs: ['awk', 'sed', 'sort'],
+      writes: ['${admin_properties}'],
+      reason:
+        'literal text filters over `kafka-topics` output (awk / sed program is a quoted literal, sort has no --compress-program); run inside the pinned broker image. The write is its own mktemp file',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/topic-limits.sh',
+    {
+      programs: ['awk'],
+      reason: 'one literal awk program over topic limits; run inside the pinned broker image',
+    },
+  ],
+  [
+    'infrastructure/docker/kafka/broker-entrypoint.sh',
+    {
+      programs: ['sed'],
+      writes: ['${format}'],
+      reason:
+        'JAAS escaping: a literal `s///` script; runs inside the pinned broker image. The write is its own mktemp file',
+    },
+  ],
+  [
+    'scripts/ci-pull-image.sh',
+    {
+      programs: ['sed'],
+      reason: 'a literal `s///` script over a reference printed by docker pull',
+    },
+  ],
+  [
+    'infrastructure/docker/postgres/00-init-databases.sh',
+    {
+      programs: ['psql'],
+      reason: 'init-time SQL over the local socket of the already running postgres',
+    },
+  ],
+  [
+    'scripts/backup-restore-drill',
+    {
+      programs: ['node'],
+      reason: 'runs its sibling scripts/backup-restore-drill.mjs, the drill implementation',
+    },
   ],
 ]);
 
@@ -452,7 +594,14 @@ export function tokenizeShell(src) {
   const groups = [];
   const parents = [-1]; // parents[group]: the group it was opened in
   const arrays = new Set(); // the groups that are array literals
+  const functions = new Set(); // names defined as `name() …` or `function name`
+  // FU-159 r2 F2: where each definition stands: `index` is the command that holds the name (`name`
+  // of `name() …`, or the whole `function name …` command); an unquoted keyword and name only.
+  const definitions = [];
+  const arithmetic = []; // FU-159 r3 F2: the text of every `((` command
+  const opened = new Map(); // group -> the word before its ( and how many commands came before
   let pending = '';
+  let pendingUsed = false; // a command already took this separator as its own
   let cmdSep = '';
   // PR #805 r2 F2: the operator in front of a `( … )` group (`a &⏎( b )`: b is in a list `a` is part of).
   let lead = '';
@@ -462,27 +611,63 @@ export function tokenizeShell(src) {
   let input = {};
 
   const ensureWord = () => {
-    if (!word) word = { value: '', opaque: false };
+    if (!word) word = { value: '', opaque: false, split: false, segments: [] };
     if (startLine === null) {
       startLine = line;
       cmdSep = pending;
+      pendingUsed = true;
       cmdLead = pending === '(' ? lead : '';
     }
   };
+  // FU-159 r3 F1: the word's PARTS as written: bare text, `\x`, '…', "…" (raw, between the quotes),
+  // `$(…)` and `${…}`. `value` has the quotes removed and cannot tell `"$a""b"` from `"$ab"`.
+  const segment = (kind, raw) => {
+    const last = word.segments.at(-1);
+    if (kind === 'bare' && last?.kind === 'bare') last.raw += raw;
+    else word.segments.push({ kind, raw });
+  };
   let hereStringWord = false;
+  // FU-159 F1: a `case` is read as a state machine, never by guessing from a command's shape:
+  // 'subject' (case WORD), 'pattern' (up to the `)` that ends it) and 'body' (up to `;;` or `esac`).
+  // The commands of a pattern list are flagged `pattern`; every body is an ordinary command.
+  const cases = [];
+  const keyword = (value) => word && !word.quoted && word.value === value;
   const pushWord = () => {
     // A here-string's word is the command's input, not one of its arguments; it is kept as
     // that input (FU-092), so a shell reading it is seen.
     if (word && hereStringWord) {
       input = { ...input, hereString: word };
       hereStringWord = false;
-    } else if (word) words.push(word);
+    } else if (word) {
+      if (words.length === 0 && keyword('case')) cases.push('subject');
+      else if (words.length === 0 && keyword('esac')) cases.pop();
+      else if (words.length === 1 && words[0].value === 'function' && !words[0].quoted) {
+        functions.add(word.value);
+        if (!word.quoted) definitions.push({ name: word.value, index: commands.length });
+      }
+      const opens = cases.at(-1) === 'subject' && words.length === 2 && keyword('in');
+      words.push(word);
+      word = null;
+      if (opens) {
+        cases[cases.length - 1] = 'pattern';
+        endCommand();
+      }
+    }
     word = null;
   };
-  const endCommand = () => {
+  const endCommand = (pattern = false) => {
     pushWord();
     if (words.length > 0) {
-      commands.push({ startLine, endLine: line, words, input, group, sep: cmdSep, lead: cmdLead });
+      commands.push({
+        startLine,
+        endLine: line,
+        words,
+        input,
+        group,
+        sep: cmdSep,
+        lead: cmdLead,
+        ...(pattern ? { pattern } : {}),
+      });
       input = {};
     }
     words = [];
@@ -495,10 +680,11 @@ export function tokenizeShell(src) {
     return end;
   };
   const countLines = (text) => (text.match(/\n/g) ?? []).length;
-  const substitution = () => {
+  const substitution = (quoted = false) => {
     // at `$(`, `$((` or a backtick
     ensureWord();
     word.opaque = true;
+    if (!quoted) word.split = true;
     if (src[i] === '`') {
       const end = src.indexOf('`', i + 1);
       if (end === -1) throw new ShellSyntaxError(`unclosed backtick at line ${line + 1}`);
@@ -512,8 +698,10 @@ export function tokenizeShell(src) {
     const body = src.slice(i + 2, end - 1);
     word.scripts = [...(word.scripts ?? []), body];
     // FU-077 r2 F2: an arithmetic body runs the substitutions inside it.
-    if (body.startsWith('(')) nested.push(...substitutionsIn(body, line));
-    else nested.push({ script: body, line });
+    if (body.startsWith('(')) {
+      nested.push(...substitutionsIn(body, line));
+      word.arith = [...(word.arith ?? []), body]; // FU-159 F2: `$(( c = 5 ))` writes c
+    } else nested.push({ script: body, line });
     line += countLines(src.slice(i, end));
     word.value += '$(…)';
     i = end;
@@ -534,14 +722,17 @@ export function tokenizeShell(src) {
         continue;
       }
       ensureWord();
+      word.quoted = true;
       word.value += src[i + 1] ?? '';
+      segment('esc', src.slice(i, i + 2));
       i += 2;
       continue;
     }
     if (c === '\n') {
       endCommand();
       // `a &&<newline> b` still continues the list, and `a &<newline>` still backgrounded a.
-      if (!['&&', '||', '|', '|&', '&', '('].includes(pending)) pending = '\n';
+      // a pipeline's last stage took its `|`: the next line starts a list of its own
+      if (pendingUsed || !['&&', '||', '|', '|&', '&', '('].includes(pending)) pending = '\n';
       line += 1;
       i += 1;
       while (heredocs.length > 0) {
@@ -570,10 +761,19 @@ export function tokenizeShell(src) {
           throw new ShellSyntaxError(
             `an expanding here-document read by a shell contains an expansion (line ${bodyLine})`,
           );
-        if (feedsShell) nested.push({ script: body.join('\n'), line: bodyLine });
+        // the command that owns the here-document is where its body (and what it runs) belongs
+        const holder = commands.findIndex((c) => c.words === owner);
+        // FU-159 r3 F2: an expanding body is an expansion site (`${v:=x}`, `$((n))`) of its command
+        if (expands && holder >= 0)
+          commands[holder].heredocs = [...(commands[holder].heredocs ?? []), body.join('\n')];
+        if (feedsShell)
+          nested.push({ script: body.join('\n'), line: bodyLine, shell: true, holder });
         // FU-077 r2 F2: an unquoted delimiter expands the body, running its substitutions;
         // FU-092: also when a shell then reads the expanded body (`bash <<EOF` with `$(…)`).
-        if (expands) nested.push(...substitutionsIn(body.join('\n'), bodyLine));
+        if (expands)
+          nested.push(
+            ...substitutionsIn(body.join('\n'), bodyLine).map((found) => ({ ...found, holder })),
+          );
       }
       continue;
     }
@@ -586,11 +786,55 @@ export function tokenizeShell(src) {
       while (i < src.length && src[i] !== '\n') i += 1;
       continue;
     }
+    if (cases.at(-1) === 'pattern') {
+      // `a|b)`: the alternatives and the `)` are one pattern list, not commands
+      if (c === '|' && src[i + 1] !== '|') {
+        pushWord();
+        i += 1;
+        continue;
+      }
+      if (c === '(' && !word && words.length === 0) {
+        i += 1;
+        continue;
+      }
+      if (c === ')') {
+        endCommand(true);
+        cases[cases.length - 1] = 'body';
+        i += 1;
+        continue;
+      }
+    }
+    // an inner `esac` right before `;;` ends the inner case first: that `;;` belongs to the outer one
+    if (c === ';' && cases.at(-1) === 'pattern' && words.length === 0 && keyword('esac'))
+      pushWord();
+    if (c === ';' && /^;;&?|^;&/.test(src.slice(i, i + 3)) && cases.at(-1) === 'body') {
+      endCommand();
+      const op = /^;;&?|^;&/.exec(src.slice(i, i + 3))[0];
+      cases[cases.length - 1] = 'pattern';
+      pending = op;
+      pendingUsed = false;
+      i += op.length;
+      continue;
+    }
+    // `>&2`, `2>&1`, `<&3`: the `&` belongs to the redirection, it does not background anything
+    // and `>|` is the clobbering redirection, not a pipe
+    if (
+      (c === '&' || c === '|') &&
+      word &&
+      !word.quoted &&
+      (c === '&' ? /[<>]$/ : />$/).test(word.value) &&
+      src[i + 1] !== c
+    ) {
+      word.value += c;
+      i += 1;
+      continue;
+    }
     if (c === ';' || c === '&' || c === '|') {
       endCommand();
       const pipe = c === '|' && src[i + 1] !== '|';
       const length = src[i + 1] === c || (c === '|' && src[i + 1] === '&') ? 2 : 1;
       pending = src.slice(i, i + length);
+      pendingUsed = false;
       i += length;
       if (pipe) input = { pipe: true };
       continue;
@@ -598,15 +842,41 @@ export function tokenizeShell(src) {
     if (c === '(' || c === ')') {
       // PR #805 r2 F1: `name=( … )` is an array literal: its words are elements, not commands.
       const array = c === '(' && !pending.startsWith('(') && Boolean(word?.value.endsWith('='));
+      // FU-159: `name ( )` with nothing inside defines a function (read from the tokens, never
+      // from the raw text, where a string or a comment can imitate it).
+      const nameWord = word
+        ? words.length === 0
+          ? word
+          : null
+        : words.length === 1
+          ? words[0]
+          : null;
+      const named = nameWord ? nameWord.value : null;
+      const plain = nameWord !== null && !nameWord.quoted && named !== 'function';
+      // FU-159 r3 F2: `((` evaluates arithmetic (or is nested subshells): the text inside is kept
+      if (c === '(' && src[i + 1] === '(') {
+        const end = matchParen(src, i);
+        arithmetic.push(end === -1 ? src.slice(i + 1) : src.slice(i + 1, end - 1));
+      }
       endCommand();
       if (c === '(') {
         groups.push(group);
         parents[nextGroup] = group;
         if (array) arrays.add(nextGroup);
+        if (!array && named !== null && pending !== '(')
+          opened.set(nextGroup, { name: named, count: commands.length, plain });
         group = nextGroup++;
-      } else group = groups.pop() ?? 0;
+      } else {
+        const open = opened.get(group);
+        if (open && commands.length === open.count) {
+          functions.add(open.name);
+          if (open.plain) definitions.push({ name: open.name, index: open.count - 1 });
+        }
+        group = groups.pop() ?? 0;
+      }
       if (c === '(' && pending !== '(') lead = pending;
       pending = c;
+      pendingUsed = false;
       i += 1;
       continue;
     }
@@ -641,23 +911,28 @@ export function tokenizeShell(src) {
     }
     if (c === "'") {
       ensureWord();
+      word.quoted = true;
       const end = src.indexOf("'", i + 1);
       if (end === -1) throw new ShellSyntaxError(`unclosed single quote at line ${line + 1}`);
       const text = src.slice(i + 1, end);
       word.value += text;
+      segment('sq', text);
       line += countLines(text);
       i = end + 1;
       continue;
     }
     if (c === '"') {
       ensureWord();
+      word.quoted = true;
       i += 1;
+      const quoteStart = i;
       let closed = false;
       while (i < src.length) {
         const d = src[i];
         noContinuedDollar();
         if (d === '"') {
           closed = true;
+          segment('dq', src.slice(quoteStart, i));
           i += 1;
           break;
         }
@@ -668,7 +943,7 @@ export function tokenizeShell(src) {
           continue;
         }
         if ((d === '$' && src[i + 1] === '(') || d === '`') {
-          substitution();
+          substitution(true);
           continue;
         }
         if (d === '\n') line += 1;
@@ -679,11 +954,14 @@ export function tokenizeShell(src) {
       continue;
     }
     if ((c === '$' && src[i + 1] === '(') || c === '`') {
+      const from = i;
       substitution();
+      segment('sub', src.slice(from, i));
       continue;
     }
     if (c === '$' && src[i + 1] === '{') {
       ensureWord();
+      word.split = true;
       let depth = 0;
       let j = i + 1;
       for (; j < src.length; j += 1) {
@@ -696,17 +974,21 @@ export function tokenizeShell(src) {
       if (inner.length > 0) word.opaque = true;
       nested.push(...inner);
       word.value += src.slice(i, j + 1);
+      segment('brace', src.slice(i, j + 1));
       line += countLines(src.slice(i, j + 1));
       i = j + 1;
       continue;
     }
     ensureWord();
+    if ('$*?['.includes(c)) word.split = true; // an unquoted expansion or pattern: unknown word count
     word.value += c;
+    segment('bare', c);
     i += 1;
   }
   endCommand();
+  if (cases.length > 0) throw new ShellSyntaxError('a case with no esac');
   if (heredocs.length > 0) throw new ShellSyntaxError('here-document is never closed');
-  return { commands, nested, parents, arrays };
+  return { commands, nested, parents, arrays, functions, definitions, arithmetic };
 }
 
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
@@ -738,6 +1020,53 @@ export function validateInfraImagePins(files, policy = {}) {
   const tagless = policy.tagless ?? TAGLESS;
   const composeFiles = policy.composeFiles ?? COMPOSE_FILES;
   const evaluated = { allowed: policy.evaluatedOutputs ?? EVALUATED_OUTPUTS, used: new Set() };
+  const executedPrograms = policy.executedPrograms ?? EXECUTED_PROGRAMS;
+  const executedUsed = new Set();
+  const executed = {
+    // FU-159 r2 F4: every variable of the word must be read-only by then (`readonly NAME=…`)
+    allows: (file, word, readonly = new Set()) => {
+      if (!executedPrograms.get(file)?.words.includes(word)) return false;
+      if (
+        [...word.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].some(([, name]) => !readonly.has(name))
+      )
+        return false;
+      executedUsed.add(`${file} ${word}`);
+      return true;
+    },
+  };
+  // FU-159 r2 F1: a program outside every table runs only where a reviewed entry names it.
+  const reviewedPrograms = policy.reviewedPrograms ?? REVIEWED_PROGRAMS;
+  const reviewedUsed = new Set();
+  const reviewed = {
+    allows: (file, name) => {
+      if (!reviewedPrograms.get(file)?.programs.includes(name)) return false;
+      reviewedUsed.add(`${file} ${name}`);
+      return true;
+    },
+    // a program a reviewed entry names (its text operands are what the reviewer read)
+    has: (file, name) => Boolean(reviewedPrograms.get(file)?.programs.includes(name)),
+    // a redirect / copy target this check cannot read, named by its exact word in a reviewed entry
+    writes: (file, word) => {
+      if (!reviewedPrograms.get(file)?.writes?.includes(word)) return false;
+      reviewedUsed.add(`${file} WRITE ${word}`);
+      return true;
+    },
+    // `echo <one listed path> >> "$GITHUB_PATH"`: the only way a reviewed entry changes PATH
+    pathEntry: (file, words) => {
+      const at = executionChain(words).chain.at(-1);
+      const operands = [];
+      for (let k = at + 1; k < words.length; k++) {
+        const width = redirectWidth(words, k);
+        if (width > 0) k += width - 1;
+        else operands.push(words[k]);
+      }
+      const path = operands[0]?.value;
+      if (words[at]?.value !== 'echo' || operands.length !== 1) return false;
+      if (!reviewedPrograms.get(file)?.paths?.includes(path)) return false;
+      reviewedUsed.add(`${file} PATH ${path}`);
+      return true;
+    },
+  };
   // FU-092: a script a shell is told to run is read only if it is one of these files.
   const shellFiles = new Set(files.filter(({ kind }) => kind === 'shell').map(({ name }) => name));
   const errors = [];
@@ -767,7 +1096,24 @@ export function validateInfraImagePins(files, policy = {}) {
       if (!read.some((file) => file.name === name))
         errors.push(`SOURCED_LIBRARIES lists ${name}, which was not found`);
   const sourced = new Set([...shellFiles, ...verified]);
-  const shared = { composeFiles, evaluated, shellFiles, sourced };
+  const shared = {
+    composeFiles,
+    evaluated,
+    executed,
+    reviewed,
+    shellFiles,
+    sourced,
+    // FU-159 F3: false only for a file whose own text, and that of every file it sources, never changes directory
+    sourceMoves: (path) => !texts.has(path) || fileScope(path, shared).moves,
+    texts: undefined,
+    libraries,
+    verified,
+    memo: new Map(),
+  };
+  const texts = new Map(
+    files.filter(({ kind }) => kind === 'shell' || kind === 'library').map((f) => [f.name, f.text]),
+  );
+  shared.texts = texts;
   const images = [];
   const usedTagless = new Set();
 
@@ -778,7 +1124,13 @@ export function validateInfraImagePins(files, policy = {}) {
       else if (file.kind !== 'library')
         shellImages(
           file.text,
-          { file: file.name, lineOf: (n) => n + 1, env: new Map(), self: file.name, ...shared },
+          {
+            file: file.name,
+            lineOf: (n) => n + 1,
+            env: new Map(),
+            self: file.name,
+            ...shared,
+          },
           images,
           errors,
         );
@@ -836,6 +1188,35 @@ export function validateInfraImagePins(files, policy = {}) {
     if (!reason || !evaluated.used.has(path))
       errors.push(`EVALUATED_OUTPUTS lists ${path}, which nothing evaluates any more`);
   }
+  for (const [file, { writes = [], reason }] of reviewedPrograms)
+    for (const word of writes)
+      if (
+        files.some((f) => f.name === file) &&
+        (!reason || !reviewedUsed.has(`${file} WRITE ${word}`))
+      )
+        errors.push(
+          `REVIEWED_PROGRAMS lists the write ${word} in ${file}, which nothing writes any more`,
+        );
+  for (const [file, { paths = [], reason }] of reviewedPrograms)
+    for (const path of paths)
+      if (
+        files.some((f) => f.name === file) &&
+        (!reason || !reviewedUsed.has(`${file} PATH ${path}`))
+      )
+        errors.push(
+          `REVIEWED_PROGRAMS lists the PATH entry ${path} in ${file}, which nothing adds any more`,
+        );
+  for (const [file, { programs, reason }] of reviewedPrograms)
+    for (const name of programs)
+      if (files.some((f) => f.name === file) && (!reason || !reviewedUsed.has(`${file} ${name}`)))
+        errors.push(`REVIEWED_PROGRAMS lists ${name} in ${file}, which nothing runs any more`);
+  for (const [file, { words, reason }] of executedPrograms)
+    for (const word of words)
+      if (
+        files.some(({ name }) => name === file) &&
+        (!reason || !executedUsed.has(`${file} ${word}`))
+      )
+        errors.push(`EXECUTED_PROGRAMS lists ${word} in ${file}, which nothing runs any more`);
   for (const key of tagless.keys()) {
     if (!usedTagless.has(key))
       errors.push(`TAGLESS lists ${key}, which nothing uses without a tag any more`);
@@ -1025,7 +1406,9 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   const expressions = [];
   const src = script.replace(GH_EXPRESSION, (match) => {
     expressions.push(match);
-    return `__GHEXPR${expressions.length - 1}__`;
+    // FU-159 r2 F1: GitHub pastes the value in before the shell parses: it is text of unknown words
+    // and may name a program, so it is read as an expansion (`$NAME`), never as a literal word.
+    return `$__GHEXPR${expressions.length - 1}__`;
   });
   const exempt = new Map();
   src.split('\n').forEach((text, index) => {
@@ -1052,64 +1435,151 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
   for (const [index, command] of parsed.commands.entries())
     if (command.sep === '&' && /[<>]$/.test(parsed.commands[index - 1]?.words.at(-1)?.value ?? ''))
       command.words = command.words.slice(1);
-  // Inside a `case … esac` body a command of one word is a pattern (`*`, `*-service`, `#*`), which
-  // names no program: its glob characters are not a computed program. A `$` is never excused.
-  let caseDepth = 0;
-  const patterns = parsed.commands.map(({ words }) => {
-    if (words[0]?.value === 'esac') caseDepth = Math.max(0, caseDepth - 1);
-    const pattern =
-      caseDepth > 0 && words.length === 1 && !words[0].opaque && !words[0].value.includes('$');
-    if (words[0]?.value === 'case') caseDepth += 1;
-    return pattern;
+  // FU-159 F1: the tokenizer flags the commands of a `case` pattern list; a body is a command.
+  const isPattern = (index) => Boolean(parsed.commands[index].pattern);
+  // FU-159 F3: a file named relative to the directory this script starts in is a different file
+  // once it (or a wrapper) changes directory; in this shell and every context nested in it.
+  const changes = directoryChanges(parsed.commands, (word) => {
+    const path = word && sourcedPath(word, ctx.self);
+    return path !== undefined && ctx.sourceMoves?.(path) === false;
   });
-  const isPattern = (index) => patterns[index];
+  const layout = layoutOf(parsed.commands);
+  const { nesting } = layout;
+  const inGroup = (group, ancestor) => groupWithin(parsed, group, ancestor);
+  // A `cd` in a ( ) group leaves the commands outside it where they were. Inside a compound
+  // command or function body (`nesting`) the order is not the text order; `later` is text that
+  // runs at another time (a trap handler).
+  const movedAt = (position, later = false) =>
+    Boolean(ctx.moved) ||
+    (changes.length > 0 &&
+      (later ||
+        position === undefined ||
+        nesting[position] > 0 ||
+        changes.some(
+          (at) =>
+            at < position && inGroup(parsed.commands[position].group, parsed.commands[at].group),
+        )));
+  const moved = movedAt();
+  // FU-159 r2 F2: the names that are certainly shell functions where each command runs
+  const imports = topLevelSources(
+    parsed,
+    layout,
+    ctx.self ?? '',
+    (path, index) => ctx.self !== undefined && (ctx.sourced?.has(path) ?? false) && !movedAt(index),
+  ).map(({ index, path }) => ({
+    index,
+    names: fileScope(path, ctx).exported,
+    unsets: fileScope(path, ctx).unsets,
+  }));
+  const table = functionTable(parsed, layout, imports, ctx.functions ?? new Set());
+  const callableAt = (position) => table.callable(position);
+  // FU-159 r2 F4: a variable in an EXECUTED_PROGRAMS path is proved only by `readonly NAME=…` run at
+  // the top level before the command: bash refuses every later write to it (`NAME=`, `read`, `printf -v`,
+  // `unset`, `local`, `declare -n`), so no write analysis has to find them all.
+  const readonlyDecls = [];
+  for (const [index, command] of parsed.commands.entries()) {
+    const { chain, problem, bypass } = executionChain(command.words);
+    const at = chain.at(-1);
+    const program = command.words[at]?.value;
+    const rest = command.words.slice(at + 1);
+    const flagged =
+      program === 'readonly' ||
+      (['declare', 'typeset'].includes(program) && rest.some((w) => /^-[A-Za-z]*r/.test(w.value)));
+    if (
+      command.pattern ||
+      problem ||
+      bypass ||
+      !flagged ||
+      layout.outer[index] !== 0 ||
+      command.group !== 0 ||
+      !LIST_STARTS.has(command.sep)
+    )
+      continue;
+    // `readonly NAME=v`, or `NAME=v` as the command right before `readonly NAME` (nothing between)
+    const before = parsed.commands[index - 1];
+    for (const word of rest) {
+      const name = /^([A-Za-z_][A-Za-z0-9_]*)(=|$)/.exec(word.value);
+      if (!name) continue;
+      const adjacent =
+        name[2] === '' &&
+        before !== undefined &&
+        before.group === 0 &&
+        layout.outer[index - 1] === 0 &&
+        assignmentOnly(before.words) &&
+        before.words.some((w) => w.value.startsWith(`${name[1]}=`));
+      if (name[2] === '=' || adjacent) readonlyDecls.push({ name: name[1], index });
+    }
+  }
+  const readonlyAt = (position) =>
+    new Set([
+      ...(ctx.readonly ?? []),
+      ...readonlyDecls.filter(({ index }) => index < table.timeOf(position)).map((d) => d.name),
+    ]);
+  /** what `at` says about every command that holds `line`: only what ALL of them agree on */
+  const agreeAtLine = (line, at) => {
+    const holders = parsed.commands.flatMap((c, k) =>
+      c.startLine <= line && line <= c.endLine ? [k] : [],
+    );
+    const sets = holders.map(at);
+    return new Set([...(sets[0] ?? [])].filter((name) => sets.every((set) => set.has(name))));
+  };
+  const callableAtLine = (line) => agreeAtLine(line, callableAt);
+  const movedAtLine = (line) => {
+    const holders = parsed.commands.flatMap((c, k) =>
+      c.startLine <= line && line <= c.endLine ? [k] : [],
+    );
+    return holders.length > 0 ? holders.some((k) => movedAt(k)) : moved;
+  };
   const vars = new Map();
   const outputs = new Map(); // variable -> the one command substitution it was assigned from
-  // Every place a name is written to (`x=`, `x+=`, `read x`, `for x in`): not after `$`/`{`.
-  // `${NAME:=x}` / `${NAME=x}` assign too (FU-092).
-  // FU-150 F2: also the name attached to an option (`printf -vc`, `read -ac`).
-  const writes = (name) =>
-    (
-      src.match(
-        new RegExp(
-          `(?<![\\w$\\{])${name}(?![\\w])|(?<=(?:^|[\\s;&|(])-[A-Za-z]*)${name}(?![\\w])|\\$\\{${name}:?=`,
-          'g',
-        ),
-      ) ?? []
-    ).length;
-  const restore = (value) => value.replace(/__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
-  // How many assignment-only commands of this script assign a variable one `$(…)`.
+  const restore = (value) => value.replace(/\$__GHEXPR(\d+)__/g, (_, n) => expressions[Number(n)]);
+  // FU-092: an evaluated variable's provenance cannot be proved inside a compound command or function
+  // body (`if`, loops, `{ }`: it may not run), or where this shell could write a variable under a name
+  // this check cannot read. FU-159 F2 + r3 F2: the writes are the CANONICAL words of every command, the
+  // text of every expansion site (here-strings, expanding here-documents), the text of `eval` and `trap`
+  // run in this shell, the implicit targets of read, select, mapfile and getopts, and any arithmetic that
+  // is not provably constant; no raw-source counting.
+  const writes = shellWrites(parsed);
+  // FU-159 r3 F3: the interpreter of a producer is external only where no function or alias can be
+  // called by that name: a definition anywhere in this shell (or one it was reached from) refuses.
+  const maybe = new Set([...(ctx.maybe ?? []), ...writes.functions]);
+  const aliasing = Boolean(ctx.aliasing) || writes.aliasing;
+  const shadowed = (name) => aliasing || maybe.has(name);
+  // How many assignment-only commands of this script assign a variable one `$(…)`; the variables
+  // whose every such assignment is the output of an EVALUATED_OUTPUTS script.
   const assignedFrom = new Map();
+  const fromAllowed = new Map();
   for (const { words } of parsed.commands) {
     if (!assignmentOnly(words)) continue;
     for (const { value, scripts } of withoutDeclarers(words)) {
       const [, variable, assigned] = value.match(ASSIGNMENT);
-      if (assigned === '$(…)' && scripts?.length === 1)
+      if (assigned === '$(…)' && scripts?.length === 1) {
         assignedFrom.set(variable, (assignedFrom.get(variable) ?? 0) + 1);
+        const file = evaluatedFile(scripts[0]);
+        fromAllowed.set(
+          variable,
+          (fromAllowed.get(variable) ?? true) &&
+            file !== undefined &&
+            ctx.evaluated.allowed.has(file),
+        );
+      }
     }
   }
 
-  // FU-092: an evaluated variable's provenance is proved or the eval refuses. It cannot be
-  // proved inside a compound command or function body (`if`, loops, `{ }`: it may not run),
-  // or where a sourced file or a computed-name write (`printf -v "$(…)"`, `read "$n"`,
-  // `declare -n`) could have set the variable.
-  // FU-150 F2: and an arithmetic assignment whose target name is computed (`(( $n = 5 ))`).
+  // FU-092: an evaluated variable's provenance is proved or the eval refuses (see `writes`, above).
   const provenanceBroken =
-    parsed.commands.some(({ words }, index) => !isPattern(index) && dynamicWriter(words)) ||
-    /\(\([^)]*[$`][^)]*(?<![=!<>])=(?!=)/.test(src);
-  let open = 0;
-  const nesting = parsed.commands.map(({ words }) => {
-    const first = words[headIndex(words)]?.value;
-    if (CLOSERS.has(first)) open = Math.max(0, open - 1);
-    const at = open;
-    if (OPENERS.has(first)) open += 1;
-    return at;
-  });
-  /** `group` is `ancestor` or a subshell opened inside it: it inherits the variables set there. */
-  const inGroup = (group, ancestor) => {
-    for (let g = group; g >= 0; g = parsed.parents[g]) if (g === ancestor) return true;
-    return false;
-  };
+    writes.unresolved || writes.evals.some((words) => !trackedEval(words, fromAllowed));
+  const mentions = (name) =>
+    (
+      writes.texts
+        .join('\n')
+        .match(
+          new RegExp(
+            `(?<![\\w$]|\\$\\{)${name}(?![\\w])|(?<=(?:^|[\\s;&|(])-[A-Za-z]*)${name}(?![\\w])|\\$\\{${name}:?=`,
+            'g',
+          ),
+        ) ?? []
+    ).length;
   /**
    * The command at `position` runs whenever the command at `later` runs. A `&&` list that is
    * backgrounded or piped runs in a subshell: `later` must then be in that same list.
@@ -1135,12 +1605,49 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     return false;
   };
 
+  // the `name` of a `name() …` definition is the definition, not a call of it
+  const definitionNames = new Set(
+    parsed.definitions
+      .filter(({ index }) => parsed.commands[index].words[0].value !== 'function')
+      .map(({ index }) => index),
+  );
+  const unknownWrites = []; // writes whose target this check cannot read
   for (const [position, command] of parsed.commands.entries()) {
+    if (definitionNames.has(position)) continue;
     const where = `${ctx.file}:${ctx.lineOf(command.startLine)}`;
     let words = command.words;
     // PR #805 r2 F1: a variable a shell evaluates at startup is text this check does not read.
     if (words.some(({ value }) => STARTUP_TEXT.test(value)))
       errors.push(`${where}: sets a variable a shell evaluates at startup (BASH_ENV, ENV ...)`);
+    // FU-159 r2 F1: text that is a command substitution once an ARITHMETIC evaluator reads it
+    // (`let 'x[$(cmd)]=1'`, `declare -i`, `[[ $x -eq 1 ]]` with such a value, `$((x))`): in data it is
+    // refused, wherever it stands but in the text this check reads as a script (eval, trap, a shell's
+    // -c body, a docker container command).
+    if (!readsText(words, ctx) && words.some((w) => !w.opaque && /\$\(|`/.test(w.value)))
+      errors.push(
+        `${where}: a word holds the text $( or a backtick inside quotes; an arithmetic evaluation (let, [[ ]], (( )), declare -i) would run it as a command substitution`,
+      );
+    // FU-159 r2 F4: PATH decides which file every command name is; a command found there is not the
+    // program this check read the name of. `hash` is handled with the other stages (wordStage).
+    if (words.some(({ value }) => LOOKUP_TEXT.test(value)))
+      errors.push(`${where}: names PATH or CDPATH, which decide which file a command word runs`);
+    for (const target of outputRedirects(words))
+      if (/GITHUB_PATH/.test(target.value) && !ctx.reviewed.pathEntry(ctx.file, words))
+        errors.push(
+          `${where}: appends to GITHUB_PATH, which changes the program every later step finds (REVIEWED_PROGRAMS paths)`,
+        );
+    // FU-159 r2 F4: a write that can replace a file this run sources or executes
+    const written = writeTargets(words);
+    for (const target of written) {
+      // an absolute path outside the scratch directories may be the checkout under another spelling
+      if (unreadArgument(target) || ABSOLUTE_ELSEWHERE.test(posix.normalize(target.value))) {
+        if (!ctx.reviewed.writes(ctx.file, target.value))
+          unknownWrites.push(`${where} (${target.value})`);
+      } else if (ctx.sourced?.has(posix.normalize(target.value)))
+        errors.push(
+          `${where}: writes ${posix.normalize(target.value)}, a file this run sources or executes (its contents are the ones this check read)`,
+        );
+    }
     // Assignments before a command, or alone (a variable for later commands).
     let index = 0;
     while (
@@ -1149,7 +1656,7 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     )
       index += 1;
     const assignments = [];
-    while (index < words.length && ASSIGNMENT.test(words[index].value)) {
+    while (index < words.length && isAssignment(words[index])) {
       assignments.push(words[index]);
       index += 1;
     }
@@ -1175,12 +1682,29 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     const staged =
       parsed.arrays.has(command.group) || isPattern(position)
         ? {}
-        : textStage(command.words, command.input, { files: ctx.sourced, self: ctx.self });
+        : textStage(command.words, command.input, {
+            files: ctx.sourced,
+            self: ctx.self,
+            shellFiles: ctx.shellFiles,
+            moved: movedAt(position),
+            callable: callableAt(position),
+            readonly: readonlyAt(position),
+            executed: ctx.executed,
+            reviewed: ctx.reviewed,
+            file: ctx.file,
+          });
     if (staged.problem) problem(staged.problem);
     for (const script of staged.scripts ?? [])
       shellImages(
         script,
-        { ...ctx, self: undefined, lineOf: (n) => ctx.lineOf(command.startLine + n) },
+        {
+          ...ctx,
+          moved: movedAt(position, true),
+          functions: sameShell(command.words) ? callableAt(position) : new Set(),
+          readonly: sameShell(command.words) ? readonlyAt(position) : new Set(),
+          self: undefined,
+          lineOf: (n) => ctx.lineOf(command.startLine + n),
+        },
         images,
         errors,
         state,
@@ -1200,18 +1724,29 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
               !provenanceBroken &&
               nesting[position] === 0 &&
               nesting[from.position] === 0 &&
-              writes(name) === assignedFrom.get(name) &&
+              mentions(name) === assignedFrom.get(name) &&
               inGroup(command.group, parsed.commands[from.position].group) &&
               unconditional(from.position, position),
           )
           .map(([name, from]) => [name, from.script]),
       );
-      const read = shellInput(words.slice(shellAt), command.input, tracked, ctx);
+      const read = shellInput(words.slice(shellAt), command.input, tracked, {
+        ...ctx,
+        moved: movedAt(position) || executionChain(command.words).moves,
+        shadowed,
+      });
       if (read.problem) problem(read.problem);
       else if (read.script !== undefined)
         shellImages(
           read.script,
-          { ...ctx, self: undefined, lineOf: (n) => ctx.lineOf(command.startLine + n) },
+          {
+            ...ctx,
+            moved: movedAt(position),
+            functions: sameShell(command.words) ? callableAt(position) : new Set(),
+            readonly: sameShell(command.words) ? readonlyAt(position) : new Set(),
+            self: undefined,
+            lineOf: (n) => ctx.lineOf(command.startLine + n),
+          },
           images,
           errors,
           state,
@@ -1300,10 +1835,31 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       );
     }
   }
-  for (const { script: inner, line } of parsed.nested) {
+  // FU-159 r2 F4: a write to a path this check cannot read may replace a file the same script runs
+  if (unknownWrites.length > 0 && runsFile(parsed.commands))
+    for (const where of unknownWrites)
+      errors.push(
+        `${where}: writes to a path this check cannot read in a script that also sources or runs a file (the write may replace that file; REVIEWED_PROGRAMS writes)`,
+      );
+  for (const { script: inner, line, shell, holder } of parsed.nested) {
+    const at = holder !== undefined && holder >= 0 ? holder : undefined;
     shellImages(
       inner,
-      { ...ctx, self: undefined, lineOf: (n) => ctx.lineOf(line + n) },
+      {
+        ...ctx,
+        maybe,
+        aliasing,
+        // the directory at the commands that hold it (a substitution has no position of its own)
+        moved: at === undefined ? movedAtLine(line) : movedAt(at),
+        functions: shell ? new Set() : at === undefined ? callableAtLine(line) : callableAt(at),
+        readonly: shell
+          ? new Set()
+          : at === undefined
+            ? agreeAtLine(line, readonlyAt)
+            : readonlyAt(at),
+        self: undefined,
+        lineOf: (n) => ctx.lineOf(line + n),
+      },
       images,
       errors,
       state,
@@ -1312,42 +1868,51 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
 }
 
 // PR #805 r2 F1: variables whose value a shell runs at startup or between commands.
+const ABSOLUTE_ELSEWHERE = /^\/(?!(?:dev|tmp|proc\/self)(?:\/|$))/;
+const LOOKUP_TEXT = /^(?:PATH|CDPATH)(?:\+?=.*)?$/;
 const STARTUP_TEXT = /^(?:BASH_ENV|ENV|PROMPT_COMMAND|PS0|PS1|PS4|SHELLOPTS|BASHOPTS)(?:\+?=.*)?$/;
-/** Programs that run an operand string as a command line, or read commands from standard input. */
-const STRING_RUNNERS = new Set('flock su runuser sg script ssh watch at batch parallel'.split(' '));
-const STRING_WRAPPERS = new Set(['sudo', 'doas']);
-/** Names that take text wherever they stand in a command (not `source` and `.`: those are arguments too). */
-const TAKES_TEXT = new Set(
-  ['alias trap env xargs find', ...[...STRING_RUNNERS, ...STRING_WRAPPERS]].flatMap((names) =>
-    names.split(' '),
-  ),
-);
+/**
+ * Names that take text wherever they stand in a command (not `source` and `.`: those are arguments too).
+ * FU-159 r2 F1: `su`, `ssh`, `watch`, `parallel`, `script`, `at`, `sg`, `runuser` ... run a string or an
+ * argv this check does not rebuild: they are in no table, so they refuse like any unknown program.
+ */
+const TAKES_TEXT = new Set('alias trap env xargs find'.split(' '));
 /** Programs that substitute into the command they run (`xargs -I{}`, `find -exec … {}`). */
-const REWRITERS = new Set(['xargs', 'find', 'parallel']);
+const REWRITERS = new Set(['xargs', 'find']);
 const computedWord = (word) => Boolean(word.opaque || word.value.includes('$'));
 /**
  * PR #805 r2 F1: what the stages between a command line and the commands it runs do. A stage
  * that rewrites, generates or hands over text is read (`{ scripts }`) or refused (`{ problem }`);
  * none is "nothing relevant".
  */
-function textStage(words, input, sourced) {
+function textStage(words, input, env) {
   // FU-150 F1: the shared execution boundary names the words that run the next one (control
   // words, wrappers with their options, xargs operands) and refuses a computed program.
-  const { chain: list, problem } = executionChain(words);
+  const { chain: list, problem, moves, inputs, bypass } = executionChain(words);
   if (problem) return { problem };
   if (list.length === 0) return {};
+  // FU-159 F3: `env -C dir`, `sudo -D dir` and `chroot` run what follows from another directory.
+  const here = { ...env, moved: env.moved || moves };
+  const final = list.at(-1);
+  const unproven = programProblem(words[final], inputs, bypass, here);
+  if (unproven) return { problem: unproven };
   const chain = new Set(list);
   const scripts = [];
   for (const [index, word] of words.entries()) {
     const name = word.value.split('/').at(-1);
     if (index < list[0] || !(chain.has(index) || TAKES_TEXT.has(name))) continue;
-    const stage = wordStage(name, words.slice(index + 1), input, sourced);
+    const stage = wordStage(name, words.slice(index + 1), input, here);
     if (stage.problem) return stage;
     scripts.push(...(stage.scripts ?? []));
-    // `find … -exec CMD … ;`: each operand command line is read like a line of its own.
+    // `find … -exec CMD … ;`: each operand command line is read like a line of its own. find runs
+    // external programs, never a shell function; `-execdir` runs them from each match's directory.
     if (name === 'find')
       for (const operands of findCommands(words.slice(index + 1))) {
-        const inner = textStage(operands, {}, sourced);
+        const inner = textStage(
+          [...operands],
+          {},
+          { ...here, callable: new Set(), moved: here.moved || operands.dir },
+        );
         if (inner.problem) return inner;
         scripts.push(...(inner.scripts ?? []));
       }
@@ -1356,10 +1921,429 @@ function textStage(words, input, sourced) {
 }
 
 /**
+ * FU-159 F1: words of the grammar and builtins. They run no argument as a command (the ones that
+ * do - `eval`, `source`, `.`, `trap`, `exec`, `command`, `builtin` - are read by their own stage).
+ */
+const BUILTINS = new Set(
+  (
+    ': [ [[ ]] ]] test echo printf read cd pushd popd pwd exit return break continue shift set unset ' +
+    'export local declare typeset readonly getopts mapfile readarray wait umask ulimit true false ' +
+    'type hash for in do done while until if then else elif fi case esac select function { } ! ( ) ' +
+    'eval source . trap alias docker docker-compose exec command builtin'
+  ).split(' '),
+);
+/**
+ * FU-159 r2 F1: the ONE table of installed programs PROVEN to run none of their operands or files as a
+ * command. Anything not here, not a builtin, not a modeled dispatcher (`WRAPPERS`, the string runners,
+ * the shells, `xargs` / `find`), not a function of the script and not a reviewed per-script entry
+ * (`REVIEWED_PROGRAMS`) is refused: an unknown program is not assumed harmless because its
+ * arguments look like text. One row per reason; add a program here only after reading what it does
+ * with every option (GNU `sort --compress-program`, `tar --to-command`, `sed e`, `awk system()`,
+ * `find -exec`, `make`, `git` hooks and the interpreters are NOT here).
+ */
+const DATA_PROGRAMS = new Set(
+  Object.values({
+    'file and directory utilities: operands are paths, modes or owners, read or written, never run':
+      'cat cp mv rm mkdir mktemp chmod chown ls ln touch tee',
+    'filters and printers: operands are patterns, field lists or counts':
+      'grep head tail wc cut tr uniq',
+    'path, number, time and delay printers: no operand is a command':
+      'dirname basename pwd seq date sleep',
+    'HTTP client: an operand is a URL, an option a header, a path or a request; curl has no way to run a program':
+      'curl',
+  }).flatMap((names) => names.split(' ')),
+);
+/** An argument whose value this check cannot read: an expansion, a pattern, a substitution. */
+const unreadArgument = (word) => unsplit(word) || word.value.includes('$');
+/** A path to a file (not a bare program name, not an installed program by absolute path). */
+const filePath = (value) => value.includes('/') && !SYSTEM_PATH.test(value);
+
+/**
+ * FU-159 r2 F1: DEFAULT DENY. The program that finally runs (the end of the execution chain) is
+ * allowed only if it is (a) a builtin or a word of the grammar, (b) in DATA_PROGRAMS, (c) a modeled
+ * dispatcher whose operands this check reads (a shell, a string runner, `xargs`, `find`, a wrapper
+ * with nothing left to run), (d) a shell function that is certainly one here and not called through
+ * a wrapper, or a path, (e) listed for this script in REVIEWED_PROGRAMS. A path runs a FILE: it passes
+ * only as a CI script of this run by its exact path, or an EXECUTED_PROGRAMS entry.
+ */
+function programProblem(program, inputs, bypass, env) {
+  const { value } = program;
+  if (filePath(value)) {
+    const fixed = env.executed.allows(env.file, value, env.readonly);
+    const path = posix.normalize(value);
+    if (fixed || (!unreadArgument(program) && !env.moved && env.shellFiles.has(path))) return null;
+    return `runs ${value}, a file this check does not read (a CI .sh file by its exact path, from a directory this script has not left, or an EXECUTED_PROGRAMS entry)`;
+  }
+  const name = value.split('/').at(-1);
+  if (BUILTINS.has(name) || DATA_PROGRAMS.has(name) || SHELL_WORD.test(name) || REWRITERS.has(name))
+    return null;
+  // a wrapper that is the last word has nothing to run, unless xargs hands it its operands
+  if (WRAPPER_NAMES.has(name) && !inputs) return null;
+  if (value === name && !bypass && env.callable.has(name)) return null;
+  if (env.reviewed.allows(env.file, name)) return null;
+  return `runs ${name}, a program this check does not model and has not proven to run no operand as a command (DATA_PROGRAMS, or a reviewed REVIEWED_PROGRAMS entry for this script)`;
+}
+
+/**
+ * FU-159 r2 F2: `{ nesting, outer }` per command. `outer` is how many compound commands (`if`, a
+ * `{ }` group, a function body, a loop) hold it; `nesting` is the same, plus one for a command that
+ * stands in the SAME command as the opener (`{ source x`, `if f`): it is inside, not at the level.
+ */
+function layoutOf(commands) {
+  let open = 0;
+  const nesting = [];
+  const outer = [];
+  for (const { words } of commands) {
+    const head = headIndex(words);
+    const first = words[head]?.value;
+    if (CLOSERS.has(first)) open = Math.max(0, open - 1);
+    outer.push(open);
+    let here = open;
+    if (OPENERS.has(first)) {
+      open += 1;
+      const final = executionChain(words).chain.at(-1);
+      if (final > head && !OPENERS.has(words[final]?.value)) here = open;
+    }
+    nesting.push(here);
+  }
+  return { nesting, outer };
+}
+
+/** `group` is `ancestor` or a subshell opened inside it: it inherits the variables set there. */
+function groupWithin(parsed, group, ancestor) {
+  for (let g = group; g >= 0; g = parsed.parents[g]) if (g === ancestor) return true;
+  return false;
+}
+
+/** The names `unset` removes in these commands (also in literal `eval` / `trap` text), or `all`. */
+function unsetTargets(commands, depth = 0, out = { names: new Set(), all: false }) {
+  for (const { words, pattern } of commands) {
+    if (pattern) continue;
+    const { chain } = executionChain(words);
+    const at = chain.at(-1);
+    const rest = words.slice(at + 1);
+    const program = words[at]?.value;
+    const text = (script) => {
+      let inner = null;
+      try {
+        inner = depth < 4 ? tokenizeShell(script) : null;
+      } catch {
+        // unreadable text: it could unset anything
+      }
+      if (inner) unsetTargets(inner.commands, depth + 1, out);
+      else out.all = true;
+    };
+    if (program === 'unset') {
+      for (const word of rest) {
+        if (computedWord(word)) out.all = true;
+        else if (!word.value.startsWith('-')) out.names.add(word.value);
+      }
+    } else if (program === 'eval') {
+      if (rest.some(computedWord)) out.all = true;
+      else text(rest.map(({ value }) => value).join(' '));
+    } else if (program === 'trap') {
+      const handler = rest.find(({ value }) => !value.startsWith('-') || value === '-');
+      if (handler && handler.value !== '-' && handler.value !== '') {
+        if (computedWord(handler)) out.all = true;
+        else text(handler.value);
+      }
+    }
+  }
+  return out;
+}
+
+const nameOfWord = (word) => word.value.split('/').at(-1);
+
+/** A command whose text operands this check reads as scripts, or runs inside a container. */
+function readsText(words, ctx) {
+  const { chain } = executionChain(words);
+  const name = words[chain.at(-1)]?.value ?? '';
+  return (
+    SHELL_WORD.test(name) ||
+    ctx.reviewed.has(ctx.file, name) ||
+    ['eval', 'trap', 'docker', 'docker-compose'].includes(name) ||
+    words.some((w) => /(?:^|\/)docker(?:-compose)?$/.test(w.value))
+  );
+}
+
+/** The words a command line writes to: redirections, and what `cp` / `mv` / `ln` / `tee` / `touch` / `curl -o` name. */
+function writeTargets(words) {
+  const targets = outputRedirects(words);
+  const { chain } = executionChain(words);
+  const at = chain.at(-1);
+  const name = (words[at]?.value ?? '').split('/').at(-1);
+  const operands = [];
+  for (let k = at + 1; k < words.length; k++) {
+    const width = redirectWidth(words, k);
+    if (width > 0) k += width - 1;
+    else operands.push(words[k]);
+  }
+  // `time -o FILE` (also `--output`) writes its report to a file
+  for (const index of chain) {
+    if (nameOfWord(words[index]) !== 'time') continue;
+    for (let k = index + 1; k < words.length && !chain.includes(k); k++) {
+      const attached = /^(?:-[A-Za-z]*o|--output=)(.+)$/.exec(words[k].value);
+      if (attached && !words[k].value.startsWith('--output=')) targets.push({ value: attached[1] });
+      else if (attached) targets.push({ value: attached[1] });
+      else if (/^(?:-[A-Za-z]*o|--output)$/.test(words[k].value))
+        targets.push(words[k + 1] ?? { value: '$unknown', opaque: true });
+    }
+  }
+  if (['cp', 'mv', 'ln', 'tee', 'touch'].includes(name))
+    targets.push(...operands.filter(({ value }) => !value.startsWith('-')));
+  if (name === 'curl')
+    for (const [k, { value }] of operands.entries()) {
+      if (/^-[A-Za-z]*[OJ]|^--(?:remote-name|remote-header-name)/.test(value))
+        targets.push({ value: '$unknown', opaque: true });
+      const file = /^--(?:output|dump-header|cookie-jar|trace|trace-ascii|stderr)=(.*)$/.exec(
+        value,
+      );
+      if (file) targets.push({ value: file[1] });
+      else if (
+        /^(?:-[A-Za-z]*[oDc]|--(?:output|dump-header|cookie-jar|trace|trace-ascii|stderr))$/.test(
+          value,
+        )
+      )
+        targets.push(operands[k + 1] ?? { value: '$unknown', opaque: true });
+    }
+  return targets;
+}
+
+/** True when the script sources a file, runs a path, or hands a script file to a shell. */
+function runsFile(commands) {
+  return commands.some(({ words, pattern }) => {
+    if (pattern) return false;
+    const { chain, problem } = executionChain(words);
+    const word = words[chain.at(-1)];
+    if (problem || !word) return false;
+    if (word.value === 'source' || word.value === '.' || filePath(word.value)) return true;
+    return (
+      SHELL_WORD.test(word.value) &&
+      shellInvocation(words.slice(chain.at(-1) + 1), word.value).file !== undefined
+    );
+  });
+}
+
+/** `eval` and `trap` run their text in THIS shell, so its functions are there; nothing else does. */
+const sameShell = (words) => {
+  const { chain, bypass } = executionChain(words);
+  return !bypass && ['eval', 'trap'].includes(words[chain.at(-1)]?.value);
+};
+
+/** The name a command calls when no wrapper stands in front of it (so a shell function can answer). */
+function calledName(words) {
+  const { chain, problem, bypass } = executionChain(words);
+  const word = words[chain.at(-1)];
+  return problem || bypass || !word || computedWord(word) || word.value.includes('/')
+    ? null
+    : word.value;
+}
+
+/**
+ * FU-159 r2 F2: which command names are CERTAINLY shell functions where a command runs. A name is a
+ * function there only if (1) it is defined exactly once in the shell, by an unquoted `name() …` or
+ * `function name …` at the file's top level that always runs (not in a branch, loop, list or
+ * background), or by a library or script this shell sources the same way; (2) that definition (or
+ * source) comes BEFORE the command - a call inside a function body counts from the first time that
+ * function runs; (3) nothing in the shell or its sources unsets it. The caller also requires that no
+ * wrapper (`command`, `env`, a path) stands in front of the call.
+ * `imports` are the unconditional top-level `source`s: `{ index, names, unsets }`.
+ */
+function functionTable(parsed, layout, imports, inherited = new Set()) {
+  const { commands, definitions } = parsed;
+  const { nesting, outer } = layout;
+  const total = new Map();
+  for (const name of [
+    ...definitions.map((d) => d.name),
+    ...imports.flatMap((i) => [...i.names]),
+    ...inherited,
+  ])
+    total.set(name, (total.get(name) ?? 0) + 1);
+  const unsets = unsetTargets(commands);
+  for (const imported of imports) {
+    for (const name of imported.unsets.names) unsets.names.add(name);
+    unsets.all ||= imported.unsets.all;
+  }
+  const owner = new Array(commands.length).fill(-1); // the definition whose body holds the command
+  const closes = [];
+  for (const [di, { index: d }] of definitions.entries()) {
+    const form = commands[d].words[0]?.value === 'function';
+    const open = form ? d : d + 1;
+    let end = open + 1;
+    const group = commands[open]?.group;
+    const subshell = !form && commands[open]?.sep === '(' && group !== commands[d].group;
+    if (subshell)
+      while (end < commands.length && groupWithin(parsed, commands[end].group, group)) end++;
+    else while (end < commands.length && outer[end] > outer[d]) end++;
+    for (let k = open; k < end; k++)
+      if (k > open || subshell || nesting[k] > outer[k]) owner[k] = di;
+    closes[di] = subshell ? end : end + 1; // the command after the whole definition
+  }
+  const valid = new Map(); // name -> the command that defines it
+  for (const [di, { name, index: d }] of definitions.entries()) {
+    const c = commands[d];
+    if (
+      total.get(name) === 1 &&
+      outer[d] === 0 &&
+      c.group === 0 &&
+      LIST_STARTS.has(c.sep) &&
+      !['&', '|', '|&'].includes(commands[closes[di]]?.sep) &&
+      !unsets.all &&
+      !unsets.names.has(name)
+    )
+      valid.set(name, d);
+  }
+  const run = new Map(); // function name -> the first time (a command index) it can run
+  const timeOf = (k) =>
+    owner[k] < 0 ? k : (run.get(definitions[owner[k]].name) ?? definitions[owner[k]].index);
+  const named = new Set(definitions.map((d) => d.index)); // the `name` of `name() …` is no call
+  const calls = commands.map(({ words, pattern }, k) =>
+    pattern || (named.has(k) && words[0].value !== 'function') ? null : calledName(words),
+  );
+  for (let again = true, guard = 0; again && guard < 64; guard++) {
+    again = false;
+    for (const [k, name] of calls.entries()) {
+      if (name === null) continue;
+      const time = timeOf(k);
+      if (time < (run.get(name) ?? Infinity)) {
+        run.set(name, time);
+        again = true;
+      }
+    }
+  }
+  const certain = (name) => total.get(name) === 1 && !unsets.all && !unsets.names.has(name);
+  return {
+    unsets,
+    timeOf,
+    /** the names callable by the command at `position` (a command index) */
+    callable(position) {
+      const time = timeOf(position);
+      const names = new Set();
+      for (const [name, d] of valid) if (d < time) names.add(name);
+      for (const { index, names: from } of imports)
+        if (index < time) for (const name of from) if (certain(name)) names.add(name);
+      for (const name of inherited) if (certain(name)) names.add(name);
+      return names;
+    },
+    /** what a shell that sources this one gets: every definition that is certain by the end */
+    exported() {
+      const names = new Set(valid.keys());
+      for (const { names: from } of imports)
+        for (const name of from) if (certain(name)) names.add(name);
+      return names;
+    },
+  };
+}
+
+/** The top-level `source`/`.` commands of a script whose one path is resolved: `[{ index, path }]`. */
+function topLevelSources(parsed, layout, self, usable) {
+  const found = [];
+  for (const [index, command] of parsed.commands.entries()) {
+    if (command.pattern) continue;
+    const { chain, problem, bypass } = executionChain(command.words);
+    const at = chain.at(-1);
+    const program = command.words[at]?.value;
+    if (problem || bypass || (program !== 'source' && program !== '.')) continue;
+    const path = sourcedPath(command.words[at + 1], self);
+    if (
+      path !== undefined &&
+      layout.outer[index] === 0 &&
+      command.group === 0 &&
+      LIST_STARTS.has(command.sep) &&
+      usable(path, index)
+    )
+      found.push({ index, path });
+  }
+  return found;
+}
+
+/**
+ * What sourcing a file does to the shell that sources it: `moves` (it can change the directory,
+ * from the tokens of the file and of the files it sources, or a library whose pool has a directory
+ * word), the function names it leaves and the names it unsets. Memoised; a cycle promises nothing.
+ */
+const unknownUnsets = () => ({ names: new Set(), all: true });
+function fileScope(path, shared) {
+  if (shared.memo.has(path)) return shared.memo.get(path);
+  shared.memo.set(path, { moves: true, exported: new Set(), unsets: unknownUnsets() });
+  let scope;
+  if (path.endsWith('.bash')) {
+    // a hash-pinned library: its text was read by a reviewer, not by the tokenizer
+    const pinned = shared.verified.has(path);
+    scope = {
+      moves:
+        !pinned ||
+        [...shared.libraries.keys()].some((name) =>
+          DIRECTORY_WORD.test(shared.texts.get(name) ?? ''),
+        ),
+      exported: new Set(pinned ? shared.libraries.get(path).functions : []),
+      unsets: { names: new Set(), all: false },
+    };
+  } else {
+    try {
+      const parsed = tokenizeShell(shared.texts.get(path));
+      const layout = layoutOf(parsed.commands);
+      const moves =
+        directoryChanges(parsed.commands, (word) => {
+          const target = word && sourcedPath(word, path);
+          return (
+            target !== undefined &&
+            shared.texts.has(target) &&
+            fileScope(target, shared).moves === false
+          );
+        }).length > 0;
+      const imports = moves
+        ? []
+        : topLevelSources(parsed, layout, path, (target) => shared.texts.has(target)).map(
+            ({ index, path: target }) => ({
+              index,
+              names: fileScope(target, shared).exported,
+              unsets: fileScope(target, shared).unsets,
+            }),
+          );
+      const table = functionTable(parsed, layout, imports);
+      scope = { moves, exported: table.exported(), unsets: table.unsets };
+    } catch {
+      scope = { moves: true, exported: new Set(), unsets: unknownUnsets() };
+    }
+  }
+  shared.memo.set(path, scope);
+  return scope;
+}
+
+/** A word of the text that changes directory, anywhere (a comment too: this errs toward refusing). */
+const DIRECTORY_WORD = /(?<![\w$./-])(?:cd|pushd|popd|chroot)(?![\w./-])/;
+/**
+ * FU-159 F3: the indexes of the commands that can change this shell's working directory (`cd`,
+ * `pushd`, `popd`, a wrapper option such as `env -C` or `sudo -D`, `chroot`, also inside literal
+ * `eval`, `trap` and `-c` text). A relative file name means another file after that.
+ */
+function directoryChanges(commands, inert, depth = 0) {
+  return commands.flatMap(({ words }, index) => {
+    const { chain, moves } = executionChain(words);
+    const inText = ({ value }) => {
+      if (depth >= 4 || !/[\s;&|]/.test(value)) return false;
+      try {
+        return directoryChanges(tokenizeShell(value).commands, inert, depth + 1).length > 0;
+      } catch {
+        return false;
+      }
+    };
+    const program = words[chain.at(-1)]?.value;
+    // a sourced file runs in this shell: it may `cd` unless it is a file whose text never does
+    const sources = (program === 'source' || program === '.') && !inert(words[chain.at(-1) + 1]);
+    return moves || sources || ['cd', 'pushd', 'popd'].includes(program) || words.some(inText)
+      ? [index]
+      : [];
+  });
+}
+
+/**
  * FU-150 F1: the repository path a `source` operand names, or undefined. A literal is itself
- * (normalised); the one computed form read is `$(dirname "$0")/<tail>` or `$(dirname
- * "${BASH_SOURCE[0]}")/<tail>` in a top-level script (`self`, its own path), which is that
- * script's directory plus the tail. No other prefix, no suffix match, no variable.
+ * (normalised); the one computed form read is `$(dirname "${BASH_SOURCE[0]}")/<tail>` in a
+ * top-level script (`self`, its own path), which is that script's directory plus the tail.
+ * `$0` is NOT the file's own once another script sources it (FU-159). No other prefix, no suffix
+ * match, no variable.
  */
 function sourcedPath(word, self) {
   if (!word) return undefined;
@@ -1367,7 +2351,7 @@ function sourcedPath(word, self) {
   if (!computedWord(word)) return exact(word.value);
   const tail = /^\$\(…\)(\/[^$]*)$/.exec(word.value)?.[1];
   const inner = word.scripts?.length === 1 ? word.scripts[0].trim() : '';
-  const own = /^dirname\s+"(?:\$0|\$BASH_SOURCE|\$\{BASH_SOURCE(?:\[0\])?\})"$/.test(inner);
+  const own = /^dirname\s+"(?:\$BASH_SOURCE|\$\{BASH_SOURCE(?:\[0\])?\})"$/.test(inner);
   return self !== undefined && tail !== undefined && own
     ? exact(posix.join(posix.dirname(self), tail))
     : undefined;
@@ -1375,8 +2359,21 @@ function sourcedPath(word, self) {
 
 /** The stage the program `name` is, given the words after it. */
 function wordStage(name, args, input, sourced) {
-  const standardInput = input.pipe || input.hereString || input.hereDocument;
   if (name === 'alias') return { problem: 'alias defines text a later command runs' };
+  // FU-159 r2 F1: `declare -i x=…` evaluates the value as an arithmetic expression, which runs `$(…)`
+  if (
+    ['declare', 'typeset', 'local', 'export', 'readonly'].includes(name) &&
+    args.some(({ value }) => /^-[A-Za-z]*i/.test(value))
+  )
+    return { problem: `${name} -i evaluates its value as arithmetic, which can run a command` };
+  // FU-159 r2 F4: `hash -p FILE NAME` makes NAME run FILE whatever PATH says
+  if (name === 'hash' && args.some(({ value }) => value !== '-r'))
+    return { problem: 'hash binds a command name to a file this check did not read' };
+  if (
+    (name === 'mapfile' || name === 'readarray') &&
+    args.some(({ value }) => /^-[A-Za-z]*C/.test(value))
+  )
+    return { problem: `${name} -C runs a callback this check does not read` };
   if (name === 'trap') {
     const handler = args.find(({ value }) => !value.startsWith('-') || value === '-');
     if (!handler || handler.value === '-' || handler.value === '') return {};
@@ -1386,29 +2383,17 @@ function wordStage(name, args, input, sourced) {
   }
   if (name === 'source' || name === '.') {
     const target = sourcedPath(args[0], sourced.self);
-    return target !== undefined && sourced.files.has(target)
+    return target !== undefined && sourced.files.has(target) && !sourced.moved
       ? {}
       : {
-          problem: `${name} runs ${args[0]?.value ?? 'nothing'}, a script this check does not read (only the exact path of a CI .sh file or a hash-pinned library)`,
+          problem: `${name} runs ${args[0]?.value ?? 'nothing'}, a script this check does not read (only the exact path of a CI .sh file or a hash-pinned library, from a directory this script has not left)`,
         };
   }
   if (name === 'env' && args.some(({ value }) => /^(?:-[A-Za-z]*S|--split-string)/.test(value)))
     return { problem: 'env -S splits a string into a command this check does not read' };
   if (REWRITERS.has(name) && args.some(({ value }) => SHELL_WORD.test(value) || value === 'eval'))
     return { problem: `${name} rewrites the text a shell runs` };
-  const runner = STRING_RUNNERS.has(name);
-  if (!runner && !STRING_WRAPPERS.has(name)) return {};
-  if (runner && standardInput)
-    return {
-      problem: `${name} reads commands from standard input, which this check does not read`,
-    };
-  const scripts = [];
-  for (const word of args) {
-    if (computedWord(word) && runner)
-      return { problem: `${name} runs a command string this check cannot read` };
-    if (!computedWord(word) && /\s/.test(word.value)) scripts.push(word.value);
-  }
-  return { scripts };
+  return {};
 }
 
 /**
@@ -1419,14 +2404,19 @@ function wordStage(name, args, input, sourced) {
  * FU-092: the shell's own options are classified by shellInvocation (shared), and a script
  * operand counts only if it is a file of the run (`ctx.shellFiles`), never by default.
  */
-function shellInput([command, ...args], input, outputs, { evaluated, shellFiles }) {
+function shellInput(
+  [command, ...args],
+  input,
+  outputs,
+  { evaluated, shellFiles, moved, shadowed },
+) {
   const literal = (word) => !word.opaque && !word.value.includes('$');
   if (command.value === 'eval') {
     if (args.length > 0 && args.every(literal))
       return { script: args.map(({ value }) => value).join(' ') };
-    const name = args.length === 1 && /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(args[0].value);
-    const source = name && !args[0].opaque ? outputs.get(name[1]) : undefined;
-    const file = source === undefined ? undefined : evaluatedFile(source);
+    const name = args.length === 1 ? evalSubject(args[0]) : undefined;
+    const source = name === undefined ? undefined : outputs.get(name);
+    const file = source === undefined ? undefined : evaluatedFile(source, shadowed);
     if (file !== undefined && evaluated.allowed.has(file)) {
       evaluated.used.add(file);
       return {};
@@ -1440,10 +2430,10 @@ function shellInput([command, ...args], input, outputs, { evaluated, shellFiles 
   if (run.body) return { script: run.body.value };
   if (run.file) {
     const file = run.file.value.replace(/^\.\//, '');
-    return shellFiles.has(file)
+    return shellFiles.has(file) && !moved
       ? {}
       : {
-          problem: `${command.value} runs ${file}, a script this check does not read (only CI .sh files under infrastructure/ and scripts/ are)`,
+          problem: `${command.value} runs ${file}, a script this check does not read (only CI .sh files under infrastructure/ and scripts/ are, from a directory this script has not left)`,
         };
   }
   if (input.hereDocument && !input.pipe && !input.hereString) return {};
@@ -1455,16 +2445,26 @@ function shellInput([command, ...args], input, outputs, { evaluated, shellFiles 
 }
 
 const withoutDeclarers = (words) => words.filter(({ value }) => !DECLARERS.has(value));
+/**
+ * FU-159 r3 F1: a genuine assignment word: `name=` is the unquoted, unescaped start of the word as written.
+ * `comm""ands=x`, `"commands"=x`, `comm\ands=x` and `commands"="x` read the same after quote removal but are
+ * the name of a command to run, not an assignment.
+ */
+const isAssignment = (word) => {
+  const name = ASSIGNMENT.exec(word.value)?.[1];
+  const [first] = word.segments ?? [];
+  return name !== undefined && first?.kind === 'bare' && first.raw.startsWith(`${name}=`);
+};
 /** An assignment-only command (`a=1`, `export a=$(x)`): it runs no program. */
 const assignmentOnly = (words) => {
   const plain = withoutDeclarers(words);
-  return plain.length > 0 && plain.every(({ value }) => ASSIGNMENT.test(value));
+  return plain.length > 0 && plain.every(isAssignment);
 };
 const OPENERS = new Set('if while until for select case { function coproc'.split(' '));
 const CLOSERS = new Set('fi done esac }'.split(' '));
 const LIST_STARTS = new Set(['', '\n', ';', '(']);
 const NAME_WRITERS = new Set(
-  'read readarray mapfile getopts let declare typeset local export readonly unset printf source .'.split(
+  'read readarray mapfile getopts let declare typeset local export readonly unset printf source . compgen complete'.split(
     ' ',
   ),
 );
@@ -1483,20 +2483,42 @@ function headIndex(words) {
   return at;
 }
 
-/** A command that can write a variable whose NAME this check cannot read. */
-function dynamicWriter(all) {
-  // FU-150 F2: the command word is found past control words (`then printf -v …`, `{ read …`),
-  // prefixes and wrapper options by the shared execution boundary; unreadable ⇒ a possible write.
-  const { chain, problem } = executionChain(all, { builtins: true });
-  if (problem) return true;
-  const at = chain.at(-1) ?? -1;
-  if (at < 0 || at >= all.length) return false;
-  const [command, ...rest] = all.slice(at);
-  if (!NAME_WRITERS.has(command.value)) return false;
-  if (command.value === 'source' || command.value === '.') return true;
-  if (command.value === 'printf')
-    return unsure(rest[0]) || (rest[0]?.value === '-v' && unsure(rest[1]));
-  if (['declare', 'typeset', 'local', 'export', 'readonly', 'unset'].includes(command.value))
+/**
+ * FU-159 r2 F3 + r3 F1: the only text `eval` may run unread is the value of ONE ordinary variable, quoted. The
+ * word is made of exactly one part, written in double quotes, and what is between them is exactly
+ * `$name` or `${name}` (raw: `"$comm""ands"`, `"\$name"`, `'$name'""` and `"${name}x"` are other words, which
+ * the canonical `value` cannot tell apart), and `name` is lower-case. Every name bash writes by itself is
+ * upper-case or `_` (`BASH_REMATCH`, `_`, `IFS`, `REPLY` ...): a lower-case name is written only by a command
+ * that names it, which is what the canonical-word writes (`shellWrites`) count. Returns the name, or undefined.
+ */
+function evalSubject(word) {
+  // an empty pair of quotes contributes nothing to the word: `"$name"''` is `"$name"`
+  const [only, ...more] = (word?.segments ?? []).filter(
+    ({ kind, raw }) => !(raw === '' && (kind === 'sq' || kind === 'dq')),
+  );
+  if (!only || more.length > 0 || only.kind !== 'dq') return undefined;
+  return /^\$(?:\{([a-z][a-z0-9_]*)\}|([a-z][a-z0-9_]*))$/.exec(only.raw)?.slice(1).find(Boolean);
+}
+
+/** `eval "$name"` where every `name=$(…)` of the script is the output of an EVALUATED_OUTPUTS script. */
+function trackedEval(words, fromAllowed) {
+  const at = executionChain(words).chain.at(-1);
+  if (words[at]?.value !== 'eval' || words.length !== at + 2) return false;
+  const name = evalSubject(words[at + 1]);
+  return name !== undefined && fromAllowed.get(name) === true;
+}
+
+/** True when a name-writing builtin has an operand whose NAME this check cannot read. */
+function unresolvedTarget(program, rest) {
+  if (!NAME_WRITERS.has(program)) return false;
+  if (program === 'source' || program === '.') return true;
+  if (program === 'printf')
+    return (
+      unsure(rest[0]) ||
+      (rest[0]?.value === '-v' && unsure(rest[1])) ||
+      (rest.some(({ value }) => value.includes('%n')) && rest.some(unsure))
+    );
+  if (['declare', 'typeset', 'local', 'export', 'readonly', 'unset'].includes(program))
     return rest.some(
       (word) =>
         /^-[A-Za-z]*n/.test(word.value) ||
@@ -1506,8 +2528,140 @@ function dynamicWriter(all) {
   return rest.some(unsure);
 }
 
+/** An arithmetic body this check can prove constant: no name, no `$`, no backtick, nothing to evaluate. */
+const CONSTANT_ARITHMETIC = /^[\s0-9+\-*/%()<>=!&|^~?:,]*$/;
+// a plain name assigned a constant evaluates no data (the name is a write, which the texts count)
+const CONSTANT_ASSIGNMENT = /^[\s(]*[A-Za-z_]\w*\s*=\s*\d+[\s)]*$/;
+const ARITHMETIC_TESTS = new Set(['-eq', '-ne', '-lt', '-le', '-gt', '-ge']);
+
+/**
+ * FU-159 r3 F2: what bash EVALUATES in a text it expands: the body of `$((…))` and `$[…]`, every `[subscript]`,
+ * a `${v:offset:length}`, and the expansions that assign through a name this check cannot read (`${!ref:=x}`),
+ * run commands in this shell (`${ cmd; }`) or expand the value again (`${v@P}`).
+ */
+function evaluationsIn(text) {
+  const bodies = [];
+  let unreadable = false;
+  const end = (at, close) => {
+    const found = text.indexOf(close, at);
+    return found === -1 ? text.length : found;
+  };
+  for (const { index } of text.matchAll(/\$\[/g))
+    bodies.push(text.slice(index + 2, end(index + 2, ']')));
+  for (const { index } of text.matchAll(/\$\(\(/g)) {
+    const close = matchParen(text, index + 1);
+    bodies.push(text.slice(index + 3, close === -1 ? text.length : close - 2));
+  }
+  for (const found of text.matchAll(/(?<=\w)\[([^\]]*)\]/g)) bodies.push(found[1]);
+  for (const { index } of text.matchAll(/\$\{/g)) {
+    let depth = 0;
+    let at = index + 1;
+    for (; at < text.length; at += 1) {
+      if (text[at] === '{') depth += 1;
+      else if (text[at] === '}' && --depth === 0) break;
+    }
+    const inner = text.slice(index + 2, at);
+    // `${!ref}` reads the variable NAMED by ref, a subscript included (`a[commands=5]`): evaluated arithmetic
+    if (/^[\s|]|@P$/.test(inner) || /^!(?![A-Za-z_]\w*(?:\[[@*]\]|[@*])$)/.test(inner))
+      unreadable = true;
+    const offset = /^[!#]?(?:[A-Za-z_]\w*|[@*]|\d+)(?:\[[^\]]*\])?:([^-=+?].*)$/s.exec(inner);
+    if (offset) bodies.push(offset[1]);
+  }
+  return { bodies: bodies.filter((body) => !/^[@*]$/.test(body)), unreadable };
+}
+
+/**
+ * FU-159 F2 + r3 F2: what this shell can write, from the CANONICAL words of its commands and from EVERY place
+ * bash expands text: command words, redirection targets, here-strings, the bodies of expanding here-documents,
+ * `((` commands, `[[ n -eq … ]]`, `let` and the integer attribute. `texts` are those texts (the implicit targets
+ * of read/select/mapfile/getopts included); a name is written wherever it is mentioned bare, and the text of a
+ * literal `eval` and `trap` handler is read the same way. Arithmetic is not followed through variables: any
+ * arithmetic this check cannot prove constant (a name, `$`, a backtick) makes the writes `unresolved`, as
+ * does any target it cannot read. `functions` are the names the script (and its eval text) defines; `evals`
+ * the `eval` commands whose text is computed: the caller decides which of those it trusts.
+ */
+function shellWrites(
+  parsed,
+  out = { texts: [], unresolved: false, functions: new Set(), evals: [], aliasing: false },
+  depth = 0,
+) {
+  const arithmetic = (body) => {
+    out.texts.push(body);
+    if (!CONSTANT_ARITHMETIC.test(body) && !CONSTANT_ASSIGNMENT.test(body)) out.unresolved = true;
+  };
+  const site = (text) => {
+    out.texts.push(text);
+    const { bodies, unreadable } = evaluationsIn(text);
+    bodies.forEach(arithmetic);
+    if (unreadable) out.unresolved = true;
+  };
+  parsed.arithmetic.forEach(arithmetic);
+  for (const name of parsed.functions) out.functions.add(name);
+  // `[[ … ]]` is split by the tokenizer at its `&&`: its operands are the commands up to the one with `]]`
+  const operators = /^(?:\[\[|\]\]|!|=|==|!=|=~|<|>|\(|\)|-[A-Za-z]{1,2})$/;
+  for (const [start, { words }] of parsed.commands.entries()) {
+    if (!words.some(({ value, quoted }) => value === '[[' && !quoted)) continue;
+    const stop = parsed.commands.findIndex(
+      (c, k) => k >= start && c.words.some(({ value }) => value === ']]'),
+    );
+    const range = parsed.commands
+      .slice(start, stop === -1 ? undefined : stop + 1)
+      .flatMap((c) => c.words);
+    if (range.some(({ value }) => ARITHMETIC_TESTS.has(value)))
+      for (const { value } of range) if (!operators.test(value)) arithmetic(value);
+  }
+  for (const { words, pattern, input, heredocs } of parsed.commands) {
+    for (const word of [
+      ...words,
+      ...(typeof input?.hereString === 'object' ? [input.hereString] : []),
+    ]) {
+      site(word.value);
+      (word.arith ?? []).forEach(arithmetic);
+    }
+    (heredocs ?? []).forEach(site);
+    if (pattern) continue;
+    const { chain, problem } = executionChain(words);
+    if (problem) out.unresolved = true;
+    const at = chain.at(-1) ?? -1;
+    if (problem || at < 0 || at >= words.length) continue;
+    const program = words[at].value;
+    const rest = words.slice(at + 1);
+    const text = (script) => {
+      let inner = null;
+      try {
+        inner = depth < 4 ? tokenizeShell(script) : null;
+      } catch {
+        // unreadable text: unresolved below
+      }
+      if (inner) shellWrites(inner, out, depth + 1);
+      else out.unresolved = true;
+    };
+    if (program === 'eval') {
+      if (!rest.some(unsure)) text(rest.map(({ value }) => value).join(' '));
+      else out.evals.push(words);
+    } else if (program === 'trap') {
+      const handler = rest.find(({ value }) => !value.startsWith('-') || value === '-');
+      // a computed handler is read as the text it is: its computed command word is unresolved
+      if (handler && handler.value !== '-' && handler.value !== '') text(handler.value);
+    } else if (program === 'let') rest.forEach(({ value }) => arithmetic(value));
+    else if (program === 'alias') out.aliasing = true;
+    else if (
+      ['mapfile', 'readarray', 'compgen', 'complete'].includes(program) &&
+      rest.some(({ value }) => /^-[A-Za-z]*[CFW]/.test(value))
+    )
+      out.unresolved = true; // a callback, function or word list: text bash runs or expands in this shell
+    else if (
+      ['declare', 'typeset', 'local'].includes(program) &&
+      rest.some(({ value }) => /^[-+][A-Za-z]*i/.test(value))
+    )
+      out.unresolved = true; // an integer variable evaluates every value assigned to it
+    if (unresolvedTarget(program, rest)) out.unresolved = true;
+  }
+  return out;
+}
+
 /** The script file of `[NAME=… ]bash|sh <file> …`, the only command an evaluated output may come from. */
-function evaluatedFile(source) {
+function evaluatedFile(source, shadowed = () => false) {
   let parsed;
   try {
     parsed = tokenizeShell(source);
@@ -1518,6 +2672,8 @@ function evaluatedFile(source) {
   const all = parsed.commands[0].words;
   const words = all.slice(all.findIndex(({ value }) => !ASSIGNMENT.test(value)));
   if (words.length < 2 || !/^(?:ba)?sh$/.test(words[0].value) || words[1].opaque) return undefined;
+  // FU-159 r3 F3: `bash` is the external interpreter only where no function (or alias) can be called that
+  if (shadowed(words[0].value)) return undefined;
   return words[1].value.replace(/^\.\//, '');
 }
 
