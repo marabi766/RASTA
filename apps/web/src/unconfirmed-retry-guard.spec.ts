@@ -22,6 +22,9 @@ import type { SupplierBaseline } from '@/server/supplier-commands';
 import { mintCreateStamp } from '@/server/project-create-replay';
 import { mintDemandStamp } from '@/server/demand-replay';
 import { mintSubmissionId } from '@/server/submission';
+import { assetRegistrationRequest, driverCreationRequest } from '@/server/create-request';
+import { EMPTY_REGISTER_ASSET_FORM } from '@/lib/asset-form-fields';
+import { EMPTY_CREATE_DRIVER_FORM } from '@/lib/driver-fields';
 import { topUpSnapshot } from '@/server/top-up-request';
 import { actingAccessToken } from '@/test/session-token';
 import type { WebSession } from '@/server/session';
@@ -127,6 +130,8 @@ const OWN_MECHANISM: Readonly<
   ],
   'apps/web/src/app/projects/actions.ts': ['SERVER_STORE', 'server/unresolved-request.ts'],
   'apps/web/src/app/wallet/actions.ts': ['SERVER_STORE', 'server/top-up-request.ts'],
+  'apps/web/src/app/assets/actions.ts': ['SERVER_STORE', 'server/create-request.ts'],
+  'apps/web/src/app/drivers/actions.ts': ['SERVER_STORE', 'server/create-request.ts'],
   'apps/web/src/app/suppliers/supplier-actions.ts': [
     'SERVER_STORE',
     'server/supplier-unresolved.ts',
@@ -140,6 +145,22 @@ const SERVER_STORE: Readonly<
     { writes: readonly string[]; exemptions: Readonly<Record<string, string>>; tests: string }
   >
 > = {
+  'apps/web/src/app/assets/actions.ts': {
+    writes: ['submitRegisterAsset'],
+    exemptions: {
+      releaseUnresolvedAssetRegistration:
+        'Explicit reconciliation; compare-and-delete, no domain write.',
+    },
+    tests: 'app/assets/actions.spec.ts',
+  },
+  'apps/web/src/app/drivers/actions.ts': {
+    writes: ['submitCreateDriver'],
+    exemptions: {
+      releaseUnresolvedDriverCreation:
+        'Explicit reconciliation; compare-and-delete, no domain write.',
+    },
+    tests: 'app/drivers/actions.spec.ts',
+  },
   'apps/web/src/app/projects/actions.ts': {
     writes: ['submitCreateProject'],
     exemptions: {
@@ -269,7 +290,7 @@ const OWN_PREVIOUS = CASES.filter(({ module }) => OWN_MECHANISM[module]?.[0] ===
 it('finds the write actions, and holds every one outside OWN_MECHANISM to the shared rule', () => {
   expect(CASES.length).toBeGreaterThan(30);
   // The 7 project commands and the 14 modules of PR-830 r2's follow-up table, at least.
-  expect(SHARED.length).toBeGreaterThanOrEqual(37);
+  expect(SHARED.length).toBeGreaterThanOrEqual(35);
 });
 
 it('names only modules that exist in OWN_MECHANISM', () => {
@@ -304,6 +325,8 @@ const STORE_BEHAVIOURS: Readonly<Record<string, Readonly<Record<string, StoreMod
   'apps/web/src/app/projects/actions.ts': { submitCreateProject: 'REPLAY' },
   'apps/web/src/app/procurement/demands/demand-actions.ts': { submitDemandRequest: 'REPLAY' },
   'apps/web/src/app/wallet/actions.ts': { submitTopUp: 'PREVIOUS' },
+  'apps/web/src/app/assets/actions.ts': { submitRegisterAsset: 'PREVIOUS' },
+  'apps/web/src/app/drivers/actions.ts': { submitCreateDriver: 'PREVIOUS' },
   'apps/web/src/app/suppliers/supplier-actions.ts': {
     submitRegisterSupplier: 'RECONCILE', submitQualificationRequest: 'RECONCILE',
     submitApproveQualification: 'RECONCILE', submitRejectQualification: 'RECONCILE',
@@ -388,7 +411,7 @@ describe.each(STORE_WRITES)('$label (SERVER_STORE behaviour)', ({ action, export
     reserve.mockResolvedValue({ kind: 'HELD', reason: 'OTHER_REQUEST', request: record });
     read.mockResolvedValue({
       kind: 'PENDING', now: Date.now(),
-      request: { ...record, ref: topUpSnapshot(session, 'ID_1', submissionId, '1000') },
+      request: { ...record, ref: module.includes('/assets/') ? assetRegistrationRequest.snapshot(session, submissionId, EMPTY_REGISTER_ASSET_FORM) : module.includes('/drivers/') ? driverCreationRequest.snapshot(session, submissionId, EMPTY_CREATE_DRIVER_FORM) : topUpSnapshot(session, 'ID_1', submissionId, '1000') },
     });
     expect(await action(...ids, { kind: 'IDLE' }, form)).toMatchObject({
       kind: mode === 'RECONCILE' ? 'UNCONFIRMED' : 'HELD',

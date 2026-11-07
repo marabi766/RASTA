@@ -1,6 +1,8 @@
 /**
  * @jest-environment node
  */
+import { useUnresolvedStore } from '@/server/unresolved-request';
+import { memoryUnresolvedStore } from '@/server/unresolved-request-store';
 import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
@@ -79,8 +81,9 @@ function formData(
 }
 
 beforeEach(() => {
+  useUnresolvedStore(memoryUnresolvedStore());
   currentSession.mockResolvedValue(SESSION);
-  registerAsset.mockResolvedValue({
+  registerAsset.mockReset().mockResolvedValue({
     kind: 'CREATED',
     data: { id: 'AST_1' },
     correlationId: 'corr-sample',
@@ -336,7 +339,7 @@ describe('what the service refuses', () => {
       retryAfterSeconds: 1,
       correlationId: 'corr-sample',
     });
-    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toMatchObject({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
       submissionId: expect.any(String),
@@ -348,7 +351,7 @@ describe('what the service refuses', () => {
     // The service may have registered the machine; "nothing was saved" would
     // invite a retry that reports a duplicate.
     registerAsset.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-sample' });
-    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toMatchObject({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
       submissionId: expect.any(String),
@@ -356,7 +359,7 @@ describe('what the service refuses', () => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
-  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+  it('keeps the first unknown outcome without replaying (FU-173/FU-190)', async () => {
     // The first answer was lost; the same form again meets the gateway's rate limit,
     // which says nothing about the first send.
     registerAsset.mockReset();
@@ -370,24 +373,26 @@ describe('what the service refuses', () => {
       });
     const form = formData(VALID);
     const first = await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, form);
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-first',
       submissionId: form.get(SUBMISSION_FIELD),
     });
-    expect(await submitRegisterAsset(first, form)).toEqual(first);
-    expect(registerAsset).toHaveBeenCalledTimes(2);
+    expect(await submitRegisterAsset(first, form)).toMatchObject({
+      ...first,
+      releaseToken: expect.any(String),
+    });
+    expect(registerAsset).toHaveBeenCalledTimes(1);
   });
 
-  it('reports an outage with its status and correlation id', async () => {
+  it('treats an ambiguous 503 as unconfirmed', async () => {
     registerAsset.mockResolvedValue({
       kind: 'UNAVAILABLE',
       status: 503,
       correlationId: 'corr-sample',
     });
-    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
-      kind: 'FAILED',
-      status: 503,
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toMatchObject({
+      kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
     });
   });

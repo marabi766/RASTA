@@ -15,7 +15,8 @@ import {
 } from '@/lib/driver-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
-import { submitCreateDriver } from './actions';
+import { UnresolvedRegistrationNotice } from '@/app/UnresolvedRegistrationNotice';
+import { submitCreateDriver, releaseUnresolvedDriverCreation } from './actions';
 import { IDLE_CREATE_DRIVER_FORM, type CreateDriverFormState } from './form-state';
 
 /**
@@ -34,7 +35,9 @@ const LABELS: Record<CreateDriverField, string> = {
 };
 
 function valuesOf(state: CreateDriverFormState): CreateDriverFormValues {
-  return state.kind === 'INVALID' ? state.values : EMPTY_CREATE_DRIVER_FORM;
+  return state.kind === 'INVALID' || state.kind === 'HELD' || state.kind === 'UNCONFIRMED'
+    ? (state.values ?? EMPTY_CREATE_DRIVER_FORM)
+    : EMPTY_CREATE_DRIVER_FORM;
 }
 
 function errorsOf(state: CreateDriverFormState): Partial<Record<CreateDriverField, string>> {
@@ -56,28 +59,39 @@ const ID_HINTS: Record<Extract<DriverPicker, { kind: 'ID' }>['reason'], string> 
 export function NewDriverForm({
   csrfToken,
   submissionId,
+  initialState = IDLE_CREATE_DRIVER_FORM,
   picker,
 }: {
   csrfToken: string;
   /** Minted for this render; reused on a retry so a retry is not a second record. */
   submissionId: string;
+  initialState?: CreateDriverFormState;
   /** Who may be picked, or the id field (`server/driver-roster.ts`). */
   picker: DriverPicker;
 }) {
-  const [state, action, pending] = useActionState(submitCreateDriver, IDLE_CREATE_DRIVER_FORM);
+  const [state, action, pending] = useActionState(submitCreateDriver, initialState);
 
   const values = valuesOf(state);
   const errors = errorsOf(state);
-  const currentSubmissionId = state.kind === 'INVALID' ? state.submissionId : submissionId;
+  const locked =
+    state.kind === 'HELD' || state.kind === 'UNCONFIRMED' || state.kind === 'NOT_CHECKED';
+  const currentSubmissionId =
+    state.kind === 'INVALID' || state.kind === 'HELD' || state.kind === 'UNCONFIRMED'
+      ? state.submissionId
+      : submissionId;
 
-  return (
-    <form action={action} className="flex flex-col gap-4">
+  const form = (
+    <form
+      key={locked ? `held:${currentSubmissionId}` : 'editing'}
+      action={action}
+      className="flex flex-col gap-4"
+    >
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
-      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId ?? ''} />
 
       <FormBanner state={state} />
 
-      {picker.kind === 'PICK' ? (
+      {picker.kind === 'PICK' && !locked ? (
         <Field
           label="عضو سازمان"
           required
@@ -91,6 +105,7 @@ export function NewDriverForm({
               // (docs/16 § ۱۶٫۱, `select-reset.spec.tsx`).
               key={values.userId}
               {...control}
+              disabled={locked}
               name="userId"
               defaultValue={values.userId}
               className={controlClassName}
@@ -105,10 +120,16 @@ export function NewDriverForm({
           )}
         </Field>
       ) : (
-        <Field label={LABELS.userId} required error={errors.userId} hint={ID_HINTS[picker.reason]}>
+        <Field
+          label={LABELS.userId}
+          required
+          error={errors.userId}
+          hint={picker.kind === 'ID' ? ID_HINTS[picker.reason] : undefined}
+        >
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="userId"
               defaultValue={values.userId}
               dir="ltr"
@@ -124,6 +145,7 @@ export function NewDriverForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="employeeNo"
               defaultValue={values.employeeNo}
               dir="ltr"
@@ -136,6 +158,7 @@ export function NewDriverForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="licenceNumber"
               defaultValue={values.licenceNumber}
               dir="ltr"
@@ -150,6 +173,7 @@ export function NewDriverForm({
           {(control) => (
             <input
               {...control}
+              disabled={locked}
               name="licenceClass"
               defaultValue={values.licenceClass}
               dir="ltr"
@@ -162,6 +186,7 @@ export function NewDriverForm({
           {(control) => (
             <JalaliDateInput
               {...control}
+              disabled={locked}
               type="date"
               name="licenceValidTo"
               defaultValue={values.licenceValidTo}
@@ -175,6 +200,7 @@ export function NewDriverForm({
         {(control) => (
           <textarea
             {...control}
+            disabled={locked}
             name="notes"
             rows={3}
             defaultValue={values.notes}
@@ -184,15 +210,35 @@ export function NewDriverForm({
       </Field>
 
       <div className="flex flex-wrap items-center gap-2 pt-2">
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || locked}>
           {pending ? 'در حال ثبت…' : 'ثبت راننده'}
         </Button>
       </div>
     </form>
   );
+  return (
+    <>
+      {'releaseToken' in state && state.releaseToken ? (
+        <UnresolvedRegistrationNotice
+          csrfToken={csrfToken}
+          releaseToken={state.releaseToken}
+          href="/drivers"
+          action={releaseUnresolvedDriverCreation}
+        />
+      ) : null}
+      {form}
+    </>
+  );
 }
 
 function FormBanner({ state }: { state: CreateDriverFormState }) {
+  if (state.kind === 'HELD' || state.kind === 'NOT_CHECKED') {
+    return (
+      <Alert tone="warning">
+        نتیجهٔ درخواست پیشین مشخص نیست. پیش از ثبت دوباره، فهرست را بررسی کنید.
+      </Alert>
+    );
+  }
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
   }
