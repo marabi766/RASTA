@@ -189,6 +189,7 @@ const PATCH_PROTOCOL = new Map([
   ['economic-hold-refusal-exit-v1', 9],
   ['economic-hold-send-fence-v1', 10],
   ['economic-hold-fence-on-order-v1', 11],
+  ['economic-refusal-reconciles-held-v1', 12],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // The hold's fence on the order row (D-144): a build below it sends uncounted (D-150).

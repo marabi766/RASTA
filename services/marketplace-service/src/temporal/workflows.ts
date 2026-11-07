@@ -101,7 +101,8 @@ export { PROVEN_REFUSALS };
  *
  * `confirmedCall` puts another economic call in the same wait. Only an answer
  * that proves the call changed nothing (`PROVEN_REFUSALS`) takes the path it
- * always took; anything else — a 5xx, a timeout, a lost response, a code nobody
+ * always took, unless the money may still be held (D-127, below); anything
+ * else — a 5xx, a timeout, a lost response, a code nobody
  * listed — says nothing about the money, so the saga stays and asks again under
  * the same key. `siblingCall` does the same for the dispute filing, the refund and
  * the hold (FU-117). An empty lookup does not end a hold in doubt: a request on its
@@ -131,6 +132,14 @@ export { PROVEN_REFUSALS };
  * read, lookup or local step ends the saga meanwhile. The owner's terminal status is
  * an answer: money back with the buyer, or never held, lets a cancellation finish;
  * anything else stays for a person (`staysForReconciliation`), never a false one.
+ *
+ * ## A first refusal does not end the saga with the money held (D-127)
+ *
+ * The first attempt's proven refusal of the authorisation, the filing or the refund says the
+ * call changed nothing; the money it was about may still be held, and an ended saga returns
+ * none of it. Unless the order's obligation is back with the buyer or never held, the call's
+ * wait takes the refusal, operator-visible and alerted, and asks again in doubt, so only its
+ * answer or the owner's terminal status ends it (`refusalReconciles`).
  *
  * ## The hold is fenced where it lands (D-132)
  *
@@ -216,12 +225,16 @@ export interface UnconfirmedSibling {
   transactionId?: string;
   disputeId?: string;
   reason?: string;
+  /** Waiting since a refusal proven on its first attempt, with the money possibly held (D-127). */
+  refused?: true;
 }
 
 /** An authorisation in its wait for confirmation, for the next run to go on counting. */
 export interface UnconfirmedCall {
   operation: UnconfirmedOperation;
   rounds: number;
+  /** As in {@link UnconfirmedSibling}. */
+  refused?: true;
   /**
    * The saga left the wait to follow a moved order, the call still unconfirmed.
    * A later return to the call goes on from here, not as a first send.
@@ -407,6 +420,16 @@ export const HOLD_FENCE_PATCH = 'economic-hold-send-fence-v1';
  * refund ends the hold's recovery. A history without the marker replays what it did.
  */
 export const HOLD_ROW_PATCH = 'economic-hold-fence-on-order-v1';
+
+/**
+ * A refusal proven on its first attempt no longer ends the saga while the money may be
+ * held (D-127, `refusalReconciles`). Asked only where such a refusal ended the run, so a
+ * history that ended there replays its end.
+ */
+export const REFUSAL_RECONCILES_PATCH = 'economic-refusal-reconciles-held-v1';
+
+/** What the status query shows while a refused call waits for a person or an answer. */
+const RECONCILIATION_PHASE = 'OBLIGATION_RECONCILIATION';
 
 /** On economic-service's record of a refund no party asked for. */
 const LATE_HOLD_REFUND_REASON = 'A hold arrived after the saga gave up on it';
@@ -868,6 +891,43 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   }
 
   /**
+   * Asked of every failure that would end the call's wait, an older build's
+   * `OWNER_STATE_IS_FINAL` included: the obligation, not the mark, decides.
+   *
+   * A refusal proven on its first attempt shows that the call changed nothing, not that the
+   * saga may end: the money may still be held, and nothing would return or pay it out
+   * (D-127). So the call's wait takes it, as `RECONCILIATION_PHASE` with the alert on, and
+   * each round asks again in doubt: only the call's answer or the owner's terminal status ends
+   * it. The refusal still ends the saga where the order's obligation, read now, holds no money:
+   * back with the buyer or never held, as `ownerHoldsNothing` reads it, for this transaction.
+   * HELD, any other status, another transaction, none, or a lookup that fails: the money may
+   * be held, and the saga stays. The hold has its own proofs (`placeHold`), and is not asked.
+   */
+  async function refusalReconciles(
+    operation: UnconfirmedOperation,
+    transactionId: string | undefined,
+    error: unknown,
+  ): Promise<boolean> {
+    if (operation === 'createObligation' || !releaseCanWait(error)) return false;
+    if (!patched(REFUSAL_RECONCILES_PATCH)) return false;
+    try {
+      const found = await askEconomic(orderId);
+      return !(
+        transactionId !== undefined &&
+        typeof found === 'object' &&
+        found !== null &&
+        'notHeld' in found &&
+        found.transactionId === transactionId &&
+        found.status !== 'CREATED' &&
+        leftNothingToRefund(found.funds)
+      );
+    } catch (lookup) {
+      if (releaseCanWait(lookup)) return true;
+      throw lookup;
+    }
+  }
+
+  /**
    * An economic call that ends the saga only on proof it changed nothing
    * (`outcomeUnknown`); on anything else it waits for confirmation. `later` is
    * what each round sends, for a call that may no longer be wanted by then. A
@@ -877,6 +937,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   async function confirmedCall<T>(
     operation: UnconfirmedOperation,
     at: OrderStatus,
+    transactionId: string,
     call: () => Promise<T>,
     later: () => Promise<T>,
     wakes: () => boolean,
@@ -887,12 +948,23 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     try {
       return await call();
     } catch (error) {
-      if (!canWait(error) || !patched(ECONOMIC_WAIT_PATCH)) throw error;
-      const pending: UnconfirmedCall = { operation, rounds: unconfirmed?.rounds ?? 0 };
+      const refused = !canWait(error);
+      if (
+        refused
+          ? !(await refusalReconciles(operation, transactionId, error))
+          : !patched(ECONOMIC_WAIT_PATCH)
+      ) {
+        throw error;
+      }
+      const pending: UnconfirmedCall = {
+        operation,
+        rounds: unconfirmed?.rounds ?? 0,
+        ...(refused || unconfirmed?.refused ? { refused: true as const } : {}),
+      };
       unconfirmed = pending;
       return await waitForConfirmation(
         {
-          phase: UNCONFIRMED_PHASE[operation],
+          phase: pending.refused ? RECONCILIATION_PHASE : UNCONFIRMED_PHASE[operation],
           at,
           call: later,
           canWait,
@@ -931,12 +1003,20 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         carried.operation === 'createObligation'
           ? patched(HOLD_WAIT_PATCH)
           : patched(SIBLING_WAIT_PATCH);
-      if (!canWait(error) || !adopted()) throw error;
+      const refused = !canWait(error);
+      if (
+        refused
+          ? !(await refusalReconciles(carried.operation, carried.transactionId, error))
+          : !adopted()
+      ) {
+        throw error;
+      }
       const pending: UnconfirmedSibling = sibling ?? { ...carried, rounds: 0 };
+      if (refused) pending.refused = true;
       sibling = pending;
       answer = await waitForConfirmation(
         {
-          phase: UNCONFIRMED_PHASE[pending.operation],
+          phase: pending.refused ? RECONCILIATION_PHASE : UNCONFIRMED_PHASE[pending.operation],
           at: UNCONFIRMED_AT[pending.operation],
           call: () => call(true),
           canWait,
@@ -1422,6 +1502,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     const authorisation = await confirmedCall<AuthorisationResult | 'MOVED'>(
       'authoriseSettlement',
       'RECEIPT_CONFIRMED',
+      transactionId,
       unconfirmed ? askAgain : send,
       askAgain,
       // A dispute is filed as soon as it is raised, not at the next backoff.
