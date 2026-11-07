@@ -6,9 +6,9 @@ export const JEST_LAUNCHERS = {
       'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
     sha256: {
       'scripts/verify-migration-reversible-lib.test.mjs':
-        'cabc139c9859660c52832d0cc57d8b4853250ed3ee16ee73541114c1df62c15c',
+        '1d4d60011bc80d5db5e780c0c1ad66bb50420899b1bf679f6069d5a0ac7b9f69',
       'scripts/verify-migration-reversible-lib.mjs':
-        '0f6e461cb176fdba901633fcdac1de5f71a7a1d8a8eb7c9b98d74494964c6b94',
+        '4b81fabf454fbb2263c8f220c222538705bd98e9c9b37269187185270cf1e9c5',
       'scripts/psql-prisma-url.mjs':
         '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
     },

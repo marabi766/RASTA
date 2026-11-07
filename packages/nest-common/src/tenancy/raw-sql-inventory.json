@@ -22,7 +22,7 @@
   },
   {
     "file": "services/analytics-service/src/prisma/prisma.service.ts",
-    "line": 104,
+    "line": 110,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -211,7 +211,7 @@
   },
   {
     "file": "services/asset-service/src/prisma/prisma.service.ts",
-    "line": 118,
+    "line": 124,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -281,56 +281,56 @@
   },
   {
     "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
-    "line": 58,
+    "line": 98,
     "hash": "eddd5de45570718e23166439d4b2c6d353abe78d153b615739819fc7b5e77167",
     "occurrence": 0,
     "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
   },
   {
     "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
-    "line": 236,
+    "line": 313,
     "hash": "76f5c31752bf913d857829a2fef73d4308d1b8cb791b34a34347f3f6b5751958",
     "occurrence": 0,
     "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
   },
   {
     "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
-    "line": 242,
+    "line": 321,
     "hash": "db43fbeaa38c2c52616e2008e1f82ae289453d52c1ab93b786136a958bcb76cb",
     "occurrence": 0,
     "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
   },
   {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
-    "line": 59,
+    "line": 60,
     "hash": "839f7e9a308c458a3c203532ca02d081cbd4a40365adb1b8647dd3e7d9be3b22",
     "occurrence": 0,
     "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
   },
   {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
-    "line": 239,
+    "line": 241,
     "hash": "1b6e0d58da2ac563b351590150b6090fc4390aa0da3a8ff7701ed151b932f603",
     "occurrence": 0,
     "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
   },
   {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
-    "line": 243,
+    "line": 249,
     "hash": "4d7070a1c204b99a9c348dd8cc33b12b8ab4e4cd32cc0affb1bbdaf0549f3599",
     "occurrence": 0,
     "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
   },
   {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
-    "line": 258,
+    "line": 264,
     "hash": "332d58ce892ffa77dc64a7b95d7536357d487e356890b11f69260f3dd1a60aa8",
     "occurrence": 0,
     "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
   },
   {
     "file": "services/audit-service/src/prisma/prisma.service.ts",
-    "line": 119,
+    "line": 141,
     "hash": "0f467be12ddd1851e057cd1ee269ca1e59a340c387193c1be3d70f7c84d12f4c",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -393,7 +393,7 @@
   },
   {
     "file": "services/construction-service/src/prisma/prisma.service.ts",
-    "line": 143,
+    "line": 149,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -442,7 +442,7 @@
   },
   {
     "file": "services/construction-service/src/shared/idempotency.ts",
-    "line": 477,
+    "line": 505,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
@@ -701,7 +701,7 @@
   },
   {
     "file": "services/contract-service/src/prisma/prisma.service.ts",
-    "line": 124,
+    "line": 131,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -792,7 +792,7 @@
   },
   {
     "file": "services/document-service/src/prisma/prisma.service.ts",
-    "line": 129,
+    "line": 135,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -806,7 +806,7 @@
   },
   {
     "file": "services/document-service/src/scanning/scan.repository.ts",
-    "line": 239,
+    "line": 237,
     "hash": "f6262e06e9077efe9b5f6f51356ba7aebfd97f2b804a49cd61ce94a6cf90ac42",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
@@ -946,23 +946,23 @@
   },
   {
     "file": "services/economic-service/src/prisma/prisma.service.ts",
-    "line": 150,
+    "line": 157,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
   },
   {
     "file": "services/economic-service/src/reward/configuration-lock.ts",
+    "line": 12,
     "hash": "9eee77d2bdc33b43f0d45f7765c134896c3d1f1647b5ec7b735fba3640d68b67",
     "occurrence": 0,
-    "line": 12,
     "decision": "platform-wide: transaction advisory lock serializes selection against changes to shared and tenant reward rules; no tenant data returned"
   },
   {
     "file": "services/economic-service/src/reward/configuration-lock.ts",
+    "line": 14,
     "hash": "0c246a521e21bdbc86cf4cfea7b6a3518144b2e248444eafad453f5bb9835dd6",
     "occurrence": 0,
-    "line": 14,
     "decision": "platform-wide: transaction advisory lock serializes selection against changes to shared and tenant reward rules; no tenant data returned"
   },
   {
@@ -1009,9 +1009,9 @@
   },
   {
     "file": "services/economic-service/src/reward/reward.service.ts",
+    "line": 415,
     "hash": "d02037f790ea3a082b3c6b5319b4ea0628c2a01a86b88e02056bc3afb5a35600",
     "occurrence": 0,
-    "line": 415,
     "decision": "has bound organization predicate"
   },
   {
@@ -1023,9 +1023,9 @@
   },
   {
     "file": "services/economic-service/src/reward/reward.service.ts",
+    "line": 664,
     "hash": "cbcec50989c75261ecaae6e7f7726b4d4164796180c8bd35342d75e07a3f24b5",
     "occurrence": 0,
-    "line": 664,
     "decision": "platform-wide: obtains the database clock for rule changes; no domain rows accessed"
   },
   {
@@ -1044,7 +1044,7 @@
   },
   {
     "file": "services/economic-service/src/settlement/settlement.service.ts",
-    "line": 272,
+    "line": 292,
     "hash": "3a2847060285accdac0f8ee25bf877009c2b53db2675f19cdf423793226e741e",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
@@ -1058,28 +1058,35 @@
   },
   {
     "file": "services/economic-service/src/shared/idempotency.ts",
-    "line": 287,
+    "line": 350,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
+    "file": "services/economic-service/src/shared/idempotency.ts",
+    "line": 607,
+    "hash": "aeb744de90db395a80b4075b80d09eb8910c9f980c83783afc5fe7b7c541deaa",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
+  },
+  {
     "file": "services/economic-service/src/transaction/resolved-dispute-backfill.ts",
-    "line": 111,
+    "line": 115,
     "hash": "bc4e9ef7538c0d8209ef8dd81cf543dfde199abf1f67eb15d89fe416b5b788c5",
     "occurrence": 0,
     "decision": "platform-wide: explicit administrative dispute-attribution backfill scans all historical transactions; no tenant request invokes this worker"
   },
   {
     "file": "services/economic-service/src/transaction/resolved-dispute-backfill.ts",
-    "line": 129,
+    "line": 133,
     "hash": "b1fd4528452d7347e79cfb0d2eed17f814385cd5a7d9d55a39aeab3653b732a2",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/economic-service/src/transaction/resolved-dispute-backfill.ts",
-    "line": 133,
+    "line": 137,
     "hash": "196681ad67de5f64a7433751a995413e019b85f6dc28fcf3947b0bc5d294b2f5",
     "occurrence": 0,
     "decision": "platform-wide: explicit administrative dispute-attribution backfill scans all historical transactions; no tenant request invokes this worker"
@@ -1331,7 +1338,7 @@
   },
   {
     "file": "services/fleet-service/src/prisma/prisma.service.ts",
-    "line": 123,
+    "line": 129,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -1373,84 +1380,84 @@
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 93,
+    "line": 94,
     "hash": "38934ac8cc4db4536c4fc0dd347d02836492b504ed594f08eac6a69137b514ad",
     "occurrence": 0,
     "decision": "platform-wide: locks a global User before membership decisions; User intentionally spans organizations"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 138,
+    "line": 139,
     "hash": "4ff2ae1269c0917a3792c54480bf83ae2161c88bd4847c6e3ba9482d3f3d0e2f",
     "occurrence": 0,
     "decision": "platform-wide: locks a global User before membership decisions; User intentionally spans organizations"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 202,
+    "line": 203,
     "hash": "0f8a7530ee62ed050462a0c421d636d582c78088063b3246c6553a5547c060fe",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 222,
+    "line": 223,
     "hash": "f01beefcaec286147a53c78abd6df7c6093c4ac9d73b11c6cb32eede0d11a621",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 241,
+    "line": 242,
     "hash": "54ae1f7667c57ad050abd7fd4b416433c4a8edd5f106ed88b1295696e4fb90e2",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 264,
+    "line": 265,
     "hash": "ab20ab6b5213db5161616fcf956e9eba4510a1ce1b22df0c673c09dcceb6c1f9",
     "occurrence": 0,
     "decision": "platform-wide: provisioning intent is bound to actor and idempotency key before a user exists; stored acting tenant is compared by the caller"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 281,
+    "line": 282,
     "hash": "9c60588e42674859dbb4aa44d5dc3bf1a8458a42402a24a5f470547c29dbe444",
     "occurrence": 0,
     "decision": "platform-wide: provisioning intent is bound to actor and idempotency key before a user exists; stored acting tenant is compared by the caller"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 323,
+    "line": 324,
     "hash": "a1ba77a9c3437da873aabfff7462c640d5a7e9b64fd9996f6cab8ae7c02f9cb3",
     "occurrence": 0,
     "decision": "platform-wide: provisioning intent is bound to actor and idempotency key before a user exists; stored acting tenant is compared by the caller"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 352,
+    "line": 353,
     "hash": "f92b725a8eec9f85cc1781ad071e62aa104ca61fef3e138b75519e1ebbcb3c37",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 365,
+    "line": 366,
     "hash": "f57dde680b26d8a4f7b4ab5399e89253093a36d3d8064be590b223e18b609e0c",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 389,
+    "line": 390,
     "hash": "64528c04015d48052d3597c05529a7a6caabb5aa1f1a4d661543eadc686942e5",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 419,
+    "line": 420,
     "hash": "8b53c50ed86731132dd7ce3e4b3de81b7a294f5973a1c41d7c844c12ddce19b8",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
@@ -1464,35 +1471,35 @@
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 444,
+    "line": 446,
     "hash": "aaac953394946f63c3ef0d0dc25d71ed1eea2424b5c7da57db4e93a8b9eae37a",
     "occurrence": 0,
     "decision": "platform-wide: registration is a platform-reviewed intake before tenant membership exists; selected by request or global user"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 656,
+    "line": 672,
     "hash": "e8a3be89fcb402e7e86aca6ac9673a663cb1a8a92440ff4aab33ea7e8b8d72c9",
     "occurrence": 0,
     "decision": "platform-wide: trusted membership projection reads one global user across tenants to rebuild signed membership claims"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 691,
+    "line": 707,
     "hash": "b732f4bff4c18b7b4de230908c7882692852f986b84e4d4084e59fda0b10278a",
     "occurrence": 0,
     "decision": "platform-wide: database clock for global identity decisions; no tenant row accessed"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 717,
+    "line": 733,
     "hash": "c800cee16a347924920fa1df04d32f6003afc6b8ece24353849aea9be75b3b06",
     "occurrence": 0,
     "decision": "platform-wide: trusted membership projection reads one global user across tenants to rebuild signed membership claims"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 741,
+    "line": 757,
     "hash": "dcd4431845e71ebb573201c3dd536cde0d9e18811c4a2467ac04c94b158accc5",
     "occurrence": 0,
     "decision": "platform-wide: membership administration or expiry operates on a previously locked membership; user-wide projector and expiry scanner intentionally span tenants"
@@ -1506,14 +1513,14 @@
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 557,
+    "line": 558,
     "hash": "cf60cf5ffc5bf4d6b675e7741ef3d11c44a1d8c19b35be09ddb6609ea91f753d",
     "occurrence": 0,
     "decision": "platform-wide: usernames and emails are unique across the whole platform (ux_user_username_login_key, ux_user_email_login_key, FU-084); answers only whether a holder exists, before a write already authorized for its target"
   },
   {
     "file": "services/identity-service/src/identity/identity.repository.ts",
-    "line": 571,
+    "line": 572,
     "hash": "1b2d33f032a295176f0064e19b1cb87568802e77931e85178daa0bf7ea8546cf",
     "occurrence": 0,
     "decision": "platform-wide: a username's login key is unique across the platform (ux_user_username_login_key, FU-084); returns only the holder's id, which the caller uses to filter its own tenant-scoped read"
@@ -1569,7 +1576,7 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 427,
+    "line": 428,
     "hash": "52da1ad34dda81788acfe10974f4845e2dc8d93a17fa382c45bdc55748a37a33",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
@@ -1583,7 +1590,7 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 464,
+    "line": 465,
     "hash": "cd034b291207b27e67c24fd6f3416c3d293e05cbb1ac342839c5bb4594313804",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
@@ -1597,7 +1604,7 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 657,
+    "line": 658,
     "hash": "11ea3c0f68ff46ca0317ecc6ac15b21d2f2ae1362ed924b3a0be5e29911fe2ed",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
@@ -1611,21 +1618,21 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 699,
+    "line": 700,
     "hash": "b803f199328d5d3bc2389de0a07414377400329b1f327c30fa880d934a0bac61",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 737,
+    "line": 738,
     "hash": "b20aace091522b50d6c405fbe2095d20f2733c42c356a0b651a48b9772cd2157",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 753,
+    "line": 754,
     "hash": "a07fc8e5e4e33713f89cf3c0ddfa21568ed65235a74d2ff54fd3536cd639a45c",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
@@ -1639,14 +1646,14 @@
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 797,
+    "line": 799,
     "hash": "1cd9b31158eb1ee7bc5cbae1f4238624a8aecfd492278d8c9b9da763592b61ff",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
   },
   {
     "file": "services/identity-service/src/keycloak/keycloak-write-fence.ts",
-    "line": 818,
+    "line": 820,
     "hash": "2013b72e0c7722502d7057711a6358e09962afce448147d0f7f5269db19a44c6",
     "occurrence": 0,
     "decision": "platform-wide: identity write fences follow a global user across memberships; keyed by user or attempt and consumed by the platform projector"
@@ -1709,35 +1716,35 @@
   },
   {
     "file": "services/identity-service/src/prisma/prisma.service.spec.ts",
-    "line": 221,
+    "line": 224,
     "hash": "3656d97c9addafd984ac478758a941e2ba3a7757c4ab5030650340c3cd17d64c",
     "occurrence": 1,
     "decision": "platform-wide: unit-test stub exercises pool admission only; never sends SQL to a database"
   },
   {
     "file": "services/identity-service/src/prisma/prisma.service.spec.ts",
-    "line": 248,
+    "line": 251,
     "hash": "7f3df481dcceece73ce71b9688439ec729c1f2c67650498cc001d1f9fa10af2f",
     "occurrence": 0,
     "decision": "platform-wide: unit-test stub exercises pool admission only; never sends SQL to a database"
   },
   {
     "file": "services/identity-service/src/prisma/prisma.service.ts",
-    "line": 255,
+    "line": 261,
     "hash": "c9df54046ff2cd36d99bf0cc75e0abf986dbb3d1080e7e7a806cc139040cbcd2",
     "occurrence": 0,
     "decision": "platform-wide: private runtime-role verification seam executes the shared fixed PostgreSQL privilege/catalogue queries; no domain tenant rows are read"
   },
   {
     "file": "services/identity-service/src/prisma/prisma.service.ts",
-    "line": 342,
+    "line": 348,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
   },
   {
     "file": "services/identity-service/src/prisma/prisma.service.ts",
-    "line": 404,
+    "line": 410,
     "hash": "ecb07b23213bef5f1075fbda07bd822211ccd5be0b4ee3795eeddd3992cb4abd",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
@@ -1821,7 +1828,7 @@
   },
   {
     "file": "services/inventory-service/src/prisma/prisma.service.ts",
-    "line": 125,
+    "line": 131,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -2031,35 +2038,35 @@
   },
   {
     "file": "services/inventory-service/src/shared/idempotency.ts",
-    "line": 258,
+    "line": 419,
     "hash": "3c8d69686c2d237e240b1f8efb7a468b9c867110248344b693c1ca86acf60054",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/inventory-service/src/shared/idempotency.ts",
-    "line": 396,
+    "line": 623,
     "hash": "be13b77228770fba0a49f8751a9b8efa93fd57d8e3019661dc5d69d3eb6dc7c8",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/inventory-service/src/shared/idempotency.ts",
-    "line": 434,
+    "line": 661,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/inventory-service/src/shared/idempotency.ts",
-    "line": 461,
+    "line": 688,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
     "occurrence": 1,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/inventory-service/src/shared/idempotency.ts",
-    "line": 462,
+    "line": 689,
     "hash": "c57c92764d58b19d856c8670edf25e361e5e074ffa5b6b3cb18005b11e120b44",
     "occurrence": 0,
     "decision": "has bound organization predicate"
@@ -2108,7 +2115,7 @@
   },
   {
     "file": "services/inventory-service/src/shipment/shipment.repository.ts",
-    "line": 239,
+    "line": 237,
     "hash": "d339e7177c87984986feb0720c13214dd9a2bb0b15edb45d17d203031ec590bf",
     "occurrence": 0,
     "decision": "platform-wide: shipment is visible to its owner and consignee or buyer; bound visible SQL fragment encodes these party predicates before returning data"
@@ -2353,7 +2360,7 @@
   },
   {
     "file": "services/maintenance-service/src/prisma/prisma.service.ts",
-    "line": 128,
+    "line": 134,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -2395,7 +2402,7 @@
   },
   {
     "file": "services/marketplace-service/src/order/order.repository.ts",
-    "line": 135,
+    "line": 136,
     "hash": "9444a272eb21edaddb32a8f2e1a63caf4aae24e2e737f8c2812f9deeae8b29d0",
     "occurrence": 0,
     "decision": "platform-wide: buyer and supplier share this order or return; lock by global id precedes party visibility and command authority checks; it also reads whether the buyer's receipt is recorded on that same row, which decides where an operator's SETTLE may return the order (D-083)"
@@ -2415,22 +2422,36 @@
     "decision": "has bound organization predicate"
   },
   {
+    "file": "services/marketplace-service/src/order/order.repository.ts",
+    "line": 367,
+    "hash": "48708c323d033c8bf27b541374b8f3f5721759ad2d1ecc86905e891dd1b369c5",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/marketplace-service/src/order/order.repository.ts",
+    "line": 434,
+    "hash": "89cb5847e8caaa97fb38a8123c4eeb63c2c2e503868650d04500fa71f6be538d",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
     "file": "services/marketplace-service/src/order/order.service.ts",
-    "line": 1254,
+    "line": 1256,
     "hash": "1f9813e3acb98d6f59e103a4f2b7ab1a2e2dee1554ceef6e1722e1a3f8bb3cd2",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/marketplace-service/src/order/order.service.ts",
-    "line": 1285,
+    "line": 1287,
     "hash": "1f9813e3acb98d6f59e103a4f2b7ab1a2e2dee1554ceef6e1722e1a3f8bb3cd2",
     "occurrence": 1,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/marketplace-service/src/prisma/prisma.service.ts",
-    "line": 126,
+    "line": 133,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -2584,7 +2605,7 @@
   },
   {
     "file": "services/notification-service/src/prisma/prisma.service.ts",
-    "line": 161,
+    "line": 167,
     "hash": "52d9cb3577b74314528aa28198014694dcffd3a0c63ea56b49ca61abb97b6d05",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -2752,7 +2773,7 @@
   },
   {
     "file": "services/organization-service/src/prisma/prisma.service.ts",
-    "line": 69,
+    "line": 74,
     "hash": "a49de0c843a808a5ff966b4678a28e669e337a2ab137c8ea33ffb50cfadb8e47",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -2906,7 +2927,7 @@
   },
   {
     "file": "services/procurement-service/src/prisma/prisma.service.ts",
-    "line": 113,
+    "line": 121,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -2927,7 +2948,7 @@
   },
   {
     "file": "services/procurement-service/src/quotation/quotation.repository.ts",
-    "line": 182,
+    "line": 185,
     "hash": "e2bf218d5c6baa98e6a6ea867a6f80c946d36007be1997ddd01456b658950625",
     "occurrence": 0,
     "decision": "platform-wide: transaction-scoped advisory lock keyed by the RFQ id the caller already share-locked through its own invitation; reads and returns no row"
@@ -2948,28 +2969,28 @@
   },
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
-    "line": 296,
+    "line": 303,
     "hash": "1dec3cf27e2f1c106e21bc6ed7b259914b74b0923502179278cff44037e3b3a8",
     "occurrence": 0,
     "decision": "platform-wide: background rfq worker leases due work across tenants with SKIP LOCKED and a fenced claim"
   },
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
-    "line": 322,
+    "line": 329,
     "hash": "8ea7c3d9dedce6c6e034f450d58b94a28091b8f54d189f3338d9c63e1cea3a29",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
-    "line": 343,
+    "line": 350,
     "hash": "0a853e23cb2098feae1ed9ec3e611c80f779ed035f93a71d138102a483d610fd",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/procurement-service/src/rfq/rfq.repository.ts",
-    "line": 360,
+    "line": 367,
     "hash": "8c209743f4b46f3d6202c167d942d055e6f5e2e2243dd5cfe20d3fe0bfb31fe4",
     "occurrence": 0,
     "decision": "platform-wide: operational worker backlog metric aggregates due work across tenants; no public domain-row response"
@@ -2983,35 +3004,35 @@
   },
   {
     "file": "services/procurement-service/src/shared/idempotency.ts",
-    "line": 252,
+    "line": 424,
     "hash": "3c8d69686c2d237e240b1f8efb7a468b9c867110248344b693c1ca86acf60054",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/procurement-service/src/shared/idempotency.ts",
-    "line": 383,
+    "line": 615,
     "hash": "be13b77228770fba0a49f8751a9b8efa93fd57d8e3019661dc5d69d3eb6dc7c8",
     "occurrence": 0,
     "decision": "has bound organization predicate"
   },
   {
     "file": "services/procurement-service/src/shared/idempotency.ts",
-    "line": 421,
+    "line": 653,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
     "occurrence": 0,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/procurement-service/src/shared/idempotency.ts",
-    "line": 445,
+    "line": 677,
     "hash": "f9028822b27328c0a677fc7d5722394bd8b4921aa17f6cdc28b3ede01b5b9805",
     "occurrence": 1,
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
     "file": "services/procurement-service/src/shared/idempotency.ts",
-    "line": 446,
+    "line": 678,
     "hash": "c57c92764d58b19d856c8670edf25e361e5e074ffa5b6b3cb18005b11e120b44",
     "occurrence": 0,
     "decision": "has bound organization predicate"
@@ -3039,7 +3060,7 @@
   },
   {
     "file": "services/supplier-service/src/prisma/prisma.service.ts",
-    "line": 163,
+    "line": 169,
     "hash": "c04412b69a8acbac90fba9b921c9619156c149e22629046812a6658798fd1919",
     "occurrence": 0,
     "decision": "platform-wide: readiness checks a constant or runtime privileges; no tenant rows returned"
@@ -3053,14 +3074,14 @@
   },
   {
     "file": "services/supplier-service/src/supplier/supplier.repository.ts",
-    "line": 523,
+    "line": 528,
     "hash": "1d4cf4939680856a2f4fa0f8b4bdaa594880c1ee781ff8c258daf1b6ec56557c",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"
   },
   {
     "file": "services/supplier-service/src/supplier/supplier.repository.ts",
-    "line": 561,
+    "line": 566,
     "hash": "81ce96343c289e3477f27d7c92a1ecca5fee2b1f698aa5b9899dc2d61a4ec574",
     "occurrence": 0,
     "decision": "platform-wide: obtains the database clock; no domain rows accessed"

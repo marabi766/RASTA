@@ -234,6 +234,8 @@ export class OrderService {
                 supplierOrganizationId: priced.supplierOrganizationId,
                 placedBy: actor,
                 status: 'PENDING',
+                // No send yet: the column's default says otherwise, for any other writer.
+                holdSendClaims: 0,
                 sagaStartRequestedAt: createdAt,
                 totalAmountMinor: priced.totalAmountMinor,
                 currency: priced.currency,
@@ -1315,6 +1317,27 @@ export class OrderService {
     return this.repository.confirmSagaCallsOn(this.prisma.client, order, operations, subject);
   }
 
+  /** See `OrderRepository.claimHoldSend`. */
+  claimHoldSend(
+    order: { id: string; organizationId: string },
+    proposed: string | undefined,
+  ): Promise<{ holdNotAfter: string | null; claims: number } | { closed: boolean }> {
+    return this.repository.claimHoldSend(this.prisma.client, order, proposed);
+  }
+
+  /** See `OrderRepository.closeHoldSendsOnRefusal`. */
+  closeHoldSendsOnRefusal(order: { id: string; organizationId: string }): Promise<boolean> {
+    return this.repository.closeHoldSendsOnRefusal(this.prisma.client, order);
+  }
+
+  /** See `OrderRepository.closeHoldSendsIfNoneCanLand`. */
+  closeHoldSendsIfNoneCanLand(
+    order: { id: string; organizationId: string },
+    marginMs: number,
+  ): Promise<boolean> {
+    return this.repository.closeHoldSendsIfNoneCanLand(this.prisma.client, order, marginMs);
+  }
+
   /** What the saga needs to know to drive an order without re-reading it. */
   async describe(orderId: string): Promise<{
     id: string;
@@ -1372,6 +1395,10 @@ export class OrderService {
     dispute: { id: string; reason: string; resolution: string | null } | null;
     /** `mirroredDisputeId`'s dispute on this order, when one was named. */
     mirroredDispute?: { id: string; resolution: string | null } | null;
+    /** The hold's fence as any run left it (D-144). Absent from a read recorded before it. */
+    holdNotAfter?: string | null;
+    holdSendsClosed?: boolean;
+    holdMayHaveSent?: boolean;
   }> {
     // One snapshot for all three reads: a resolution committing between them
     // would show the order DISPUTED with no OPEN dispute, and the saga stops
@@ -1409,6 +1436,9 @@ export class OrderService {
       cancellationReason: row.cancellationReason,
       dispute,
       ...(mirroredDispute === undefined ? {} : { mirroredDispute }),
+      holdNotAfter: row.holdNotAfter?.toISOString() ?? null,
+      holdSendsClosed: row.holdSendsClosedAt !== null,
+      holdMayHaveSent: row.holdSendClaims > 0,
     };
   }
 

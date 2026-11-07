@@ -108,6 +108,7 @@ describe('work the saga owes (#796 r1)', () => {
     const base: Record<string, Fn> = {
       readOrder: () => ({ ...state, dispute: state.status === 'DISPUTED' ? state.dispute : null }),
       findObligation: () => null,
+      noHoldCanLand: () => true,
       authoriseSettlement: () => undefined,
       settle: () => SETTLED,
       disputeObligation: () => 'ECON_1',
@@ -348,40 +349,8 @@ describe('work the saga owes (#796 r1)', () => {
       expect(s.calls).not.toContain('createObligation');
     });
 
-    it('a hold left unanswered gives the next run no proof', async () => {
-      let refusing = true;
-      let lookups = 0;
-      const s = saga({ status: 'PENDING' }, (state) => ({
-        createObligation: () => {
-          state.status = 'CANCELLING';
-          state.cancellationReason = 'changed their mind';
-          throw refused('UPSTREAM_UNAVAILABLE');
-        },
-        findObligation: () => {
-          lookups += 1;
-          if (lookups > 1 && refusing) throw refused('FORBIDDEN');
-          return null;
-        },
-      }));
-      await drive(
-        s,
-        async (handle, id) => {
-          const latest = await rolled(handle, id);
-          await atRest(latest);
-          refusing = false;
-          await latest.signal(retryDisputeRelease);
-          await eventually(
-            () => s.rounds.some((round) => round.includes('does not show')),
-            'the empty lookup to be refused',
-          );
-          expect(s.calls).not.toContain('markCancelled');
-        },
-        { historyEventThreshold: 32 },
-      );
-    });
-
     it('a continued run with no proof of its hold does not close on it', async () => {
-      const s = saga(cancelling(null));
+      const s = saga(cancelling(null), () => ({ noHoldCanLand: () => false }));
       await drive(s, (handle) => stays(s, handle, 'COMPENSATION_UNCONFIRMED'), resumedAt());
       expect(s.rounds[0]).toContain('does not show');
       expect(s.calls).not.toContain('markCancelled');

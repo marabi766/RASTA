@@ -361,20 +361,20 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 
 فهرست کامل کدها: [`packages/contracts/src/common/errors.ts`](../packages/contracts/src/common/errors.ts)
 
-| وضعیت | کدهای نمونه                                                                                                                                       |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                                                         |
-| 413   | `PAYLOAD_TOO_LARGE`                                                                                                                               |
-| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                                                          |
-| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                                                             |
-| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                                                         |
-| 404   | `NOT_FOUND`                                                                                                                                       |
-| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `REPLAY_WINDOW_CLOSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED`         |
-| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `ACTOR_IDENTITY_UNKNOWN` · `NO_ACTIVE_RULE` · `BUSINESS_LINE_REQUIRED` |
-| 429   | `RATE_LIMIT_EXCEEDED`                                                                                                                             |
-| 500   | `INTERNAL_ERROR`                                                                                                                                  |
-| 503   | `UPSTREAM_UNAVAILABLE` · `KEYCLOAK_UNAVAILABLE` · `KEYCLOAK_WRITE_SETTLING`                                                                       |
-| 504   | `UPSTREAM_TIMEOUT`                                                                                                                                |
+| وضعیت | کدهای نمونه                                                                                                                                                                |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                                                                                  |
+| 413   | `PAYLOAD_TOO_LARGE`                                                                                                                                                        |
+| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                                                                                   |
+| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                                                                                      |
+| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                                                                                  |
+| 404   | `NOT_FOUND`                                                                                                                                                                |
+| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `REPLAY_WINDOW_CLOSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED`                                  |
+| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `ACTOR_IDENTITY_UNKNOWN` · `NO_ACTIVE_RULE` · `BUSINESS_LINE_REQUIRED` · `HOLD_DEADLINE_PASSED` |
+| 429   | `RATE_LIMIT_EXCEEDED`                                                                                                                                                      |
+| 500   | `INTERNAL_ERROR`                                                                                                                                                           |
+| 503   | `UPSTREAM_UNAVAILABLE` · `KEYCLOAK_UNAVAILABLE` · `KEYCLOAK_WRITE_SETTLING`                                                                                                |
+| 504   | `UPSTREAM_TIMEOUT`                                                                                                                                                         |
 
 **`KEYCLOAK_UNAVAILABLE` (503، identity، D-064).** حذف نقش (`POST /v1/memberships/:id/roles`) و ابطال
 (`POST /v1/memberships/:id/revoke`) پیش از Commit در Keycloak نوشته می‌شوند؛ اگر نوشته نشود، هیچ چیز تغییر نمی‌کند و رویدادی
@@ -396,6 +396,12 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 در خطاست (بیرون از `development` و `test`): تعهد بی خط را هیچ قاعده‌ای قیمت نمی‌کند و با صفر تسویه می‌شد. هیچ چیز ثبت یا
 Hold نمی‌شود؛ خط را بفرست. تنها استثنا marketplace-service است که سفارش خودش (`ORDER` به‌صورت `MARKETPLACE_ORDER`) را ثبت
 می‌کند — با منبع راستی‌آزمایی‌شده، نه انتخاب فراخوان. خط نامعتبر همان `400 VALIDATION_FAILED` است.
+
+**`HOLD_DEADLINE_PASSED` (422، economic، D-132).** `POST /v1/transactions` با `holdFunds` و `holdNotAfter`، وقتی ساعت پایگاه دادهٔ
+economic از آن مهلت گذشته است. فراخوان مهلت را در نخستین ارسال همان کلید ثابت می‌کند. بررسی هم در تراکنش ثبت کلید است و هم در
+تراکنش خود Hold، پس هیچ چیز ثبت یا Hold نمی‌شود و پاسخ زیر همان کلید می‌ماند؛ کلید منقضی یا پاک‌شده هم دوباره همین پاسخ را می‌گیرد.
+پاسخ موفق ذخیره‌شده پیش از مهلت همچنان بازپخش می‌شود. مهلت در هش درخواست است، پس مهلت دیگر زیر همان کلید `409
+IDEMPOTENCY_KEY_REUSED` است. بی `holdNotAfter` رفتار مثل گذشته است.
 
 **تغییر قرارداد (#188، بخش پ).** `CREATOR_IDENTITY_UNKNOWN` (economic، مسیر اپراتور آشتی پرداخت، ADR-064 § ۶) حذف شد و همان
 حالت اکنون `422 ACTOR_IDENTITY_UNKNOWN` است — همان کدی که هر جدایی وظایفِ اثبات‌ناپذیر در پلتفرم برمی‌گرداند (`docs/09` § ۹٫۳).

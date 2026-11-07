@@ -81,6 +81,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
     const economic = {
       createObligation: method('createObligation', async () => ({ id: `TXN_${ulid()}` })),
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       authoriseSettlement: method('authoriseSettlement', async () => undefined),
       settle: method('settle', settle),
       refund: method('refund', async () => undefined),
@@ -205,6 +207,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
 
     const economic = {
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       createObligation: async (input: { orderId: string }) => {
         calls.push('createObligation');
         obligation.orderId = input.orderId;

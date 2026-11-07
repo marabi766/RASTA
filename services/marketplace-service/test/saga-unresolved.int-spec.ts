@@ -39,6 +39,9 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
   const economic = {
     dispute: async () => ({ disputeId: `TXD_${ulid()}` }),
     resolveDispute: async () => undefined,
+    // economic-service with the D-150 rule, which the row's proof needs (FU-233, #948):
+    // every stub below spreads this one, so a hold is sent and its record opened.
+    requiresOrderHoldDeadline: async () => true,
   } as unknown as EconomicClient;
   const acts: OrderActivities = createActivities({
     orders: wiring.orders,
@@ -956,6 +959,8 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
       currentAttempt: () => attempt as number,
     });
     const lost = () => new Error('economic-service did not answer (socket hang up)');
+    /** The deadline a workflow at the fence proposes (D-144); far ahead, never passed. */
+    const DEADLINE = new Date(Date.now() + 86_400_000).toISOString();
     const refused = (code: string, status: number) =>
       new RastaError(code as never, 'refused', { internalContext: { operation: 'x', status } });
     const intentOpen = async (orderId: string) => {
@@ -1107,8 +1112,32 @@ describe('saga unresolved financial state (PostgreSQL)', () => {
         creating = async () => {
           throw refused(code, status);
         };
-        await expect(hold.createObligation(orderId)).rejects.toThrow();
+        // With the deadline a workflow at the fence proposes (D-144): the first send the
+        // order row has ever counted, so the row's proof and the record's agree.
+        await expect(hold.createObligation(orderId, DEADLINE)).rejects.toThrow();
         expect([code, status, await intentOpen(orderId)]).toEqual([code, status, open]);
+      }
+      // #836 with #812: the record closes on a refusal only where the row's proof holds
+      // too. A round of a wait from before the fence (no deadline proposed), or a second
+      // send the row has counted, leaves it open, even for a refusal that held nothing.
+      for (const [why, deadline, claimsBefore] of [
+        ['no deadline proposed', undefined, 0],
+        ['an earlier send counted on the row', DEADLINE, 1],
+      ] as const) {
+        const orderId = await place();
+        if (claimsBefore > 0) {
+          await runUnscoped(
+            'the suite counts an earlier send on the order',
+            () =>
+              prisma.client.$executeRaw`UPDATE "order" SET hold_send_claims = ${claimsBefore}
+              WHERE id = ${orderId}`,
+          );
+        }
+        creating = async () => {
+          throw refused('INSUFFICIENT_BALANCE', 422);
+        };
+        await expect(hold.createObligation(orderId, deadline)).rejects.toThrow();
+        expect([why, await intentOpen(orderId)]).toEqual([why, true]);
       }
       await runUnscoped(
         'the suite closes the intents it opened',
