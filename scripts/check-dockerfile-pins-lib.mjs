@@ -341,7 +341,7 @@ export const REVIEWED_PROGRAMS = new Map([
     'infrastructure/docker/kafka/ci-up.sh',
     {
       programs: ['node', 'openssl'],
-      writes: ['${directory}/${variable}', '${TLS_DIR}/broker.env'],
+      writes: ['${GITHUB_ENV}', '${directory}/${variable}', '${TLS_DIR}/broker.env'], // ENV: publish's `echo "$1=$2"` (as on main)
       // the names `publish NAME value` appends to $GITHUB_ENV (`echo "$1=$2"`: the name is a parameter, not readable here)
       githubEnv: ['KAFKA_BROKERS', 'KAFKA_SSL', 'KAFKA_SSL_CA_FILE'],
       assigns: ['$1=$2', '${variable}=${value}'], // publish NAME value, and the loop over the principals' variables
@@ -1109,7 +1109,6 @@ export function validateInfraImagePins(files, policy = {}) {
   // FU-092: a script a shell is told to run is read only if it is one of these files.
   const shellFiles = new Set(files.filter(({ kind }) => kind === 'shell').map(({ name }) => name));
   const errors = [];
-  const runner = { named: false, outputWrites: [] }; // task 372 R1: see namesRunnerOutput
   // FU-150 F1: a library is sourceable only when this run read it and its contents are the
   // reviewed ones; nothing is approved by its path or its name.
   const libraries = policy.sourcedLibraries ?? SOURCED_LIBRARIES;
@@ -1124,7 +1123,6 @@ export function validateInfraImagePins(files, policy = {}) {
       continue;
     }
     const sha256 = createHash('sha256').update(text).digest('hex');
-    if (RUNNER_OUTPUT_NAME.test(text)) runner.named = true; // task 372 R1: a library is sourced into the shell
     if (!entry) errors.push(`${name}: a .bash file no reviewed list names (SOURCED_LIBRARIES)`);
     else if (entry.sha256 !== sha256)
       errors.push(
@@ -1150,7 +1148,6 @@ export function validateInfraImagePins(files, policy = {}) {
     libraries,
     verified,
     memo: new Map(),
-    runner, // task 372 R1: see namesRunnerOutput
     pastes: [], // task 368 F3: every `${{ env.NAME }}` pasted into a script, checked against the $GITHUB_ENV writes
     envWrites: new Set(), // ... and the names those writes define
   };
@@ -1185,11 +1182,6 @@ export function validateInfraImagePins(files, policy = {}) {
     }
   }
 
-  if (shared.runner.named)
-    for (const where of shared.runner.outputWrites)
-      errors.push(
-        `${where}: writes to a path this check cannot read (this run names GITHUB_OUTPUT or GITHUB_STEP_SUMMARY other than to read it, so the name may not be the runner's file; REVIEWED_PROGRAMS writes)`,
-      );
   for (const { name, where } of shared.pastes)
     if (shared.envWrites.has(name.toLowerCase()))
       errors.push(
@@ -1400,7 +1392,6 @@ function workflowImages({ name, text }, images, errors, shared) {
       const known = key.toLowerCase();
       if (!env.has(known)) env.set(known, new Set());
       env.get(known).add(String(value));
-      if (namesRunnerOutput(key) || namesRunnerOutput(String(value))) shared.runner.named = true;
       if (/_IMAGE$/.test(key)) {
         const where = `${name}:${lineAt(doc.getIn([...path, key], true))}`;
         for (const ref of resolveExpressions(String(value), env, where, errors))
@@ -1728,11 +1719,11 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
       .map(({ index }) => index),
   );
   const unknownWrites = []; // writes whose target this check cannot read
+  const runnerWrites = []; // unreviewed writes to a runner file: main's rule (task 207)
   for (const [position, command] of parsed.commands.entries()) {
     if (definitionNames.has(position)) continue;
     const where = `${ctx.file}:${ctx.lineOf(command.startLine)}`;
     let words = command.words;
-    if (words.some(({ value }) => namesRunnerOutput(value))) ctx.runner.named = true; // task 372 R1
     // PR #805 r2 F1: a variable a shell evaluates at startup is text this check does not read.
     if (words.some(({ value }) => STARTUP_TEXT.test(value)))
       errors.push(
@@ -1784,10 +1775,12 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     for (const target of written) {
       // an absolute path outside the scratch directories may be the checkout under another spelling
       if (unreadTarget(target) || (movedAt(position) && !target.value.startsWith('/'))) {
+        // task 207 (#941 r4 R1′): a runner file's name may be set at run time (`readonly $a$b`), so it is judged by main's
+        // rule — unreviewed and in a script that sources or runs a file ⇒ refused — never exempt
         if (!ctx.reviewed.writes(ctx.file, target.value))
-          unknownWrites.push(`${where} (${target.value})`);
-      } else if (RUNNER_OUTPUT_READ.test(target.value)) {
-        ctx.runner.outputWrites.push(`${where} (${target.value})`); // judged once the whole run is read
+          (RUNNER_FILE.test(target.value) ? runnerWrites : unknownWrites).push(
+            `${where} (${target.value})`,
+          );
       } else if (ctx.sourced?.has(posix.normalize(target.value)))
         errors.push(
           `${where}: writes ${posix.normalize(target.value)}, a file this run sources or executes (its contents are the ones this check read)`,
@@ -2027,6 +2020,11 @@ function shellImages(script, ctx, images, errors, state = { localTags: new Set()
     errors.push(
       `${where}: writes to a path this check cannot read (it may be $GITHUB_ENV, $GITHUB_PATH, a curl config or a file a later step runs; REVIEWED_PROGRAMS writes)`,
     );
+  if (runsFile(parsed.commands))
+    for (const where of runnerWrites)
+      errors.push(
+        `${where}: writes to a path this check cannot read in a script that also sources or runs a file (the write may replace that file; REVIEWED_PROGRAMS writes)`,
+      );
   for (const { script: inner, line, shell, holder } of parsed.nested) {
     const at = holder !== undefined && holder >= 0 ? holder : undefined;
     shellImages(
@@ -2059,26 +2057,27 @@ const ABSOLUTE_ELSEWHERE = /^\/(?!(?:dev|tmp)(?:\/|$))/;
  * absolute elsewhere (the runner's `_temp/_runner_file_commands`), under `~`, or climbing out with `..`.
  */
 const unreadTarget = (target) =>
-  !OWN_FORM_TARGET.test(target.value) &&
-  (unreadArgument(target) ||
-    ABSOLUTE_ELSEWHERE.test(posix.normalize(target.value)) ||
-    target.value.startsWith('~') ||
-    posix.normalize(target.value).split('/')[0] === '..');
-// the runner files a step may append to by name: ENV and PATH are read by their own forms (githubEnvWrite, pathEntry),
-// the summary and the step outputs change no env name and no program
-const OWN_FORM_TARGET = /^\$\{?GITHUB_(?:ENV|PATH|STEP_SUMMARY|OUTPUT)\}?$/;
-/**
- * Task 372 R1: the name of the summary / output file is only the runner's file while nothing in the run sets it. The
- * exemption for those two targets holds only if NO text of the run (a step, a script, a library) and no env key or
- * value names them in any form but a bare read (`$NAME`, `${NAME}`): an assignment, `export`/`read`/`for`/`printf -v`
- * operand, `${NAME:=…}`, a prefix assignment, an `${!ref:=…}`. One flag for the whole run, because a script a step
- * starts inherits the step's env: `GITHUB_OUTPUT=scripts/lib.sh bash scripts/b.sh` and `export …` taint `b.sh` too.
- */
-const RUNNER_OUTPUT_NAME = /GITHUB_(?:STEP_SUMMARY|OUTPUT)/i;
-const RUNNER_OUTPUT_READ = /^\$\{?GITHUB_(?:STEP_SUMMARY|OUTPUT)\}?$/;
-const namesRunnerOutput = (value) =>
-  (RUNNER_OUTPUT_NAME.test(value) && !RUNNER_OUTPUT_READ.test(value)) ||
-  /\$\{![^}]*:?=/.test(value);
+  unreadArgument(target) ||
+  ABSOLUTE_ELSEWHERE.test(posix.normalize(target.value)) ||
+  target.value.startsWith('~') ||
+  posix.normalize(target.value).split('/')[0] === '..';
+// Task 207 (#941 r4 R1′): no runner file is exempt — its name can be set at run time in text this check cannot read
+// (`readonly $a$b`), so a write to it is judged by main's rule (runsFile), and PATH also by its own form (pathEntry)
+const RUNNER_FILE = /^\$\{?GITHUB_(?:ENV|PATH|STEP_SUMMARY|OUTPUT)\}?$/;
+/** True when the script sources a file, runs a path, or hands a script file to a shell (main's, verbatim; task 207). */
+function runsFile(commands) {
+  return commands.some(({ words, pattern }) => {
+    if (pattern) return false;
+    const { chain, problem } = executionChain(words);
+    const word = words[chain.at(-1)];
+    if (problem || !word) return false;
+    if (word.value === 'source' || word.value === '.' || filePath(word.value)) return true;
+    return (
+      SHELL_WORD.test(word.value) &&
+      shellInvocation(words.slice(chain.at(-1) + 1), word.value).file !== undefined
+    );
+  });
+}
 /** The words after the program (index `at`) that are not redirections: its operands and options. */
 function operandsAfter(words, at) {
   const operands = [];

@@ -3942,8 +3942,8 @@ test('task 372 R1: $GITHUB_OUTPUT and $GITHUB_STEP_SUMMARY are the runner files 
           wf(env, level).some((e) => unread.test(e)),
           `${level} ${JSON.stringify(env)}`,
         );
-    // the same run with the name only read stays accepted
-    assert.deepEqual(wf({ OTHER: 'x' }, 'job'), []);
+    // task 207: with the name never set the same run is refused too (main's rule: a write to it + a file run)
+    assert.ok(wf({ OTHER: 'x' }, 'job').some((e) => unread.test(e)));
     acceptsShell(`echo "k=v" >> "$${name}"\ncat "\${${name}}" > /dev/null`, bare, [lib]);
   }
   // ... in a hash-pinned library the run sources (its hash is the reviewed one, so only the name decides)
@@ -3957,7 +3957,94 @@ test('task 372 R1: $GITHUB_OUTPUT and $GITHUB_STEP_SUMMARY are the runner files 
     },
     [lib, library(naming)],
   );
-  // controls: reading and appending in the runner's own form, in a script that runs a file
-  acceptsShell(`echo "## done" >> "$GITHUB_STEP_SUMMARY"\n${write('GITHUB_OUTPUT')}`, bare, [lib]);
-  acceptsShell(`echo x | tee -a "\${GITHUB_STEP_SUMMARY}"\nbash scripts/lib.sh`, bare, [lib]);
+  // task 207: appending in the runner's own form in a script that runs a file is refused, as on main
+  refusesShell(
+    `echo "## done" >> "$GITHUB_STEP_SUMMARY"\n${write('GITHUB_OUTPUT')}`,
+    unread,
+    bare,
+    [lib],
+  );
+  refusesShell(`echo x | tee -a "\${GITHUB_STEP_SUMMARY}"\nbash scripts/lib.sh`, unread, bare, [
+    lib,
+  ]);
+});
+
+test('task 207 (#941 r4 R1′): a write to $GITHUB_ENV/OUTPUT/STEP_SUMMARY/PATH is judged by main’s rule, so a name built at run time is refused', () => {
+  const lib = scriptFile('scripts/lib.sh');
+  const unread =
+    /writes to a path this check cannot read in a script that also sources or runs a file/;
+  const policy = { ...bare, sourcedLibraries: new Map() };
+  const errors = (files) => validateInfraImagePins([lib, ...files], policy).errors;
+  for (const n of ['OUTPUT', 'STEP_SUMMARY', 'ENV']) {
+    const W =
+      n === 'ENV'
+        ? 'echo "X=a docker run alpine:latest true" >> "$GITHUB_ENV"\nbash scripts/lib.sh'
+        : `echo 'docker run alpine:latest true' >> "$GITHUB_${n}"\nbash scripts/lib.sh`;
+    const ab = `a=GITHUB_; b=${n}=scripts/lib.sh`;
+    const sh = (text, extra = []) => [...extra, scriptFile('scripts/x.sh', `${text}\n${W}`)];
+    const wf = (run) => [
+      workflowYaml(stringify({ env: { X: n }, jobs: { j: { steps: [{ run: `${run}\n${W}` }] } } })),
+    ];
+    // one row per probe of the r4 table (each ACC at f6250897 for OUTPUT/STEP_SUMMARY, most for ENV; REF on main)
+    const rows = {
+      'R1 assignment': sh(`GITHUB_${n}=scripts/lib.sh`),
+      'R1 export': sh(`export GITHUB_${n}=scripts/lib.sh`),
+      'readonly $a$b': sh(`${ab}; readonly $a$b`),
+      'readonly --': sh(`${ab}; readonly -- $a$b`),
+      'builtin readonly': sh(`${ab}; builtin readonly $a$b`),
+      'command readonly': sh(`${ab}; command readonly $a$b`),
+      'in a function': sh(`${ab}\nf() { readonly $a$b; }\nf`),
+      'in a sourced file': sh('source scripts/b.sh', [
+        scriptFile('scripts/b.sh', `${ab}; readonly $a$b`),
+      ]),
+      'printf substitution': sh(`readonly "$(printf %s GITHUB_ ${n}=scripts/lib.sh)"`),
+      'array elements': sh(`v=(GITHUB_ ${n}=scripts/lib.sh); readonly "\${v[0]}\${v[1]}"`),
+      positional: sh(`a=GITHUB_; set -- \${a}${n}=scripts/lib.sh; readonly "$1"`),
+      'pasted for': wf('for GITHUB_${{ env.X }} in scripts/lib.sh; do :; done'),
+      'pasted select': wf('select GITHUB_${{ env.X }} in scripts/lib.sh; do break; done'),
+      'pasted unset + :=': wf(
+        'unset GITHUB_${{ env.X }}; : "${GITHUB_${{ env.X }}:=scripts/lib.sh}"',
+      ),
+      'workflow step readonly': wf(`${ab}; readonly $a$b`),
+      'control: plain write + run (REF on main)': sh('true'),
+    };
+    for (const [row, files] of Object.entries(rows))
+      assert.ok(
+        errors(files).some((e) => unread.test(e)),
+        `${n} ${row}: ${errors(files)}`,
+      );
+    // control: the same write in a script that runs no file stays accepted, as on main
+    assert.deepEqual(errors([scriptFile('scripts/x.sh', W.split('\n')[0])]), [], n);
+  }
+  // control: a reviewed write stays accepted (main's mechanism; the real tree: FU-159 r2 F4 test)
+  const reviewed = (writes) => ({
+    ...policy,
+    reviewedPrograms: new Map([['scripts/x.sh', { programs: [], writes, reason: 'r' }]]),
+  });
+  // sibling: $GITHUB_PATH was exempt too (only its own form, pathEntry, judged it); a listed path appended to a file
+  // the run then executes. ACC at f6250897, REF on main
+  const paths = {
+    ...policy,
+    reviewedPrograms: new Map([
+      ['scripts/x.sh', { programs: [], paths: ['$RUNNER_TEMP/bin'], reason: 'r' }],
+    ]),
+  };
+  const P = 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"';
+  for (const text of [`a=GITHUB_; b=PATH=scripts/lib.sh; readonly $a$b\n${P}`, P])
+    assert.ok(
+      validateInfraImagePins(
+        [lib, scriptFile('scripts/x.sh', `${text}\nbash scripts/lib.sh`)],
+        paths,
+      ).errors.some((e) => unread.test(e)),
+      text,
+    );
+  assert.deepEqual(validateInfraImagePins([lib, scriptFile('scripts/x.sh', P)], paths).errors, []);
+  const run = `echo x | tee -a "\${GITHUB_STEP_SUMMARY}"\nbash scripts/lib.sh`;
+  assert.deepEqual(
+    validateInfraImagePins(
+      [lib, scriptFile('scripts/x.sh', run)],
+      reviewed(['${GITHUB_STEP_SUMMARY}']),
+    ).errors,
+    [],
+  );
 });
