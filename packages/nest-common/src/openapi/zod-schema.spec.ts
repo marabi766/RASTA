@@ -526,6 +526,10 @@ describe('toJsonSchema', () => {
     it.each(['i', 'm', 's', 'g', 'y', 'd', 'v', 'iu', 'mu', 'su', 'gu', 'yu', 'du'])(
       'omits flags=%j without making a value-preserving check a barrier',
       (flags) => {
+        if (path === 'registered refinement' && /[gy]/.test(flags)) {
+          expect(() => makeSchema(new RegExp('^a$', flags))).toThrow('Stateful');
+          return;
+        }
         const schema = makeSchema(new RegExp('^a$', flags)).max(3).pipe(z.string().min(1));
         expect(toJsonSchema(schema)).toEqual({ type: 'string', minLength: 1, maxLength: 3 });
       },
@@ -639,4 +643,81 @@ describe('toJsonSchema', () => {
       });
     });
   });
+});
+
+describe('FU-181 construction trust', () => {
+  it.each([/^.{1,3}$/, new RegExp('^\\p{L}+$'), /^[^x]{2}$/, new RegExp('^\\a$')])(
+    'omits ambiguous no-flag regex %s',
+    (pattern) => {
+      for (const schema of [
+        z.string().regex(pattern),
+        z.string().check(patternRefinement(pattern, 'Invalid')),
+      ]) {
+        expect(toJsonSchema(schema)).toEqual({ type: 'string' });
+      }
+    },
+  );
+  it.each(['bounds', 'zone', 'url', 'builtin', 'forged'] as const)(
+    'refuses a replaced %s runner',
+    (kind) => {
+      const schema =
+        kind === 'bounds'
+          ? codePointLength(z.string(), 1, 3)
+          : kind === 'zone'
+            ? z.string().check(isoDateTime())
+            : kind === 'url'
+              ? z.string().check(parsableUrl())
+              : kind === 'builtin'
+                ? z.string().min(2)
+                : z.string().check(z.check<string>(() => {}));
+      const check = schema._zod.def.checks![0]!;
+      check._zod.check = (payload) => {
+        payload.value = 'a';
+      };
+      if (kind === 'forged') Object.assign(check._zod.def, { check: 'min_length', minimum: 1 });
+      const published = toJsonSchema(schema.max(3));
+      expect(published.minLength).toBeUndefined();
+      expect(published.maxLength).toBeUndefined();
+      expect(published.pattern).toBeUndefined();
+      expect(published.description).toContain('omitted');
+    },
+  );
+  it('refuses changed builtin metadata and the value-changing URL format', () => {
+    const schema = z.string().regex(/^a$/);
+    Object.assign(schema._zod.def.checks![0]!._zod.def, { pattern: /^b$/ });
+    expect(toJsonSchema(schema)).toMatchObject({ description: expect.stringContaining('omitted') });
+    expect(toJsonSchema(z.string().url().min(3))).toMatchObject({
+      description: expect.stringContaining('omitted'),
+    });
+  });
+});
+
+it('FU-181 refuses a caller-supplied when on an otherwise original builtin', () => {
+  const check = new z.core.$ZodCheckMinLength({
+    check: 'min_length',
+    minimum: 1,
+    when: (payload) => {
+      payload.value = 'a';
+      return true;
+    },
+  });
+  expect(toJsonSchema(z.string().check(check).max(3))).toMatchObject({
+    description: expect.stringContaining('omitted'),
+  });
+});
+
+it('FU-181 conservatively omits no-flag lookarounds', () => {
+  const pattern = /(?<!^)(?!$)(?<![a-z])/;
+  expect(pattern.test('😀')).toBe(true);
+  expect(toJsonSchema(z.string().regex(pattern))).toEqual({ type: 'string' });
+});
+
+it('FU-181 refuses fake regex objects and changed definition prototypes', () => {
+  const fake = { source: '^a$', flags: 'u', test: () => true } as unknown as RegExp;
+  expect(toJsonSchema(z.string().regex(fake))).toMatchObject({
+    description: expect.stringContaining('omitted'),
+  });
+  const schema = codePointLength(z.string(), 1, 3);
+  Object.setPrototypeOf(schema._zod.def.checks![0]!._zod.def, { when: () => true });
+  expect(toJsonSchema(schema)).toMatchObject({ description: expect.stringContaining('omitted') });
 });

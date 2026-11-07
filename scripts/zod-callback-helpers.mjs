@@ -89,14 +89,16 @@ const pins = {
   'packages/contracts/src/common/iso-datetime.ts': [
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
     '0575a17e05a4e9808cd0948bf5aa0f14b3e1abf68782907fedab9fc3cba158de',
+    // FU-181 construction identities; reviewed value-preserving helper.
+    '494b7b001527a51ca94be8b1241faabb61bec293b849aac6a564a4c1bf0acf87',
   ],
+  'packages/contracts/src/common/pattern-refinement.ts':
+    '0ef5ec0e5383f56e34e9d7b96fb7206a9bf301ccbf1a168330a0177270e442c8',
   'packages/contracts/src/common/text.ts':
     '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
     'baa12fdedf9e9bfbbeadd2be36f3b97acc62229af37ce9bc3ccdfea5c3e98cf9',
-    // FU-152 adds only pattern-refinement exports; reviewed helpers keep their sources.
-    '292d4fef2cb013e364ea7dd29ef04b112bf64734394155147d7dee955d91f770',
     '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',
     // + the transaction-text exports (FU-134, PR #806): `plainText` still re-exported from text.ts.
     'd470201ab822d732e8c10f0b6db953e4a5daacf94e47ae77afd0b75b64313822',
@@ -104,8 +106,14 @@ const pins = {
     '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
     // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171), numberInputInnerSchema (FU-160, #831) and the FU-152 private pattern registry exports (#840): exact union.
     'ea1656bd023da6f0fddd9d24e1842aa628939bd610f77c5a7ad4f793e277c155',
+    // FU-181 construction identities; reviewed value-preserving helper.
+    '45c308b60a4588cf7dfba8496b264f4c50fac4c75d5f652868ead8b9cae6de04',
+    // CI repair: the pure URL helper gains a read-only construction lookup.
+    'bcf57fa29d3032b8106d41bec16165a5423d810d77780e832d03101bd936e527',
     // + MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS (FU-171, #879) on top of that union: exact union.
     '0d7a692210ab8c4f739096703984e7253fa3019a63f7c99049666348f2835238',
+    // CI/main synchronization: exact union of FU-181 and the maintenance replay constant.
+    '83991df34a484819959e3e747235a462e0f4e4a6d5c59812dfa60821a1ae036e',
   ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
@@ -159,6 +167,9 @@ export function verifiedCallbackHelper(root, modulePath, name, binding = {}) {
   try {
     const files = [
       helper[1],
+      ...(helper[1] === 'packages/contracts/src/common/iso-datetime.ts'
+        ? ['packages/contracts/src/common/pattern-refinement.ts']
+        : []),
       ...(modulePath === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
       ...([
         'apps/web/src/lib/format',
