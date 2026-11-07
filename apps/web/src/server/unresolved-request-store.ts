@@ -133,6 +133,9 @@ export class UnresolvedStoreUnavailable extends Error {
 const hex = (length: number) => z.string().regex(new RegExp(`^[0-9a-f]{${length}}$`));
 const instant = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
+/** Bounded encrypted form snapshots (up to 1000 Unicode characters plus the remaining fields). */
+export const MAX_REQUEST_REF_LENGTH = 16_384;
+
 const commonFields = {
   /** The generation of this record: what a release form names. */
   id: hex(32),
@@ -142,7 +145,7 @@ const commonFields = {
   digest: z.string().min(1).max(100),
   issuedAt: instant,
   /** The signed replay stamp the form is rebuilt from. */
-  ref: z.string().max(800).nullable(),
+  ref: z.string().max(MAX_REQUEST_REF_LENGTH).nullable(),
   state: z.enum(['RESERVED', 'UNRESOLVED']),
   /** True once an attempt ended ambiguously: a refusal of a later retry then proves nothing. */
   wasUnresolved: z.boolean(),
@@ -364,7 +367,7 @@ local function validate(rec, c)
   if c.bind ~= nil and rec.bind ~= c.bind then return false end
   if not isStr(rec.key, 1, 200) or not isStr(rec.digest, 1, 100) then return false end
   if not isInt(rec.issuedAt) or not isInt(rec.createdAt) or not isInt(rec.reservedAt) then return false end
-  if rec.ref ~= cjson.null and not isStr(rec.ref, 0, 800) then return false end
+  if rec.ref ~= cjson.null and not isStr(rec.ref, 0, ${MAX_REQUEST_REF_LENGTH}) then return false end
   if rec.state ~= 'RESERVED' and rec.state ~= 'UNRESOLVED' then return false end
   if type(rec.wasUnresolved) ~= 'boolean' then return false end
   -- UNRESOLVED implies wasUnresolved: the one state/flag pair this code can never write.

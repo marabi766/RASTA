@@ -20,10 +20,12 @@ import { cleanupFixtures, LOST_DIAGNOSTIC, signalChild } from './test/build-life
 import {
   alive,
   goneAtBoundary,
+  heldWriters,
   liveMembers,
   LOCK,
   plantFakeApp,
   plantFakeNext,
+  releaseAll,
   releaseHold,
   runDriver,
   runModule,
@@ -458,13 +460,16 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     for (const dir of caseApps) {
       chmodSync(dir, 0o700);
       if (existsSync(join(dir, '.next'))) chmodSync(join(dir, '.next'), 0o700);
-      // A case that failed before it released its writer must not leave it held (FU-199).
-      releaseHold(dir, true);
     }
+    // A case that failed before it released its writer must not leave it held: released AND joined
+    // (FU-199, FU-216), before anything is removed.
+    await releaseAll(caseApps);
     await cleanupFixtures();
     caseApps.clear();
   });
   afterAll(() => {
+    // Never remove a marker (or its directory) from under a writer that has not ended (FU-216).
+    expect(heldWriters()).toEqual([]);
     for (const entry of readdirSync(root)) {
       const lock = join(root, entry, LOCK);
       if (existsSync(lock)) chmodSync(lock, 0o700);
@@ -580,7 +585,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(alive({ group })).toBe(true); // The pipe holder still lives: rejection did not wait.
     // Its parent died: no endpoint can authorize a root signal. Let it finish and observe its
     // natural exit.
-    releaseHold(dir);
+    await releaseHold(dir);
     await waitFor(() => !alive({ group }));
     await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
   });
@@ -1072,7 +1077,7 @@ setInterval(() => {}, 1000);`,
     expect(events.filter((e) => e === 'send-term' || e === 'send-kill')).toEqual([]);
     // Its parent died: no endpoint can authorize a root signal. Let the writer finish by itself
     // and observe its natural exit instead of using its saved PID.
-    releaseHold(dir);
+    await releaseHold(dir);
     await waitFor(() => !alive({ group }));
     expect(inProgress(dir)).toBe(false);
     await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
