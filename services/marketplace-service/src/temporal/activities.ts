@@ -703,8 +703,9 @@ export function createActivities(deps: ActivityDependencies) {
             // otherwise authorise an obligation migration 20261103121000 put
             // back in HELD (#625 round 2 self-review). Refused for good, with
             // the funds held, for the runbook
-            // (docs/runbooks/marketplace-receipt-evidence.md): the saga stops on
-            // a first attempt, and in doubt it waits, never reading as authorised.
+            // (docs/runbooks/marketplace-receipt-evidence.md): refused on a first
+            // attempt with the funds held, the saga waits for that runbook's exit,
+            // alerted (D-127); in doubt it waits too, never reading as authorised.
             requires: (order) => {
               if (!order.receiptConfirmed) {
                 throw RastaError.businessRule(
@@ -1000,7 +1001,8 @@ export function createActivities(deps: ActivityDependencies) {
       economicCallsUnconfirmedTotal.inc({ service: SERVICE_NAME, operation });
       logger.error(
         `The ${operation} call of order ${orderId} is unconfirmed after round ${round} ` +
-          `(${failure}); its outcome is unknown and the saga keeps trying ` +
+          `(${failure}); its outcome is unknown, or it was refused with the funds possibly held ` +
+          '(OBLIGATION_RECONCILIATION), and the saga keeps trying ' +
           '(docs/runbooks/marketplace-saga-deploy.md)',
       );
     },

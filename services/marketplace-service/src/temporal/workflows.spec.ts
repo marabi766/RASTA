@@ -1479,9 +1479,16 @@ describe('the order saga', () => {
       );
     });
 
-    it('proven refused: the saga ends as it always did, unreported and unmarked', async () => {
+    // With the money held it waits instead (D-127, workflows-refusal-reconciles.spec.ts).
+    it('proven refused, nothing held any more: the saga ends as it always did, unreported and unmarked', async () => {
       const order = new FakeOrder();
       const { calls, activities } = failing(order, refused);
+      activities.findObligation = async () => ({
+        notHeld: true,
+        transactionId: TRANSACTION,
+        status: 'REFUNDED',
+        funds: 'RETURNED',
+      });
       let seen: WorkflowHandle | undefined;
 
       await expect(
@@ -1915,6 +1922,13 @@ describe('the order saga', () => {
           owner.post = () => {
             throw refuse(code);
           };
+          // Nothing held any more, so the refusal still ends the saga (D-127).
+          activities.findObligation = async () => ({
+            notHeld: true,
+            transactionId: TRANSACTION,
+            status: 'REFUNDED',
+            funds: 'RETURNED',
+          });
 
           await expect(run(order, activities, reachReceipt)).rejects.toBeInstanceOf(
             WorkflowFailedError,
@@ -2085,9 +2099,16 @@ describe('the order saga', () => {
           );
         });
 
-        it('a refusal marked as its first attempt ends the saga, with no wait', async () => {
+        // With the money held it waits instead (D-127, workflows-refusal-reconciles.spec.ts).
+        it('a refusal marked as its first attempt, nothing held any more, ends the saga, with no wait', async () => {
           const order = new FakeOrder();
           const { calls, rounds, activities } = failingOn(order, operation, refused);
+          activities.findObligation = async () => ({
+            notHeld: true,
+            transactionId: TRANSACTION,
+            status: 'REFUNDED',
+            funds: 'RETURNED',
+          });
           await expect(run(order, activities, reach)).rejects.toMatchObject({
             cause: { cause: { type: 'INVALID_STATE_TRANSITION' } },
           });

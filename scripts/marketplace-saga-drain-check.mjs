@@ -186,6 +186,7 @@ const PATCH_PROTOCOL = new Map([
   ['economic-hold-refusal-exit-v1', 8],
   ['economic-hold-send-fence-v1', 9],
   ['economic-hold-fence-on-order-v1', 10],
+  ['economic-refusal-reconciles-held-v1', 11],
 ]);
 const LATEST_PROTOCOL = Math.max(...PATCH_PROTOCOL.values());
 // A continued run has no marker until its first workflow task: its `resume` is

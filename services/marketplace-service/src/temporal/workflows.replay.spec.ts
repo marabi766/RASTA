@@ -129,6 +129,23 @@ describe('orderSaga replays histories on both sides of the release wait', () => 
     'fu117r5-legacy-watch-stays-then-terminal',
     'fu117r5-hold-refunded-cancelled',
     'fu117r5-hold-refunded-failed',
+    // FU-158 (D-127): a refund, filing or authorisation refused on its first attempt ended the
+    // run on every build before protocol 11, each captured with that build's own workflow, and
+    // must replay that end. With the marker, the wait to its end, and the refusal kept where
+    // the obligation holds nothing.
+    'pre-fu158-p4-refund-refused',
+    'pre-fu158-p5-refund-refused',
+    'pre-fu158-p6-refund-refused',
+    'pre-fu158-p7-refund-refused',
+    'pre-fu158-p10-refund-refused',
+    'pre-fu158-p5-filing-refused',
+    'pre-fu158-p10-filing-refused',
+    'pre-fu158-p4-authorise-refused',
+    'pre-fu158-p10-authorise-refused',
+    'fu158-refund-waits-then-refunded',
+    'fu158-refund-refused-owner-refunded',
+    'fu158-filing-waits-then-filed',
+    'fu158-authorise-waits-then-settled',
   ])('the %s history replays without divergence', async (name) => {
     await expect(
       Worker.runReplayHistory(

@@ -972,6 +972,7 @@ const PATCHES = {
   'economic-hold-refusal-exit-v1': 8,
   'economic-hold-send-fence-v1': 9,
   'economic-hold-fence-on-order-v1': 10,
+  'economic-refusal-reconciles-held-v1': 11,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -1667,6 +1668,7 @@ for (const [name, required] of [
   ['fu103-wait-then-dispute-exhausted', 4],
   ['fu117-compensate-wait', 5],
   ['fu117-dispute-wait', 5],
+  ['fu158-refund-waits-then-refunded', 11],
 ]) {
   test(`a real captured history (${name}) requires protocol ${required}`, () => {
     const real = JSON.parse(
