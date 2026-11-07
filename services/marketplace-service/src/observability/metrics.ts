@@ -256,3 +256,33 @@ export const sagaWorkerUp = new Gauge({
   labelNames: ['service'] as const,
   registers: [registry],
 });
+
+/**
+ * Unresolved financial episodes, by why (#770 r2 F3, #792 r1 F1): an open
+ * `saga_unconfirmed_call` row (`DISPUTE_RELEASE`, or `UNCONFIRMED_CALL` for any
+ * other call), or an order in a saga-custody status (`SAGA_CUSTODY`). State
+ * read from the database, not a count of attempts. Every reason is always
+ * present. For diagnosis: no alert reads the reason.
+ */
+export const sagaUnresolvedOrders = stateGauge(
+  'rasta_marketplace_saga_unresolved_orders',
+  'Unresolved financial episodes the saga owes, by reason',
+  ['service', 'reason'] as const,
+);
+export const sagaUnresolvedAge = stateGauge(
+  'rasta_marketplace_saga_unresolved_age_seconds',
+  'Seconds the oldest such episode has waited, by reason (0 when none)',
+  ['service', 'reason'] as const,
+);
+/**
+ * How many unresolved financial episodes are past the hour (#792 r1 F2), aged
+ * against `saga_monitor_clock`, which never runs back: an episode, once
+ * counted, stays counted until it is resolved, whatever its reason becomes or
+ * the database clock does. No reason label, so a change of reason is not a new
+ * alert. `RastaMarketplaceSagaFinancialEpisodeOverdue` reads only this.
+ */
+export const sagaUnresolvedOverdue = stateGauge(
+  'rasta_marketplace_saga_unresolved_overdue',
+  'Unresolved financial episodes past the overdue threshold',
+  ['service'] as const,
+);

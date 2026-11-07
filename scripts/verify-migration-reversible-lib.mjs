@@ -2988,6 +2988,8 @@ export const EXPECTED = {
       'saga_step',
       // 20261105130000_saga_unconfirmed_call (FU-104): the record of unconfirmed economic calls.
       'saga_unconfirmed_call',
+      // 20261106120000_saga_monitor_clock (#792 r1 F2): the forward-only reference of the money gauges.
+      'saga_monitor_clock',
       // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
       'return_request',
       'return_line',
@@ -3034,6 +3036,8 @@ export const EXPECTED = {
       'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
       'ck_saga_unconfirmed_call_not_blank',
+      'ck_saga_unconfirmed_call_command_whole',
+      'ck_saga_monitor_clock_single_row',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',
