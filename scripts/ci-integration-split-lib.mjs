@@ -423,6 +423,8 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  * of runs.
  */
 export const JOB_SETUP_MINUTES = Object.freeze({
+  // Existing scan/install budget, excluding the new limited tool transfer.
+  security: 20,
   'integration-suites': 8,
   'integration-construction': 8,
   'integration-economic': 8,

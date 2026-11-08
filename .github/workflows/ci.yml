@@ -605,7 +605,7 @@ jobs:
   security:
     name: Security scans
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 33
     permissions:
       contents: read
       security-events: write
@@ -633,10 +633,22 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Install verified Gitleaks
+        timeout-minutes: 13
+        uses: ./.github/actions/install-ci-tool
+        with:
+          tool: gitleaks
+
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        # Retain the action's first-parent change scan and failure threshold.
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SCAN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SCAN_BASE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SCAN_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          gitleaks detect --redact --exit-code=2 --log-opts="--no-merges --first-parent $SCAN_BASE^..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif
 
       - name: Dependency audit
         # High and critical fail. The repo holds no production secrets, but it
@@ -4684,9 +4696,8 @@ jobs:
   trivy-db:
     name: Trivy vulnerability DB (downloaded once)
     runs-on: ubuntu-latest
-    # 21: the seven steps' limits sum to 20 and the runner's own set-up and
-    # completion took up to 5 s (1 minute at x 1.5).
-    timeout-minutes: 21
+    # Includes the verified Go archive's four-attempt transfer budget.
+    timeout-minutes: 34
     # Every run downloads the DB, ordinary pull requests included: the required
     # ClamAV image scan (`clamav-signatures`) reads it too, so skipping this job
     # on a PR that builds no service image broke that check. No `if`, and no
@@ -4700,6 +4711,8 @@ jobs:
           # Everything the fetch imports (node built-ins only besides these):
           # pinned by a test that follows the imports.
           sparse-checkout: |
+            .github/actions/install-ci-tool/action.yml
+            scripts/ci-tool-download.mjs
             scripts/ci-trivy-db.mjs
             scripts/ci-trivy-db-lib.mjs
             scripts/trivy-db-check/go.mod
@@ -4710,11 +4723,10 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Set up Go for the official bbolt checker
-        timeout-minutes: 1
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        timeout-minutes: 13
+        uses: ./.github/actions/install-ci-tool
         with:
-          go-version: '1.24.9'
-          cache: false
+          tool: go
 
       - name: Build and test the official bbolt checker
         timeout-minutes: 2

@@ -1,0 +1,22 @@
+name: Install a verified CI tool
+description: Cache exact release bytes; retry only transient network failures, then verify before use.
+inputs:
+  tool:
+    description: Reviewed tool name in scripts/ci-tool-download.mjs (Linux x64).
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+      run: node scripts/ci-tool-download.mjs key "$TOOL"
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ steps.pin.outputs.archive }}
+        key: ${{ steps.pin.outputs.key }}
+    - shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+      run: node scripts/ci-tool-download.mjs install "$TOOL"

@@ -81,7 +81,7 @@
     "test:test-phases": "node --test --test-timeout=300000 scripts/test-phases.test.mjs scripts/authored-source-inventory.test.mjs",
     "check:test-phases": "node scripts/check-test-phases.mjs",
     "test:ci-integration-split": "node --test --test-timeout=300000 scripts/ci-integration-split.test.mjs",
-    "test:ci-pull-image": "node --test --test-timeout=300000 scripts/ci-pull-image.test.mjs",
+    "test:ci-pull-image": "node --test --test-timeout=300000 scripts/ci-pull-image.test.mjs scripts/ci-tool-download.test.mjs",
     "test:ci-trivy-db": "node --test --test-timeout=300000 scripts/ci-trivy-db.test.mjs",
     "test:ci-pg-connections": "node --test --test-timeout=300000 scripts/ci-pg-connections.test.mjs",
     "test:aggregation-evidence-lib": "node --test --test-timeout=300000 scripts/aggregation-evidence.test.mjs scripts/aggregation-evidence-cli.test.mjs",
