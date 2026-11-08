@@ -11,17 +11,32 @@
 //   R2  an INSERT that leaves a `timestamp(3)` column to a session-dependent DEFAULT;
 //   R3  a bare clock in a fragment that names no table, except a plain reading of the clock
 //       (`SELECT clock_timestamp() AS now`: an instant, right in any zone);
-//   R4  a routine with a `timestamp` local variable, parameter or result and a bare clock:
-//       the conversion between them goes through the session's zone.
+//   R4  a routine with a bare clock that names a `timestamp` type (a local, parameter, result
+//       or cast) or a type it cannot read (`%TYPE`): the conversion goes through the session.
 //
-// WHAT IT CANNOT PROVE, IT REFUSES (PR #906 r1 F2): a table it cannot resolve beside a bare
-// clock, an INSERT or a DEFAULT; a migration statement or ALTER TABLE action it does not
-// model; a live definition holding a clock outside a column DEFAULT; dynamic SQL in a routine
-// or DDL in a DO block. Reviewed exemptions are bound to the reviewed content.
+// WHAT IT CANNOT PROVE, IT REFUSES (PR #906 r1 F2, r2 F2 = FU-226). Each construct is read by
+// an explicit grammar, and what falls outside it counts as unsafe, never as absent:
+//   - relations: FROM lists (every comma), JOIN, DELETE … USING, INSERT/MERGE INTO and UPDATE
+//     targets (`UPDATE ONLY (t)`); a name resolves to a replayed public table, a listed
+//     catalogue relation or a CTE, else it is unresolved (`other.t`, `pg_missing`);
+//   - strings by their decoded value (dollar quotes, E'…' and U&'…' escapes);
+//   - types as PostgreSQL reads them (`pg_catalog.timestamp`, `"timestamp"`);
+//   - a pin: grouping, `AT TIME ZONE 'UTC'` or timezone('UTC', …), then date_trunc() or a cast
+//     to plain timestamp, used where nothing converts it back (no coalesce(), CASE branch,
+//     other cast or zone; listed calls only, read outward through every parenthesis);
+//   - a text that does not lex is lexed again past the stray quote, never skipped;
+//   - migrations: a statement, ALTER action, trigger binding or DO block it does not model, a
+//     partition's own defaults or column ALTERs, DDL or EXECUTE in a routine; conditional DDL
+//     (IF [NOT] EXISTS) as PostgreSQL runs it. DDL or EXECUTE in a DO block goes to review.
+// A reviewed exemption is bound to what its review relied on: a routine to its signature,
+// body, trigger bindings and the column types of the tables it fires on or names; a DO block
+// to its body and migration; a literal to its text and the column types it `assumes`.
 //
 // LIMITS. This reads clocks, not types. It cannot see an instant reaching a `timestamp(3)`
 // column with no clock in the statement (a timestamptz column copied across, a
-// `$n::timestamptz` parameter), a column spliced with `${column}` on a named table,
+// `$n::timestamptz` parameter), a pinned clock compared with or added to a timestamptz operand,
+// a pinned constant spliced into another literal (it is read where it is written), a CASE or
+// COALESCE sibling's type (refused for now, FU-226 part B), a column spliced with `${column}` on a named table,
 // `AT TIME ZONE 'UTC'` wrongly written into a timestamptz column, one-shot DML of a migration
 // (already applied; not live), or SQL outside production source and migrations (seeds,
 // runbooks). What it cannot see the runtime check refuses: no application session runs outside
@@ -40,12 +55,16 @@ import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { productionFiles, readSchemas, sqlLiterals } from './eligibility-clock-derive.mjs';
-import { lex, stripComments, tableRefs } from './eligibility-clock-sql.mjs';
+import { lex, stripComments } from './eligibility-clock-sql.mjs';
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
 const KEYWORD_CLOCK = 'current_timestamp';
 const SESSION_WALL = new Set(['localtimestamp', 'localtime', 'current_time', 'current_date']);
-const STRING_CLOCK = /^[eE]?'\s*(?:now|today|tomorrow|yesterday)\s*'$/i;
+// A string's VALUE that PostgreSQL may read as the session's clock: one of these words among a
+// few date/time fields (`'tomorrow 10:00'`, `' NOW '`), not a sentence that mentions one.
+const CLOCK_WORD = /(?:^|[^a-z])(?:now|today|tomorrow|yesterday)(?:$|[^a-z])/i;
+const isStringClock = (value) =>
+  CLOCK_WORD.test(value) && /^[\w\s:.,+\-/]*$/.test(value) && value.trim().split(/\s+/).length <= 6;
 const isUtcString = (t) => t?.type === 'string' && t.value.toUpperCase() === "'UTC'";
 /** An identifier's name: folded, because the spellings a guard must catch differ only in case. */
 const nameOf = (t) =>
@@ -54,71 +73,209 @@ const isOp = (t, value) => t?.type === 'op' && t.value === value;
 const isWord = (t, ...values) => t?.type === 'word' && values.includes(t.lower);
 const isAtTimeZone = (tokens, i) =>
   isWord(tokens[i], 'at') && isWord(tokens[i + 1], 'time') && isWord(tokens[i + 2], 'zone');
-const isZonedType = (tokens, i) => {
-  if (isWord(tokens[i], 'timestamptz')) return true;
-  const zone = isOp(tokens[i + 1], '(') ? i + 4 : i + 1;
-  return isWord(tokens[i], 'timestamp') && isWord(tokens[zone], 'with');
-};
 // A parenthesis after these groups an expression; after any other name it is a call.
 const BEFORE_GROUPING = new Set(
-  'select when then else and or not where on by having returning values in between return if'.split(
+  'select when then else and or not where on by having returning values in between return if from exists any all some filter over group'.split(
     ' ',
   ),
 );
 const isGrouping = (before) => nameOf(before) === null || BEFORE_GROUPING.has(before.lower);
 
-/** Whether a pinned value at tokens[start..end] is turned back into a session-zone value. */
-function zonedAgain(tokens, start, end) {
-  let after = end + 1;
-  while (isOp(tokens[after], ')')) after += 1;
-  if (isAtTimeZone(tokens, after)) return true;
-  if (isOp(tokens[after], '::') && isZonedType(tokens, after + 1)) return true;
-  if (isWord(tokens[after], 'as') && isZonedType(tokens, after + 1)) return true;
-  let before = start - 1;
-  while (isOp(tokens[before], '(') && isGrouping(tokens[before - 1])) before -= 1;
-  return (
-    isOp(tokens[before], ',') &&
-    tokens[before - 1]?.type === 'string' &&
-    nameOf(tokens[before - 3]) === 'timezone'
+const chr = (code) => (code > 0x10ffff ? '\uFFFD' : String.fromCodePoint(code));
+const ESCAPES = { b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+const unescape = (body) =>
+  body.replace(
+    /\\(?:x([0-9a-f]{1,2})|u([0-9a-f]{4})|U([0-9a-f]{8})|([0-7]{1,3})|(.))/gis,
+    (...g) =>
+      g[5] !== undefined
+        ? (ESCAPES[g[5]] ?? g[5])
+        : chr(parseInt(g[1] ?? g[2] ?? g[3] ?? g[4], g[4] ? 8 : 16)),
   );
+const unicodeUnescape = (body) =>
+  body.replace(
+    /\\(?:([0-9a-f]{4})|\+([0-9a-f]{6})|(\\))/gi,
+    (_, a, b, slash) => slash ?? chr(parseInt(a ?? b, 16)),
+  );
+
+/**
+ * What a string token may mean, decoded as PostgreSQL decodes it (PR #906 r2 F2): a dollar
+ * quote, E'…' and U&'…' escapes, and '…' read both with and without backslash escapes (the
+ * value of standard_conforming_strings is not in the text). Null: it cannot be read.
+ */
+function stringValues(tokens, i) {
+  const t = tokens[i];
+  if (t.unterminated) return null;
+  const dollar = /^\$\w*\$/.exec(t.value)?.[0];
+  if (dollar) return [t.value.slice(dollar.length, t.value.length - dollar.length)];
+  const escaped = /^e/i.test(t.value);
+  const body = t.value.slice(escaped ? 2 : 1, -1).replaceAll("''", "'");
+  const [u, amp] = [tokens[i - 2], tokens[i - 1]];
+  if (isOp(amp, '&') && isWord(u, 'u') && u.start + 1 === amp.start && amp.start + 1 === t.start) {
+    return isWord(tokens[i + 1], 'uescape') ? null : [unicodeUnescape(body)];
+  }
+  return escaped ? [unescape(body)] : [body, unescape(body)];
 }
 
-/** Whether the clock at tokens[first..last] is written `AT TIME ZONE 'UTC'` or `timezone('UTC', …)`. */
-function pinnedToUtc(tokens, first, last) {
-  let start = first;
-  let end = last;
-  while (
-    isOp(tokens[start - 1], '(') &&
-    isOp(tokens[end + 1], ')') &&
-    isGrouping(tokens[start - 2])
-  ) {
-    start -= 1;
-    end += 1;
+/**
+ * The type named at tokens[i] and its last token: 'ts' (timestamp without time zone), 'tz', or
+ * 'other'. Qualified by pg_catalog, quoted or in any case it is the same type (PR #906 r2 F2).
+ */
+export function typeAt(tokens, i) {
+  let j = i;
+  if (nameOf(tokens[j]) === 'pg_catalog' && isOp(tokens[j + 1], '.')) j += 2;
+  const name = nameOf(tokens[j]);
+  if ((name !== 'timestamp' && name !== 'timestamptz') || isOp(tokens[j + 1], '.')) {
+    return { kind: 'other', end: j };
   }
-  if (isAtTimeZone(tokens, end + 1) && isUtcString(tokens[end + 4])) {
-    return !zonedAgain(tokens, start, end + 4);
+  const end = isOp(tokens[j + 1], '(') ? closing(tokens, j + 1) : j;
+  if (name === 'timestamptz') return { kind: 'tz', end };
+  const zoned = isWord(tokens[end + 2], 'time') && isWord(tokens[end + 3], 'zone');
+  if (isWord(tokens[end + 1], 'with') && zoned) return { kind: 'tz', end: end + 3 };
+  if (isWord(tokens[end + 1], 'without') && zoned) return { kind: 'ts', end: end + 3 };
+  return { kind: 'ts', end };
+}
+
+const QUERY_HEADS = ['select', 'with', 'values', 'insert', 'update', 'delete'];
+/** The parenthesis opening the one tokens[i] stands in, or -1. */
+function enclosing(tokens, i) {
+  for (let k = i - 1, depth = 0; k >= 0; k -= 1) {
+    if (isOp(tokens[k], ')')) depth += 1;
+    else if (isOp(tokens[k], '(') && (depth -= 1) < 0) return k;
   }
-  if (!isOp(tokens[start - 1], ',') || !isOp(tokens[end + 1], ')')) return false;
-  // `'UTC'` or `'UTC'::text`, the form pg_get_expr prints.
+  return -1;
+}
+/** Whether tokens[i] stands inside the parentheses of a call (not a grouping, not a subquery). */
+function insideCall(tokens, i) {
+  const open = enclosing(tokens, i);
+  return open >= 0 && !isGrouping(tokens[open - 1]) && !isWord(tokens[open + 1], ...QUERY_HEADS);
+}
+/** The arguments of the call opened at tokens[open]: its commas at depth one, plus one. */
+function argumentCount(tokens, open) {
+  let count = 1;
+  for (let k = open + 1, depth = 0; k < closing(tokens, open); k += 1) {
+    if (isOp(tokens[k], '(')) depth += 1;
+    else if (isOp(tokens[k], ')')) depth -= 1;
+    else if (depth === 0 && isOp(tokens[k], ',')) count += 1;
+  }
+  return count;
+}
+
+// Calls a pinned value may pass through: these keep it a plain timestamp (date_trunc of two
+// arguments, min, max) or end it in a type with no zone (to_char, extract, date_part, count).
+// Any other call (coalesce, greatest, a cast, three-argument date_trunc) may convert it.
+const KEEPS_TIMESTAMP = new Set(['date_trunc', 'min', 'max']);
+const ENDS_TIMESTAMP = new Set(['to_char', 'extract', 'date_part', 'count']);
+
+/** Whether every parenthesis around tokens[i], read outward, keeps it a plain timestamp. */
+function enclosureKeepsPin(tokens, i) {
+  for (let open = enclosing(tokens, i); open >= 0; open = enclosing(tokens, open)) {
+    const name = nameOf(tokens[open - 1]);
+    if (ENDS_TIMESTAMP.has(name)) return true;
+    const kept =
+      isGrouping(tokens[open - 1]) ||
+      isWord(tokens[open + 1], ...QUERY_HEADS) ||
+      (KEEPS_TIMESTAMP.has(name) && argumentCount(tokens, open) <= 2);
+    if (!kept) return false;
+  }
+  return true;
+}
+
+/** `name('<arg>'[::text], tokens[start..end])` with name in `names`: the call's span, or null. */
+function callAround(tokens, start, end, names, argument) {
+  if (!isOp(tokens[start - 1], ',') || !isOp(tokens[end + 1], ')')) return null;
   const text = isOp(tokens[start - 3], '::') && isWord(tokens[start - 2], 'text');
-  const zone = start - (text ? 4 : 2);
-  return (
-    isUtcString(tokens[zone]) &&
-    isOp(tokens[zone - 1], '(') &&
-    nameOf(tokens[zone - 2]) === 'timezone' &&
-    !zonedAgain(tokens, zone - 2, end + 1)
-  );
+  const arg = start - (text ? 4 : 2);
+  if (
+    !argument(tokens[arg]) ||
+    !isOp(tokens[arg - 1], '(') ||
+    !names.has(nameOf(tokens[arg - 2]))
+  ) {
+    return null;
+  }
+  const first = arg - 2;
+  const qualified = isOp(tokens[first - 1], '.') && nameOf(tokens[first - 2]) === 'pg_catalog';
+  return { start: qualified ? first - 2 : first, end: end + 1 };
 }
 
-/** Token ranges of the clocks in `tokens`, each with whether it is pinned to UTC. */
+// Where a value pinned to UTC may go next, and come from: a comparison, an assignment,
+// arithmetic, a list or a clause. Anything else (a call such as coalesce(), a CASE branch, an
+// array, another zone or a cast to another type) may turn it back into a session-zone value.
+const PIN_NEIGHBOURS = new Set([',', ';', '=', '<', '<=', '>', '>=', '<>', '!=', '+', '-']);
+const PIN_BEFORE = new Set(
+  'select where and or when if elsif return returning between default by set from'.split(' '),
+);
+const PIN_AFTER = new Set(
+  'and or as from where then loop is between order group limit offset fetch for union intersect except into having window asc desc nulls returning on when'.split(
+    ' ',
+  ),
+);
+const TIMEZONE = new Set(['timezone']);
+const DATE_TRUNC = new Set(['date_trunc']);
+
+/**
+ * Whether the clock at tokens[first..last] is pinned to UTC: read outward through an explicit
+ * grammar (grouping, `AT TIME ZONE 'UTC'`, `timezone('UTC', …)`, then date_trunc() or a cast to
+ * plain timestamp), and then used where nothing converts it back. What it cannot read is a bare
+ * clock (PR #906 r2 F2: nested casts, quoted or qualified types, coalesce()).
+ */
+function pinnedToUtc(tokens, first, last) {
+  let [start, end, pinned, bound] = [first, last, false, true];
+  if (isOp(tokens[start - 1], '.') && nameOf(tokens[start - 2]) === 'pg_catalog') start -= 2;
+  for (;;) {
+    let call;
+    if (
+      isOp(tokens[start - 1], '(') &&
+      isOp(tokens[end + 1], ')') &&
+      isGrouping(tokens[start - 2])
+    ) {
+      [start, end, bound] = [start - 1, end + 1, true];
+    } else if (!pinned && isAtTimeZone(tokens, end + 1) && isUtcString(tokens[end + 4])) {
+      [end, pinned, bound] = [end + 4, true, false];
+    } else if (!pinned && (call = callAround(tokens, start, end, TIMEZONE, isUtcString))) {
+      [start, end, pinned] = [call.start, call.end, true];
+    } else if (
+      pinned &&
+      (call = callAround(tokens, start, end, DATE_TRUNC, (t) => t?.type === 'string'))
+    ) {
+      [start, end, bound] = [call.start, call.end, true];
+    } else if (
+      pinned &&
+      bound &&
+      isOp(tokens[end + 1], '::') &&
+      typeAt(tokens, end + 2).kind === 'ts'
+    ) {
+      end = typeAt(tokens, end + 2).end;
+    } else break;
+  }
+  if (!pinned) return false;
+  const [before, after] = [tokens[start - 1], tokens[end + 1]];
+  const fromOk =
+    before === undefined ||
+    (before.type === 'op' && (PIN_NEIGHBOURS.has(before.value) || isOp(before, '('))) ||
+    PIN_BEFORE.has(before.lower);
+  const toOk =
+    after === undefined ||
+    (after.type === 'op' && (PIN_NEIGHBOURS.has(after.value) || isOp(after, ')'))) ||
+    PIN_AFTER.has(after.lower);
+  return fromOk && toOk && enclosureKeepsPin(tokens, start);
+}
+
+/**
+ * Token ranges of the clocks in `tokens`, each with whether it is pinned to UTC. In a text with
+ * unbalanced parentheses (a piece of a larger statement) no pin is proven: its context is elsewhere.
+ */
 export function clocksIn(tokens) {
   const found = [];
+  let depth = 0;
+  for (const t of tokens) if (depth >= 0) depth += isOp(t, '(') ? 1 : isOp(t, ')') ? -1 : 0;
   for (let i = 0; i < tokens.length; i += 1) {
     const t = tokens[i];
     const name = nameOf(t);
     let end;
-    if (t.type === 'string' && STRING_CLOCK.test(t.value)) {
-      found.push({ index: i, name: t.value, utc: false });
+    if (t.type === 'string') {
+      const values = stringValues(tokens, i);
+      if (!values || values.some(isStringClock))
+        found.push({ index: i, name: t.value, utc: false });
       continue;
     }
     if (name === null) continue;
@@ -135,7 +292,7 @@ export function clocksIn(tokens) {
     } else {
       continue;
     }
-    found.push({ index: i, name, utc: pinnedToUtc(tokens, i, end) });
+    found.push({ index: i, name, utc: depth === 0 && pinnedToUtc(tokens, i, end) });
   }
   return found;
 }
@@ -173,13 +330,13 @@ const VIEW = statementRe(
 const DROP_VIEW = statementRe(
   String.raw`DROP\s+(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+EXISTS\s+)?${IDENT}`,
 );
-const ALTER_TABLE = String.raw`ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?${IDENT}\s+`;
+const ALTER_TABLE = String.raw`ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(ONLY\s+)?${IDENT}\s+`;
 const RENAME_TABLE = statementRe(String.raw`${ALTER_TABLE}RENAME\s+TO\s+${NAME}`);
 const ALTER_ACTIONS = statementRe(String.raw`${ALTER_TABLE}([\s\S]+)$`);
 const ADD_COLUMN = statementRe(
-  String.raw`ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?${NAME}\s+([\s\S]+)$`,
+  String.raw`ADD\s+(?:COLUMN\s+)?(IF\s+NOT\s+EXISTS\s+)?${NAME}\s+([\s\S]+)$`,
 );
-const DROP_COLUMN = statementRe(String.raw`DROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?${NAME}`);
+const DROP_COLUMN = statementRe(String.raw`DROP\s+(?:COLUMN\s+)?(IF\s+EXISTS\s+)?${NAME}`);
 const RENAME_COLUMN = statementRe(String.raw`RENAME\s+(?:COLUMN\s+)?${NAME}\s+TO\s+${NAME}`);
 const ALTER_COLUMN = String.raw`ALTER\s+(?:COLUMN\s+)?${NAME}\s+`;
 const SET_TYPE = statementRe(String.raw`${ALTER_COLUMN}(?:SET\s+DATA\s+)?TYPE\s+([\s\S]+)$`);
@@ -198,10 +355,13 @@ const INERT_ALTER_ACTION =
 const INERT_HEADS =
   /^(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX|ALTER\s+INDEX|CREATE\s+TYPE|ALTER\s+TYPE|DROP\s+TYPE|CREATE\s+EXTENSION|CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER|DROP\s+TRIGGER|COMMENT|GRANT|REVOKE|SET|RESET|LOCK|BEGIN|COMMIT|ALTER\s+DEFAULT\s+PRIVILEGES|CREATE\s+POLICY|ALTER\s+POLICY|DROP\s+POLICY|CREATE\s+SEQUENCE|ALTER\s+SEQUENCE|DROP\s+SEQUENCE|CREATE\s+SCHEMA|ANALYZE|TRUNCATE)\b/i;
 const ONE_SHOT_HEADS = /^(?:INSERT|UPDATE|DELETE|SELECT|WITH)\b/i;
+const CREATE_TRIGGER = /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i;
 const TRIGGER_BINDING =
-  /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b[\s\S]*?\bON\s+(?:"?public"?\.)?"?(\w+)"?[\s\S]*?\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(?:"?public"?\.)?"?(\w+)"?/i;
-const LIVE_DDL =
-  /\b(?:CREATE|ALTER|DROP)\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE|ROUTINE|VIEW|MATERIALIZED|TABLE|TRIGGER)\b/i;
+  /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b[\s\S]*?\bON\s+(?:"?(\w+)"?\s*\.\s*)?"?(\w+)"?[\s\S]*?\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(?:"?(\w+)"?\s*\.\s*)?"?(\w+)"?\s*\(/i;
+// Statement heads that change what is live: DDL the replay cannot follow from inside a body.
+const LIVE_DDL = new Set(['create', 'alter', 'drop', 'import']);
+/** DDL or dynamic SQL in a body, read from its tokens (words in strings are no statements). */
+const ddlIn = (tokens) => tokens.some((t) => isWord(t, 'execute', ...LIVE_DDL));
 
 /** The index of the parenthesis closing tokens[open]. */
 function closing(tokens, open) {
@@ -236,9 +396,13 @@ function statementsOf(raw) {
   const statements = [];
   let tokens = [];
   let depth = 0;
+  let unreadable = false;
   const flush = (stop) => {
-    if (tokens.length > 0) statements.push({ tokens, text: text.slice(tokens[0].start, stop) });
-    tokens = [];
+    if (tokens.length > 0) {
+      const statement = { tokens, text: text.slice(tokens[0].start, stop) };
+      statements.push(unreadable || depth !== 0 ? { ...statement, unreadable: true } : statement);
+    }
+    [tokens, depth, unreadable] = [[], 0, false];
   };
   for (const t of lex(text)) {
     if (isOp(t, ';') && depth === 0) {
@@ -246,17 +410,15 @@ function statementsOf(raw) {
       continue;
     }
     if (isOp(t, '(')) depth += 1;
-    if (isOp(t, ')')) depth -= 1;
+    if (isOp(t, ')') && (depth -= 1) < 0) unreadable = true;
+    if (t.unterminated) unreadable = true;
     tokens.push(t);
   }
   flush(text.length);
   return statements;
 }
 
-function columnType(definition) {
-  if (/^TIMESTAMPTZ|^TIMESTAMP(?:\(\d\))?\s+WITH\s+TIME\s+ZONE/i.test(definition)) return 'tz';
-  return /^TIMESTAMP/i.test(definition) ? 'ts' : 'other';
-}
+const columnType = (definition) => typeAt(lex(definition), 0).kind;
 
 function columnFacts(definition) {
   const expression = DEFAULT_CLAUSE.exec(definition)?.[1];
@@ -281,10 +443,13 @@ function applyAlterAction(columns, action) {
   let a;
   if (INERT_ALTER_ACTION.test(action)) return undefined;
   if ((a = ADD_COLUMN.exec(action))) {
-    if (NOT_A_COLUMN.test(a[1])) return `a constraint not modelled: ${action.trim()}`;
-    columns.set(a[1], columnFacts(a[2].trim()));
+    if (NOT_A_COLUMN.test(a[2])) return `a constraint not modelled: ${action.trim()}`;
+    // As PostgreSQL does: IF NOT EXISTS keeps a column there (and its default), a second ADD fails.
+    if (columns.has(a[2])) return a[1] ? undefined : `ADD of a column already there: ${a[2]}`;
+    columns.set(a[2], columnFacts(a[3].trim()));
   } else if ((a = DROP_COLUMN.exec(action))) {
-    columns.delete(a[1]);
+    if (!a[1] && !columns.has(a[2])) return missing(a[2]);
+    columns.delete(a[2]);
   } else if ((a = RENAME_COLUMN.exec(action))) {
     if (!columns.has(a[1])) return missing(a[1]);
     columns.set(a[2], columns.get(a[1]));
@@ -366,6 +531,7 @@ function readCreateTable({ tokens, text }, columns) {
     if (clockOutsideDefault(part)) return `a clock outside a DEFAULT: ${part.trim()}`;
     const c = COLUMN_DEFINITION.exec(part);
     if (/^\s*LIKE\b/i.test(part)) return `a CREATE TABLE form not modelled: ${part.trim()}`;
+    if (!c && part.trim()) return `a column definition not read: ${part.trim()}`;
     if (c && !NOT_A_COLUMN.test(c[1])) columns.set(c[1], columnFacts(c[2].trim()));
   }
   return undefined;
@@ -383,12 +549,21 @@ export function replayMigrations(texts) {
   const unmodelled = [];
   const doBlocks = [];
   const triggers = new Map();
+  const partitioned = new Set(); // partitions and their parents
   const firstLine = (text) => text.split('\n', 1)[0].slice(0, 100);
   const refuse = (what) => unmodelled.push(what);
-  for (const raw of texts) {
+  for (const [index, entry] of texts.entries()) {
+    const { name: migration = String(index), text: raw } =
+      typeof entry === 'string' ? { text: entry } : entry;
     for (const statement of statementsOf(raw)) {
       const { text } = statement;
       let m;
+      if (statement.unreadable) {
+        refuse(
+          `a statement the guard cannot read (unterminated or unbalanced): ${firstLine(text)}`,
+        );
+        continue;
+      }
       const routine = readRoutine(statement);
       if (routine?.refused) {
         refuse(routine.refused);
@@ -399,9 +574,19 @@ export function replayMigrations(texts) {
       } else if ((m = DROP_VIEW.exec(text))) {
         views.delete(m[1]);
       } else if ((m = PARTITION_OF.exec(text))) {
-        // A partition has its parent's columns, types and defaults.
-        if (tables.has(m[2])) tables.set(m[1], tables.get(m[2]));
-        else refuse(`PARTITION OF unknown table ${m[2]}`);
+        if (/\bIF\s+NOT\s+EXISTS\b/i.test(m[0]) && tables.has(m[1])) continue;
+        if (!tables.has(m[2])) {
+          refuse(`PARTITION OF unknown table ${m[2]}`);
+          continue;
+        }
+        // A partition has its parent's columns, in a map of its own. Its own defaults, and an
+        // ALTER of a column on either side, are not modelled: refused (PR #906 r2 F2).
+        tables.set(m[1], new Map([...tables.get(m[2])].map(([c, facts]) => [c, { ...facts }])));
+        partitioned.add(m[1]).add(m[2]);
+        const rest = statement.tokens.find(
+          (t) => t.start - statement.tokens[0].start >= m[0].length,
+        );
+        if (isOp(rest, '(')) refuse(`partition column options not modelled: ${firstLine(text)}`);
       } else if ((m = CREATE_TABLE.exec(text))) {
         if (/\bIF\s+NOT\s+EXISTS\b/i.test(text.slice(0, m[0].length)) && tables.has(m[1])) continue;
         const columns = new Map();
@@ -409,7 +594,12 @@ export function replayMigrations(texts) {
         const problem = readCreateTable(statement, columns);
         if (problem) refuse(problem);
       } else if ((m = DROP_TABLE.exec(text))) {
-        tables.delete(m[1]);
+        const list = text.replace(/^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?/i, '');
+        for (const item of list.replace(/\s+(?:CASCADE|RESTRICT)\s*$/i, '').split(',')) {
+          const name = /^\s*(?:"?public"?\.)?"?(\w+)"?\s*$/.exec(item)?.[1];
+          if (name) tables.delete(name);
+          else refuse(`a DROP TABLE not read: ${firstLine(text)}`);
+        }
       } else if ((m = DROP_ROUTINE.exec(text))) {
         for (const [key, known] of functions) {
           const signature = m[2] && lex(m[2].slice(1, -1)).map((t) => t.value.toLowerCase());
@@ -418,28 +608,70 @@ export function replayMigrations(texts) {
           }
         }
       } else if ((m = RENAME_TABLE.exec(text))) {
-        if (tables.has(m[1])) tables.set(m[2], tables.get(m[1]));
-        else refuse(`RENAME of unknown table ${m[1]}`);
-        tables.delete(m[1]);
-      } else if ((m = ALTER_ACTIONS.exec(text))) {
-        const columns = tables.get(m[1]);
-        if (!columns) {
-          refuse(`ALTER of unknown table ${m[1]}`);
+        const [, , from, to] = m;
+        if (!tables.has(from) || partitioned.has(from)) {
+          refuse(`RENAME of a table not modelled: ${from}`);
           continue;
         }
-        for (const action of topLevelParts(m[2])) {
-          const problem = applyAlterAction(columns, action);
-          if (problem) refuse(`${m[1]}: ${problem}`);
+        tables.set(to, tables.get(from));
+        tables.delete(from);
+        for (const [fn, on] of triggers)
+          triggers.set(
+            fn,
+            on.map((t) => (t === from ? to : t)),
+          );
+      } else if ((m = ALTER_ACTIONS.exec(text))) {
+        const [, , table, actions] = m;
+        if (!tables.has(table)) {
+          refuse(`ALTER of unknown table ${table}`);
+          continue;
+        }
+        for (const action of topLevelParts(actions)) {
+          const inert = INERT_ALTER_ACTION.test(action) && !clockOutsideDefault(action);
+          const problem =
+            partitioned.has(table) && !inert
+              ? `a column ALTER in a partition tree is not modelled: ${action.trim()}`
+              : applyAlterAction(tables.get(table), action);
+          if (problem) refuse(`${table}: ${problem}`);
         }
       } else if (isWord(statement.tokens[0], 'do')) {
-        const body = statement.tokens.find((t) => t.type === 'string');
-        if (body && LIVE_DDL.test(body.value))
-          doBlocks.push({ head: firstLine(text), body: body.value });
+        // Its body read from its tokens: DDL or EXECUTE (format() included) goes to review.
+        const at = statement.tokens.findIndex((t) => t.type === 'string');
+        const language = statement.tokens.findIndex((t) => isWord(t, 'language'));
+        const bodies = at < 0 ? null : stringValues(statement.tokens, at)?.map((v) => lex(v));
+        if (
+          !bodies ||
+          bodies.some((tokens) => tokens.some((t) => t.unterminated)) ||
+          (language >= 0 && !isWord(statement.tokens[language + 1], 'plpgsql'))
+        ) {
+          refuse(`a DO block not read: ${firstLine(text)}`);
+        } else if (bodies.some(ddlIn)) {
+          doBlocks.push({ head: firstLine(text), body: statement.tokens[at].value, migration });
+        }
       } else if (INERT_HEADS.test(text)) {
-        if ((m = TRIGGER_BINDING.exec(text))) {
-          triggers.set(m[2], [...(triggers.get(m[2]) ?? []), m[1]]);
+        if (CREATE_TRIGGER.test(text)) {
+          m = TRIGGER_BINDING.exec(text);
+          const [, schema, table, fnSchema, fn] = m ?? [];
+          const inPublic = (name) => name === undefined || name.toLowerCase() === 'public';
+          if (
+            !m ||
+            !inPublic(schema) ||
+            !inPublic(fnSchema) ||
+            !(tables.has(table) || views.has(table))
+          ) {
+            refuse(`a trigger binding not modelled: ${firstLine(text)}`);
+          } else {
+            const routine = fn.toLowerCase(); // as routine names are read: folded
+            triggers.set(routine, [...new Set([...(triggers.get(routine) ?? []), table])]);
+          }
         }
         if (hasBareClock(text)) refuse(`a clock in a definition not modelled: ${firstLine(text)}`);
+        if (
+          /^(?:CREATE|ALTER)\s+TYPE\b/i.test(text) &&
+          statement.tokens.some((_, i) => typeAt(statement.tokens, i).kind === 'ts')
+        ) {
+          refuse(`a timestamp field in a type not modelled: ${firstLine(text)}`);
+        }
       } else if (!ONE_SHOT_HEADS.test(text)) {
         refuse(`a migration statement not modelled: ${firstLine(text)}`);
       }
@@ -448,52 +680,170 @@ export function replayMigrations(texts) {
   return { tables, functions, views, unmodelled, doBlocks, triggers };
 }
 
-/** The tables a text writes: INSERT INTO, MERGE INTO, UPDATE … SET. */
-function writesIn(tokens) {
-  const writes = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    let kind = null;
-    let at = i + 1;
-    if (isWord(tokens[i], 'insert', 'merge') && isWord(tokens[i + 1], 'into')) {
-      kind = tokens[i].lower;
-      at = i + 2;
-    } else if (
-      isWord(tokens[i], 'update') &&
-      !isWord(tokens[i - 1], 'for', 'do', 'key', 'before', 'after', 'of', 'or')
-    ) {
-      kind = 'update';
-      if (isWord(tokens[at], 'only')) at += 1;
-    }
-    if (!kind) continue;
-    if (tokens[at]?.type === 'placeholder' && !isOp(tokens[at + 1], '.')) {
-      if (kind !== 'update' || isWord(tokens[at + 1], 'set')) writes.push({ kind, table: null });
-      continue;
-    }
-    let table = nameOf(tokens[at]);
-    if (!table && tokens[at]?.type !== 'placeholder') continue;
-    if (isOp(tokens[at + 1], '.')) {
-      const inPublic = table === 'public' || tokens[at].type === 'placeholder';
-      at += 2;
-      table = inPublic ? nameOf(tokens[at]) : `${table}.${nameOf(tokens[at])}`;
-    }
-    let next = at + 1;
-    if (isWord(tokens[next], 'as')) next += 2;
-    else if (
-      nameOf(tokens[next]) &&
-      !isWord(tokens[next], 'set', 'values', 'select', 'default', 'using', 'overriding')
-    )
-      next += 1;
-    // `update the record`: a word, not a statement.
-    if (kind === 'update' && !isWord(tokens[next], 'set')) continue;
-    const listed = isOp(tokens[next], '(') ? new Set() : null;
-    if (listed) {
-      for (let j = next + 1; j < tokens.length && !isOp(tokens[j], ')'); j += 1) {
-        if (nameOf(tokens[j])) listed.add(nameOf(tokens[j]));
-      }
-    }
-    writes.push({ kind, table, listed });
+// Catalogue relations production SQL reads: none has a `timestamp` column. Any other name,
+// `pg_` or not, must be a replayed table (PR #906 r2 F2: `pg_missing`).
+const CATALOGUE = new Set(
+  'pg_class pg_namespace pg_roles pg_database pg_db_role_setting pg_locks pg_stat_activity pg_trigger pg_tables pg_stats pg_inherits pg_depend pg_settings pg_attribute pg_proc pg_index pg_constraint pg_type pg_auth_members pg_stat_user_tables'.split(
+    ' ',
+  ),
+);
+// Where a FROM list ends; up to there each comma at its depth starts another relation.
+const FROM_END = new Set(
+  'where group having order limit offset fetch window union intersect except returning for loop then else end when into select values do conflict'.split(
+    ' ',
+  ),
+);
+const ALIAS_STOP = new Set([
+  ...FROM_END,
+  ...'set default overriding natural tablesample using join left right inner full cross outer lateral on as'.split(
+    ' ',
+  ),
+]);
+// `update` after these is no UPDATE statement: FOR [NO KEY] UPDATE, BEFORE/AFTER/OR UPDATE, ON
+// UPDATE, GRANT UPDATE. And `UPDATE SET` is the action of ON CONFLICT or MERGE.
+const NOT_AN_UPDATE = new Set(['for', 'key', 'before', 'after', 'or', 'on', 'grant']);
+
+/**
+ * The relation at tokens[j]: `[ONLY|LATERAL] [(] [schema.]name [)]` -> {schema, table, end},
+ * {dynamic}, {unreadable} (refused by the caller), or null: a subquery or a call (`call`), whose
+ * own relations are read where they stand.
+ */
+function relationAt(tokens, j, call = true) {
+  const at = isWord(tokens[j], 'only', 'lateral') ? j + 1 : j;
+  const t = tokens[at];
+  if (isOp(t, '(')) {
+    if (isWord(tokens[at + 1], 'select', 'with', 'values')) return null;
+    const inner = relationAt(tokens, at + 1, call);
+    return inner && isOp(tokens[inner.end + 1], ')') ? { ...inner, end: inner.end + 1 } : inner;
   }
-  return writes;
+  if (t?.type === 'placeholder' && !isOp(tokens[at + 1], '.')) return { dynamic: true, end: at };
+  const first = t?.type === 'placeholder' ? null : nameOf(t);
+  if (first === null && t?.type !== 'placeholder') return { unreadable: true, end: at };
+  let [schema, table, end] = [null, first, at];
+  if (isOp(tokens[at + 1], '.')) {
+    if (tokens[at + 2]?.type === 'placeholder') return { dynamic: true, end: at + 2 };
+    // `${schema}.table`: only the schema is spliced.
+    [schema, table, end] = [first, nameOf(tokens[at + 2]), at + 2];
+    if (table === null) return { unreadable: true, end };
+  }
+  // A set-returning call: its columns are not typed here, so it is unresolved, never skipped.
+  if (call && isOp(tokens[end + 1], '(')) return { unreadable: true, table: `${table}()`, end };
+  return { schema, table, end };
+}
+
+/** The index after a relation's `*` and alias. */
+function afterAlias(tokens, k) {
+  let at = isOp(tokens[k], '*') ? k + 1 : k;
+  const t = tokens[at];
+  if (isWord(t, 'as')) at += 2;
+  else if (t?.type === 'quoted' || (t?.type === 'word' && !ALIAS_STOP.has(t.lower))) at += 1;
+  return at;
+}
+
+/** WITH names: `name [(columns)] AS [[NOT] MATERIALIZED] (`. */
+function cteNames(tokens) {
+  const names = new Set();
+  tokens.forEach((t, i) => {
+    if (
+      nameOf(t) === null ||
+      !(isWord(tokens[i - 1], 'with', 'recursive') || isOp(tokens[i - 1], ','))
+    )
+      return;
+    let k = isOp(tokens[i + 1], '(') ? closing(tokens, i + 1) + 1 : i + 1;
+    if (!isWord(tokens[k], 'as')) return;
+    k += isWord(tokens[k + 1], 'not') ? 3 : isWord(tokens[k + 1], 'materialized') ? 2 : 1;
+    if (isOp(tokens[k], '(')) names.add(nameOf(t));
+  });
+  return names;
+}
+
+/**
+ * Every relation a text reads or writes, by an explicit grammar: FROM lists (each comma), JOIN,
+ * DELETE … USING, INSERT/MERGE INTO and UPDATE targets. A target it cannot read is `unreadable`,
+ * never skipped (PR #906 r2 F2: `UPDATE ONLY (task)`, `FROM a, task`).
+ */
+export function relationsIn(tokens) {
+  const ctes = cteNames(tokens);
+  const refs = [];
+  const writes = [];
+  const read = (j, keyword, call) => {
+    const rel = relationAt(tokens, j, call);
+    const cte = keyword !== 'update' && keyword !== 'delete' && rel?.schema === null;
+    if (rel) refs.push({ ...rel, keyword, cte: cte && ctes.has(rel.table) });
+    return rel;
+  };
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (isWord(t, 'join')) read(i + 1, 'join');
+    else if (isWord(t, 'from') && !isWord(tokens[i - 1], 'distinct') && !insideCall(tokens, i)) {
+      read(i + 1, isWord(tokens[i - 1], 'delete') ? 'delete' : 'from');
+      for (let k = i + 1, depth = 0; k < tokens.length; k += 1) {
+        const u = tokens[k];
+        if (isOp(u, '(')) depth += 1;
+        else if (isOp(u, ')') && (depth -= 1) < 0) break;
+        else if (depth > 0) continue;
+        else if (isOp(u, ';') || (u.type === 'word' && FROM_END.has(u.lower))) break;
+        else if (isOp(u, ',') || (isWord(u, 'using') && isWord(tokens[i - 1], 'delete'))) {
+          read(k + 1, 'from');
+        }
+      }
+    } else if (isWord(t, 'insert', 'merge') && isWord(tokens[i + 1], 'into')) {
+      const rel = read(i + 2, t.lower, false) ?? { unreadable: true, end: i + 2 };
+      const k = afterAlias(tokens, rel.end + 1);
+      let listed = null;
+      if (isOp(tokens[k], '(') && !isWord(tokens[k + 1], 'select', 'with', 'values')) {
+        listed = new Set(
+          tokens
+            .slice(k + 1, closing(tokens, k))
+            .map(nameOf)
+            .filter(Boolean),
+        );
+      }
+      writes.push({ kind: t.lower, ...rel, listed });
+    } else if (
+      isWord(t, 'update') &&
+      !(tokens[i - 1]?.type === 'word' && NOT_AN_UPDATE.has(tokens[i - 1].lower)) &&
+      !isWord(tokens[i + 1], 'set')
+    ) {
+      const rel = read(i + 1, 'update', true) ?? { unreadable: true, end: i + 1 };
+      const set = isWord(tokens[afterAlias(tokens, rel.end + 1)], 'set');
+      writes.push(set ? { kind: 'update', ...rel } : { kind: 'update', unreadable: true });
+    }
+  }
+  return { refs, writes };
+}
+
+/** How a relation resolves: 'table', 'catalogue', 'cte', 'dynamic', or unresolved (refused). */
+function resolution(ref, tables) {
+  if (ref.dynamic) return 'dynamic';
+  if (ref.unreadable) return 'unresolved';
+  if (ref.cte) return 'cte';
+  if ((ref.schema ?? 'pg_catalog') === 'pg_catalog' && CATALOGUE.has(ref.table)) return 'catalogue';
+  if (ref.schema === 'information_schema') return 'catalogue';
+  if ((ref.schema ?? 'public') === 'public' && tables.has(ref.table)) return 'table';
+  return 'unresolved';
+}
+
+/**
+ * The tokens of a text that may not lex (a literal of production source is often prose: "the
+ * caller's roles"): a string that runs off the end is read both ways, as a string up to the end
+ * (`'now` may close in the next literal) and as one character with the rest lexed again, so
+ * nothing after it hides from the rules.
+ */
+function lexAll(text) {
+  const tokens = [];
+  for (let rest = stripComments(text); ;) {
+    const part = lex(rest);
+    const stray = part.findIndex((t) => t.unterminated);
+    if (stray < 0) return [...tokens, ...part];
+    const { start, type, value } = part[stray];
+    const close = /^\$\w*\$/.exec(value)?.[0] ?? "'";
+    const closed = `${rest.slice(start)}${close}`;
+    tokens.push(...part.slice(0, stray));
+    if (type === 'string') tokens.push({ type, value: closed, lower: closed.toLowerCase(), start });
+    else tokens.push({ type: 'op', value: rest[start], lower: rest[start], start });
+    rest = ' '.repeat(start + 1) + stripComments(rest.slice(start + 1));
+  }
 }
 
 /**
@@ -501,22 +851,22 @@ function writesIn(tokens) {
  * this text may mean (one service's, or every service's for a shared package).
  */
 export function problemsIn(text, tables) {
-  const tokens = lex(text);
+  const tokens = lexAll(text);
   const problems = [];
   const clocks = clocksIn(tokens);
-  const refs = tableRefs(tokens);
-  const writes = writesIn(tokens);
-  const named = refs.filter(
-    (ref) =>
-      ref.table &&
-      !ref.cte &&
-      // `SELECT … INTO variable` and `RAISE … USING errcode = …` of a routine are no tables.
-      (ref.keyword !== 'into' || writes.some((write) => write.table === ref.table)) &&
-      !(ref.keyword === 'using' && isOp(tokens[ref.index + 1], '=')),
-  );
-  const unresolved = named.filter((ref) => !tables.has(ref.table) && !/^pg_/.test(ref.table));
+  const { refs, writes } = relationsIn(tokens);
+  const kinds = refs.map((ref) => resolution(ref, tables));
+  const named = refs.filter((_, i) => kinds[i] === 'table' || kinds[i] === 'catalogue');
+  const unresolved = refs.filter((_, i) => kinds[i] === 'unresolved');
   const words = new Set(tokens.map(nameOf).filter(Boolean));
   const bare = clocks.filter((clock) => !clock.utc);
+  // `$1::timestamp <= now()`, `AS r(at timestamp)`: the comparison goes through the session too.
+  const typed = tokens.findIndex(
+    (t, i) => !isOp(tokens[i - 1], '.') && typeAt(tokens, i).kind === 'ts',
+  );
+  if (bare.length > 0 && typed >= 0) {
+    problems.push(`R4 a timestamp type beside a bare ${bare[0].name}: ${tokens[typed].value}`);
+  }
   if (bare.length > 0) {
     const reading =
       tokens[0]?.lower === 'select' &&
@@ -549,7 +899,12 @@ export function problemsIn(text, tables) {
     } else if (refs.some((ref) => ref.dynamic)) {
       problems.push(`R1 bare ${bare[0].name} on a spliced table`);
     } else if (unresolved.length > 0) {
-      problems.push(`R1 bare ${bare[0].name} on unresolved table ${unresolved[0].table}`);
+      const what = unresolved[0].table
+        ? [unresolved[0].schema, unresolved[0].table]
+        : ['(unreadable)'];
+      problems.push(
+        `R1 bare ${bare[0].name} on unresolved table ${what.filter(Boolean).join('.')}`,
+      );
     } else if (named.length === 0 && !reading) {
       problems.push(`R3 bare ${bare[0].name} in a fragment naming no table`);
     }
@@ -563,8 +918,10 @@ export function problemsIn(text, tables) {
       continue;
     }
     if (write.kind === 'update' && !explicitDefault) continue;
-    if (write.table === null || !tables.has(write.table)) {
-      problems.push(`R2 ${write.kind} on unresolved table ${write.table ?? '(spliced)'}`);
+    if (resolution(write, tables) !== 'table') {
+      problems.push(
+        `R2 ${write.kind} on unresolved table ${write.table ?? '(spliced or unreadable)'}`,
+      );
       continue;
     }
     for (const columnsOfTable of tables.get(write.table)) {
@@ -586,9 +943,10 @@ export function problemsIn(text, tables) {
 }
 
 /**
- * Reviewed sites whose bare clocks reach no `timestamp(3)` column. Bound to the exact text or
- * the content hash, and an entry that matches nothing fails the check, so it cannot outlive the
- * SQL that was reviewed.
+ * Reviewed sites whose bare clocks reach no `timestamp(3)` column. A literal is bound to its exact
+ * text and to the column types its review assumed (`noTimestampIn`); a routine to its binding
+ * (definitionBinding: signature, body, trigger bindings, column types); a DO block to its body and
+ * migration. An entry that matches nothing fails the check, so it cannot outlive what was reviewed.
  */
 export const REVIEWED_LITERALS = [
   {
@@ -603,79 +961,145 @@ export const REVIEWED_LITERALS = [
      ON CONFLICT ("topic", "partition_key")
      DO UPDATE SET "next_seq" = s."next_seq" + 1
      RETURNING s."next_seq" - 1 AS allocated`,
+    assumes: { outbox_stream_sequence: 'no ts' },
     why: 'outbox_stream_sequence (the constant spliced here) has no timestamp column at all',
+  },
+  // A CASE or COALESCE branch meets its siblings' type: these are timestamp(3) or NULL, so the
+  // pinned clock stays plain timestamp. Until the guard types siblings itself (FU-226 part B).
+  {
+    file: 'services/marketplace-service/src/temporal/saga-start.store.ts',
+    sha256: 'd9a74ce3446e744b0b68d3e82d73e31460f4712a93901f6cceee2c34c8f5af9d',
+    assumes: { 'order.saga_start_attempted_at': 'ts', 'order.created_at': 'ts' },
+    why: 'COALESCE(o.saga_start_attempted_at, CASE … THEN o.created_at ELSE <pinned> END): all timestamp(3)',
+  },
+  {
+    file: 'services/marketplace-service/src/temporal/saga-start.store.ts',
+    sha256: '57da77774cf80f26e250c6c3a4ee8f43389feb2d20290dbf577e9e559ded8817',
+    assumes: { 'order.saga_start_delivered_at': 'ts' },
+    why: 'CASE WHEN … THEN <pinned> ELSE NULL END into saga_start_delivered_at, timestamp(3)',
   },
 ];
 export const REVIEWED_FUNCTIONS = [
   {
     service: 'construction-service',
     name: 'bid_guard',
-    sha256: 'b7715c3d036b764b0a3899c898959c990afb47c368e50b00bdb0e18f5d789f0a',
+    sha256: 'a6dcf942e2d423831d7ec99110948148b66e8a8c6596eb0eb1b9ddc611e03b0d',
     why: 'clocks are compared with its timestamptz locals; submitted_at, timestamp(3), is compared only with OLD.submitted_at',
   },
   {
     service: 'procurement-service',
     name: 'rfq_guard',
-    sha256: 'ba81705db9f9fe929cef54a6656da14aafad9e8d57be4f5fbc7fe3964e205301',
+    sha256: '4e4e3f581516009dd6fa8be268cd5b17147b30666f5752a773bac20a6537e399',
     why: 'clocks are compared with quotation_closing_at and closed_at, both timestamptz',
   },
   {
     service: 'analytics-service',
     name: 'fact_recorded_at_now',
-    sha256: '54a5f821b7503ba5df69419c498d7742e77ed1514dfb1329e4a36e321292e3cb',
-    why: 'assigns clock_timestamp() to recorded_at, which is timestamptz on every fact table',
+    sha256: '7638308e1a32a00b5197fa92599b703f6a593459b40f70e3a49ff9a80ec8a0ef',
+    why: 'assigns clock_timestamp() to recorded_at, timestamptz on both tables it fires on (fact_maintenance, baseline_metric)',
   },
   {
     service: 'analytics-service',
     name: 'projection_coverage_started_now',
-    sha256: '556318a18fa8d879b8c713b78ce22e8b6ed1223ee1d895744c2b21a90a2eb04d',
+    sha256: '65c6dc42720abf826c2e37fe8aab1bdc932d1345e017320d80e524ced2942630',
     why: 'assigns clock_timestamp() to covered_from, which is timestamptz',
   },
   {
     service: 'construction-service',
     name: 'award_standing_check_guard',
-    sha256: 'c69b7451751f292df1f2f6ce01013c348e3a96cd899c044c63d3584a27e388f3',
+    sha256: '5dda1c8af723c33d7723387713306a7406654963db1225d228b2444061b862fc',
     why: 'every clock is compared with tender_award_standing_check columns, all timestamptz; the tender.created_at it matched is another table',
   },
 ];
 
-/** One-shot DO blocks whose text names DDL that defines nothing live. */
+/** One-shot DO blocks with DDL or EXECUTE that define nothing live: bound to body and migration. */
 export const REVIEWED_DO_BLOCKS = [
   {
     service: 'asset-service',
-    sha256: 'd933168bd92fb472eb347ca3e46ea00110cf68f33db2dba8c08014d9f6ff0f13',
-    why: 'a preflight: `CREATE FUNCTION` is only words in its error hints',
+    migration: '20260925110000_asset_legacy_dossier_and_identifiers',
+    sha256: 'f0b0ab23c9d9783817dac975febf7deeeac1ab4cb7e9966609c2fc3652d0ec14',
+    why: '$canonicalise$: EXECUTE format() of one-shot INSERT/UPDATE of text identifiers; no clock, no DDL',
+  },
+  {
+    service: 'asset-service',
+    migration: '20260925110000_asset_legacy_dossier_and_identifiers',
+    sha256: '49d622004a8fc93b91f81803a697473bca9929e191faff441563abd6e8019211',
+    why: '$dossier$: EXECUTE format() of one-shot INSERT/UPDATE of organization_id; no clock, no DDL',
   },
   {
     service: 'economic-service',
+    migration: '20261105120000_settlement_creation_proof',
     sha256: 'f0fd9ff137c71c1b103e3867b803cfa6b36e4cd79ea964b0e42a095c67c99cac',
     why: 'only ALTER TABLE … VALIDATE CONSTRAINT: no column, default or routine changes',
   },
+  {
+    service: 'identity-service',
+    migration: '20261004100000_membership_live_duplicates_guard',
+    sha256: 'cb7e36a67c4ba94658ab183c903c548164c6a78dfeb096df30c73446c46d8157',
+    why: 'DROP INDEX of an invalid index: no column, default or routine changes',
+  },
 ];
 
-/** What a reviewed definition is bound to: its tokens, so not its whitespace or comments. */
-export function contentHash(text) {
-  const tokens = lex(text.replace(/\r\n?/g, '\n')).map((t) => `${t.type}:${t.value}`);
-  return createHash('sha256').update(tokens.join('\n')).digest('hex');
+const canonical = (text) => lex(text.replace(/\r\n?/g, '\n')).map((t) => `${t.type}:${t.value}`);
+const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+
+/** A text's tokens, so not its whitespace or comments. */
+export const contentHash = (text) => sha256(canonical(text).join('\n'));
+
+/**
+ * What a reviewed routine or view is bound to (PR #906 r2 F2): its signature and result, its
+ * body's tokens, the tables its triggers fire on, and the type and default of every column of
+ * those tables and of the tables its body names. Bind it to another table, or change a column
+ * type it relied on, and the review no longer covers it.
+ */
+export function definitionBinding(definition, tables, firesOn = []) {
+  const named = relationsIn(lex(definition.body)).refs.filter(
+    (ref) => resolution(ref, tables) === 'table',
+  );
+  const bound = [...new Set([...firesOn, ...named.map((ref) => ref.table)])].sort();
+  const columns = bound.map((table) => [
+    table,
+    (tables.get(table) ?? []).map((cols) =>
+      [...cols].map(([column, f]) => `${column}:${f.type}:${f.sessionDefault}`).sort(),
+    ),
+  ]);
+  return sha256(
+    JSON.stringify({
+      key: definition.key ?? definition.name,
+      header: canonical(definition.header ?? ''),
+      body: canonical(definition.body),
+      firesOn: [...new Set(firesOn)].sort(),
+      columns,
+    }),
+  );
 }
 
-/** R4: a `timestamp` local variable, parameter or result of a routine, beside a bare clock. */
+/**
+ * R4: a routine with a bare clock that names a `timestamp` type anywhere (a local, parameter,
+ * result or cast; qualified or quoted), or a type it cannot read (`%TYPE`, `%ROWTYPE`).
+ */
 export function localVariableProblems(body, header = '') {
-  const local = /\b\w+\s+timestamp(?:\(\d\))?(?:\s+without\s+time\s+zone)?\s*(?::=[^;]*)?;/i.exec(
-    body,
-  );
-  const signature = /\btimestamp\b(?!\s*(?:\(\s*\d\s*\)\s*)?with\s+time\s+zone)/i.exec(header);
-  const bare = hasBareClock(body);
-  if (!bare) return [];
-  return local || signature
-    ? [`R4 a timestamp variable beside a bare clock: ${(local ?? signature)[0]}`]
-    : [];
+  if (!hasBareClock(body)) return [];
+  for (const tokens of [lex(header), lex(body)]) {
+    for (let i = 0; i < tokens.length; i += 1) {
+      if (isOp(tokens[i], '%') && isWord(tokens[i + 1], 'type', 'rowtype')) {
+        return [`R4 a type the guard cannot read beside a bare clock: %${tokens[i + 1].value}`];
+      }
+      if (!isOp(tokens[i - 1], '.') && typeAt(tokens, i).kind === 'ts') {
+        return [
+          `R4 a timestamp type beside a bare clock: ${tokens[i - 1]?.value ?? ''} ${tokens[i].value}`,
+        ];
+      }
+    }
+  }
+  return [];
 }
 
 /** What is wrong with a live routine or view, whatever its clocks. */
 export function definitionProblems({ body, header }, tables, firesOn = []) {
   const tokens = lex(body);
   const dynamic = tokens.some((t) => isWord(t, 'execute'));
+  const ddl = tokens.some((t) => isWord(t, ...LIVE_DDL));
   const words = new Set(tokens.map(nameOf));
   // `NEW.col := now()` names the table it fires on nowhere in its body.
   const rowColumns = firesOn.flatMap((table) =>
@@ -692,12 +1116,14 @@ export function definitionProblems({ body, header }, tables, firesOn = []) {
       ? [`R1 a bare clock beside timestamp(3) ${rowColumns.join(', ')} of its trigger's table`]
       : []),
     ...(dynamic ? ['dynamic SQL (EXECUTE): the guard cannot read it'] : []),
+    ...(ddl ? ['DDL in a routine body: the replay cannot follow it'] : []),
   ];
 }
 
 /** Everything `problemsIn` can answer on has one of these; the rest skips the lexer. */
+// An escape (`E'\x6eow'`, `U&'\006e…'`) or a dollar quote can spell a clock without its letters.
 const RELEVANT_TEXT =
-  /now|clock_timestamp|statement_timestamp|transaction_timestamp|current_timestamp|localtime|current_time|current_date|timeofday|today|tomorrow|yesterday|insert|merge|default/i;
+  /now|clock_timestamp|statement_timestamp|transaction_timestamp|current_timestamp|localtime|current_time|current_date|timeofday|today|tomorrow|yesterday|insert|merge|default|\\|&'|\$\w*\$/i;
 
 /** The text of `new SomethingError('...')`, never SQL. */
 function isErrorMessage(node) {
@@ -709,10 +1135,10 @@ function isErrorMessage(node) {
 function collectTables(repository) {
   const texts = new Map();
   for (const path of authoredFiles(join(repository, 'services')).sort()) {
-    const service = /\/services\/([^/]+)\/prisma\/migrations\/[^/]+\/migration\.sql$/.exec(
-      path,
-    )?.[1];
-    if (service) texts.set(service, [...(texts.get(service) ?? []), readFileSync(path, 'utf8')]);
+    const [, service, name] =
+      /\/services\/([^/]+)\/prisma\/migrations\/([^/]+)\/migration\.sql$/.exec(path) ?? [];
+    const migration = { name, text: readFileSync(path, 'utf8') };
+    if (service) texts.set(service, [...(texts.get(service) ?? []), migration]);
   }
   return new Map([...texts].map(([service, sql]) => [service, replayMigrations(sql)]));
 }
@@ -768,15 +1194,29 @@ export function utcClockProblems(repository) {
       if (isErrorMessage(literal.node)) continue;
       const found = problemsIn(literal.text, tables);
       if (found.length === 0) continue;
+      // The column types its review assumed hold in every service, or the review is void.
+      const holds = ([what, expected]) => {
+        const [table, column] = what.split('.');
+        const maps = allTables.get(table) ?? [];
+        const fact = (columns) =>
+          column
+            ? columns.get(column)?.type === expected
+            : expected === 'no ts' && [...columns.values()].every((f) => f.type !== 'ts');
+        return maps.length > 0 && maps.every(fact);
+      };
+      const hash = contentHash(literal.text);
       const reviewed = REVIEWED_LITERALS.find(
-        (entry) => entry.file === local && entry.text === literal.text,
+        (entry) =>
+          entry.file === local &&
+          (entry.text === literal.text || entry.sha256 === hash) &&
+          Object.entries(entry.assumes ?? {}).every(holds),
       );
       if (reviewed) {
         reviewedUsed.add(reviewed);
         continue;
       }
       const line = ast.getLineAndCharacterOfPosition(literal.node.getStart(ast)).line + 1;
-      for (const problem of found) problems.push(`${local}:${line}: ${problem}`);
+      for (const problem of found) problems.push(`${local}:${line}: ${problem} [sha256 ${hash}]`);
     }
   }
   for (const [
@@ -784,28 +1224,33 @@ export function utcClockProblems(repository) {
     { functions, views, tables, unmodelled, doBlocks, triggers },
   ] of perService) {
     for (const what of unmodelled) problems.push(`services/${service} migrations: ${what}`);
-    for (const { head, body } of doBlocks) {
+    for (const { head, body, migration } of doBlocks) {
       const reviewed = REVIEWED_DO_BLOCKS.find(
-        (entry) => entry.service === service && entry.sha256 === contentHash(body),
+        (entry) =>
+          entry.service === service &&
+          entry.migration === migration &&
+          entry.sha256 === contentHash(body),
       );
       if (reviewed) reviewedUsed.add(reviewed);
       else problems.push(`services/${service} migrations: DDL in a DO block: ${head}`);
     }
     const scoped = new Map([...tables].map(([table, columns]) => [table, [columns]]));
     for (const definition of [...functions.values(), ...views.values()]) {
+      const firesOn = triggers.get(definition.name) ?? [];
+      const binding = definitionBinding(definition, scoped, firesOn);
       const reviewed = REVIEWED_FUNCTIONS.find(
         (entry) =>
-          entry.service === service &&
-          entry.name === definition.name &&
-          entry.sha256 === contentHash(definition.body),
+          entry.service === service && entry.name === definition.name && entry.sha256 === binding,
       );
-      const found = definitionProblems(definition, scoped, triggers.get(definition.name));
+      const found = definitionProblems(definition, scoped, firesOn);
       if (reviewed && found.length > 0) {
         reviewedUsed.add(reviewed);
         continue;
       }
       for (const problem of found)
-        problems.push(`services/${service} function ${definition.name}: ${problem}`);
+        problems.push(
+          `services/${service} function ${definition.name}: ${problem} [binding ${binding}]`,
+        );
     }
   }
   for (const entry of [...REVIEWED_LITERALS, ...REVIEWED_FUNCTIONS, ...REVIEWED_DO_BLOCKS]) {
