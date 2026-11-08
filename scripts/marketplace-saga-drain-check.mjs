@@ -17,10 +17,15 @@
  *      time are enumerated (count/list/count); their CURRENT runs are described
  *      by workflow id alone, and any unlisted running successor blocks;
  *   5. inspected histories, their markers and their recorded activity results, are
- *      compatible with the declared target build.
+ *      compatible with the declared target build;
+ *   6. no durable saga call record is open (`saga_unconfirmed_call`, FU-221, D-151),
+ *      whatever its operation: a call economic-service has not answered may still be
+ *      answered only by the build that made it. Temporal cannot show one: a fenced
+ *      authorisation completes its saga with no pending activity and its record open.
  * This is an observation after workers stop, not proof that workflows have
  * completed or that funds cannot move when workers resume.
- * Exit 1: a poller or a pending activity was found, or anything could not
+ * Exit 1: a poller (before or after the database read), a pending activity or an open
+ * call record was found, or anything could not
  * be checked — a missing setting, the CLI absent or failing, output it does
  * not recognise. Both block the deployment; there is no exception.
  *
@@ -49,14 +54,22 @@
  * as it may have left orders no saga lists yet (D-150). Always run this gate from the
  * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
+ * DATABASE_URL_MARKETPLACE — the service's own runtime URL, required: psql on PATH reads
+ * the table with the role the service's monitor reads it with (cross-tenant platform
+ * plumbing; the table has no row security, and row security found on it refuses). The URL
+ * is the read's only connection input (#947 r1 M1): explicit host, port and database, no
+ * libpq parameter that could point elsewhere, no inherited PG* variable, and the server
+ * must name that database and port back.
  */
 import {
   commandFailure,
   clientFailureCode,
   markRefusal,
 } from '../packages/config/src/command-failure.js';
+import { readUrl } from '../packages/config/src/url-reader.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { libpqInvocation } from './psql-prisma-url.mjs';
 
 const QUERY = 'WorkflowType="orderSaga" AND ExecutionStatus="Running"';
 const CLI_TIMEOUT_MS = 60_000;
@@ -420,6 +433,228 @@ function requiredProtocol(history, historyLength, taskQueue) {
   return Math.max(required, activityResultProtocol(events));
 }
 
+// Every operation the saga keeps a durable call record of (`RecordedCall` in
+// services/marketplace-service/src/temporal/activities.ts; the test pins the two equal).
+// An open record of another operation was written by a build this gate does not know.
+const RECORDED_CALLS = new Set([
+  'createObligation',
+  'authoriseSettlement',
+  'settle',
+  'compensate',
+  'resolveObligationDispute',
+]);
+const OPEN_CALLS_SHOWN = 50;
+const DATABASE_URL = 'DATABASE_URL_MARKETPLACE';
+/** An identifier is printed only in this shape; any other is withheld, never the row dropped. */
+const PRINTABLE = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+/**
+ * The URL parameters the read accepts: Prisma's own (dropped before psql), the credential
+ * `libpqInvocation` moves to the environment, the startup options it moves to PGOPTIONS,
+ * and libpq's TLS, authentication and socket settings. None of them can name a host, an
+ * address, a port, a database or a service, so libpq has nothing beside the URL's own
+ * authority and path to connect with (#947 r1 M1: `service`, `hostaddr`, `host`, `port`,
+ * `dbname`, `user`, multi-host routing). An allowlist: whatever a later libpq adds refuses.
+ */
+const PINNED_URL_PARAMETERS = new Set([
+  'schema',
+  'connection_limit',
+  'pool_timeout',
+  'socket_timeout',
+  'pgbouncer',
+  'statement_cache_size',
+  'password',
+  'options',
+  'application_name',
+  'channel_binding',
+  'connect_timeout',
+  'gssencmode',
+  'keepalives',
+  'keepalives_count',
+  'keepalives_idle',
+  'keepalives_interval',
+  'krbsrvname',
+  'require_auth',
+  'ssl_max_protocol_version',
+  'ssl_min_protocol_version',
+  'sslcert',
+  'sslcompression',
+  'sslcrl',
+  'sslcrldir',
+  'sslkey',
+  'sslmode',
+  'sslnegotiation',
+  'sslrootcert',
+  'sslsni',
+  'tcp_user_timeout',
+]);
+
+/**
+ * How psql reaches the service's database: the service's own runtime URL, through the
+ * one URL-to-psql boundary (password in PGPASSWORD, never argv), and the URL's schema,
+ * which qualifies the table itself: nothing rides on a search_path a pooler may drop.
+ * The URL must name its host, port and database, and only parameters that cannot move
+ * the connection: libpq fills whatever the URL leaves out from PG* variables or a
+ * service file, which the service itself (Prisma) never reads (#947 r1 M1). `expected`
+ * is what the server must answer it is. Refused with a fixed text, before Temporal is
+ * asked anything.
+ */
+function databaseConnection() {
+  const url = setting(DATABASE_URL);
+  try {
+    const { target, env } = libpqInvocation(url);
+    const parsed = readUrl(url);
+    const schemas = parsed.searchParams.getAll('schema');
+    const schema = schemas.length === 0 ? 'public' : schemas[0];
+    if (schemas.length > 1 || !/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error();
+    if ([...parsed.searchParams.keys()].some((name) => !PINNED_URL_PARAMETERS.has(name))) {
+      throw new Error();
+    }
+    const port = /^[1-9][0-9]{0,4}$/.test(parsed.port) ? Number(parsed.port) : 0;
+    const database = /^\/([\w$-]+)$/.exec(parsed.pathname)?.[1];
+    // An empty host with a port does not parse; the host check stands for a parser that would.
+    if (!parsed.hostname || port < 1 || port > 65535 || !database) throw new Error();
+    // `env` is the URL's own password and options, nothing inherited.
+    return { target, env, schema, expected: { database, port } };
+  } catch {
+    throw new Unverifiable(
+      `${DATABASE_URL} cannot be handed to psql (it must name host, port and database, ` +
+        'with no parameter that can move the connection); its value is not repeated',
+    );
+  }
+}
+
+/**
+ * psql's whole environment: PATH to find it, HOME, the URL's own password and options, and
+ * a connect timeout. No inherited PG* variable (PGHOSTADDR, PGPORT, PGDATABASE, PGSERVICE,
+ * PGSERVICEFILE, PGSYSCONFDIR, PGPASSFILE, PGSSLMODE, …) and no PSQLRC reaches it. HOME
+ * names no connection (a service file there is read only for a named service, refused) and
+ * keeps `~/.postgresql/root.crt`, which libpq verifies the server against, where it was.
+ */
+function psqlEnv(env) {
+  return {
+    ...Object.fromEntries(
+      ['PATH', 'HOME'].flatMap((name) =>
+        process.env[name] === undefined ? [] : [[name, process.env[name]]],
+      ),
+    ),
+    PGCONNECT_TIMEOUT: '10',
+    ...env,
+  };
+}
+
+/**
+ * Every durable saga call record still open (FU-221, D-151) becomes a blocker. A fenced
+ * authorisation completes with no pending activity and its record open, so Temporal
+ * cannot show it. One READ ONLY transaction, time-boxed in the SQL itself; the rows come
+ * through the partial index `ix_saga_unconfirmed_call_open` (opened_at WHERE confirmed_at
+ * IS NULL), oldest first and one more than shown, so closed history is never walked.
+ * Row security on the table would make an empty answer the policy's, not the table's,
+ * and a standby's may lag the primary: both refused. Only pg_catalog is searched, the
+ * table named with its schema. Whatever does not answer exactly as asked refuses.
+ */
+function openCallRecords({ target, env, schema, expected }) {
+  const table = `"${schema}".saga_unconfirmed_call`;
+  const sql = `BEGIN TRANSACTION READ ONLY;
+SET LOCAL statement_timeout = '10s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL search_path = pg_catalog;
+SELECT json_build_object(
+  'database', current_database(),
+  'port', inet_server_port(),
+  'recovery', pg_is_in_recovery(),
+  'rowSecurity', (SELECT relrowsecurity OR relforcerowsecurity FROM pg_catalog.pg_class
+    WHERE oid = '${table}'::regclass),
+  'open', COALESCE((SELECT json_agg(r) FROM (
+    SELECT c.organization_id AS "organizationId", c.order_id AS "orderId", c.operation,
+      c.subject, c.generation,
+      floor(extract(epoch FROM clock_timestamp() - c.opened_at))::bigint AS "ageSeconds"
+    FROM ${table} c
+    WHERE c.confirmed_at IS NULL
+    ORDER BY c.opened_at, c.organization_id, c.order_id, c.operation, c.subject
+    LIMIT ${OPEN_CALLS_SHOWN + 1}
+  ) r), '[]'::json));
+COMMIT;
+`;
+  const result = spawnSync(
+    'psql',
+    [target, '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-f', '-'],
+    {
+      input: sql,
+      encoding: 'utf8',
+      timeout: CLI_TIMEOUT_MS,
+      env: psqlEnv(env),
+    },
+  );
+  if (result.error) throw new Unverifiable(`psql could not be run (${spawnCode(result.error)})`);
+  if (result.status !== 0) {
+    throw new Unverifiable('saga_unconfirmed_call could not be read; psql diagnostics withheld');
+  }
+  let answer;
+  try {
+    answer = JSON.parse(result.stdout);
+  } catch {
+    answer = undefined;
+  }
+  const rows = isRecord(answer) ? answer.open : undefined;
+  if (
+    !isRecord(answer) ||
+    Object.keys(answer).length !== 5 ||
+    typeof answer.database !== 'string' ||
+    !Number.isSafeInteger(answer.port) ||
+    typeof answer.recovery !== 'boolean' ||
+    typeof answer.rowSecurity !== 'boolean' ||
+    !Array.isArray(rows) ||
+    rows.length > OPEN_CALLS_SHOWN + 1
+  ) {
+    throw new Unverifiable('saga_unconfirmed_call: psql did not print the open records');
+  }
+  // The same statement names where it ran: another database or another server's port
+  // answered for one the URL does not name, and its empty table proves nothing.
+  if (answer.database !== expected.database || answer.port !== expected.port) {
+    throw new Unverifiable(
+      'saga_unconfirmed_call was read from a database or port other than the URL names',
+    );
+  }
+  if (answer.recovery) {
+    throw new Unverifiable(
+      'saga_unconfirmed_call was read on a standby; a record may not have arrived',
+    );
+  }
+  if (answer.rowSecurity) {
+    throw new Unverifiable(
+      'saga_unconfirmed_call has row security: an empty answer proves nothing',
+    );
+  }
+  const shown = (value) => (PRINTABLE.test(value) ? value : '<withheld>');
+  const blockers = [];
+  for (const row of rows) {
+    if (
+      !isRecord(row) ||
+      ['organizationId', 'orderId', 'operation', 'subject'].some(
+        (field) => typeof row[field] !== 'string' || !row[field],
+      ) ||
+      !Number.isSafeInteger(row.generation) ||
+      row.generation < 1 ||
+      !Number.isSafeInteger(row.ageSeconds)
+    ) {
+      throw new Unverifiable('saga_unconfirmed_call: an open record this gate cannot read');
+    }
+    if (!RECORDED_CALLS.has(row.operation)) {
+      throw new Unverifiable('saga_unconfirmed_call: an open record of an unknown operation');
+    }
+    if (blockers.length === OPEN_CALLS_SHOWN) {
+      blockers.push(`more than ${OPEN_CALLS_SHOWN} open saga call records; list them (runbook)`);
+      break;
+    }
+    blockers.push(
+      `open saga call record: order ${shown(row.orderId)} (organization ${shown(row.organizationId)}), ` +
+        `${row.operation} on ${shown(row.subject)}, generation ${row.generation}, open ${row.ageSeconds} s`,
+    );
+  }
+  return blockers;
+}
+
 function check() {
   const cli = process.env.TEMPORAL_CLI?.trim() || 'temporal';
   const address = setting('TEMPORAL_ADDRESS');
@@ -434,6 +669,7 @@ function check() {
   ) {
     throw new Unverifiable('MARKETPLACE_SAGA_STOP_TIME must be a past canonical UTC timestamp');
   }
+  const database = databaseConnection();
   const continuedQuery = `WorkflowType="orderSaga" AND ExecutionStatus="ContinuedAsNew" AND CloseTime >= "${stopTime}"`;
   let target;
   try {
@@ -465,24 +701,27 @@ function check() {
   }
   const common = ['--address', address, '--namespace', namespace];
 
-  const queue = temporal(cli, [
-    'task-queue',
-    'describe',
-    ...common,
-    '--task-queue',
-    taskQueue,
-    '--output',
-    'json',
-  ]);
-  if (
-    !isRecord(queue) ||
-    !Object.hasOwn(queue, 'pollers') ||
-    !(queue.pollers === null || Array.isArray(queue.pollers)) ||
-    !Array.isArray(queue.stats)
-  ) {
-    throw new Unverifiable('temporal task-queue describe: no poller list in its answer');
-  }
-  for (let i = 0; i < (queue.pollers ?? []).length; i += 1) {
+  const pollers = () => {
+    const queue = temporal(cli, [
+      'task-queue',
+      'describe',
+      ...common,
+      '--task-queue',
+      taskQueue,
+      '--output',
+      'json',
+    ]);
+    if (
+      !isRecord(queue) ||
+      !Object.hasOwn(queue, 'pollers') ||
+      !(queue.pollers === null || Array.isArray(queue.pollers)) ||
+      !Array.isArray(queue.stats)
+    ) {
+      throw new Unverifiable('temporal task-queue describe: no poller list in its answer');
+    }
+    return (queue.pollers ?? []).length;
+  };
+  for (let i = pollers(); i > 0; i -= 1) {
     blockers.push('task queue has an active poller; details withheld');
   }
 
@@ -579,6 +818,13 @@ function check() {
   if (after !== before) {
     throw new Unverifiable(`running order sagas went from ${before} to ${after} during the check`);
   }
+  blockers.push(...openCallRecords(database));
+  // The queue again, after the read (#947 r1 L1): the first describe may be minutes old.
+  // With no poller listed now, no worker was there to open a record after the read; one
+  // that came back meanwhile blocks.
+  for (let i = pollers(); i > 0; i -= 1) {
+    blockers.push('task queue has an active poller after the record read; details withheld');
+  }
   return { running: before, blockers };
 }
 
@@ -602,7 +848,7 @@ try {
     process.exit(1);
   }
   console.log(
-    `marketplace saga drain check: OK — no poller, ${running} running order saga(s), no pending activity`,
+    `marketplace saga drain check: OK — no poller, ${running} running order saga(s), no pending activity, no open saga call record`,
   );
 } catch (error) {
   const reason = error instanceof Unverifiable ? error.message : commandFailure(error);
