@@ -598,8 +598,8 @@ brings the wait back. Nothing is deleted: each deadline taken back is recorded i
 run's summary:
 
 ```bash
-node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 \
-  --single-transaction -f - <<'SQL'
+cat <<'SQL' | node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X \
+  -v ON_ERROR_STOP=1 --single-transaction -f -
 \set run_id '<runId>'
 \set operator 'jane.doe@example.org'
 \set ticket 'OPS-1235'

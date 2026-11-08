@@ -21,15 +21,16 @@ const MIGRATION = join(
 );
 const RUNBOOK = join(__dirname, '../../../docs/runbooks/marketplace-saga-deploy.md');
 /**
- * The runbook's "Roll back" block, verbatim: the psql script between `<<'SQL'` and `SQL`. Its
+ * The runbook's "Roll back" block, verbatim: the psql script its heredoc feeds (`<<'SQL'`). Its
  * `\set` lines must be exactly the three values the operator gives; the test gives its own.
  */
 function runbookRollback(): string {
   const doc = readFileSync(RUNBOOK, 'utf8');
-  const start = doc.indexOf("<<'SQL'\n", doc.indexOf('**Roll back.**'));
+  const command = doc.indexOf("cat <<'SQL' | ", doc.indexOf('**Roll back.**'));
+  const start = doc.indexOf(' -f -\n', command);
   const end = doc.indexOf('\nSQL\n', start);
-  if (start < 0 || end < 0) throw new Error('the runbook has no rollback block');
-  const script = doc.slice(start + "<<'SQL'\n".length, end);
+  if (command < 0 || start < 0 || end < 0) throw new Error('the runbook has no rollback block');
+  const script = doc.slice(start + ' -f -\n'.length, end);
   const sets = [...script.matchAll(/^\\set (\w+) /gm)].map((m) => m[1]);
   expect(sets).toEqual(['run_id', 'operator', 'ticket']);
   return script.replace(/^\\set .*$/gm, '');
