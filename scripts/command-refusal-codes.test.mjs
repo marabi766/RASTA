@@ -12,7 +12,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import {
   REFUSAL_CODES,
   commandFailure,
@@ -35,6 +36,7 @@ import {
 } from './outbox-b2-lib.mjs';
 import { parseVacuumOptions, vacuumService } from './outbox-b2-vacuum.mjs';
 import { prismaPort } from './outbox-b2-prisma-port.mjs';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 const root = resolve(import.meta.dirname, '..');
 
@@ -113,6 +115,7 @@ for (const [entry, exit] of [
   ['services/fleet-service/dist/fleet/drain-check.cli.js', 2],
   ['services/identity-service/dist/keycloak/projection.cli.js', 2],
   ['services/economic-service/dist/transaction/resolved-dispute-backfill.cli.js', 1],
+  ['services/marketplace-service/dist/ops/hold-deadline-backfill.cli.js', 1],
 ]) {
   test(`usage: ${entry} refuses its command line by code, exit ${exit}`, () => {
     assertCliRefusal('usage', entry, [`--${SENTINELS[0]}`, SENTINELS[1]], exit);
@@ -387,6 +390,44 @@ test('lag-unreadable: an expected topic the principal cannot see', () => {
     `await require('./services/fleet-service/dist/fleet/drain-check.command.js')
       .checkConsumerGroupDrained({ listTopics: async () => [] }, 'probe-group', ['probe.topic']);`,
   );
+});
+
+// --- marketplace hold-deadline backfill (FU-234) ------------------------------
+
+test('economic-rule-unproven: the database clock is not the margin past the rule instant', () => {
+  const since = new Date(Date.now() - 60_000).toISOString();
+  assertBuiltRefusal(
+    'economic-rule-unproven',
+    `const { backfillLegacyHoldDeadlines } = require('./services/marketplace-service/dist/ops/hold-deadline-backfill.js');
+    const tx = {
+      $executeRaw: async () => 0,
+      $queryRaw: async (sql) => (sql.join('').includes('now() AS now') ? [{ now: new Date() }] : [{ n: 0n }]),
+    };
+    await backfillLegacyHoldDeadlines({ $transaction: (work) => work(tx) }, {
+      apply: false, economicRuleSince: '${since}', operator: 'probe', ticket: 'probe',
+      batchSize: 1, maxBatches: 1,
+    });`,
+  );
+});
+
+// --- every operational CLI reports through the closed boundary ---------------
+
+test('every *.cli.ts of a service is driven above, so each reports through commandFailure', () => {
+  const driven = new Set(
+    [
+      ...readFileSync(new URL(import.meta.url), 'utf8').matchAll(
+        /'services\/([\w-]+)\/dist\/([\w/.-]+)\.cli\.js'/g,
+      ),
+    ].map(([, service, path]) => `services/${service}/src/${path}.cli.ts`),
+  );
+  const clis = authoredFiles(join(root, 'services'))
+    .map((file) => relative(root, file))
+    .filter((file) => /^services\/[\w-]+\/src\/.+\.cli\.ts$/.test(file));
+  assert.ok(clis.length >= 8, clis.join(','));
+  for (const file of clis) {
+    assert.ok(driven.has(file), `${file}: no refusal test drives it through commandFailure`);
+    assert.match(readFileSync(join(root, file), 'utf8'), /\bcommandFailure\(/, file);
+  }
 });
 
 // --- fail closed -------------------------------------------------------------

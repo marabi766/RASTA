@@ -682,6 +682,21 @@ export const CLI_CONTRACT = Object.freeze({
   'services/identity-service/src/keycloak/projection.cli.ts': { positionals: ['enum'] },
   'services/identity-service/src/openapi/document.ts': { other: PRETTIER },
   'services/inventory-service/src/openapi/document.ts': { other: PRETTIER },
+  // FU-234: the operator's legacy hold-deadline backfill. The instant must be one exact ISO-8601
+  // instant with its zone, not before D-150; operator and ticket match the audit table's CHECK.
+  // Each is refused by name, never echoed.
+  'services/marketplace-service/src/ops/hold-deadline-backfill.cli.ts': { positionals: [] },
+  'services/marketplace-service/src/ops/hold-deadline-backfill.ts': {
+    accepts: {
+      '--apply': 'switch',
+      '--batch-size': 'integer',
+      '--dry-run': 'switch',
+      '--economic-rule-since': 'identifier',
+      '--max-batches': 'integer',
+      '--operator': 'identifier',
+      '--ticket': 'identifier',
+    },
+  },
   'services/notification-service/src/openapi/document.ts': { other: PRETTIER },
   'services/organization-service/src/openapi/document.ts': { other: PRETTIER },
   'services/procurement-service/src/openapi/document.ts': { other: PRETTIER },
