@@ -5,6 +5,7 @@ import type { HoldPurpose } from '../src/wallet/wallet.repository';
 import {
   asActor,
   cleanup,
+  coverByHand,
   databaseUrl,
   fundWallet,
   newPrisma,
@@ -1015,6 +1016,8 @@ describe('the proof of a settlement at its creation (real database, runtime role
           currency: 'USD',
         },
       ];
+      // The wallet it debits holds the money first (FU-228): the shape is what is refused.
+      await coverByHand(usd.payer, GROSS);
       await refused(await pending(), { legs }, LEGS);
     });
   });
@@ -1091,6 +1094,8 @@ describe('the proof of a settlement at its creation (real database, runtime role
             currency,
           },
         ];
+        // The wallet it debits holds the money first (FU-228).
+        await coverByHand(legs[0]!.accountId, amount);
         return runtime.$transaction(async (tx) => {
           const id = await insertJournal(tx, transactionId, { journal_type: 'FUNDS_HELD' });
           await insertLegs(tx, id, legs);

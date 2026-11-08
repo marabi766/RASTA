@@ -9,6 +9,7 @@ import {
   asActor,
   bareObligation,
   cleanup,
+  coverByHand,
   databaseUrl,
   fundWallet,
   newPrisma,
@@ -146,8 +147,19 @@ describe('funding is money that is there, once, in the wallet’s currency (real
     return journalId;
   };
 
-  const plantJournal = (transactionId: string, options: Parameters<typeof writeJournal>[2] = {}) =>
-    owner.$transaction((tx) => writeJournal(tx, transactionId, options));
+  const plantJournal = async (
+    transactionId: string,
+    options: Parameters<typeof writeJournal>[2] = {},
+  ) => {
+    // A wallet or escrow it debits holds the money first (FU-228): what is asked here is where
+    // the money came from, not whether it was there.
+    for (const leg of options.legs ?? INTO_ESCROW) {
+      if (leg.direction !== 'DEBIT') continue;
+      const account = await accountOf(leg.purpose, options.currency ?? 'IRR', leg.organizationId);
+      await coverByHand(account.id, leg.amount ?? options.amount ?? AMOUNT);
+    }
+    return owner.$transaction((tx) => writeJournal(tx, transactionId, options));
+  };
 
   const plantHold = async (
     reference: string,
