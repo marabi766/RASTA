@@ -1,14 +1,11 @@
 import { Alert, Button } from '@/ui';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { CSRF_FIELD } from '@/lib/form-fields';
 import { HELD_IN_PROGRESS_MESSAGE } from '@/lib/demand-commands';
 import { mayResend, type UnresolvedRequest } from '@/server/unresolved-request';
 
 import { releaseUnresolvedDemand } from './demand-actions';
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-} from './demand-form-state';
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE } from './demand-form-state';
 
 /**
  * Shown on `/procurement/demands` for as long as an earlier submission is

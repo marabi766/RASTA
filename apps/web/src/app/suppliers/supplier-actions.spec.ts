@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 import { BASELINE_FIELD } from '@/lib/form-fields';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { STALE_MESSAGE, type SupplierCommand, type SupplierNotice } from '@/lib/supplier-commands';
 import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
@@ -11,7 +13,6 @@ import { sealSupplierBaseline } from '@/server/supplier-commands';
 import {
   RECONCILED_FIELD,
   RECONCILED_VALUE,
-  RELEASE_FIELD,
   supplierWriteScope,
 } from '@/server/supplier-unresolved';
 import { withForgedMac } from '@/test/forged-token';
@@ -69,8 +70,6 @@ const { readUnresolved, releaseToken, useUnresolvedStore } =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
 const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
   require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
-const { readReleaseFeedback } =
-  require('@/server/release-feedback') as typeof import('@/server/release-feedback');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 const SESSION = {
@@ -507,11 +506,11 @@ function unreachable(over: Partial<ReturnType<typeof memoryUnresolvedStore>> = {
 
 /** What a reconciliation redirect says happened: the signed `release` parameter, read for this login. */
 const said = (url: URL, supplierId: string | null = SUPPLIER_ID) =>
-  readReleaseFeedback(
+  feedbackFor(
     SESSION,
     supplierId === null
       ? { surface: 'supplier-write' }
-      : { surface: 'supplier-write', target: supplierId },
+      : { surface: 'supplier-record', target: supplierId },
     url.searchParams.get('release'),
     true,
   );

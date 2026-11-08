@@ -103,7 +103,7 @@ export default async function ProjectsPage({
   const releaseOutcome = readReleaseFeedback(
     session,
     { surface: 'project-creation' },
-    one(params.release),
+    params,
     pending.kind === 'NONE',
   );
   const notice = readFlash(session, one(params[FLASH_PARAM]), INBOX_FLASH_SUBJECT, PROJECT_NOTICES);

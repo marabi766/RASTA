@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { WebServerEnv } from './env';
 import { webServerEnv } from './env';
+import { ReleaseScope } from './release-scope';
 import { signPayload, verifyPayload } from './signed-payload';
 import type { WebSession } from './session';
 import { mintSubmissionId } from './submission';
@@ -135,6 +136,9 @@ export function checkCreateStamp(
 
 /** Where the create form's unresolved request is kept (`server/unresolved-request.ts`); the organization comes from the login. */
 export const PROJECT_CREATE_UNRESOLVED = { purpose: 'project-create' } as const;
+
+/** What the create form's release acts on (`settleRelease`). */
+export const PROJECT_CREATE_RELEASE = ReleaseScope.of(PROJECT_CREATE_UNRESOLVED);
 
 /**
  * Whether an unresolved create may be sent again with its own key and body is

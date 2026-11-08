@@ -2,17 +2,18 @@
  * @jest-environment node
  */
 import Redis from 'ioredis';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 
 import { BASELINE_FIELD } from '@/lib/form-fields';
 import { CSRF_FIELD } from '@/server/csrf';
-import { readReleaseFeedback } from '@/server/release-feedback';
+
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import { sealSupplierBaseline } from '@/server/supplier-commands';
 import {
   RECONCILED_FIELD,
   RECONCILED_VALUE,
-  RELEASE_FIELD,
   supplierWriteScope,
 } from '@/server/supplier-unresolved';
 
@@ -166,9 +167,9 @@ describeReal('the supplier writes against a real Redis', () => {
     suspendSupplier.mockClear();
 
     expect(
-      readReleaseFeedback(
+      feedbackFor(
         session,
-        { surface: 'supplier-write', target: SUPPLIER_ID },
+        { surface: 'supplier-record', target: SUPPLIER_ID },
         (await reconciled(tokenA)).searchParams.get('release'),
         true,
       ),

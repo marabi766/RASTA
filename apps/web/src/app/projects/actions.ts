@@ -14,14 +14,11 @@ import {
   checkCreateStamp,
   createBodyDigest,
   createStampTerms,
+  PROJECT_CREATE_RELEASE,
   PROJECT_CREATE_UNRESOLVED,
 } from '@/server/project-create-replay';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
-import {
-  releaseUnresolved,
-  reserveUnresolved,
-  settleUnresolved,
-} from '@/server/unresolved-request';
+import { reserveUnresolved, settleUnresolved } from '@/server/unresolved-request';
 import { MAX_CLOCK_SKEW_MS } from '@/server/unresolved-request-policy';
 
 import { type CreateProjectFormState } from './form-state';
@@ -245,7 +242,7 @@ export async function releaseUnresolvedCreate(form: FormData): Promise<void> {
     form,
     back: '/projects',
     subject: { surface: 'project-creation' },
-    release: (current, token) => releaseUnresolved(current, PROJECT_CREATE_UNRESOLVED, token),
+    scope: PROJECT_CREATE_RELEASE,
     quietSuccess: true,
   });
 }

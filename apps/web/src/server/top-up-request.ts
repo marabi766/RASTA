@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { TopUpFormState } from '@/app/wallet/form-state';
 import { seal, type WebSession } from './session';
 import { actingOrganizationId } from './session-organization';
+import { ReleaseScope } from './release-scope';
 import { requestDigest } from './unresolved-request';
 import { restoreRequestSnapshot } from './request-snapshot';
 
@@ -10,6 +11,10 @@ export const topUpScope = (walletId: string): { purpose: string; target: string 
   purpose: 'wallet-top-up',
   target: walletId,
 });
+
+/** What the wallet's release acts on (`settleRelease`). */
+export const topUpReleaseScope = (walletId: string): ReleaseScope =>
+  ReleaseScope.of(topUpScope(walletId));
 
 // Reuse the store's opaque ref for an encrypted snapshot; no amount is stored in clear text.
 const snapshotSchema = z.object({ submissionId: z.string(), amountMinor: z.string() }).strict();

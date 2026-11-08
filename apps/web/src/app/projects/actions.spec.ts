@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 import { REPLAY_FIELD } from '@/lib/form-fields';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { CSRF_FIELD } from '@/server/csrf';
 import {
   createReplayWindowSeconds,
@@ -21,7 +23,7 @@ import {
   type UnresolvedStore,
 } from '@/server/unresolved-request-store';
 import { readFlash } from '@/server/flash';
-import { readReleaseFeedback } from '@/server/release-feedback';
+
 import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
@@ -29,7 +31,6 @@ import {
   CONFIRM_DUPLICATE_FIELD,
   CONFIRM_DUPLICATE_VALUE,
   IDLE_CREATE_PROJECT_FORM,
-  RELEASE_FIELD,
 } from './form-state';
 import { actingAccessToken } from '@/test/session-token';
 
@@ -814,7 +815,7 @@ describe('an unresolved create outlives the form that sent it', () => {
       expect(landing).toMatch(/^NEXT_REDIRECT:\/projects/);
       const url = new URL(landing.slice('NEXT_REDIRECT:'.length), 'http://localhost');
       return (
-        readReleaseFeedback(
+        feedbackFor(
           SESSION,
           { surface: 'project-creation' },
           url.searchParams.get('release'),

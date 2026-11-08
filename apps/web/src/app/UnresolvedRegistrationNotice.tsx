@@ -1,11 +1,8 @@
 import type { JSX } from 'react';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { Alert, Button } from '@/ui';
 import { CSRF_FIELD } from '@/lib/form-fields';
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-} from '@/app/projects/form-state';
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE } from '@/app/projects/form-state';
 
 /** The existing signed reconciliation flow, shared by asset and driver registration. */
 export function UnresolvedRegistrationNotice({

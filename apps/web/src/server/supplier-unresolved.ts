@@ -1,3 +1,4 @@
+import { ReleaseScope } from './release-scope';
 import type { UnresolvedScope } from './unresolved-request';
 
 /**
@@ -18,8 +19,10 @@ export function supplierWriteScope(supplierId: string | null): UnresolvedScope {
   };
 }
 
+/** What a supplier page's release acts on (`settleRelease`). */
+export const supplierReleaseScope = (supplierId: string | null): ReleaseScope =>
+  ReleaseScope.of(supplierWriteScope(supplierId));
+
 /** The checkbox that releases a slot: the person re-read the record and checked. */
 export const RECONCILED_FIELD = 'reconciled';
 export const RECONCILED_VALUE = 'yes';
-/** The hidden field that names the held record the confirmation was drawn for (a signed token). */
-export const RELEASE_FIELD = 'release';

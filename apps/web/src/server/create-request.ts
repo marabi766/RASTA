@@ -2,15 +2,11 @@ import { z } from 'zod';
 import type { RequestNotChecked } from '@/lib/request-not-checked';
 import { REGISTER_ASSET_FIELDS } from '@/lib/asset-form-fields';
 import { CREATE_DRIVER_FIELDS } from '@/lib/driver-fields';
+import { ReleaseScope } from './release-scope';
 import { seal, type WebSession } from './session';
 import { submissionBinding } from './submission';
 import { restoreRequestSnapshot } from './request-snapshot';
-import {
-  requestDigest,
-  reserveUnresolved,
-  settleUnresolved,
-  releaseUnresolved,
-} from './unresolved-request';
+import { requestDigest, reserveUnresolved, settleUnresolved } from './unresolved-request';
 import { MAX_REQUEST_REF_LENGTH } from './unresolved-request-store';
 import { isProvenRefusal, type WriteResult } from './write';
 
@@ -128,7 +124,8 @@ function createRequest<F extends string>(purpose: string, fields: readonly F[]) 
     snapshot,
     send,
     values,
-    release: (session: WebSession, token: unknown) => releaseUnresolved(session, scope, token),
+    /** What this request's release acts on (`settleRelease`). */
+    releaseScope: ReleaseScope.of(scope),
   };
 }
 

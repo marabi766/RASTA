@@ -26,12 +26,13 @@ describe('FU-217/FU-222/FU-253 release messages', () => {
   it.each(Object.keys(STORE_ANSWERS))('covers the store answer %s', (answer) => {
     expect(RELEASE_TEMPLATES).toHaveProperty(answer);
   });
-  it('knows all six surfaces', () => {
+  it('knows all seven surfaces', () => {
     expect([...RELEASE_SURFACES].sort()).toEqual([
       'asset-registration',
       'demand-submission',
       'driver-creation',
       'project-creation',
+      'supplier-record',
       'supplier-write',
       'wallet',
     ]);
@@ -56,7 +57,10 @@ describe('FU-217/FU-222/FU-253 release messages', () => {
     expect(releaseMessage('GONE', 'driver-creation')).toContain('رانندگان');
     expect(releaseMessage('GONE', 'project-creation')).toContain('پروژه‌ها');
     expect(releaseMessage('GONE', 'demand-submission')).toContain('نیازها');
-    expect(releaseMessage('GONE', 'supplier-write')).toContain('تأمین‌کنندگان');
+    expect(releaseMessage('GONE', 'supplier-write')).toContain('فهرست تأمین‌کنندگان');
+    // On a supplier's own page the held write is a command on that record, not on the list.
+    expect(releaseMessage('GONE', 'supplier-record')).toContain('پرونده‌ی این تأمین‌کننده');
+    expect(releaseMessage('GONE', 'supplier-record')).not.toContain('فهرست');
   });
   it.each(['SOMETHING_NEW', '', '__proto__', 'toString', 'constructor', undefined, null, 7])(
     'reads %p as not done, never as a success',

@@ -1,5 +1,6 @@
 /** @jest-environment node */
 import { Children, isValidElement, type ReactNode } from 'react';
+import { feedbackFor } from '@/test/release-query';
 import { assetRegistrationRequest, driverCreationRequest } from '@/server/create-request';
 import { useUnresolvedStore as setUnresolvedStore } from '@/server/unresolved-request';
 import {
@@ -12,7 +13,7 @@ import { EMPTY_REGISTER_ASSET_FORM } from '@/lib/asset-form-fields';
 import { EMPTY_CREATE_DRIVER_FORM } from '@/lib/driver-fields';
 import type { WebSession } from '@/server/session';
 import { pageContext } from '@/server/page-context';
-import { readReleaseFeedback, releaseFeedback } from '@/server/release-feedback';
+import { releaseFeedback } from '@/server/release-feedback';
 import { releaseMessage } from '@/lib/release-messages';
 import AssetsPage from './assets/page';
 import DriversPage from './drivers/page';
@@ -394,7 +395,7 @@ describe.each(cases)('FU-217/FU-222 $name release feedback', (c) => {
     return new URL(error.message.slice('REDIRECT:'.length), 'http://localhost');
   }
   const feedbackOf = (url: URL) =>
-    readReleaseFeedback(session, subject, url.searchParams.get('release'), true);
+    feedbackFor(session, subject, url.searchParams.get('release'), true);
   it.each(['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'GONE'] as const)(
     'redirects with the store answer %s and the page shows it',
     async (outcome) => {

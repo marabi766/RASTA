@@ -29,10 +29,9 @@ import { currentSession } from '@/server/current-session';
 import {
   RECONCILED_FIELD,
   RECONCILED_VALUE,
-  supplierWriteScope,
+  supplierReleaseScope,
 } from '@/server/supplier-unresolved';
 import { settleRelease } from '@/server/release-feedback';
-import { releaseUnresolved } from '@/server/unresolved-request';
 import {
   approveQualification,
   rejectQualification,
@@ -203,8 +202,8 @@ export async function reconcileSupplierWrite(
     subject:
       supplierId === null
         ? { surface: 'supplier-write' }
-        : { surface: 'supplier-write', target: supplierId },
-    release: (current, token) => releaseUnresolved(current, supplierWriteScope(supplierId), token),
+        : { surface: 'supplier-record', target: supplierId },
+    scope: supplierReleaseScope(supplierId),
     quietSuccess: true,
     // The box on this form says "I re-read the record", not the duplicate-risk box.
     consent: { field: RECONCILED_FIELD, value: RECONCILED_VALUE },

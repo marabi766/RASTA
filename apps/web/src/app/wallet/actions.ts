@@ -16,13 +16,13 @@ import {
 } from '@/server/wallet';
 
 import { keepUnconfirmed } from '@/server/unconfirmed-retry';
-import { restoreTopUp, topUpScope, topUpSnapshot } from '@/server/top-up-request';
 import {
-  releaseUnresolved,
-  reserveUnresolved,
-  requestDigest,
-  settleUnresolved,
-} from '@/server/unresolved-request';
+  restoreTopUp,
+  topUpReleaseScope,
+  topUpScope,
+  topUpSnapshot,
+} from '@/server/top-up-request';
+import { reserveUnresolved, requestDigest, settleUnresolved } from '@/server/unresolved-request';
 import { settleRelease } from '@/server/release-feedback';
 import { isProvenRefusal } from '@/server/write';
 
@@ -156,6 +156,6 @@ export async function releaseUnresolvedTopUp(walletId: string, form: FormData): 
     form,
     back: '/wallet',
     subject: { surface: 'wallet', target: walletId },
-    release: (current, token) => releaseUnresolved(current, topUpScope(walletId), token),
+    scope: topUpReleaseScope(walletId),
   });
 }

@@ -12,6 +12,7 @@
  */
 
 import { isValidElement, type ReactElement } from 'react';
+import { feedbackFor } from '@/test/release-query';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { ReleaseFeedback } from '@/app/ReleaseFeedback';
@@ -78,7 +79,7 @@ const pending =
 const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
   require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
 const { pageContext } = require('@/server/page-context') as typeof import('@/server/page-context');
-const { releaseFeedback, readReleaseFeedback } =
+const { releaseFeedback } =
   require('@/server/release-feedback') as typeof import('@/server/release-feedback');
 const { policyOf } =
   require('@/server/unresolved-request-policy') as typeof import('@/server/unresolved-request-policy');
@@ -183,8 +184,8 @@ const CASES: readonly Case[] = [
   },
   {
     name: 'a supplier record',
-    surface: 'supplier-write',
-    subject: { surface: 'supplier-write', target: SUPPLIER_ID },
+    surface: 'supplier-record',
+    subject: { surface: 'supplier-record', target: SUPPLIER_ID },
     scope: supplierWriteScope(SUPPLIER_ID),
     back: `/suppliers/${SUPPLIER_ID}`,
     consent: [RECONCILED_FIELD, RECONCILED_VALUE],
@@ -261,7 +262,7 @@ afterEach(() => {
 
 describe.each(CASES)('FU-253 release feedback: $name', (c) => {
   const readBack = (url: URL, idle = true) =>
-    readReleaseFeedback(SESSION, c.subject, url.searchParams.get('release'), idle);
+    feedbackFor(SESSION, c.subject, url.searchParams.get('release'), idle);
 
   it('has no feedback and no unsigned read when there was no release', async () => {
     await lose(c.scope);

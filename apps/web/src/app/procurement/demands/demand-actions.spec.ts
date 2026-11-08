@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 import { REPLAY_FIELD } from '@/lib/form-fields';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { CSRF_FIELD } from '@/server/csrf';
 import {
   DEMAND_SUBMIT_UNRESOLVED,
@@ -9,7 +11,7 @@ import {
   mintDemandStamp,
 } from '@/server/demand-replay';
 import { readFlash } from '@/server/flash';
-import { readReleaseFeedback } from '@/server/release-feedback';
+
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import {
@@ -29,7 +31,6 @@ import {
   CONFIRM_DUPLICATE_FIELD,
   CONFIRM_DUPLICATE_VALUE,
   IDLE_DEMAND_FORM,
-  RELEASE_FIELD,
 } from './demand-form-state';
 
 /**
@@ -458,7 +459,7 @@ describe('an unresolved submission outlives the form that sent it (checklist A 2
 function outcomeOf(landing: string): string | undefined {
   const url = new URL(landing, 'http://localhost');
   expect(url.pathname).toBe('/procurement/demands');
-  return readReleaseFeedback(
+  return feedbackFor(
     SESSION,
     { surface: 'demand-submission' },
     url.searchParams.get('release'),

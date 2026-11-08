@@ -2,16 +2,13 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import WalletPage from './page';
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-  IDLE_TOP_UP_FORM,
-} from './form-state';
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE, IDLE_TOP_UP_FORM } from './form-state';
 import { restoreTopUp, topUpScope } from '@/server/top-up-request';
 import {
   purgeUnresolved,
@@ -23,7 +20,7 @@ import {
   UnresolvedStoreUnavailable,
 } from '@/server/unresolved-request-store';
 import { pageContext } from '@/server/page-context';
-import { readReleaseFeedback, releaseFeedback } from '@/server/release-feedback';
+import { releaseFeedback } from '@/server/release-feedback';
 import { actingAccessToken } from '@/test/session-token';
 
 /**
@@ -565,9 +562,9 @@ describe('FU-217 release feedback', () => {
         ),
       ).rejects.toThrow('NEXT_REDIRECT:/wallet');
       const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
-      expect(
-        readReleaseFeedback(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true),
-      ).toBe(outcome);
+      expect(feedbackFor(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true)).toBe(
+        outcome,
+      );
     },
   );
 });
@@ -584,9 +581,9 @@ describe('FU-222 wallet release refusals before the store', () => {
     for (const [key, value] of Object.entries(extra)) form.set(key, value);
     await expect(releaseUnresolvedTopUp(WALLET_ID, form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
     const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
-    expect(
-      readReleaseFeedback(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true),
-    ).toBe(outcome);
+    expect(feedbackFor(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true)).toBe(
+      outcome,
+    );
     expect(spy).not.toHaveBeenCalled();
   });
   // FU-254 L1: the wallet id is a bound action argument (client-controlled). A crafted one must not
@@ -600,23 +597,22 @@ describe('FU-222 wallet release refusals before the store', () => {
       const token = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost').searchParams.get(
         'release',
       );
-      expect(
-        readReleaseFeedback(SESSION, { surface: 'wallet', target: crafted }, token, true),
-      ).toBe('CSRF_REFUSED');
+      expect(feedbackFor(SESSION, { surface: 'wallet', target: crafted }, token, true)).toBe(
+        'CSRF_REFUSED',
+      );
       for (const surface of [
         'asset-registration',
         'driver-creation',
         'project-creation',
         'demand-submission',
         'supplier-write',
+        'supplier-record',
       ] as const) {
-        expect(readReleaseFeedback(SESSION, { surface }, token, true)).toBeUndefined();
-        expect(
-          readReleaseFeedback(SESSION, { surface, target: crafted }, token, true),
-        ).toBeUndefined();
+        expect(feedbackFor(SESSION, { surface }, token, true)).toBeUndefined();
+        expect(feedbackFor(SESSION, { surface, target: crafted }, token, true)).toBeUndefined();
       }
-      expect(readReleaseFeedback(SESSION, { surface: 'wallet' }, token, true)).toBeUndefined();
-      expect(readReleaseFeedback(SESSION, WALLET_SUBJECT, token, true)).toBeUndefined();
+      expect(feedbackFor(SESSION, { surface: 'wallet' }, token, true)).toBeUndefined();
+      expect(feedbackFor(SESSION, WALLET_SUBJECT, token, true)).toBeUndefined();
     },
   );
   it('shows an answer it does not know as not done', async () => {
@@ -634,9 +630,9 @@ describe('FU-222 wallet release refusals before the store', () => {
       ),
     ).rejects.toThrow('NEXT_REDIRECT:/wallet');
     const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
-    expect(
-      readReleaseFeedback(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true),
-    ).toBe('NOT_DONE');
+    expect(feedbackFor(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true)).toBe(
+      'NOT_DONE',
+    );
   });
 });
 
@@ -667,15 +663,15 @@ describe('F4 server-derived wallet release feedback', () => {
       { ...SESSION, subject: 'other' },
       { ...SESSION, organizationId: 'other', accessToken: actingAccessToken('other') },
     ]) {
-      expect(readReleaseFeedback(other, WALLET_SUBJECT, token, true)).toBeUndefined();
+      expect(feedbackFor(other, WALLET_SUBJECT, token, true)).toBeUndefined();
     }
     expect(
-      readReleaseFeedback(SESSION, { surface: 'wallet', target: 'WLT_OTHER' }, token, true),
+      feedbackFor(SESSION, { surface: 'wallet', target: 'WLT_OTHER' }, token, true),
     ).toBeUndefined();
-    expect(readReleaseFeedback(SESSION, WALLET_SUBJECT, token + 'x', true)).toBeUndefined();
+    expect(feedbackFor(SESSION, WALLET_SUBJECT, token + 'x', true)).toBeUndefined();
     const time = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
     try {
-      expect(readReleaseFeedback(SESSION, WALLET_SUBJECT, token, true)).toBeUndefined();
+      expect(feedbackFor(SESSION, WALLET_SUBJECT, token, true)).toBeUndefined();
     } finally {
       time.mockRestore();
     }

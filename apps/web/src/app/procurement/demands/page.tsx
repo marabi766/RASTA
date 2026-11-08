@@ -95,7 +95,7 @@ export default async function DemandsPage({
                   outcome={readReleaseFeedback(
                     session,
                     { surface: 'demand-submission' },
-                    one(params.release),
+                    params,
                     pending.kind === 'NONE',
                   )}
                 />

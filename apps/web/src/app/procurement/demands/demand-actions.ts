@@ -3,9 +3,8 @@
 import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
-import { DEMAND_SUBMIT_UNRESOLVED } from '@/server/demand-replay';
+import { DEMAND_SUBMIT_RELEASE } from '@/server/demand-replay';
 import { settleRelease } from '@/server/release-feedback';
-import { releaseUnresolved } from '@/server/unresolved-request';
 
 import { type DemandFormState } from './demand-form-state';
 import { runSubmitDemand } from './demand-runner';
@@ -39,7 +38,7 @@ export async function releaseUnresolvedDemand(form: FormData): Promise<void> {
     form,
     back,
     subject: { surface: 'demand-submission' },
-    release: (current, token) => releaseUnresolved(current, DEMAND_SUBMIT_UNRESOLVED, token),
+    scope: DEMAND_SUBMIT_RELEASE,
     quietSuccess: true,
   });
 }

@@ -101,7 +101,7 @@ export default async function DriversPage({
         outcome={readReleaseFeedback(
           session,
           { surface: 'driver-creation' },
-          one(params.release),
+          params,
           createState.kind === 'IDLE',
         )}
       />

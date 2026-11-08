@@ -94,7 +94,7 @@ export default async function WalletPage({
             ? readReleaseFeedback(
                 session,
                 { surface: 'wallet', target: wallet.data.id },
-                params.release,
+                params,
                 topUp?.kind === 'IDLE',
               )
             : undefined

@@ -1,11 +1,11 @@
 import { Alert, Button } from '@/ui';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { CSRF_FIELD } from '@/lib/form-fields';
 import { UNCONFIRMED_WRITE_MESSAGE } from '@/lib/unconfirmed-write';
 import { HELD_IN_PROGRESS_MESSAGE, PENDING_UNCHECKED_MESSAGE } from '@/lib/supplier-commands';
 import {
   RECONCILED_FIELD,
   RECONCILED_VALUE,
-  RELEASE_FIELD,
   supplierWriteScope,
 } from '@/server/supplier-unresolved';
 import { readReleaseFeedback } from '@/server/release-feedback';
@@ -111,13 +111,16 @@ export function SupplierPendingNotices({
     session,
     supplierId === null
       ? { surface: 'supplier-write' }
-      : { surface: 'supplier-write', target: supplierId },
-    query.release,
+      : { surface: 'supplier-record', target: supplierId },
+    query,
     pending.kind === 'NONE',
   );
   return (
     <>
-      <ReleaseFeedback surface="supplier-write" outcome={outcome} />
+      <ReleaseFeedback
+        surface={supplierId === null ? 'supplier-write' : 'supplier-record'}
+        outcome={outcome}
+      />
       {pending.kind === 'UNAVAILABLE' ? (
         <Alert tone="warning">{PENDING_UNCHECKED_MESSAGE}</Alert>
       ) : pending.kind === 'PENDING' ? (

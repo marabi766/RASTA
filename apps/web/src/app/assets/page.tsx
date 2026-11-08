@@ -87,7 +87,7 @@ export default async function AssetsPage({
         outcome={readReleaseFeedback(
           session,
           { surface: 'asset-registration' },
-          one(params.release),
+          params,
           createState.kind === 'IDLE',
         )}
       />

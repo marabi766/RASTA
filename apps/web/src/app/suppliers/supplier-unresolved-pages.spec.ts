@@ -274,11 +274,11 @@ describe('back from a refused reconciliation', () => {
     const detail = await detailTree({
       release: releaseFeedback(
         SESSION,
-        { surface: 'supplier-write', target: SUPPLIER_ID },
+        { surface: 'supplier-record', target: SUPPLIER_ID },
         'STALE',
       ),
     });
-    expect(feedbackOf(detail)).toEqual([{ surface: 'supplier-write', outcome: 'STALE' }]);
+    expect(feedbackOf(detail)).toEqual([{ surface: 'supplier-record', outcome: 'STALE' }]);
     const list = await listTree({
       release: releaseFeedback(SESSION, { surface: 'supplier-write' }, 'IN_PROGRESS'),
     });
@@ -288,7 +288,7 @@ describe('back from a refused reconciliation', () => {
   it('reads no bare word from the URL (FU-254 P1), and no token drawn for the other page', async () => {
     for (const word of ['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'RELEASED']) {
       expect(feedbackOf(await detailTree({ release: word }))).toEqual([
-        { surface: 'supplier-write', outcome: undefined },
+        { surface: 'supplier-record', outcome: undefined },
       ]);
       expect(feedbackOf(await listTree({ release: word }))).toEqual([
         { surface: 'supplier-write', outcome: undefined },
@@ -296,7 +296,7 @@ describe('back from a refused reconciliation', () => {
     }
     const forRegistration = releaseFeedback(SESSION, { surface: 'supplier-write' }, 'STALE');
     expect(feedbackOf(await detailTree({ release: forRegistration }))).toEqual([
-      { surface: 'supplier-write', outcome: undefined },
+      { surface: 'supplier-record', outcome: undefined },
     ]);
   });
 });

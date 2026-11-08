@@ -1,5 +1,10 @@
 import type { ReleaseOutcome } from '@/server/unresolved-request';
 
+/** The hidden form field that names the held record a release was drawn for (a signed token); the one spelling. */
+export const RELEASE_FIELD = 'release';
+/** The query parameter a release redirect carries its signed outcome in (`server/release-feedback.ts` only). */
+export const RELEASE_QUERY = 'release';
+
 /** A release the action refused itself, before it asked the store: nothing was released. */
 export type ReleaseRefusal = 'CSRF_REFUSED' | 'CONSENT_MISSING';
 
@@ -16,7 +21,8 @@ export type ReleaseSurface =
   | 'driver-creation'
   | 'project-creation'
   | 'demand-submission'
-  | 'supplier-write';
+  | 'supplier-write'
+  | 'supplier-record';
 
 /**
  * What the person is told to look at before sending anything new, per surface (the wallet's money
@@ -30,6 +36,7 @@ const WHAT_TO_CHECK = {
   'project-creation': 'فهرست پروژه‌ها',
   'demand-submission': 'فهرست نیازها',
   'supplier-write': 'فهرست تأمین‌کنندگان',
+  'supplier-record': 'پرونده‌ی این تأمین‌کننده',
 } as const satisfies Record<ReleaseSurface, string>;
 
 export const RELEASE_SURFACES = Object.keys(WHAT_TO_CHECK) as ReleaseSurface[];

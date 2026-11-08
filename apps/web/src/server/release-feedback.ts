@@ -1,21 +1,20 @@
 import { redirect } from 'next/navigation';
 import { z } from 'zod';
 
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE } from '@/app/projects/form-state';
 import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
   RELEASE_FIELD,
-} from '@/app/projects/form-state';
-import {
+  RELEASE_QUERY,
   releaseFeedbackKey,
   type ReleaseFeedbackKey,
   type ReleaseSurface,
 } from '@/lib/release-messages';
 import { verifyCsrf } from './csrf';
-import { pageHref } from './page-context';
+import { pageHref, type PageParams, releaseTokenOf } from './page-context';
+import { ReleaseScope } from './release-scope';
 import type { WebSession } from './session';
 import { signPayload, verifyPayload } from './signed-payload';
-import type { ReleaseOutcome } from './unresolved-request';
+import { releaseUnresolved } from './unresolved-request';
 
 const PURPOSE = 'release-feedback';
 const FLASH_TTL_SECONDS = 30;
@@ -53,13 +52,18 @@ export function releaseFeedback(
   );
 }
 
+/**
+ * The one reader of a release redirect's outcome. `params` is what `pageParams` returned: the signed
+ * token is not a key of it (the query's `release` is withheld there), only this function can reach it,
+ * so no page can show a bare word from the URL however it spells the key.
+ */
 export function readReleaseFeedback(
   session: WebSession,
   subject: ReleaseSubject,
-  token: unknown,
+  params: PageParams,
   idle: boolean,
 ): ReleaseFeedbackKey | undefined {
-  const flash = verifyPayload(session, PURPOSE, token, schema);
+  const flash = verifyPayload(session, PURPOSE, releaseTokenOf(params), schema);
   if (!flash || flash.surface !== subject.surface || flash.target !== (subject.target ?? null)) {
     return undefined;
   }
@@ -91,7 +95,8 @@ export async function settleRelease(options: {
   back: string;
   /** Whose feedback it is: namespaced, so no other surface reads the token. */
   subject: ReleaseSubject;
-  release: (session: WebSession, token: unknown) => Promise<ReleaseOutcome>;
+  /** Which held request it lets go of; built in `server/` only (`release-scope.ts`). */
+  scope: ReleaseScope;
   quietSuccess?: boolean;
   consent?: ReleaseConsent;
 }): Promise<never> {
@@ -100,7 +105,7 @@ export async function settleRelease(options: {
     form,
     back,
     subject,
-    release,
+    scope,
     quietSuccess = false,
     consent = DUPLICATE_RISK_CONSENT,
   } = options;
@@ -108,9 +113,11 @@ export async function settleRelease(options: {
     redirect(
       quietSuccess && outcome === 'RELEASED'
         ? pageHref(session, back)
-        : pageHref(session, back, { release: releaseFeedback(session, subject, outcome) }),
+        : pageHref(session, back, { [RELEASE_QUERY]: releaseFeedback(session, subject, outcome) }),
     );
   if (!verifyCsrf(session, form).ok) return done('CSRF_REFUSED');
   if (form.get(consent.field) !== consent.value) return done('CONSENT_MISSING');
-  return done(await release(session, form.get(RELEASE_FIELD)));
+  // The only call of the store's release in the portal: nothing is let go of outside this tail.
+  if (!(scope instanceof ReleaseScope)) return done('NOT_DONE');
+  return done(await releaseUnresolved(session, scope.scope, form.get(RELEASE_FIELD)));
 }

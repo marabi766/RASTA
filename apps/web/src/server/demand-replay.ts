@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { webServerEnv, type WebServerEnv } from './env';
+import { ReleaseScope } from './release-scope';
 import { signPayload, verifyPayload } from './signed-payload';
 import type { WebSession } from './session';
 import { mintSubmissionId } from './submission';
@@ -114,6 +115,9 @@ export const DEMAND_SUBMIT_UNRESOLVED: UnresolvedScope = {
   purpose: DEMAND_UNRESOLVED_PURPOSE,
   target: 'submit',
 };
+
+/** What the demand form's release acts on (`settleRelease`). */
+export const DEMAND_SUBMIT_RELEASE = ReleaseScope.of(DEMAND_SUBMIT_UNRESOLVED);
 
 /** The digest the unresolved request carries: of the body exactly as it is sent. */
 export function demandBodyDigest(session: WebSession, body: unknown): string {
