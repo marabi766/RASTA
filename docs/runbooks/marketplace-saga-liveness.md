@@ -163,7 +163,36 @@ sampled`, with `read` and `outcome`; `saga_monitor_clock has no row` means the r
      claim-time fence (D-132, #812): a create past its deadline is refused at the claim. Closing after that fence is
      FU-161; until it is on main, no step closes this row.
 
+### The drain gate refuses: an open call record
+
+`scripts/marketplace-saga-drain-check.mjs` (FU-221, D-151) exits 1 with one line per open `saga_unconfirmed_call` row,
+oldest first: `open saga call record: order <orderId> (organization <orgId>), <operation> on <subject>, generation <n>,
+open <s> s` (at most 50; then `more than 50 …`: list them with the query of
+[`marketplace-saga-deploy`](marketplace-saga-deploy.md) § FU-104). Every operation blocks, whatever the order's status,
+because an unanswered call may still be answered only by the build that sent it. The commonest case Temporal cannot
+show: an authorisation the order fenced (a dispute or a decision arrived before the send) completes its saga with no
+pending activity, and its record stays open (D-151): `inDoubt` means an earlier send may still land.
+
+1. Do not start the new release. With the workers stopped nothing closes these rows by itself.
+2. A saga still waiting on its call (`workflow query --name status`: a `…_UNCONFIRMED` phase) closes its own row at
+   its next attempt: bring the **running** release back (the same image), let it answer, then repeat from step 2 of the
+   deployment.
+3. A row no saga waits on: reconcile it exactly as steps 5–7 above say, from what economic-service shows for that very
+   call, and close it only with the `generation` the gate printed. For a fenced authorisation: `PENDING_SETTLEMENT` or
+   `SETTLED` answers it, `REFUNDED` answers it; `HELD` or anything else is still unanswered and the row stays open.
+4. Never close a row to pass the gate: not by its age, the key's retention (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`), the
+   order's status or an empty lookup (#836 N1, D-135), and never a `createObligation` row by hand (step 7). Never
+   `terminate` or `reset` a saga, and never edit the target manifest. There is no "deploy anyway".
+5. `cannot verify … saga_unconfirmed_call …` is the read itself failing (psql missing, the URL, privilege, a 10 s
+   statement or 5 s lock timeout, row security on the table, an operation this gate does not know): fix that and rerun;
+   an unknown operation means a newer build wrote the row, so run the gate from the newest release.
+
 ## Known limits
+
+- **The drain gate has no "nothing due yet" exception** (FU-221): a backfilled or saga-opened release row of a dispute
+  still `OPEN` on an order still `DISPUTED` blocks a deployment although the monitor does not count it, and so does a
+  `createObligation` row that step 7 forbids closing: until FU-161 (D-132's fence) no deployment passes while one
+  exists. Escalate such a row to engineering; the gate is not bypassed for it.
 
 - **First deploy:** the backfill of `20261105130000_saga_unconfirmed_call` gives a row to every dispute of an
   unfinished order, released or not, so `FinancialEpisodeOverdue` fires for releases that did happen: a backfilled row

@@ -36,6 +36,7 @@ import { providerNotice } from '@/lib/wallet-fields';
 import type { TopUpFormState } from './form-state';
 import { TopUpForm } from './TopUpForm';
 import { UnresolvedTopUpNotice } from './UnresolvedTopUpNotice';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 import { withContext, type InContext } from '@/lib/page-context';
 import { ContextField } from '@/app/ContextField';
 
@@ -73,6 +74,7 @@ export interface WalletScreenProps {
   readonly csrfToken: string;
   readonly submissionId: string;
   readonly topUpState?: TopUpFormState;
+  readonly releaseOutcome?: string;
 }
 
 function hrefWith(
@@ -300,6 +302,7 @@ export function WalletScreen({
   csrfToken,
   submissionId,
   topUpState,
+  releaseOutcome,
 }: WalletScreenProps) {
   const filtered = Boolean(query.status || query.transactionType);
   const releaseKey =
@@ -336,6 +339,7 @@ export function WalletScreen({
           </Section>
 
           <Section headingId="top-up" title="افزایش موجودی">
+            <ReleaseFeedback outcome={releaseOutcome} />
             {provider.kind !== 'OK' && releaseKey ? (
               <UnresolvedTopUpNotice
                 walletId={wallet.data.id}

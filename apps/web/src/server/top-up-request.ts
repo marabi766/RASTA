@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import type { TopUpFormState } from '@/app/wallet/form-state';
 import { seal, type WebSession } from './session';
-import { submissionBinding } from './submission';
+import { actingOrganizationId } from './session-organization';
 import { requestDigest } from './unresolved-request';
 import { restoreRequestSnapshot } from './request-snapshot';
 
@@ -16,7 +16,7 @@ const snapshotSchema = z.object({ submissionId: z.string(), amountMinor: z.strin
 const snapshotKey = (session: WebSession, walletId: string): string =>
   requestDigest(session, 'wallet-top-up-snapshot', {
     walletId,
-    login: submissionBinding(session).session,
+    organizationId: actingOrganizationId(session),
   });
 
 export function topUpSnapshot(

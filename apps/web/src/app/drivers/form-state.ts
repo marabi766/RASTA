@@ -1,3 +1,4 @@
+import type { RequestNotChecked } from '@/lib/request-not-checked';
 import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { CreateDriverField, CreateDriverFormValues } from '@/lib/driver-fields';
@@ -12,7 +13,7 @@ import type { CreateDriverField, CreateDriverFormValues } from '@/lib/driver-fie
  */
 export type CreateDriverFormState =
   | { readonly kind: 'IDLE' }
-  | { readonly kind: 'NOT_CHECKED'; readonly releaseToken?: string }
+  | RequestNotChecked
   | {
       readonly kind: 'HELD';
       readonly releaseToken?: string;

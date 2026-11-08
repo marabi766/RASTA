@@ -316,6 +316,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--all-tags',
       '--cap-add',
       '--cap-drop',
+      '--compress-program',
       '--config',
       '--context',
       '--cpus',
@@ -475,10 +476,17 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
-  // It reads argv only to refuse any argument at all (#673 r1 F2).
+  // It reads argv only to refuse any argument at all (#673 r1 F2). psql's switches read the
+  // open call records (FU-221); its connection is DATABASE_URL_MARKETPLACE's, never an argument.
   'scripts/marketplace-saga-drain-check.mjs': {
     positionals: [],
     other: [
+      '-A',
+      '-X',
+      '-f',
+      '-q',
+      '-t',
+      '-v',
       '--no-json-shorthand-payloads',
       '--address',
       '--namespace',

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { RequestNotChecked } from '@/lib/request-not-checked';
 import { REGISTER_ASSET_FIELDS } from '@/lib/asset-form-fields';
 import { CREATE_DRIVER_FIELDS } from '@/lib/driver-fields';
 import { seal, type WebSession } from './session';
@@ -36,9 +37,7 @@ function createRequest<F extends string>(purpose: string, fields: readonly F[]) 
   async function restore(
     session: WebSession,
   ): Promise<
-    | Hold
-    | { kind: 'IDLE'; submissionId: string }
-    | { kind: 'NOT_CHECKED'; submissionId: string; releaseToken?: string }
+    Hold | { kind: 'IDLE'; submissionId: string } | (RequestNotChecked & { submissionId: string })
   > {
     const state = await restoreRequestSnapshot(session, scope, key(session), snapshotSchema);
     if (state.kind !== 'HELD') return state;
@@ -47,7 +46,12 @@ function createRequest<F extends string>(purpose: string, fields: readonly F[]) 
       Object.keys(saved).length !== fields.length ||
       !fields.every((f) => Object.hasOwn(saved, f))
     )
-      return { kind: 'NOT_CHECKED', submissionId: '', releaseToken: state.releaseToken };
+      return {
+        kind: 'NOT_CHECKED',
+        reason: 'SNAPSHOT_UNREADABLE',
+        submissionId: '',
+        releaseToken: state.releaseToken,
+      };
     return {
       kind: 'HELD',
       submissionId: state.submissionId,
@@ -65,7 +69,7 @@ function createRequest<F extends string>(purpose: string, fields: readonly F[]) 
     dispatch: () => Promise<WriteResult<T, F>>,
   ): Promise<
     | Hold
-    | { kind: 'NOT_CHECKED'; releaseToken?: string }
+    | RequestNotChecked
     | {
         kind: 'UNCONFIRMED';
         correlationId: string;
@@ -76,7 +80,8 @@ function createRequest<F extends string>(purpose: string, fields: readonly F[]) 
     | { kind: 'RESULT'; result: WriteResult<T, F> }
   > {
     const ref = snapshot(session, submissionId, heldValues);
-    if (ref.length > MAX_REQUEST_REF_LENGTH) return { kind: 'NOT_CHECKED' };
+    if (ref.length > MAX_REQUEST_REF_LENGTH)
+      return { kind: 'NOT_CHECKED', reason: 'SNAPSHOT_TOO_LARGE' };
     const reserved = await reserveUnresolved(session, scope, {
       key: submissionId,
       digest: requestDigest(session, purpose, body),
@@ -85,9 +90,10 @@ function createRequest<F extends string>(purpose: string, fields: readonly F[]) 
       deadline: null,
       windowMs: null,
     });
+    if (reserved.kind === 'CAPACITY') return { kind: 'NOT_CHECKED', reason: 'CAPACITY' };
     if (reserved.kind !== 'RESERVED') {
       const state = await restore(session);
-      return state.kind === 'IDLE' ? { kind: 'NOT_CHECKED' } : state;
+      return state.kind === 'IDLE' ? { kind: 'NOT_CHECKED', reason: 'STORE_UNAVAILABLE' } : state;
     }
     let result: WriteResult<T, F>;
     try {

@@ -11,6 +11,9 @@ import { actingAccessToken } from '@/test/session-token';
 import { EMPTY_REGISTER_ASSET_FORM } from '@/lib/asset-form-fields';
 import { EMPTY_CREATE_DRIVER_FORM } from '@/lib/driver-fields';
 import type { WebSession } from '@/server/session';
+import { pageContext } from '@/server/page-context';
+import { readReleaseFeedback } from '@/server/release-feedback';
+import { RELEASE_MESSAGES } from '@/lib/release-messages';
 import AssetsPage from './assets/page';
 import DriversPage from './drivers/page';
 import { submitRegisterAsset, releaseUnresolvedAssetRegistration } from './assets/actions';
@@ -39,8 +42,8 @@ const asset = jest.fn();
 const driver = jest.fn();
 jest.mock('@/server/current-session', () => ({ currentSession: () => currentSession() }));
 jest.mock('next/navigation', () => ({
-  redirect: () => {
-    throw new Error('REDIRECT');
+  redirect: (url: string) => {
+    throw new Error(`REDIRECT:${url}`);
   },
 }));
 jest.mock('@/server/asset-commands', () => ({
@@ -205,7 +208,10 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
       const store = memoryUnresolvedStore();
       setUnresolvedStore(store);
       jest.spyOn(store, method).mockRejectedValue(new UnresolvedStoreUnavailable());
-      expect((await c.submit(form(c.valid))).kind).toBe('NOT_CHECKED');
+      expect(await c.submit(form(c.valid))).toMatchObject({
+        kind: 'NOT_CHECKED',
+        reason: 'STORE_UNAVAILABLE',
+      });
     }
     expect(c.dispatch).not.toHaveBeenCalled();
     const store = memoryUnresolvedStore();
@@ -214,7 +220,16 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
     await c.submit(form(c.valid));
     for (const [key, raw] of store.records)
       store.records.set(key, JSON.stringify({ ...JSON.parse(raw), ref: 'corrupt' }));
-    expect((await c.submit(form(c.edit))).kind).toBe('NOT_CHECKED');
+    expect(await c.submit(form(c.edit))).toMatchObject({
+      kind: 'NOT_CHECKED',
+      reason: 'SNAPSHOT_UNREADABLE',
+    });
+    for (const [key, raw] of store.records)
+      store.records.set(key, JSON.stringify({ ...JSON.parse(raw), state: 'BROKEN' }));
+    expect(await c.request.restore(session)).toMatchObject({
+      kind: 'NOT_CHECKED',
+      reason: 'CORRUPT_RECORD',
+    });
     expect(c.dispatch).toHaveBeenCalledTimes(1);
   });
   it.each(['UNRESOLVED', 'AGED', 'LOST_CONFIRMATION', 'FORMER', 'CORRUPT'])(
@@ -248,6 +263,7 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
           : session;
       currentSession.mockResolvedValue(acting);
       const held = await c.request.restore(acting);
+      if (cause === 'FORMER') expect(held).toMatchObject({ reason: 'FORMER_COPY' });
       expect(held.kind).toBe(cause === 'FORMER' || cause === 'CORRUPT' ? 'NOT_CHECKED' : 'HELD');
       if (!('releaseToken' in held) || !held.releaseToken)
         throw new Error('missing reconciliation exit');
@@ -313,6 +329,16 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
     await sending;
     expect(c.dispatch).toHaveBeenCalledTimes(1);
   });
+  it('distinguishes capacity before dispatch', async () => {
+    const store = memoryUnresolvedStore();
+    setUnresolvedStore(store);
+    jest.spyOn(store, 'reserve').mockResolvedValue({ kind: 'CAPACITY' });
+    expect(await c.submit(form(c.valid))).toMatchObject({
+      kind: 'NOT_CHECKED',
+      reason: 'CAPACITY',
+    });
+    expect(c.dispatch).not.toHaveBeenCalled();
+  });
   it('releases proven refusals and keeps snapshots bounded', async () => {
     c.dispatch.mockResolvedValue({
       kind: 'UNAVAILABLE',
@@ -337,7 +363,76 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
         {},
         dispatch,
       ),
-    ).toEqual({ kind: 'NOT_CHECKED' });
+    ).toEqual({ kind: 'NOT_CHECKED', reason: 'SNAPSHOT_TOO_LARGE' });
     expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe.each(cases)('FU-217/FU-222 $name release feedback', (c) => {
+  const back = c.page === AssetsPage ? '/assets' : '/drivers';
+  async function hold(): Promise<{
+    token: string;
+    store: ReturnType<typeof memoryUnresolvedStore>;
+  }> {
+    const store = memoryUnresolvedStore();
+    setUnresolvedStore(store);
+    c.dispatch.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+    await c.submit(form(c.valid));
+    const held = await c.request.restore(session);
+    if (!('releaseToken' in held) || !held.releaseToken) throw new Error('missing exit');
+    return { token: held.releaseToken, store };
+  }
+  async function landing(data: FormData): Promise<URL> {
+    const error = await c.release(data).then(
+      () => new Error('no redirect'),
+      (e: Error) => e,
+    );
+    expect(error.message).toMatch(/^REDIRECT:/);
+    return new URL(error.message.slice('REDIRECT:'.length), 'http://localhost');
+  }
+  const feedbackOf = (url: URL) =>
+    readReleaseFeedback(session, back, url.searchParams.get('release'), true);
+  it.each(['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'GONE'] as const)(
+    'redirects with the store answer %s and the page shows it',
+    async (outcome) => {
+      const { token, store } = await hold();
+      if (outcome === 'UNAVAILABLE')
+        jest.spyOn(store, 'release').mockRejectedValue(new UnresolvedStoreUnavailable());
+      else jest.spyOn(store, 'release').mockResolvedValue(outcome);
+      const url = await landing(form({ release: token, confirmDuplicate: 'yes' }));
+      expect(url.pathname).toBe(back);
+      expect(feedbackOf(url)).toBe(outcome);
+      setUnresolvedStore(memoryUnresolvedStore());
+      const page = await c.page({
+        searchParams: Promise.resolve({
+          ctx: pageContext(session),
+          release: url.searchParams.get('release') ?? '',
+        }),
+      });
+      expect(JSON.stringify(page)).toContain(`"outcome":"${outcome}"`);
+      expect(RELEASE_MESSAGES[outcome]).toEqual(expect.any(String));
+    },
+  );
+  it('keeps a plain redirect for a real success, and the hold is gone', async () => {
+    const { token } = await hold();
+    const url = await landing(form({ release: token, confirmDuplicate: 'yes' }));
+    expect(url.searchParams.has('release')).toBe(false);
+    expect((await c.request.restore(session)).kind).toBe('IDLE');
+  });
+  it.each([
+    ['CSRF_REFUSED', { csrf: 'wrong', confirmDuplicate: 'yes' }],
+    ['CONSENT_MISSING', {}],
+  ] as const)('says %s and releases nothing', async (outcome, extra) => {
+    const { token } = await hold();
+    const data = form({ release: token });
+    for (const [key, value] of Object.entries(extra)) data.set(key, value);
+    expect(feedbackOf(await landing(data))).toBe(outcome);
+    expect((await c.request.restore(session)).kind).toBe('HELD');
+  });
+  it('shows an answer it does not know as not done, never as released', async () => {
+    const { token, store } = await hold();
+    jest.spyOn(store, 'release').mockResolvedValue('SOMETHING_NEW' as never);
+    const url = await landing(form({ release: token, confirmDuplicate: 'yes' }));
+    expect(feedbackOf(url)).toBe('NOT_DONE');
   });
 });
