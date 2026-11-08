@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { refusedBeforeSending } from '@rasta/config';
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, RedirectRefusedError, foldAsciiCase, internalFetch } from '@rasta/nest-common';
 import {
@@ -162,6 +163,8 @@ function errorName(error: unknown): string {
 }
 
 function neverSent(error: unknown): boolean {
+  // internalFetch refused an altered runtime before sending (FU-249).
+  if (refusedBeforeSending(error)) return true;
   const name = errorName(error);
   if (name === 'TimeoutError' || name === 'AbortError') return false;
   const cause = (error as { cause?: { code?: unknown } } | null)?.cause;

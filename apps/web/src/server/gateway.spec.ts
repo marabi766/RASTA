@@ -6,6 +6,8 @@
  * `fetch`, `Response` and `node:crypto`, and a browser-shaped environment
  * would be testing a different runtime than the one that serves the request.
  */
+import { CredentialEnvironmentRefusedError, refuseAlteredEnvironment } from '@rasta/config';
+
 import {
   GatewayOriginError,
   GatewayOutcomeUnknownError,
@@ -20,6 +22,18 @@ import {
 } from './gateway';
 import { tenantCredential } from './session-organization';
 import { actingAccessToken } from '@/test/session-token';
+
+/**
+ * The single seam of the FU-249 environment check: credential-fetch.ts imports
+ * it from here. The real check, unless a test stubs it on purpose.
+ */
+jest.mock('@rasta/config', () => {
+  const actual = jest.requireActual<typeof import('@rasta/config')>('@rasta/config');
+  return { ...actual, refuseAlteredEnvironment: jest.fn(actual.refuseAlteredEnvironment) };
+});
+const environmentCheck = jest.mocked(refuseAlteredEnvironment);
+const REAL_ENVIRONMENT_CHECK =
+  jest.requireActual<typeof import('@rasta/config')>('@rasta/config').refuseAlteredEnvironment;
 
 const ORG = 'ORG-DEH-0001';
 const TOKEN = actingAccessToken(ORG);
@@ -529,8 +543,25 @@ describe('FU-219 gateway runtime boundary', () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
+  /**
+   * Both properties hold while `Object.prototype` is polluted. With the FU-249
+   * check in force (#967) the call is refused before anything is sent, and
+   * reported as never sent — a 503 `GatewayNeverSentError`, never an unknown
+   * outcome that would hold a write nobody sent. The FU-219 property, that the
+   * gateway takes no method, key or transport from the prototype, is its own
+   * resolution: proven with that check stubbed at its single seam.
+   */
+  type Check = 'in force' | 'stubbed';
+  const CHECKS: Check[] = ['in force', 'stubbed'];
+
   /** Runs `work` with `properties` on Object.prototype, removed before any assertion. */
-  async function polluted<R>(properties: Record<string, unknown>, work: () => Promise<R>) {
+  async function polluted<R>(
+    check: Check,
+    properties: Record<string, unknown>,
+    work: () => Promise<R>,
+  ) {
+    environmentCheck.mockClear();
+    if (check === 'stubbed') environmentCheck.mockImplementation(() => undefined);
     for (const [key, value] of Object.entries(properties))
       Object.defineProperty(Object.prototype, key, { value, configurable: true, writable: true });
     try {
@@ -540,7 +571,18 @@ describe('FU-219 gateway runtime boundary', () => {
       );
     } finally {
       for (const key of Object.keys(properties)) delete (Object.prototype as never)[key];
+      environmentCheck.mockImplementation(REAL_ENVIRONMENT_CHECK);
     }
+  }
+  /** The outcome of a send the environment check refused: nothing left, and callers know it. */
+  function expectRefusedBeforeSending(outcome: { value?: unknown; error?: unknown }) {
+    expect(outcome.error).toBeInstanceOf(GatewayNeverSentError);
+    expect(outcome.error).not.toBeInstanceOf(GatewayOutcomeUnknownError);
+    expect(outcome.error).toMatchObject({ status: 503 });
+    expect(environmentCheck.mock.results).toEqual([
+      { type: 'throw', value: expect.any(CredentialEnvironmentRefusedError) },
+    ]);
+    expect(environmentCheck.mock.results[0]?.value).toMatchObject({ reason: 'prototype' });
   }
   const INHERITED = {
     method: 'POST',
@@ -550,65 +592,101 @@ describe('FU-219 gateway runtime boundary', () => {
     timeoutMs: 1,
   };
 
-  it('reads a plain read literal as GET when Object.prototype carries write fields (PR-949 r1 F2)', async () => {
-    const transport = jest.fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>(
-      async () => new Response('{}'),
-    );
-    const inheritedFetch = jest.fn();
-    const outcome = await polluted({ ...INHERITED, fetchImpl: inheritedFetch }, () =>
-      callGateway({
+  it.each(CHECKS)(
+    'reads a plain read literal as GET when Object.prototype carries write fields, check %s (PR-949 r1 F2)',
+    async (check) => {
+      const transport = jest.fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>(
+        async () => new Response('{}'),
+      );
+      const inheritedFetch = jest.fn();
+      const outcome = await polluted(check, { ...INHERITED, fetchImpl: inheritedFetch }, () =>
+        callGateway({
+          baseUrl: GATEWAY,
+          path: '/v1/x',
+          credential: CREDENTIAL,
+          fetchImpl: transport,
+        }),
+      );
+      expect(inheritedFetch).not.toHaveBeenCalled();
+      if (check === 'in force') {
+        expectRefusedBeforeSending(outcome);
+        expect(transport).not.toHaveBeenCalled();
+        return;
+      }
+      expect(outcome).toEqual({ value: expect.anything() });
+      expect(environmentCheck).toHaveBeenCalledWith(transport);
+      const init = transport.mock.calls[0]![1]!;
+      expect(init.method).toBe('GET');
+      expect(Object.hasOwn(init, 'body') && init.body).toBe(undefined);
+      expect(Object.keys(init.headers as object).sort()).toEqual(
+        ['accept', 'authorization', 'x-correlation-id', 'x-organization-id'].sort(),
+      );
+    },
+  );
+
+  it.each(CHECKS)(
+    'never takes an inherited fetchImpl: the call goes to the default transport, check %s',
+    async (check) => {
+      const global = jest
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async () => new Response('{}'));
+      const inheritedFetch = jest.fn();
+      try {
+        const outcome = await polluted(check, { fetchImpl: inheritedFetch }, () =>
+          callGateway({ baseUrl: GATEWAY, path: '/v1/x', credential: CREDENTIAL }),
+        );
+        expect(inheritedFetch).not.toHaveBeenCalled();
+        if (check === 'in force') {
+          expectRefusedBeforeSending(outcome);
+          expect(global).not.toHaveBeenCalled();
+          return;
+        }
+        expect(outcome).toEqual({ value: expect.anything() });
+        expect(environmentCheck).toHaveBeenCalledWith(global);
+        expect(global).toHaveBeenCalledTimes(1);
+        expect(global.mock.calls[0]![1]!.method).toBe('GET');
+      } finally {
+        global.mockRestore();
+      }
+    },
+  );
+
+  it.each(CHECKS)(
+    'a write takes neither its method nor its key from Object.prototype, check %s',
+    async (check) => {
+      const transport = jest.fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>(
+        async () => new Response('{}'),
+      );
+      const base = {
         baseUrl: GATEWAY,
         path: '/v1/x',
         credential: CREDENTIAL,
         fetchImpl: transport,
-      }),
-    );
-    expect(outcome).toEqual({ value: expect.anything() });
-    expect(inheritedFetch).not.toHaveBeenCalled();
-    const init = transport.mock.calls[0]![1]!;
-    expect(init.method).toBe('GET');
-    expect(Object.hasOwn(init, 'body') && init.body).toBe(undefined);
-    expect(Object.keys(init.headers as object).sort()).toEqual(
-      ['accept', 'authorization', 'x-correlation-id', 'x-organization-id'].sort(),
-    );
-  });
-
-  it('never takes an inherited fetchImpl: the call goes to the default transport', async () => {
-    const global = jest
-      .spyOn(globalThis, 'fetch')
-      .mockImplementation(async () => new Response('{}'));
-    const inheritedFetch = jest.fn();
-    try {
-      await polluted({ fetchImpl: inheritedFetch }, () =>
-        callGateway({ baseUrl: GATEWAY, path: '/v1/x', credential: CREDENTIAL }),
+      };
+      // Refused by the gateway's own snapshot, before the transport is reached.
+      const refused = await polluted(check, { method: 'DELETE' }, () => callGatewayWrite(base));
+      expect(refused).toEqual({
+        error: expect.objectContaining({
+          message: expect.stringMatching(/write needs a write method/),
+        }),
+      });
+      expect(environmentCheck).not.toHaveBeenCalled();
+      expect(transport).not.toHaveBeenCalled();
+      const outcome = await polluted(check, { ...INHERITED, method: 'DELETE' }, () =>
+        callGatewayWrite({ ...base, method: 'PUT' }),
       );
-      expect(inheritedFetch).not.toHaveBeenCalled();
-      expect(global).toHaveBeenCalledTimes(1);
-      expect(global.mock.calls[0]![1]!.method).toBe('GET');
-    } finally {
-      global.mockRestore();
-    }
-  });
-
-  it('a write takes neither its method nor its key from Object.prototype', async () => {
-    const transport = jest.fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>(
-      async () => new Response('{}'),
-    );
-    const base = { baseUrl: GATEWAY, path: '/v1/x', credential: CREDENTIAL, fetchImpl: transport };
-    const refused = await polluted({ method: 'DELETE' }, () => callGatewayWrite(base));
-    expect(refused).toEqual({
-      error: expect.objectContaining({
-        message: expect.stringMatching(/write needs a write method/),
-      }),
-    });
-    expect(transport).not.toHaveBeenCalled();
-    await polluted({ ...INHERITED, method: 'DELETE' }, () =>
-      callGatewayWrite({ ...base, method: 'PUT' }),
-    );
-    const init = transport.mock.calls[0]![1]!;
-    expect(init.method).toBe('PUT');
-    expect(Object.hasOwn(init, 'body') && init.body).toBe(undefined);
-    expect(Object.keys(init.headers as object)).not.toContain('idempotency-key');
-    expect(Object.keys(init.headers as object)).not.toContain('idempotency-replay-deadline');
-  });
+      if (check === 'in force') {
+        expectRefusedBeforeSending(outcome);
+        expect(transport).not.toHaveBeenCalled();
+        return;
+      }
+      expect(outcome).toEqual({ value: expect.anything() });
+      expect(environmentCheck).toHaveBeenCalledWith(transport);
+      const init = transport.mock.calls[0]![1]!;
+      expect(init.method).toBe('PUT');
+      expect(Object.hasOwn(init, 'body') && init.body).toBe(undefined);
+      expect(Object.keys(init.headers as object)).not.toContain('idempotency-key');
+      expect(Object.keys(init.headers as object)).not.toContain('idempotency-replay-deadline');
+    },
+  );
 });
