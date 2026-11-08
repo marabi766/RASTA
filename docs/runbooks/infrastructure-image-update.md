@@ -26,7 +26,7 @@ image: postgis/postgis:16-3.4@sha256:<digest>
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `docker-compose.yml`                   | هر `image:`، در هر Profile (`all`، `observability`، `search`، `tools`)                                    |
 | `.github/workflows/*.yml`              | `image:` هر `services:`/`container:`؛ متغیرهای `*_IMAGE` در `env:`؛ تصویر هر `docker run`/`create`/`pull` |
-| `infrastructure/docker/kafka/ci-up.sh` | پیش‌فرض `KAFKA_IMAGE` — Brokerی که CI بالا می‌آورد                                                        |
+| `infrastructure/docker/kafka/ci-up.sh` | `readonly IMAGE=…` (نخستین فرمان پس از `set -euo pipefail`) — Brokerی که CI بالا می‌آورد                  |
 
 **یک Repository، یک Digest، هر جا که باشد:** Compose و CI همان Postgres، همان Keycloak و همان Broker را اجرا می‌کنند.
 `pnpm check:dockerfile-pins` (در `pnpm verify` و Job `quality`) هم تصویر بی Digest را رد می‌کند و هم Repositoryای را که در
@@ -44,6 +44,13 @@ image: postgis/postgis:16-3.4@sha256:<digest>
   `compose` فقط با `docker-compose.yml`؛ فعل‌های بی‌تصویر (`exec`، `logs`، `rm`، …) آزادند.
 - **بسته شکست می‌خورد:** `include:`، `build:` یا `extends: file:` در Compose؛ متغیر بی پیش‌فرض؛ عبارت GitHub جز
   `${{ env.X }}`؛ فعل، گزینه یا گزینهٔ سراسری ناشناختهٔ `docker` (مثلاً `docker build`)؛ Scriptی که قابل شکستن نیست.
+- **نام تصویر یا برنامه فقط به سه شکل خوانده می‌شود (FU-224):** مرجع حرفی `name:tag@sha256:…`؛ `"${{ env.NAME }}"` (در نقل‌قول؛ مقدارش
+  ناتهی، بدون نحو Shell و از env همان گام باشد؛ نامی که گامی با `>> "$GITHUB_ENV"` تعریف می‌کند خوانده نمی‌شود)؛ یا `"$NAME"` به‌عنوان کل واژه، که `NAME` با `IMAGE` (برای برنامه `BIN`) پایان می‌یابد و در
+  آغاز Script، فقط پس از `set -euo pipefail`، با `readonly NAME=<literal>` اعلام شده است. هر گسترش دیگر (`$IMG` بی نقل‌قول،
+  `${X:-…}`، `"$@"` پیش از تصویر، `eval`، `xargs`، `find`، `source` شرطی، `declare -n`) رد می‌شود و خطا سطر و راه‌حل را می‌گوید. اعلام `readonly` فقط برای Shellی است که تازه آغاز می‌شود؛ در `$(…)`،
+  پشت‌نقل‌قول، متن `eval`/`trap` و Scriptی که `source` می‌شود اعتباری ندارد، و `export -f`، `set -a` و کلید `BASH_FUNC_*` رد
+  می‌شوند. `curl` فقط با گزینه‌های فهرست‌شده (`-sSfL`، `-o`، `-w`، …) خوانده می‌شود.
+  نوشتن در مسیری که بررسی نمی‌تواند بخواند (متغیر، `..`، `~`، مسیر مطلق جز `/tmp`) در هر Script و گامی رد می‌شود، مگر `REVIEWED_PROGRAMS` همان واژه را نام ببرد؛ `cp`، `mv`، `ln` و `tee` فقط گزینه‌های بلند فهرست‌شده را می‌پذیرند و گزینهٔ محاسبه‌شده برای `set`، `export` و `declare` رد می‌شود.
 
 ## به‌روزرسانی
 
