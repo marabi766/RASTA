@@ -888,7 +888,7 @@ describe('every guard of an economic step reads the order after the step looked'
 
 describe('the deadline of a hold (D-132)', () => {
   const DEADLINE = '2026-11-07T00:00:00.000Z';
-  function sending(answer: () => unknown, attempt = 1) {
+  function sending(answer: () => unknown, attempt = 1, rowDeadline?: string) {
     const send = jest.fn(async (_input: { holdNotAfter?: string }) => answer());
     const activities = createActivities({
       orders: {
@@ -903,7 +903,7 @@ describe('the deadline of a hold (D-132)', () => {
         }),
         onceForSaga: (_o: unknown, _s: unknown, _a: unknown, call: () => unknown) => call(),
         claimHoldSend: async (_o: unknown, proposed?: string) => ({
-          holdNotAfter: proposed ?? null,
+          holdNotAfter: rowDeadline ?? proposed ?? null,
           claims: 1,
         }),
         closeHoldSendsOnRefusal: async () => true,
@@ -945,6 +945,22 @@ describe('the deadline of a hold (D-132)', () => {
       nonRetryable: true,
       details: [REFUSED_PAST_HOLD_DEADLINE],
     });
+  });
+
+  // FU-234: the row's deadline can be later than the one the workflow proposed (a legacy
+  // row's backfilled one, or an earlier run's), and the workflow judges by its own.
+  it.each([
+    ['not yet past the row’s deadline and margin: unmarked', -30 * 60_000, []],
+    ['past the row’s deadline and margin: marked', 30 * 60_000, [REFUSED_PAST_HOLD_DEADLINE]],
+  ])('a refusal to the row’s later deadline, %s', async (_name, pastBy, details) => {
+    const row = new Date(Date.now() - pastBy - 3_600_000).toISOString();
+    const { activities, send } = sending(past, 1, row);
+    await expect(activities.createObligation('ORD', DEADLINE)).rejects.toMatchObject({
+      type: 'HOLD_DEADLINE_PASSED',
+      nonRetryable: true,
+      details,
+    });
+    expect(send.mock.calls[0]?.[0].holdNotAfter).toBe(row);
   });
 
   it('the same code to a request that set no deadline proves nothing', async () => {

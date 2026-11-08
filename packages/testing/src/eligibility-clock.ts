@@ -225,6 +225,13 @@ const reviewedClockTemplates: readonly {
     template: '079e569561e460718d41c3022ec1dcf8f3ccef64f83b4bdc2ea743a127ba96e4',
     expressions: 'f7d12489c58c3e92cecd39bd9a969cd282160cb7e34c476dd0724522acb6293f',
   },
+  // FU-234: an order row no writer makes (a send count below zero), copied from a placed
+  // order, database-clock retry parked 24 hours, for the backfill to refuse.
+  {
+    file: 'services/marketplace-service/test/hold-deadline-backfill.int-spec.ts',
+    template: 'ced52d1ec7cff69af545b47adb6fa1e3567cf9168658ea979c520b84fde1df22',
+    expressions: 'eb179d1906c5586a28111bd5b55854ecd24c901df010638c0e59dba598ac8de8',
+  },
   // Task 1201: legacy occurrence evidence, and fixed data in an isolated migration schema.
   // Fact-time boundaries intentionally use owner timestamps, not a live eligibility clock.
   {

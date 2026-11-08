@@ -85,6 +85,7 @@ const REFUSAL_CODES = new Set([
   'vacuum-unproven',
   'lag-unreadable',
   'session-time-zone',
+  'economic-rule-unproven',
 ]);
 
 // One registry per process (held on `process`), shared by every copy of this module (scripts load

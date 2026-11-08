@@ -38,6 +38,7 @@ import {
   PROVEN_REFUSALS,
   REFUSED_ON_FIRST_ATTEMPT,
   REFUSED_PAST_HOLD_DEADLINE,
+  sentPastHoldFence,
 } from './economic-refusal';
 import {
   economicCallsUnconfirmedTotal,
@@ -725,6 +726,7 @@ export function createActivities(deps: ActivityDependencies) {
         const sent = await openCall(orderId, 'createObligation', orderId);
         sending.opening = sent;
 
+        const sentAt = Date.now();
         const transaction = await deps.economic
           .createObligation({
             ...obligationTermsOf(order),
@@ -746,7 +748,14 @@ export function createActivities(deps: ActivityDependencies) {
                 message: refusal.message,
                 type: HOLD_DEADLINE_PASSED,
                 nonRetryable: true,
-                details: [REFUSED_PAST_HOLD_DEADLINE],
+                // The workflow judges by the deadline it proposed. The row's can be later (an
+                // earlier run's, or one given to a legacy row, FU-234): then marked only if
+                // this request left past the deadline it carried and the margin.
+                details:
+                  Date.parse(deadline) <= Date.parse(holdNotAfter ?? '') ||
+                  sentPastHoldFence(deadline, sentAt)
+                    ? [REFUSED_PAST_HOLD_DEADLINE]
+                    : [],
               });
             }
             // Only the send's own refusal on its first attempt is proof (`placeHold`).
