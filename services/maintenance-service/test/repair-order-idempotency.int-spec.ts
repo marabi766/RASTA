@@ -17,7 +17,7 @@ import {
   REPAIR_ORDER_ENDPOINTS,
   RepairOrderController,
 } from '../src/maintenance/repair-order.controller';
-import { IdempotencyStore } from '../src/maintenance/idempotency';
+import { IdempotencyStore, idempotentRequest } from '../src/maintenance/idempotency';
 import { MAX_AMOUNT_MINOR } from '../src/maintenance/dto';
 import type {
   MaintenanceCostView,
@@ -39,6 +39,9 @@ import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
  * must be one cost line and one event, however the two posts interleave.
  */
 const LEASE_SECONDS = 120;
+
+/** The headers a keyed command reads, as Nest hands them over. */
+const keyed = (key: string | undefined) => (key === undefined ? {} : { 'idempotency-key': key });
 
 describe('repair-order writes under an Idempotency-Key', () => {
   let prisma: PrismaService;
@@ -62,6 +65,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
     store = new IdempotencyStore(prisma, {
       MAINTENANCE_IDEMPOTENCY_TTL_HOURS: 24,
       MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: LEASE_SECONDS,
+      MAINTENANCE_CLOCK_SKEW_SECONDS: 30,
     });
     controller = new RepairOrderController(repairOrders, store);
 
@@ -186,8 +190,12 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const { orderId } = await order();
       const key = id('KEY');
 
-      const first = await asActor(manager, () => controller.recordCost(orderId, charge(), key));
-      const retry = await asActor(manager, () => controller.recordCost(orderId, charge(), key));
+      const first = await asActor(manager, () =>
+        controller.recordCost(orderId, charge(), keyed(key)),
+      );
+      const retry = await asActor(manager, () =>
+        controller.recordCost(orderId, charge(), keyed(key)),
+      );
 
       expect(retry).toEqual(first);
       expect(await costRows(orderId)).toHaveLength(1);
@@ -200,8 +208,12 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const { orderId } = await order();
       const key = id('KEY');
 
-      const first = await asActor(manager, () => controller.recordPart(orderId, part(), key));
-      const retry = await asActor(manager, () => controller.recordPart(orderId, part(), key));
+      const first = await asActor(manager, () =>
+        controller.recordPart(orderId, part(), keyed(key)),
+      );
+      const retry = await asActor(manager, () =>
+        controller.recordPart(orderId, part(), keyed(key)),
+      );
 
       expect(retry).toEqual(first);
       expect(await costRows(orderId)).toHaveLength(1);
@@ -213,8 +225,12 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const { orderId } = await order();
       const key = id('KEY');
 
-      const first = await asActor(manager, () => controller.recordLabour(orderId, labour(), key));
-      const retry = await asActor(manager, () => controller.recordLabour(orderId, labour(), key));
+      const first = await asActor(manager, () =>
+        controller.recordLabour(orderId, labour(), keyed(key)),
+      );
+      const retry = await asActor(manager, () =>
+        controller.recordLabour(orderId, labour(), keyed(key)),
+      );
 
       expect(retry).toEqual(first);
       expect(await costRows(orderId)).toHaveLength(1);
@@ -226,8 +242,8 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const { requestId, orderId } = await order();
       const key = id('KEY');
 
-      const first = await asActor(manager, () => controller.start(orderId, {}, key));
-      const retry = await asActor(manager, () => controller.start(orderId, {}, key));
+      const first = await asActor(manager, () => controller.start(orderId, {}, keyed(key)));
+      const retry = await asActor(manager, () => controller.start(orderId, {}, keyed(key)));
 
       expect(retry).toEqual(first);
       expect((first as RepairOrderView).status).toBe('IN_PROGRESS');
@@ -236,12 +252,12 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
     it('completes once, and a retry is the original answer, not "already completed"', async () => {
       const { requestId, orderId } = await order(true);
-      await asActor(manager, () => controller.recordCost(orderId, charge(), id('KEY')));
+      await asActor(manager, () => controller.recordCost(orderId, charge(), keyed(id('KEY'))));
       const key = id('KEY');
       const dto = { workPerformed: 'انجام شد', expectedTotalCostMinor: '500000' };
 
-      const first = await asActor(manager, () => controller.complete(orderId, dto, key));
-      const retry = await asActor(manager, () => controller.complete(orderId, dto, key));
+      const first = await asActor(manager, () => controller.complete(orderId, dto, keyed(key)));
+      const retry = await asActor(manager, () => controller.complete(orderId, dto, keyed(key)));
 
       expect(retry).toEqual(first);
       expect((first as RepairOrderView).status).toBe('COMPLETED');
@@ -254,8 +270,8 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const key = id('KEY');
       const dto = { reason: 'تعمیرگاه نپذیرفت' };
 
-      const first = await asActor(manager, () => controller.cancel(orderId, dto, key));
-      const retry = await asActor(manager, () => controller.cancel(orderId, dto, key));
+      const first = await asActor(manager, () => controller.cancel(orderId, dto, keyed(key)));
+      const retry = await asActor(manager, () => controller.cancel(orderId, dto, keyed(key)));
 
       expect(retry).toEqual(first);
       expect((first as RepairOrderView).status).toBe('CANCELLED');
@@ -274,7 +290,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const first = asActor(manager, () =>
         store.execute<MaintenanceCostView>(
           REPAIR_ORDER_ENDPOINTS.costs,
-          key,
+          idempotentRequest({ 'idempotency-key': key }),
           { repairOrderId: orderId, ...dto },
           201,
           async (fence) =>
@@ -291,7 +307,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       await a.reached;
 
       // B, the same post, arrives now. It must neither run the work nor give up.
-      const duplicate = asActor(manager, () => controller.recordCost(orderId, dto, key));
+      const duplicate = asActor(manager, () => controller.recordCost(orderId, dto, keyed(key)));
       const settled = await Promise.race([
         duplicate.then(() => 'answered'),
         sleep(600).then(() => 'waiting'),
@@ -317,7 +333,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const first = asActor(manager, () =>
         store.execute<MaintenanceCostView>(
           REPAIR_ORDER_ENDPOINTS.costs,
-          key,
+          idempotentRequest({ 'idempotency-key': key }),
           { repairOrderId: orderId, ...dto },
           201,
           async (fence) => {
@@ -343,7 +359,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       // The claim has expired while A holds it. The duplicate's removal of the
       // expired row must wait for A's lock — a blocked session we can see.
-      const duplicate = asActor(manager, () => controller.recordCost(orderId, dto, key));
+      const duplicate = asActor(manager, () => controller.recordCost(orderId, dto, keyed(key)));
       const deadline = Date.now() + 5_000;
       for (;;) {
         const [{ waiting }] = await prisma.client.$queryRawUnsafe<{ waiting: number }[]>(
@@ -370,10 +386,10 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       await Promise.all([
         asActor(manager, () =>
-          controller.recordCost(orderId, charge({ amountMinor: '100' }), id('KEY')),
+          controller.recordCost(orderId, charge({ amountMinor: '100' }), keyed(id('KEY'))),
         ),
         asActor(manager, () =>
-          controller.recordCost(orderId, charge({ amountMinor: '200' }), id('KEY')),
+          controller.recordCost(orderId, charge({ amountMinor: '200' }), keyed(id('KEY'))),
         ),
       ]);
 
@@ -387,19 +403,19 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const { orderId } = await order();
       const other = (await order()).orderId;
       const key = id('KEY');
-      await asActor(manager, () => controller.recordCost(orderId, charge(), key));
+      await asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key)));
 
       await expect(
         asActor(manager, () =>
-          controller.recordCost(orderId, charge({ amountMinor: '600000' }), key),
+          controller.recordCost(orderId, charge({ amountMinor: '600000' }), keyed(key)),
         ),
       ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
       await expect(
-        asActor(manager, () => controller.recordCost(other, charge(), key)),
+        asActor(manager, () => controller.recordCost(other, charge(), keyed(key))),
       ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
       await expect(
         asActor(as({ ...manager, userId: 'USR-ITEST-SOMEONE-ELSE' }), () =>
-          controller.recordCost(orderId, charge(), key),
+          controller.recordCost(orderId, charge(), keyed(key)),
         ),
       ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
 
@@ -412,8 +428,8 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const { orderId } = await order();
       const key = id('KEY');
 
-      await asActor(manager, () => controller.start(orderId, {}, key));
-      await asActor(manager, () => controller.recordCost(orderId, charge(), key));
+      await asActor(manager, () => controller.start(orderId, {}, keyed(key)));
+      await asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key)));
 
       expect(await costRows(orderId)).toHaveLength(1);
     });
@@ -421,12 +437,12 @@ describe('repair-order writes under an Idempotency-Key', () => {
     it('is the organization’s own: the same key in another organization is not a replay, and cannot reach this order', async () => {
       const { orderId } = await order();
       const key = id('KEY');
-      await asActor(manager, () => controller.recordCost(orderId, charge(), key));
+      await asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key)));
 
       // Authorization comes first: another tenant is answered as for an order that does not exist.
       await expect(
         asActor({ organizationId: org.b, userId: 'USR-ITEST-OTHER-TENANT' }, () =>
-          controller.recordCost(orderId, charge(), key),
+          controller.recordCost(orderId, charge(), keyed(key)),
         ),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
       expect(await costRows(orderId)).toHaveLength(1);
@@ -437,13 +453,13 @@ describe('repair-order writes under an Idempotency-Key', () => {
     it('releases the key, so a corrected retry with the same key can run', async () => {
       const { orderId } = await order(true);
       await asActor(manager, () =>
-        controller.complete(orderId, { workPerformed: 'انجام شد' }, id('KEY')),
+        controller.complete(orderId, { workPerformed: 'انجام شد' }, keyed(id('KEY'))),
       );
       const key = id('KEY');
 
       // A completed order takes no more cost.
       await expect(
-        asActor(manager, () => controller.recordCost(orderId, charge(), key)),
+        asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key))),
       ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
       expect(await keyRows(REPAIR_ORDER_ENDPOINTS.costs, key)).toEqual([]);
       expect(await costRows(orderId)).toEqual([]);
@@ -458,7 +474,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
         .mockRejectedValueOnce(new Error('response store failed (injected)'));
       try {
         await expect(
-          asActor(manager, () => controller.recordCost(orderId, charge(), key)),
+          asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key))),
         ).rejects.toThrow('response store failed (injected)');
       } finally {
         failing.mockRestore();
@@ -469,8 +485,8 @@ describe('repair-order writes under an Idempotency-Key', () => {
       expect(await keyRows(REPAIR_ORDER_ENDPOINTS.costs, key)).toEqual([]);
 
       // The retry is the first request that commits — once, with its event.
-      await asActor(manager, () => controller.recordCost(orderId, charge(), key));
-      await asActor(manager, () => controller.recordCost(orderId, charge(), key));
+      await asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key)));
+      await asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key)));
       expect(await costRows(orderId)).toHaveLength(1);
       expect(await eventCount(orderId, 'REPAIR_COST_RECORDED')).toBe(1);
     });
@@ -482,7 +498,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       for (const key of [undefined, '', '   ']) {
         await expect(
-          asActor(manager, () => controller.recordCost(orderId, charge(), key)),
+          asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key))),
         ).rejects.toMatchObject({
           code: 'VALIDATION_FAILED',
           details: expect.arrayContaining([
@@ -499,12 +515,12 @@ describe('repair-order writes under an Idempotency-Key', () => {
     it('is refused for every one of the six writes', async () => {
       const { orderId } = await order(true);
       const calls: (() => Promise<unknown>)[] = [
-        () => controller.start(orderId, {}, undefined),
-        () => controller.complete(orderId, { workPerformed: 'انجام شد' }, undefined),
-        () => controller.cancel(orderId, { reason: 'تعمیرگاه نپذیرفت' }, undefined),
-        () => controller.recordPart(orderId, part(), undefined),
-        () => controller.recordLabour(orderId, labour(), undefined),
-        () => controller.recordCost(orderId, charge(), undefined),
+        () => controller.start(orderId, {}, keyed(undefined)),
+        () => controller.complete(orderId, { workPerformed: 'انجام شد' }, keyed(undefined)),
+        () => controller.cancel(orderId, { reason: 'تعمیرگاه نپذیرفت' }, keyed(undefined)),
+        () => controller.recordPart(orderId, part(), keyed(undefined)),
+        () => controller.recordLabour(orderId, labour(), keyed(undefined)),
+        () => controller.recordCost(orderId, charge(), keyed(undefined)),
       ];
       for (const call of calls) {
         await expect(asActor(manager, call)).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
@@ -550,7 +566,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const { orderId } = await order();
       for (const key of ['short', 'x'.repeat(256)]) {
         await expect(
-          asActor(manager, () => controller.recordCost(orderId, charge(), key)),
+          asActor(manager, () => controller.recordCost(orderId, charge(), keyed(key))),
         ).rejects.toMatchObject({
           code: 'VALIDATION_FAILED',
           details: expect.arrayContaining([expect.objectContaining({ code: 'invalid' })]),
@@ -600,7 +616,12 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       // The claim is taken and the process dies: nothing completes it.
       await asActor(manager, () =>
-        store.claim(REPAIR_ORDER_ENDPOINTS.costs, key, { repairOrderId: orderId, ...dto }),
+        store.claim(
+          REPAIR_ORDER_ENDPOINTS.costs,
+          key,
+          { repairOrderId: orderId, ...dto },
+          undefined,
+        ),
       );
       const claimed = (await secondsLeft(REPAIR_ORDER_ENDPOINTS.costs, key)) ?? 0;
       expect(claimed).toBeGreaterThan(LEASE_SECONDS - 30);
@@ -608,7 +629,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       // A completed response is kept for the hours it is configured for.
       const done = id('KEY');
-      await asActor(manager, () => controller.recordCost(orderId, charge(), done));
+      await asActor(manager, () => controller.recordCost(orderId, charge(), keyed(done)));
       expect((await secondsLeft(REPAIR_ORDER_ENDPOINTS.costs, done)) ?? 0).toBeGreaterThan(
         23 * 3_600,
       );
@@ -619,11 +640,16 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const key = id('KEY');
       const dto = charge();
       await asActor(manager, () =>
-        store.claim(REPAIR_ORDER_ENDPOINTS.costs, key, { repairOrderId: orderId, ...dto }),
+        store.claim(
+          REPAIR_ORDER_ENDPOINTS.costs,
+          key,
+          { repairOrderId: orderId, ...dto },
+          undefined,
+        ),
       );
 
       await expect(
-        asActor(manager, () => controller.recordCost(orderId, dto, key)),
+        asActor(manager, () => controller.recordCost(orderId, dto, keyed(key))),
       ).rejects.toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
       expect(await costRows(orderId)).toEqual([]);
     }, 20_000);
@@ -633,12 +659,19 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const key = id('KEY');
       const dto = charge();
       await asActor(manager, () =>
-        store.claim(REPAIR_ORDER_ENDPOINTS.costs, key, { repairOrderId: orderId, ...dto }),
+        store.claim(
+          REPAIR_ORDER_ENDPOINTS.costs,
+          key,
+          { repairOrderId: orderId, ...dto },
+          undefined,
+        ),
       );
       const deadHolder = await tokenOf(REPAIR_ORDER_ENDPOINTS.costs, key);
       await lapse(REPAIR_ORDER_ENDPOINTS.costs, key);
 
-      const recorded = await asActor(manager, () => controller.recordCost(orderId, dto, key));
+      const recorded = await asActor(manager, () =>
+        controller.recordCost(orderId, dto, keyed(key)),
+      );
 
       expect(await costRows(orderId)).toHaveLength(1);
       expect(await eventCount(orderId, 'REPAIR_COST_RECORDED')).toBe(1);
@@ -648,7 +681,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       expect(successor).toBeTruthy();
       expect(successor).not.toBe(deadHolder);
       // And a further retry is now the replay.
-      expect(await asActor(manager, () => controller.recordCost(orderId, dto, key))).toEqual(
+      expect(await asActor(manager, () => controller.recordCost(orderId, dto, keyed(key)))).toEqual(
         recorded,
       );
       expect(await costRows(orderId)).toHaveLength(1);
@@ -666,7 +699,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const late = asActor(manager, () =>
         store.execute<MaintenanceCostView>(
           REPAIR_ORDER_ENDPOINTS.costs,
-          key,
+          idempotentRequest({ 'idempotency-key': key }),
           body,
           201,
           async (fence) => {
@@ -684,7 +717,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       // Its lease lapses and a retry takes over and records the line.
       await lapse(REPAIR_ORDER_ENDPOINTS.costs, key);
-      const retried = await asActor(manager, () => controller.recordCost(orderId, dto, key));
+      const retried = await asActor(manager, () => controller.recordCost(orderId, dto, keyed(key)));
       expect(await tokenOf(REPAIR_ORDER_ENDPOINTS.costs, key)).not.toBe(holderToken);
 
       // The holder wakes: both its check on the claim and its response are
@@ -696,7 +729,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       expect(await eventCount(orderId, 'REPAIR_COST_RECORDED')).toBe(1);
       expect((await totals(orderId)).total).toBe('500000');
       expect(await keyRows(REPAIR_ORDER_ENDPOINTS.costs, key)).toEqual([{ state: 'COMPLETED' }]);
-      expect(await asActor(manager, () => controller.recordCost(orderId, dto, key))).toEqual(
+      expect(await asActor(manager, () => controller.recordCost(orderId, dto, keyed(key)))).toEqual(
         retried,
       );
     });
@@ -711,13 +744,13 @@ describe('repair-order writes under an Idempotency-Key', () => {
     it('accepts a cost of exactly the bound, and refuses the next unit of it without recording it', async () => {
       const { orderId } = await order();
       await asActor(manager, () =>
-        controller.recordCost(orderId, charge({ amountMinor: MAX }), id('KEY')),
+        controller.recordCost(orderId, charge({ amountMinor: MAX }), keyed(id('KEY'))),
       );
       expect(await totals(orderId)).toEqual({ total: MAX, request_total: MAX });
 
       await expect(
         asActor(manager, () =>
-          controller.recordCost(orderId, charge({ amountMinor: '1' }), id('KEY')),
+          controller.recordCost(orderId, charge({ amountMinor: '1' }), keyed(id('KEY'))),
         ),
       ).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
@@ -735,14 +768,18 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const past = (MAX_AMOUNT_MINOR + 1n).toString();
 
       const calls: (() => Promise<unknown>)[] = [
-        () => controller.recordCost(orderId, charge({ amountMinor: past }), id('KEY')),
+        () => controller.recordCost(orderId, charge({ amountMinor: past }), keyed(id('KEY'))),
         () =>
-          controller.recordPart(orderId, part({ unitCostMinor: past, quantity: '1' }), id('KEY')),
+          controller.recordPart(
+            orderId,
+            part({ unitCostMinor: past, quantity: '1' }),
+            keyed(id('KEY')),
+          ),
         () =>
           controller.recordLabour(
             orderId,
             labour({ hourlyRateMinor: past, hours: '1' }),
-            id('KEY'),
+            keyed(id('KEY')),
           ),
       ];
       for (const call of calls) {
@@ -761,7 +798,11 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       await expect(
         asActor(manager, () =>
-          controller.recordPart(orderId, part({ quantity: '2', unitCostMinor: half }), id('KEY')),
+          controller.recordPart(
+            orderId,
+            part({ quantity: '2', unitCostMinor: half }),
+            keyed(id('KEY')),
+          ),
         ),
       ).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
@@ -772,7 +813,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
           controller.recordLabour(
             orderId,
             labour({ hours: '2', hourlyRateMinor: half }),
-            id('KEY'),
+            keyed(id('KEY')),
           ),
         ),
       ).rejects.toMatchObject({
@@ -784,7 +825,11 @@ describe('repair-order writes under an Idempotency-Key', () => {
 
       // …and the largest line that does fit goes in.
       await asActor(manager, () =>
-        controller.recordPart(orderId, part({ quantity: '1', unitCostMinor: MAX }), id('KEY')),
+        controller.recordPart(
+          orderId,
+          part({ quantity: '1', unitCostMinor: MAX }),
+          keyed(id('KEY')),
+        ),
       );
       expect((await totals(orderId)).total).toBe(MAX);
     });
@@ -792,10 +837,10 @@ describe('repair-order writes under an Idempotency-Key', () => {
     it('refuses the request’s total across referrals: a withdrawn order’s cost still counts', async () => {
       const first = await order();
       await asActor(manager, () =>
-        controller.recordCost(first.orderId, charge({ amountMinor: MAX }), id('KEY')),
+        controller.recordCost(first.orderId, charge({ amountMinor: MAX }), keyed(id('KEY'))),
       );
       await asActor(manager, () =>
-        controller.cancel(first.orderId, { reason: 'تعمیرگاه نپذیرفت' }, id('KEY')),
+        controller.cancel(first.orderId, { reason: 'تعمیرگاه نپذیرفت' }, keyed(id('KEY'))),
       );
       // The request stays open and is referred again; the first order's cost is kept.
       const second = await asActor(manager, () =>
@@ -805,7 +850,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       // 1 on the new order is fine for it, but the request would hold MAX + 1.
       await expect(
         asActor(manager, () =>
-          controller.recordCost(second.id, charge({ amountMinor: '1' }), id('KEY')),
+          controller.recordCost(second.id, charge({ amountMinor: '1' }), keyed(id('KEY'))),
         ),
       ).rejects.toMatchObject({
         internalContext: expect.objectContaining({ rule: 'COST_TOTAL_TOO_LARGE' }),
@@ -919,7 +964,7 @@ describe('repair-order writes under an Idempotency-Key', () => {
       const stranger = { organizationId: org.b, userId: 'USR-ITEST-STRANGER' };
 
       await expect(
-        asActor(stranger, () => controller.recordCost(orderId, charge(), id('KEY'))),
+        asActor(stranger, () => controller.recordCost(orderId, charge(), keyed(id('KEY')))),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
       expect(await costRows(orderId)).toEqual([]);
     });

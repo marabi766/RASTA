@@ -114,6 +114,7 @@
 // longer hands out a position already on a row.
 // -----------------------------------------------------------------------------
 
+import { markRefusal } from '../packages/config/src/command-failure.js';
 import { assertB1Definitions } from './verify-outbox-b1-lib.mjs';
 
 /** The eight service-owned databases that have the B1 schema. */
@@ -151,17 +152,23 @@ export const SEQUENCE_TABLE = 'outbox_stream_sequence';
  */
 export const ALLOWED_ENVIRONMENTS = ['development', 'test', 'ci'];
 
-/** Raised for every refusal, so the CLI can print a reason instead of a stack. */
+/**
+ * Raised for every refusal. The CLIs print only its registered `code`
+ * (`command refused (code <code>)`, FU-023), never the message; a code outside
+ * `REFUSAL_CODES` marks nothing and reports as `unknown` (fail closed).
+ */
 export class B2RefusalError extends Error {
-  constructor(message) {
+  constructor(message, code) {
     super(message);
     this.name = 'B2RefusalError';
+    markRefusal(this, code);
   }
 }
 
-const refuse = (message) => {
-  throw new B2RefusalError(message);
+const refuse = (message, code) => {
+  throw new B2RefusalError(message, code);
 };
+const usage = (message) => refuse(message, 'usage');
 
 // ---------------------------------------------------------------------------
 // Options
@@ -193,7 +200,7 @@ export function parseOptions(argv, env = {}) {
     const arg = argv[i];
     const value = () => {
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) refuse(`${arg} needs a value.`);
+      if (next === undefined || next.startsWith('--')) usage(`${arg} needs a value.`);
       i += 1;
       return next;
     };
@@ -223,7 +230,7 @@ export function parseOptions(argv, env = {}) {
       case '--vacuum-every':
         // Removed, and refused by name rather than as an unknown option, so an
         // operator's old command line learns where the maintenance went.
-        refuse(
+        usage(
           '--vacuum-every was removed (D-045): the backfill runs as the runtime role, ' +
             'which owns no table and whose VACUUM PostgreSQL skips. The backfill reports ' +
             '`vacuum: required` instead; bound a large run with --max-batches and run ' +
@@ -232,21 +239,21 @@ export function parseOptions(argv, env = {}) {
         break;
       default:
         // Not repeated: only an option that matched is ever echoed (#385 r6).
-        refuse(
+        usage(
           `Unknown option at position ${i + 1}; it is not repeated. Known: ${KNOWN_OPTIONS.join(', ')}.`,
         );
     }
   }
 
   if (options.dryRun && options.apply) {
-    refuse('--dry-run and --apply contradict each other; pass exactly one.');
+    usage('--dry-run and --apply contradict each other; pass exactly one.');
   }
   if (all && options.services.length > 0) {
-    refuse('--all and --service contradict each other; pass exactly one.');
+    usage('--all and --service contradict each other; pass exactly one.');
   }
   if (all) options.services = [...SERVICES];
   if (options.services.length === 0) {
-    refuse(
+    usage(
       'No target selected. Pass --service <name> (repeatable) or --all. ' +
         `Known services: ${SERVICES.join(', ')}.`,
     );
@@ -254,17 +261,17 @@ export function parseOptions(argv, env = {}) {
 
   const unknown = options.services.filter((service) => !SERVICES.includes(service));
   if (unknown.length > 0) {
-    refuse(
+    usage(
       `Unknown service(s): ${unknown.length} --service value(s), not repeated. Known: ${SERVICES.join(', ')}.`,
     );
   }
   const duplicates = options.services.filter((s, i) => options.services.indexOf(s) !== i);
   if (duplicates.length > 0) {
-    refuse(`Service(s) named more than once: ${[...new Set(duplicates)].join(', ')}.`);
+    usage(`Service(s) named more than once: ${[...new Set(duplicates)].join(', ')}.`);
   }
 
   if (options.batchSize > MAX_BATCH_SIZE) {
-    refuse(
+    usage(
       `--batch-size ${options.batchSize} exceeds the ADR-051 § B2 ceiling of ${MAX_BATCH_SIZE}.`,
     );
   }
@@ -283,10 +290,10 @@ const KNOWN_OPTIONS = [
 ];
 
 function parsePositiveInt(flag, raw) {
-  if (!/^\d+$/.test(raw)) refuse(`${flag} must be a positive integer; its value is not repeated.`);
+  if (!/^\d+$/.test(raw)) usage(`${flag} must be a positive integer; its value is not repeated.`);
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    refuse(`${flag} must be a positive integer; its value is not repeated.`);
+    usage(`${flag} must be a positive integer; its value is not repeated.`);
   }
   return parsed;
 }
@@ -307,6 +314,7 @@ export function assertEnvironment(env = {}) {
       'Refusing to run with NODE_ENV=production. The B2 backfill is an operational ' +
         'tool for development and CI databases; a production backfill is a separately ' +
         'reviewed procedure (see the ADR-051 B2 runbook).',
+      'node-env',
     );
   }
   if (!ALLOWED_ENVIRONMENTS.includes(nodeEnv)) {
@@ -315,6 +323,7 @@ export function assertEnvironment(env = {}) {
     refuse(
       'Refusing to run with an unrecognised NODE_ENV. ' +
         `Known: ${ALLOWED_ENVIRONMENTS.join(', ')}.`,
+      'node-env',
     );
   }
   return nodeEnv;
@@ -322,7 +331,7 @@ export function assertEnvironment(env = {}) {
 
 /** `DATABASE_URL_<SERVICE>` and nothing else — never a shared connection (A-01). */
 export function databaseUrlKey(service) {
-  if (!SERVICES.includes(service)) refuse('Unknown service; it is not repeated.');
+  if (!SERVICES.includes(service)) refuse('Unknown service; it is not repeated.', 'usage');
   return `DATABASE_URL_${service.toUpperCase()}`;
 }
 
@@ -341,6 +350,7 @@ export function resolveDatabaseUrl(service, env = {}) {
     refuse(
       `${key} is not set. The B2 backfill resolves each service through its own ` +
         'DATABASE_URL_<SERVICE> and never through a shared DATABASE_URL.',
+      'database-url-unset',
     );
   }
   return url;
@@ -723,6 +733,23 @@ function toNumber(value) {
 const mapRow = (row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, toNumber(v)]));
 
 /**
+ * The error is the B1 assertion's own `RAISE EXCEPTION`: SQLSTATE `P0001`
+ * (raise_exception) and a message starting with the `B1: ` prefix every check
+ * in `assertB1Definitions()` uses. Prisma wraps a raw-query database error as
+ * `P2010` with the server's code and message in `meta`; a bare driver error
+ * carries them at the top level. Anything else — including an error with the
+ * right text but no SQLSTATE, or the SQLSTATE without the prefix — is not
+ * proof that the schema is missing.
+ */
+export function isB1AssertionFailure(error) {
+  if (typeof error !== 'object' || error === null) return false;
+  const meta = typeof error.meta === 'object' && error.meta !== null ? error.meta : undefined;
+  const sqlState = meta ? meta.code : error.code;
+  const message = meta ? meta.message : error.message;
+  return sqlState === 'P0001' && typeof message === 'string' && /^(?:ERROR:\s+)?B1: /.test(message);
+}
+
+/**
  * Run B2 against one service database.
  *
  * `db` is the port — `query`, `transaction`, `execute` — so this function is
@@ -739,12 +766,19 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
 
   // Preconditions first, and against the catalog rather than against a name.
   // A missing or reshaped B1 object is a refusal, not a partial run.
+  //
+  // Only a failure the assertion itself raised is a confirmed schema refusal
+  // (#673 r1 F1). A connection reset, an unreachable server (P1001) or any
+  // other error means the schema could not be inspected, not that B1 is
+  // missing; it propagates unchanged and is reported generically.
   try {
     await db.query(assertB1Definitions());
   } catch (error) {
+    if (!isB1AssertionFailure(error)) throw error;
     throw new B2RefusalError(
       `B1 schema precondition failed for ${service}: ${error.message}. ` +
         'Deploy the three ADR-051 B1 migrations before running the B2 backfill.',
+      'b1-precondition',
     );
   }
 
@@ -761,6 +795,7 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
   if (plan.streams_history_purged > 0) {
     throw new B2RefusalError(
       `${historyPurgedMessage(service, plan.streams_history_purged)} Nothing was written.`,
+      'history-purged',
     );
   }
 
@@ -796,12 +831,14 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
             'backfill was running, and appending them would contradict (created_at, id). ' +
             'Nothing was assigned in this batch. Quiesce the producers for this service ' +
             'and re-run; see the ADR-051 B2 runbook.',
+          'ordering-violation',
         );
       }
       if (row.history_purged > 0) {
         throw new B2RefusalError(
           `${historyPurgedMessage(service, row.history_purged)} Found in batch ${batchNumber}, ` +
             'so the purge ran during the backfill: nothing in this batch was assigned, earlier batches are committed.',
+          'history-purged',
         );
       }
       return row;
@@ -827,6 +864,7 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
       throw new B2RefusalError(
         `${service}: batch ${batchNumber} selected ${result.selected} rows and assigned ` +
           'none. Refusing to loop.',
+        'no-progress',
       );
     }
     if (result.selected === 0) break;
@@ -888,6 +926,7 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
         `head_mismatch=${verified.head_mismatch}. Sequences already assigned are committed. ` +
         'A relay publishing between finalisation and verification can cause this once: ' +
         're-run, and if it persists, stop and investigate (see the ADR-051 B2 runbook).',
+      'verification-mismatch',
     );
   }
 

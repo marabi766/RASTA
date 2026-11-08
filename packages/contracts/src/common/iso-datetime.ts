@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { unchangedCheck } from './pattern-refinement';
 
 /**
  * zod 3's ISO datetime rule, kept after the move to zod 4 (GHSA-mrhx-c7xc-m3w5).
@@ -16,6 +17,12 @@ import { z } from 'zod';
  * format with the pattern swapped, so the issue (`invalid_format`, format
  * `datetime`, zod 3's "Invalid datetime") and the OpenAPI `format: date-time`
  * are unchanged. Invalid numeric offsets and unparseable instants are refused.
+ *
+ * `format: date-time` alone (RFC 3339) admits offsets up to ±23:59 and, for the
+ * UTC-only form, any offset at all, so a client reading only the format would be
+ * refused with no published reason (FU-035). Each check is therefore registered
+ * with the zone it accepts ({@link publishedIsoDateTimeZone}), and the OpenAPI
+ * converter (`@rasta/nest-common`) publishes it as a `pattern` and a description.
  */
 
 const DATE_SOURCE = `((\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-((0[13578]|1[02])-(0[1-9]|[12]\\d|3[01])|(0[469]|11)-(0[1-9]|[12]\\d|30)|(02)-(0[1-9]|1\\d|2[0-8])))`;
@@ -37,6 +44,36 @@ export interface IsoDateTimeOptions {
   precision?: number | null;
   /** A schema message in place of the default. */
   message?: string;
+}
+
+/** The zone suffix a check accepts, as published beside `format: date-time` (FU-035). */
+export interface IsoDateTimeZone {
+  /** Unanchored at the start, so it reads with the format: the value must end like this. */
+  pattern: string;
+  description: string;
+}
+
+const OFFSET_SOURCE = `[+-](?:(?:0\\d|1[0-3]):?[0-5]\\d|14:?00)`;
+
+function zoneOf(options: IsoDateTimeOptions): IsoDateTimeZone {
+  const zone = options.offset ? `(?:Z|${OFFSET_SOURCE})` : 'Z';
+  const pattern = options.local ? `(?:${zone}|\\d)$` : `${zone}$`;
+  // Direction-neutral: the same schema describes request fields (refused with 400) and responses.
+  const accepted = options.offset
+    ? 'ends in `Z` or a numeric offset within ±14:00 (`+03:30`, `+0330`); an offset beyond ±14:00, which RFC 3339 allows, is invalid here'
+    : 'ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here';
+  return {
+    pattern,
+    description: `ISO 8601 instant that ${accepted}${options.local ? ', or carries no zone' : ''}.`,
+  };
+}
+
+const ZONES = new WeakMap<object, { zone: IsoDateTimeZone; unchanged: () => boolean }>();
+
+/** The zone an `isoDateTime()` check accepts, or `undefined` for any other check. */
+export function publishedIsoDateTimeZone(check: object): IsoDateTimeZone | undefined {
+  const registered = ZONES.get(check);
+  return registered?.unchanged() ? { ...registered.zone } : undefined;
 }
 
 /** The legacy datetime syntax, with numeric offsets bounded to ±14:00. */
@@ -69,5 +106,6 @@ export function isoDateTime(options: IsoDateTimeOptions = {}): z.core.$ZodCheck<
       continue: true,
     });
   };
+  ZONES.set(check, { zone: zoneOf(options), unchanged: unchangedCheck(check) });
   return check;
 }

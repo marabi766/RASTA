@@ -44,11 +44,7 @@ import {
 } from '@rasta/nest-common';
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
-import {
-  INTERNAL_TOKEN_API_KEY,
-  INTERNAL_TOKEN_SCHEME,
-  enrichOpenApiDocument,
-} from './openapi/document';
+import { enrichOpenApiDocument, publishOperationSecurity } from './openapi/document';
 
 async function bootstrap(): Promise<void> {
   // D-045: refuse to start as anything but the runtime role before Nest builds a
@@ -94,9 +90,10 @@ async function bootstrap(): Promise<void> {
         'x-correlation-id',
         'x-organization-id',
         'idempotency-key',
+        'idempotency-replay-deadline',
         'if-match',
       ],
-      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag'],
+      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag', 'retry-after'],
       maxAge: 600,
     });
   }
@@ -119,17 +116,19 @@ async function bootstrap(): Promise<void> {
         )
         .setVersion(env.SERVICE_VERSION)
         .addBearerAuth()
-        .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
         .build(),
     );
     SwaggerModule.setup(
       'docs',
       app,
-      enrichOpenApiDocument(document, {
-        // From the running configuration, so the contract states the retention
-        // this deployment honours rather than a number written beside it.
-        idempotencyTtlHours: env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS,
-      }),
+      publishOperationSecurity(
+        enrichOpenApiDocument(document, {
+          // From the running configuration, so the contract states the retention
+          // this deployment honours rather than a number written beside it.
+          idempotencyTtlHours: env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS,
+        }),
+        app,
+      ),
     );
   }
 

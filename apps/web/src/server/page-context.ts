@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 
 import { CONTEXT_PARAM, contextHref } from '@/lib/page-context';
+import { RELEASE_QUERY } from '@/lib/release-messages';
 
 import { contextTagFor } from './context-tag';
 import { webServerEnv } from './env';
@@ -29,6 +30,17 @@ import { actingOrganizationId } from './session-organization';
  */
 
 type Params = Record<string, string | string[] | undefined>;
+
+/** What `pageParams` hands a page: the query without the context tag and without the release outcome. */
+export type PageParams = Readonly<Params>;
+
+/** The `release` token of each handed-over query, reachable by `releaseTokenOf` and nothing else. */
+const RELEASE_TOKENS = new WeakMap<object, unknown>();
+
+/** `release-feedback.ts`'s door to the signed outcome; a query it did not hand over has none. */
+export function releaseTokenOf(params: PageParams): unknown {
+  return RELEASE_TOKENS.get(params);
+}
 
 /** The tag of the organization this session acts for. Throws for one that cannot be told. */
 export function pageContext(session: WebSession): string {
@@ -61,10 +73,20 @@ function sameTag(received: unknown, expected: string): boolean {
 export async function pageParams(
   session: WebSession,
   searchParams: Promise<Params> | Params,
-): Promise<Params> {
-  const query = await searchParams;
+): Promise<PageParams> {
+  return handOver(session, await searchParams);
+}
+
+/** `pageParams` for a query already awaited. */
+export function handOver(session: WebSession, query: Params): PageParams {
   if (!sameTag(query[CONTEXT_PARAM], pageContext(session))) return {};
-  return Object.fromEntries(Object.entries(query).filter(([name]) => name !== CONTEXT_PARAM));
+  const params: PageParams = Object.fromEntries(
+    Object.entries(query).filter(([name]) => name !== CONTEXT_PARAM && name !== RELEASE_QUERY),
+  );
+  // The release outcome is signed and read by one function; to a page the key does not exist.
+  const token = query[RELEASE_QUERY];
+  RELEASE_TOKENS.set(params, Array.isArray(token) ? token[0] : token);
+  return params;
 }
 
 /** `path` with `params`, bound to the organization this session acts for. */

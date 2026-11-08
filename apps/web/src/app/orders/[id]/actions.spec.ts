@@ -7,7 +7,7 @@ import type { WebSession } from '@/server/session';
 
 import { RECEIPT_NOTE_REFUSAL } from '@/server/orders';
 
-import { IDLE_ORDER_COMMAND_FORM } from './form-state';
+import { IDLE_ORDER_COMMAND_FORM, type OrderCommandFormState } from './form-state';
 import { actingAccessToken } from '@/test/session-token';
 import { landing } from '@/test/landing';
 
@@ -53,6 +53,8 @@ const actions =
   require('./actions') as typeof import('./actions');
 const submit = (form: FormData) =>
   actions.submitOrderCommand('ORD_1', IDLE_ORDER_COMMAND_FORM, form);
+const submitWith = (previous: OrderCommandFormState, form: FormData) =>
+  actions.submitOrderCommand('ORD_1', previous, form);
 
 const SESSION = {
   subject: 'USR_1',
@@ -306,10 +308,34 @@ describe('what the service answers', () => {
       await expect(submit(formData(RECEIPT))).resolves.toEqual({
         kind: 'UNCONFIRMED',
         correlationId: 'c',
+        submissionId: expect.any(String),
       });
       expect(redirect).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps a retry of an unconfirmed send UNCONFIRMED when the retry is refused with a 429 (FU-173)', async () => {
+    // The first answer was lost; the same form again meets the gateway's rate limit,
+    // which says nothing about the first send.
+    issueOrderCommand.mockReset();
+    issueOrderCommand
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData(RECEIPT);
+    const first = await submit(form);
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+    });
+    expect(await submitWith(first, form)).toEqual(first);
+    expect(issueOrderCommand).toHaveBeenCalledTimes(2);
+  });
 
   it('never puts anything token-shaped in the state it returns', async () => {
     issueOrderCommand.mockResolvedValue({

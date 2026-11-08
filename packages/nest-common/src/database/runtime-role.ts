@@ -44,7 +44,7 @@
  */
 
 import { clientFailureCode } from './client-failure';
-import { DemoSeedRefusedError } from '@rasta/config';
+import { DemoSeedRefusedError, markRefusal } from '@rasta/config';
 
 /** The one raw-SQL method every generated Prisma client has. */
 export interface RuntimeRoleQueryClient {
@@ -69,6 +69,8 @@ export interface ConnectedRoleFacts {
   createOnSchemas: string[];
   /** Roles it is a member of — SET or INHERIT, either — that are owners or superuser-capable. */
   memberOf: string[];
+  /** This session's `TimeZone`: anything but `UTC` refuses the start (FU-188). */
+  timeZone: string;
 }
 
 /** Read by {@link assertRuntimeRole}; exported so a live test runs exactly this. */
@@ -81,6 +83,7 @@ export const CONNECTED_ROLE_SQL = `
   SELECT current_user::text AS role,
          session_user::text AS "sessionRole",
          current_database()::text AS database,
+         current_setting('TimeZone') AS "timeZone",
          r.rolsuper AS superuser,
          r.rolcreatedb AS "createDb",
          r.rolcreaterole AS "createRole",
@@ -117,6 +120,9 @@ export const CONNECTED_ROLE_SQL = `
 /** Every reason the connected role may not run a service; empty when it may. */
 export function connectedRoleProblems(facts: ConnectedRoleFacts): string[] {
   const problems: string[] = [];
+  if (facts.timeZone !== 'UTC') {
+    problems.push(`has a session in time zone ${facts.timeZone}, not UTC (docs/11 § 11.2)`);
+  }
   if (facts.superuser) problems.push('is a superuser');
   for (const name of new Set([facts.role, facts.sessionRole])) {
     if (/_migrator$/.test(name)) problems.push(`is a migrator role (${name})`);
@@ -157,6 +163,7 @@ export class RuntimeRoleRefusedError extends Error {
         '(docs/runbooks/db-role-split.md, D-045).',
     );
     this.name = 'RuntimeRoleRefusedError';
+    markRefusal(this, 'runtime-role');
   }
 }
 
@@ -204,6 +211,7 @@ export class RuntimeRoleUnverifiedError extends Error {
       `${runtimeVariable}: the connected role could not be checked (code ${code}); ` +
         "the database client's own error is withheld",
     );
+    markRefusal(this, 'runtime-role-unverified');
   }
 }
 

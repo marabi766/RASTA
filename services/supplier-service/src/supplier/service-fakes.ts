@@ -218,10 +218,12 @@ export class FakeRepository {
     capability?: SupplierCapability;
     qualifiedFor?: SupplierCapability;
     status?: SupplierStatusName;
+    organizationIds?: readonly string[];
     cursor?: string;
     limit: number;
   }) {
     const status = filter.qualifiedFor ? 'ACTIVE' : filter.status;
+    const organizations = filter.organizationIds ? new Set(filter.organizationIds) : undefined;
 
     return this.suppliers
       .filter((row) => (status ? row.status === status : true))
@@ -237,6 +239,7 @@ export class FakeRepository {
             )
           : true,
       )
+      .filter((row) => (organizations ? organizations.has(row.organizationId) : true))
       .filter((row) => (filter.cursor ? row.id > filter.cursor : true))
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .slice(0, filter.limit + 1);

@@ -1,7 +1,11 @@
 import { Body, Controller, Get, Headers, HttpCode, Post } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import {
   recordAggregationSettingSchema,
   type AggregationSettingView,
@@ -67,9 +71,9 @@ export class AggregationSettingController {
   })
   async record(
     @Body(zodPipe(recordAggregationSettingSchema)) dto: RecordAggregationSettingDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<AggregationSettingView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<AggregationSettingView>(
       RECORD_SETTING_ENDPOINT,
       key,

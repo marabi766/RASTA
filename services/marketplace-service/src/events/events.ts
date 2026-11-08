@@ -292,6 +292,22 @@ export const orderDisputeResolvedPayload = z.object({
   buyerOrganizationId: z.string(),
   supplierOrganizationId: z.string(),
   outcome: z.enum(['SETTLE', 'REFUND']),
+  /**
+   * Where the decision left the order (D-083): REFUND -> CANCELLING; SETTLE ->
+   * the status the dispute found it in — RECEIPT_CONFIRMED only for a dispute
+   * raised after the buyer confirmed receipt. A SETTLE is not a receipt.
+   * Additive: every decision since D-083 carries it, and an event written
+   * before it — when SETTLE always meant RECEIPT_CONFIRMED — does not.
+   */
+  orderStatus: z
+    .enum([
+      'FUNDS_HELD',
+      'CONFIRMED',
+      'AWAITING_RECEIPT_CONFIRMATION',
+      'RECEIPT_CONFIRMED',
+      'CANCELLING',
+    ])
+    .optional(),
   responsibility: responsibilityAttribution,
   resolvedBy: z.string(),
   resolvedAt: isoTimestamp,

@@ -8,6 +8,7 @@ import {
   errorEnvelopeProblems,
   httpErrorBodyProblems,
   PROBE_TRACEPARENT,
+  routeErrorProblems,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import request from 'supertest';
@@ -15,6 +16,8 @@ import { AppModule } from '../app.module';
 import {
   DocumentationModule,
   buildDocumentationApp,
+  organizationRouteDocument,
+  ORGANIZATION_PROBE_EXCEPTIONS,
   buildOrganizationOpenApiDocument,
   buildScopedOpenApiDocument,
   formatDocument,
@@ -26,6 +29,19 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 describe('organization-service published errors (D-121)', () => {
+  it.each(['', '0x10', '1e', ' 16 '])(
+    'FU-131 HTTP refuses non-decimal latitude %j',
+    async (value) => {
+      const response = await request(app.getHttpServer())
+        .get('/v1/organizations/nearby')
+        .query({ latitude: value, longitude: '0' });
+      expect(response.status).toBe(400);
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: 'latitude' })]),
+      );
+    },
+  );
+
   let app: INestApplication;
   let document: OpenAPIObject;
 
@@ -51,6 +67,54 @@ describe('organization-service published errors (D-121)', () => {
     await app.close();
   });
 
+  it('FU-160 accepts JS exponent serialization for both published coordinates over HTTP', async () => {
+    const parameters = document.paths['/v1/organizations/nearby']?.get?.parameters as {
+      name: string;
+      schema: { type: string };
+    }[];
+    const service = app.get(OrganizationService);
+    const nearby = jest.fn().mockResolvedValue([]);
+    service.nearby = nearby;
+    try {
+      for (const name of ['latitude', 'longitude']) {
+        nearby.mockClear();
+        expect(parameters.find((parameter) => parameter.name === name)?.schema.type).toBe('number');
+        await request(app.getHttpServer())
+          .get('/v1/organizations/nearby')
+          .query({ latitude: '0', longitude: '0', [name]: String(0.0000001) })
+          .expect(200);
+        expect(nearby).toHaveBeenLastCalledWith(expect.objectContaining({ [name]: 0.0000001 }));
+        await request(app.getHttpServer())
+          .get('/v1/organizations/nearby')
+          .query({ latitude: '0', longitude: '0', [name]: '1e-400' })
+          .expect(400);
+        expect(nearby).toHaveBeenCalledTimes(1);
+        await request(app.getHttpServer())
+          .get('/v1/organizations/nearby')
+          .query({ latitude: '0', longitude: '0', [name]: '1e9999' })
+          .expect(400);
+        expect(nearby).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      delete (service as Partial<OrganizationService>).nearby;
+    }
+  });
+
+  it('holds the routes the app really serves, and their real error answers, against the document (FU-031)', async () => {
+    const send = async (method: string, url: string) => {
+      const verb = method.toLowerCase() as 'get' | 'post' | 'put' | 'patch' | 'delete';
+      const response = await request(app.getHttpServer())[verb](url);
+      return { status: response.status, body: response.body as unknown };
+    };
+    expect(
+      await routeErrorProblems(app, document, {
+        declared: organizationRouteDocument(app),
+        probeExceptions: ORGANIZATION_PROBE_EXCEPTIONS,
+        send,
+      }),
+    ).toEqual([]);
+  });
+
   it('documents every runtime controller (including excluded controllers)', () => {
     expect(Reflect.getMetadata('controllers', DocumentationModule)).toEqual(
       Reflect.getMetadata('controllers', AppModule),
@@ -68,20 +132,25 @@ describe('organization-service published errors (D-121)', () => {
     const response = await request(app.getHttpServer()).get('/health/startup').expect(503);
     startupBodies.push(response.body);
     expect(
-      probeExceptionProblems(document, 'organization-service', [
-        {
-          service: 'organization-service',
-          path: '/health/ready',
-          status: 503,
-          bodies: readyBodies,
-        },
-        {
-          service: 'organization-service',
-          path: '/health/startup',
-          status: 503,
-          bodies: startupBodies,
-        },
-      ]),
+      probeExceptionProblems(
+        document,
+        'organization-service',
+        [
+          {
+            service: 'organization-service',
+            path: '/health/ready',
+            status: 503,
+            bodies: readyBodies,
+          },
+          {
+            service: 'organization-service',
+            path: '/health/startup',
+            status: 503,
+            bodies: startupBodies,
+          },
+        ],
+        { declared: organizationRouteDocument(app) },
+      ),
     ).toEqual([]);
   });
 

@@ -22,7 +22,7 @@ import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/serve
 import type { WebSession } from '@/server/session';
 import { withForgedMac } from '@/test/forged-token';
 
-import { IDLE_DOCUMENT_FORM } from './document-form-state';
+import { IDLE_DOCUMENT_FORM, type DocumentFormState } from './document-form-state';
 import { actingAccessToken } from '@/test/session-token';
 
 /**
@@ -461,6 +461,27 @@ describe('a resend is not a second upload', () => {
     expect(state).toMatchObject({ kind: 'INVALID', resume: token });
     nothingSent();
   });
+
+  it('keeps an unconfirmed attach UNCONFIRMED, with its token, when the resend is refused (FU-173)', async () => {
+    attachAssetDocument
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const first = (await submit(formData(VALID, { submission }))) as DocumentFormState & {
+      resume: string;
+    };
+    expect(first).toMatchObject({ kind: 'UNCONFIRMED', correlationId: 'corr-first' });
+    const resend = formData(VALID, { submission, uploaded: first.resume, file: null });
+    expect(await actions.submitAttachDocument(ASSET_ID, first, resend)).toEqual(first);
+    // Refused before the post is even read (the session ended): the token the form held stays.
+    currentSession.mockResolvedValueOnce(null);
+    expect(await actions.submitAttachDocument(ASSET_ID, first, resend)).toEqual(first);
+    expect(uploadDocument).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('a resend must still be the submission its token vouches for (Codex r1 on #225)', () => {
@@ -628,6 +649,65 @@ describe('a lost answer is not a dead end, and never a second reference (Codex r
     expect(key).not.toBe(first);
   });
 
+  it('keeps an unconfirmed attach after a fresh start under the fresh key, with the token bound to it (PR-880 r1 F1)', async () => {
+    // Executed on a1bd6bac: the token was bound to the fresh key B, the state named
+    // no key, the form rendered the page's key A, and the token did not open for it.
+    const pageKey = mintSubmissionId(SESSION);
+    uploadDocument
+      .mockResolvedValueOnce({
+        kind: 'REGISTERED',
+        documentId: 'DOC_2',
+        fingerprint: PDF_FINGERPRINT,
+      })
+      .mockResolvedValueOnce({
+        kind: 'REGISTERED',
+        documentId: 'DOC_3',
+        fingerprint: PDF_FINGERPRINT,
+      });
+    attachAssetDocument
+      .mockResolvedValueOnce({
+        kind: 'INVALID',
+        fieldErrors: {},
+        message: ATTACH_KEY_REUSED_MESSAGE,
+        correlationId: 'c-409',
+      })
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-b' });
+    const fresh = (await submit(formData(VALID, { submission: pageKey }))) as DocumentFormState & {
+      submissionId: string;
+    };
+    const keyB = fresh.submissionId;
+    expect(keyB).not.toBe(pageKey);
+
+    const unconfirmed = (await actions.submitAttachDocument(
+      ASSET_ID,
+      fresh,
+      formData(VALID, { submission: keyB }),
+    )) as DocumentFormState & { resume: string; submissionId: string };
+    expect(unconfirmed).toMatchObject({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-b',
+      submissionId: keyB,
+      values: expect.objectContaining({ kind: VALID.kind, title: VALID.title }),
+    });
+    expect(
+      openUploadedDocument(SESSION, unconfirmed.resume, { assetId: ASSET_ID, submissionId: keyB }),
+    ).not.toBeNull();
+
+    // The page's key with B's token is not B's retry: nothing is sent.
+    const resend = (submission: string) =>
+      formData(VALID, { submission, uploaded: unconfirmed.resume, file: null });
+    expect(await actions.submitAttachDocument(ASSET_ID, unconfirmed, resend(pageKey))).toEqual(
+      unconfirmed,
+    );
+    expect(attachAssetDocument).toHaveBeenCalledTimes(2);
+
+    // Under the key the state names, the token opens: the attach is resent, the file is not.
+    await redirectedTo(actions.submitAttachDocument(ASSET_ID, unconfirmed, resend(keyB)));
+    expect(uploadDocument).toHaveBeenCalledTimes(2);
+    const [, , documentId, , key] = attachAssetDocument.mock.calls.at(-1)!;
+    expect([documentId, key]).toEqual(['DOC_3', keyB]);
+  });
+
   it('does not treat any other refusal of the attach as a conflict: the same submission id stays', async () => {
     const submission = mintSubmissionId(SESSION);
     attachAssetDocument.mockResolvedValueOnce({
@@ -667,7 +747,13 @@ describe('what the services answered', () => {
     ],
     [
       { kind: 'UNCONFIRMED', correlationId: 'c3' },
-      { kind: 'UNCONFIRMED', correlationId: 'c3', resume: null },
+      {
+        kind: 'UNCONFIRMED',
+        correlationId: 'c3',
+        resume: null,
+        submissionId: expect.any(String),
+        values: expect.any(Object),
+      },
     ],
   ])('says %j of the upload as %j, and attaches nothing', async (outcome, expected) => {
     uploadDocument.mockResolvedValue(outcome);

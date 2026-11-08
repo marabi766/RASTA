@@ -13,10 +13,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
+import { authoredFiles } from './authored-source-inventory.cjs';
+
+// Lists authored files only: generated output (src/generated) may be regenerating meanwhile.
+const authoredUnder = (url) => {
+  const dir = fileURLToPath(url);
+  return authoredFiles(dir).map((path) => relative(dir, path));
+};
 import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./marketplace-saga-drain-check.mjs', import.meta.url));
@@ -125,11 +141,34 @@ function drained() {
   };
 }
 
+// FU-221: the stand-in `psql`, first on PATH, records its argv, its stdin (the SQL) and
+// its whole environment, and answers as told. It finds both files beside its own
+// directory, not through the environment: the gate hands psql an allowlisted one (#947).
+const FAKE_PSQL = `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from 'node:fs';
+const answer = JSON.parse(readFileSync(new URL('../psql-answer.json', import.meta.url), 'utf8'));
+const { PGPASSWORD = null, PGOPTIONS = null } = process.env;
+const env = Object.fromEntries(Object.entries(process.env).toSorted());
+const call = { args: process.argv.slice(2), sql: readFileSync(0, 'utf8'), PGPASSWORD, PGOPTIONS, env };
+appendFileSync(new URL('../psql-calls.jsonl', import.meta.url), JSON.stringify(call) + '\\n');
+if (answer.stderr) process.stderr.write(answer.stderr);
+if (answer.stdout !== undefined) {
+  process.stdout.write(typeof answer.stdout === 'string' ? answer.stdout : JSON.stringify(answer.stdout) + '\\n');
+}
+process.exit(answer.status ?? 0);
+`;
+/** psql's answer with no record open: `json_agg` of nothing, coalesced. */
+const openRecords = (open = [], rowSecurity = false, recovery = false, where = {}) => ({
+  stdout: { database: 'rasta_marketplace', port: 5432, ...where, recovery, rowSecurity, open },
+});
+const DATABASE = 'postgresql://rasta_marketplace:hunter2@db.invalid:5432/rasta_marketplace';
+
 const SETTINGS = {
   TEMPORAL_ADDRESS: 'temporal.internal:7233',
   TEMPORAL_NAMESPACE: 'rasta-prod',
   MARKETPLACE_TEMPORAL_TASK_QUEUE: 'rasta-order',
   MARKETPLACE_SAGA_STOP_TIME: STOP_TIME,
+  DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=public`,
 };
 
 const TARGET_NAME = '@rasta/marketplace-service';
@@ -143,7 +182,16 @@ const legacyTarget = JSON.parse(
 
 function run(
   scenario,
-  { settings = SETTINGS, cli, target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 } } = {},
+  {
+    settings = SETTINGS,
+    cli,
+    target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 },
+    // The release stopped: by default one below the rollback floor, so that every other
+    // test asks only what the histories require.
+    stopped = { name: TARGET_NAME, marketplaceSagaProtocol: 0 },
+    args = [],
+    psql = openRecords(),
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'saga-drain-'));
   try {
@@ -153,21 +201,44 @@ function run(
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify(scenario));
     writeFileSync(join(dir, 'calls.jsonl'), '');
     writeFileSync(join(dir, 'target.json'), JSON.stringify(target));
+    writeFileSync(join(dir, 'stopped.json'), JSON.stringify(stopped));
+    // Only node and the stand-in psql (`null`: none): a host's psql is never reached.
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, 'node'));
+    if (psql !== null) {
+      writeFileSync(join(bin, 'psql'), FAKE_PSQL);
+      chmodSync(join(bin, 'psql'), 0o755);
+    }
+    writeFileSync(join(dir, 'psql-answer.json'), JSON.stringify(psql ?? {}));
+    writeFileSync(join(dir, 'psql-calls.jsonl'), '');
     const env = {
       MARKETPLACE_TARGET_PACKAGE_JSON: join(dir, 'target.json'),
-      PATH: process.env.PATH,
+      MARKETPLACE_STOPPED_PACKAGE_JSON: join(dir, 'stopped.json'),
+      PATH: bin,
       ...settings,
       TEMPORAL_CLI: cli ?? fake,
     };
     env.FAKE_TEMPORAL_SCENARIO = join(dir, 'scenario.json');
     env.FAKE_TEMPORAL_CALLS = join(dir, 'calls.jsonl');
-    const result = spawnSync(process.execPath, [SCRIPT], { env, encoding: 'utf8' });
+    const result = spawnSync(process.execPath, [SCRIPT, ...args], { env, encoding: 'utf8' });
     const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-    return { status: result.status, stdout: result.stdout, stderr: result.stderr, calls };
+    const psqlCalls = readFileSync(join(dir, 'psql-calls.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      calls,
+      psqlCalls,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -232,8 +303,33 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
     ['workflow', 'list', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
     ['workflow', 'count', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
     ['workflow', 'count', ...common, '--query', QUERY, '--output', 'json'],
+    // After the database read (#947 r1 L1).
+    ['task-queue', 'describe', ...common, '--task-queue', 'rasta-order', '--output', 'json'],
   ]);
 });
+
+// #673 r1 F2: the gate takes its settings from the environment only. An
+// argument — even one naming another namespace — is refused before any
+// `temporal` call, so it can never report OK for a namespace it did not check.
+for (const args of [
+  ['--namespace', 'requested-namespace'],
+  ['--task-queue', SENTINELS[1]],
+  [SENTINELS[0]],
+]) {
+  test(`refuses an argument (${args[0]}) on a drained queue, asking Temporal nothing`, () => {
+    const { status, stdout, stderr, calls } = run(drained(), { args });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.equal(
+      stderr,
+      'marketplace saga drain check: cannot verify — deployment blocked: ' +
+        'command refused (code usage); diagnostics withheld; ' +
+        'prior work may have committed — reconcile before retrying\n',
+    );
+    assert.deepEqual(calls, []);
+    assertNoSentinel(stdout + stderr, args[0]);
+  });
+}
 
 // The predecessor is visible; its current successor need not be indexed yet.
 const predecessor = (id, runId = `previous-${id}`) => ({
@@ -703,6 +799,1103 @@ for (const [name, recorded] of Object.entries({
   });
 }
 
+// ---- Recorded activity results are evidence too (PR-796 r2 F5) ------------------
+//
+// A worker that recorded a final answer and stopped before the workflow's next task
+// leaves a history without the marker. An older workflow reads that answer as the
+// call's own effect: `markCancelled` on a paid-out order.
+const encoded = (value) =>
+  value === undefined ? { metadata: { encoding: 'YmluYXJ5L251bGw=' } } : payload(value);
+/** A history of one scheduled activity and its recorded result, as the CLI prints it. */
+const withResult = (activity, result = { payloads: [encoded(undefined)] }) => {
+  const { events } = history();
+  return {
+    events: [
+      ...events,
+      {
+        eventId: '2',
+        eventType: 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED',
+        activityTaskScheduledEventAttributes: { activityType: { name: activity } },
+      },
+      {
+        eventId: '3',
+        eventType: 'EVENT_TYPE_ACTIVITY_TASK_COMPLETED',
+        activityTaskCompletedEventAttributes: { scheduledEventId: '2', result },
+      },
+    ],
+  };
+};
+const showing = (recorded) => {
+  const scenario = drained();
+  scenario['workflow show order-A'].stdout = recorded;
+  scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
+    recorded.events.length,
+  );
+  return scenario;
+};
+const atProtocol = (marketplaceSagaProtocol) => ({
+  target: { name: TARGET_NAME, marketplaceSagaProtocol },
+});
+const FINAL_ANSWER = { final: true, status: 'SETTLED', funds: 'PAID_OUT' };
+const LATEST_KNOWN = 7;
+const producers = {
+  compensate: [undefined],
+  resolveObligationDispute: [undefined],
+  disputeObligation: [undefined, null, 'ECON_DISPUTE'],
+  authoriseSettlement: [
+    undefined,
+    { disputed: true, reason: 'broken' },
+    { disputed: true, reason: 'broken', economicDisputeId: null },
+    { disputed: true, reason: 'broken', economicDisputeId: 'ECON_DISPUTE' },
+  ],
+};
+
+test('the review of #796 r2: a settled refund recorded just before the workers stopped', () => {
+  // The captured history cut right after `compensate` answered, before its marker.
+  const captured = JSON.parse(
+    readFileSync(
+      new URL(
+        '../services/marketplace-service/src/temporal/__fixtures__/order-saga-fu117r2-settled-reconciliation.history.json',
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const events = captured.events.slice(0, 15);
+  assert.equal(events[12].activityTaskScheduledEventAttributes.activityType.name, 'compensate');
+  assert.deepEqual(
+    JSON.parse(
+      Buffer.from(
+        events[14].activityTaskCompletedEventAttributes.result.payloads[0].data,
+        'base64',
+      ).toString(),
+    ),
+    FINAL_ANSWER,
+  );
+  events[0].workflowExecutionStartedEventAttributes.taskQueue.name = 'rasta-order';
+  const scenario = showing({ events });
+  const refused = run(scenario, atProtocol(5));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /requires saga protocol 6; incompatible target build/);
+  assert.equal(run(scenario, atProtocol(6)).status, 0);
+});
+
+for (const [activity, earlier] of Object.entries(producers)) {
+  test(`${activity}: a final answer without the marker needs protocol 6`, () => {
+    const scenario = showing(withResult(activity, { payloads: [payload(FINAL_ANSWER)] }));
+    for (const target of [0, 5]) {
+      const refused = run(scenario, atProtocol(target));
+      assert.equal(refused.status, 1, `target ${target}`);
+      assert.match(refused.stderr, /requires saga protocol 6; incompatible target build/);
+    }
+    assert.equal(run(scenario, atProtocol(6)).status, 0);
+  });
+
+  for (const value of earlier) {
+    test(`${activity}: ${JSON.stringify(value)} needs nothing of its own`, () => {
+      const scenario = showing(withResult(activity, { payloads: [encoded(value)] }));
+      assert.equal(run(scenario, atProtocol(0)).status, 0);
+    });
+  }
+
+  for (const unknown of [
+    { final: false, status: 'SETTLED', funds: 'PAID_OUT' },
+    { final: true, status: 'SETTLED' },
+    { final: true, status: 7, funds: 'PAID_OUT' },
+    { final: true, status: 'SETTLED', funds: 7 },
+    { ...FINAL_ANSWER, extra: 1 },
+    { something: 'else' },
+    [],
+    false,
+    7,
+    ...(activity === 'disputeObligation' ? [] : ['a words answer']),
+    ...(activity === 'authoriseSettlement' ? [] : [{ disputed: true, reason: 'broken' }]),
+    { disputed: true, reason: 'broken', extra: 1 },
+    { disputed: true },
+  ]) {
+    test(`${activity}: an unknown result ${JSON.stringify(unknown)} blocks every target`, () => {
+      const refused = run(
+        showing(withResult(activity, { payloads: [payload(unknown)] })),
+        atProtocol(LATEST_KNOWN),
+      );
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /unknown activity result/);
+    });
+  }
+}
+
+for (const [name, recorded, words] of [
+  ['an activity it does not list', withResult('newActivity'), /unknown activity result/],
+  [
+    'a final answer from a call that never gives one',
+    withResult('settle', { payloads: [payload(FINAL_ANSWER)] }),
+    /unknown activity result/,
+  ],
+  ['two results', withResult('compensate', { payloads: [payload(1), payload(2)] }), /unreadable/],
+  [
+    'a result in another encoding',
+    withResult('compensate', { payloads: [{ metadata: { encoding: 'YmluYXJ5L3BsYWlu' } }] }),
+    /cannot be read/,
+  ],
+  [
+    'a null encoding that carries data',
+    withResult('compensate', {
+      payloads: [{ metadata: { encoding: 'YmluYXJ5L251bGw=' }, data: 'e30=' }],
+    }),
+    /cannot be read/,
+  ],
+  [
+    'a result of no scheduling',
+    (() => {
+      const orphan = withResult('compensate');
+      orphan.events[2].activityTaskCompletedEventAttributes.scheduledEventId = '9';
+      return orphan;
+    })(),
+    /without its scheduling/,
+  ],
+  [
+    'result attributes on another event type',
+    (() => {
+      const odd = withResult('compensate');
+      odd.events[2].eventType = 'EVENT_TYPE_TIMER_FIRED';
+      return odd;
+    })(),
+    /without its scheduling/,
+  ],
+]) {
+  test(`recorded result: ${name} blocks even the latest target`, () => {
+    const refused = run(showing(recorded), atProtocol(LATEST_KNOWN));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, words);
+  });
+}
+
+// ---- A fenced authorisation, before its marker (#895 r1 F1) ----------------------
+//
+// An authorisation completed `{fenced: true, ...}`, and the workers stopped before the
+// next workflow task recorded `authorisation-order-fence-v1`. A build below the fence
+// took that answer as "authorised": the dispute resolved SETTLE, `markSettling` passed,
+// economic-service still held an unauthorised obligation, and the saga ended
+// SETTLEMENT_EXHAUSTED with the funds held. First attempts, retries and later rounds all
+// reach the workflow through this one recorded result.
+const FENCE_PROTOCOL = 7;
+const fenced = (inDoubt = false, status = 'DISPUTED') => ({ fenced: true, status, inDoubt });
+const answered = (value) => ({ payloads: [encoded(value)] });
+
+/** A real captured history cut right after its last authorisation, answering `value`. */
+function cutAtAuthorisation(name, value, attempt) {
+  const { events } = JSON.parse(
+    readFileSync(
+      new URL(
+        `../services/marketplace-service/src/temporal/__fixtures__/order-saga-${name}.history.json`,
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const last = events.findLastIndex(
+    ({ activityTaskCompletedEventAttributes: done }) =>
+      done &&
+      events[Number(done.scheduledEventId) - 1].activityTaskScheduledEventAttributes.activityType
+        .name === 'authoriseSettlement',
+  );
+  assert.ok(last > 0, `${name} has no authorisation`);
+  const done = events[last].activityTaskCompletedEventAttributes;
+  done.result = answered(value);
+  if (attempt) {
+    events[Number(done.startedEventId) - 1].activityTaskStartedEventAttributes.attempt = attempt;
+  }
+  events[0].workflowExecutionStartedEventAttributes.taskQueue.name = 'rasta-order';
+  return { events: events.slice(0, last + 1) };
+}
+
+for (const [name, recorded] of [
+  ['a first attempt', cutAtAuthorisation('pre-d083-settled', fenced())],
+  ['a retry', cutAtAuthorisation('pre-d083-resumed', fenced(true), 3)],
+  ['a later round', cutAtAuthorisation('fu103-authorise-wait', fenced(true))],
+  [
+    'a resumed run',
+    (() => {
+      const unconfirmedCall = { operation: 'authoriseSettlement', rounds: 2, movedOn: true };
+      const { events } = withResult('authoriseSettlement', answered(fenced(true)));
+      const [start] = history({ resume: { activitySequence: 7, unconfirmedCall } }).events;
+      return { events: [start, ...events.slice(1)] };
+    })(),
+  ],
+]) {
+  test(`#895 r1 F1: a fenced answer to ${name}, no marker yet, refuses below its protocol`, () => {
+    const scenario = showing(recorded);
+    const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+    assert.equal(refused.status, 1);
+    assert.doesNotMatch(refused.stdout, /OK/);
+    assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+    assert.equal(run(scenario, atProtocol(4)).status, 1);
+    assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+  });
+}
+
+test('#895 r1 F1: the fenced answer and its marker together refuse, as the marker alone does', () => {
+  const { events } = withResult('authoriseSettlement', answered(fenced()));
+  const marker = history({}, [{ id: 'authorisation-order-fence-v1', deprecated: false }]).events[1];
+  const scenario = showing({ events: [...events, { ...marker, eventId: '4' }] });
+  const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+  assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+});
+
+test('#895 r1 F1: the authorised answer of a real protocol-4 history still passes protocol 4', () => {
+  const scenario = showing(cutAtAuthorisation('fu103-authorise-wait', undefined));
+  assert.equal(run(scenario, atProtocol(4)).status, 0);
+  assert.match(run(scenario, atProtocol(3)).stderr, /requires saga protocol 4; incompatible/);
+});
+
+for (const [name, result] of [
+  ['an encrypted payload', { payloads: [{ metadata: { encoding: 'YmluYXJ5L2VuY3J5cHRlZA==' } }] }],
+  ['no encoding', { payloads: [{ data: 'e30=' }] }],
+  ['data that is not base64', { payloads: [{ ...payload(0), data: '{"fenced":true}' }] }],
+  ['data that is not JSON', { payloads: [{ ...payload(0), data: 'e2ZlbmNlZA==' }] }],
+  ['data that is not UTF-8', { payloads: [{ ...payload(0), data: 'Iv8i' }] }],
+]) {
+  test(`#895 r1 F1: an authorisation recorded with ${name} refuses even the latest target`, () => {
+    const refused = run(showing(withResult('authoriseSettlement', result)), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /compatibility payload cannot be read/);
+    assertNoSentinel(refused.stdout + refused.stderr);
+  });
+}
+
+// A protocol-6 worker reads every one of these as "authorised".
+for (const value of [
+  { fenced: true },
+  { fenced: true, status: 'DISPUTED' },
+  { fenced: true, inDoubt: false },
+  { fenced: false, status: 'DISPUTED', inDoubt: false },
+  { fenced: 'true', status: 'DISPUTED', inDoubt: false },
+  { fenced: true, status: '', inDoubt: false },
+  { fenced: true, status: 7, inDoubt: false },
+  { fenced: true, status: 'DISPUTED', inDoubt: 'no' },
+  { ...fenced(), another: 1 },
+  { ...fenced(), disputed: true, reason: 'broken' },
+  [fenced()],
+]) {
+  test(`#895 r1 F1: an authorisation answering ${JSON.stringify(value)} refuses even the latest target`, () => {
+    const refused = run(
+      showing(withResult('authoriseSettlement', answered(value))),
+      atProtocol(LATEST),
+    );
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+for (const activity of ['settle', 'markSettling', 'readOrder', 'compensate', 'disputeObligation']) {
+  test(`#895 r1 F1: a fenced answer from ${activity}, which never gives one, refuses`, () => {
+    const refused = run(showing(withResult(activity, answered(fenced()))), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+test('the authorisation answers are the ones the gate reads', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const file = ts.createSourceFile('activities.ts', source, ts.ScriptTarget.Latest, true);
+  const declared = (name) => file.statements.find((node) => node.name?.text === name);
+  // A new answer fails here until it has a protocol and a shape in `resultProtocol`.
+  assert.equal(
+    declared('AuthorisationResult').type.getText().replace(/\s+/g, ' ').trim(),
+    'DisputedObligation | ObligationFinal | AuthorisationFenced | undefined',
+  );
+  const fields = (name) => declared(name).members.map((member) => member.name.text);
+  assert.deepEqual(fields('AuthorisationFenced').toSorted(), ['fenced', 'inDoubt', 'status']);
+  assert.deepEqual(fields('DisputedObligation').toSorted(), [
+    'disputed',
+    'economicDisputeId',
+    'reason',
+  ]);
+});
+
+test('recorded result: a completed event with no result is not taken for a void one', () => {
+  const recorded = withResult('compensate');
+  delete recorded.events[2].activityTaskCompletedEventAttributes.result;
+  const refused = run(showing(recorded), atProtocol(LATEST_KNOWN));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /unreadable activity result/);
+});
+
+test('the gate lists every activity the saga can schedule', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const names = [];
+  const file = ts.createSourceFile('activities.ts', source, ts.ScriptTarget.Latest, true);
+  const visit = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'createActivities') {
+      const returned = node.body.statements.find(ts.isReturnStatement);
+      for (const property of returned.expression.properties) names.push(property.name.text);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(names.length >= 18, names.join());
+  // Absent from the gate's table, a call's result refuses every target.
+  const events = [history().events[0]];
+  for (const name of names) {
+    const [, scheduled, completed] = withResult(name).events;
+    const id = events.length + 1;
+    events.push(
+      { ...scheduled, eventId: String(id) },
+      {
+        ...completed,
+        eventId: String(id + 1),
+        activityTaskCompletedEventAttributes: {
+          ...completed.activityTaskCompletedEventAttributes,
+          scheduledEventId: String(id),
+        },
+      },
+    );
+  }
+  const answered = run(showing({ events }), atProtocol(0));
+  assert.equal(answered.status, 0, answered.stderr);
+});
+
+// ---- Every marker the saga records is known to the gate (FU-079) --------------
+//
+// What a target must declare to run a history carrying each patch id. Adding a
+// `patched()` id to the saga without an entry here fails below; the entry then
+// fails until the gate knows the id and the manifest declares its protocol.
+const PATCHES = {
+  'order-saga-durable-rollover-v1': 1,
+  'dispute-settle-resumes-order': 2,
+  'dispute-release-durable-wait-v1': 3,
+  'economic-call-durable-wait-v1': 4,
+  'economic-sibling-call-durable-wait-v1': 5,
+  'saga-owed-work-durable-v1': 6,
+  'authorisation-order-fence-v1': 7,
+  'economic-hold-call-durable-wait-v1': 8,
+  'economic-hold-refusal-exit-v1': 9,
+  'economic-hold-send-fence-v1': 10,
+  'economic-hold-fence-on-order-v1': 11,
+  'economic-refusal-reconciles-held-v1': 12,
+};
+const LATEST = Math.max(...Object.values(PATCHES));
+const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
+const manifest = JSON.parse(readFileSync(new URL('../package.json', SAGA_SOURCE), 'utf8'));
+const WORKFLOWS_FILE = 'temporal/workflows.ts';
+// Prisma's output is machine-written and git-ignored, so CI does not have it.
+const scannedFiles = (files) =>
+  files
+    .filter((file) => !file.startsWith('generated/prisma/') && /\.[cm]?[jt]sx?$/.test(file))
+    .filter((file) => !file.endsWith('.spec.ts'))
+    .map((file) => {
+      // Read as TypeScript below: another kind of source would be misread or missed.
+      assert.ok(file.endsWith('.ts') && !file.endsWith('.d.ts'), `unscannable file: ${file}`);
+      return file;
+    });
+const sagaSources = () =>
+  scannedFiles(authoredUnder(SAGA_SOURCE)).map((file) =>
+    readFileSync(new URL(file, SAGA_SOURCE), 'utf8'),
+  );
+const parsed = (source) => ts.createSourceFile('saga.ts', source, ts.ScriptTarget.Latest, true);
+const eachNode = (node, visit) => {
+  visit(node);
+  ts.forEachChild(node, (child) => eachNode(child, visit));
+};
+const WORKFLOW_MODULE = '@temporalio/workflow';
+// What the saga may import from the SDK. Read the SDK before adding one: some
+// record a marker of their own. `condition` does, on a zero timeout (see below).
+const WORKFLOW_IMPORTS = new Set(
+  `ActivityFailure ActivityOptions ApplicationFailure CancellationScope condition continueAsNew
+   defineQuery defineSignal deprecatePatch isCancellation patched proxyActivities setHandler sleep
+   workflowInfo`.split(/\s+/),
+);
+// The SDK's other ways to a marker, which the gate refuses, and what reaches them unseen.
+const REFUSED_NAMES =
+  'proxyLocalActivities scheduleLocalActivity patchInternal __TEMPORAL_ACTIVATOR__ globalThis eval Function';
+// `condition(fn, 0)` records `__sdk_internal_patch_number:1` (SDK workflow.js:901). These
+// are the timeouts proven non-zero: a client sends hours of at least 1 (env.ts:174), and
+// the release backoff is never under a minute, whatever its round (workflows.spec.ts).
+const RECHECK = '(input.recheckIntervalHours ?? DEFAULT_RECHECK_HOURS) * HOUR';
+const RELEASE_BACKOFF = 'releaseBackoffMs(round)';
+
+/**
+ * The compiler's own binder and checker over this one file: a name means what
+ * its scope says, not what some declaration of that spelling holds. No imports
+ * are followed, so what lives in another file stays unresolved and is refused.
+ * The target is the run time's scoping: a parameter default does not see the body.
+ */
+function checkerOf(file) {
+  const host = ts.createCompilerHost({});
+  host.getSourceFile = (name) => (name === file.fileName ? file : undefined);
+  const target = ts.ScriptTarget.Latest;
+  const options = { noLib: true, noResolve: true, types: [], strict: true, target };
+  return ts.createProgram({ rootNames: [file.fileName], options, host }).getTypeChecker();
+}
+
+/** The initializer of the `const` this identifier binds to; anything else is unproven. */
+function constInitializer(argument, checker) {
+  if (!argument || !ts.isIdentifier(argument)) return null;
+  const declaration = checker().getSymbolAtLocation(argument)?.valueDeclaration;
+  if (!declaration || !ts.isVariableDeclaration(declaration)) return null;
+  const flags = ts.getCombinedNodeFlags(declaration);
+  const isConst = (flags & ts.NodeFlags.BlockScoped) === ts.NodeFlags.Const;
+  if (!isConst || flags & ts.NodeFlags.Ambient) return null;
+  return declaration.initializer ?? null;
+}
+
+/** A patch id is a string literal, or the one `const` that holds one; nothing else is proven. */
+function patchIdOf(argument, checker) {
+  if (ts.isStringLiteralLike(argument)) return argument.text;
+  const initializer = constInitializer(argument, checker);
+  return initializer && ts.isStringLiteralLike(initializer) ? initializer.text : null;
+}
+
+/** What could add to a scanned interface, or to the compile, from outside the scan. */
+function assertAddsNothingElsewhere(name, source) {
+  assert.ok(!name.endsWith('.d.ts'), `unscannable declaration file: ${name}`);
+  const file = parsed(source);
+  const { referencedFiles, typeReferenceDirectives, libReferenceDirectives } = file;
+  const references = [referencedFiles, typeReferenceDirectives, libReferenceDirectives].flat();
+  assert.equal(references.length, 0, 'unscannable reference directive');
+  eachNode(file, (node) => {
+    assert.ok(!ts.isModuleDeclaration(node), 'unscannable module or namespace declaration');
+  });
+}
+
+/** Every patch id in `sources`; any use it cannot read as a plain call throws. */
+function patchIdsIn(sources) {
+  const ids = new Set();
+  for (const source of sources) {
+    const file = parsed(source);
+    let bound;
+    const checker = () => (bound ??= checkerOf(file));
+    eachNode(file, (node) => {
+      // A computed module name reads as nothing below.
+      const dynamic =
+        ts.isCallExpression(node) && ['import', 'require'].includes(node.expression.getText());
+      assert.ok(!dynamic, 'unscannable dynamic import');
+      if (!ts.isIdentifier(node) && !ts.isStringLiteralLike(node)) return;
+      const { parent } = node;
+      assert.ok(
+        node.text === WORKFLOW_MODULE || !node.text.includes(WORKFLOW_MODULE),
+        'unscannable SDK path',
+      );
+      // Specs are not scanned, so production must not load one.
+      assert.ok(!/\.spec(\.[cm]?[jt]s)?$/.test(node.text), 'unscannable import of a spec');
+      if (node.text === WORKFLOW_MODULE) {
+        // Named imports only: a namespace, a default or a re-export hides names.
+        const clause = ts.isImportDeclaration(parent) ? parent.importClause : undefined;
+        const bindings = clause?.name ? undefined : clause?.namedBindings;
+        assert.ok(bindings && ts.isNamedImports(bindings), 'unscannable use of the workflow API');
+        for (const { propertyName, name } of bindings.elements) {
+          const known = !propertyName && WORKFLOW_IMPORTS.has(name.text);
+          assert.ok(known, `unreviewed workflow API: ${name.text}`);
+        }
+      }
+      assert.ok(!REFUSED_NAMES.split(' ').includes(node.text), `refused name: ${node.text}`);
+      if (node.text === 'condition') {
+        if (ts.isImportSpecifier(parent)) return;
+        const isCall =
+          ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node;
+        assert.ok(isCall, 'unscannable use of condition');
+        const [, timeout, ...others] = parent.arguments;
+        const initializer = constInitializer(timeout, checker)?.getText();
+        const proven = initializer === RECHECK || initializer === RELEASE_BACKOFF;
+        assert.ok(others.length === 0 && (!timeout || proven), 'condition timeout may be zero');
+        return;
+      }
+      if (node.text !== 'patched' && node.text !== 'deprecatePatch') return;
+      if (ts.isImportSpecifier(parent) && !parent.propertyName) return;
+      assert.ok(
+        ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node,
+        `unscannable use of ${node.text}`,
+      );
+      const [argument] = parent.arguments;
+      const id = parent.arguments.length === 1 && patchIdOf(argument, checker);
+      assert.ok(id, `patch id cannot be resolved: ${node.text}`);
+      ids.add(id);
+    });
+  }
+  return ids;
+}
+
+test('every patch id in the saga source has its own protocol; the manifest declares the latest', () => {
+  const found = patchIdsIn(sagaSources());
+  // A scan that stopped finding them would pass everything below.
+  assert.ok(
+    found.has('order-saga-durable-rollover-v1') && found.has('dispute-settle-resumes-order'),
+  );
+  for (const id of found) assert.ok(Object.hasOwn(PATCHES, id), `gate test does not know ${id}`);
+  // A new id on an old protocol would pass the previous release, which cannot replay it.
+  const protocols = Object.values(PATCHES);
+  assert.equal(new Set(protocols).size, protocols.length);
+  assert.equal(manifest.marketplaceSagaProtocol, LATEST);
+});
+
+test('the source scan refuses what it cannot read, so a marker cannot hide from it', () => {
+  const url = "const u = 'http://x'; ";
+  assert.deepEqual(
+    [
+      ...patchIdsIn([
+        `const P = 'via-constant';\nimport { patched } from '${WORKFLOW_MODULE}';\npatched(P);\n${url}patched('direct');`,
+        "'/*'; patched('between-comment-marks'); '*/'",
+      ]),
+    ],
+    ['via-constant', 'direct', 'between-comment-marks'],
+  );
+  // The same spelling in two scopes is two ids, each where the compiler binds it.
+  assert.deepEqual(
+    [
+      ...patchIdsIn([
+        "function a() { const P = 'one'; patched(P); }\nfunction b() { const P = 'two'; patched(P); }",
+        "const Q = 'outer'; { const Q = 'inner'; patched(Q); }",
+      ]),
+    ],
+    ['one', 'two', 'inner'],
+  );
+  assert.deepEqual(
+    [
+      ...patchIdsIn([
+        'condition(fn);',
+        `const ms = ${RECHECK};\ncondition(fn, ms);`,
+        `const ms = ${RELEASE_BACKOFF};\ncondition(fn, ms);`,
+      ]),
+    ],
+    [],
+  );
+  // A parameter default does not see the body's binding at run time, nor here.
+  assert.deepEqual(
+    [...patchIdsIn(["const P = 'outer'; function f(a = patched(P)) { const P = 'body'; }"])],
+    ['outer'],
+  );
+  for (const source of [
+    "import { patched as p } from 'x';",
+    'const p = patched;',
+    "import { patched } from 'x';\nconst p = patched;\np('hidden');",
+    "wf['patched']('hidden');",
+    "wf.patched('hidden');",
+    `import * as wf from '${WORKFLOW_MODULE}';\nwf[k]('hidden');`,
+    `import wf from '${WORKFLOW_MODULE}';`,
+    `export * from '${WORKFLOW_MODULE}';`,
+    `const wf = require('${WORKFLOW_MODULE}');`,
+    "patched('one', 'two');",
+    'patched();',
+    'patched(computed());',
+    'patched(unresolved);',
+    'deprecatePatch(unresolved);',
+    'proxyLocalActivities({});',
+    `import { uuid4 } from '${WORKFLOW_MODULE}';`,
+    `import { default as wf } from '${WORKFLOW_MODULE}';`,
+    `import wf, { sleep } from '${WORKFLOW_MODULE}';`,
+    `import * as wf from '${WORKFLOW_MODULE}/lib/workflow';`,
+    "wf.scheduleLocalActivity('x', []);",
+    "activator.patchInternal('hidden', false);",
+    "x['__TEMPORAL_ACTIVATOR__'];",
+    "(globalThis as any)['__TEMPORAL_' + 'ACTIVATOR__'];",
+    "(0, eval)('code');",
+    "new Function('code');",
+    "import('@temporalio/' + name);",
+    "require('@temporalio/' + name);",
+    `import * as wf from '../../node_modules/${WORKFLOW_MODULE}';`,
+    "import { mark } from './mark.spec';",
+    `import { condition as sleep } from '${WORKFLOW_MODULE}';`,
+    'const wait = condition;',
+    'condition(fn, 0);',
+    'const ms = 0;\ncondition(fn, ms);',
+    `let ms = ${RECHECK};\ncondition(fn, ms);`,
+    `const ms = Math.max(0, ${RECHECK});\ncondition(fn, ms);`,
+    'const ms = releaseBackoffMs(round) - HOUR;\ncondition(fn, ms);',
+    'const ms = releaseBackoffMs(other);\ncondition(fn, ms);',
+    `let ms = ${RELEASE_BACKOFF};\ncondition(fn, ms);`,
+    `const ms = ${RECHECK};\ncondition(fn, ms, opts);`,
+  ]) {
+    assert.throws(() => patchIdsIn([source]), assert.AssertionError, source);
+  }
+});
+
+// Review of #728 r1: these passed the scan, which took the initializer of any
+// variable of that spelling, while the saga recorded another marker at run time.
+const KNOWN_ID = 'order-saga-durable-rollover-v1';
+const HIDDEN_IDS = {
+  'a reassigned variable': (call) => `let P = '${KNOWN_ID}';\nP = 'future';\n${call}(P);`,
+  'a shadowing parameter': (call) =>
+    `const P = '${KNOWN_ID}';\nfunction step(P: string) { ${call}(P); }\nstep('future');`,
+  'an uninitialized shadowing variable': (call) =>
+    `const P = '${KNOWN_ID}';\nfunction step() { let P: string; P = 'future'; ${call}(P); }`,
+};
+for (const [name, source] of Object.entries(HIDDEN_IDS)) {
+  for (const call of ['patched', 'deprecatePatch']) {
+    test(`the source scan refuses ${call}() of ${name}`, () => {
+      assert.throws(() => patchIdsIn([source(call)]), /patch id cannot be resolved/);
+    });
+  }
+}
+
+test('a patch id is only ever a literal or the one const holding one', () => {
+  for (const binding of [
+    "let P = 'x';",
+    "var P = 'x';",
+    'let P;',
+    "declare const P = 'x';",
+    "const P = 'x' as string;",
+    'const P = `x${y}`;',
+    "const P = 'x' + 'y';",
+    "const Q = 'x'; const P = Q;",
+    "const { P = 'x' } = o;",
+    "const [P = 'x'] = o;",
+    "using P = 'x';",
+    "await using P = 'x';",
+    "for (const P of ['x']) patched(P);",
+    'try {} catch (P) { patched(P); }',
+    'function P() {}',
+    'enum P { x }',
+    "import { P } from './elsewhere';",
+  ]) {
+    const source = `${binding}\npatched(P);`;
+    assert.throws(() => patchIdsIn([source]), /patch id cannot be resolved/, source);
+  }
+  for (const argument of ['...P', "('x')", "'x' as string", 'o.P', '`x${y}`']) {
+    const source = `const P = 'x';\npatched(${argument});`;
+    assert.throws(() => patchIdsIn([source]), /patch id cannot be resolved/, source);
+  }
+  for (const file of ['a.js', 'a.mjs', 'a.tsx', 'a.d.ts', 'temporal/a.js', 'generated/a.js']) {
+    assert.throws(() => scannedFiles([file]), /unscannable file/, file);
+  }
+  assert.deepEqual(scannedFiles(['a.ts', 'a.spec.ts', 'generated/prisma/a.js', 'a.json', 'dir']), [
+    'a.ts',
+  ]);
+});
+
+function assertServiceAddsNothing(listing, read) {
+  const outsideScan = /^(node_modules|dist|src\/generated\/prisma)\//;
+  const files = listing.filter((file) => /\.[cm]?ts$/.test(file) && !outsideScan.test(file));
+  // The specs too: a production import of one would apply what it declares.
+  assert.ok(files.includes(`src/${WORKFLOWS_FILE}`) && files.some((f) => f.endsWith('.spec.ts')));
+  for (const file of files) assertAddsNothingElsewhere(file, read(file));
+}
+
+test('nothing in the service adds to a scanned interface from outside the scan', () => {
+  const service = new URL('../', SAGA_SOURCE);
+  assertServiceAddsNothing(authoredUnder(service), (file) =>
+    readFileSync(new URL(file, service), 'utf8'),
+  );
+  for (const file of ['test/a.spec.ts', 'src/generated/a.ts', 'dev/a.ts']) {
+    const listing = [`src/${WORKFLOWS_FILE}`, 'src/b.spec.ts', file];
+    const read = (name) => (name === file ? 'declare global {}' : '');
+    assert.throws(() => assertServiceAddsNothing(listing, read), /module or namespace/, file);
+  }
+  for (const source of [
+    "declare module './temporal/workflows' { interface SagaResume { future: string } }",
+    'declare global { interface SagaResume { future: string } }',
+    'namespace N { export const x = 1; }',
+  ]) {
+    assert.throws(() => assertAddsNothingElsewhere('a.ts', source), /module or namespace/, source);
+  }
+  for (const directive of ['path="../a.d.ts"', 'types="a"', 'lib="dom"']) {
+    const source = `/// <reference ${directive} />\nexport {};`;
+    assert.throws(() => assertAddsNothingElsewhere('a.ts', source), /reference directive/, source);
+  }
+  for (const name of ['test/a.d.ts', 'b.d.ts']) {
+    assert.throws(() => assertAddsNothingElsewhere(name, ''), /declaration file/, name);
+  }
+});
+
+function withHistory(recorded) {
+  const scenario = drained();
+  scenario['workflow show order-A'].stdout = recorded;
+  scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
+    recorded.events.length,
+  );
+  return scenario;
+}
+const targetOf = (marketplaceSagaProtocol) => ({
+  target: { name: TARGET_NAME, marketplaceSagaProtocol },
+});
+
+for (const [id, protocol] of Object.entries(PATCHES)) {
+  test(`marker ${id} needs protocol ${protocol}: passes the real manifest, blocks below`, () => {
+    const scenario = withHistory(history({}, [{ id, deprecated: false }]));
+    assert.equal(run(scenario, { target: manifest }).status, 0);
+    assert.equal(run(scenario, targetOf(protocol)).status, 0);
+    const below = run(scenario, targetOf(protocol - 1));
+    assert.equal(below.status, 1);
+    assert.match(below.stderr, new RegExp(`requires saga protocol ${protocol}; incompatible`));
+  });
+}
+
+test('the highest protocol in a history decides, in either order', () => {
+  const markers = [
+    { id: 'order-saga-durable-rollover-v1', deprecated: false },
+    { id: 'dispute-settle-resumes-order', deprecated: true },
+  ];
+  for (const recorded of [markers, [...markers].reverse()]) {
+    const scenario = withHistory(history({}, recorded));
+    assert.equal(run(scenario, targetOf(1)).status, 1);
+    assert.equal(run(scenario, targetOf(2)).status, 0);
+  }
+});
+
+for (const id of ['unknown', 'constructor', '__proto__', 'dispute-settle-resumes-order-v2', 7]) {
+  test(`refuses unknown marker ${id} even for the latest target`, () => {
+    const result = run(withHistory(history({}, [{ id, deprecated: false }])), targetOf(LATEST));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown compatibility marker/);
+  });
+}
+
+test('a missing marker id or flag is refused, known id or not', () => {
+  for (const patch of [{ deprecated: false }, { id: 'dispute-settle-resumes-order' }]) {
+    const result = run(withHistory(history({}, [patch])), targetOf(LATEST));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown compatibility marker/);
+  }
+});
+
+test('a continuation carries its writer protocol before its first marker', () => {
+  const written = withHistory(history({ resume: { activitySequence: 1, reminderDue: [] } }));
+  assert.match(run(written, targetOf(1)).stderr, /requires saga protocol 2; incompatible/);
+  assert.equal(run(written, targetOf(2)).status, 0);
+  const before = withHistory(history({ resume: { activitySequence: 1 } }));
+  assert.equal(run(before, targetOf(1)).status, 0);
+});
+
+/**
+ * The property signatures a type node stands for, read only from syntax whose
+ * meaning cannot depend on anything outside this file: this file's own plain
+ * interfaces and type literals, `extends` and `&`. This one-file checker gets the
+ * rest wrong (a conditional on an import or a lib type, an overload, a generic),
+ * so all else is refused rather than evaluated.
+ */
+function membersOf(checker, node, what) {
+  const refuse = () => assert.fail(`cannot enumerate ${what}: ${node.getText()}`);
+  const listed = (members) =>
+    members.map((member) =>
+      ts.isPropertySignature(member) && ts.isIdentifier(member.name) ? member : refuse(),
+    );
+  if (ts.isIntersectionTypeNode(node)) {
+    return node.types.flatMap((part) => membersOf(checker, part, what));
+  }
+  if (ts.isTypeLiteralNode(node)) return listed(node.members);
+  const name = ts.isTypeReferenceNode(node)
+    ? node.typeName
+    : ts.isExpressionWithTypeArguments(node)
+      ? node.expression
+      : null;
+  if (!name || !ts.isIdentifier(name)) refuse();
+  const declarations = checker.getSymbolAtLocation(name)?.declarations ?? [];
+  const plain = (found) => ts.isInterfaceDeclaration(found) && !found.typeParameters;
+  if (declarations.length === 0 || !declarations.every(plain)) refuse();
+  return declarations.flatMap(({ members, heritageClauses = [] }) => [
+    ...listed(members),
+    ...heritageClauses
+      .flatMap((clause) => [...clause.types])
+      .flatMap((base) => membersOf(checker, base, what)),
+  ]);
+}
+
+/** Every field `orderSaga` in `source` takes, read from its one declaration, not a name. */
+function sagaFields(source) {
+  const file = parsed(source);
+  const checker = checkerOf(file);
+  const [saga, ...overloads] = file.statements.filter(
+    (node) => ts.isFunctionDeclaration(node) && node.name?.text === 'orderSaga',
+  );
+  const isExport = ({ kind }) => kind === ts.SyntaxKind.ExportKeyword;
+  const isDefault = ({ kind }) => kind === ts.SyntaxKind.DefaultKeyword;
+  assert.ok(
+    saga?.modifiers?.some(isExport) && !saga.modifiers.some(isDefault),
+    'no exported orderSaga',
+  );
+  const [parameter, ...others] = saga.parameters;
+  assert.ok(
+    overloads.length === 0 &&
+      others.length === 0 &&
+      parameter?.type &&
+      !parameter.dotDotDotToken &&
+      !parameter.questionToken &&
+      !parameter.initializer,
+    'orderSaga must take exactly one input',
+  );
+  const input = membersOf(checker, parameter.type, 'the saga input');
+  const resumes = input.filter((member) => member.name.text === 'resume');
+  assert.ok(resumes.length === 1 && resumes[0].type, 'the saga input must have one typed resume');
+  const names = (members) => members.map((member) => member.name.text);
+  return {
+    input: names(input),
+    resume: names(membersOf(checker, resumes[0].type, 'the saga resume')),
+  };
+}
+
+const RESUME_FIELDS = {
+  status: 1,
+  mirroredDispute: 1,
+  mirroredEconomicDispute: 1,
+  waitingIn: 1,
+  nextReminderAt: 1,
+  activitySequence: 1,
+  reminderDue: 2,
+  releaseRounds: 3,
+  unconfirmedCall: 4,
+  siblingCall: 5,
+  outstandingWork: 6,
+  holdCall: 8,
+  lateHoldWatch: 9,
+  holdNotAfter: 10,
+};
+
+function assertResumeFieldsKnown(fields) {
+  for (const field of fields) {
+    const protocol = RESUME_FIELDS[field];
+    assert.ok(protocol, `gate test does not know resume.${field}`);
+    const known = withHistory(history({ resume: { [field]: 1 } }));
+    assert.equal(run(known, targetOf(protocol)).status, 0, `gate does not know resume.${field}`);
+    assert.equal(run(known, targetOf(protocol - 1)).status, 1, `resume.${field} needs ${protocol}`);
+  }
+}
+
+function assertInputFieldsKnown(fields) {
+  for (const field of fields.filter((name) => name !== 'resume')) {
+    const known = withHistory(history({ [field]: 1 }));
+    assert.equal(run(known, targetOf(0)).status, 0, `gate does not know input.${field}`);
+  }
+}
+
+/** The saga's own source with `edits` applied; each must actually change it. */
+function sagaSourceWith(...edits) {
+  let source = readFileSync(new URL(WORKFLOWS_FILE, SAGA_SOURCE), 'utf8');
+  for (const [from, to] of edits) {
+    assert.ok(source.includes(from), `the saga source no longer has: ${from}`);
+    source = source.replace(from, to);
+  }
+  return source;
+}
+
+test('every field the saga continues with needs its protocol, and any other is refused', () => {
+  const { resume: fields } = sagaFields(sagaSourceWith());
+  // A scan that stopped finding them would pass everything below.
+  assert.deepEqual(fields.toSorted(), Object.keys(RESUME_FIELDS).toSorted());
+  assert.ok(Math.max(...Object.values(RESUME_FIELDS)) <= manifest.marketplaceSagaProtocol);
+  assertResumeFieldsKnown(fields);
+  for (const resume of [{ another: 1 }, null, []]) {
+    const result = run(withHistory(history({ resume })), targetOf(LATEST));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown continuation state|invalid start input/);
+  }
+});
+
+test('every field a saga starts with is known, and any other is refused', () => {
+  const { input: fields } = sagaFields(sagaSourceWith());
+  assert.ok(fields.includes('orderId') && fields.includes('resume'));
+  assertInputFieldsKnown(fields);
+  const unknown = run(withHistory(history({ anotherField: 1 })), targetOf(LATEST));
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /invalid start input/);
+});
+
+// Review of #728 r1: `extends` added a field the inventory, which read only the
+// members written in the interface's own body, never saw.
+const RESUME = 'export interface SagaResume {';
+const INPUT = 'export interface OrderSagaInput {';
+const PROP = 'resume?: SagaResume;';
+const ARG = 'orderSaga(input: OrderSagaInput)';
+const ADD = [RESUME, `interface Added { futureField: string }\n${RESUME}`];
+const viaBase = (base) => `export interface SagaResume extends ${base} {`;
+const FN = ARG.replace('orderSaga', 'function orderSaga');
+const ONE = /exactly one input/;
+const onResume = (declared, type) => [
+  ADD,
+  [RESUME, `${declared}\n${RESUME}`],
+  [PROP, `resume?: ${type};`],
+];
+const IMPORT = "import type { F } from './f';";
+const EITHER = (on) => `string extends ${on} ? SagaResume : SagaResume & Added;`;
+const PICK = 'function f(x: string): SagaResume;\nfunction f(x: number): Added;\nconst r = f(v);';
+
+test('SagaResume extends Added: the inherited field fails the inventory', () => {
+  const { resume } = sagaFields(sagaSourceWith(ADD, [RESUME, viaBase('Added')]));
+  assert.ok(resume.includes('futureField'));
+  assert.throws(() => assertResumeFieldsKnown(resume), /does not know resume\.futureField/);
+});
+
+test('OrderSagaInput extends Added: the inherited field fails the inventory', () => {
+  const extended = [INPUT, 'export interface OrderSagaInput extends Added {'];
+  const { input } = sagaFields(sagaSourceWith(ADD, extended));
+  assert.ok(input.includes('futureField'));
+  assert.throws(() => assertInputFieldsKnown(input), /does not know input\.futureField/);
+});
+
+for (const [name, side, edits] of [
+  ['a chain', 'resume', [ADD, [RESUME, `interface Mid extends Added {}\n${viaBase('Mid')}`]]],
+  ['a merged declaration', 'resume', [[RESUME, `${RESUME} futureField: string }\n${RESUME}`]]],
+  ['an intersected property', 'resume', [ADD, [PROP, 'resume?: SagaResume & Added;']]],
+  ['another type on the property', 'resume', [ADD, [PROP, 'resume?: Added;']]],
+  ['an intersected signature', 'input', [ADD, [ARG, 'orderSaga(input: OrderSagaInput & Added)']]],
+]) {
+  test(`the field inventory sees a field added by ${name}`, () => {
+    assert.ok(sagaFields(sagaSourceWith(...edits))[side].includes('futureField'));
+  });
+}
+
+for (const [name, edits, reason = /cannot enumerate the saga (input|resume)/] of [
+  ['an imported base', [[RESUME, `import type { O } from './o';\n${viaBase('O')}`]]],
+  ['a missing base', [[RESUME, viaBase('Missing')]]],
+  ['an index signature', [[RESUME, `${RESUME}\n  [field: string]: unknown;`]]],
+  ['a computed member', [[RESUME, `const KEY = 'x';\n${RESUME}\n  [KEY]: string;`]]],
+  ['a union', [ADD, [PROP, 'resume?: SagaResume | Added;']]],
+  ['a mapped type', [[PROP, "resume?: { [K in 'x']: string };"]]],
+  ['an untyped property', [[PROP, 'resume?: any;']]],
+  ['an untyped input', [[ARG, 'orderSaga(input: any)']]],
+  ['a second parameter', [[ARG, `${ARG.slice(0, -1)}, more: string)`]], /exactly one input/],
+  ['no export', [['export async function orderSaga', 'async function orderSaga']], /no exported/],
+  [
+    'a default export',
+    [['export async function orderSaga', 'export default async function orderSaga']],
+    /no exported/,
+  ],
+  // The real compile lists futureField in the first four; this one-file checker did not.
+  ['a conditional on an import', onResume(`${IMPORT} type C = ${EITHER('F')}`, 'C')],
+  ['a conditional on a lib type', onResume(`type C = ${EITHER("Lowercase<'A'>")}`, 'C')],
+  ['a conditional base', [ADD, [RESUME, `type C = ${EITHER('F')}\n${viaBase('C')}`]]],
+  ['an overload picked by an import', onResume(`${IMPORT} ${PICK}`, 'typeof r')],
+  [
+    'an overloaded saga',
+    [[`export async ${FN}`, `export async ${FN}: string;\nexport async ${FN}`]],
+    ONE,
+  ],
+  ['a lib type on a base', [ADD, [RESUME, viaBase('Partial<Added>')]]],
+  ['a generic base', [[RESUME, `interface G<T> { f: T }\n${viaBase('G')}`]]],
+  [
+    'a type parameter',
+    [ADD, [INPUT, `${INPUT.slice(0, -2)}<T = Added> {`], [PROP, `${PROP.slice(0, -1)} & T;`]],
+  ],
+  ['a generic saga', [[ARG, 'orderSaga<T extends OrderSagaInput>(input: T)']]],
+  ['a class base', [[RESUME, `class C { futureField = 1 }\n${viaBase('C')}`]]],
+  ['an optional input', [[ARG, 'orderSaga(input?: OrderSagaInput)']], ONE],
+  ['a rest input', [[ARG, 'orderSaga(...input: [OrderSagaInput])']], ONE],
+  ['a default input', [[ARG, 'orderSaga(input: OrderSagaInput = o)']], ONE],
+  [
+    'two resumes',
+    [[ARG, 'orderSaga(input: OrderSagaInput & { resume?: Added })']],
+    /one typed resume/,
+  ],
+]) {
+  test(`the field inventory refuses ${name}`, () => {
+    const source = sagaSourceWith(...edits);
+    assert.throws(() => sagaFields(source), reason);
+  });
+}
+
+test('a continuation rolled over in the wait of an authorisation needs protocol 4', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        unconfirmedCall: { operation: 'authoriseSettlement', rounds: 2 },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(3)).stderr, /requires saga protocol 4; incompatible/);
+  assert.equal(run(rolled, targetOf(4)).status, 0);
+});
+
+test('a continuation rolled over in the wait of a filing or refund needs protocol 5', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        siblingCall: { operation: 'compensate', rounds: 2, transactionId: 'T' },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(4)).stderr, /requires saga protocol 5; incompatible/);
+  assert.equal(run(rolled, targetOf(5)).status, 0);
+});
+
+test('a continuation rolled over in the wait of the hold needs protocol 8', () => {
+  const rolled = withHistory(history({ resume: { activitySequence: 1, holdCall: { rounds: 2 } } }));
+  assert.match(run(rolled, targetOf(7)).stderr, /requires saga protocol 8; incompatible/);
+  assert.equal(run(rolled, targetOf(8)).status, 0);
+});
+
+test('a continuation that gave its hold up needs protocol 9', () => {
+  const rolled = withHistory(
+    history({ resume: { activitySequence: 1, lateHoldWatch: { until: 1, reason: 'refused' } } }),
+  );
+  assert.match(run(rolled, targetOf(8)).stderr, /requires saga protocol 9; incompatible/);
+  assert.equal(run(rolled, targetOf(9)).status, 0);
+});
+
+test('a continuation whose hold carries a deadline needs protocol 10', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        holdCall: { rounds: 2 },
+        holdNotAfter: '2026-11-07T00:00:00.000Z',
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(9)).stderr, /requires saga protocol 10; incompatible/);
+  assert.equal(run(rolled, targetOf(10)).status, 0);
+});
+
+test('the retention in a start input asks nothing of the target', () => {
+  const started = withHistory(history({ economicKeyRetentionHours: 24 }));
+  assert.equal(run(started, targetOf(1)).status, 0);
+});
+
+test('a continuation carrying owed work needs protocol 6', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        outstandingWork: { operation: 'settle', rounds: 1 },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(5)).stderr, /requires saga protocol 6; incompatible/);
+  assert.equal(run(rolled, targetOf(6)).status, 0);
+});
+
+test('a continuation rolled over in the release wait needs protocol 3', () => {
+  const rolled = withHistory(history({ resume: { activitySequence: 1, releaseRounds: 2 } }));
+  assert.match(run(rolled, targetOf(2)).stderr, /requires saga protocol 3; incompatible/);
+  assert.equal(run(rolled, targetOf(3)).status, 0);
+});
+
+// The SDK's own markers, not this file's idea of them.
+for (const [name, required] of [
+  ['pre-fu080-release-refused', 2],
+  ['fu080-release-wait', 3],
+  ['fu103-authorise-wait', 4],
+  ['fu103-wait-then-refund-exhausted', 4],
+  ['fu103-wait-then-dispute-exhausted', 4],
+  ['fu117-compensate-wait', 5],
+  ['fu117-dispute-wait', 5],
+  ['fu158-refund-waits-then-refunded', 12],
+]) {
+  test(`a real captured history (${name}) requires protocol ${required}`, () => {
+    const real = JSON.parse(
+      readFileSync(new URL(`temporal/__fixtures__/order-saga-${name}.history.json`, SAGA_SOURCE)),
+    );
+    const scenario = withHistory(real);
+    scenario['workflow count'] = { stdout: { count: '1' } };
+    scenario['workflow list'] = { stdout: [execution('A')] };
+    const queue = real.events[0].workflowExecutionStartedEventAttributes.taskQueue.name;
+    scenario['workflow describe order-A'].stdout.executionConfig.taskQueue.name = queue;
+    const settings = { ...SETTINGS, MARKETPLACE_TEMPORAL_TASK_QUEUE: queue };
+    assert.equal(run(scenario, { settings, ...targetOf(required) }).status, 0);
+    const below = run(scenario, { settings, ...targetOf(required - 1) });
+    assert.equal(below.status, 1);
+    assert.match(below.stderr, new RegExp(`requires saga protocol ${required}; incompatible`));
+  });
+}
+
 test('legacy-only histories accept an explicitly declared legacy target', () => {
   assert.equal(
     run(drained(), { target: { name: TARGET_NAME, marketplaceSagaProtocol: 0 } }).status,
@@ -718,7 +1911,7 @@ test('legacy-only histories accept the unmodified origin/main pre-protocol targe
   assert.match(result.stdout, /OK — no poller/);
 });
 
-for (const value of ['1', '0', 2, -1, 0.5, null, false, {}, []]) {
+for (const value of ['1', '0', LATEST + 1, -1, 0.5, null, false, {}, []]) {
   test(`refuses malformed or unknown target protocol ${JSON.stringify(value)} before querying`, () => {
     const result = run(drained(), {
       target: { name: TARGET_NAME, marketplaceSagaProtocol: value },
@@ -743,6 +1936,60 @@ for (const target of [
     assert.deepEqual(result.calls, []);
   });
 }
+// D-150: an order the stopped build placed has no saga yet, so no history shows it.
+const FLOOR = PATCHES['economic-hold-fence-on-order-v1'];
+test('a stopped build at the rollback floor refuses every target below it, even with nothing running', () => {
+  const empty = {
+    ...drained(),
+    'workflow count': { stdout: {} },
+    'workflow list': { stdout: [] },
+  };
+  const stopped = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR };
+  for (const protocol of [0, 1, FLOOR - 1]) {
+    const result = run(empty, { stopped, ...targetOf(protocol) });
+    assert.equal(result.status, 1, `target ${protocol}`);
+    assert.match(
+      result.stderr,
+      new RegExp(`declares saga protocol ${protocol}, below the rollback floor ${FLOOR}`),
+    );
+  }
+  assert.match(
+    run(empty, { stopped, target: { name: TARGET_NAME } }).stderr,
+    /declares saga protocol 0, below the rollback floor/,
+  );
+  for (const protocol of [FLOOR, LATEST]) {
+    assert.equal(run(empty, { stopped, ...targetOf(protocol) }).status, 0);
+  }
+  const past = { name: TARGET_NAME, marketplaceSagaProtocol: LATEST };
+  assert.equal(run(empty, { stopped: past, ...targetOf(FLOOR - 1) }).status, 1);
+  // Below the floor it binds nothing: what was there before it still rolls back.
+  const below = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR - 1 };
+  assert.equal(run(empty, { stopped: below, ...targetOf(1) }).status, 0);
+  assert.equal(run(empty, { stopped: { name: TARGET_NAME }, ...targetOf(1) }).status, 0);
+});
+for (const stopped of [
+  { name: '@rasta/economic-service', marketplaceSagaProtocol: 1 },
+  { marketplaceSagaProtocol: 1 },
+  null,
+  { name: TARGET_NAME, marketplaceSagaProtocol: LATEST + 1 },
+  { name: TARGET_NAME, marketplaceSagaProtocol: '11' },
+]) {
+  test(`refuses a wrong, unknown or newer stopped manifest ${JSON.stringify(stopped)} before querying`, () => {
+    const result = run(drained(), { stopped, ...targetOf(LATEST) });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /stopped (manifest is not marketplace-service|build compatibility declaration is unsupported)/);
+    assert.deepEqual(result.calls, []);
+  });
+}
+test('refuses an unreadable or omitted stopped manifest', () => {
+  for (const path of ['', '/nonexistent/stopped.json']) {
+    const result = run(drained(), {
+      settings: { ...SETTINGS, MARKETPLACE_STOPPED_PACKAGE_JSON: path },
+    });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls, []);
+  }
+});
 test('refuses unreadable or omitted target manifest', () => {
   for (const path of ['', '/nonexistent/target.json']) {
     assert.equal(
@@ -771,4 +2018,442 @@ test('refuses unreadable histories, inputs and compatibility markers', () => {
   const truncated = drained();
   truncated['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = '2';
   assert.equal(run(truncated).status, 1);
+});
+
+// ---- FU-221: open durable saga call records (D-151) ------------------------------
+//
+// The review's probe: an authorisation the order fenced completed (nothing sent, its
+// record left open by D-151), workers stopped, no pending activity, a protocol-7 target.
+// Temporal shows nothing to wait for; only `saga_unconfirmed_call` does.
+const RECORDED = [
+  'createObligation',
+  'authoriseSettlement',
+  'settle',
+  'compensate',
+  'resolveObligationDispute',
+];
+const openRecord = (operation, fields = {}) => ({
+  organizationId: 'org-1',
+  orderId: 'ord-9',
+  operation,
+  subject: 'obl-4',
+  generation: 2,
+  ageSeconds: 7260,
+  ...fields,
+});
+const fencedProbe = () =>
+  showing(cutAtAuthorisation('fu103-authorise-wait', fenced(true, 'DISPUTED')));
+
+test('FU-221 probe: a fenced completion with its record open refuses; closed, it passes', () => {
+  const refused = run(fencedProbe(), {
+    ...atProtocol(FENCE_PROTOCOL),
+    psql: openRecords([openRecord('authoriseSettlement')]),
+  });
+  assert.equal(refused.status, 1);
+  assert.doesNotMatch(refused.stdout, /OK/);
+  assert.match(
+    refused.stderr,
+    /BLOCKED — 1 finding\(s\):\n {2}open saga call record: order ord-9 \(organization org-1\), authoriseSettlement on obl-4, generation 2, open 7260 s\n$/,
+  );
+  // The record closed: the read returns no open row, and the same history passes.
+  const passed = run(fencedProbe(), { ...atProtocol(FENCE_PROTOCOL), psql: openRecords() });
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.match(passed.stdout, /no pending activity, no open saga call record$/m);
+});
+
+for (const operation of RECORDED) {
+  test(`FU-221: an open ${operation} record blocks a drained queue`, () => {
+    const { status, stdout, stderr } = run(drained(), {
+      psql: openRecords([openRecord(operation, { generation: 1, ageSeconds: 5 })]),
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(
+      stderr,
+      new RegExp(
+        `order ord-9 \\(organization org-1\\), ${operation} on obl-4, generation 1, open 5 s`,
+      ),
+    );
+  });
+}
+
+test('FU-221: the gate knows exactly the operations the saga records', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const union = /type RecordedCall =([^;]+);/.exec(source)?.[1];
+  assert.ok(union, 'RecordedCall not found');
+  const listed = [...union.matchAll(/'(\w+)'/g)].map(([, name]) => name);
+  assert.deepEqual(listed.toSorted(), RECORDED.toSorted());
+  const gate = readFileSync(SCRIPT, 'utf8');
+  const known = /const RECORDED_CALLS = new Set\(\[([^\]]+)\]\)/.exec(gate)?.[1];
+  assert.deepEqual(
+    [...known.matchAll(/'(\w+)'/g)].map(([, name]) => name).toSorted(),
+    RECORDED.toSorted(),
+  );
+});
+
+test('FU-221: reads once, last, read-only, through the open-record index, password off argv', () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=market` },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  const [{ args, sql, PGPASSWORD }] = psqlCalls;
+  assert.deepEqual(args, [
+    'postgresql://rasta_marketplace@db.invalid:5432/rasta_marketplace',
+    '-X',
+    '-q',
+    '-A',
+    '-t',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-f',
+    '-',
+  ]);
+  assert.equal(PGPASSWORD, 'hunter2');
+  assert.match(sql, /^BEGIN TRANSACTION READ ONLY;\nSET LOCAL statement_timeout = '10s';\n/);
+  assert.match(sql, /\nSET LOCAL search_path = pg_catalog;\n/);
+  assert.match(sql, /'recovery', pg_is_in_recovery\(\),\n/);
+  assert.match(sql, /WHERE oid = '"market"\.saga_unconfirmed_call'::regclass/);
+  assert.match(sql, /FROM "market"\.saga_unconfirmed_call c\n\s+WHERE c\.confirmed_at IS NULL\n/);
+  assert.match(sql, /ORDER BY c\.opened_at, [^\n]+\n\s+LIMIT 51\n/);
+  assert.match(sql, /\nCOMMIT;\n$/);
+});
+
+test('FU-221: no psql read when Temporal already could not be checked', () => {
+  const scenario = { ...drained(), 'workflow count': { status: 1 } };
+  const { status, psqlCalls } = run(scenario);
+  assert.equal(status, 1);
+  assert.deepEqual(psqlCalls, []);
+});
+
+test('FU-221: more than 50 open records: 50 shown and the list said to be cut', () => {
+  const open = Array.from({ length: 51 }, (_, i) => openRecord('settle', { orderId: `ord-${i}` }));
+  const { status, stderr } = run(drained(), { psql: openRecords(open) });
+  assert.equal(status, 1);
+  assert.match(stderr, /BLOCKED — 51 finding\(s\)/);
+  assert.match(stderr, /order ord-49 /);
+  assert.doesNotMatch(stderr, /order ord-50 /);
+  assert.match(stderr, /more than 50 open saga call records; list them \(runbook\)\n$/);
+});
+
+test('FU-221: an identifier in another shape is withheld, its record still blocks', () => {
+  const { status, stderr } = run(drained(), {
+    psql: openRecords([openRecord('compensate', { orderId: `\u001b]8;;${SENTINELS[0]}` })]),
+  });
+  assert.equal(status, 1);
+  assert.match(stderr, /order <withheld> \(organization org-1\), compensate/);
+  assertNoSentinel(stderr);
+});
+
+for (const [name, psql, words] of [
+  ['psql is not installed', null, /psql could not be run \(ENOENT\)/],
+  [
+    'psql fails (unreachable, no privilege, no table, timed out)',
+    { status: 3, stderr: `ERROR: relation does not exist ${SENTINELS[0]}\n` },
+    /saga_unconfirmed_call could not be read; psql diagnostics withheld/,
+  ],
+  ['psql prints nothing', { stdout: '' }, /psql did not print the open records/],
+  ['psql prints no JSON', { stdout: 'SET\n[]\n' }, /psql did not print the open records/],
+  [
+    'an answer without row security',
+    { stdout: { database: 'rasta_marketplace', port: 5432, recovery: false, open: [] } },
+    /did not print the open records/,
+  ],
+  ['an answer with more keys', { stdout: { ...openRecords().stdout, more: 1 } }, /did not print/],
+  [
+    'open not a list',
+    { stdout: { ...openRecords().stdout, open: {} } },
+    /did not print the open records/,
+  ],
+  ['a list longer than asked', openRecords(Array(52).fill(openRecord('settle'))), /did not print/],
+  [
+    'row security on the table',
+    openRecords([], true),
+    /has row security: an empty answer proves nothing/,
+  ],
+  ['a standby (lagging replica)', openRecords([], false, true), /was read on a standby/],
+  [
+    'an answer without recovery',
+    { stdout: { database: 'rasta_marketplace', port: 5432, rowSecurity: false, open: [] } },
+    /did not print/,
+  ],
+  [
+    'an unknown operation',
+    openRecords([openRecord('disputeObligation')]),
+    /an open record of an unknown operation/,
+  ],
+  [
+    'generation 0',
+    openRecords([openRecord('settle', { generation: 0 })]),
+    /an open record this gate cannot read/,
+  ],
+  [
+    'an age not an integer',
+    openRecords([openRecord('settle', { ageSeconds: '7' })]),
+    /cannot read/,
+  ],
+  ['an empty subject', openRecords([openRecord('settle', { subject: '' })]), /cannot read/],
+  ['a row not an object', openRecords([null]), /an open record this gate cannot read/],
+]) {
+  test(`FU-221: cannot verify when ${name}`, () => {
+    const { status, stdout, stderr } = run(drained(), { psql });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(stderr, /cannot verify — deployment blocked: /);
+    assert.match(stderr, words);
+    assertNoSentinel(stderr);
+  });
+}
+
+for (const [name, settings] of [
+  [
+    'a schema that is not one plain identifier',
+    { DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=a"b` },
+  ],
+  ['two schemas', { DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=a&schema=b` }],
+  [
+    'a URL that hides a credential',
+    { DATABASE_URL_MARKETPLACE: `${DATABASE}?sslpassword=${SENTINELS[0]}` },
+  ],
+  ['not a URL', { DATABASE_URL_MARKETPLACE: SENTINELS[0] }],
+]) {
+  test(`FU-221: refuses ${name} before asking Temporal or psql anything`, () => {
+    const { status, stderr, calls, psqlCalls } = run(drained(), {
+      settings: { ...SETTINGS, ...settings },
+    });
+    assert.equal(status, 1);
+    assert.match(
+      stderr,
+      /cannot verify — deployment blocked: DATABASE_URL_MARKETPLACE cannot be handed to psql \(it must name host, port and database, with no parameter that can move the connection\); its value is not repeated\n$/,
+    );
+    assert.deepEqual([calls, psqlCalls], [[], []]);
+    assertNoSentinel(stderr);
+  });
+}
+
+// ---- #947 r1 M1: the read lands only where the URL says ---------------------------
+//
+// libpq fills whatever the URL leaves out from PG* variables and a service file, and a
+// `service`, `hostaddr`, `host` or `port` parameter moves the connection; Prisma reads
+// none of them. Another database with an empty table would answer "no open record".
+
+/** Every environment variable libpq or psql reads (libpq-envars, psql ENVIRONMENT). */
+const LIBPQ_VARIABLES = [
+  'PGHOST',
+  'PGHOSTADDR',
+  'PGPORT',
+  'PGDATABASE',
+  'PGUSER',
+  'PGPASSWORD',
+  'PGPASSFILE',
+  'PGSERVICE',
+  'PGSERVICEFILE',
+  'PGSYSCONFDIR',
+  'PGOPTIONS',
+  'PGAPPNAME',
+  'PGSSLMODE',
+  'PGREQUIRESSL',
+  'PGSSLNEGOTIATION',
+  'PGSSLCOMPRESSION',
+  'PGSSLCERT',
+  'PGSSLKEY',
+  'PGSSLROOTCERT',
+  'PGSSLCRL',
+  'PGSSLCRLDIR',
+  'PGSSLSNI',
+  'PGREQUIREPEER',
+  'PGSSLMINPROTOCOLVERSION',
+  'PGSSLMAXPROTOCOLVERSION',
+  'PGGSSENCMODE',
+  'PGKRBSRVNAME',
+  'PGGSSLIB',
+  'PGGSSDELEGATION',
+  'PGCONNECT_TIMEOUT',
+  'PGCLIENTENCODING',
+  'PGTARGETSESSIONATTRS',
+  'PGLOADBALANCEHOSTS',
+  'PGCHANNELBINDING',
+  'PGREQUIREAUTH',
+  'PGDATESTYLE',
+  'PGTZ',
+  'PGGEQO',
+  'PGLOCALEDIR',
+  'PSQLRC',
+  'PSQL_HISTORY',
+  'PSQL_PAGER',
+  'PAGER',
+];
+
+test('#947 M1 (a, b, c): psql gets an allowlisted environment, no inherited PG* variable', () => {
+  const inherited = Object.fromEntries(LIBPQ_VARIABLES.map((name) => [name, '10.9.9.9']));
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, ...inherited, HOME: '/nonexistent' },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  const { env, args } = psqlCalls[0];
+  assert.deepEqual(Object.keys(env).toSorted(), [
+    'HOME',
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGPASSWORD',
+  ]);
+  assert.equal(env.HOME, '/nonexistent');
+  assert.equal(env.PGPASSWORD, 'hunter2');
+  assert.equal(env.PGCONNECT_TIMEOUT, '10');
+  assert.equal(args[0], 'postgresql://rasta_marketplace@db.invalid:5432/rasta_marketplace');
+});
+
+test("#947 M1 (a): an inherited PGHOSTADDR does not reach psql (the review's probe row)", () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, PGHOSTADDR: '10.9.9.9' },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  assert.equal(Object.hasOwn(psqlCalls[0].env, 'PGHOSTADDR'), false);
+  assert.deepEqual(Object.keys(psqlCalls[0].env).toSorted(), [
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGPASSWORD',
+  ]);
+});
+
+test('#947 M1: the URL options are the only PGOPTIONS psql gets', () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: {
+      ...SETTINGS,
+      PGOPTIONS: '-c search_path=other',
+      DATABASE_URL_MARKETPLACE: `${DATABASE}?options=-c%20statement_timeout%3D5000&sslmode=verify-full`,
+    },
+  });
+  assert.equal(status, 0);
+  const [{ env, args }] = psqlCalls;
+  assert.deepEqual(Object.keys(env).toSorted(), [
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGOPTIONS',
+    'PGPASSWORD',
+  ]);
+  assert.equal(env.PGOPTIONS, '-c statement_timeout=5000');
+  assert.match(args[0], /\?sslmode=verify-full$/);
+});
+
+const PINNED = 'postgresql://rasta_marketplace:hunter2@db.invalid';
+for (const [name, url, inherited = {}] of [
+  ['(d) a service parameter', `${DATABASE}?service=other`],
+  ['(d) a percent-encoded service parameter', `${DATABASE}?serv%69ce=other`],
+  ['(e) a hostaddr parameter', `${DATABASE}?hostaddr=10.9.9.9`],
+  ['a host parameter', `${DATABASE}?host=other.invalid`],
+  ['a port parameter', `${DATABASE}?port=6543`],
+  ['a user parameter', `${DATABASE}?user=other`],
+  ['a dbname parameter', `${DATABASE}?dbname=other`],
+  ['target_session_attrs', `${DATABASE}?target_session_attrs=any`],
+  ['load_balance_hosts', `${DATABASE}?load_balance_hosts=random`],
+  ['an unknown parameter', `${DATABASE}?later_libpq_parameter=1`],
+  ['(b) no port, PGPORT inherited', `${PINNED}/rasta_marketplace`, { PGPORT: '6543' }],
+  ['(c) no database, PGDATABASE inherited', `${PINNED}:5432`, { PGDATABASE: 'staging' }],
+  ['(c) no database, only a schema', `${PINNED}:5432?schema=public`, { PGDATABASE: 'staging' }],
+  ['an empty database', `${PINNED}:5432/`],
+  ['port 0', `${PINNED}:0/rasta_marketplace`],
+  ['a port out of range', `${PINNED}:65536/rasta_marketplace`],
+  ['no host', 'postgresql://rasta_marketplace:hunter2@:5432/rasta_marketplace'],
+  ['no host at all', 'postgresql:///rasta_marketplace'],
+]) {
+  test(`#947 M1: refuses ${name} before asking Temporal or psql anything`, () => {
+    const { status, stdout, stderr, calls, psqlCalls } = run(drained(), {
+      settings: { ...SETTINGS, ...inherited, DATABASE_URL_MARKETPLACE: url },
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(
+      stderr,
+      /cannot verify — deployment blocked: DATABASE_URL_MARKETPLACE cannot be handed to psql \(it must name host, port and database, with no parameter that can move the connection\); its value is not repeated\n$/,
+    );
+    assert.doesNotMatch(stderr, /hunter2/);
+    assert.deepEqual([calls, psqlCalls], [[], []]);
+  });
+}
+
+test('#947 M1: the read asks the server, in the same statement, which database and port it is', () => {
+  const { status, psqlCalls } = run(drained());
+  assert.equal(status, 0);
+  assert.match(
+    psqlCalls[0].sql,
+    /SELECT json_build_object\(\n {2}'database', current_database\(\),\n {2}'port', inet_server_port\(\),\n {2}'recovery', pg_is_in_recovery\(\),\n/,
+  );
+});
+
+const ELSEWHERE = /read from a database or port other than the URL names\n$/;
+const NOT_AN_ANSWER = /psql did not print the open records\n$/;
+for (const [name, where, words] of [
+  ['(f) another database answered', { database: 'marketplace_staging' }, ELSEWHERE],
+  ['(f) another port answered', { port: 6543 }, ELSEWHERE],
+  ['a Unix socket answered (no port)', { port: null }, NOT_AN_ANSWER],
+  ['the port is text', { port: '5432' }, NOT_AN_ANSWER],
+  ['no database named', { database: null }, NOT_AN_ANSWER],
+]) {
+  test(`#947 M1: cannot verify when ${name}, even with no open record`, () => {
+    const { status, stdout, stderr } = run(drained(), {
+      psql: openRecords([], false, false, where),
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(stderr, /cannot verify — deployment blocked: saga_unconfirmed_call/);
+    assert.match(stderr, words);
+  });
+}
+
+test('#947 M1: an answer missing the database or the port is not an answer', () => {
+  for (const missing of ['database', 'port']) {
+    const answer = openRecords();
+    delete answer.stdout[missing];
+    const { status, stderr } = run(drained(), { psql: answer });
+    assert.equal(status, 1);
+    assert.match(stderr, /psql did not print the open records/);
+  }
+});
+
+// ---- #947 r1 L1: a poller is looked for again after the read ----------------------
+
+test('#947 L1: a worker that came back during the check blocks, found after the read', () => {
+  const poller = { buildId: 'UNVERSIONED', taskQueueType: 'activity', identity: 'w@new' };
+  const scenario = {
+    ...drained(),
+    'task-queue describe': {
+      sequence: [
+        { stdout: { reachability: null, pollers: null, stats } },
+        { stdout: { reachability: null, pollers: [poller], stats } },
+      ],
+    },
+  };
+  const { status, stdout, stderr, calls } = run(scenario);
+  assert.equal(status, 1);
+  assert.equal(stdout, '');
+  assert.match(
+    stderr,
+    /BLOCKED — 1 finding\(s\):\n {2}task queue has an active poller after the record read; details withheld\n$/,
+  );
+  assert.deepEqual(calls.at(-1).slice(0, 2), ['task-queue', 'describe']);
+});
+
+test('#947 L1: the second poller check follows the read (a failed read leaves it unasked)', () => {
+  const { status, calls, psqlCalls } = run(drained(), { psql: { status: 3 } });
+  assert.equal(status, 1);
+  assert.equal(psqlCalls.length, 1);
+  assert.equal(calls.filter((args) => args[0] === 'task-queue').length, 1);
+});
+
+test('#947 L1: the second describe is checked like the first', () => {
+  const scenario = {
+    ...drained(),
+    'task-queue describe': {
+      sequence: [{ stdout: { reachability: null, pollers: null, stats } }, { stdout: {} }],
+    },
+  };
+  const { status, stderr } = run(scenario);
+  assert.equal(status, 1);
+  assert.match(stderr, /temporal task-queue describe: no poller list in its answer/);
 });

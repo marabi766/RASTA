@@ -15,6 +15,8 @@ import type { EventEnvelope } from '@rasta/contracts';
 
 export const TENDER_EVIDENCE_CONSUMER = 'audit-service.tender-evidence';
 export const CONSTRUCTION_TOPIC = 'rasta.construction.v1';
+/** The only producer whose events extend a tender's chain or record a read of a bid. */
+export const TENDER_EVIDENCE_PRODUCER = 'construction-service';
 
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const identifier = z.string().min(1).max(128);
@@ -105,7 +107,8 @@ export class TenderEvidenceContinuityError extends Error {
 /**
  * The envelope and the payload disagree about whose record this is (the tenant, or
  * the tender the event is about), or the receipt belongs to a tender already held
- * under another organization. Neither answer is picked for the producer: the
+ * under another organization, or the envelope names a producer other than
+ * {@link TENDER_EVIDENCE_PRODUCER}. Neither answer is picked for the producer: the
  * delivery is refused (retried, then dead-lettered with this reason). Names the
  * field, never its value.
  */
@@ -113,18 +116,27 @@ export class TenderEvidenceIdentityError extends Error {
   constructor(
     eventName: string,
     eventId: string,
-    readonly field: 'tenantId' | 'tenderId' | 'organization',
+    readonly field: 'tenantId' | 'tenderId' | 'organization' | 'producer',
   ) {
     super(`${eventName} ${eventId}: ${field} disagrees between the envelope and the payload`);
     this.name = 'TenderEvidenceIdentityError';
   }
 }
 
-/** The envelope and the payload must name the same tenant and the same tender. */
+/**
+ * Only the service that owns tenders may write this evidence, and the envelope and the
+ * payload must name the same tenant and the same tender.
+ */
 function assertSameIdentity(
   envelope: EventEnvelope,
   payload: { organizationId: string; tenderId: string },
 ): void {
+  // The chain and the read record are trust anchors. The topic's ACL already admits only
+  // construction-service; this refuses an event that names any other producer (or none) all
+  // the same — an exact match, so a missing or unknown producer is refused, never defaulted.
+  if (envelope.producer !== TENDER_EVIDENCE_PRODUCER) {
+    throw new TenderEvidenceIdentityError(envelope.eventName, envelope.eventId, 'producer');
+  }
   if (envelope.tenantId !== payload.organizationId) {
     throw new TenderEvidenceIdentityError(envelope.eventName, envelope.eventId, 'tenantId');
   }

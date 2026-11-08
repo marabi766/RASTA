@@ -50,17 +50,71 @@ const helpers = [
     ['decodeAuditCursor'],
     'predicate',
   ],
+  // Pure string canonicaliser: folds keyboard variants and returns `string | null`. It reads only its
+  // first argument as text and the `caseFold` flag; it never converts to a number, date or money.
+  // `exact`: only the bare or `.ts` spelling of an import, or the function declared in that very
+  // file, carries the allowance; a sibling `.mjs`/`.tsx`/`.js` of the same stem never does. The
+  // result is not a string proof (it may be null), so callers must still handle `null`.
+  [
+    'packages/nest-common/src/text/canonical-unique-text',
+    'packages/nest-common/src/text/canonical-unique-text.ts',
+    ['canonicalUniqueText'],
+    'canonicalizer',
+    { exact: true },
+  ],
+  // Pure string canonicaliser: NFKC, Arabic ي/ك/digits folded, tatweel removed, blanks collapsed and
+  // trimmed. String in, string out; it never converts to a number, date or money (audit L3-10).
+  [
+    'services/asset-service/src/asset/identifier',
+    'services/asset-service/src/asset/identifier.ts',
+    ['canonicalIdentifier'],
+    'string',
+    { exact: true },
+  ],
+  // `z.string().trim().regex(...)`: a string schema that refuses bidi controls. Its output is a
+  // string, so a chain through `.pipe(plainText())` keeps the string proof. It is a schema factory,
+  // never a callback, and never a string value. Reached through the contracts barrel, pinned below.
+  ['@rasta/contracts', 'packages/contracts/src/common/text.ts', ['plainText'], 'string-schema'],
   // The ISO adapter validates syntax/finite instants and only appends issues; it never rewrites payload.value.
   ['@rasta/contracts', 'packages/contracts/src/common/iso-datetime.ts', ['isoDateTime'], 'check'],
 ];
 // Published-parent and reviewed fixed-message formatter versions.
 const pins = {
+  'services/asset-service/src/asset/identifier.ts':
+    '58f1d8ee057dabf0cd0eae309aece7226d87a59cbf0e7efedae501d66b9f5dcb',
+  'packages/nest-common/src/text/canonical-unique-text.ts':
+    '5eb97cc83fd4f3dd9a9e39c88513aa5673f22ab2d8a978cd8000d78144b89ee9',
   'apps/web/src/lib/repair-order-fields.ts':
     'b80e6b6a0fccce159661427e3c1e0dce973c93e1837ea632d7b47533a9944b13',
-  'packages/contracts/src/common/iso-datetime.ts':
+  'packages/contracts/src/common/iso-datetime.ts': [
     'f4b9b95a3dbf414ac4fc9e9502423dbbad23facd8fcebe25c6ed18f70a6e23e8',
-  'packages/contracts/src/index.ts':
+    '0575a17e05a4e9808cd0948bf5aa0f14b3e1abf68782907fedab9fc3cba158de',
+    // FU-181 construction identities; reviewed value-preserving helper.
+    '494b7b001527a51ca94be8b1241faabb61bec293b849aac6a564a4c1bf0acf87',
+  ],
+  'packages/contracts/src/common/pattern-refinement.ts':
+    '0ef5ec0e5383f56e34e9d7b96fb7206a9bf301ccbf1a168330a0177270e442c8',
+  'packages/contracts/src/common/text.ts':
+    '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
+  'packages/contracts/src/index.ts': [
     'b71ac3bbaddf706f5158fa47e8207b8a775511bf36ff9d7408edcc1e2d793e55',
+    'baa12fdedf9e9bfbbeadd2be36f3b97acc62229af37ce9bc3ccdfea5c3e98cf9',
+    '262f681400ee96f279f442b5f6d83f821596808ae5b72effa0c588e6875124c9',
+    // + the transaction-text exports (FU-134, PR #806): `plainText` still re-exported from text.ts.
+    'd470201ab822d732e8c10f0b6db953e4a5daacf94e47ae77afd0b75b64313822',
+    // + PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (FU-156): one constant beside the project-create one.
+    '833a9126faf3d7bb4082515cc895e451741fdb655591ecccf8b90782af9c8824',
+    // + INVENTORY_MAX_REPLAY_WINDOW_SECONDS (FU-171), numberInputInnerSchema (FU-160, #831) and the FU-152 private pattern registry exports (#840): exact union.
+    'ea1656bd023da6f0fddd9d24e1842aa628939bd610f77c5a7ad4f793e277c155',
+    // FU-181 construction identities; reviewed value-preserving helper.
+    '45c308b60a4588cf7dfba8496b264f4c50fac4c75d5f652868ead8b9cae6de04',
+    // CI repair: the pure URL helper gains a read-only construction lookup.
+    'bcf57fa29d3032b8106d41bec16165a5423d810d77780e832d03101bd936e527',
+    // + MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS (FU-171, #879) on top of that union: exact union.
+    '0d7a692210ab8c4f739096703984e7253fa3019a63f7c99049666348f2835238',
+    // CI/main synchronization: exact union of FU-181 and the maintenance replay constant.
+    '83991df34a484819959e3e747235a462e0f4e4a6d5c59812dfa60821a1ae036e',
+  ],
   'apps/web/src/lib/form-issues.ts':
     'a26e429c7f0992c69d794a18adb497e451fc42c276ca3620c07d040ed8da755f',
   'apps/web/src/lib/format/codepoints.ts':
@@ -78,8 +132,10 @@ const pins = {
   'apps/web/src/lib/format/text.ts':
     'df06651d9fa1d3d0c03f2543b27a97caef2a2e4e35e0b8d4b7f521e472355d9c',
   'apps/web/src/lib/order-fields.ts': [
-    '943ca0863d6421c7dccfd33cc212507cb4a9f9ebf3fbda566b9de0139c9631f1',
     '952fd53124d672d01c43152b669108fe8487849ea708ab067c8da64be98b91cf',
+    '61ab1f3188c8e27fcd5fadd3b517a8ec69c5dcf8f636ff80fe3e2164dc88dd55',
+    // + limits from TRANSACTION_TEXT_BOUNDS (FU-134, PR #806); `isOrderCommand` unchanged.
+    'b7d5f55a96f188adb1af73dc11ad1fa628d7d1e32b5a5cf6d3f2cef508eb5c9f',
   ],
   'apps/web/src/server/drivers.ts': [
     'c404487bde658fd99190401956f83270e1473fb6a738fc9c6e9acf896ad2c740',
@@ -93,12 +149,27 @@ const pins = {
     '61320e503117b4535f008253df76539e8ec2d29159cb9d5fdcb59e56753b814b',
 };
 export const CALLBACK_HELPER_SOURCES = Object.freeze(Object.keys(pins));
-export function verifiedCallbackHelper(root, modulePath, name) {
+// `binding` describes how the call site names the helper: the final segment of the import
+// specifier (or of the declaring file's own path) and the scope definition type. An `exact` entry
+// accepts only the bare or `.ts` module name, so `./x.mjs`, `./x/`, `./x/.` and `./x/index` never
+// inherit it, and only an import or a function declaration, never a variable.
+export function verifiedCallbackHelper(root, modulePath, name, binding = {}) {
   const helper = helpers.find(([path, , names]) => path === modulePath && names.includes(name));
   if (!helper) return undefined;
+  if (helper[4]?.exact) {
+    const base = modulePath.split('/').pop();
+    if (
+      ![base, `${base}.ts`].includes(binding.spelling) ||
+      !['ImportBinding', 'FunctionName'].includes(binding.definition)
+    )
+      return undefined;
+  }
   try {
     const files = [
       helper[1],
+      ...(helper[1] === 'packages/contracts/src/common/iso-datetime.ts'
+        ? ['packages/contracts/src/common/pattern-refinement.ts']
+        : []),
       ...(modulePath === '@rasta/contracts' ? ['packages/contracts/src/index.ts'] : []),
       ...([
         'apps/web/src/lib/format',

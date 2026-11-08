@@ -1,5 +1,13 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { basename, join, relative } from 'node:path';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (
+    dir: string,
+    options?: { skip?: (name: string) => boolean; optional?: boolean },
+  ) => string[];
+};
 
 /**
  * PR #444 r1 F1, closed as a class: a zod refusal reaches a person, a log or
@@ -17,34 +25,14 @@ const ROOT = join(__dirname, '../../../..');
 const BOUNDARY = 'packages/contracts/src/common/zod-issues.ts';
 
 function sourcesUnder(dir: string): string[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  return entries.flatMap((entry) => {
-    const path = join(dir, entry);
-    if (statSync(path).isDirectory()) {
-      // `generated` is git-ignored codegen (Prisma clients, .gitignore): not
-      // authored here, and another job's `prisma generate` may rewrite it
-      // while this walk reads it (ENOENT, PR #466 run 40490748601).
-      return [
-        'node_modules',
-        'dist',
-        '.next',
-        'generated',
-        'test',
-        '__tests__',
-        '__fixtures__',
-      ].includes(entry)
-        ? []
-        : sourcesUnder(path);
-    }
-    return /\.(ts|tsx|mjs|cjs|js)$/.test(entry) && !/\.(spec|test|int-spec)\.|fixture/.test(entry)
-      ? [path]
-      : [];
-  });
+  // The shared inventory never opens git-ignored codegen (`generated`): another job's
+  // `prisma generate` may rewrite it mid-walk (ENOENT, PR #466 run 40490748601; FU-102).
+  const skipped = ['test', '__tests__', '__fixtures__'];
+  return authoredFiles(dir, { optional: true, skip: (name) => skipped.includes(name) }).filter(
+    (path) =>
+      /\.(ts|tsx|mjs|cjs|js)$/.test(path) &&
+      !/\.(spec|test|int-spec)\.|fixture/.test(basename(path)),
+  );
 }
 
 const workspaces = (parent: string): string[] =>

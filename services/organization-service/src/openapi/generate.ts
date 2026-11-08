@@ -7,7 +7,8 @@ import { buildScopedOpenApiDocument, buildDocumentationApp, formatDocument } fro
  *
  * Boots the documentation module only, so no database, broker or JWKS
  * endpoint is needed and the output is the same bytes on every machine.
- * `test/openapi.int-spec.ts` proves those bytes describe the real application.
+ * `src/openapi/document.spec.ts` holds those bytes to the generator and the documentation
+ * module to the real `AppModule` controllers, its routes and their real error answers.
  *
  * Run from the service directory: `pnpm openapi:generate`.
  */

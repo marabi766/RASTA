@@ -243,9 +243,9 @@ model RegistrationIntake {
   id            String   @id @db.VarChar(64)
   /// The validated `SubmitRegistrationDto`: personal data, kept only until handled.
   submission    Json
-  receivedAt    DateTime @default(now()) @map("received_at")
+  receivedAt    DateTime @default(dbgenerated("timezone('UTC'::text, now())")) @map("received_at")
   attempts      Int      @default(0)
-  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  nextAttemptAt DateTime @default(dbgenerated("timezone('UTC'::text, now())")) @map("next_attempt_at")
   /// The submitting request's verified principal (`USER` | `SERVICE`), or `ANONYMOUS` (no id) when unauthenticated. Never from the body.
   actorType     String   @map("actor_type") @db.VarChar(16)
   actorId       String?  @map("actor_id") @db.VarChar(256)
@@ -510,7 +510,7 @@ model UserProvisioningIntent {
   requestHash          String    @map("request_hash") @db.Char(64)
   userId               String    @unique(map: "ux_user_provisioning_intent_user") @map("user_id") @db.VarChar(64)
   membershipId         String    @map("membership_id") @db.VarChar(64)
-  createdAt            DateTime  @default(now()) @map("created_at")
+  createdAt            DateTime  @default(dbgenerated("timezone('UTC'::text, now())")) @map("created_at")
   completedAt          DateTime? @map("completed_at")
   /// The answer a retry replays once the user committed.
   responseBody         Json?     @map("response_body")

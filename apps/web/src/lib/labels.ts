@@ -199,6 +199,9 @@ const ASSIGNMENT_END_REASONS: Readonly<Record<string, string>> = {
   REASSIGNED: 'تخصیص مجدد',
 };
 
+/** HELD without economic-service's proof: {@link presentTransactionStatus}. */
+const HELD_UNPROVEN_LABEL = 'وثیقه اثبات‌نشده';
+
 /** `TRANSACTION_STATUSES`, `services/economic-service/src/transaction/dto.ts`. */
 const TRANSACTION_STATUSES: Readonly<Record<string, string>> = {
   CREATED: 'ثبت‌شده',
@@ -206,6 +209,8 @@ const TRANSACTION_STATUSES: Readonly<Record<string, string>> = {
   PENDING_SETTLEMENT: 'در انتظار تسویه',
   DISPUTED: 'معترض‌شده',
   SETTLED: 'تسویه‌شده',
+  PARTIALLY_REVERSED: 'برگشت‌خورده جزئی',
+  REVERSED: 'برگشت‌خورده',
   REFUNDED: 'بازگشت‌داده‌شده',
   CANCELLED: 'لغوشده',
   FAILED: 'ناموفق',
@@ -236,6 +241,31 @@ const WALLET_HOLD_STATUSES: Readonly<Record<string, string>> = {
 const PRODUCT_KINDS: Readonly<Record<string, string>> = {
   GOOD: 'کالا',
   SERVICE: 'خدمت',
+};
+
+/** procurement-service `DEMAND_STATES` (`demand/demand.state-machine.ts`). */
+const DEMAND_STATUSES: Readonly<Record<string, string>> = {
+  SUBMITTED: 'ثبت‌شده',
+  WITHDRAWN: 'پس‌گرفته',
+  REFERRED: 'ارجاع‌شده',
+  LAPSED: 'منقضی‌شده',
+};
+
+/** procurement-service `AGGREGATION_STATES`. */
+const AGGREGATION_STATUSES: Readonly<Record<string, string>> = {
+  OPEN: 'پنجره باز',
+  READY: 'آماده استعلام',
+  RFQ_ISSUED: 'استعلام صادرشده',
+  REFERRED: 'ارجاع‌شده',
+  LAPSED: 'منقضی‌شده',
+  CANCELLED: 'لغوشده',
+};
+
+/** procurement-service `SHORTFALL_POLICIES`: what a window that misses its threshold does. */
+const SHORTFALL_POLICIES: Readonly<Record<string, string>> = {
+  EXTEND: 'تمدید پنجره',
+  REFER: 'ارجاع',
+  CLOSE: 'بستن',
 };
 
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
@@ -346,11 +376,25 @@ export const partSourceLabel = (value: string): string => lookup(PART_SOURCES, v
 export const driverStatusLabel = (value: string): string => lookup(DRIVER_STATUSES, value);
 export const assignmentEndReasonLabel = (value: string): string =>
   lookup(ASSIGNMENT_END_REASONS, value);
-export const transactionStatusLabel = (value: string): string =>
-  lookup(TRANSACTION_STATUSES, value);
+/**
+ * The one way a transaction's status is worded. It takes the row, not the status:
+ * HELD says funds are in escrow, and only economic-service's `heldProven` proves
+ * that (FU-138). `false` or missing reads as what it is, in words that claim no escrow.
+ */
+export const presentTransactionStatus = (transaction: {
+  readonly status: string;
+  readonly heldProven?: boolean;
+}): string =>
+  transaction.status === 'HELD' && transaction.heldProven !== true
+    ? HELD_UNPROVEN_LABEL
+    : lookup(TRANSACTION_STATUSES, transaction.status);
 export const transactionTypeLabel = (value: string): string => lookup(TRANSACTION_TYPES, value);
 export const walletHoldStatusLabel = (value: string): string => lookup(WALLET_HOLD_STATUSES, value);
 export const productKindLabel = (value: string): string => lookup(PRODUCT_KINDS, value);
+export const demandStatusLabel = (value: string): string => lookup(DEMAND_STATUSES, value);
+export const aggregationStatusLabel = (value: string): string =>
+  lookup(AGGREGATION_STATUSES, value);
+export const shortfallPolicyLabel = (value: string): string => lookup(SHORTFALL_POLICIES, value);
 
 /** The options a filter offers, in the order a person reads them. */
 export const assetTypeOptions = ASSET_TYPES.map((value) => ({

@@ -173,9 +173,12 @@ describe('the real construction DTOs', () => {
     expect(schema.additionalProperties).toBe(false);
   });
 
-  it('publishes the reason floor a withdrawal must meet', () => {
+  it('marks the reason floor applied after trimming as omitted (FU-120)', () => {
     const properties = toJsonSchema(withdrawNeedSchema).properties as Record<string, unknown>;
 
-    expect(properties.reason).toEqual({ type: 'string', minLength: 8, maxLength: 500 });
+    expect(properties.reason).toEqual({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 });

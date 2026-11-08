@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 
 export interface RedirectProbe {
   baseUrl: string;
-  /** Captured before any test replaces global fetch. */
+  /** Captured sender, restricted to this active probe’s own servers. */
   fetch: typeof fetch;
   recover(): void;
   sent: { method: string; headers: IncomingHttpHeaders; url: string }[];
@@ -29,10 +29,19 @@ export async function withRedirectProbe(
   const sent: RedirectProbe['sent'] = [];
   const target: RedirectProbe['target'] = [];
   const servers: Server[] = [];
+  const origins = new Set<string>();
+  const realFetch = globalThis.fetch;
+  const probeFetch: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    if (!origins.has(new URL(request.url).origin)) throw new Error('Redirect probe origin refused');
+    return realFetch(request);
+  };
   const serve = async (server: Server): Promise<string> => {
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    origins.add(origin);
+    return origin;
   };
   try {
     const targetUrl = await serve(
@@ -92,7 +101,7 @@ export async function withRedirectProbe(
     );
     await run({
       baseUrl,
-      fetch: globalThis.fetch,
+      fetch: probeFetch,
       sent,
       target,
       recover: () => {
@@ -100,6 +109,7 @@ export async function withRedirectProbe(
       },
     });
   } finally {
+    origins.clear();
     await Promise.all(
       servers.map(
         (server) =>

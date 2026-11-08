@@ -12,6 +12,7 @@
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { boundQuery } from '@/test/page-context';
+import { callGateway } from '@/server/gateway';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -27,6 +28,9 @@ const ORG = 'ORG-OWNER';
 const mockSession = { current: null as unknown };
 const mockFetched: string[] = [];
 const mockAnswers: Record<string, unknown> = {};
+
+jest.mock('@/server/gateway', () => ({ callGateway: jest.fn() }));
+jest.mock('@/server/demo-mode', () => ({ fetchDemoMode: async () => 'UNKNOWN' }));
 
 jest.mock('@/server/current-session', () => ({
   currentSession: async () => mockSession.current,
@@ -71,6 +75,8 @@ const { CreateProjectForm } =
 const { openProjectBaseline } =
   require('@/server/project-commands') as typeof import('@/server/project-commands');
 const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
+const { releaseFeedback } =
+  require('@/server/release-feedback') as typeof import('@/server/release-feedback');
 const { reserveUnresolved, settleUnresolved, useUnresolvedStore } =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
 const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
@@ -183,6 +189,10 @@ const offeredIn = (tree: ReactNode): string[] =>
   Object.keys(
     propsOf<{ tokens: Record<string, unknown> }>(ofType(tree, ProjectCommands)[0]).tokens ?? {},
   ).sort();
+
+afterEach(() => {
+  expect(callGateway).not.toHaveBeenCalled();
+});
 
 describe('/projects/[id]', () => {
   it('sends a person with no session to sign in, and back', async () => {
@@ -617,10 +627,24 @@ describe('/projects', () => {
 
     it('says a release form was refused as stale, and draws the current state', async () => {
       await remember();
-      const tree = await list({ search: { release: 'STALE' } });
-      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('تغییر کرده');
+      const token = releaseFeedback(
+        mockSession.current as never,
+        { surface: 'project-creation' },
+        'STALE',
+      );
+      const tree = await list({ search: { release: token } });
+      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('"outcome":"STALE"');
       expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(1);
     });
+
+    it.each(['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'RELEASED'])(
+      'reads no unsigned ?release=%s from the URL (FU-254 P1)',
+      async (word) => {
+        await remember();
+        const tree = await list({ search: { release: word } });
+        expect(JSON.stringify(elements(tree).map((e) => e.props))).not.toContain('"outcome":"');
+      },
+    );
 
     it('draws no notice when nothing is unresolved', async () => {
       expect(ofType(await list(), UnresolvedCreateNotice)).toHaveLength(0);

@@ -2,7 +2,8 @@ import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import type { PrismaClient } from '../src/generated/prisma';
 import { PrismaClient as Owner } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { IdempotencyStore, hashRequest } from '../src/shared/idempotency';
+import { databaseClock } from '../src/shared/clock';
+import { IdempotencyStore, hashRequest, idempotentRequest } from '../src/shared/idempotency';
 import { WarehouseService } from '../src/warehouse/warehouse.service';
 import { actor, client, key, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
 import {
@@ -236,8 +237,13 @@ describe('idempotent stock commands', () => {
     const narrow = new PrismaService(url.toString());
     const store = new IdempotencyStore(
       narrow,
-      { INVENTORY_IDEMPOTENCY_TTL_HOURS: 24, INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: 120 },
+      {
+        INVENTORY_IDEMPOTENCY_TTL_HOURS: 24,
+        INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: 120,
+        INVENTORY_CLOCK_SKEW_SECONDS: 30,
+      },
       () => undefined,
+      databaseClock,
     );
     const release = await occupyPool(narrow, 1);
     try {
@@ -248,7 +254,14 @@ describe('idempotent stock commands', () => {
         userId: 'USR-IDEM-POOL0001',
       });
       const outcome = await runWithContext(context, () =>
-        store.execute('POST /v1/stock/adjustments', key(), { n: 1 }, 201, work, jest.fn()),
+        store.execute(
+          'POST /v1/stock/adjustments',
+          idempotentRequest({ 'idempotency-key': key() }),
+          { n: 1 },
+          201,
+          work,
+          jest.fn(),
+        ),
       ).catch((error: unknown) => error);
 
       expect(outcome).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });

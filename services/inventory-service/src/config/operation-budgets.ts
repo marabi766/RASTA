@@ -23,6 +23,22 @@ export const IN_FLIGHT_WAIT_MS = 5_000;
 /** Slack for the waiting transaction beyond its lock wait, so the wait ends first. */
 export const WAIT_TRANSACTION_SLACK_MS = 2_000;
 
+/**
+ * The replay fence's slack (FU-171, PM decision D-133; procurement's FU-156): a claim reads this
+ * replica's clock once per attempt, and the insert it decides can run up to a claim's whole wait
+ * (`IN_FLIGHT_WAIT_MS` plus its transaction slack) later.
+ */
+export const REPLAY_FENCE_MARGIN_MS = IN_FLIGHT_WAIT_MS + WAIT_TRANSACTION_SLACK_MS;
+
+/**
+ * B, the fence budget in ms: how much earlier than the retention a replay deadline must end, and how
+ * long after its deadline a completed response is still kept. `B = 2·skew + margin` — two replicas'
+ * clocks may each be off by `skew` in opposite directions (the one that stored, the one that asks).
+ */
+export function replayFenceBudgetMs(clockSkewSeconds: number): number {
+  return 2 * clockSkewSeconds * 1000 + REPLAY_FENCE_MARGIN_MS;
+}
+
 /** Room a stock transaction has besides its lock waits. */
 export const STOCK_TRANSACTION_MARGIN_MS = 10_000;
 

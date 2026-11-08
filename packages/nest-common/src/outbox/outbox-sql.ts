@@ -10,6 +10,28 @@ import {
 } from './outbox';
 
 /**
+ * THE outbox clock (FU-170, FU-188): every write and every comparison below
+ * interpolates this one constant, and outbox.store.spec.ts holds them to it.
+ *
+ * Services own either timestamp(3) (UTC wall time) or timestamptz(3) columns, each
+ * service's four `outbox_message` instants all of one type. This decodes an explicit
+ * UTC instant into the table's own type, so neither assignment nor comparison can
+ * reinterpret it in the session zone. Floored before decoding: populate_record
+ * applies the column's millisecond precision. For aligned columns, <= / > this floor
+ * equals <= / > raw now(). Kept on the right-hand side of predicates: indexed
+ * deadline columns stay untouched.
+ *
+ * A scalar subquery, so it is one InitPlan, evaluated once per statement. Where the
+ * clock is a Filter (`paired` walks its index and filters on GREATEST) the decode would
+ * otherwise run per scanned row: measured on 200,000 leased rows, 496-687 ms for the
+ * claim against 245-380 ms, and 162-201 ms for a plain `now()` (FU-188).
+ */
+export const OUTBOX_NOW = `(SELECT (jsonb_populate_record(NULL::outbox_message, jsonb_build_object(
+  'claim_expires_at', to_char(date_trunc('milliseconds', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+))).claim_expires_at)`;
+
+// TIMESTAMP(3) rounds to nearest. Floor the clock and the complete deadline.
+/**
  * The SQL behind every service's outbox store.
  *
  * All eight implemented services had a byte-identical `outbox.store.ts`, so a
@@ -241,13 +263,13 @@ interface ClaimedExtras {
  *
  * ## Why four streams rather than one predicate
  *
- * The obvious form — `(claim_expires_at IS NULL OR claim_expires_at <= now())
- * AND (next_attempt_at IS NULL OR next_attempt_at <= now())` with
+ * The obvious form — `(claim_expires_at IS NULL OR claim_expires_at <= OUTBOX_NOW)
+ * AND (next_attempt_at IS NULL OR next_attempt_at <= OUTBOX_NOW)` with
  * `ORDER BY created_at, id` — is correct but cannot be executed efficiently,
  * and the reason is not a missing index.
  *
- * `now()` is **stable, not immutable**: its value is unknown at planning time,
- * so PostgreSQL cannot consult a histogram for `<= now()` and falls back to the
+ * The clock is **stable, not immutable**: its value is unknown at planning time,
+ * so PostgreSQL cannot consult a histogram for `<= OUTBOX_NOW` and falls back to the
  * 33% default selectivity. Measured, not assumed: an expression index on
  * `GREATEST(COALESCE(...), COALESCE(...))` does collect statistics
  * (`n_distinct = 2` in `pg_stats`), and the planner *still* estimated 66,667 of
@@ -264,13 +286,13 @@ interface ClaimedExtras {
  * | stream   | which rows                     | eligible when              |
  * | -------- | ------------------------------ | -------------------------- |
  * | `fresh`  | no lease, no retry             | always                     |
- * | `lease`  | lease only                     | `claim_expires_at <= now()`|
- * | `retry`  | retry only                     | `next_attempt_at <= now()` |
- * | `paired` | both present                   | `GREATEST(both) <= now()`  |
+ * | `lease`  | lease only                     | `claim_expires_at <= OUTBOX_NOW`|
+ * | `retry`  | retry only                     | `next_attempt_at <= OUTBOX_NOW` |
+ * | `paired` | both present                   | `GREATEST(both) <= OUTBOX_NOW`  |
  *
  * The four are mutually exclusive and exhaustive, so their union is exactly the
  * original predicate — asserted row-for-row by the equivalence tests, including
- * the boundary where a timestamp equals the database's own `now()`.
+ * the boundary where a timestamp equals the database's own clock.
  *
  * Taking each stream's oldest `limit` and then re-ordering the union globally
  * still yields the true global oldest `limit`: if a row were among the global
@@ -338,14 +360,14 @@ export async function claimPendingSql(
      lease AS (
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL AND next_attempt_at IS NULL
-          AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
+          AND claim_expires_at IS NOT NULL AND claim_expires_at <= ${OUTBOX_NOW}
         ORDER BY created_at, id LIMIT $4
           FOR UPDATE SKIP LOCKED
      ),
      retry AS (
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL AND claim_expires_at IS NULL
-          AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
+          AND next_attempt_at IS NOT NULL AND next_attempt_at <= ${OUTBOX_NOW}
         ORDER BY created_at, id LIMIT $4
           FOR UPDATE SKIP LOCKED
      ),
@@ -353,7 +375,7 @@ export async function claimPendingSql(
        SELECT id, created_at FROM outbox_message
         WHERE published_at IS NULL
           AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
-          AND GREATEST(claim_expires_at, next_attempt_at) <= now()
+          AND GREATEST(claim_expires_at, next_attempt_at) <= ${OUTBOX_NOW}
         ORDER BY created_at, id LIMIT $4
           FOR UPDATE SKIP LOCKED
      ),
@@ -371,15 +393,16 @@ export async function claimPendingSql(
          FROM outbox_message o
         WHERE o.id IN (SELECT id FROM candidates)
           AND o.published_at IS NULL
-          AND (o.claim_expires_at IS NULL OR o.claim_expires_at <= now())
-          AND (o.next_attempt_at  IS NULL OR o.next_attempt_at  <= now())
+          AND (o.claim_expires_at IS NULL OR o.claim_expires_at <= ${OUTBOX_NOW})
+          AND (o.next_attempt_at  IS NULL OR o.next_attempt_at  <= ${OUTBOX_NOW})
         ORDER BY o.created_at, o.id
           FOR UPDATE SKIP LOCKED
      )
      UPDATE outbox_message AS o
         SET claim_token      = $1,
             claim_owner      = $2,
-            claim_expires_at = now() + make_interval(secs => $3::double precision),
+            claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', ${OUTBOX_NOW})
+                + make_interval(secs => $3::double precision)),
             claim_count      = o.claim_count + 1
        FROM due
       WHERE o.id = due.id
@@ -450,7 +473,7 @@ export async function markPublishedSql(
   if (ids.length === 0) return 0;
   return client.$executeRawUnsafe(
     `UPDATE outbox_message
-        SET published_at     = now(),
+        SET published_at     = ${OUTBOX_NOW},
             claim_token      = NULL,
             claim_owner      = NULL,
             claim_expires_at = NULL,
@@ -466,7 +489,7 @@ export async function markPublishedSql(
 /**
  * Records a failure, releases the claim, and schedules the retry.
  *
- * The delay is computed entirely in SQL from `now()`. No JavaScript clock
+ * The delay is computed entirely in SQL from {@link OUTBOX_NOW}. No JavaScript clock
  * enters the decision, so skew between replicas cannot pull a row forward or
  * push it back. `attempts` on the right-hand side is the pre-update value —
  * PostgreSQL evaluates every SET expression against the old row — so a first
@@ -487,10 +510,10 @@ export async function markFailedSql(
     `UPDATE outbox_message
         SET attempts         = attempts + 1,
             last_error       = $3,
-            next_attempt_at  = now() + make_interval(secs => least(
+            next_attempt_at  = date_trunc('milliseconds', date_trunc('milliseconds', ${OUTBOX_NOW}) + make_interval(secs => least(
               power(2, least(attempts, 10)) * $4::double precision,
               $5::double precision
-            )),
+            ))),
             claim_token      = NULL,
             claim_owner      = NULL,
             claim_expires_at = NULL
@@ -629,7 +652,8 @@ export async function renewSql(
     await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
     const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
       `UPDATE outbox_message
-          SET claim_expires_at = now() + make_interval(secs => $3::double precision)
+          SET claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', ${OUTBOX_NOW})
+                + make_interval(secs => $3::double precision))
         WHERE id = ANY($1::text[])
           AND claim_token = $2
           AND published_at IS NULL
@@ -647,7 +671,7 @@ export async function renewSql(
 
 export async function oldestPendingAgeSecondsSql(client: OutboxSqlClient): Promise<number> {
   const result = await client.$queryRawUnsafe<{ age: number | null }[]>(
-    `SELECT EXTRACT(EPOCH FROM (now() - MIN(created_at)))::float8 AS age
+    `SELECT EXTRACT(EPOCH FROM (${OUTBOX_NOW} - MIN(created_at)))::float8 AS age
        FROM outbox_message
       WHERE published_at IS NULL`,
   );
@@ -701,7 +725,7 @@ export interface PurgePublishedBatch {
  *
  * ## Which rows, and why only those
  *
- * `published_at IS NOT NULL AND published_at < now() - retention`, and the
+ * `published_at IS NOT NULL AND published_at < OUTBOX_NOW - retention`, and the
  * DELETE re-checks `published_at IS NOT NULL AND claim_token IS NULL` on the
  * locked row. An unpublished row is an event nobody has received yet; it is
  * never selected, however old. A published row holds no claim
@@ -767,8 +791,8 @@ export async function purgePublishedSql(
         `WITH doomed AS (
          SELECT id FROM outbox_message
           WHERE published_at IS NOT NULL
-            AND published_at < now() - make_interval(secs => ${retentionSeconds})
-            AND created_at   < now() - make_interval(secs => ${retentionSeconds})
+            AND published_at < ${OUTBOX_NOW} - make_interval(secs => ${retentionSeconds})
+            AND created_at   < ${OUTBOX_NOW} - make_interval(secs => ${retentionSeconds})
             AND (last_error IS NULL OR last_error NOT LIKE '${MANUALLY_SKIPPED_PREFIX}%')
           LIMIT ${limit}
             FOR UPDATE SKIP LOCKED
@@ -803,7 +827,7 @@ export async function activeLeaseCountSql(client: OutboxSqlClient): Promise<numb
        FROM outbox_message
       WHERE published_at IS NULL
         AND claim_expires_at IS NOT NULL
-        AND claim_expires_at > now()`,
+        AND claim_expires_at > ${OUTBOX_NOW}`,
   );
   return Number(result[0]?.count ?? 0);
 }

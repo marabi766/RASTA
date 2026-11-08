@@ -33,6 +33,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve as resolvePath } from 'node:path';
 import ts from 'typescript';
 import { SOURCE, files, walk } from './eligibility-clock-derive.mjs';
+import { workspaceDirectories } from './workspace-roots-lib.mjs';
 
 const TEST_FILE =
   /\.(?:spec|test|int-spec|e2e-spec|live-spec)\.[cm]?[jt]sx?$|\.pg\.test\.[cm]?[jt]s$/;
@@ -108,14 +109,15 @@ function resolveAbsolute(repository, absolute) {
 const workspaceCache = new Map();
 function findWorkspace(repository, name) {
   if (!workspaceCache.size)
-    for (const base of ['apps', 'packages', 'services', 'tests'])
-      for (const path of files(join(repository, base)).filter((p) => p.endsWith('/package.json'))) {
-        try {
-          workspaceCache.set(JSON.parse(readFileSync(path, 'utf8')).name, dirname(path));
-        } catch {
-          /* not a workspace manifest */
-        }
+    // Members come from pnpm-workspace.yaml (fails closed), not from four hard-coded roots.
+    for (const directory of workspaceDirectories(repository)) {
+      const path = join(repository, directory, 'package.json');
+      try {
+        workspaceCache.set(JSON.parse(readFileSync(path, 'utf8')).name, dirname(path));
+      } catch {
+        /* not a workspace manifest */
       }
+    }
   return workspaceCache.get(name) ?? null;
 }
 
@@ -305,9 +307,16 @@ const REVIEWED_COMPUTED_IMPORTS = [
     loads: 'the generated Prisma client of a service (external, generated code)',
   },
   {
-    file: 'scripts/outbox-b2-prisma-port.mjs',
-    argument: 'generated',
-    loads: "join(serviceDir, 'src', 'generated', 'prisma'): the generated Prisma client (external)",
+    file: 'scripts/workspace-module.mjs',
+    argument: 'path',
+    loads:
+      'require.resolve only (does not execute): local workspace build/config or generated-client paths; the resolved path is canonicalized and checked before loading',
+  },
+  {
+    file: 'scripts/workspace-module.mjs',
+    argument: 'resolved',
+    loads:
+      'canonical workspace builds (production roots), Jest configs (test entry points), or generated Prisma clients (external); the loader refuses outside/dependency paths before require',
   },
   {
     file: 'scripts/aggregation-campaign-preflight.test.mjs',
@@ -318,6 +327,12 @@ const REVIEWED_COMPUTED_IMPORTS = [
   {
     file: 'apps/web/src/write-session-refusal.spec.ts',
     argument: 'join(REPO_ROOT, path)',
+    loads:
+      'the server-action modules discoverServerActions finds under apps/web/src: production (apps/*/src)',
+  },
+  {
+    file: 'apps/web/src/unconfirmed-retry-guard.spec.ts',
+    argument: 'join(REPO_ROOT, module)',
     loads:
       'the server-action modules discoverServerActions finds under apps/web/src: production (apps/*/src)',
   },
@@ -353,8 +368,8 @@ const REVIEWED_COMPUTED_IMPORTS = [
 function packageScriptEntries(repository) {
   const entries = [];
   const manifests = [join(repository, 'package.json')];
-  for (const base of ['apps', 'packages', 'services', 'tests'])
-    manifests.push(...files(join(repository, base)).filter((p) => p.endsWith('/package.json')));
+  for (const directory of workspaceDirectories(repository))
+    manifests.push(join(repository, directory, 'package.json'));
   for (const manifest of manifests) {
     const scripts = JSON.parse(readFileSync(manifest, 'utf8')).scripts ?? {};
     for (const [name, command] of Object.entries(scripts)) {

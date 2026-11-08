@@ -112,6 +112,10 @@ Projection به Keycloak روی آن عمل نمی‌کند — تغییر سا�
 | `ORGANIZATION_POLICY_CHANGED`  | audit                                              | `organizationId`, `policyKey`, `value`                                                                            |
 | `ORGANIZATION_CONTACT_CHANGED` | audit                                              | `organizationId`, `contactId`, `change`, `kind`, `isPrimary`, `demotedContactIds[]` — **بدون** تلفن، ایمیل یا نام |
 
+**برنامه‌ریزی‌شده (ADR-072، هنوز تولید نمی‌شود):** `ORGANIZATION_UNION_MEMBERSHIP_STARTED` و `ORGANIZATION_UNION_MEMBERSHIP_ENDED`
+روی همین Topic — کلید Partition سازمان عضو، مستأجر لفافه اتحادیه؛ مصرف: audit (Projection ـِ `UnionMembership/{membershipId}`، PR 1b، پیش از نخستین رویداد مستقر می‌شود) · construction و contract (فقط
+`..._ENDED`، محرک بازپرسی سیاست، Q-83). Payload در ADR-072 § ۳؛ ردیف‌ها در PR ـِ `organization-service` به این جدول می‌آیند.
+
 ## Asset — `rasta.asset.v1`
 
 | رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                                                             |
@@ -432,18 +436,18 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
   `netAmountMinor` را حمل می‌کند — **بازتاب پاسخ تسویه**، نه محاسبه محلی. این
   سرویس نرخ کارمزد را نمی‌داند و نباید به‌نظر برسد که می‌داند (ADR-040 § ۶).
 
-| رویداد                    | مصرف‌کنندگان                                                              | Payload کلیدی                                                                                                                   |
-| ------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `OFFER_PUBLISHED`         | search · analytics                                                        | `offerId`, `productId`, `supplierOrganizationId`, `price`                                                                       |
-| `ORDER_CREATED`           | **economic (Hold)** · inventory (رزرو) · notification · supplier (امتیاز) | `orderId`, `buyerOrganizationId`, `supplierOrganizationId`, `total`, `lines[]`, `promisedDeliveryAt` (اختیاری، ADR-052 § ۱-الف) |
-| `ORDER_CONFIRMED`         | notification · analytics                                                  | `orderId`                                                                                                                       |
-| `ORDER_FULFILLED`         | notification · inventory · supplier (امتیاز)                              | `orderId`, `fulfillmentId`                                                                                                      |
-| `ORDER_RECEIPT_CONFIRMED` | **economic (Release + تسویه + کارمزد)**                                   | `orderId`, `confirmedBy`                                                                                                        |
-| `ORDER_COMPLETED`         | economic (پاداش) · supplier (امتیاز) · analytics                          | `orderId`, `total`                                                                                                              |
-| `ORDER_CANCELLED`         | economic (بازگشت) · inventory (آزادسازی) · supplier (امتیاز)              | `orderId`, `reason`, `cancellationCause` (اختیاری، enum بسته، ADR-052 § ۱-پ)                                                    |
-| `ORDER_DISPUTED`          | **economic (توقف تسویه)** · notification · supplier                       | `orderId`, `disputeId`, `reason`                                                                                                |
-| `ORDER_DISPUTE_RESOLVED`  | supplier (امتیاز)                                                         | `orderId`, `disputeId`, `outcome`, `responsibility` (enum بسته، الزامی، ADR-052 § ۱-ب)                                          |
-| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                                      | `orderId`, `rating`, optional `qualityRating` (1–5; Q-56; absent = no quality signal), `submittedAt`                            |
+| رویداد                    | مصرف‌کنندگان                                                              | Payload کلیدی                                                                                                                                                                                    |
+| ------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OFFER_PUBLISHED`         | search · analytics                                                        | `offerId`, `productId`, `supplierOrganizationId`, `price`                                                                                                                                        |
+| `ORDER_CREATED`           | **economic (Hold)** · inventory (رزرو) · notification · supplier (امتیاز) | `orderId`, `buyerOrganizationId`, `supplierOrganizationId`, `total`, `lines[]`, `promisedDeliveryAt` (اختیاری، ADR-052 § ۱-الف)                                                                  |
+| `ORDER_CONFIRMED`         | notification · analytics                                                  | `orderId`                                                                                                                                                                                        |
+| `ORDER_FULFILLED`         | notification · inventory · supplier (امتیاز)                              | `orderId`, `fulfillmentId`                                                                                                                                                                       |
+| `ORDER_RECEIPT_CONFIRMED` | **economic (Release + تسویه + کارمزد)**                                   | `orderId`, `confirmedBy`                                                                                                                                                                         |
+| `ORDER_COMPLETED`         | economic (پاداش) · supplier (امتیاز) · analytics                          | `orderId`, `total`                                                                                                                                                                               |
+| `ORDER_CANCELLED`         | economic (بازگشت) · inventory (آزادسازی) · supplier (امتیاز)              | `orderId`, `reason`, `cancellationCause` (اختیاری، enum بسته، ADR-052 § ۱-پ)                                                                                                                     |
+| `ORDER_DISPUTED`          | **economic (توقف تسویه)** · notification · supplier                       | `orderId`, `disputeId`, `reason`                                                                                                                                                                 |
+| `ORDER_DISPUTE_RESOLVED`  | supplier (امتیاز)                                                         | `orderId`, `disputeId`, `outcome`, `orderStatus` (اختیاری؛ جایی که تصمیم سفارش را گذاشت — D-083: `SETTLE` به مرحلهٔ ثبت اختلاف برمی‌گرداند)، `responsibility` (enum بسته، الزامی، ADR-052 § ۱-ب) |
+| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                                      | `orderId`, `rating`, optional `qualityRating` (1–5; Q-56; absent = no quality signal), `submittedAt`                                                                                             |
 
 ### رکوردهای حسابرسی — L7-14 (2026-09-25)
 

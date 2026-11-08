@@ -5,6 +5,9 @@ import {
   isTerminal,
   nextStatus,
   resolvedStatus,
+  SETTLEMENT_BARRED,
+  STATEMENT_SETTLEMENT_BARRED,
+  reversedStatus,
   TERMINAL_STATUSES,
   type TransactionEvent,
 } from './state-machine';
@@ -32,6 +35,8 @@ const ALL_STATUSES: TransactionStatus[] = [
   'PENDING_SETTLEMENT',
   'DISPUTED',
   'SETTLED',
+  'PARTIALLY_REVERSED',
+  'REVERSED',
   'REFUNDED',
   'CANCELLED',
   'FAILED',
@@ -46,6 +51,7 @@ const ALL_EVENTS: TransactionEvent[] = [
   'FAIL',
   'DISPUTE',
   'RESOLVE_DISPUTE',
+  'REVERSE_SETTLEMENT',
 ];
 
 describe('the happy path', () => {
@@ -88,6 +94,7 @@ describe('a dispute stops settlement completely', () => {
       nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', {
         settlementAuthorised: true,
         fundsHeld: true,
+        settlementBarred: false,
       }),
     ).toBe('PENDING_SETTLEMENT');
   });
@@ -98,22 +105,36 @@ describe('a dispute stops settlement completely', () => {
         nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', {
           settlementAuthorised: false,
           fundsHeld: true,
+          settlementBarred: false,
         }),
       ).toBe('HELD');
     });
 
     it('returns an authorised transaction to PENDING_SETTLEMENT, held or not', () => {
       for (const fundsHeld of [true, false]) {
-        expect(resolvedStatus({ settlementAuthorised: true, fundsHeld })).toBe(
-          'PENDING_SETTLEMENT',
-        );
+        expect(
+          resolvedStatus({ settlementAuthorised: true, fundsHeld, settlementBarred: false }),
+        ).toBe('PENDING_SETTLEMENT');
       }
     });
 
     it('returns an obligation with no escrow to PENDING_SETTLEMENT: it was authorised when recorded', () => {
-      expect(resolvedStatus({ settlementAuthorised: false, fundsHeld: false })).toBe(
-        'PENDING_SETTLEMENT',
-      );
+      expect(
+        resolvedStatus({ settlementAuthorised: false, fundsHeld: false, settlementBarred: false }),
+      ).toBe('PENDING_SETTLEMENT');
+    });
+
+    // D-123: barred, or not known not to be, whatever the authorisation and the hold say.
+    it('returns a transaction its hold record bars to HELD, never to the settlement queue', () => {
+      for (const settlementAuthorised of [true, false]) {
+        for (const fundsHeld of [true, false]) {
+          for (const settlementBarred of [true, undefined]) {
+            expect(
+              resolvedStatus({ settlementAuthorised, fundsHeld, settlementBarred } as never),
+            ).toBe('HELD');
+          }
+        }
+      }
     });
 
     it('refuses to guess a resolution without the authority it depends on', () => {
@@ -136,7 +157,11 @@ describe('a dispute stops settlement completely', () => {
 describe('settlement checks its authority, not only its status (D-083, #623 r1 F1)', () => {
   it('refuses an escrowed transaction with no recorded authorisation — the legacy PENDING_SETTLEMENT row', () => {
     try {
-      assertSettlementReady('TXN_1', { settlementAuthorised: false, fundsHeld: true });
+      assertSettlementReady('TXN_1', {
+        settlementAuthorised: false,
+        fundsHeld: true,
+        settlementBarred: false,
+      });
       throw new Error('settled without authority');
     } catch (error) {
       expect(error).toBeInstanceOf(RastaError);
@@ -150,14 +175,51 @@ describe('settlement checks its authority, not only its status (D-083, #623 r1 F
       { settlementAuthorised: true, fundsHeld: false },
       { settlementAuthorised: false, fundsHeld: false },
     ]) {
-      expect(() => assertSettlementReady('TXN_1', authority)).not.toThrow();
+      expect(() =>
+        assertSettlementReady('TXN_1', { ...authority, settlementBarred: false }),
+      ).not.toThrow();
     }
+  });
+
+  // FU-138, D-123: nothing held would otherwise say ready, and debit the payer's spendable balance.
+  it.each([
+    [{ settlementAuthorised: false, fundsHeld: false }],
+    [{ settlementAuthorised: false, fundsHeld: true }],
+    [{ settlementAuthorised: true, fundsHeld: false }],
+    [{ settlementAuthorised: true, fundsHeld: true }],
+  ])('refuses %j while its hold record bars it, or that is not known', (authority) => {
+    for (const settlementBarred of [true, undefined, null, 'false']) {
+      expect(() =>
+        assertSettlementReady('TXN_1', { ...authority, settlementBarred } as never),
+      ).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_STATE_TRANSITION',
+          message: SETTLEMENT_BARRED,
+        }),
+      );
+    }
+  });
+
+  it('tells the operator a barred statement obligation has no way forward, and no one else that', () => {
+    const authority = { settlementAuthorised: true, fundsHeld: false, settlementBarred: true };
+    expect(() => assertSettlementReady('TXN_1', authority, 'STATEMENT')).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_STATE_TRANSITION',
+        message: STATEMENT_SETTLEMENT_BARRED,
+      }),
+    );
+    expect(() => assertSettlementReady('TXN_1', authority, 'ORDER')).toThrow(
+      expect.objectContaining({ message: SETTLEMENT_BARRED }),
+    );
+    expect(() =>
+      assertSettlementReady('TXN_1', { ...authority, settlementBarred: false }, 'STATEMENT'),
+    ).not.toThrow();
   });
 
   it('agrees with where a resolution sends it: settlement-ready exactly when settleable', () => {
     for (const settlementAuthorised of [true, false]) {
       for (const fundsHeld of [true, false]) {
-        const authority = { settlementAuthorised, fundsHeld };
+        const authority = { settlementAuthorised, fundsHeld, settlementBarred: false };
         const settleable = (() => {
           try {
             assertSettlementReady('TXN_1', authority);
@@ -187,6 +249,73 @@ describe('settlement requires authorisation', () => {
 
   it('permits settlement only from PENDING_SETTLEMENT', () => {
     expect(canTransition('PENDING_SETTLEMENT', 'SETTLE')).toBe(true);
+  });
+});
+
+describe('a settlement is undone only by a reversal, as far as money moved (docs/24 Q-76, D-115 A)', () => {
+  const progress = (reversedGrossMinor: bigint) => ({
+    settlementGrossMinor: 1_000n,
+    reversedGrossMinor,
+  });
+
+  it('leaves SETTLED by no other event', () => {
+    const exits = ALL_EVENTS.filter((event) => canTransition('SETTLED', event));
+    expect(exits).toEqual(['REVERSE_SETTLEMENT']);
+  });
+
+  it.each(['SETTLED', 'PARTIALLY_REVERSED'] as const)(
+    'goes from %s as far as the applied reversals say',
+    (from) => {
+      expect(nextStatus('TXN_1', from, 'REVERSE_SETTLEMENT', progress(1n))).toBe(
+        'PARTIALLY_REVERSED',
+      );
+      expect(nextStatus('TXN_1', from, 'REVERSE_SETTLEMENT', progress(999n))).toBe(
+        'PARTIALLY_REVERSED',
+      );
+      expect(nextStatus('TXN_1', from, 'REVERSE_SETTLEMENT', progress(1_000n))).toBe('REVERSED');
+    },
+  );
+
+  it('leaves PARTIALLY_REVERSED by no other event, and REVERSED by none at all', () => {
+    expect(ALL_EVENTS.filter((event) => canTransition('PARTIALLY_REVERSED', event))).toEqual([
+      'REVERSE_SETTLEMENT',
+    ]);
+    expect(isTerminal('REVERSED')).toBe(true);
+    expect(() => nextStatus('TXN_1', 'REVERSED', 'REVERSE_SETTLEMENT', progress(1_000n))).toThrow(
+      expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }),
+    );
+  });
+
+  it.each([0n, -1n, 1_001n])('refuses a reversed total of %s rather than round it', (total) => {
+    expect(() => reversedStatus(progress(total))).toThrow(
+      expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }),
+    );
+    expect(() => nextStatus('TXN_1', 'SETTLED', 'REVERSE_SETTLEMENT', progress(total))).toThrow(
+      expect.objectContaining({ code: 'INVALID_STATE_TRANSITION' }),
+    );
+  });
+
+  it('decides exactly above what a number can hold', () => {
+    const big = 2n ** 62n;
+    expect(reversedStatus({ settlementGrossMinor: big + 1n, reversedGrossMinor: big })).toBe(
+      'PARTIALLY_REVERSED',
+    );
+  });
+
+  it('refuses to guess without the facts, or with the wrong ones', () => {
+    expect(() => nextStatus('TXN_1', 'SETTLED', 'REVERSE_SETTLEMENT')).toThrow(
+      'needs its progress',
+    );
+    expect(() =>
+      nextStatus('TXN_1', 'SETTLED', 'REVERSE_SETTLEMENT', {
+        settlementAuthorised: true,
+        fundsHeld: false,
+        settlementBarred: false,
+      }),
+    ).toThrow('needs its progress');
+    expect(() => nextStatus('TXN_1', 'DISPUTED', 'RESOLVE_DISPUTE', progress(1n))).toThrow(
+      'needs its settlement authority',
+    );
   });
 });
 
@@ -254,9 +383,11 @@ describe('refusals', () => {
       'HELD:AUTHORISE_SETTLEMENT',
       'HELD:DISPUTE',
       'HELD:REFUND',
+      'PARTIALLY_REVERSED:REVERSE_SETTLEMENT',
       'PENDING_SETTLEMENT:DISPUTE',
       'PENDING_SETTLEMENT:REFUND',
       'PENDING_SETTLEMENT:SETTLE',
+      'SETTLED:REVERSE_SETTLEMENT',
     ]);
   });
 });
@@ -295,6 +426,7 @@ describe('the refusal message', () => {
     ['SETTLED', 'HOLD_PLACED', 'have funds held against it'],
     ['SETTLED', 'AUTHORISE_SETTLEMENT', 'be authorised for settlement'],
     ['CREATED', 'SETTLE', 'be settled'],
+    ['CREATED', 'REVERSE_SETTLEMENT', 'have its settlement reversed'],
     ['CREATED', 'REFUND', 'be refunded'],
     ['HELD', 'CANCEL', 'be cancelled'],
     ['HELD', 'FAIL', 'be marked failed'],

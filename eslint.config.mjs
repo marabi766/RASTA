@@ -9,6 +9,7 @@ import { typedOrUntypedParser } from './scripts/internal-token-parser.mjs';
 import rawHttpBoundary from './scripts/raw-http-boundary-rule.mjs';
 import noZodDefault from './scripts/no-zod-default-rule.mjs';
 import zodCoercion from './scripts/zod-coercion-rule.mjs';
+import { code } from './scripts/lint-extensions.mjs';
 
 /**
  * The internal rules, one plugin object for every block that turns them on
@@ -160,7 +161,7 @@ const base = tseslint.config(
     // prints its verdict, CI captures it, a human reads it — so `log`, `info`,
     // `warn` and `error` are allowed here. `debug`, `trace`, `dir` and the rest
     // stay errors: they are leftovers, not output.
-    files: ['scripts/**/*.{js,mjs,cjs}'],
+    files: [code('scripts/**/*')],
     languageOptions: { globals: { ...globals.node } },
     rules: {
       'no-console': ['error', { allow: ['log', 'info', 'warn', 'error'] }],
@@ -168,12 +169,8 @@ const base = tseslint.config(
   },
   {
     // Workspaces re-export this config, so paths must match from their cwd too.
-    files: [
-      '**/src/**/*.{ts,js,mjs,cjs}',
-      '**/dev/**/*.{ts,js,mjs,cjs}',
-      '**/prisma/**/*.{ts,js,mjs,cjs}',
-      'scripts/**/*.{js,mjs,cjs}',
-    ],
+    // Every executable extension (scripts/lint-extensions.mjs, FU-074).
+    files: [code('**/src/**/*'), code('**/dev/**/*'), code('**/prisma/**/*'), code('scripts/**/*')],
     ignores: [
       '**/*.spec.ts',
       '**/*.test.ts',
@@ -205,14 +202,18 @@ const base = tseslint.config(
     // real credentials — an admin password grant, an admin bearer — so they get
     // the boundary too (PR #492 r2 F2): they send through guardedFetch, or
     // globalFetchStub when they replace the global (@rasta/testing).
-    files: ['**/*.live-spec.ts'],
+    files: [code('**/*.live-spec')],
     plugins: { internal: internalPlugin },
     rules: { 'internal/raw-http': 'error' },
   },
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import
     // it before any build (url-reader.js); Node's CommonJS globals apply.
-    files: ['**/src/url-reader.js', '**/src/command-failure.js'],
+    files: [
+      '**/src/url-reader.js',
+      '**/src/command-failure.js',
+      '**/src/credential-environment.js',
+    ],
     languageOptions: { sourceType: 'commonjs', globals: { ...globals.node } },
   },
   {
