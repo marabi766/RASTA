@@ -1155,3 +1155,39 @@ for (const code of [
   `z.ZodEffects.create(z.string(), {type:'preprocess', transform:Number});`,
 ])
   it(`FU-070 refuses unproven input: ${code}`, () => assert.ok(messages(code).length, code));
+
+// PR #730 r1 F1: only a receiverless callback takes the pipe's upstream as its
+// input; a method-form callback's input is its own receiver chain.
+for (const code of [
+  `z.unknown().pipe(z.string().transform(v => v.trim()));`,
+  `z.unknown().pipe(z.string().overwrite(v => v.trim()));`,
+  `z.pipe(z.unknown(), z.string().transform(Number));`,
+  `z.string().pipe(z.string().transform(Number));`,
+])
+  it(`r1 F1 method callback uses its receiver: ${code}`, () =>
+    assert.deepEqual(messages(code), []));
+for (const code of [
+  `z.string().pipe(z.string().transform(s => s.split(',')).transform(Number));`,
+  `z.string().pipe(z.string().transform(s => s.split(',')).overwrite(Number));`,
+  `z.string().pipe(z.preprocess(v => v, z.any()).transform(Number));`,
+  `z.pipe(z.string(), z.string().transform(s => s.split(',')).transform(Number));`,
+  `z.string().pipe(z.unknown().transform(Number));`,
+  `z.string().pipe((z.unknown().transform(Number)));`,
+])
+  it(`r1 F1 pipe never stands in for a receiver: ${code}`, () =>
+    assert.ok(messages(code).length, code));
+
+// PR #730 r1 F2: JavaScript keeps the last duplicate key, so a definition
+// field named twice is refused instead of read first-match.
+for (const code of [
+  `z.ZodEffects.create(z.string(), {type:'transform', transform:Number, type:'preprocess'});`,
+  `z.ZodEffects.create(z.string(), {type:'transform', transform:v=>v.trim(), 'type':'transform'});`,
+  `new z.ZodEffects({schema:z.string(), effect:{type:'transform',transform:Number}, schema:z.unknown()});`,
+  `new z.ZodCodec({type:'pipe',in:z.string(),out:z.number(),transform:Number,reverseTransform:v=>v,in:z.unknown()});`,
+  `new z.ZodCodec({type:'pipe',in:z.number(),out:z.string(),out:z.unknown(),transform:v=>v,reverseTransform:Number});`,
+])
+  it(`r1 F2 duplicate definition key refuses: ${code}`, () =>
+    assert.ok(
+      messages(code).some((m) => m.messageId === 'preprocess'),
+      JSON.stringify(messages(code)),
+    ));
