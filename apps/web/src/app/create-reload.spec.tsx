@@ -12,8 +12,8 @@ import { EMPTY_REGISTER_ASSET_FORM } from '@/lib/asset-form-fields';
 import { EMPTY_CREATE_DRIVER_FORM } from '@/lib/driver-fields';
 import type { WebSession } from '@/server/session';
 import { pageContext } from '@/server/page-context';
-import { readReleaseFeedback } from '@/server/release-feedback';
-import { RELEASE_MESSAGES } from '@/lib/release-messages';
+import { readReleaseFeedback, releaseFeedback } from '@/server/release-feedback';
+import { releaseMessage } from '@/lib/release-messages';
 import AssetsPage from './assets/page';
 import DriversPage from './drivers/page';
 import { submitRegisterAsset, releaseUnresolvedAssetRegistration } from './assets/actions';
@@ -370,6 +370,9 @@ describe.each(cases)('FU-190 $name reload reservation', (c) => {
 
 describe.each(cases)('FU-217/FU-222 $name release feedback', (c) => {
   const back = c.page === AssetsPage ? '/assets' : '/drivers';
+  const subject = {
+    surface: c.page === AssetsPage ? 'asset-registration' : 'driver-creation',
+  } as const;
   async function hold(): Promise<{
     token: string;
     store: ReturnType<typeof memoryUnresolvedStore>;
@@ -391,7 +394,7 @@ describe.each(cases)('FU-217/FU-222 $name release feedback', (c) => {
     return new URL(error.message.slice('REDIRECT:'.length), 'http://localhost');
   }
   const feedbackOf = (url: URL) =>
-    readReleaseFeedback(session, back, url.searchParams.get('release'), true);
+    readReleaseFeedback(session, subject, url.searchParams.get('release'), true);
   it.each(['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'GONE'] as const)(
     'redirects with the store answer %s and the page shows it',
     async (outcome) => {
@@ -410,7 +413,7 @@ describe.each(cases)('FU-217/FU-222 $name release feedback', (c) => {
         }),
       });
       expect(JSON.stringify(page)).toContain(`"outcome":"${outcome}"`);
-      expect(RELEASE_MESSAGES[outcome]).toEqual(expect.any(String));
+      expect(releaseMessage(outcome, subject.surface)).toEqual(expect.any(String));
     },
   );
   it('keeps a plain redirect for a real success, and the hold is gone', async () => {
@@ -428,6 +431,35 @@ describe.each(cases)('FU-217/FU-222 $name release feedback', (c) => {
     for (const [key, value] of Object.entries(extra)) data.set(key, value);
     expect(feedbackOf(await landing(data))).toBe(outcome);
     expect((await c.request.restore(session)).kind).toBe('HELD');
+  });
+  // FU-254 L3: a signed success can be replayed within its TTL; a newer hold must win over it.
+  const pageWith = (token: string) =>
+    c.page({ searchParams: Promise.resolve({ ctx: pageContext(session), release: token }) });
+  it.each(['GONE', 'RELEASED'] as const)(
+    'shows no %s outcome while a newer hold exists, and shows it once the hold is gone',
+    async (outcome) => {
+      await hold();
+      const token = releaseFeedback(session, subject, outcome);
+      expect(JSON.stringify(await pageWith(token))).not.toContain(`"outcome":"${outcome}"`);
+      setUnresolvedStore(memoryUnresolvedStore());
+      expect(JSON.stringify(await pageWith(token))).toContain(`"outcome":"${outcome}"`);
+    },
+  );
+  it.each(['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'CSRF_REFUSED', 'CONSENT_MISSING'] as const)(
+    'still shows the refusal %s while the hold remains',
+    async (outcome) => {
+      await hold();
+      expect(JSON.stringify(await pageWith(releaseFeedback(session, subject, outcome)))).toContain(
+        `"outcome":"${outcome}"`,
+      );
+    },
+  );
+  it('shows a token minted for the other registration page nowhere on this one', async () => {
+    const other = {
+      surface: subject.surface === 'asset-registration' ? 'driver-creation' : 'asset-registration',
+    } as const;
+    const page = await pageWith(releaseFeedback(session, other, 'STALE'));
+    expect(JSON.stringify(page)).not.toContain('"outcome":"STALE"');
   });
   it('shows an answer it does not know as not done, never as released', async () => {
     const { token, store } = await hold();

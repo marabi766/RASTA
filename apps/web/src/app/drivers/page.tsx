@@ -97,9 +97,10 @@ export default async function DriversPage({
       sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
     >
       <ReleaseFeedback
+        surface="driver-creation"
         outcome={readReleaseFeedback(
           session,
-          '/drivers',
+          { surface: 'driver-creation' },
           one(params.release),
           createState.kind === 'IDLE',
         )}

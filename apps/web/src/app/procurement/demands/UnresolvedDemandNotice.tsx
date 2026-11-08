@@ -1,10 +1,6 @@
 import { Alert, Button } from '@/ui';
 import { CSRF_FIELD } from '@/lib/form-fields';
-import {
-  HELD_IN_PROGRESS_MESSAGE,
-  PENDING_UNCHECKED_MESSAGE,
-  RELEASE_STALE_MESSAGE,
-} from '@/lib/demand-commands';
+import { HELD_IN_PROGRESS_MESSAGE } from '@/lib/demand-commands';
 import { mayResend, type UnresolvedRequest } from '@/server/unresolved-request';
 
 import { releaseUnresolvedDemand } from './demand-actions';
@@ -85,18 +81,4 @@ export function UnresolvedDemandNotice({
       </div>
     </Alert>
   );
-}
-
-/** Why a release came back refused, in fixed words; null when it did not. */
-export function releaseRefusalText(release: string | undefined): string | null {
-  switch (release) {
-    case 'STALE':
-      return RELEASE_STALE_MESSAGE;
-    case 'IN_PROGRESS':
-      return HELD_IN_PROGRESS_MESSAGE;
-    case 'UNAVAILABLE':
-      return PENDING_UNCHECKED_MESSAGE;
-    default:
-      return null;
-  }
 }

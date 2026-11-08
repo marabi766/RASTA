@@ -411,10 +411,6 @@ export const PENDING_CAPACITY_MESSAGE =
   'شمار درخواست‌های روشن‌نشده این نشست به سقف رسیده است و چیزی فرستاده نشد. ' +
   'نخست درخواست‌های روشن‌نشده را بررسی و رها کنید.';
 
-/** The confirmation form was drawn for a request that has since changed. */
-export const RELEASE_STALE_MESSAGE =
-  'درخواست روشن‌نشده از زمان باز شدن این صفحه تغییر کرده است و چیزی تغییر نکرد. صفحه را تازه کنید و دوباره بررسی کنید.';
-
 export const BUSINESS_RULE_MESSAGE =
   'این کار با قواعد سامانه سازگار نیست. صفحه را تازه کنید و وضعیت را ببینید.';
 

@@ -2,19 +2,12 @@
 
 import { redirect } from 'next/navigation';
 
-import { verifyCsrf } from '@/server/csrf';
 import { currentSession } from '@/server/current-session';
 import { DEMAND_SUBMIT_UNRESOLVED } from '@/server/demand-replay';
-import { pageHref } from '@/server/page-context';
+import { settleRelease } from '@/server/release-feedback';
 import { releaseUnresolved } from '@/server/unresolved-request';
 
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-  RELEASE_PARAM,
-  type DemandFormState,
-} from './demand-form-state';
+import { type DemandFormState } from './demand-form-state';
 import { runSubmitDemand } from './demand-runner';
 
 /**
@@ -41,16 +34,12 @@ export async function releaseUnresolvedDemand(form: FormData): Promise<void> {
   const back = '/procurement/demands';
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(back)}`);
-  if (!verifyCsrf(session, form).ok) redirect(back);
-  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect(back);
-  const outcome = await releaseUnresolved(
+  return settleRelease({
     session,
-    DEMAND_SUBMIT_UNRESOLVED,
-    form.get(RELEASE_FIELD),
-  );
-  redirect(
-    outcome === 'RELEASED' || outcome === 'GONE'
-      ? pageHref(session, back, {})
-      : pageHref(session, back, { [RELEASE_PARAM]: outcome }),
-  );
+    form,
+    back,
+    subject: { surface: 'demand-submission' },
+    release: (current, token) => releaseUnresolved(current, DEMAND_SUBMIT_UNRESOLVED, token),
+    quietSuccess: true,
+  });
 }

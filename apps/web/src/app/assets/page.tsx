@@ -83,9 +83,10 @@ export default async function AssetsPage({
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
       <ReleaseFeedback
+        surface="asset-registration"
         outcome={readReleaseFeedback(
           session,
-          '/assets',
+          { surface: 'asset-registration' },
           one(params.release),
           createState.kind === 'IDLE',
         )}

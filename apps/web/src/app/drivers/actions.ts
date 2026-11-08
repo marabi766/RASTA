@@ -112,6 +112,7 @@ export async function releaseUnresolvedDriverCreation(form: FormData): Promise<v
     session,
     form,
     back: '/drivers',
+    subject: { surface: 'driver-creation' },
     release: driverCreationRequest.release,
     quietSuccess: true,
   });

@@ -155,7 +155,7 @@ export async function releaseUnresolvedTopUp(walletId: string, form: FormData): 
     session,
     form,
     back: '/wallet',
-    subject: walletId,
+    subject: { surface: 'wallet', target: walletId },
     release: (current, token) => releaseUnresolved(current, topUpScope(walletId), token),
   });
 }

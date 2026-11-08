@@ -75,6 +75,8 @@ const { CreateProjectForm } =
 const { openProjectBaseline } =
   require('@/server/project-commands') as typeof import('@/server/project-commands');
 const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
+const { releaseFeedback } =
+  require('@/server/release-feedback') as typeof import('@/server/release-feedback');
 const { reserveUnresolved, settleUnresolved, useUnresolvedStore } =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
 const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
@@ -625,10 +627,24 @@ describe('/projects', () => {
 
     it('says a release form was refused as stale, and draws the current state', async () => {
       await remember();
-      const tree = await list({ search: { release: 'STALE' } });
-      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('تغییر کرده');
+      const token = releaseFeedback(
+        mockSession.current as never,
+        { surface: 'project-creation' },
+        'STALE',
+      );
+      const tree = await list({ search: { release: token } });
+      expect(JSON.stringify(elements(tree).map((e) => e.props))).toContain('"outcome":"STALE"');
       expect(ofType(tree, UnresolvedCreateNotice)).toHaveLength(1);
     });
+
+    it.each(['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'RELEASED'])(
+      'reads no unsigned ?release=%s from the URL (FU-254 P1)',
+      async (word) => {
+        await remember();
+        const tree = await list({ search: { release: word } });
+        expect(JSON.stringify(elements(tree).map((e) => e.props))).not.toContain('"outcome":"');
+      },
+    );
 
     it('draws no notice when nothing is unresolved', async () => {
       expect(ofType(await list(), UnresolvedCreateNotice)).toHaveLength(0);

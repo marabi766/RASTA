@@ -13,13 +13,14 @@ import {
   actingScope,
   sessionWriteRoles,
 } from '@/server/session-organization';
+import { readReleaseFeedback } from '@/server/release-feedback';
 import { readUnresolved, releaseToken } from '@/server/unresolved-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 
 import { DemandForm } from './DemandForm';
 import { DemandsScreen, demandsHref } from './DemandsScreen';
-import { RELEASE_PARAM } from './demand-form-state';
-import { UnresolvedDemandNotice, releaseRefusalText } from './UnresolvedDemandNotice';
+import { UnresolvedDemandNotice } from './UnresolvedDemandNotice';
 
 /**
  * The `/procurement/demands` route — نیازهای تدارکات (EXP-004, COM-007): this
@@ -62,7 +63,6 @@ export default async function DemandsPage({
     fetchDemands(session, query),
     mayCreate ? readUnresolved(session, DEMAND_SUBMIT_UNRESOLVED) : null,
   ]);
-  const refused = releaseRefusalText(one(params[RELEASE_PARAM]));
 
   return (
     <AppShell
@@ -90,7 +90,15 @@ export default async function DemandsPage({
           create={
             pending === null ? null : (
               <div className="flex flex-col gap-4">
-                {refused ? <Alert tone="warning">{refused}</Alert> : null}
+                <ReleaseFeedback
+                  surface="demand-submission"
+                  outcome={readReleaseFeedback(
+                    session,
+                    { surface: 'demand-submission' },
+                    one(params.release),
+                    pending.kind === 'NONE',
+                  )}
+                />
                 {pending.kind === 'UNAVAILABLE' ? (
                   // Not "nothing held": the store could not say, so no form is
                   // drawn (and no fresh key minted); the action refuses too.
