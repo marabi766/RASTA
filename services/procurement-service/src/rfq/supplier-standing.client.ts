@@ -1,4 +1,4 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -113,7 +113,7 @@ export class SupplierStandingClient implements SupplierStandingSource {
           this.logger.warn(`supplier-service answered ${response.status} to a standing read`);
           throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
         }
-        const text = await readCapped(response, MAX_STANDING_BYTES);
+        const text = await readCappedText(response, MAX_STANDING_BYTES);
         if (text === null) {
           this.logger.warn('supplier-service answered a standing over the size bound');
           throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
@@ -144,28 +144,4 @@ function correlationId(): string {
   } catch {
     return `procurement-${Date.now()}`;
   }
-}
-
-/** The body, or null when it is larger than `limit` bytes (declared or read). */
-async function readCapped(response: Response, limit: number): Promise<string | null> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > limit) {
-    await response.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
 }

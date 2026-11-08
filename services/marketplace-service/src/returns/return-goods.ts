@@ -1,4 +1,4 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import {
   ExchangeDeadlineError,
@@ -199,7 +199,7 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
           ),
         async (response) => {
           if (response.status !== 200) throw this.refused(`status ${response.status}`);
-          const text = await readCapped(response, MAX_GOODS_ANSWER_BYTES);
+          const text = await readCappedText(response, MAX_GOODS_ANSWER_BYTES);
           if (text === null) throw this.refused('a body larger than the contract');
           try {
             return JSON.parse(text) as unknown;
@@ -222,28 +222,4 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
     this.logger.warn(`inventory-service gave ${why}; refusing (fail closed)`);
     return RastaError.upstreamUnavailable(INVENTORY_SERVICE);
   }
-}
-
-/** The body as text, or `null` once it exceeds `limit` bytes (reading stops). */
-async function readCapped(response: Response, limit: number): Promise<string | null> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > limit) {
-    await response.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
 }

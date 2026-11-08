@@ -475,3 +475,43 @@ describe('IdentityHttpRecipientAdapter', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+describe('IdentityHttpRecipientAdapter decoding and deadline (PR #722 r2 F2/F3)', () => {
+  afterEach(() => jest.restoreAllMocks());
+  const page = { items: [user('USR_1', ['FLEET_MANAGER'])], nextCursor: null, hasMore: false };
+
+  it('reads a BOM-prefixed page as Fetch does', async () => {
+    const { fetch } = fakeFetch(
+      () =>
+        new Response(
+          new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(JSON.stringify(page))]),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    const adapter = new IdentityHttpRecipientAdapter(
+      { baseUrl: 'http://identity.test', timeoutMs: 1000 },
+      tokens,
+      fetch,
+    );
+    await expect(adapter.resolve(query)).resolves.toMatchObject({
+      recipients: [{ userId: 'USR_1' }],
+    });
+  });
+
+  it('takes no page whose parsing crossed the deadline: TIMEOUT', async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(page));
+    const adapter = new IdentityHttpRecipientAdapter(
+      { baseUrl: 'http://identity.test', timeoutMs: 1000 },
+      tokens,
+      fetch,
+    );
+    let now = 1_000;
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const parse = JSON.parse.bind(JSON);
+    jest.spyOn(JSON, 'parse').mockImplementation(((text: string) => {
+      now += 60_000;
+      return parse(text) as unknown;
+    }) as typeof JSON.parse);
+    await expect(adapter.resolve(query)).rejects.toMatchObject({ reason: 'TIMEOUT' });
+  });
+});

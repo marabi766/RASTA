@@ -1,4 +1,4 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { z } from 'zod';
 import {
   RastaError,
@@ -170,7 +170,7 @@ export class ReturnRequestSourceClient implements ReturnRequestSource {
           throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
         }
 
-        const text = await readCapped(response, MAX_RETURN_REQUEST_BYTES);
+        const text = await readCappedText(response, MAX_RETURN_REQUEST_BYTES);
         if (text === null) throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
         const body: unknown = JSON.parse(text);
 
@@ -193,30 +193,6 @@ export class ReturnRequestSourceClient implements ReturnRequestSource {
       },
     );
   }
-}
-
-/** The body as text, or `null` once it exceeds `limit` bytes (reading stops). */
-export async function readCapped(response: Response, limit: number): Promise<string | null> {
-  const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > limit) {
-    await response.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
 }
 
 /**

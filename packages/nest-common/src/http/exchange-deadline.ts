@@ -26,6 +26,24 @@ export class ExchangeCancelledError extends Error {
   }
 }
 
+/**
+ * The monotonic instant (`performance.now()`) by which the exchange that
+ * produced `response` must be over, or `undefined` outside an exchange.
+ *
+ * The abort timer alone is not a deadline: a body whose chunks are always
+ * ready resolves every read on the microtask queue, the timer's turn never
+ * comes, and the answer completes late (PR #722 r1 F2). The capped readers
+ * (`./bounded-body.ts`) check this instant between chunks, and the exchange
+ * checks it again before it returns.
+ */
+export function exchangeDeadlineOf(
+  response: Response,
+): { readonly at: number; readonly timeoutMs: number } | undefined {
+  return deadlines.get(response);
+}
+
+const deadlines = new WeakMap<Response, { readonly at: number; readonly timeoutMs: number }>();
+
 export interface ExchangeOptions {
   /**
    * The caller leaving. Ends the exchange like the deadline does — the request
@@ -74,6 +92,7 @@ export async function exchangeWithDeadline<T>(
   options: ExchangeOptions = {},
 ): Promise<T> {
   const controller = new AbortController();
+  const deadlineAt = performance.now() + timeoutMs;
   let timer: NodeJS.Timeout | undefined;
   let endedBy: 'deadline' | 'caller' | undefined;
   let over = false;
@@ -102,6 +121,7 @@ export async function exchangeWithDeadline<T>(
       giveUp(received);
       throw endedError(endedBy, timeoutMs);
     }
+    deadlines.set(received, { at: deadlineAt, timeoutMs });
     return read(received, controller.signal);
   })();
   // If the deadline wins, the exchange may still fail later (the abort reaches
@@ -109,10 +129,18 @@ export async function exchangeWithDeadline<T>(
   running.catch(() => undefined);
   try {
     const outcome = await Promise.race([running, stopped]);
+    // The timer may never have had its turn (see `exchangeDeadlineOf`): an
+    // answer completed after the deadline is not taken.
+    if (performance.now() >= deadlineAt) endedBy ??= 'deadline';
+    if (endedBy) throw endedError(endedBy, timeoutMs);
     return outcome;
   } catch (error) {
     // The transport's own abort error can get here before the deadline's: the
-    // cause is the one that ended the exchange first.
+    // cause is the one that ended the exchange first. A reader that stopped on
+    // the deadline between chunks ended it by the deadline too.
+    if (!endedBy && (error instanceof ExchangeDeadlineError || performance.now() >= deadlineAt)) {
+      endedBy = 'deadline';
+    }
     throw endedBy ? endedError(endedBy, timeoutMs) : error;
   } finally {
     over = true;
