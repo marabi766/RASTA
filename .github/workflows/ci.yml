@@ -16,10 +16,10 @@ on:
     branches: [main]
 
 concurrency:
-  # Supersede an in-flight run for the same ref: a stale result on an old
-  # commit is worse than no result, because people act on it.
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Every push range needs its own scan, including otherwise displaced pending
+  # runs. PR updates can supersede earlier runs because they scan base..head.
+  group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   NODE_VERSION: '22'
@@ -640,14 +640,21 @@ jobs:
           tool: gitleaks
 
       - name: Secret scan
-        # Retain the action's first-parent change scan and failure threshold.
+        # Include every introduced commit and each merge's changes against ALL
+        # parents, including content introduced during conflict resolution.
         env:
           SCAN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           SCAN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           node -e 'for (const key of ["SCAN_BASE", "SCAN_HEAD"]) if (!/^[0-9a-f]{40}$/.test(process.env[key] ?? "")) process.exit(1)'
-          gitleaks detect --redact --exit-code=2 --log-opts="--no-merges --first-parent $SCAN_BASE^..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif
+          git cat-file -e "$SCAN_BASE^{commit}"
+          git cat-file -e "$SCAN_HEAD^{commit}"
+          if [ "$SCAN_HEAD" != "$SCAN_BASE" ]; then
+            SCAN_COUNT="$(git rev-list --count "$SCAN_BASE..$SCAN_HEAD")"
+            test "$SCAN_COUNT" -gt 0
+          fi
+          gitleaks detect --redact --exit-code=2 --log-opts="--full-history --diff-merges=separate $SCAN_BASE..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif
 
       - name: Dependency audit
         # High and critical fail. The repo holds no production secrets, but it

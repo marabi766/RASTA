@@ -23,8 +23,9 @@ export const BACKOFF = [5, 15, 30];
 // Four transfers (155s process limits) + 50s backoff + 60s extraction fit in 13 minutes.
 export function transient(code, http) {
   return (
-    ([5, 6, 7, 18, 28, 52, 55, 56].includes(code) &&
-      (!http || ['000', '200', '206'].includes(http))) ||
+    // Transport failure: http can still describe an earlier redirect hop.
+    [5, 6, 7, 18, 28, 52, 55, 56].includes(code) ||
+    // Only an HTTP failure (22) makes the final response authoritative.
     (code === 22 && ['408', '429', '500', '502', '503', '504'].includes(http))
   );
 }
