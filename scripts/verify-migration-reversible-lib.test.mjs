@@ -35,6 +35,9 @@ import {
   UNUSABLE_PRISMA_SCHEMA,
   NO_TRANSACTION_MARKER,
   downFileMode,
+  downChainProblems,
+  objectsCreated,
+  objectsRedefined,
   newScratchDatabase,
   psqlFileRunner,
   psqlRunner,
@@ -3060,4 +3063,262 @@ test('the probe of 20261107120000 over used data asks what its WARNING counts, w
   const warning = up.slice(up.lastIndexOf('DO $$'));
   assert.match(warning, /RAISE WARNING 'wallet_hold: holds naming a journal/);
   assert.ok(warning.includes(`WHERE ${HOLD_UNPROVEN_SINCE_AT_COMMIT}`), warning);
+});
+
+// ---------------------------------------------------------------------------
+// Down chains in a rollback against real data (FU-240)
+// ---------------------------------------------------------------------------
+
+/** A service's migration names, sorted (`migrationNames`), and a reader for their migration.sql. */
+function serviceMigrations(service) {
+  const dir = join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations');
+  return {
+    names: migrationNames(service),
+    read: (name) => readFileSync(join(dir, name, 'migration.sql'), 'utf8'),
+  };
+}
+
+const UTC_CLOCK_DEFAULTS = '20261106140000_utc_clock_defaults';
+
+test('every rollback against real data leaves no newer migration applied under what it redefines', () => {
+  const checked = [];
+  for (const [service, entry] of Object.entries(EXPECTED)) {
+    if (!entry.dataRollback) continue;
+    const { names, read } = serviceMigrations(service);
+    const { problems } = downChainProblems(entry.dataRollback, names, read);
+    assert.deepEqual(problems, [], service);
+    checked.push(service);
+  }
+  // Every service that has one; a rollback the loop skipped would pass unseen.
+  assert.deepEqual(checked.sort(), [
+    'asset',
+    'construction',
+    'document',
+    'economic',
+    'identity',
+    'marketplace',
+  ]);
+});
+
+test("main's economic chains before #936's sync, which skipped 20261106140000, are refused by name", () => {
+  const { names, read } = serviceMigrations('economic');
+  const steps = EXPECTED.economic.dataRollback.steps.map((step) =>
+    Array.isArray(step.runDownScript)
+      ? { ...step, runDownScript: step.runDownScript.filter((name) => name !== UTC_CLOCK_DEFAULTS) }
+      : step,
+  );
+  const { problems } = downChainProblems({ ...EXPECTED.economic.dataRollback, steps }, names, read);
+  const named = problems.filter((problem) =>
+    problem.includes(`while ${UTC_CLOCK_DEFAULTS} stays applied`),
+  );
+  // The seven chains #936's sync completed (one of them runs twice), and its funded-hold step.
+  assert.ok(named.length >= 9, problems.join('\n'));
+  assert.equal(named.length, problems.length, problems.join('\n'));
+  for (const problem of named) {
+    assert.match(problem, /redefines [^:]*stamp_transaction_held_at/);
+    // The decision's default, wherever the chain takes its migration down too.
+    if (problem.includes('20261106120000_transaction_hold_decision')) {
+      assert.match(problem, /redefines [^:]*\btransaction_hold_decision\b/);
+    }
+    assert.match(problem, new RegExp(`List ${UTC_CLOCK_DEFAULTS} in the chain, before `));
+  }
+});
+
+/** Three migrations: A creates, B is independent of it, C redefines what A created. */
+function chainFixture(c) {
+  const sql = {
+    '1_a': `-- CREATE TABLE "commented_out" (id int);
+CREATE TABLE "t" ("id" INT, "x" INT);
+ALTER TABLE "t" ADD COLUMN "c" INT;
+CREATE OR REPLACE FUNCTION "f"() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;`,
+    '2_b': `CREATE TABLE "u" ("id" INT);`,
+    '3_c': c,
+  };
+  return { names: Object.keys(sql), read: (name) => sql[name] };
+}
+const run = (fixture, steps, migration = '1_a') =>
+  downChainProblems({ migration, label: 'probe', steps }, fixture.names, fixture.read);
+
+test('a chain that leaves a redefining migration applied is refused, naming it; an independent one is not', () => {
+  for (const redefinition of [
+    `ALTER TABLE "t" ALTER COLUMN "x" SET DEFAULT 2;`,
+    `ALTER TABLE public."t" ALTER COLUMN "c" SET DEFAULT 2;`,
+    `CREATE OR REPLACE FUNCTION f() RETURNS int AS $$ SELECT 2 $$ LANGUAGE sql;`,
+    `CREATE TRIGGER "g" BEFORE INSERT ON "t" FOR EACH ROW EXECUTE FUNCTION "f"();`,
+    `CREATE INDEX "i" ON "t" ("x");`,
+    `COMMENT ON COLUMN "t"."x" IS 'x';`,
+    `DROP FUNCTION "f"();`,
+  ]) {
+    const fixture = chainFixture(redefinition);
+    const steps = [
+      { label: 'down', runDownScript: ['1_a'] },
+      { label: 'up', reapply: true },
+    ];
+    const { problems, keptApplied } = run(fixture, steps);
+    assert.equal(problems.length, 1, `${redefinition}\n${problems.join('\n')}`);
+    assert.match(problems[0], /step 1 \("down"\): rolls back 1_a while 3_c stays applied/);
+    assert.match(problems[0], /List 3_c in the chain, before 1_a\./);
+    assert.doesNotMatch(problems[0], /2_b/);
+    assert.deepEqual(keptApplied.get(0), ['2_b', '3_c']);
+
+    // Listed, newest first: nothing to refuse, and only the independent one stays applied.
+    const listed = run(fixture, [
+      { label: 'down', runDownScript: ['3_c', '1_a'] },
+      { label: 'up', reapply: true },
+    ]);
+    assert.deepEqual(listed.problems, [], redefinition);
+    assert.deepEqual(listed.keptApplied.get(0), ['2_b']);
+  }
+  // A column A never added, of a table A never created, is not A's.
+  for (const unrelated of [
+    `ALTER TABLE "v" ALTER COLUMN "x" SET DEFAULT 2;`,
+    `ALTER TABLE "u" ADD COLUMN "c" INT;`,
+    `-- ALTER TABLE "t" ALTER COLUMN "x" SET DEFAULT 2;\nSELECT 'ALTER TABLE t';`,
+  ]) {
+    const { problems } = run(chainFixture(unrelated), [
+      { label: 'down', runDownScript: true },
+      { label: 'up', reapply: true },
+    ]);
+    assert.deepEqual(problems, [], unrelated);
+  }
+});
+
+test('what a migration creates and redefines, read past comments and strings', () => {
+  assert.deepEqual([...objectsCreated(chainFixture('').read('1_a'))].sort(), ['f', 't', 't.c']);
+  assert.deepEqual(
+    [
+      ...objectsRedefined(
+        `ALTER TABLE ONLY "Mixed"."T" ALTER COLUMN "x" DROP DEFAULT, DROP CONSTRAINT "k";
+         -- DROP TABLE "gone";
+         SELECT 'DROP TABLE nope';`,
+      ),
+    ].sort(),
+    ['T', 'T.x', 'k'],
+  );
+  assert.throws(() => objectsCreated(`SELECT 'unterminated`), /cannot be read as SQL/);
+});
+
+test('every step whose effect on the ledger cannot be told is refused', () => {
+  const fixture = chainFixture(`CREATE TABLE "w" ("id" INT);`);
+  const cases = [
+    [[{ label: 's', runDownScript: ['9_x'] }], /no such migration: 9_x/],
+    [[{ label: 's', runDownScript: [] }], /names no migration/],
+    [[{ label: 's', runDownScript: ['2_b', '3_c'] }], /runs newest first/],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 's', runDownScript: ['3_c'] },
+      ],
+      /step 2 \("s"\): rolls back 3_c, which is not applied/,
+    ],
+    [[{ label: 's', runDownScript: ['3_c'] }], /ends with 3_c rolled back/],
+    [[{ label: 's', deployMustFail: 'boom' }], /with no migration pending/],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+        { label: 's', runDownScript: ['2_b'] },
+      ],
+      /a down while a failed deploy is unresolved/,
+    ],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+        { label: 's', reapply: true },
+      ],
+      /a deploy while a failed deploy is unresolved/,
+    ],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+        { label: 's', resolveRolledBack: '2_b' },
+      ],
+      /resolves 2_b, which is not a pending migration/,
+    ],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+      ],
+      /ends with a failed deploy unresolved/,
+    ],
+    [
+      [{ label: 's', sql: `DELETE FROM "_prisma_migrations" WHERE migration_name = '3_c';` }],
+      /writes _prisma_migrations/,
+    ],
+    [
+      [
+        {
+          label: 's',
+          sql: `DELETE FROM "_prisma_migrations" WHERE migration_name = '3_c' OR true AND rolled_back_at IS NOT NULL;`,
+        },
+      ],
+      /writes _prisma_migrations/,
+    ],
+    [
+      [
+        {
+          label: 's',
+          sql: `DO $$ BEGIN UPDATE _prisma_migrations SET rolled_back_at = now(); END $$;`,
+        },
+      ],
+      /writes _prisma_migrations/,
+    ],
+    [
+      [{ label: 's', sql: `INSERT INTO public._prisma_migrations (id) VALUES ('x');` }],
+      /writes _prisma_migrations/,
+    ],
+    [[{ label: 's' }], /a step of no known kind/],
+  ];
+  for (const [steps, problem] of cases) {
+    const { problems } = run(fixture, steps);
+    assert.ok(
+      problems.some((text) => problem.test(text)),
+      `${inspect(steps)}\n${problems.join('\n')}`,
+    );
+  }
+});
+
+test('refusals, failed deploys resolved as the runbook says, and the rolled-back cleanup are modelled', () => {
+  const fixture = chainFixture(`CREATE TABLE "w" ("id" INT);`);
+  const { problems, keptApplied } = run(fixture, [
+    // A refusal changes nothing, so a down of an older one under it needs no newer listed.
+    { label: 'refused', runDownScript: ['2_b'], mustFail: 'refusing' },
+    { label: 'down', runDownScript: ['3_c', '2_b'] },
+    { label: 'fails', deployMustFail: 'boom' },
+    { label: 'P3009', deployMustFail: 'P3009' },
+    // The deploy applied 2_b before 3_c failed.
+    { label: 'resolve', resolveRolledBack: '3_c' },
+    { label: 'down again', runDownScript: ['2_b'] },
+    { label: 'up', reapply: true },
+    {
+      label: 'cleanup',
+      sql: `DELETE FROM "_prisma_migrations" WHERE migration_name IN ('3_c') AND rolled_back_at IS NOT NULL;
+            SELECT count(*) FROM "_prisma_migrations";`,
+    },
+  ]);
+  assert.deepEqual(problems, []);
+  assert.equal(keptApplied.has(0), false);
+  assert.deepEqual(keptApplied.get(1), []);
+  assert.deepEqual(keptApplied.get(5), []);
+});
+
+test('the verifier refuses an unmodellable rollback before it runs, and proves where it ends exact', () => {
+  const runner = readFileSync(join(ROOT, 'scripts', 'verify-migration-reversible.mjs'), 'utf8');
+  const refusal = runner.indexOf('if (chainModel.problems.length > 0)');
+  assert.ok(refusal > 0 && refusal < runner.indexOf("mustRun(\n    'clean scratch schema'"));
+  const end = runner.indexOf("const context = 'the rollback against real data, at its end';");
+  const wholeChain = runner.indexOf('// --- down ---');
+  const dataSteps = runner.indexOf('for (const [stepIndex, step] of probe.steps.entries())');
+  assert.ok(dataSteps > 0 && end > dataSteps && end < wholeChain);
+  const proof = runner.slice(end, wholeChain);
+  assert.match(
+    proof,
+    /assertSnapshotScript\(metaSchema, POST_UP, targetSchema, context, undefined, \{\n\s+extensionHome,/,
+  );
+  assert.match(proof, /sql\(ledgerAssertionScript\(migrations, context\)\)/);
+  assert.match(proof, /if \(!exact\.ok\) fail\(/);
+  assert.match(proof, /if \(!ledger\.ok\)\s+fail\(/);
 });

@@ -1,14 +1,9 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-} from '@/app/projects/form-state';
-
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { settleRelease } from '@/server/release-feedback';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { mintFlash } from '@/server/flash';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
@@ -137,8 +132,11 @@ async function attemptRegisterAsset(form: FormData): Promise<RegisterAssetFormSt
 export async function releaseUnresolvedAssetRegistration(form: FormData): Promise<void> {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/assets');
-  if (!verifyCsrf(session, form).ok) redirect('/assets');
-  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/assets');
-  await assetRegistrationRequest.release(session, form.get(RELEASE_FIELD));
-  redirect('/assets');
+  return settleRelease({
+    session,
+    form,
+    back: '/assets',
+    release: assetRegistrationRequest.release,
+    quietSuccess: true,
+  });
 }

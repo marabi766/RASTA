@@ -126,11 +126,21 @@ const UNPROVEN = 'cannot prove a writer is gone';
  * state can. `waitpid` is not an option: these are grandchildren of the build, not children of
  * the test. Fails closed: every row must be a complete `pid pgid stat` of the grammar, and the
  * calling process (known live) must be in the census, so a snapshot that cannot be taken, read
- * or is incomplete proves nothing and throws (`ps`: test seam).
+ * or is incomplete proves nothing and throws (`ps`, `timeoutMs`: test seams). The snapshot is
+ * bounded: a `ps` that does not answer in time is killed and counts as no snapshot.
  */
-export function liveMembers(targets: readonly ProcessTarget[], ps = 'ps'): number[][] {
+export const CENSUS_TIMEOUT_MS = 10_000;
+export function liveMembers(
+  targets: readonly ProcessTarget[],
+  ps = 'ps',
+  timeoutMs = CENSUS_TIMEOUT_MS,
+): number[][] {
   const ids = targets.map(signalTarget);
-  const census = spawnSync(ps, ['-axo', 'pid=,pgid=,stat='], { encoding: 'utf8' });
+  const census = spawnSync(ps, ['-axo', 'pid=,pgid=,stat='], {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  });
   if (census.status !== 0) throw new Error(`process census failed: ${UNPROVEN}`);
   const rows = census.stdout
     .trim()

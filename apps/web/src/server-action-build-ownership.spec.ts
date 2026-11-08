@@ -51,7 +51,8 @@ jest.setTimeout(60_000);
 
 const IMPORT_LOCK = `import { acquireBuildLock, buildInProgress } from ${JSON.stringify(url('build-lock.mjs'))};`;
 const nonce = (c: string): string => c.repeat(24);
-const deadPid = (): number => spawnSync(process.execPath, ['-e', '1']).pid as number;
+const deadPid = (): number =>
+  spawnSync(process.execPath, ['-e', '1'], { timeout: 30_000 }).pid as number;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (test: () => boolean, ms = 30_000): Promise<void> => {
   const deadline = Date.now() + ms;
@@ -1010,7 +1011,7 @@ setInterval(() => {}, 1000);`,
     await goneAtBoundary([[pid, 'root `next build` (exited, supervisor holds the group)']]);
     expect(alive(group)).toBe(true);
     expect(alive({ group })).toBe(true);
-    const census = spawnSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8' });
+    const census = spawnSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8', timeout: 10_000 });
     expect(census.status).toBe(0);
     const members = census.stdout
       .trim()
@@ -1196,7 +1197,10 @@ setInterval(() => {}, 1000);`,
       expect(result.printed).not.toMatch(/census-sentinel|not-a-process|EIO|private/);
       // Verify the injected fault itself: an invalid test executable must not stand
       // in for a well-formed census whose exit status or membership is wrong.
-      const probe = spawnSync(join(dir, 'census-bin/ps'), [], { encoding: 'utf8' });
+      const probe = spawnSync(join(dir, 'census-bin/ps'), [], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
       expect(probe.status).toBe(censusFault === 'error' ? 1 : 0);
       if (censusFault === 'missing-supervisor') expect(probe.stdout).toBe('1 1\n');
       if (censusFault === 'error') expect(probe.stdout).toMatch(/^\d+ \d+\n\d+ \d+\n$/);

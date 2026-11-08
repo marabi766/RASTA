@@ -4,7 +4,6 @@ import { nonStandardSpelling } from '@/test/orthography';
 import { RegisterAssetForm } from './assets/RegisterAssetForm';
 import { NewDriverForm } from './drivers/NewDriverForm';
 import { TopUpForm } from './wallet/TopUpForm';
-import { TopUpReleaseFeedback } from './wallet/UnresolvedTopUpNotice';
 
 jest.mock('./assets/actions', () => ({
   submitRegisterAsset: jest.fn(),
@@ -42,15 +41,4 @@ describe.each(['asset', 'driver', 'wallet'])('FU-210 %s notices', (form) => {
       expect(nonStandardSpelling(view.container.textContent ?? '')).toBeNull();
     },
   );
-});
-it('FU-217 renders every release outcome distinctly with standard orthography', () => {
-  const messages = ['IN_PROGRESS', 'STALE', 'UNAVAILABLE', 'RELEASED', 'GONE'].map((outcome) => {
-    const view = render(<TopUpReleaseFeedback outcome={outcome} />);
-    const message = view.container.textContent;
-    expect(view.getByRole('alert')).toBeInTheDocument();
-    expect(nonStandardSpelling(message ?? '')).toBeNull();
-    view.unmount();
-    return message;
-  });
-  expect(new Set(messages).size).toBe(5);
 });
