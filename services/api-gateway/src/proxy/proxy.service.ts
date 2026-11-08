@@ -259,7 +259,9 @@ export class ProxyService {
         // Never follows a redirect: one is refused, and so not ready.
         (signal) => internalFetch(target, { method: 'GET', signal }),
         async (response) => {
-          await response.text();
+          // Bounded like every proxied body (PR #722 r1 F1): past the ceiling
+          // the read rejects, and the service is not ready.
+          await readBoundedText(response, MAX_PROXIED_BODY_BYTES);
           return response.ok;
         },
       );
