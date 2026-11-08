@@ -21,6 +21,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
@@ -159,6 +160,9 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     RfqEvidenceController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: (): AuditEnv => loadAuditEnv() },
 
     {

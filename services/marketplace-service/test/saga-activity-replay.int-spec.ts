@@ -1,10 +1,16 @@
-import { MockActivityEnvironment, TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from './temporal-environment';
+import { MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { createActivities, type OrderActivities } from '../src/temporal/activities';
+import {
+  createActivities,
+  type DisputedObligation,
+  type OrderActivities,
+} from '../src/temporal/activities';
 import type { EconomicClient } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { EventPublisher } from '../src/events/publisher';
 import { restartedSagaSteps } from './fixtures/restarted-saga.workflow';
 import {
   asActor,
@@ -75,6 +81,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
     const economic = {
       createObligation: method('createObligation', async () => ({ id: `TXN_${ulid()}` })),
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       authoriseSettlement: method('authoriseSettlement', async () => undefined),
       settle: method('settle', settle),
       refund: method('refund', async () => undefined),
@@ -92,6 +100,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           organizationId: org.buyer,
           transactionType: 'MARKETPLACE_ORDER',
           status: 'HELD',
+          heldProven: true,
           sourceReference: input.orderId,
         };
       },
@@ -111,6 +120,9 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     // When the workflow scheduled each activity: fixed at its first attempt
     // and kept by every retry, as Temporal does.
     const scheduled = new Map<number, number>();
+    // Later than the last one, as the workflow schedules one after another: a call
+    // record is owned by the command scheduled last (#836 r1 R1).
+    let last = 0;
     return {
       /** Schedules `activityId` at `at` rather than at its first attempt. */
       schedule(activityId: number, at: number): void {
@@ -121,7 +133,10 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         attempt: number,
         fn: (acts: OrderActivities) => Promise<R>,
       ): Promise<R> {
-        if (!scheduled.has(activityId)) scheduled.set(activityId, Date.now());
+        if (!scheduled.has(activityId)) {
+          last = Math.max(Date.now(), last + 1);
+          scheduled.set(activityId, last);
+        }
         const env = new MockActivityEnvironment({
           workflowExecution: { workflowId: `order-${orderId}`, runId },
           activityId: String(activityId),
@@ -147,6 +162,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       id: `TXN_${ulid()}`,
       orderId: '',
       status: 'HELD',
+      heldProven: true,
       commissionAmountMinor: '0',
       netAmountMinor: '0',
       disputedAt: null as string | null,
@@ -166,10 +182,13 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
     let loseNext = false;
     let disputes = 0;
+    // As economic-service will keep text after FU-115: LF line endings — the
+    // reader this release ships first (`sameText`). Today it keeps it as sent.
+    const lf = (text: string) => text.replace(/\r\n?/g, '\n');
     const disputed = (reason: string) => {
       disputes += 1;
       obligation.disputedAt = new Date().toISOString();
-      obligation.disputeReason = reason;
+      obligation.disputeReason = lf(reason);
       obligation.disputeId = `TXD_${disputes}`;
     };
 
@@ -188,6 +207,8 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     };
 
     const economic = {
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       createObligation: async (input: { orderId: string }) => {
         calls.push('createObligation');
         obligation.orderId = input.orderId;
@@ -224,7 +245,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           );
         }
         return move('resolveDispute', ['DISPUTED'], 'PENDING_SETTLEMENT', () => {
-          obligation.disputeReason = input.resolution;
+          obligation.disputeReason = lf(input.resolution);
         });
       },
       settle: async () => {
@@ -253,6 +274,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           counterpartyOrganizationId: org.supplier,
           transactionType: 'MARKETPLACE_ORDER',
           status: obligation.status,
+          heldProven: obligation.heldProven,
           grossAmountMinor: '500000',
           commissionAmountMinor: obligation.commissionAmountMinor,
           netAmountMinor: obligation.netAmountMinor,
@@ -379,7 +401,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
     'restarts two terminal chains under one workflow id without stale effects or collisions (reorder=%s)',
     async (reorder) => {
       const { orderId } = await receiptConfirmed();
-      const env = await TestWorkflowEnvironment.createTimeSkipping();
+      const env = await createTemporalTestEnvironment();
       try {
         const taskQueue = key('restart-steps');
         const workflowId = `order-${orderId}`;
@@ -568,13 +590,21 @@ describe('a retried saga activity answers what its first attempt answered (D-053
   it('every economic step is asked once per scheduled activity', async () => {
     const { calls, economic } = stubEconomic();
     const { orderId, saga, transactionId } = await receiptConfirmed(economic);
+    // Before the dispute: a disputed order is not authorised at all (FU-178).
+    await saga.run(4, 1, (a) => a.authoriseSettlement(orderId, transactionId));
     await asBuyer(() =>
       wiring.orders.raiseDispute(orderId, { reason: 'still not what we ordered' }),
     );
     const { dispute } = await saga.run(11, 1, (a) => a.readOrder(orderId));
 
-    for (const attempt of [1, 2, 3]) {
+    // Every attempt of a step before the next is scheduled, as the workflow
+    // awaits each: an attempt of a step once a later one owns its call record
+    // is refused before it calls (#836 r1 R1).
+    const attempts = [1, 2, 3];
+    for (const attempt of attempts) {
       await saga.run(4, attempt, (a) => a.authoriseSettlement(orderId, transactionId));
+    }
+    for (const attempt of attempts) {
       // economic-service's identity of the dispute it filed, answered by
       // every attempt from the record of the first.
       await expect(
@@ -582,9 +612,13 @@ describe('a retried saga activity answers what its first attempt answered (D-053
           a.disputeObligation(orderId, transactionId, dispute!.id, 'still not what we ordered'),
         ),
       ).resolves.toBe('TXD_STUB');
+    }
+    for (const attempt of attempts) {
       await saga.run(13, attempt, (a) =>
         a.resolveObligationDispute(orderId, transactionId, dispute!.id, 'refunded'),
       );
+    }
+    for (const attempt of attempts) {
       await saga.run(14, attempt, (a) => a.compensate(orderId, transactionId, 'refunded'));
     }
 
@@ -652,9 +686,10 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       expect(econ.obligation.status).toBe('PENDING_SETTLEMENT');
       expect(await recordsOf(orderId)).not.toContainEqual({ activity: 'authoriseSettlement' });
 
-      // Attempt 2 arrives after the TTL: refused PENDING_SETTLEMENT ->
-      // PENDING_SETTLEMENT. It used to go on being refused until the attempts
-      // ran out, and the workflow failed with the funds held.
+      // Attempt 2 arrives after the TTL. Sent again, it would be refused
+      // PENDING_SETTLEMENT -> PENDING_SETTLEMENT, which once went on until the
+      // attempts ran out and failed the workflow with the funds held. In doubt it
+      // asks the obligation first, so it is not sent again at all (FU-178).
       await expect(
         saga.run(4, 2, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).resolves.toBeUndefined();
@@ -662,11 +697,7 @@ describe('a retried saga activity answers what its first attempt answered (D-053
 
       // Recorded: a third attempt asks nobody.
       await saga.run(4, 3, (a) => a.authoriseSettlement(orderId, transactionId));
-      expect(econ.calls.slice(2)).toEqual([
-        'authoriseSettlement',
-        'authoriseSettlement',
-        'readObligation',
-      ]);
+      expect(econ.calls.slice(2)).toEqual(['authoriseSettlement', 'readObligation']);
 
       // And the saga carries on to settle.
       await expect(saga.run(5, 1, (a) => a.markSettling(orderId))).resolves.toBe('SETTLING');
@@ -770,21 +801,17 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       // Someone with authority disputes the transaction in economic-service.
       econ.disputeThere(OBJECTION);
 
-      // Attempt 2, after the TTL: refused DISPUTED, read back DISPUTED — which
-      // used to be refused until the attempts ran out. economic-service's
-      // record says this order's own command authorised it: the dispute is
-      // the answer, and it is recorded.
+      // Attempt 2, after the TTL, in doubt: the obligation is asked first, not
+      // sent to. It reads DISPUTED, which sent again used to be refused until the
+      // attempts ran out. economic-service's record says this order's own command
+      // authorised it: the dispute is the answer, and it is recorded.
       await expect(
         saga.run(4, 2, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
       await expect(
         saga.run(4, 3, (a) => a.authoriseSettlement(orderId, transactionId)),
       ).resolves.toEqual({ disputed: true, reason: OBJECTION, economicDisputeId: 'TXD_1' });
-      expect(econ.calls.slice(2)).toEqual([
-        'authoriseSettlement',
-        'authoriseSettlement',
-        'readObligation',
-      ]);
+      expect(econ.calls.slice(2)).toEqual(['authoriseSettlement', 'readObligation']);
 
       // The order takes the dispute, with economic-service's words, and the
       // step names it; its retry names the same one.
@@ -944,6 +971,56 @@ describe('a retried saga activity answers what its first attempt answered (D-053
       ]);
     });
 
+    /** FU-104: economic-service already holds it, so the record may not come after. */
+    describe('the record of the release it now owes', () => {
+      const recordOf = (orderId: string) =>
+        runUnscoped('the test reads the record the step left', () =>
+          // The release's record; the hold has its own (#836 r1 R2a).
+          prisma.client.sagaUnconfirmedCall.findMany({
+            where: { orderId, operation: 'resolveObligationDispute' },
+          }),
+        );
+
+      it('is written with the dispute, under the buyer, and a retry does not reopen it', async () => {
+        const econ = expiredEconomic();
+        const { orderId, saga } = await receiptConfirmed(econ.economic);
+
+        const taken = await saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION));
+        await saga.run(5, 2, (a) => a.markObligationDisputed(orderId, OBJECTION));
+
+        expect(await recordOf(orderId)).toEqual([
+          expect.objectContaining({
+            organizationId: org.buyer,
+            operation: 'resolveObligationDispute',
+            subject: taken.disputeId,
+            generation: 1,
+            confirmedAt: null,
+          }),
+        ]);
+      });
+
+      it('commits or fails with the dispute: nothing half-written', async () => {
+        const econ = expiredEconomic();
+        const { orderId, saga } = await receiptConfirmed(econ.economic);
+        const lost = jest
+          .spyOn(EventPublisher.prototype, 'enqueue')
+          .mockRejectedValueOnce(new Error('connection lost'));
+        try {
+          await expect(
+            saga.run(5, 1, (a) => a.markObligationDisputed(orderId, OBJECTION)),
+          ).rejects.toThrow();
+        } finally {
+          lost.mockRestore();
+        }
+        expect(await disputesOf(orderId)).toEqual([]);
+        expect(await recordOf(orderId)).toEqual([]);
+
+        const taken = await saga.run(5, 2, (a) => a.markObligationDisputed(orderId, OBJECTION));
+
+        expect(await recordOf(orderId)).toMatchObject([{ subject: taken.disputeId }]);
+      });
+    });
+
     it('reads the mirrored dispute by its id, not as the most recent one', async () => {
       const econ = expiredEconomic();
       const { orderId, saga } = await receiptConfirmed(econ.economic);
@@ -1071,14 +1148,14 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         a.authoriseSettlement(run.orderId, run.transactionId),
       );
       expect(answer).toEqual({ disputed: true, reason: A, economicDisputeId: 'TXD_1' });
-      return { econ, ...run, answer: answer! };
+      return { econ, ...run, answer: answer as DisputedObligation };
     }
 
-    async function decide(orderId: string): Promise<void> {
+    async function decide(orderId: string, resolution = DECIDED): Promise<void> {
       await asOperator(() =>
         resolveOpenDispute(wiring, orderId, {
           outcome: 'SETTLE',
-          resolution: DECIDED,
+          resolution,
           responsibility: 'BUYER',
         }),
       );
@@ -1194,6 +1271,39 @@ describe('a retried saga activity answers what its first attempt answered (D-053
         else await expect(step).rejects.toMatchObject({ type: 'INVALID_STATE_TRANSITION' });
       },
     );
+
+    // economic-service with LF line endings (FU-115; today it keeps the text
+    // as sent); this service keeps what the person sent. The same words.
+    const CRLF_WORDS = 'the supplier showed\r\na signed delivery note';
+
+    it('without an identity, resolved there with the same words in LF: answered', async () => {
+      const { econ, orderId, saga, transactionId, answer } = await disputedAfterAuthorisation();
+      const taken = await saga.run(5, 1, (a) => a.markObligationDisputed(orderId, answer.reason));
+      econ.resolveThere('the supplier showed\na signed delivery note', true);
+      await decide(orderId, CRLF_WORDS);
+
+      await expect(
+        saga.run(6, 1, (a) =>
+          a.resolveObligationDispute(orderId, transactionId, taken.disputeId!, CRLF_WORDS),
+        ),
+      ).resolves.toBeUndefined();
+    });
+
+    it('a dispute filed in CRLF, kept there in LF, read back after its answer was lost: its own', async () => {
+      const econ = expiredEconomic();
+      const { orderId, saga, transactionId } = await receiptConfirmed(econ.economic);
+      await asBuyer(() => wiring.orders.raiseDispute(orderId, { reason: CRLF_WORDS }));
+      const { dispute } = await saga.run(5, 1, (a) => a.readOrder(orderId));
+
+      econ.loseNextAnswer();
+      await expect(
+        saga.run(6, 1, (a) => a.disputeObligation(orderId, transactionId, dispute!.id, CRLF_WORDS)),
+      ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE' });
+      expect(econ.obligation.disputeReason).toBe('the supplier showed\na signed delivery note');
+      await expect(
+        saga.run(6, 2, (a) => a.disputeObligation(orderId, transactionId, dispute!.id, CRLF_WORDS)),
+      ).resolves.toBe('TXD_1');
+    });
 
     it('a dispute the saga files: economic-service’s identity of it, also when read back after its answer was lost', async () => {
       const econ = expiredEconomic();

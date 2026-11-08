@@ -3,9 +3,12 @@
  */
 import type { z } from 'zod';
 
+import { ERROR_STATUS } from '@rasta/contracts';
+
 import {
   GENERIC_REFUSAL_MESSAGE,
   MAX_IN_PROGRESS_WAIT_SECONDS,
+  isProvenRefusal,
   mapProblemToFields,
   writeThroughGateway,
   type FieldMapping,
@@ -211,16 +214,17 @@ describe('what comes back', () => {
     expect(missing.kind).toBe('NOT_FOUND');
   });
 
-  it('never reads a 5xx body, and reports the status with its correlation id', async () => {
-    // A 500 body can carry anything, including a tenant's data. The screen
-    // gets a status and an id support can trace, and nothing else.
+  it('never reads a 5xx body, and calls it unconfirmed with its correlation id (FU-189)', async () => {
+    // A 500 body can carry anything, including a tenant's data. The screen gets
+    // an id support can trace, and nothing else — and a 500 may come from a read
+    // after the commit, so it is never "nothing changed".
     const result = await call((async () =>
       jsonResponse(500, {
         code: 'INTERNAL_ERROR',
         message: 'stack trace here',
       })) as unknown as typeof fetch);
 
-    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 500 });
+    expect(result).toEqual({ kind: 'UNKNOWN_OUTCOME', correlationId: expect.any(String) });
     expect(JSON.stringify(result)).not.toContain('stack trace here');
   });
 
@@ -240,10 +244,54 @@ describe('what comes back', () => {
         })) as unknown as typeof fetch,
     );
 
-    // No problem body to map, so it is an outage to the person rather than a
-    // silent success or a crash.
-    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 400 });
+    // No problem body: nothing proves the platform refused it (a proxy's page
+    // says nothing about the service), so it is unconfirmed — never a silent
+    // success, a crash, or "nothing changed" (PR-830 r1 F1).
+    expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
   });
+});
+
+describe('a 4xx this portal cannot prove was a refusal (PR-830 r1 F1)', () => {
+  const answer = (status: number, body?: unknown) =>
+    call((async () =>
+      body === undefined
+        ? new Response(null, { status })
+        : jsonResponse(status, body)) as unknown as typeof fetch);
+
+  it.each([
+    ['404 without a body (code=null)', 404, undefined],
+    ['403 without a body', 403, undefined],
+    ['401 without a body', 401, undefined],
+    ['429 without a body', 429, undefined],
+    ['400 with an undocumented code', 400, { code: 'SOMETHING_NEW', message: 'x' }],
+    ['409 with an undocumented code', 409, { code: 'SOMETHING_NEW', message: 'x' }],
+    ['422 with an undocumented code', 422, { code: 'SOMETHING_NEW', message: 'x' }],
+    [
+      '404 with a documented code of another status',
+      404,
+      { code: 'VALIDATION_FAILED', message: 'x' },
+    ],
+    ['403 with a documented code of another status', 403, { code: 'NOT_FOUND', message: 'x' }],
+    ['409 with a code that is an inherited property name', 409, { code: 'toString', message: 'x' }],
+  ])('%s is UNKNOWN_OUTCOME, never a refusal', async (_label, status, body) => {
+    expect((await answer(status, body)).kind).toBe('UNKNOWN_OUTCOME');
+  });
+
+  it.each([
+    [403, 'INSUFFICIENT_ROLE', 'FORBIDDEN'],
+    [404, 'NOT_FOUND', 'NOT_FOUND'],
+    [400, 'VALIDATION_FAILED', 'INVALID'],
+    [409, 'OPTIMISTIC_LOCK_FAILED', 'INVALID'],
+    [422, 'BUSINESS_RULE_VIOLATION', 'INVALID'],
+    [429, 'RATE_LIMIT_EXCEEDED', 'UNAVAILABLE'],
+  ])(
+    '%s %s, documented under its own status, is the refusal it says (%s)',
+    async (status, code, kind) => {
+      const result = await answer(status, { code, message: 'x' });
+      expect(result.kind).toBe(kind);
+      if (result.kind === 'UNAVAILABLE') expect(result).toMatchObject({ status, code });
+    },
+  );
 });
 
 describe('mapProblemToFields — a fallback keyed by error code', () => {
@@ -596,11 +644,10 @@ describe('sent, but not confirmed', () => {
     expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503, neverSent: true });
   });
 
-  it('does not mark a 503 the platform answered as never sent: it may follow a commit', async () => {
+  it('is UNKNOWN_OUTCOME for a 503 the platform answered: it may follow a commit (FU-189)', async () => {
     const result = await call((async () =>
       jsonResponse(503, { code: 'UNAVAILABLE', message: 'x' })) as unknown as typeof fetch);
-    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
-    expect(result).not.toHaveProperty('neverSent');
+    expect(result).toEqual({ kind: 'UNKNOWN_OUTCOME', correlationId: expect.any(String) });
   });
 
   it('is UNKNOWN_OUTCOME for a 2xx whose body does not parse', async () => {
@@ -620,12 +667,78 @@ describe('sent, but not confirmed', () => {
     expect(result.kind).toBe('UNKNOWN_OUTCOME');
   });
 
-  it('is still UNAVAILABLE when the gateway refused to forward it (503)', async () => {
+  it('is UNKNOWN_OUTCOME for a 503 UPSTREAM_UNAVAILABLE too: a 5xx body is never read, so it proves nothing', async () => {
+    // The gateway's own "did not forward" and a reset after the service committed
+    // reach this portal as the same status; only a refusal it can prove is one.
     const result = await call((async () =>
       jsonResponse(503, {
         code: 'UPSTREAM_UNAVAILABLE',
         message: 'open',
       })) as unknown as typeof fetch);
-    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
+    expect(result).toEqual({ kind: 'UNKNOWN_OUTCOME', correlationId: expect.any(String) });
+  });
+});
+
+/**
+ * The writer's one rule, swept (FU-189, PR-880 F2; checklist A1): every answer the
+ * platform gives, for every status, with every kind of body. `UNAVAILABLE` — the
+ * one kind a caller renders as "failed, nothing changed" — comes back only for a
+ * refusal the answer proves (a documented code under its own status) or for a send
+ * that never left this portal. So no caller can reach "nothing changed" on a `5xx`.
+ */
+describe('UNAVAILABLE is proof that nothing was written, for every answer', () => {
+  const BODIES: readonly [string, (status: number) => Response][] = [
+    ['no body', (status) => new Response(null, { status })],
+    [
+      'a page that is not the platform’s',
+      (status) =>
+        new Response('<html>busy</html>', { status, headers: { 'content-type': 'text/html' } }),
+    ],
+    [
+      'the platform’s error under a code it does not document',
+      (status) => jsonResponse(status, { code: 'NOT_A_PLATFORM_CODE', message: 'x' }),
+    ],
+    ...Object.keys(ERROR_STATUS).map(
+      (code) =>
+        [
+          `the platform’s error under ${code}`,
+          (status: number) => jsonResponse(status, { code, message: 'x' }),
+        ] as [string, (status: number) => Response],
+    ),
+  ];
+  // Every status that is not a success (2xx is the success path); 304 cannot carry a body.
+  const STATUSES = Array.from({ length: 300 }, (_, i) => 300 + i).filter((s) => s !== 304);
+
+  it('answers UNAVAILABLE only for a proven refusal, and never for any 5xx', async () => {
+    const leaks: string[] = [];
+    for (const status of STATUSES) {
+      for (const [label, respond] of BODIES) {
+        const result = await call((async () => respond(status)) as unknown as typeof fetch);
+        if (result.kind !== 'UNAVAILABLE') continue;
+        const code = result.code;
+        if (status >= 500 || result.neverSent || !isProvenRefusal(status, code)) {
+          leaks.push(`${status} with ${label}`);
+        }
+      }
+    }
+    expect(leaks).toEqual([]);
+  });
+
+  it('answers every 5xx, whatever its body, as UNKNOWN_OUTCOME', async () => {
+    for (let status = 500; status < 600; status += 1) {
+      for (const [, respond] of BODIES) {
+        const result = await call((async () => respond(status)) as unknown as typeof fetch);
+        expect(result.kind).toBe('UNKNOWN_OUTCOME');
+      }
+    }
+  });
+
+  it('still answers a proven refusal no other kind names as UNAVAILABLE (429 RATE_LIMIT_EXCEEDED)', async () => {
+    const result = await call((async () =>
+      jsonResponse(429, {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: 'slow',
+      })) as unknown as typeof fetch);
+    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED' });
   });
 });

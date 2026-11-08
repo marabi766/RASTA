@@ -128,7 +128,15 @@ incomplete dependent closures. Run from the worktree root after
 scope and parity suites serially in a controlled environment, then verifies the
 selection and execution inputs again. `scripts/prepush-parity.json` explicitly
 pins the entire workflow context, quality-job settings and repository pnpm inputs,
-and accounts for every quality-job step, including exclusions with reasons. Executed
+and accounts for every quality-job step, including exclusions with reasons. Root
+`package.json` is pinned per entry of a projection (FU-093): every top-level key except
+`scripts`, plus the root scripts the quality jobs can reach: the `pnpm run` closure of the
+tokenized step and script commands, every root script named as a literal by a launcher those
+commands run (node entries and the code files they name, bash files, tool configs, turbo
+`//#` tasks), hooks and the install lifecycle. A command form it does not model (expanded
+command word, wrapper, `sh -c`, control flow, unknown program or pnpm form) refuses; an
+unrelated script does not move the pin. After review, repin with
+`node scripts/prepush-parity-repin.mjs` (same projection code as the check). Executed
 steps allow only `name` and `run`; their pre/post hooks are refused. Command,
 environment, condition or failure-handling drift refuses until reviewed. This is
 an incomplete parity slice, not the full pre-push gate: package checks, static

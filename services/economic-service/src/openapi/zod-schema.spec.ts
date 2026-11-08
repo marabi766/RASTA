@@ -205,7 +205,12 @@ describe('the listing contracts', () => {
       Record<string, unknown>
     >;
 
-    expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
+    expect(properties.limit).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 100,
+      default: 25,
+    });
     expect(properties.status).toMatchObject({ type: 'string' });
   });
 });

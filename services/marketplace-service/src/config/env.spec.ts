@@ -124,6 +124,7 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
     ).toEqual([
       ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
       ['CLAIM_WAIT_MS', 7000],
+      ['ORDER_HOLD_TRANSACTION_MS', 9000],
       ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
     ]);
   });

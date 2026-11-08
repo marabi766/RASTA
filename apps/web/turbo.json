@@ -32,8 +32,15 @@
         "$TURBO_ROOT$/packages/config/*.json",
         "$TURBO_ROOT$/packages/contracts/**",
         "$TURBO_ROOT$/packages/testing/**",
-        "$TURBO_ROOT$/scripts/authored-source-inventory.cjs",
         "$TURBO_ROOT$/tests/e2e/playwright.config.ts",
+        "$TURBO_ROOT$/scripts/authored-source-inventory.cjs",
+        // write-classifier.guard.spec runs ESLint, whose config loads these rules (FU-219).
+        "$TURBO_ROOT$/scripts/*-rule.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-parser.mjs",
+        "$TURBO_ROOT$/scripts/lint-extensions.mjs",
+        "$TURBO_ROOT$/scripts/zod-callback-helpers.mjs",
+        "$TURBO_ROOT$/scripts/test-only-path.mjs",
+        "$TURBO_ROOT$/scripts/testing-dev-only.mjs",
         "$TURBO_ROOT$/tsconfig.base.json",
         "$TURBO_ROOT$/packages/nest-common/src/**",
         "$TURBO_ROOT$/services/api-gateway/src/**",
@@ -50,6 +57,7 @@
         "$TURBO_ROOT$/services/inventory-service/src/**",
         "$TURBO_ROOT$/services/maintenance-service/src/**",
         "$TURBO_ROOT$/services/marketplace-service/src/**",
+        "$TURBO_ROOT$/services/procurement-service/src/**",
         "$TURBO_ROOT$/services/supplier-service/src/**"
       ]
     },
@@ -63,8 +71,15 @@
         "$TURBO_ROOT$/packages/config/*.json",
         "$TURBO_ROOT$/packages/contracts/**",
         "$TURBO_ROOT$/packages/testing/**",
-        "$TURBO_ROOT$/scripts/authored-source-inventory.cjs",
         "$TURBO_ROOT$/tests/e2e/playwright.config.ts",
+        "$TURBO_ROOT$/scripts/authored-source-inventory.cjs",
+        // write-classifier.guard.spec runs ESLint, whose config loads these rules (FU-219).
+        "$TURBO_ROOT$/scripts/*-rule.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-parser.mjs",
+        "$TURBO_ROOT$/scripts/lint-extensions.mjs",
+        "$TURBO_ROOT$/scripts/zod-callback-helpers.mjs",
+        "$TURBO_ROOT$/scripts/test-only-path.mjs",
+        "$TURBO_ROOT$/scripts/testing-dev-only.mjs",
         "$TURBO_ROOT$/tsconfig.base.json",
         "$TURBO_ROOT$/packages/nest-common/src/**",
         "$TURBO_ROOT$/services/api-gateway/src/**",
@@ -81,6 +96,7 @@
         "$TURBO_ROOT$/services/inventory-service/src/**",
         "$TURBO_ROOT$/services/maintenance-service/src/**",
         "$TURBO_ROOT$/services/marketplace-service/src/**",
+        "$TURBO_ROOT$/services/procurement-service/src/**",
         "$TURBO_ROOT$/services/supplier-service/src/**"
       ]
     }

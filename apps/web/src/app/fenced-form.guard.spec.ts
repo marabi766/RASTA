@@ -838,6 +838,536 @@ describe('the guard fails where it must', () => {
       });
     });
 
+    describe('FU-071: one provenance for adapters — own members stay own, composed adapters invoke their target', () => {
+      // #1 (regression of PR 698 r2): a module's own `call`/`apply` member is itself, not an adapter.
+      const owns = ['call', 'apply'].flatMap((name) =>
+        [`${name}(p) { return fencedSlot(p); }`, `${name}: (p) => fencedSlot(p)`].flatMap(
+          (member) =>
+            [
+              `export default { ${member} };`,
+              `const api = { ${member} }; export default api;`,
+            ].flatMap((exported) =>
+              ['ts', 'tsx'].map((ext) => [`${exported} (.${ext})`, name, exported, ext] as const),
+            ),
+        ),
+      );
+      it.each(owns)('an own factory member %s is found', (_label, name, exported, ext) => {
+        const extra = {
+          [`lib/factory.${ext}`]: `import { fencedSlot } from './unresolved-tenancy'; ${exported}`,
+          'lib/thing-store.ts': STORE.replace(
+            "import { fencedSlot } from './unresolved-tenancy';\n    const slot = fencedSlot(",
+            `import F from './factory'; const slot = F.${name}(`,
+          ),
+        };
+        expect(fencedModules(tree(COMPLIANT, extra)).has('lib/thing-store.ts')).toBe(true);
+        expect(fencedForms(tree(COMPLIANT, extra))).toEqual(['app/thing/ThingForm.tsx']);
+        expect(rules(COMPLIANT, extra)).toEqual([]);
+        expect(rules(`${COMPLIANT} saveThing();`, extra)).toEqual(['store']);
+      });
+
+      // #2: composed, kept, aliased and bound adapters.
+      const composed = [
+        'saveThing.call.bind(saveThing)(null)',
+        'Reflect.apply.apply(null, [saveThing, null, []])',
+        'Reflect.apply.call.apply(Reflect.apply, [null, saveThing, null, []])',
+        'Function.prototype.call.call(saveThing, null)',
+        'Function.prototype.bind.call(saveThing, null)()',
+        'Reflect.apply.bind(null, saveThing)(null, [])',
+        'Reflect.apply.bind(null, saveThing, null)([])',
+        'globalThis.Reflect.apply(saveThing, null, [])',
+        '(0, Reflect.apply)(saveThing, null, [])',
+      ];
+      // Already refused at 8c945408 (PR 698 r2); kept so the provenance rewrite cannot lose them.
+      const guarded = [
+        'Reflect.apply.call(null, saveThing, null, [])',
+        'saveThing.bind(null).call(null)',
+        '(Reflect.apply as never)(saveThing, null, [])',
+      ];
+      const kept = [
+        'const run = Reflect.apply; run(saveThing, null, []);',
+        'const R = Reflect; R.apply(saveThing, null, []);',
+        'const { apply } = Reflect; apply(saveThing, null, []);',
+        'const { apply: run } = Reflect; run(saveThing, null, []);',
+        'const R = Reflect; const { apply: run } = R; run(saveThing, null, []);',
+        'const c = saveThing.call; c.call(saveThing, null);',
+        'const a = saveThing.apply; a.call(saveThing, null, []);',
+        'const c = Function.prototype.call; c.apply(saveThing, [null]);',
+        'const b = saveThing.call.bind(saveThing); b(null);',
+        'const b = Reflect.apply.bind(null, saveThing); b(null, []);',
+      ];
+      it.each([...[...composed, ...guarded].map((c) => `${c};`), ...kept])(
+        '%s is refused outside the boundary',
+        (write) => {
+          expect(rules(`${COMPLIANT} ${write}`)).toEqual(['store']);
+        },
+      );
+      it.each([...composed, ...guarded])('%s passes inside the boundary', (write) => {
+        expect(
+          rules(COMPLIANT.replace('remember: () => saveThing()', `remember: () => ${write}`)),
+        ).toEqual([]);
+      });
+      it('an adapter whose function or arguments cannot be read is refused (fail closed)', () => {
+        for (const write of [
+          'const c = saveThing.call; c(null);',
+          'Reflect.apply(...xs);',
+          'Reflect.construct(saveThing, []);',
+          'const { construct } = Reflect; construct(saveThing, []);',
+        ]) {
+          expect({ write, rules: rules(`${COMPLIANT} ${write}`) }).toEqual({
+            write,
+            rules: ['unresolved'],
+          });
+        }
+      });
+      it('bound arguments reach the target: the hook, the boundary and a factory', () => {
+        const valid = COMPLIANT.replace(
+          'useSlotActionState(send, null)',
+          'useSlotActionState.bind(null, send)(null)',
+        );
+        expect(rules(valid)).toEqual([]);
+        const react = valid.replace(
+          'useSlotActionState.bind(null, send)(null)',
+          'Reflect.apply.bind(null, useActionState, null)([send, null])',
+        );
+        expect(rules(`import { useActionState } from 'react'; ${react}`)).toEqual(['state']);
+        const made = {
+          'lib/thing-store.ts': STORE.replace(
+            "fencedSlot('p.'",
+            "Reflect.apply.bind(null, fencedSlot).call(null, null, ['p.']), fencedSlot('p.'",
+          ),
+        };
+        expect(fencedModules(tree(COMPLIANT, made)).has('lib/thing-store.ts')).toBe(true);
+        const only = {
+          'lib/thing-store.ts': STORE.replace(
+            "import { fencedSlot } from './unresolved-tenancy';",
+            "import { fencedSlot as f } from './unresolved-tenancy'; const fencedSlot = f.call.bind(f, null);",
+          ),
+        };
+        expect(fencedModules(tree(COMPLIANT, only)).has('lib/thing-store.ts')).toBe(true);
+        expect(fencedForms(tree(COMPLIANT, only))).toEqual(['app/thing/ThingForm.tsx']);
+      });
+    });
+
+    describe('PR 724 r2: bound provenance, effective arguments and comma aliases', () => {
+      const formPath = 'app/thing/ThingForm.tsx';
+      const hook = "import { useSlotActionState } from '@/lib/fenced-submission';";
+      const writers = [
+        'slot.start.bind(slot)',
+        'Reflect.apply.bind(null, slot.start, slot, [])',
+        'slot.start.call.bind(slot.start, slot)',
+      ];
+      it.each(
+        [
+          ['named', "export { saveThing } from './thing-store';", '{ saveThing }', 'saveThing'],
+          [
+            'default',
+            "export { saveThing as default } from './thing-store';",
+            'saveThing',
+            'saveThing',
+          ],
+          [
+            'local export',
+            "import { saveThing as s } from './thing-store'; export { s as saveThing };",
+            '{ saveThing }',
+            'saveThing',
+          ],
+          [
+            'local namespace export',
+            "import { saveThing } from './thing-store'; export { saveThing };",
+            '* as S',
+            'S.saveThing',
+          ],
+          ['star barrel', "export * from './thing-store';", '* as S', 'S.saveThing'],
+          [
+            'named namespace barrel',
+            "export { saveThing } from './thing-store';",
+            '* as S',
+            'S.saveThing',
+          ],
+        ].flatMap((row) =>
+          writers.map((bound) => [`${row[0]} (${bound})`, ...row.slice(1), bound]),
+        ),
+      )('F1 discovers a bound writer through %s', (_label, barrel, names, writer, bound) => {
+        const form = `${hook} import ${names} from '@/lib/exports'; useSlotActionState(() => ${writer}(), null);`;
+        const sources = tree(form, {
+          'lib/thing-store.ts': STORE.replace('() => slot.start()', bound),
+          'lib/exports.ts': barrel,
+        });
+        expect(fencedForms(sources)).toEqual([formPath]);
+        expect(fencedFormViolations(sources).map((v) => v.rule)).toEqual(
+          expect.arrayContaining(['callback', 'boundary', 'store', 'drawn']),
+        );
+      });
+      it.each(['isRedirect', 'sessionHasEnded'])(
+        'F1 keeps bound %s completion provenance',
+        (name) => {
+          const extra = {
+            'lib/check.ts': `import { ${name} } from './session-refusal'; export const check = ${name}.bind(null).bind(null);`,
+          };
+          expect(
+            rules(`${COMPLIANT} import { check } from '@/lib/check'; check;`, extra),
+          ).toContain('completion');
+          expect(rules(`${COMPLIANT} import * as C from '@/lib/check'; C.check;`, extra)).toContain(
+            'completion',
+          );
+        },
+      );
+      it.each(['local', 'imported'])('F1 checks %s bound JSX inside and outside forms', (where) => {
+        const extra = {
+          'lib/draw.ts':
+            "import { UnresolvedForm, QuarantineGate } from '@/app/UnresolvedQuarantine'; export const Draw = UnresolvedForm.bind(null); export const Gate = QuarantineGate.bind(null).bind(null);",
+        };
+        const imports =
+          where === 'local'
+            ? "import { QuarantineGate } from '@/app/UnresolvedQuarantine'; const Gate = QuarantineGate.bind(null);"
+            : "import { Gate } from '@/lib/draw';";
+        const valid = COMPLIANT.replace(
+          "import { UnresolvedForm } from '@/app/UnresolvedQuarantine';",
+          "import { Draw as UnresolvedForm } from '@/lib/draw';",
+        );
+        expect(rules(valid, extra)).toEqual([]);
+        expect(rules(`${COMPLIANT} ${imports} const Bad = () => <Gate />;`, extra)).toContain(
+          'drawn',
+        );
+        const sources = tree(COMPLIANT, {
+          ...extra,
+          'app/Other.tsx': `${imports} const Bad = () => <Gate />;`,
+        });
+        expect(fencedFormViolations(sources)).toEqual([
+          {
+            file: 'app/Other.tsx',
+            rule: 'drawn',
+            detail: 'draws QuarantineGate outside UnresolvedForm',
+          },
+        ]);
+      });
+
+      const adapters: [string, (f: string, receiver: string, args: string[]) => string][] = [
+        ['call', (f, r, a) => `${f}.call(${r}, ${a.join(', ')})`],
+        ['apply', (f, r, a) => `${f}.apply(${r}, [${a.join(', ')}])`],
+        ['Reflect.apply', (f, r, a) => `Reflect.apply(${f}, ${r}, [${a.join(', ')}])`],
+        ['bound', (f, r, a) => `${f}.bind(${r}, ${a.join(', ')})()`],
+        ['composed', (f, r, a) => `${f}.call.bind(${f}, ${r})(${a.join(', ')})`],
+        ['kept', (f, r, a) => `kept.call(${f}, ${r}, ${a.join(', ')})`],
+        ['Function.call', (f, r, a) => `Function.prototype.call.call(${f}, ${r}, ${a.join(', ')})`],
+      ];
+      const reducer = '() => submitThroughSlot({})';
+      const replaceReducer = (expr: string) =>
+        COMPLIANT.replace(/const send = useCallback\([\s\S]*?\n {6}\);/, `const send = ${expr};`);
+      it.each(adapters)(
+        'F2 reads the effective useCallback reducer through %s',
+        (_label, invoke) => {
+          const imports = 'const kept = useCallback.call;';
+          const invalid = replaceReducer(
+            invoke('useCallback', reducer, ["() => ({ kind: 'HELD' })", '[]']),
+          );
+          expect(rules(`${invalid} ${imports}`)).toEqual(
+            expect.arrayContaining(['callback', 'boundary']),
+          );
+          const valid = replaceReducer(invoke('useCallback', 'null', [reducer, '[]']));
+          expect(rules(`${valid} ${imports}`)).toEqual([]);
+        },
+      );
+      it('F2 refuses a reducer whose effective bound argument belongs to another module', () => {
+        const extra = {
+          'lib/memo.ts': `import { useCallback } from 'react'; import { submitThroughSlot } from './fenced-submission'; export const memo = useCallback.bind(() => submitThroughSlot({}), () => ({ kind: 'HELD' }));`,
+        };
+        const form = replaceReducer('memo([])');
+        expect(rules(`${form} import { memo } from '@/lib/memo';`, extra)).toEqual(
+          expect.arrayContaining(['callback', 'boundary']),
+        );
+      });
+      it.each(adapters)(
+        'F2 protects effective boundary options through %s, never the receiver',
+        (_label, invoke) => {
+          const imports = 'const kept = submitThroughSlot.call;';
+          const receiver = '{ send: submitThing(previous, form), remember: saveThing() }';
+          const replaceBoundary = (r: string) =>
+            COMPLIANT.replace(
+              /return submitThroughSlot\(([\s\S]*?)\);/,
+              (_match, options: string) => `return ${invoke('submitThroughSlot', r, [options])};`,
+            );
+          expect(rules(`${replaceBoundary('null')} ${imports}`)).toEqual([]);
+          expect(rules(`${replaceBoundary(receiver)} ${imports}`)).toEqual(
+            expect.arrayContaining(['transport', 'store']),
+          );
+        },
+      );
+      it('F2 protects kept bound options at their source, not the ignored receiver', () => {
+        const form = COMPLIANT.replace(
+          'return submitThroughSlot({',
+          'const through = submitThroughSlot.bind({ send: submitThing(previous, form), remember: saveThing() }, {',
+        ).replace(
+          'failed: () => null,\n          });',
+          'failed: () => null,\n          }); return through();',
+        );
+        expect(rules(form)).toEqual(expect.arrayContaining(['transport', 'store']));
+        expect(
+          rules(
+            form.replace('{ send: submitThing(previous, form), remember: saveThing() }', 'null'),
+          ),
+        ).toEqual([]);
+      });
+
+      const commas = [
+        ['writer', '(0, saveThing)', 'run()'],
+        ['Reflect.apply', '(0, Reflect.apply)', 'run(saveThing, null, [])'],
+        ['Reflect', '(0, Reflect)', 'run.apply(saveThing, null, [])'],
+        ['kept call', '(0, saveThing.call)', 'run.call(saveThing, null)'],
+      ];
+      it.each(commas)(
+        'F3 follows comma aliases of %s locally and through named/namespace exports',
+        (_label, value, invoke) => {
+          expect(rules(`${COMPLIANT} const run = ${value}; ${invoke};`)).toEqual(['store']);
+          const extra = {
+            'lib/comma.ts': `import { saveThing } from './thing-store'; export const run = ${value};`,
+          };
+          for (const [imports, call] of [
+            ["import { run } from '@/lib/comma';", invoke],
+            ["import * as C from '@/lib/comma';", invoke.replace('run', 'C.run')],
+          ])
+            expect(rules(`${COMPLIANT} ${imports} ${call};`, extra)).toEqual(['store']);
+        },
+      );
+      it('F3 discovers comma-aliased hooks and reads comma-wrapped reducers', () => {
+        const form = `${hook} import { saveThing } from '@/lib/thing-store'; const state = (0, useSlotActionState); state((0, () => saveThing()), null);`;
+        expect(fencedForms(tree(form))).toEqual([formPath]);
+        expect(rules(form)).toEqual(expect.arrayContaining(['callback', 'boundary', 'store']));
+        expect(rules(replaceReducer('useCallback((0, () => submitThroughSlot({})), [])'))).toEqual(
+          [],
+        );
+      });
+      it('F3 still scans eager comma operands outside effective options', () => {
+        const form = COMPLIANT.replace(
+          'return submitThroughSlot({',
+          'return submitThroughSlot((saveThing(), submitThing(previous, form), {',
+        ).replace('failed: () => null,\n          });', 'failed: () => null,\n          }));');
+        expect(rules(form)).toEqual(expect.arrayContaining(['store', 'transport']));
+      });
+      it.each(['call', 'apply', 'bind'])(
+        'F3 keeps comma-detached .%s receivers detached',
+        (adapter) => {
+          const form = COMPLIANT.replace(
+            'return submitThroughSlot({',
+            `return (0, submitThroughSlot.${adapter})(null, ${adapter === 'apply' ? '[' : ''}{`,
+          )
+            .replace('remember: () => saveThing()', 'remember: (saveThing(), () => saveThing())')
+            .replace(
+              'failed: () => null,\n          });',
+              `failed: () => null,\n          }${adapter === 'apply' ? ']' : ''});`,
+            );
+          expect(rules(form)).toEqual(expect.arrayContaining(['callback', 'boundary', 'store']));
+        },
+      );
+      it.each(['ts', 'tsx'])('F3 discovers comma-wrapped default factories in .%s', (ext) => {
+        const extra = {
+          [`lib/factory.${ext}`]:
+            "import { fencedSlot } from './unresolved-tenancy'; export default (0, (p) => fencedSlot(p));",
+          'lib/thing-store.ts': STORE.replace(
+            "import { fencedSlot } from './unresolved-tenancy';",
+            "import fencedSlot from './factory';",
+          ),
+        };
+        expect(fencedModules(tree(COMPLIANT, extra)).has('lib/thing-store.ts')).toBe(true);
+        expect(fencedForms(tree(COMPLIANT, extra))).toEqual([formPath]);
+        expect(rules(`${COMPLIANT} saveThing();`, extra)).toEqual(['store']);
+      });
+    });
+
+    describe('FU-106: returned expressions and bound inline functions', () => {
+      const boundary = 'submitThroughSlot({})';
+      const reducer = (body: string) =>
+        COMPLIANT.replace(
+          /const send = useCallback\([\s\S]*?\n {6}\);/,
+          `const send = useCallback(async (previous, form) => ${body}, []);`,
+        );
+
+      const inlineStore = (target: string) => ({
+        'lib/inline-store.ts': `import { fencedSlot } from './unresolved-tenancy';
+          const slot = fencedSlot('inline.'); export const G = (${target}).bind(null);`,
+      });
+      const importG = "import { G } from '@/lib/inline-store';";
+
+      it.each(['slot.start()', "fencedSlot('j.')"])(
+        'r1 F1 refuses anonymous store JSX in forms and other files: %s',
+        (body) => {
+          const extra = inlineStore(`() => { ${body}; return null; }`);
+          expect(rules(`${COMPLIANT} ${importG} const X = () => <G />;`, extra)).toContain(
+            'unresolved',
+          );
+          expect(
+            rules(COMPLIANT, { ...extra, 'app/Other.tsx': `${importG} const X = () => <G />;` }),
+          ).toContain('unresolved');
+        },
+      );
+
+      it.each([
+        '({ f: () => slot.start() }).f',
+        '(Math.random() ? () => slot.start() : () => null)',
+        '(() => () => fencedSlot("z."))()',
+      ])('r1 F2 refuses unresolvable bound targets outside and inside send: %s', (target) => {
+        for (const form of [
+          `${COMPLIANT} ${importG} G();`,
+          `${importG} ${COMPLIANT.replace('send: () => submitThing(previous, form)', 'send: () => G()')}`,
+        ])
+          expect(rules(form, inlineStore(target))).toContain('unresolved');
+      });
+
+      it.each([
+        '(() => fencedSlot("x.")).bind(null)',
+        '(function () { return fencedSlot("x."); }).bind(null)',
+        'Function.prototype.bind.call(() => fencedSlot("x."), null)',
+        'Reflect.apply(Function.prototype.bind, () => fencedSlot("x."), [null])',
+      ])('r1 F3 refuses anonymous factories inside send through adapters: %s', (bound) => {
+        const form = `${importG} ${COMPLIANT.replace('send: () => submitThing(previous, form)', 'send: () => G()')}`;
+        expect(
+          rules(form, {
+            'lib/inline-store.ts': `import { fencedSlot } from './unresolved-tenancy'; export const G = ${bound};`,
+          }),
+        ).toContain('store');
+      });
+
+      it.each(['for await (const x of [0]) {}', 'await using r = null;'])(
+        'r1 F4 counts every callback-owned await form: %s',
+        (suspend) => {
+          expect(rules(reducer(`{ ${suspend} return ${boundary}; }`))).toContain('callback');
+        },
+      );
+
+      it.each([
+        '(Promise.reject(0), submitThroughSlot)({})',
+        '(Promise.reject(previous), SB).submitThroughSlot({})',
+        '(Promise.reject(previous), SB)["submitThroughSlot"]({})',
+        'submitThroughSlot((Promise.reject(previous), {}))',
+        '((Promise.reject(0), submitThroughSlot) as T)!({})',
+        'submitThroughSlot(((Promise.reject(previous), {}) satisfies T)!)',
+      ])(
+        'r1 F5 refuses discarded operands at every returned boundary position: %s',
+        (expression) => {
+          for (const body of [expression, `{ return ${expression}; }`]) {
+            const form = `import * as SB from '@/lib/fenced-submission'; ${reducer(body)}`;
+            expect(rules(form)).toEqual(expect.arrayContaining(['callback', 'boundary']));
+          }
+        },
+      );
+
+      it('r1 F5 discarded options never protect eager store calls', () => {
+        expect(rules(reducer('submitThroughSlot((0, { send: saveThing() }))'))).toContain('store');
+      });
+
+      it('r1 F5 checks effective options bound before the returned call', () => {
+        const form = reducer('execute()').replace(
+          'const send = useCallback(',
+          'const execute = submitThroughSlot.bind(null, (Promise.reject(0), {})); const send = useCallback(',
+        );
+        expect(rules(form)).toEqual(expect.arrayContaining(['callback', 'boundary']));
+      });
+
+      it.each([
+        '{ for (const x of [0]) {} using r = null; return submitThroughSlot({}); }',
+        'submitThroughSlot({ send: async () => { for await (const x of [0]) {} await using r = null; } })',
+        'submitThroughSlot({ send: () => (0, saveThing()) })',
+      ])('r1 preserves synchronous loops/using and nested function ownership: %s', (body) => {
+        expect(rules(reducer(body))).toEqual([]);
+      });
+
+      it.each(['await Promise.resolve(0)', 'Promise.reject(previous)', boundary, '0'])(
+        'N1 refuses discarded comma operand %s in expression and block returns',
+        (left) => {
+          for (const expression of [`(${left}, ${boundary})`, `((${left}, ${boundary}) as T)!`]) {
+            for (const body of [expression, `{ return ${expression}; }`]) {
+              expect(rules(reducer(body))).toEqual(
+                expect.arrayContaining(['callback', 'boundary']),
+              );
+            }
+          }
+        },
+      );
+
+      it.each([
+        'submitThroughSlot({ ...(await options) })',
+        'submitThroughSlot({ remember: await makeRemember() })',
+        '(submitThroughSlot({ ...(await options) }) satisfies T)!',
+      ])('N1 scans expression bodies for callback-owned awaits: %s', (expression) => {
+        expect(rules(reducer(expression))).toContain('callback');
+      });
+
+      it.each([
+        `(${boundary})`,
+        `(${boundary} as T)`,
+        `(${boundary} satisfies T)`,
+        `(${boundary})!`,
+        `((${boundary} as T) satisfies T)!`,
+        'submitThroughSlot({ send: async () => await submitThing(previous, form) })',
+        'submitThroughSlot({ async send() { return await submitThing(previous, form); } })',
+        'submitThroughSlot({ send: async function () { return await submitThing(previous, form); } })',
+      ])('N1 preserves wrappers and nested function ownership: %s', (expression) => {
+        for (const body of [expression, `{ return ${expression}; }`])
+          expect(rules(reducer(body))).toEqual([]);
+      });
+
+      it.each([
+        '(() => null).bind(null)',
+        '(function () { return null; }).bind(null)',
+        '((() => null) as T).bind(null).bind(null)',
+        '((() => null) satisfies T)!.bind(null)',
+        '(0, () => null).bind(null)',
+        'Function.prototype.bind.call(() => null, null)',
+        'Reflect.apply(Function.prototype.bind, () => null, [null])',
+      ])('N2 resolves inline bound JSX inside and outside forms: %s', (bound) => {
+        expect(rules(`${COMPLIANT} const G = ${bound}; const X = () => <G />;`)).toEqual([]);
+        expect(
+          rules(COMPLIANT, {
+            'lib/component.ts': `export const G = ${bound};`,
+            'app/Other.tsx': "import { G } from '@/lib/component'; export const X = () => <G />;",
+          }),
+        ).toEqual([]);
+      });
+
+      it('N2 retains the defining module for form discovery and refuses anonymous store JSX', () => {
+        const form = `
+          import { G } from '@/lib/thing-store';
+          import { useSlotActionState, submitThroughSlot } from '@/lib/fenced-submission';
+          import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
+          useSlotActionState(() => submitThroughSlot({}), null);
+          const X = () => <UnresolvedForm><G /></UnresolvedForm>;
+        `;
+        const sources = tree(form, {
+          'lib/thing-store.ts': `${STORE} export const G = (() => null).bind(null);`,
+        });
+        expect(fencedForms(sources)).toEqual(['app/thing/ThingForm.tsx']);
+        expect(fencedFormViolations(sources).map((violation) => violation.rule)).toEqual([
+          'unresolved',
+        ]);
+      });
+
+      it.each(['slot.start()', "fencedSlot('other.')"])(
+        'N2 refuses invoking an anonymous bound store target outside the boundary: %s',
+        (body) => {
+          const form = `${COMPLIANT} import { run } from '@/lib/inline-store'; run();`;
+          const extra = {
+            'lib/inline-store.ts': `import { fencedSlot } from './unresolved-tenancy';
+              const slot = fencedSlot('inline.'); export const run = (() => ${body}).bind(null);`,
+          };
+          expect(rules(form, extra)).toContain('store');
+        },
+      );
+
+      it.each(['missing', 'Unknown', 'cycle'])(
+        'N2 still refuses an unresolved bound target: %s',
+        (target) => {
+          const imports =
+            "import { missing } from '@/lib/thing-store'; import { cycle } from '@/lib/cycle';";
+          expect(
+            rules(COMPLIANT, {
+              'lib/cycle.ts': 'export { cycle } from "./cycle";',
+              'app/Other.tsx': `${imports} const G = ${target}.bind(null); const X = () => <G />;`,
+            }),
+          ).toContain('unresolved');
+        },
+      );
+    });
+
     it('refuses when resolution is exhausted, keeping where it stopped', () => {
       const cycle = {
         'lib/a.ts': "export { x } from './b'; export * from './thing-store';",

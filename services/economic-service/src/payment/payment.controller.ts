@@ -3,6 +3,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { PaymentService, REFUND_REFUSALS, type RefundResultView } from './payment.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { canonicalBodyPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import { toPaymentIntentView, type PaymentIntentRow } from '../shared/views';
@@ -88,7 +89,7 @@ export class PaymentController {
   async refund(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(refundPaymentSchema)) dto: RefundPaymentDto,
+    @Body(canonicalBodyPipe(refundPaymentSchema)) dto: RefundPaymentDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);

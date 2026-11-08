@@ -1,9 +1,14 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, RastaError, Roles, getContext, zodPipe } from '@rasta/nest-common';
-import { mayRecordSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
+import {
+  mayRecordSource,
+  RECORDED_SOURCE_REFUSAL,
+  refusesUnfencedOrderHold,
+} from './recorded-sources';
 import { TransactionService, type TransactionDetail } from './transaction.service';
-import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { IdempotencyStore, targeted, type TerminalRefusals } from '../shared/idempotency';
+import { canonicalBodyPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import {
@@ -102,6 +107,22 @@ export class TransactionController {
     };
   }
 
+  /** Before `:id`, which an older release answers this path with: a 404, so not capable. */
+  @Get('capabilities')
+  @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN')
+  @AllowService('marketplace-service')
+  @ApiOperation({
+    summary: 'What this release proves about a transaction',
+    description:
+      '`heldProven`: every transaction view says whether HELD is proven. The order saga starts ' +
+      'no order until this answers true (ADR-040). `orderHoldDeadlineRequired`: an `ORDER` ' +
+      'hold without `holdNotAfter` is refused (D-150); the saga takes its order row as proof ' +
+      'that no hold can land only while this answers true (FU-233). No tenant data.',
+  })
+  capabilities() {
+    return { heldProven: true, orderHoldDeadlineRequired: refusesUnfencedOrderHold() };
+  }
+
   @Get(':id')
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN')
   @AllowService('marketplace-service', 'contract-service', 'procurement-service')
@@ -142,11 +163,14 @@ export class TransactionController {
       '(400 VALIDATION_FAILED on `sourceType`). Where settlement fails closed without a ' +
       'commission rule (docs/24 Q-29, on outside development and test), `businessLine` is ' +
       'required — 422 BUSINESS_LINE_REQUIRED, nothing recorded — except for marketplace-service ' +
-      'recording its own `ORDER` (docs/24 Q-130).',
+      'recording its own `ORDER` (docs/24 Q-130). With `holdNotAfter`, past that instant by this ' +
+      "service's clock: 422 HOLD_DEADLINE_PASSED, nothing recorded or held, and the key answers " +
+      'it from then on. An `ORDER` without `holdNotAfter`: 422 HOLD_DEADLINE_REQUIRED, nothing ' +
+      'recorded or held, the key left free; an answer already stored under the key is replayed.',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(createTransactionSchema)) dto: CreateTransactionDto,
+    @Body(canonicalBodyPipe(createTransactionSchema)) dto: CreateTransactionDto,
   ) {
     assertNotAuditor();
     // With the schema's rule, and like it before any replay: a source type
@@ -164,10 +188,19 @@ export class TransactionController {
       dto,
       201,
       (answer) => this.transactions.create({ ...dto, idempotencyKey: key }, answer.map(detailView)),
-      // No target in the path: the stored answer names the transaction it made.
+      // No target in the path: the stored answer names the transaction it made. A
+      // recorded refusal names none: it says nothing but its own name, to its own actor.
       {
-        mayReplay: (stored) => this.transactions.assertMayReplay(createdId(stored), 'READ'),
+        mayReplay: async (stored) => {
+          if (stored !== undefined) {
+            await this.transactions.assertMayReplay(createdId(stored), 'READ');
+          }
+        },
         stored: storedTransactionDetailView,
+        terminalRefusals: CREATE_REFUSALS,
+        ...(dto.holdNotAfter === undefined
+          ? {}
+          : { notAfter: { at: new Date(dto.holdNotAfter), refusal: 'HOLD_DEADLINE_PASSED' } }),
       },
     );
   }
@@ -221,7 +254,7 @@ export class TransactionController {
   async dispute(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(disputeTransactionSchema)) dto: DisputeTransactionDto,
+    @Body(canonicalBodyPipe(disputeTransactionSchema)) dto: DisputeTransactionDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
@@ -264,7 +297,7 @@ export class TransactionController {
   async resolveDispute(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(resolveDisputeSchema)) dto: ResolveDisputeDto,
+    @Body(canonicalBodyPipe(resolveDisputeSchema)) dto: ResolveDisputeDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
@@ -303,7 +336,7 @@ export class TransactionController {
   async refund(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(refundTransactionSchema)) dto: RefundTransactionDto,
+    @Body(canonicalBodyPipe(refundTransactionSchema)) dto: RefundTransactionDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
@@ -336,7 +369,7 @@ export class TransactionController {
   async cancel(
     @Param('id') id: string,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(cancelTransactionSchema)) dto: CancelTransactionDto,
+    @Body(canonicalBodyPipe(cancelTransactionSchema)) dto: CancelTransactionDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
@@ -364,7 +397,15 @@ function detailView(transaction: TransactionDetail) {
   return toTransactionDetailView(transaction as never);
 }
 
-/** The transaction a stored creation answer names. A creation records no refusal. */
+/** What a creation records as its key's answer. Everything else frees the key. */
+const CREATE_REFUSALS: TerminalRefusals = {
+  HOLD_DEADLINE_PASSED: {
+    code: 'HOLD_DEADLINE_PASSED',
+    message: 'The deadline for placing this hold has passed; nothing was recorded or held',
+  },
+};
+
+/** The transaction a stored creation answer names. */
 function createdId(stored: unknown): string {
   const id = (stored as { id?: unknown } | undefined)?.id;
   if (typeof id !== 'string') {

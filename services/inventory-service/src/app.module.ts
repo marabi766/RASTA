@@ -22,6 +22,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -62,6 +63,7 @@ import {
 import { ReturnShipmentRepository } from './return-shipment/return-shipment.repository';
 import { ReturnShipmentService } from './return-shipment/return-shipment.service';
 import { CommandRunner } from './shared/command-runner';
+import { databaseClock } from './shared/clock';
 import { IdempotencyStore } from './shared/idempotency';
 import { inventoryReservationsOverdue } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -94,6 +96,9 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     MetricsController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadInventoryEnv() },
 
     {
@@ -176,9 +181,15 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
       provide: IdempotencyStore,
       inject: [PrismaService, ENV, InventoryAccess],
       useFactory: (prisma: PrismaService, env: InventoryEnv, access: InventoryAccess) =>
-        new IdempotencyStore(prisma, env, () => {
-          access.assertOperator();
-        }),
+        new IdempotencyStore(
+          prisma,
+          env,
+          () => {
+            access.assertOperator();
+          },
+          // The replay fence's last word (FU-171): read after every wait, never this replica's clock.
+          databaseClock,
+        ),
     },
 
     {

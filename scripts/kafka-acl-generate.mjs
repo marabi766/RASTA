@@ -13,14 +13,13 @@
  *
  *   pnpm kafka:acl:generate
  */
-import { createRequire } from 'node:module';
+import { loadWorkspaceModule } from './workspace-module.mjs';
 import { writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(import.meta.url);
-const contracts = require(resolve(root, 'packages/contracts/dist/index.js'));
+const contracts = loadWorkspaceModule(resolve(root, 'packages/contracts/dist/index.js'));
 const dir = resolve(root, 'infrastructure/docker/kafka');
 
 for (const profile of contracts.BROKER_PROFILES) {

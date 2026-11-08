@@ -33,7 +33,7 @@
 
 ```bash
 PGOPTIONS='-c default_transaction_read_only=on' \
-  psql "$DATABASE_URL_MARKETPLACE_MIGRATOR" -v ON_ERROR_STOP=1 \
+  node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 \
   -f services/marketplace-service/prisma/checks/dispute-settle-evidence.sql
 ```
 
@@ -52,7 +52,9 @@ PGOPTIONS='-c default_transaction_read_only=on' \
   (`economic_transaction_id`، از `GET /v1/transactions/:id`) برای PM بفرست. تسویه نکن و وضعیت را دستی عوض نکن. تنها خروج
   موجود همان مسیر عادی است: اختلاف تازه روی سفارش (از `RECEIPT_CONFIRMED` مجاز است) و تصمیم اپراتور؛ `SETTLE` آن با
   `DISPUTE_RECEIPT_EVIDENCE_MISSING` رد می‌شود چون دریافتی برای بازگشت به آن ثبت نشده، و `REFUND` وجه را برمی‌گرداند. انتخاب
-  میان این و هر راه دیگر تصمیم PM است.
+  میان این و هر راه دیگر تصمیم PM است. از Protocol 12 (D-127)، Saga ـِ چنین سفارشی با ردِ این مجوز پایان نمی‌یابد: در
+  `OBLIGATION_RECONCILIATION` با هشدار `RastaMarketplaceSagaEconomicCallUnconfirmed` (برای `authoriseSettlement`) می‌ماند
+  تا همان اختلاف تازه و تصمیم اپراتور، و پس از `REFUND` خودش وجه را برمی‌گرداند. هشدار را با پایان دادن Saga خاموش نکن.
 - **`OPEN_DISPUTE_ORIGIN_UNKNOWN`.** اپراتور می‌تواند `REFUND` کند. اگر به نظر او حق با فروشنده است، شناسه را برای PM بفرست؛
   مرحلهٔ مبدأ را با SQL ننویس — Trigger ـِ `trg_order_dispute_origin` هر تغییر آن را برمی‌گرداند، و حدس زدنش همان خطایی است که
   این Runbook برای آن نوشته شده.

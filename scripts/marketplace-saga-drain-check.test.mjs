@@ -13,7 +13,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -133,11 +141,34 @@ function drained() {
   };
 }
 
+// FU-221: the stand-in `psql`, first on PATH, records its argv, its stdin (the SQL) and
+// its whole environment, and answers as told. It finds both files beside its own
+// directory, not through the environment: the gate hands psql an allowlisted one (#947).
+const FAKE_PSQL = `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from 'node:fs';
+const answer = JSON.parse(readFileSync(new URL('../psql-answer.json', import.meta.url), 'utf8'));
+const { PGPASSWORD = null, PGOPTIONS = null } = process.env;
+const env = Object.fromEntries(Object.entries(process.env).toSorted());
+const call = { args: process.argv.slice(2), sql: readFileSync(0, 'utf8'), PGPASSWORD, PGOPTIONS, env };
+appendFileSync(new URL('../psql-calls.jsonl', import.meta.url), JSON.stringify(call) + '\\n');
+if (answer.stderr) process.stderr.write(answer.stderr);
+if (answer.stdout !== undefined) {
+  process.stdout.write(typeof answer.stdout === 'string' ? answer.stdout : JSON.stringify(answer.stdout) + '\\n');
+}
+process.exit(answer.status ?? 0);
+`;
+/** psql's answer with no record open: `json_agg` of nothing, coalesced. */
+const openRecords = (open = [], rowSecurity = false, recovery = false, where = {}) => ({
+  stdout: { database: 'rasta_marketplace', port: 5432, ...where, recovery, rowSecurity, open },
+});
+const DATABASE = 'postgresql://rasta_marketplace:hunter2@db.invalid:5432/rasta_marketplace';
+
 const SETTINGS = {
   TEMPORAL_ADDRESS: 'temporal.internal:7233',
   TEMPORAL_NAMESPACE: 'rasta-prod',
   MARKETPLACE_TEMPORAL_TASK_QUEUE: 'rasta-order',
   MARKETPLACE_SAGA_STOP_TIME: STOP_TIME,
+  DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=public`,
 };
 
 const TARGET_NAME = '@rasta/marketplace-service';
@@ -155,7 +186,11 @@ function run(
     settings = SETTINGS,
     cli,
     target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 },
+    // The release stopped: by default one below the rollback floor, so that every other
+    // test asks only what the histories require.
+    stopped = { name: TARGET_NAME, marketplaceSagaProtocol: 0 },
     args = [],
+    psql = openRecords(),
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'saga-drain-'));
@@ -166,9 +201,21 @@ function run(
     writeFileSync(join(dir, 'scenario.json'), JSON.stringify(scenario));
     writeFileSync(join(dir, 'calls.jsonl'), '');
     writeFileSync(join(dir, 'target.json'), JSON.stringify(target));
+    writeFileSync(join(dir, 'stopped.json'), JSON.stringify(stopped));
+    // Only node and the stand-in psql (`null`: none): a host's psql is never reached.
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, 'node'));
+    if (psql !== null) {
+      writeFileSync(join(bin, 'psql'), FAKE_PSQL);
+      chmodSync(join(bin, 'psql'), 0o755);
+    }
+    writeFileSync(join(dir, 'psql-answer.json'), JSON.stringify(psql ?? {}));
+    writeFileSync(join(dir, 'psql-calls.jsonl'), '');
     const env = {
       MARKETPLACE_TARGET_PACKAGE_JSON: join(dir, 'target.json'),
-      PATH: process.env.PATH,
+      MARKETPLACE_STOPPED_PACKAGE_JSON: join(dir, 'stopped.json'),
+      PATH: bin,
       ...settings,
       TEMPORAL_CLI: cli ?? fake,
     };
@@ -180,7 +227,18 @@ function run(
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-    return { status: result.status, stdout: result.stdout, stderr: result.stderr, calls };
+    const psqlCalls = readFileSync(join(dir, 'psql-calls.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      calls,
+      psqlCalls,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -245,6 +303,8 @@ test('passes a drained queue, having asked exactly what the runbook says', () =>
     ['workflow', 'list', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
     ['workflow', 'count', ...common, '--query', CONTINUED_QUERY, '--output', 'json'],
     ['workflow', 'count', ...common, '--query', QUERY, '--output', 'json'],
+    // After the database read (#947 r1 L1).
+    ['task-queue', 'describe', ...common, '--task-queue', 'rasta-order', '--output', 'json'],
   ]);
 });
 
@@ -739,6 +799,371 @@ for (const [name, recorded] of Object.entries({
   });
 }
 
+// ---- Recorded activity results are evidence too (PR-796 r2 F5) ------------------
+//
+// A worker that recorded a final answer and stopped before the workflow's next task
+// leaves a history without the marker. An older workflow reads that answer as the
+// call's own effect: `markCancelled` on a paid-out order.
+const encoded = (value) =>
+  value === undefined ? { metadata: { encoding: 'YmluYXJ5L251bGw=' } } : payload(value);
+/** A history of one scheduled activity and its recorded result, as the CLI prints it. */
+const withResult = (activity, result = { payloads: [encoded(undefined)] }) => {
+  const { events } = history();
+  return {
+    events: [
+      ...events,
+      {
+        eventId: '2',
+        eventType: 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED',
+        activityTaskScheduledEventAttributes: { activityType: { name: activity } },
+      },
+      {
+        eventId: '3',
+        eventType: 'EVENT_TYPE_ACTIVITY_TASK_COMPLETED',
+        activityTaskCompletedEventAttributes: { scheduledEventId: '2', result },
+      },
+    ],
+  };
+};
+const showing = (recorded) => {
+  const scenario = drained();
+  scenario['workflow show order-A'].stdout = recorded;
+  scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
+    recorded.events.length,
+  );
+  return scenario;
+};
+const atProtocol = (marketplaceSagaProtocol) => ({
+  target: { name: TARGET_NAME, marketplaceSagaProtocol },
+});
+const FINAL_ANSWER = { final: true, status: 'SETTLED', funds: 'PAID_OUT' };
+const LATEST_KNOWN = 7;
+const producers = {
+  compensate: [undefined],
+  resolveObligationDispute: [undefined],
+  disputeObligation: [undefined, null, 'ECON_DISPUTE'],
+  authoriseSettlement: [
+    undefined,
+    { disputed: true, reason: 'broken' },
+    { disputed: true, reason: 'broken', economicDisputeId: null },
+    { disputed: true, reason: 'broken', economicDisputeId: 'ECON_DISPUTE' },
+  ],
+};
+
+test('the review of #796 r2: a settled refund recorded just before the workers stopped', () => {
+  // The captured history cut right after `compensate` answered, before its marker.
+  const captured = JSON.parse(
+    readFileSync(
+      new URL(
+        '../services/marketplace-service/src/temporal/__fixtures__/order-saga-fu117r2-settled-reconciliation.history.json',
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const events = captured.events.slice(0, 15);
+  assert.equal(events[12].activityTaskScheduledEventAttributes.activityType.name, 'compensate');
+  assert.deepEqual(
+    JSON.parse(
+      Buffer.from(
+        events[14].activityTaskCompletedEventAttributes.result.payloads[0].data,
+        'base64',
+      ).toString(),
+    ),
+    FINAL_ANSWER,
+  );
+  events[0].workflowExecutionStartedEventAttributes.taskQueue.name = 'rasta-order';
+  const scenario = showing({ events });
+  const refused = run(scenario, atProtocol(5));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /requires saga protocol 6; incompatible target build/);
+  assert.equal(run(scenario, atProtocol(6)).status, 0);
+});
+
+for (const [activity, earlier] of Object.entries(producers)) {
+  test(`${activity}: a final answer without the marker needs protocol 6`, () => {
+    const scenario = showing(withResult(activity, { payloads: [payload(FINAL_ANSWER)] }));
+    for (const target of [0, 5]) {
+      const refused = run(scenario, atProtocol(target));
+      assert.equal(refused.status, 1, `target ${target}`);
+      assert.match(refused.stderr, /requires saga protocol 6; incompatible target build/);
+    }
+    assert.equal(run(scenario, atProtocol(6)).status, 0);
+  });
+
+  for (const value of earlier) {
+    test(`${activity}: ${JSON.stringify(value)} needs nothing of its own`, () => {
+      const scenario = showing(withResult(activity, { payloads: [encoded(value)] }));
+      assert.equal(run(scenario, atProtocol(0)).status, 0);
+    });
+  }
+
+  for (const unknown of [
+    { final: false, status: 'SETTLED', funds: 'PAID_OUT' },
+    { final: true, status: 'SETTLED' },
+    { final: true, status: 7, funds: 'PAID_OUT' },
+    { final: true, status: 'SETTLED', funds: 7 },
+    { ...FINAL_ANSWER, extra: 1 },
+    { something: 'else' },
+    [],
+    false,
+    7,
+    ...(activity === 'disputeObligation' ? [] : ['a words answer']),
+    ...(activity === 'authoriseSettlement' ? [] : [{ disputed: true, reason: 'broken' }]),
+    { disputed: true, reason: 'broken', extra: 1 },
+    { disputed: true },
+  ]) {
+    test(`${activity}: an unknown result ${JSON.stringify(unknown)} blocks every target`, () => {
+      const refused = run(
+        showing(withResult(activity, { payloads: [payload(unknown)] })),
+        atProtocol(LATEST_KNOWN),
+      );
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /unknown activity result/);
+    });
+  }
+}
+
+for (const [name, recorded, words] of [
+  ['an activity it does not list', withResult('newActivity'), /unknown activity result/],
+  [
+    'a final answer from a call that never gives one',
+    withResult('settle', { payloads: [payload(FINAL_ANSWER)] }),
+    /unknown activity result/,
+  ],
+  ['two results', withResult('compensate', { payloads: [payload(1), payload(2)] }), /unreadable/],
+  [
+    'a result in another encoding',
+    withResult('compensate', { payloads: [{ metadata: { encoding: 'YmluYXJ5L3BsYWlu' } }] }),
+    /cannot be read/,
+  ],
+  [
+    'a null encoding that carries data',
+    withResult('compensate', {
+      payloads: [{ metadata: { encoding: 'YmluYXJ5L251bGw=' }, data: 'e30=' }],
+    }),
+    /cannot be read/,
+  ],
+  [
+    'a result of no scheduling',
+    (() => {
+      const orphan = withResult('compensate');
+      orphan.events[2].activityTaskCompletedEventAttributes.scheduledEventId = '9';
+      return orphan;
+    })(),
+    /without its scheduling/,
+  ],
+  [
+    'result attributes on another event type',
+    (() => {
+      const odd = withResult('compensate');
+      odd.events[2].eventType = 'EVENT_TYPE_TIMER_FIRED';
+      return odd;
+    })(),
+    /without its scheduling/,
+  ],
+]) {
+  test(`recorded result: ${name} blocks even the latest target`, () => {
+    const refused = run(showing(recorded), atProtocol(LATEST_KNOWN));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, words);
+  });
+}
+
+// ---- A fenced authorisation, before its marker (#895 r1 F1) ----------------------
+//
+// An authorisation completed `{fenced: true, ...}`, and the workers stopped before the
+// next workflow task recorded `authorisation-order-fence-v1`. A build below the fence
+// took that answer as "authorised": the dispute resolved SETTLE, `markSettling` passed,
+// economic-service still held an unauthorised obligation, and the saga ended
+// SETTLEMENT_EXHAUSTED with the funds held. First attempts, retries and later rounds all
+// reach the workflow through this one recorded result.
+const FENCE_PROTOCOL = 7;
+const fenced = (inDoubt = false, status = 'DISPUTED') => ({ fenced: true, status, inDoubt });
+const answered = (value) => ({ payloads: [encoded(value)] });
+
+/** A real captured history cut right after its last authorisation, answering `value`. */
+function cutAtAuthorisation(name, value, attempt) {
+  const { events } = JSON.parse(
+    readFileSync(
+      new URL(
+        `../services/marketplace-service/src/temporal/__fixtures__/order-saga-${name}.history.json`,
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  const last = events.findLastIndex(
+    ({ activityTaskCompletedEventAttributes: done }) =>
+      done &&
+      events[Number(done.scheduledEventId) - 1].activityTaskScheduledEventAttributes.activityType
+        .name === 'authoriseSettlement',
+  );
+  assert.ok(last > 0, `${name} has no authorisation`);
+  const done = events[last].activityTaskCompletedEventAttributes;
+  done.result = answered(value);
+  if (attempt) {
+    events[Number(done.startedEventId) - 1].activityTaskStartedEventAttributes.attempt = attempt;
+  }
+  events[0].workflowExecutionStartedEventAttributes.taskQueue.name = 'rasta-order';
+  return { events: events.slice(0, last + 1) };
+}
+
+for (const [name, recorded] of [
+  ['a first attempt', cutAtAuthorisation('pre-d083-settled', fenced())],
+  ['a retry', cutAtAuthorisation('pre-d083-resumed', fenced(true), 3)],
+  ['a later round', cutAtAuthorisation('fu103-authorise-wait', fenced(true))],
+  [
+    'a resumed run',
+    (() => {
+      const unconfirmedCall = { operation: 'authoriseSettlement', rounds: 2, movedOn: true };
+      const { events } = withResult('authoriseSettlement', answered(fenced(true)));
+      const [start] = history({ resume: { activitySequence: 7, unconfirmedCall } }).events;
+      return { events: [start, ...events.slice(1)] };
+    })(),
+  ],
+]) {
+  test(`#895 r1 F1: a fenced answer to ${name}, no marker yet, refuses below its protocol`, () => {
+    const scenario = showing(recorded);
+    const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+    assert.equal(refused.status, 1);
+    assert.doesNotMatch(refused.stdout, /OK/);
+    assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+    assert.equal(run(scenario, atProtocol(4)).status, 1);
+    assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+  });
+}
+
+test('#895 r1 F1: the fenced answer and its marker together refuse, as the marker alone does', () => {
+  const { events } = withResult('authoriseSettlement', answered(fenced()));
+  const marker = history({}, [{ id: 'authorisation-order-fence-v1', deprecated: false }]).events[1];
+  const scenario = showing({ events: [...events, { ...marker, eventId: '4' }] });
+  const refused = run(scenario, atProtocol(FENCE_PROTOCOL - 1));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /requires saga protocol 7; incompatible target build/);
+  assert.equal(run(scenario, atProtocol(FENCE_PROTOCOL)).status, 0);
+});
+
+test('#895 r1 F1: the authorised answer of a real protocol-4 history still passes protocol 4', () => {
+  const scenario = showing(cutAtAuthorisation('fu103-authorise-wait', undefined));
+  assert.equal(run(scenario, atProtocol(4)).status, 0);
+  assert.match(run(scenario, atProtocol(3)).stderr, /requires saga protocol 4; incompatible/);
+});
+
+for (const [name, result] of [
+  ['an encrypted payload', { payloads: [{ metadata: { encoding: 'YmluYXJ5L2VuY3J5cHRlZA==' } }] }],
+  ['no encoding', { payloads: [{ data: 'e30=' }] }],
+  ['data that is not base64', { payloads: [{ ...payload(0), data: '{"fenced":true}' }] }],
+  ['data that is not JSON', { payloads: [{ ...payload(0), data: 'e2ZlbmNlZA==' }] }],
+  ['data that is not UTF-8', { payloads: [{ ...payload(0), data: 'Iv8i' }] }],
+]) {
+  test(`#895 r1 F1: an authorisation recorded with ${name} refuses even the latest target`, () => {
+    const refused = run(showing(withResult('authoriseSettlement', result)), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /compatibility payload cannot be read/);
+    assertNoSentinel(refused.stdout + refused.stderr);
+  });
+}
+
+// A protocol-6 worker reads every one of these as "authorised".
+for (const value of [
+  { fenced: true },
+  { fenced: true, status: 'DISPUTED' },
+  { fenced: true, inDoubt: false },
+  { fenced: false, status: 'DISPUTED', inDoubt: false },
+  { fenced: 'true', status: 'DISPUTED', inDoubt: false },
+  { fenced: true, status: '', inDoubt: false },
+  { fenced: true, status: 7, inDoubt: false },
+  { fenced: true, status: 'DISPUTED', inDoubt: 'no' },
+  { ...fenced(), another: 1 },
+  { ...fenced(), disputed: true, reason: 'broken' },
+  [fenced()],
+]) {
+  test(`#895 r1 F1: an authorisation answering ${JSON.stringify(value)} refuses even the latest target`, () => {
+    const refused = run(
+      showing(withResult('authoriseSettlement', answered(value))),
+      atProtocol(LATEST),
+    );
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+for (const activity of ['settle', 'markSettling', 'readOrder', 'compensate', 'disputeObligation']) {
+  test(`#895 r1 F1: a fenced answer from ${activity}, which never gives one, refuses`, () => {
+    const refused = run(showing(withResult(activity, answered(fenced()))), atProtocol(LATEST));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unknown activity result/);
+  });
+}
+
+test('the authorisation answers are the ones the gate reads', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const file = ts.createSourceFile('activities.ts', source, ts.ScriptTarget.Latest, true);
+  const declared = (name) => file.statements.find((node) => node.name?.text === name);
+  // A new answer fails here until it has a protocol and a shape in `resultProtocol`.
+  assert.equal(
+    declared('AuthorisationResult').type.getText().replace(/\s+/g, ' ').trim(),
+    'DisputedObligation | ObligationFinal | AuthorisationFenced | undefined',
+  );
+  const fields = (name) => declared(name).members.map((member) => member.name.text);
+  assert.deepEqual(fields('AuthorisationFenced').toSorted(), ['fenced', 'inDoubt', 'status']);
+  assert.deepEqual(fields('DisputedObligation').toSorted(), [
+    'disputed',
+    'economicDisputeId',
+    'reason',
+  ]);
+});
+
+test('recorded result: a completed event with no result is not taken for a void one', () => {
+  const recorded = withResult('compensate');
+  delete recorded.events[2].activityTaskCompletedEventAttributes.result;
+  const refused = run(showing(recorded), atProtocol(LATEST_KNOWN));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /unreadable activity result/);
+});
+
+test('the gate lists every activity the saga can schedule', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const names = [];
+  const file = ts.createSourceFile('activities.ts', source, ts.ScriptTarget.Latest, true);
+  const visit = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'createActivities') {
+      const returned = node.body.statements.find(ts.isReturnStatement);
+      for (const property of returned.expression.properties) names.push(property.name.text);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(names.length >= 18, names.join());
+  // Absent from the gate's table, a call's result refuses every target.
+  const events = [history().events[0]];
+  for (const name of names) {
+    const [, scheduled, completed] = withResult(name).events;
+    const id = events.length + 1;
+    events.push(
+      { ...scheduled, eventId: String(id) },
+      {
+        ...completed,
+        eventId: String(id + 1),
+        activityTaskCompletedEventAttributes: {
+          ...completed.activityTaskCompletedEventAttributes,
+          scheduledEventId: String(id),
+        },
+      },
+    );
+  }
+  const answered = run(showing({ events }), atProtocol(0));
+  assert.equal(answered.status, 0, answered.stderr);
+});
+
 // ---- Every marker the saga records is known to the gate (FU-079) --------------
 //
 // What a target must declare to run a history carrying each patch id. Adding a
@@ -747,6 +1172,16 @@ for (const [name, recorded] of Object.entries({
 const PATCHES = {
   'order-saga-durable-rollover-v1': 1,
   'dispute-settle-resumes-order': 2,
+  'dispute-release-durable-wait-v1': 3,
+  'economic-call-durable-wait-v1': 4,
+  'economic-sibling-call-durable-wait-v1': 5,
+  'saga-owed-work-durable-v1': 6,
+  'authorisation-order-fence-v1': 7,
+  'economic-hold-call-durable-wait-v1': 8,
+  'economic-hold-refusal-exit-v1': 9,
+  'economic-hold-send-fence-v1': 10,
+  'economic-hold-fence-on-order-v1': 11,
+  'economic-refusal-reconciles-held-v1': 12,
 };
 const LATEST = Math.max(...Object.values(PATCHES));
 const SAGA_SOURCE = new URL('../services/marketplace-service/src/', import.meta.url);
@@ -782,9 +1217,11 @@ const WORKFLOW_IMPORTS = new Set(
 // The SDK's other ways to a marker, which the gate refuses, and what reaches them unseen.
 const REFUSED_NAMES =
   'proxyLocalActivities scheduleLocalActivity patchInternal __TEMPORAL_ACTIVATOR__ globalThis eval Function';
-// `condition(fn, 0)` records `__sdk_internal_patch_number:1` (SDK workflow.js:901). This
-// is the one timeout proven non-zero: a client sends hours of at least 1 (env.ts:174).
+// `condition(fn, 0)` records `__sdk_internal_patch_number:1` (SDK workflow.js:901). These
+// are the timeouts proven non-zero: a client sends hours of at least 1 (env.ts:174), and
+// the release backoff is never under a minute, whatever its round (workflows.spec.ts).
 const RECHECK = '(input.recheckIntervalHours ?? DEFAULT_RECHECK_HOURS) * HOUR';
+const RELEASE_BACKOFF = 'releaseBackoffMs(round)';
 
 /**
  * The compiler's own binder and checker over this one file: a name means what
@@ -867,7 +1304,8 @@ function patchIdsIn(sources) {
           ts.isIdentifier(node) && ts.isCallExpression(parent) && parent.expression === node;
         assert.ok(isCall, 'unscannable use of condition');
         const [, timeout, ...others] = parent.arguments;
-        const proven = constInitializer(timeout, checker)?.getText() === RECHECK;
+        const initializer = constInitializer(timeout, checker)?.getText();
+        const proven = initializer === RECHECK || initializer === RELEASE_BACKOFF;
         assert.ok(others.length === 0 && (!timeout || proven), 'condition timeout may be zero');
         return;
       }
@@ -921,7 +1359,13 @@ test('the source scan refuses what it cannot read, so a marker cannot hide from 
     ['one', 'two', 'inner'],
   );
   assert.deepEqual(
-    [...patchIdsIn(['condition(fn);', `const ms = ${RECHECK};\ncondition(fn, ms);`])],
+    [
+      ...patchIdsIn([
+        'condition(fn);',
+        `const ms = ${RECHECK};\ncondition(fn, ms);`,
+        `const ms = ${RELEASE_BACKOFF};\ncondition(fn, ms);`,
+      ]),
+    ],
     [],
   );
   // A parameter default does not see the body's binding at run time, nor here.
@@ -965,6 +1409,9 @@ test('the source scan refuses what it cannot read, so a marker cannot hide from 
     'const ms = 0;\ncondition(fn, ms);',
     `let ms = ${RECHECK};\ncondition(fn, ms);`,
     `const ms = Math.max(0, ${RECHECK});\ncondition(fn, ms);`,
+    'const ms = releaseBackoffMs(round) - HOUR;\ncondition(fn, ms);',
+    'const ms = releaseBackoffMs(other);\ncondition(fn, ms);',
+    `let ms = ${RELEASE_BACKOFF};\ncondition(fn, ms);`,
     `const ms = ${RECHECK};\ncondition(fn, ms, opts);`,
   ]) {
     assert.throws(() => patchIdsIn([source]), assert.AssertionError, source);
@@ -1192,6 +1639,13 @@ const RESUME_FIELDS = {
   nextReminderAt: 1,
   activitySequence: 1,
   reminderDue: 2,
+  releaseRounds: 3,
+  unconfirmedCall: 4,
+  siblingCall: 5,
+  outstandingWork: 6,
+  holdCall: 8,
+  lateHoldWatch: 9,
+  holdNotAfter: 10,
 };
 
 function assertResumeFieldsKnown(fields) {
@@ -1336,28 +1790,111 @@ for (const [name, edits, reason = /cannot enumerate the saga (input|resume)/] of
   });
 }
 
-// The SDK's own marker, not this file's idea of one: a saga run at #625's head
-// (`dfa48a55`) against Temporal's test server, saved with `historyToJSON`.
-test('a real captured history with the dispute marker requires protocol 2', () => {
-  const real = JSON.parse(
-    readFileSync(
-      new URL(
-        'temporal/__fixtures__/order-saga-pre-fu080-release-refused.history.json',
-        SAGA_SOURCE,
-      ),
-    ),
+test('a continuation rolled over in the wait of an authorisation needs protocol 4', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        unconfirmedCall: { operation: 'authoriseSettlement', rounds: 2 },
+      },
+    }),
   );
-  const scenario = withHistory(real);
-  scenario['workflow count'] = { stdout: { count: '1' } };
-  scenario['workflow list'] = { stdout: [execution('A')] };
-  const queue = real.events[0].workflowExecutionStartedEventAttributes.taskQueue.name;
-  scenario['workflow describe order-A'].stdout.executionConfig.taskQueue.name = queue;
-  const settings = { ...SETTINGS, MARKETPLACE_TEMPORAL_TASK_QUEUE: queue };
-  assert.equal(run(scenario, { settings, ...targetOf(2) }).status, 0);
-  const below = run(scenario, { settings, ...targetOf(1) });
-  assert.equal(below.status, 1);
-  assert.match(below.stderr, /requires saga protocol 2; incompatible/);
+  assert.match(run(rolled, targetOf(3)).stderr, /requires saga protocol 4; incompatible/);
+  assert.equal(run(rolled, targetOf(4)).status, 0);
 });
+
+test('a continuation rolled over in the wait of a filing or refund needs protocol 5', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        siblingCall: { operation: 'compensate', rounds: 2, transactionId: 'T' },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(4)).stderr, /requires saga protocol 5; incompatible/);
+  assert.equal(run(rolled, targetOf(5)).status, 0);
+});
+
+test('a continuation rolled over in the wait of the hold needs protocol 8', () => {
+  const rolled = withHistory(history({ resume: { activitySequence: 1, holdCall: { rounds: 2 } } }));
+  assert.match(run(rolled, targetOf(7)).stderr, /requires saga protocol 8; incompatible/);
+  assert.equal(run(rolled, targetOf(8)).status, 0);
+});
+
+test('a continuation that gave its hold up needs protocol 9', () => {
+  const rolled = withHistory(
+    history({ resume: { activitySequence: 1, lateHoldWatch: { until: 1, reason: 'refused' } } }),
+  );
+  assert.match(run(rolled, targetOf(8)).stderr, /requires saga protocol 9; incompatible/);
+  assert.equal(run(rolled, targetOf(9)).status, 0);
+});
+
+test('a continuation whose hold carries a deadline needs protocol 10', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        holdCall: { rounds: 2 },
+        holdNotAfter: '2026-11-07T00:00:00.000Z',
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(9)).stderr, /requires saga protocol 10; incompatible/);
+  assert.equal(run(rolled, targetOf(10)).status, 0);
+});
+
+test('the retention in a start input asks nothing of the target', () => {
+  const started = withHistory(history({ economicKeyRetentionHours: 24 }));
+  assert.equal(run(started, targetOf(1)).status, 0);
+});
+
+test('a continuation carrying owed work needs protocol 6', () => {
+  const rolled = withHistory(
+    history({
+      resume: {
+        activitySequence: 1,
+        outstandingWork: { operation: 'settle', rounds: 1 },
+      },
+    }),
+  );
+  assert.match(run(rolled, targetOf(5)).stderr, /requires saga protocol 6; incompatible/);
+  assert.equal(run(rolled, targetOf(6)).status, 0);
+});
+
+test('a continuation rolled over in the release wait needs protocol 3', () => {
+  const rolled = withHistory(history({ resume: { activitySequence: 1, releaseRounds: 2 } }));
+  assert.match(run(rolled, targetOf(2)).stderr, /requires saga protocol 3; incompatible/);
+  assert.equal(run(rolled, targetOf(3)).status, 0);
+});
+
+// The SDK's own markers, not this file's idea of them.
+for (const [name, required] of [
+  ['pre-fu080-release-refused', 2],
+  ['fu080-release-wait', 3],
+  ['fu103-authorise-wait', 4],
+  ['fu103-wait-then-refund-exhausted', 4],
+  ['fu103-wait-then-dispute-exhausted', 4],
+  ['fu117-compensate-wait', 5],
+  ['fu117-dispute-wait', 5],
+  ['fu158-refund-waits-then-refunded', 12],
+]) {
+  test(`a real captured history (${name}) requires protocol ${required}`, () => {
+    const real = JSON.parse(
+      readFileSync(new URL(`temporal/__fixtures__/order-saga-${name}.history.json`, SAGA_SOURCE)),
+    );
+    const scenario = withHistory(real);
+    scenario['workflow count'] = { stdout: { count: '1' } };
+    scenario['workflow list'] = { stdout: [execution('A')] };
+    const queue = real.events[0].workflowExecutionStartedEventAttributes.taskQueue.name;
+    scenario['workflow describe order-A'].stdout.executionConfig.taskQueue.name = queue;
+    const settings = { ...SETTINGS, MARKETPLACE_TEMPORAL_TASK_QUEUE: queue };
+    assert.equal(run(scenario, { settings, ...targetOf(required) }).status, 0);
+    const below = run(scenario, { settings, ...targetOf(required - 1) });
+    assert.equal(below.status, 1);
+    assert.match(below.stderr, new RegExp(`requires saga protocol ${required}; incompatible`));
+  });
+}
 
 test('legacy-only histories accept an explicitly declared legacy target', () => {
   assert.equal(
@@ -1399,6 +1936,60 @@ for (const target of [
     assert.deepEqual(result.calls, []);
   });
 }
+// D-150: an order the stopped build placed has no saga yet, so no history shows it.
+const FLOOR = PATCHES['economic-hold-fence-on-order-v1'];
+test('a stopped build at the rollback floor refuses every target below it, even with nothing running', () => {
+  const empty = {
+    ...drained(),
+    'workflow count': { stdout: {} },
+    'workflow list': { stdout: [] },
+  };
+  const stopped = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR };
+  for (const protocol of [0, 1, FLOOR - 1]) {
+    const result = run(empty, { stopped, ...targetOf(protocol) });
+    assert.equal(result.status, 1, `target ${protocol}`);
+    assert.match(
+      result.stderr,
+      new RegExp(`declares saga protocol ${protocol}, below the rollback floor ${FLOOR}`),
+    );
+  }
+  assert.match(
+    run(empty, { stopped, target: { name: TARGET_NAME } }).stderr,
+    /declares saga protocol 0, below the rollback floor/,
+  );
+  for (const protocol of [FLOOR, LATEST]) {
+    assert.equal(run(empty, { stopped, ...targetOf(protocol) }).status, 0);
+  }
+  const past = { name: TARGET_NAME, marketplaceSagaProtocol: LATEST };
+  assert.equal(run(empty, { stopped: past, ...targetOf(FLOOR - 1) }).status, 1);
+  // Below the floor it binds nothing: what was there before it still rolls back.
+  const below = { name: TARGET_NAME, marketplaceSagaProtocol: FLOOR - 1 };
+  assert.equal(run(empty, { stopped: below, ...targetOf(1) }).status, 0);
+  assert.equal(run(empty, { stopped: { name: TARGET_NAME }, ...targetOf(1) }).status, 0);
+});
+for (const stopped of [
+  { name: '@rasta/economic-service', marketplaceSagaProtocol: 1 },
+  { marketplaceSagaProtocol: 1 },
+  null,
+  { name: TARGET_NAME, marketplaceSagaProtocol: LATEST + 1 },
+  { name: TARGET_NAME, marketplaceSagaProtocol: '11' },
+]) {
+  test(`refuses a wrong, unknown or newer stopped manifest ${JSON.stringify(stopped)} before querying`, () => {
+    const result = run(drained(), { stopped, ...targetOf(LATEST) });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /stopped (manifest is not marketplace-service|build compatibility declaration is unsupported)/);
+    assert.deepEqual(result.calls, []);
+  });
+}
+test('refuses an unreadable or omitted stopped manifest', () => {
+  for (const path of ['', '/nonexistent/stopped.json']) {
+    const result = run(drained(), {
+      settings: { ...SETTINGS, MARKETPLACE_STOPPED_PACKAGE_JSON: path },
+    });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls, []);
+  }
+});
 test('refuses unreadable or omitted target manifest', () => {
   for (const path of ['', '/nonexistent/target.json']) {
     assert.equal(
@@ -1427,4 +2018,442 @@ test('refuses unreadable histories, inputs and compatibility markers', () => {
   const truncated = drained();
   truncated['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = '2';
   assert.equal(run(truncated).status, 1);
+});
+
+// ---- FU-221: open durable saga call records (D-151) ------------------------------
+//
+// The review's probe: an authorisation the order fenced completed (nothing sent, its
+// record left open by D-151), workers stopped, no pending activity, a protocol-7 target.
+// Temporal shows nothing to wait for; only `saga_unconfirmed_call` does.
+const RECORDED = [
+  'createObligation',
+  'authoriseSettlement',
+  'settle',
+  'compensate',
+  'resolveObligationDispute',
+];
+const openRecord = (operation, fields = {}) => ({
+  organizationId: 'org-1',
+  orderId: 'ord-9',
+  operation,
+  subject: 'obl-4',
+  generation: 2,
+  ageSeconds: 7260,
+  ...fields,
+});
+const fencedProbe = () =>
+  showing(cutAtAuthorisation('fu103-authorise-wait', fenced(true, 'DISPUTED')));
+
+test('FU-221 probe: a fenced completion with its record open refuses; closed, it passes', () => {
+  const refused = run(fencedProbe(), {
+    ...atProtocol(FENCE_PROTOCOL),
+    psql: openRecords([openRecord('authoriseSettlement')]),
+  });
+  assert.equal(refused.status, 1);
+  assert.doesNotMatch(refused.stdout, /OK/);
+  assert.match(
+    refused.stderr,
+    /BLOCKED — 1 finding\(s\):\n {2}open saga call record: order ord-9 \(organization org-1\), authoriseSettlement on obl-4, generation 2, open 7260 s\n$/,
+  );
+  // The record closed: the read returns no open row, and the same history passes.
+  const passed = run(fencedProbe(), { ...atProtocol(FENCE_PROTOCOL), psql: openRecords() });
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.match(passed.stdout, /no pending activity, no open saga call record$/m);
+});
+
+for (const operation of RECORDED) {
+  test(`FU-221: an open ${operation} record blocks a drained queue`, () => {
+    const { status, stdout, stderr } = run(drained(), {
+      psql: openRecords([openRecord(operation, { generation: 1, ageSeconds: 5 })]),
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(
+      stderr,
+      new RegExp(
+        `order ord-9 \\(organization org-1\\), ${operation} on obl-4, generation 1, open 5 s`,
+      ),
+    );
+  });
+}
+
+test('FU-221: the gate knows exactly the operations the saga records', () => {
+  const source = readFileSync(
+    new URL('../services/marketplace-service/src/temporal/activities.ts', import.meta.url),
+    'utf8',
+  );
+  const union = /type RecordedCall =([^;]+);/.exec(source)?.[1];
+  assert.ok(union, 'RecordedCall not found');
+  const listed = [...union.matchAll(/'(\w+)'/g)].map(([, name]) => name);
+  assert.deepEqual(listed.toSorted(), RECORDED.toSorted());
+  const gate = readFileSync(SCRIPT, 'utf8');
+  const known = /const RECORDED_CALLS = new Set\(\[([^\]]+)\]\)/.exec(gate)?.[1];
+  assert.deepEqual(
+    [...known.matchAll(/'(\w+)'/g)].map(([, name]) => name).toSorted(),
+    RECORDED.toSorted(),
+  );
+});
+
+test('FU-221: reads once, last, read-only, through the open-record index, password off argv', () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=market` },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  const [{ args, sql, PGPASSWORD }] = psqlCalls;
+  assert.deepEqual(args, [
+    'postgresql://rasta_marketplace@db.invalid:5432/rasta_marketplace',
+    '-X',
+    '-q',
+    '-A',
+    '-t',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-f',
+    '-',
+  ]);
+  assert.equal(PGPASSWORD, 'hunter2');
+  assert.match(sql, /^BEGIN TRANSACTION READ ONLY;\nSET LOCAL statement_timeout = '10s';\n/);
+  assert.match(sql, /\nSET LOCAL search_path = pg_catalog;\n/);
+  assert.match(sql, /'recovery', pg_is_in_recovery\(\),\n/);
+  assert.match(sql, /WHERE oid = '"market"\.saga_unconfirmed_call'::regclass/);
+  assert.match(sql, /FROM "market"\.saga_unconfirmed_call c\n\s+WHERE c\.confirmed_at IS NULL\n/);
+  assert.match(sql, /ORDER BY c\.opened_at, [^\n]+\n\s+LIMIT 51\n/);
+  assert.match(sql, /\nCOMMIT;\n$/);
+});
+
+test('FU-221: no psql read when Temporal already could not be checked', () => {
+  const scenario = { ...drained(), 'workflow count': { status: 1 } };
+  const { status, psqlCalls } = run(scenario);
+  assert.equal(status, 1);
+  assert.deepEqual(psqlCalls, []);
+});
+
+test('FU-221: more than 50 open records: 50 shown and the list said to be cut', () => {
+  const open = Array.from({ length: 51 }, (_, i) => openRecord('settle', { orderId: `ord-${i}` }));
+  const { status, stderr } = run(drained(), { psql: openRecords(open) });
+  assert.equal(status, 1);
+  assert.match(stderr, /BLOCKED — 51 finding\(s\)/);
+  assert.match(stderr, /order ord-49 /);
+  assert.doesNotMatch(stderr, /order ord-50 /);
+  assert.match(stderr, /more than 50 open saga call records; list them \(runbook\)\n$/);
+});
+
+test('FU-221: an identifier in another shape is withheld, its record still blocks', () => {
+  const { status, stderr } = run(drained(), {
+    psql: openRecords([openRecord('compensate', { orderId: `\u001b]8;;${SENTINELS[0]}` })]),
+  });
+  assert.equal(status, 1);
+  assert.match(stderr, /order <withheld> \(organization org-1\), compensate/);
+  assertNoSentinel(stderr);
+});
+
+for (const [name, psql, words] of [
+  ['psql is not installed', null, /psql could not be run \(ENOENT\)/],
+  [
+    'psql fails (unreachable, no privilege, no table, timed out)',
+    { status: 3, stderr: `ERROR: relation does not exist ${SENTINELS[0]}\n` },
+    /saga_unconfirmed_call could not be read; psql diagnostics withheld/,
+  ],
+  ['psql prints nothing', { stdout: '' }, /psql did not print the open records/],
+  ['psql prints no JSON', { stdout: 'SET\n[]\n' }, /psql did not print the open records/],
+  [
+    'an answer without row security',
+    { stdout: { database: 'rasta_marketplace', port: 5432, recovery: false, open: [] } },
+    /did not print the open records/,
+  ],
+  ['an answer with more keys', { stdout: { ...openRecords().stdout, more: 1 } }, /did not print/],
+  [
+    'open not a list',
+    { stdout: { ...openRecords().stdout, open: {} } },
+    /did not print the open records/,
+  ],
+  ['a list longer than asked', openRecords(Array(52).fill(openRecord('settle'))), /did not print/],
+  [
+    'row security on the table',
+    openRecords([], true),
+    /has row security: an empty answer proves nothing/,
+  ],
+  ['a standby (lagging replica)', openRecords([], false, true), /was read on a standby/],
+  [
+    'an answer without recovery',
+    { stdout: { database: 'rasta_marketplace', port: 5432, rowSecurity: false, open: [] } },
+    /did not print/,
+  ],
+  [
+    'an unknown operation',
+    openRecords([openRecord('disputeObligation')]),
+    /an open record of an unknown operation/,
+  ],
+  [
+    'generation 0',
+    openRecords([openRecord('settle', { generation: 0 })]),
+    /an open record this gate cannot read/,
+  ],
+  [
+    'an age not an integer',
+    openRecords([openRecord('settle', { ageSeconds: '7' })]),
+    /cannot read/,
+  ],
+  ['an empty subject', openRecords([openRecord('settle', { subject: '' })]), /cannot read/],
+  ['a row not an object', openRecords([null]), /an open record this gate cannot read/],
+]) {
+  test(`FU-221: cannot verify when ${name}`, () => {
+    const { status, stdout, stderr } = run(drained(), { psql });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(stderr, /cannot verify — deployment blocked: /);
+    assert.match(stderr, words);
+    assertNoSentinel(stderr);
+  });
+}
+
+for (const [name, settings] of [
+  [
+    'a schema that is not one plain identifier',
+    { DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=a"b` },
+  ],
+  ['two schemas', { DATABASE_URL_MARKETPLACE: `${DATABASE}?schema=a&schema=b` }],
+  [
+    'a URL that hides a credential',
+    { DATABASE_URL_MARKETPLACE: `${DATABASE}?sslpassword=${SENTINELS[0]}` },
+  ],
+  ['not a URL', { DATABASE_URL_MARKETPLACE: SENTINELS[0] }],
+]) {
+  test(`FU-221: refuses ${name} before asking Temporal or psql anything`, () => {
+    const { status, stderr, calls, psqlCalls } = run(drained(), {
+      settings: { ...SETTINGS, ...settings },
+    });
+    assert.equal(status, 1);
+    assert.match(
+      stderr,
+      /cannot verify — deployment blocked: DATABASE_URL_MARKETPLACE cannot be handed to psql \(it must name host, port and database, with no parameter that can move the connection\); its value is not repeated\n$/,
+    );
+    assert.deepEqual([calls, psqlCalls], [[], []]);
+    assertNoSentinel(stderr);
+  });
+}
+
+// ---- #947 r1 M1: the read lands only where the URL says ---------------------------
+//
+// libpq fills whatever the URL leaves out from PG* variables and a service file, and a
+// `service`, `hostaddr`, `host` or `port` parameter moves the connection; Prisma reads
+// none of them. Another database with an empty table would answer "no open record".
+
+/** Every environment variable libpq or psql reads (libpq-envars, psql ENVIRONMENT). */
+const LIBPQ_VARIABLES = [
+  'PGHOST',
+  'PGHOSTADDR',
+  'PGPORT',
+  'PGDATABASE',
+  'PGUSER',
+  'PGPASSWORD',
+  'PGPASSFILE',
+  'PGSERVICE',
+  'PGSERVICEFILE',
+  'PGSYSCONFDIR',
+  'PGOPTIONS',
+  'PGAPPNAME',
+  'PGSSLMODE',
+  'PGREQUIRESSL',
+  'PGSSLNEGOTIATION',
+  'PGSSLCOMPRESSION',
+  'PGSSLCERT',
+  'PGSSLKEY',
+  'PGSSLROOTCERT',
+  'PGSSLCRL',
+  'PGSSLCRLDIR',
+  'PGSSLSNI',
+  'PGREQUIREPEER',
+  'PGSSLMINPROTOCOLVERSION',
+  'PGSSLMAXPROTOCOLVERSION',
+  'PGGSSENCMODE',
+  'PGKRBSRVNAME',
+  'PGGSSLIB',
+  'PGGSSDELEGATION',
+  'PGCONNECT_TIMEOUT',
+  'PGCLIENTENCODING',
+  'PGTARGETSESSIONATTRS',
+  'PGLOADBALANCEHOSTS',
+  'PGCHANNELBINDING',
+  'PGREQUIREAUTH',
+  'PGDATESTYLE',
+  'PGTZ',
+  'PGGEQO',
+  'PGLOCALEDIR',
+  'PSQLRC',
+  'PSQL_HISTORY',
+  'PSQL_PAGER',
+  'PAGER',
+];
+
+test('#947 M1 (a, b, c): psql gets an allowlisted environment, no inherited PG* variable', () => {
+  const inherited = Object.fromEntries(LIBPQ_VARIABLES.map((name) => [name, '10.9.9.9']));
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, ...inherited, HOME: '/nonexistent' },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  const { env, args } = psqlCalls[0];
+  assert.deepEqual(Object.keys(env).toSorted(), [
+    'HOME',
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGPASSWORD',
+  ]);
+  assert.equal(env.HOME, '/nonexistent');
+  assert.equal(env.PGPASSWORD, 'hunter2');
+  assert.equal(env.PGCONNECT_TIMEOUT, '10');
+  assert.equal(args[0], 'postgresql://rasta_marketplace@db.invalid:5432/rasta_marketplace');
+});
+
+test("#947 M1 (a): an inherited PGHOSTADDR does not reach psql (the review's probe row)", () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: { ...SETTINGS, PGHOSTADDR: '10.9.9.9' },
+  });
+  assert.equal(status, 0);
+  assert.equal(psqlCalls.length, 1);
+  assert.equal(Object.hasOwn(psqlCalls[0].env, 'PGHOSTADDR'), false);
+  assert.deepEqual(Object.keys(psqlCalls[0].env).toSorted(), [
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGPASSWORD',
+  ]);
+});
+
+test('#947 M1: the URL options are the only PGOPTIONS psql gets', () => {
+  const { status, psqlCalls } = run(drained(), {
+    settings: {
+      ...SETTINGS,
+      PGOPTIONS: '-c search_path=other',
+      DATABASE_URL_MARKETPLACE: `${DATABASE}?options=-c%20statement_timeout%3D5000&sslmode=verify-full`,
+    },
+  });
+  assert.equal(status, 0);
+  const [{ env, args }] = psqlCalls;
+  assert.deepEqual(Object.keys(env).toSorted(), [
+    'PATH',
+    'PGCONNECT_TIMEOUT',
+    'PGOPTIONS',
+    'PGPASSWORD',
+  ]);
+  assert.equal(env.PGOPTIONS, '-c statement_timeout=5000');
+  assert.match(args[0], /\?sslmode=verify-full$/);
+});
+
+const PINNED = 'postgresql://rasta_marketplace:hunter2@db.invalid';
+for (const [name, url, inherited = {}] of [
+  ['(d) a service parameter', `${DATABASE}?service=other`],
+  ['(d) a percent-encoded service parameter', `${DATABASE}?serv%69ce=other`],
+  ['(e) a hostaddr parameter', `${DATABASE}?hostaddr=10.9.9.9`],
+  ['a host parameter', `${DATABASE}?host=other.invalid`],
+  ['a port parameter', `${DATABASE}?port=6543`],
+  ['a user parameter', `${DATABASE}?user=other`],
+  ['a dbname parameter', `${DATABASE}?dbname=other`],
+  ['target_session_attrs', `${DATABASE}?target_session_attrs=any`],
+  ['load_balance_hosts', `${DATABASE}?load_balance_hosts=random`],
+  ['an unknown parameter', `${DATABASE}?later_libpq_parameter=1`],
+  ['(b) no port, PGPORT inherited', `${PINNED}/rasta_marketplace`, { PGPORT: '6543' }],
+  ['(c) no database, PGDATABASE inherited', `${PINNED}:5432`, { PGDATABASE: 'staging' }],
+  ['(c) no database, only a schema', `${PINNED}:5432?schema=public`, { PGDATABASE: 'staging' }],
+  ['an empty database', `${PINNED}:5432/`],
+  ['port 0', `${PINNED}:0/rasta_marketplace`],
+  ['a port out of range', `${PINNED}:65536/rasta_marketplace`],
+  ['no host', 'postgresql://rasta_marketplace:hunter2@:5432/rasta_marketplace'],
+  ['no host at all', 'postgresql:///rasta_marketplace'],
+]) {
+  test(`#947 M1: refuses ${name} before asking Temporal or psql anything`, () => {
+    const { status, stdout, stderr, calls, psqlCalls } = run(drained(), {
+      settings: { ...SETTINGS, ...inherited, DATABASE_URL_MARKETPLACE: url },
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(
+      stderr,
+      /cannot verify — deployment blocked: DATABASE_URL_MARKETPLACE cannot be handed to psql \(it must name host, port and database, with no parameter that can move the connection\); its value is not repeated\n$/,
+    );
+    assert.doesNotMatch(stderr, /hunter2/);
+    assert.deepEqual([calls, psqlCalls], [[], []]);
+  });
+}
+
+test('#947 M1: the read asks the server, in the same statement, which database and port it is', () => {
+  const { status, psqlCalls } = run(drained());
+  assert.equal(status, 0);
+  assert.match(
+    psqlCalls[0].sql,
+    /SELECT json_build_object\(\n {2}'database', current_database\(\),\n {2}'port', inet_server_port\(\),\n {2}'recovery', pg_is_in_recovery\(\),\n/,
+  );
+});
+
+const ELSEWHERE = /read from a database or port other than the URL names\n$/;
+const NOT_AN_ANSWER = /psql did not print the open records\n$/;
+for (const [name, where, words] of [
+  ['(f) another database answered', { database: 'marketplace_staging' }, ELSEWHERE],
+  ['(f) another port answered', { port: 6543 }, ELSEWHERE],
+  ['a Unix socket answered (no port)', { port: null }, NOT_AN_ANSWER],
+  ['the port is text', { port: '5432' }, NOT_AN_ANSWER],
+  ['no database named', { database: null }, NOT_AN_ANSWER],
+]) {
+  test(`#947 M1: cannot verify when ${name}, even with no open record`, () => {
+    const { status, stdout, stderr } = run(drained(), {
+      psql: openRecords([], false, false, where),
+    });
+    assert.equal(status, 1);
+    assert.equal(stdout, '');
+    assert.match(stderr, /cannot verify — deployment blocked: saga_unconfirmed_call/);
+    assert.match(stderr, words);
+  });
+}
+
+test('#947 M1: an answer missing the database or the port is not an answer', () => {
+  for (const missing of ['database', 'port']) {
+    const answer = openRecords();
+    delete answer.stdout[missing];
+    const { status, stderr } = run(drained(), { psql: answer });
+    assert.equal(status, 1);
+    assert.match(stderr, /psql did not print the open records/);
+  }
+});
+
+// ---- #947 r1 L1: a poller is looked for again after the read ----------------------
+
+test('#947 L1: a worker that came back during the check blocks, found after the read', () => {
+  const poller = { buildId: 'UNVERSIONED', taskQueueType: 'activity', identity: 'w@new' };
+  const scenario = {
+    ...drained(),
+    'task-queue describe': {
+      sequence: [
+        { stdout: { reachability: null, pollers: null, stats } },
+        { stdout: { reachability: null, pollers: [poller], stats } },
+      ],
+    },
+  };
+  const { status, stdout, stderr, calls } = run(scenario);
+  assert.equal(status, 1);
+  assert.equal(stdout, '');
+  assert.match(
+    stderr,
+    /BLOCKED — 1 finding\(s\):\n {2}task queue has an active poller after the record read; details withheld\n$/,
+  );
+  assert.deepEqual(calls.at(-1).slice(0, 2), ['task-queue', 'describe']);
+});
+
+test('#947 L1: the second poller check follows the read (a failed read leaves it unasked)', () => {
+  const { status, calls, psqlCalls } = run(drained(), { psql: { status: 3 } });
+  assert.equal(status, 1);
+  assert.equal(psqlCalls.length, 1);
+  assert.equal(calls.filter((args) => args[0] === 'task-queue').length, 1);
+});
+
+test('#947 L1: the second describe is checked like the first', () => {
+  const scenario = {
+    ...drained(),
+    'task-queue describe': {
+      sequence: [{ stdout: { reachability: null, pollers: null, stats } }, { stdout: {} }],
+    },
+  };
+  const { status, stderr } = run(scenario);
+  assert.equal(status, 1);
+  assert.match(stderr, /temporal task-queue describe: no poller list in its answer/);
 });

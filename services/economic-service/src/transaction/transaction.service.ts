@@ -30,7 +30,11 @@ import { ENV } from '../tokens';
 import type { IdempotentAnswer } from '../shared/idempotency';
 import { databaseNow } from '../shared/database-clock';
 import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
-import { BUSINESS_LINE_REQUIRED_MESSAGE, mayRecordWithoutLine } from './recorded-sources';
+import {
+  BUSINESS_LINE_REQUIRED_MESSAGE,
+  mayRecordWithoutLine,
+  refuseUnfencedOrderHold,
+} from './recorded-sources';
 import {
   STATEMENT_SOURCE_TYPE,
   type CreateTransactionDto,
@@ -88,6 +92,7 @@ export class TransactionService {
     const actor = getContext().userId ?? SERVICE_NAME;
     const grossAmountMinor = parseMinor(dto.grossAmountMinor, 'grossAmountMinor');
 
+    refuseUnfencedOrderHold(dto);
     if (dto.counterpartyOrganizationId === organizationId) {
       throw RastaError.businessRule('A transaction cannot have the same payer and payee');
     }
@@ -575,7 +580,20 @@ export class TransactionService {
         const [locked] = await this.walletRepository.lock(tx, [wallet.id]);
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
-        const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
+        const hold = await this.walletRepository.findActiveHold(tx, {
+          walletId: wallet.id,
+          organizationId: transaction.organizationId,
+          reference: transactionId,
+          referenceType: 'TRANSACTION',
+        });
+        // The payer's own hold exists and is not on this wallet: REFUNDED would
+        // strand its escrow, so nothing moves until a person has looked.
+        if (transaction.fundsHeld && !hold) {
+          throw RastaError.businessRule('The held funds are not on this transaction’s wallet', {
+            transactionId,
+            walletId: wallet.id,
+          });
+        }
 
         // The wallet lock was the last lock this refund takes: ask the
         // hierarchy again, so a union administrator's authority is the one
@@ -597,6 +615,7 @@ export class TransactionService {
               this.wallets.refundHold(tx, {
                 wallet: locked,
                 holdId: hold.id,
+                referenceType: 'TRANSACTION',
                 transactionId,
                 note: reason,
                 resolvedBy: actor,
@@ -694,6 +713,7 @@ export class TransactionService {
       const target = nextStatus(transactionId, transaction.status, event, {
         settlementAuthorised: transaction.settlementAuthorised,
         fundsHeld: transaction.fundsHeld,
+        settlementBarred: transaction.settlementBarred,
       });
       if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
         // Fixed words: the identities stay out of the envelope and the log.
@@ -868,11 +888,21 @@ export class TransactionService {
     // names nothing is just that text (S-09). A path id is in the logged path.
     if (!transaction) throw RastaError.notFound('Transaction');
     assertTransactionVisible(transaction);
-    return transaction as unknown as TransactionDetail;
+    const proven =
+      transaction.status === 'HELD' ? await this.repository.heldProven([id], client) : null;
+    return { ...transaction, heldProven: proven?.has(id) === true } as unknown as TransactionDetail;
   }
 
-  list(filter: TransactionFilter) {
-    return this.repository.list(getOrganizationId(), filter);
+  /** Asked only of what reads as HELD: a page is at most 100, and no other status claims escrow. */
+  async list(filter: TransactionFilter) {
+    const page = await this.repository.list(getOrganizationId(), filter);
+    const proven = await this.repository.heldProven(
+      page.items.filter((row) => row.status === 'HELD').map((row) => row.id),
+    );
+    return {
+      ...page,
+      items: page.items.map((row) => ({ ...row, heldProven: proven.has(row.id) })),
+    };
   }
 }
 
@@ -957,6 +987,8 @@ export interface TransactionDetail {
   failureReason: string | null;
   createdAt: Date;
   createdBy: string;
+  /** What `HELD` says, proven (`transaction_held_proven`). */
+  heldProven: boolean;
   settlementAuthorisedAt: Date | null;
   settlementAuthorisedService: string | null;
   settlementAuthorisationKey: string | null;

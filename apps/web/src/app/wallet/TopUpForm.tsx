@@ -1,5 +1,6 @@
 'use client';
 
+import { REQUEST_NOT_CHECKED } from '@/lib/request-not-checked';
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
@@ -9,6 +10,7 @@ import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_TOP_UP_FORM } from '@/lib/wallet-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
+import { UnresolvedTopUpNotice } from './UnresolvedTopUpNotice';
 import { submitTopUp } from './actions';
 import { IDLE_TOP_UP_FORM, type TopUpFormState } from './form-state';
 
@@ -27,24 +29,26 @@ export function TopUpForm({
   walletId,
   csrfToken,
   submissionId,
+  initialState = IDLE_TOP_UP_FORM,
 }: {
   walletId: string;
   csrfToken: string;
   submissionId: string;
+  initialState?: TopUpFormState;
 }) {
-  const [state, action, pending] = useActionState(
-    submitTopUp.bind(null, walletId),
-    IDLE_TOP_UP_FORM,
-  );
+  const [state, action, pending] = useActionState(submitTopUp.bind(null, walletId), initialState);
 
-  const values = state.kind === 'INVALID' ? state.values : EMPTY_TOP_UP_FORM;
+  const held = state.kind === 'HELD' || state.kind === 'UNCONFIRMED';
+  const locked = held || state.kind === 'NOT_CHECKED';
+  const values =
+    state.kind === 'INVALID' || held ? (state.values ?? EMPTY_TOP_UP_FORM) : EMPTY_TOP_UP_FORM;
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
-  const currentSubmissionId = state.kind === 'INVALID' ? state.submissionId : submissionId;
+  const currentSubmissionId = state.kind === 'INVALID' || held ? state.submissionId : submissionId;
 
-  return (
+  const form = (
     <form action={action} className="flex flex-col gap-4">
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
-      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId ?? ''} />
 
       <FormBanner state={state} />
 
@@ -52,25 +56,49 @@ export function TopUpForm({
         {(control) => (
           <input
             {...control}
+            key={locked ? `held:${currentSubmissionId}:${values.amountMinor}` : 'editing'}
             name="amountMinor"
             inputMode="decimal"
             autoComplete="off"
             defaultValue={values.amountMinor}
+            readOnly={locked}
             className={controlClassName}
           />
         )}
       </Field>
 
       <div className="flex flex-wrap items-center gap-2 pt-2">
-        <Button type="submit" tone="secondary" disabled={pending}>
+        <Button type="submit" tone="secondary" disabled={pending || locked}>
           {pending ? 'در حال ثبت…' : 'افزایش موجودی نمایشی'}
         </Button>
       </div>
     </form>
   );
+  return (
+    <>
+      {(state.kind === 'HELD' || state.kind === 'NOT_CHECKED') && state.releaseToken ? (
+        <UnresolvedTopUpNotice
+          walletId={walletId}
+          csrfToken={csrfToken}
+          releaseToken={state.releaseToken}
+        />
+      ) : null}
+      {form}
+    </>
+  );
 }
 
 function FormBanner({ state }: { state: TopUpFormState }) {
+  if (state.kind === 'NOT_CHECKED')
+    return <Alert tone="warning">{REQUEST_NOT_CHECKED[state.reason]}</Alert>;
+  if (state.kind === 'HELD') {
+    return (
+      <Alert tone="warning">
+        نتیجهٔ درخواست پیشین مشخص نیست. پیش از افزایش موجودی دوباره، تراکنش‌ها را بررسی کنید.
+      </Alert>
+    );
+  }
+
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
   }

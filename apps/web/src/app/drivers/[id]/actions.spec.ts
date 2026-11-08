@@ -231,6 +231,7 @@ describe('updating a driver — the full order of checks', () => {
     expect(await submitUpdateDriver(DRIVER_ID, IDLE_UPDATE_DRIVER_FORM, formData({}))).toEqual({
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
+      submissionId: expect.any(String),
     });
     expect(redirect).not.toHaveBeenCalled();
   });

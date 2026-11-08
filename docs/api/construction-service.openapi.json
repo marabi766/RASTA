@@ -242,27 +242,19 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "operationType": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 100,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 5000,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار»."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار». Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "locationDescription": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 500,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "area": {
                     "type": "object",
@@ -294,7 +286,7 @@
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["title", "operationType", "scopeOfWork", "locationDescription"],
@@ -954,27 +946,19 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "operationType": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 100,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 5000,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار»."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار». Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "locationDescription": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 500,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "area": {
                     "type": "object",
@@ -1007,7 +991,7 @@
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string.",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   }
                 },
@@ -1261,8 +1245,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reason"],
@@ -1508,30 +1491,25 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "description": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "quantity": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,13})(\\.\\d{1,4})?$",
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "unit": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 50,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedProjectVersion", "title", "description"],
@@ -1973,32 +1951,27 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "description": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "quantity": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,13})(\\.\\d{1,4})?$",
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float.",
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   },
                   "unit": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 50,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined.",
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   },
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string.",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   }
                 },
@@ -2449,8 +2422,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedProjectVersion", "expectedVersion", "reason"],
@@ -3934,23 +3906,19 @@
                   },
                   "materials": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "machinery": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "labor": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "obstacles": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "assetsUsed": {
                     "type": "array",
@@ -3958,6 +3926,7 @@
                       "anyOf": [
                         {
                           "type": "string",
+                          "pattern": "^AST_[0-9A-HJKMNP-TV-Z]{26}$",
                           "description": "AST identifier"
                         },
                         {
@@ -4928,8 +4897,7 @@
                 "properties": {
                   "organizationId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "workflowKey": {
                     "type": "string",
@@ -4943,13 +4911,11 @@
                   },
                   "label": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "rationale": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "isSample": {
                     "type": "boolean",
@@ -4962,13 +4928,11 @@
                       "properties": {
                         "approvalType": {
                           "type": "string",
-                          "minLength": 2,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "authorityOrganizationId": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 64
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "authorityRole": {
                           "type": "string",
@@ -4988,16 +4952,17 @@
                         },
                         "authorityLabel": {
                           "type": "string",
-                          "minLength": 2,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "minAmountMinor": {
                           "type": "string",
-                          "pattern": "^(0|[1-9]\\d{0,18})$"
+                          "pattern": "^(0|[1-9]\\d{0,18})$",
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "maxAmountMinor": {
                           "type": "string",
-                          "pattern": "^(0|[1-9]\\d{0,18})$"
+                          "pattern": "^(0|[1-9]\\d{0,18})$",
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": [
@@ -6827,8 +6792,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reason"],
@@ -8275,18 +8239,15 @@
                   },
                   "decisionNumber": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "conditions": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "decision"],
@@ -8546,15 +8507,11 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 20000,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "procurementNature": {
                     "type": "string",
@@ -8563,7 +8520,8 @@
                   },
                   "estimatedCostMinor": {
                     "type": "string",
-                    "pattern": "^(0|[1-9]\\d{0,18})$"
+                    "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "visibility": {
                     "type": "string",
@@ -8639,8 +8597,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 64
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           }
         ],
@@ -9263,15 +9220,11 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 20000,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "procurementNature": {
                     "type": "string",
@@ -9282,6 +9235,7 @@
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   },
                   "visibility": {
@@ -9801,8 +9755,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "reasonCode": {
                     "type": "string",
@@ -9984,8 +9937,7 @@
                 "properties": {
                   "label": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 200
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "criteria": {
                     "type": "array",
@@ -9994,13 +9946,11 @@
                       "properties": {
                         "code": {
                           "type": "string",
-                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
-                          "description": "Identifies the criterion within a tender; what scores refer to."
+                          "description": "Identifies the criterion within a tender; what scores refer to. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "label": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "weightBp": {
                           "type": "integer",
@@ -10024,7 +9974,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["label", "criteria"],
@@ -10064,8 +10015,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 200
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           }
         ],
@@ -10536,8 +10486,7 @@
                   },
                   "templateId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "criteria": {
                     "type": "array",
@@ -10546,13 +10495,11 @@
                       "properties": {
                         "code": {
                           "type": "string",
-                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
-                          "description": "Identifies the criterion within a tender; what scores refer to."
+                          "description": "Identifies the criterion within a tender; what scores refer to. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "label": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "weightBp": {
                           "type": "integer",
@@ -10576,7 +10523,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion"],
@@ -11546,9 +11494,7 @@
                 "properties": {
                   "organizationId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64,
-                    "description": "The organization invited to bid. It must exist: it is confirmed with organization-service before anything is written (422 INVITED_ORGANIZATION_NOT_FOUND if it does not; 503/504 if it cannot be confirmed, and nothing is invited unconfirmed)."
+                    "description": "The organization invited to bid. It must exist: it is confirmed with organization-service before anything is written (422 INVITED_ORGANIZATION_NOT_FOUND if it does not; 503/504 if it cannot be confirmed, and nothing is invited unconfirmed). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["organizationId"],
@@ -12250,7 +12196,7 @@
                       "priceMinor": {
                         "type": "string",
                         "pattern": "^(0|[1-9]\\d{0,18})$",
-                        "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                        "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "answers": {
                         "type": "array",
@@ -12259,25 +12205,22 @@
                           "properties": {
                             "criterionCode": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 64
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             },
                             "response": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 2000
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             }
                           },
                           "required": ["criterionCode", "response"],
                           "additionalProperties": false
                         },
                         "maxItems": 50,
-                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "note": {
                         "type": "string",
-                        "minLength": 1,
-                        "maxLength": 4000
+                        "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       }
                     },
                     "required": ["priceMinor", "answers"],
@@ -12360,7 +12303,7 @@
                               "priceMinor": {
                                 "type": "string",
                                 "pattern": "^(0|[1-9]\\d{0,18})$",
-                                "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                                "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "answers": {
                                 "type": "array",
@@ -12369,25 +12312,22 @@
                                   "properties": {
                                     "criterionCode": {
                                       "type": "string",
-                                      "minLength": 1,
-                                      "maxLength": 64
+                                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                                     },
                                     "response": {
                                       "type": "string",
-                                      "minLength": 1,
-                                      "maxLength": 2000
+                                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                                     }
                                   },
                                   "required": ["criterionCode", "response"],
                                   "additionalProperties": false
                                 },
                                 "maxItems": 50,
-                                "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                                "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "note": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 4000
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               }
                             },
                             "required": ["priceMinor", "answers"],
@@ -12790,7 +12730,7 @@
                         "priceMinor": {
                           "type": "string",
                           "pattern": "^(0|[1-9]\\d{0,18})$",
-                          "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                          "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "answers": {
                           "type": "array",
@@ -12799,25 +12739,22 @@
                             "properties": {
                               "criterionCode": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 64
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "response": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 2000
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               }
                             },
                             "required": ["criterionCode", "response"],
                             "additionalProperties": false
                           },
                           "maxItems": 50,
-                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "note": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 4000
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": ["priceMinor", "answers"],
@@ -13242,7 +13179,7 @@
                       "priceMinor": {
                         "type": "string",
                         "pattern": "^(0|[1-9]\\d{0,18})$",
-                        "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                        "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "answers": {
                         "type": "array",
@@ -13251,25 +13188,22 @@
                           "properties": {
                             "criterionCode": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 64
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             },
                             "response": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 2000
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             }
                           },
                           "required": ["criterionCode", "response"],
                           "additionalProperties": false
                         },
                         "maxItems": 50,
-                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "note": {
                         "type": "string",
-                        "minLength": 1,
-                        "maxLength": 4000
+                        "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       }
                     },
                     "required": ["priceMinor", "answers"],
@@ -13339,7 +13273,7 @@
                         "priceMinor": {
                           "type": "string",
                           "pattern": "^(0|[1-9]\\d{0,18})$",
-                          "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                          "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "answers": {
                           "type": "array",
@@ -13348,25 +13282,22 @@
                             "properties": {
                               "criterionCode": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 64
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "response": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 2000
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               }
                             },
                             "required": ["criterionCode", "response"],
                             "additionalProperties": false
                           },
                           "maxItems": 50,
-                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "note": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 4000
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": ["priceMinor", "answers"],
@@ -15114,9 +15045,7 @@
                   },
                   "reasonText": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000,
-                    "description": "Required for DISQUALIFIED, forbidden for QUALIFIED. Kept in the database; never on an event and never shown to the bidder."
+                    "description": "Required for DISQUALIFIED, forbidden for QUALIFIED. Kept in the database; never on an event and never shown to the bidder. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["decision"],
@@ -15749,7 +15678,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["scores"],
@@ -17024,9 +16954,7 @@
                   },
                   "justification": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000,
-                    "description": "Required unless the bid is the single first rank of the frozen matrix: a choice of any other rank, or among a tie, is justified in words (ADR-067 § 3, Q-89). Kept in the database; never on an event and never shown to a bidder."
+                    "description": "Required unless the bid is the single first rank of the frozen matrix: a choice of any other rank, or among a tie, is justified in words (ADR-067 § 3, Q-89). Kept in the database; never on an event and never shown to a bidder. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["bidId"],

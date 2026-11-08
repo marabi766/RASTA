@@ -88,6 +88,10 @@ export const CLI_CONTRACT = Object.freeze({
   // A Git revision is resolved to a verified commit id; raw input is never echoed.
   'scripts/prepush-parity.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
   'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
+  // FU-093: classifies `pnpm install --frozen-lockfile`, `pnpm --filter|--dir <workspace> run
+  // <script>` and `node --test` in CI steps and root scripts to derive the projected package.json;
+  // does not read process.argv.
+  'scripts/prepush-parity-lib.mjs': { other: ['--dir', '--filter', '--frozen-lockfile', '--test'] },
   'scripts/prepush-scope-lib.mjs': {
     other: [
       '--cached',
@@ -249,6 +253,23 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
+  // `git ls-files -co --exclude-standard -z`, `check-ignore --no-index -z --stdin`, `init -q --bare`, `--literal-pathspecs`: the one listing.
+  'scripts/authored-source-inventory.cjs': {
+    other: [
+      '--bare',
+      '--cached',
+      '--deleted',
+      '--exclude-standard',
+      '--literal-pathspecs',
+      '--no-index',
+      '--others',
+      '--stdin',
+      '-C',
+      '-c',
+      '-q',
+      '-z',
+    ],
+  },
   'scripts/backup-restore-drill-lib.mjs': {
     other: ['--encoding', '--format', '--quote-all-identifiers', '--schema-only', '-service'],
   },
@@ -295,6 +316,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--all-tags',
       '--cap-add',
       '--cap-drop',
+      '--compress-program',
       '--config',
       '--context',
       '--cpus',
@@ -317,6 +339,7 @@ export const CLI_CONTRACT = Object.freeze({
       '--name',
       '--net',
       '--network',
+      '--output',
       '--platform',
       '--publish',
       '--pull',
@@ -340,14 +363,21 @@ export const CLI_CONTRACT = Object.freeze({
       '-c',
       '-d',
       '-e',
+      '-eq',
       '-f',
+      '-ge',
+      '-gt',
       '-h',
       '-i',
       '-it',
       '-l',
+      '-le',
+      '-lt',
       '-m',
+      '-ne',
       '-p',
       '-q',
+      '-r',
       '-t',
       '-u',
       '-v',
@@ -362,17 +392,29 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/check-service-boundaries.mjs': { positionals: [], accepts: { '--root': 'path' } },
   'scripts/check-test-phases.mjs': { positionals: ['script'] },
   'scripts/ci-image-matrix.mjs': { other: ['--run'] },
+  // FU-092: the shell options the shared shell reader accepts as inert (a shell option, never a command line).
+  'scripts/ci-shell-text-lib.mjs': {
+    other: ['--login', '--noediting', '--noprofile', '--norc', '--posix'],
+  },
   'scripts/ci-integration-split-lib.mjs': { other: ['--filter', '--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
+  // FU-077: and the argument shapes of the tools it reads as inert (prettier, tsc, jest).
   'scripts/ci-node-test-timeouts-lib.mjs': {
     other: [
+      '--check',
       '--enable-source-maps',
       '--filter',
+      '--frozen-lockfile',
       '--import',
+      '--noEmit',
       '--no-warnings',
+      '--passWithNoTests',
+      '--require',
+      '--selectProjects',
       '--test',
       '--test-timeout',
+      '-p',
     ],
   },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
@@ -401,6 +443,8 @@ export const CLI_CONTRACT = Object.freeze({
   // fetch|check|pack|unpack; directories and the archive file (path); the
   // producer key of `check` (trivy-db-<run>-<attempt>).
   'scripts/ci-trivy-db.mjs': { positionals: ['enum', 'path', 'identifier'] },
+  // Shared inventory passes Git -z and compares an ESLint directive kind; it reads no argv.
+  'scripts/source-inventory.mjs': { other: ['-disable-next-line', '-z'] },
   'scripts/container-scope-proof.mjs': {
     other: ['--test', '--test-name-pattern', '--test-reporter'],
   },
@@ -432,10 +476,17 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
-  // It reads argv only to refuse any argument at all (#673 r1 F2).
+  // It reads argv only to refuse any argument at all (#673 r1 F2). psql's switches read the
+  // open call records (FU-221); its connection is DATABASE_URL_MARKETPLACE's, never an argument.
   'scripts/marketplace-saga-drain-check.mjs': {
     positionals: [],
     other: [
+      '-A',
+      '-X',
+      '-f',
+      '-q',
+      '-t',
+      '-v',
       '--no-json-shorthand-payloads',
       '--address',
       '--namespace',
@@ -464,6 +515,11 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/prisma.mjs': { positionals: ['forwarded'], other: ['--schema', '--stdin'] },
   'scripts/progress.mjs': { positionals: ['enum'] },
+  // The name of a DATABASE_URL_* variable, never its value, then the few flags it passes on to psql.
+  'scripts/psql-prisma-url.mjs': {
+    positionals: ['identifier', 'forwarded'],
+    other: ['--file', '--set', '-c', '-f', '-v'],
+  },
   'scripts/replay-dlq-lib.mjs': {
     accepts: {
       '--allow-stale': 'identifier',
@@ -508,6 +564,9 @@ export const CLI_CONTRACT = Object.freeze({
       '-xf',
     ],
   },
+  // FU-118: the stall watchdog READS process.execArgv for --test to know it runs in the
+  // node --test runner (parent); it has no command line.
+  'scripts/test-stall-watchdog.mjs': { other: ['--test'] },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
     other: [
@@ -623,6 +682,21 @@ export const CLI_CONTRACT = Object.freeze({
   'services/identity-service/src/keycloak/projection.cli.ts': { positionals: ['enum'] },
   'services/identity-service/src/openapi/document.ts': { other: PRETTIER },
   'services/inventory-service/src/openapi/document.ts': { other: PRETTIER },
+  // FU-234: the operator's legacy hold-deadline backfill. The instant must be one exact ISO-8601
+  // instant with its zone, not before D-150; operator and ticket match the audit table's CHECK.
+  // Each is refused by name, never echoed.
+  'services/marketplace-service/src/ops/hold-deadline-backfill.cli.ts': { positionals: [] },
+  'services/marketplace-service/src/ops/hold-deadline-backfill.ts': {
+    accepts: {
+      '--apply': 'switch',
+      '--batch-size': 'integer',
+      '--dry-run': 'switch',
+      '--economic-rule-since': 'identifier',
+      '--max-batches': 'integer',
+      '--operator': 'identifier',
+      '--ticket': 'identifier',
+    },
+  },
   'services/notification-service/src/openapi/document.ts': { other: PRETTIER },
   'services/organization-service/src/openapi/document.ts': { other: PRETTIER },
   'services/procurement-service/src/openapi/document.ts': { other: PRETTIER },

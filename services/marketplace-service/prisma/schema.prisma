@@ -230,9 +230,18 @@ model Order {
   sagaStartRequestedAt DateTime? @map("saga_start_requested_at")
   sagaStartAttemptedAt DateTime? @map("saga_start_attempted_at")
   sagaStartDeliveredAt DateTime? @map("saga_start_delivered_at")
-  sagaStartNextAttemptAt DateTime @default(now()) @map("saga_start_next_attempt_at")
+  sagaStartNextAttemptAt DateTime @default(dbgenerated("timezone('UTC'::text, now())")) @map("saga_start_next_attempt_at")
   sagaStartClaimToken String? @db.Uuid @map("saga_start_claim_token")
   sagaStartClaimExpiresAt DateTime? @map("saga_start_claim_expires_at")
+
+  /// The hold's fence, which outlives any run of the saga (D-144). The deadline every
+  /// request under the hold's key carries, set once, before the first send.
+  holdNotAfter DateTime? @db.Timestamptz(3) @map("hold_not_after")
+  /// Sends begun, each counted before it leaves. Above zero: one may be on its way. By
+  /// default one: only `place` of a build that counts them can say there has been none.
+  holdSendClaims Int @default(1) @map("hold_send_claims")
+  /// No send can begin from here on, and none begun can still hold (`noHoldCanLand`).
+  holdSendsClosedAt DateTime? @db.Timestamptz(3) @map("hold_sends_closed_at")
 
   /// Recomputed from the lines, never accumulated (the maintenance-service
   /// lesson): a total that drifts from its lines is a total nobody can audit.
@@ -290,6 +299,8 @@ model Order {
   disputes     OrderDispute[]
   review       Review?
   sagaSteps    SagaStep[]
+  sagaUnconfirmedCalls SagaUnconfirmedCall[]
+  holdDeadlineBackfills OrderHoldDeadlineBackfill[]
 
   @@unique([organizationId, idempotencyKey], map: "uq_order_org_idempotency_key")
   @@unique([organizationId, id], map: "uq_order_tenant_id")
@@ -423,6 +434,92 @@ model SagaStep {
   @@id([organizationId, orderId, stepKey], map: "saga_step_pkey")
   @@index([orderId], map: "ix_saga_step_order")
   @@map("saga_step")
+}
+
+/// A saga call to economic-service whose outcome nothing has confirmed, on record
+/// from before the call (FU-104), whether or not any worker or saga is left. A row
+/// is never deleted; `confirmedAt` is its end.
+model SagaUnconfirmedCall {
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_saga_unconfirmed_call_tenant", onUpdate: Restrict, onDelete: Cascade)
+
+  /// The call that ends this record, whichever step opened it.
+  operation String
+
+  /// What the call is about: for a dispute release, the order's dispute.
+  subject String
+
+  /// Moves with every opening; a confirmation of an earlier one closes nothing.
+  generation Int @default(1)
+
+  /// The scheduled command (saga step key) that owns the record, and when
+  /// Temporal scheduled it: an older command's opening is refused (#836 r1 R1).
+  /// Both null on a row opened before this release.
+  command            String?
+  commandScheduledAt DateTime? @map("command_scheduled_at") @db.Timestamptz(3)
+
+  /// The generation that began the open episode; null on a row from before #836.
+  episodeGeneration Int? @map("episode_generation")
+
+  openedAt    DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
+  confirmedAt DateTime? @map("confirmed_at") @db.Timestamptz(3)
+
+  /// Also a partial index over `opened_at` of the open rows,
+  /// `ix_saga_unconfirmed_call_open`, which Prisma cannot express.
+  @@id([organizationId, orderId, operation, subject], map: "saga_unconfirmed_call_pkey")
+  @@map("saga_unconfirmed_call")
+}
+
+/// The audit trail of the legacy hold-deadline backfill (FU-234): one row per deadline it
+/// gave, written with that deadline. Append-only (S-06): a trigger refuses UPDATE, DELETE and
+/// TRUNCATE. Only `src/ops/hold-deadline-backfill.ts` writes.
+model OrderHoldDeadlineBackfill {
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_order_hold_deadline_backfill_tenant", onUpdate: Restrict, onDelete: Restrict)
+
+  /// The deadline given, and the order's status and send count when it was.
+  holdNotAfter   DateTime @map("hold_not_after") @db.Timestamptz(3)
+  runId          String   @map("run_id")
+  assignedAt     DateTime @default(now()) @map("assigned_at") @db.Timestamptz(3)
+  status         String
+  holdSendClaims Int      @map("hold_send_claims")
+  /// The operator's instant since which every economic-service replica enforces D-150.
+  economicRuleSince DateTime @map("economic_rule_since") @db.Timestamptz(3)
+  /// Who ran it, under which ticket (`--operator`, `--ticket`).
+  operator String
+  ticket   String
+  /// Stamped by the database: the session's login role and the client's address.
+  dbRole     String @map("db_role")
+  clientAddr String @map("client_addr")
+
+  revocation OrderHoldDeadlineRevocation?
+
+  @@id([organizationId, orderId, holdNotAfter], map: "order_hold_deadline_backfill_pkey")
+  @@map("order_hold_deadline_backfill")
+}
+
+/// A deadline the backfill gave and an operator took back (the runbook's "Roll back" block, as
+/// the migrator). Append-only, like the row it names.
+model OrderHoldDeadlineRevocation {
+  organizationId String   @map("organization_id")
+  orderId        String   @map("order_id")
+  holdNotAfter   DateTime @map("hold_not_after") @db.Timestamptz(3)
+
+  assignment OrderHoldDeadlineBackfill @relation(fields: [organizationId, orderId, holdNotAfter], references: [organizationId, orderId, holdNotAfter], map: "fk_order_hold_deadline_revocation_assignment", onUpdate: Restrict, onDelete: Restrict)
+
+  revokedAt DateTime @default(now()) @map("revoked_at") @db.Timestamptz(3)
+  revokedBy String   @map("revoked_by")
+  ticket    String
+  /// Stamped by the database: the session's login role and the client's address.
+  dbRole     String @map("db_role")
+  clientAddr String @map("client_addr")
+
+  @@id([organizationId, orderId, holdNotAfter], map: "order_hold_deadline_revocation_pkey")
+  @@map("order_hold_deadline_revocation")
 }
 
 model OrderDispute {

@@ -1,23 +1,28 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import childProcess, { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  symlinkSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { inspect } from 'node:util';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { parse as parseYaml } from 'yaml';
 
 import {
   EXPECTED,
+  HOLD_UNPROVEN_SINCE_AT_COMMIT,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -25,9 +30,14 @@ import {
   ledgerAssertionScript,
   lexSql,
   libpqInvocation,
-  libpqUrl,
+  psqlInvocation,
+  UNUSABLE_PRISMA_OPTIONS,
+  UNUSABLE_PRISMA_SCHEMA,
   NO_TRANSACTION_MARKER,
   downFileMode,
+  downChainProblems,
+  objectsCreated,
+  objectsRedefined,
   newScratchDatabase,
   psqlFileRunner,
   psqlRunner,
@@ -40,6 +50,7 @@ import {
   verifierConnection,
   verifierRoleProblem,
 } from './verify-migration-reversible-lib.mjs';
+import { UnreadableUrlError } from '../packages/config/src/url-reader.js';
 import {
   AGGREGATE_JOB,
   BY_NAME_COMMANDS,
@@ -1106,12 +1117,18 @@ function dropAsOwner(scratch, options) {
   return dropScratchDatabase(psqlRunner(libDatabaseUrl), scratch, options);
 }
 
+/** `libpqInvocation` reads the URL as given, first: only its credential-free target is edited. */
+function libpqInvocationAt(url, database) {
+  const { target, env } = libpqInvocation(url);
+  const at = new URL(target);
+  at.search = '';
+  if (database) at.pathname = `/${database}`;
+  return { target: at.toString(), env };
+}
+
 function psqlAt(url, script, database) {
-  const target = new URL(url);
-  target.search = '';
-  if (database) target.pathname = `/${database}`;
-  const { target: psqlTarget, env } = libpqInvocation(target.toString());
-  return spawnSync('psql', [psqlTarget, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', script], {
+  const { target, env } = libpqInvocationAt(url, database);
+  return spawnSync('psql', [target, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', script], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
@@ -1262,10 +1279,10 @@ test('the drop never uses FORCE, and checks this run’s marker before it change
 });
 
 test('psql gets libpq’s own URL parameters, and none of Prisma’s', () => {
-  const url = libpqUrl(
+  const { target } = libpqInvocation(
     'postgresql://u:p@db.example:5432/rasta?schema=public&sslmode=verify-full&sslrootcert=%2Fetc%2Fca.pem&connect_timeout=5&application_name=verifier&connection_limit=3&pool_timeout=10&pgbouncer=true',
   );
-  const params = new URL(url).searchParams;
+  const params = new URL(target).searchParams;
   assert.equal(params.get('sslmode'), 'verify-full');
   assert.equal(params.get('sslrootcert'), '/etc/ca.pem');
   assert.equal(params.get('connect_timeout'), '5');
@@ -1275,19 +1292,31 @@ test('psql gets libpq’s own URL parameters, and none of Prisma’s', () => {
   }
 });
 
-test('a startup option reaches libpq percent-encoded, never with `+` for its space (L7-37)', () => {
-  // libpq decodes %XX in a URI and nothing else: `-c+TimeZone=UTC` is refused
-  // by the server as an unknown parameter `+TimeZone`.
+test('a startup option reaches psql through PGOPTIONS, never on its command line (L7-37, FU-104)', () => {
   const given = 'postgresql://u@db.example/rasta_x?schema=public&options=-c%20TimeZone%3DUTC';
-  assert.equal(libpqUrl(given), 'postgresql://u@db.example/rasta_x?options=-c%20TimeZone%3DUTC');
+  const moved = {
+    target: 'postgresql://u@db.example/rasta_x',
+    env: { PGOPTIONS: '-c TimeZone=UTC' },
+  };
+  assert.deepEqual(libpqInvocation(given), moved);
   // …including after a `URLSearchParams` edit upstream has already written `+`.
   const edited = new URL(given);
   edited.searchParams.set('schema', 'scratch');
   assert.match(edited.toString(), /options=-c\+TimeZone/);
-  assert.equal(
-    libpqInvocation(edited.toString()).target,
-    'postgresql://u@db.example/rasta_x?options=-c%20TimeZone%3DUTC',
-  );
+  assert.deepEqual(libpqInvocation(edited.toString()), moved);
+  // Each setting the repository's own URLs carry; a setting's name is not case-sensitive.
+  for (const option of [
+    '-c timezone=Asia/Tehran -c search_path=a,b',
+    '-c statement_timeout=15000 -c lock_timeout=5s -c idle_in_transaction_session_timeout=1min',
+    '-c default_transaction_read_only=on -c rasta.migration_statement_timeout=15min',
+    '-c STATEMENT_TIMEOUT=1',
+  ]) {
+    const url = `postgresql://u:p@db.example/app?options=${encodeURIComponent(option)}`;
+    assert.deepEqual(libpqInvocation(url), {
+      target: 'postgresql://u@db.example/app',
+      env: { PGPASSWORD: 'p', PGOPTIONS: option },
+    });
+  }
 });
 
 test('psql gets the password in its environment, never in its argv', () => {
@@ -1344,6 +1373,511 @@ test('psqlRunner starts psql with no password in its argv', (t) => {
   assert.equal(passed.join('\n').includes(secret), false, passed.join(' '));
   assert.equal(lines.at(-1), `PGPASSWORD=${secret}`);
 });
+
+test('psqlInvocation lands where Prisma would, and keeps what the operator set (FU-128)', () => {
+  const base = 'postgresql://u:p%40ss@db.example:5432/rasta_x';
+  assert.deepEqual(psqlInvocation(`${base}?schema=audit&connection_limit=3&sslmode=require`), {
+    target: 'postgresql://u@db.example:5432/rasta_x?sslmode=require',
+    env: { PGPASSWORD: 'p@ss', PGOPTIONS: '-c search_path=audit' },
+  });
+  // Prisma's own default, not libpq's "$user", public.
+  assert.equal(psqlInvocation(base).env.PGOPTIONS, '-c search_path=public');
+  // libpq lets a URL's options override PGOPTIONS, so no options may stay in the URL.
+  const moved = psqlInvocation(
+    `${base}?schema=audit&options=-c%20statement_timeout%3D5s`,
+    '-c default_transaction_read_only=on',
+  );
+  assert.equal(moved.target, 'postgresql://u@db.example:5432/rasta_x');
+  assert.equal(
+    moved.env.PGOPTIONS,
+    '-c statement_timeout=5s -c default_transaction_read_only=on -c search_path=audit',
+  );
+});
+
+test('psqlInvocation refuses what could override PGOPTIONS, and repeats none of the URL', () => {
+  for (const query of ['service=s3cret', 'options=-c%20a%3D1&options=-c%20b%3D2']) {
+    assert.throws(
+      () => psqlInvocation(`postgresql://u:s3cret@db.example/rasta_x?${query}`),
+      (error) => error.message === UNUSABLE_PRISMA_OPTIONS,
+      query,
+    );
+  }
+});
+
+test('psqlInvocation refuses a schema it cannot name, and repeats none of the URL', () => {
+  for (const query of [
+    'schema=',
+    'schema=Audit',
+    'schema=a%20b',
+    'schema=a%3Bdrop',
+    'schema=a&schema=b',
+  ]) {
+    assert.throws(
+      () => psqlInvocation(`postgresql://u:s3cret@db.example/rasta_x?${query}`),
+      (error) => error.message === UNUSABLE_PRISMA_SCHEMA,
+      query,
+    );
+  }
+});
+
+const PSQL_PRISMA_URL = fileURLToPath(new URL('./psql-prisma-url.mjs', import.meta.url));
+
+test("psql-prisma-url passes the conversion to psql, and psql's exit code back", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'psql-prisma-url-'));
+  const seen = join(dir, 'seen');
+  writeFileSync(
+    join(dir, 'psql'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" > '${seen}'\nprintf 'PGPASSWORD=%s\\nPGOPTIONS=%s\\nstdin=%s\\n' "$PGPASSWORD" "$PGOPTIONS" "$(cat)" >> '${seen}'\nexit 7\n`,
+    { mode: 0o755 },
+  );
+  try {
+    const run = (args, env = {}) =>
+      spawnSync('node', [PSQL_PRISMA_URL, ...args], {
+        encoding: 'utf8',
+        input: 'SELECT 1;',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PGOPTIONS: '', ...env },
+      });
+    const url = 'postgresql://u:s3cret@db.example/rasta_x?schema=audit';
+
+    const ran = run(['DATABASE_URL_X', '-X', '-f', '-'], {
+      DATABASE_URL_X: url,
+      PGOPTIONS: '-c default_transaction_read_only=on',
+    });
+    assert.equal(ran.status, 7, ran.stderr);
+    assert.deepEqual(readFileSync(seen, 'utf8').trim().split('\n'), [
+      'postgresql://u@db.example/rasta_x',
+      '-X',
+      '-f',
+      '-',
+      'PGPASSWORD=s3cret',
+      'PGOPTIONS=-c default_transaction_read_only=on -c search_path=audit',
+      'stdin=SELECT 1;',
+    ]);
+
+    rmSync(seen);
+    // A URL on the command line, a name not set, a schema it cannot name: psql never starts.
+    for (const [args, env] of [
+      [[url], {}],
+      [['DATABASE_URL_UNSET'], {}],
+      [['OTHER_URL'], { OTHER_URL: url }],
+      [[], {}],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: `${url}&schema=other` }],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: 'not a url s3cret' }],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: `${url}&service=s3cret` }],
+      [['DATABASE_URL_X'], { DATABASE_URL_X: url, PGSERVICE: 's3cret' }],
+    ]) {
+      const refused = run(args, env);
+      assert.equal(refused.status, 2, args.join(' '));
+      assert.equal(refused.stderr.includes('s3cret'), false, refused.stderr);
+      assert.equal(existsSync(seen), false, args.join(' '));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The command against a `psql` that records its argv and PGOPTIONS, and never connects. */
+function recordingPsqlCommand(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'psql-forwarding-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const seen = join(dir, 'seen');
+  writeFileSync(
+    join(dir, 'psql'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" > '${seen}'\nprintf 'PGOPTIONS=%s\\n' "$PGOPTIONS" >> '${seen}'\nexit 0\n`,
+    { mode: 0o755 },
+  );
+  return {
+    seen,
+    run: (args, url = 'postgresql://u:URL_SECRET@db.example/app') =>
+      spawnSync('node', [PSQL_PRISMA_URL, 'DATABASE_URL_X', ...args], {
+        encoding: 'utf8',
+        input: '',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          PGOPTIONS: '',
+          PGSERVICE: '',
+          DATABASE_URL_X: url,
+        },
+      }),
+  };
+}
+
+const CLI_URI = 'postgresql://u:CLI_SECRET@elsewhere.example/app';
+
+test('psql-prisma-url passes on nothing that could name a connection or hold a credential', (t) => {
+  const { seen, run } = recordingPsqlCommand(t);
+  for (const [label, args] of [
+    // PR-769-r4 F1's three probes.
+    ['short -d', ['-d', CLI_URI]],
+    ['long -d', [`--dbname=${CLI_URI}`]],
+    ['positional', [CLI_URI]],
+    // The other spellings getopt accepts for them: a check on those three would miss these.
+    ['long -d, apart', ['--dbname', CLI_URI]],
+    ['-d, attached', [`-d${CLI_URI}`]],
+    ['-d in a cluster', ['-Xd', CLI_URI]],
+    ['abbreviated long -d', [`--dbn=${CLI_URI}`]],
+    ['positional after a switch', ['-X', CLI_URI]],
+    ['positional after --', ['--', CLI_URI]],
+    ['positional after a script', ['-f', '-', CLI_URI]],
+    ['a key-value string', ['host=elsewhere.example password=CLI_SECRET']],
+    ['a service', ['service=CLI_SECRET']],
+    ['-h', ['-h', CLI_URI]],
+    ['-p', ['-p', 'CLI_SECRET']],
+    ['-U', ['-U', CLI_URI]],
+    // What else takes a value: psql connects from these too, or the value is the secret.
+    ['-c with \\connect', ['-c', `\\connect ${CLI_URI}`]],
+    ['-c with a password', ['-c', "ALTER ROLE r PASSWORD 'CLI_SECRET'"]],
+    ['-v', ['-v', `target=${CLI_URI}`]],
+    ['-v with a known name', ['-v', 'ON_ERROR_STOP=CLI_SECRET']],
+    ['-f a URL', ['-f', CLI_URI]],
+    ['--file a key-value string', ['--file', 'password=CLI_SECRET']],
+    ['-f swallowing an option', ['-f', `--dbname=${CLI_URI}`]],
+    ['-o', ['-o', 'CLI_SECRET']],
+    // A flag whose value is missing takes the next argument, or the next one psql is given.
+    ['-v alone', ['-v']],
+    ['-f alone', ['-f']],
+    ['the empty string', ['']],
+  ]) {
+    const refused = run(args);
+    assert.equal(refused.status, 2, label);
+    assert.match(refused.stderr, /its value is not repeated/, label);
+    assert.doesNotMatch(`${refused.stdout}${refused.stderr}`, SECRET_IN, label);
+    assert.equal(existsSync(seen), false, `${label}: psql was started`);
+  }
+  // PR-769-r4 F1's fourth probe, through the command.
+  const probe = run(
+    ['-X'],
+    'postgresql://u@db.example/app?options=-c%20app.password%3DOPTION_SECRET',
+  );
+  assert.equal(probe.status, 2);
+  assert.doesNotMatch(`${probe.stdout}${probe.stderr}`, SECRET_IN);
+  assert.equal(existsSync(seen), false);
+});
+
+test('psql-prisma-url passes on the flags that can hold nothing, and no URL option', (t) => {
+  const { seen, run } = recordingPsqlCommand(t);
+  const forwarded =
+    '-X --no-psqlrc -q --quiet -At --tuples-only --no-align -1 --single-transaction -v ON_ERROR_STOP=1 --set ON_ERROR_STOP=1 -f services/x/migrations/2026_x/down.sql --file -'.split(
+      ' ',
+    );
+  const ran = run(
+    forwarded,
+    'postgresql://u:URL_SECRET@db.example/app?schema=audit&options=-c%20TimeZone%3DUTC',
+  );
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.deepEqual(readFileSync(seen, 'utf8').trim().split('\n'), [
+    'postgresql://u@db.example/app',
+    ...forwarded,
+    'PGOPTIONS=-c TimeZone=UTC -c search_path=audit',
+  ]);
+});
+
+test('no document hands a database URL straight to psql (FU-128, FU-104)', (t) => {
+  // Git's file lists (the inventory), never a directory walk (FU-112).
+  const documents = authoredFiles(join(ROOT, 'docs')).filter((file) => file.endsWith('.md'));
+  assert.ok(documents.length > 10, 'the walk found the documents');
+  // A down.sql's header tells the operator how to run it.
+  const downFiles = authoredFiles(join(ROOT, 'services')).filter((file) =>
+    /^[^/]+\/prisma\/migrations\/[^/]+\/down\.sql$/.test(
+      relative(join(ROOT, 'services'), file).split(sep).join('/'),
+    ),
+  );
+  assert.ok(downFiles.length > 10, 'the walk found the down.sql files');
+  const { seen, run } = recordingPsqlCommand(t);
+  let commands = 0;
+  for (const file of [...documents, ...downFiles]) {
+    const text = readFileSync(file, 'utf8');
+    assert.doesNotMatch(
+      text,
+      /\b(?:psql|pg_dump|pg_restore|psql-prisma-url\.mjs)\s[^\n]*\$\{?\w*URL/,
+      file,
+    );
+    // Each command it gives must be one the command passes on.
+    const joined = text.replace(/\\\n(?:--)?\s*/g, ' ');
+    for (const [, args] of joined.matchAll(/psql-prisma-url\.mjs DATABASE_URL_\w+([^\n|`]*)/g)) {
+      commands += 1;
+      const ran = run(args.trim().split(/\s+/).filter(Boolean));
+      assert.equal(ran.status, 0, `${file}:${args}: ${ran.stderr}`);
+      rmSync(seen);
+    }
+  }
+  assert.ok(commands >= 8, `the walk found ${commands} commands`);
+  for (const [name, variable] of [
+    ['marketplace-receipt-evidence.md', 'DATABASE_URL_MARKETPLACE_MIGRATOR'],
+    ['marketplace-saga-deploy.md', 'DATABASE_URL_MARKETPLACE_MIGRATOR'],
+    ['insurance-reprojection.md', 'DATABASE_URL_FLEET_MIGRATOR'],
+  ]) {
+    const runbook = readFileSync(join(ROOT, 'docs', 'runbooks', name), 'utf8');
+    assert.ok(runbook.includes(`node scripts/psql-prisma-url.mjs ${variable}`), name);
+  }
+});
+
+// Each hides a secret where `new URL` and libpq read a different URL, or where libpq has
+// no other way to take it. The first four are PR-769-r3 F1's captures, byte for byte.
+const CREDENTIAL_LEAKS = [
+  ['sslpassword', 'postgresql://u@db.example/app?sslpassword=KEY_SECRET'],
+  ['raw #', 'postgresql://u:123#HASH_SECRET@db.example/app?schema=audit'],
+  ['raw ?', 'postgresql://u:123?QUESTION_SECRET%40db.example%2Fapp%3Fschema=audit'],
+  ['raw /', 'postgresql://u:123/SLASH_SECRET@db.example/app'],
+  ['encoded name', 'postgresql://u@db.example/app?sslp%61ssword=KEY_SECRET'],
+  ['fragment after a query', 'postgresql://u@db.example/app?sslmode=require#HASH_SECRET'],
+  ['all userinfo encoded', 'postgresql://u%3AUSER_SECRET@db.example/app'],
+  ['all userinfo in user', 'postgresql://db.example/app?user=u%3AUSER_SECRET'],
+  ['NUL in the username', 'postgresql://USER_SECRET%00@db.example/app'],
+  ['+ in a query password', 'postgresql://u@db.example/app?password=A+PLUS_SECRET'],
+  ['broken escape, query', 'postgresql://u@db.example/app?password=%ZZ_ESCAPE_SECRET'],
+  ['invalid UTF-8, query', 'postgresql://u@db.example/app?password=%FFBYTE_SECRET'],
+  ['a dot segment', 'postgresql://u:DOT_SECRET@db.example/..'],
+  ['allowed name', 'postgresql://u:123?sslmode=VALUE_SECRET%40db.example%2Fapp'],
+  ['allowed name, raw @', 'postgresql://u:123?sslmode=VALUE_SECRET@db.example/app'],
+  ['raw ? in value', 'postgresql://u:123?sslmode=a?VALUE_SECRET'],
+  // On a parameter that is dropped, the secret would be gone, but the host is still `u`.
+  ['dropped name, raw @', 'postgresql://u:123?schema=a@VALUE_SECRET/app'],
+  ['dropped name, raw ?', 'postgresql://u:123?schema=a?VALUE_SECRET'],
+  ['second @', 'postgresql://u:a@VALUE_SECRET@db.example/app'],
+  ['encoded host', 'postgresql://u%3AHOST_SECRET%40db.example/app'],
+  ['encoded database', 'postgresql://u:123/PATH_SECRET%40db%2Fapp'],
+  ['second path segment', 'postgresql://u:123/PATH_SECRET/app'],
+  ['a tab new URL drops', 'postgresql://u:12\t3#TAB_SECRET@db.example/app'],
+  ['a backslash', 'postgresql://u:123\\BACK_SECRET@db.example/app'],
+  ['surrounding space', ' postgresql://u:SPACE_SECRET@db.example/app'],
+  ['other scheme', 'mysql://u:SCHEME_SECRET@db.example/app'],
+  ['broken escape', 'postgresql://u:%ZZ_ESCAPE_SECRET@db.example/app'],
+  ['NUL in the password', 'postgresql://u:NUL_SECRET%00@db.example/app'],
+  ['NUL in a parameter', 'postgresql://u@db.example/app?password=NUL_SECRET%00'],
+  ['two passwords', 'postgresql://u:FIRST_SECRET@db.example/app?password=SECOND_SECRET'],
+  ['password twice', 'postgresql://u@db.example/app?password=FIRST_SECRET&password=SECOND_SECRET'],
+  ['newer libpq secret', 'postgresql://u@db.example/app?oauth_client_secret=OAUTH_SECRET'],
+  ['scram key', 'postgresql://u@db.example/app?scram_client_key=SCRAM_SECRET'],
+  ['a connection string', 'postgresql://u@db.example/app?dbname=postgresql%3A%2F%2Fu%3ADB_SECRET'],
+  ['password file', 'postgresql://u@db.example/app?passfile=PASSFILE_SECRET'],
+  ['unknown', 'postgresql://u@db.example/app?whatever=UNKNOWN_SECRET'],
+  ['a key-value string', 'host=db.example password=KV_SECRET'],
+  // PR-769-r4 F1's probe, then what it would take to get past a check on that one spelling.
+  ...[
+    '-c%20app.password%3DOPTION_SECRET',
+    'OPTION_SECRET',
+    '--app.pw%3DOPTION_SECRET',
+    '-capp.pw%3DOPTION_SECRET',
+    '-c%20TimeZone%3DUTC%20-c%20app.pw%3DOPTION_SECRET',
+    '-c%20lock_timeout%3D1%20OPTION_SECRET',
+    '-c%20TimeZone%3Dpw%3DOPTION_SECRET',
+    '-c%20TimeZone%3D%5COPTION_SECRET',
+    '-c%20TimeZone%3DUTC&options=-c%20app.pw%3DOPTION_SECRET',
+  ].map((options) => [`options=${options}`, `postgresql://u@db.example/app?options=${options}`]),
+  // On a parameter that does stay on the command line, nothing may read as a setting.
+  [
+    'a setting, plain name',
+    'postgresql://u@db.example/app?application_name=-c%20a.pw%3DAPP_SECRET',
+  ],
+  ['a key-value, plain name', 'postgresql://u@db.example/app?user=u%20password%3DUSER_SECRET'],
+];
+
+const SECRET_IN = /[A-Z]+_SECRET/;
+
+/** Records every `spawnSync` of the test instead of running it, the imported bindings included. */
+function interceptSpawnSync(t) {
+  const seen = [];
+  const original = childProcess.spawnSync;
+  childProcess.spawnSync = (command, args, options) => {
+    seen.push({ command, args, env: options?.env });
+    return { status: 0, stdout: '1\n', stderr: '' };
+  };
+  syncBuiltinESMExports();
+  t.after(() => {
+    childProcess.spawnSync = original;
+    syncBuiltinESMExports();
+  });
+  return seen;
+}
+
+/** The refusal is thrown with a fixed text, and nothing the throw holds repeats the URL. */
+function assertRefusedWithoutTheSecret(call, label) {
+  let thrown;
+  try {
+    call();
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown, `${label}: accepted`);
+  assert.ok(thrown instanceof UnreadableUrlError, `${label}: ${thrown}`);
+  assert.match(thrown.message, /its value is not repeated$/, label);
+  assert.equal(thrown.input, undefined, label);
+  assert.doesNotMatch(inspect(thrown, { depth: null, showHidden: true }), SECRET_IN, label);
+}
+
+test('psqlRunner and psqlFileRunner refuse any URL that could leave a credential in argv', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'psql-boundary-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const down = join(dir, 'down.sql');
+  writeFileSync(down, 'BEGIN;\nSELECT 1;\nCOMMIT;\n');
+  const seen = interceptSpawnSync(t);
+
+  for (const [label, url] of CREDENTIAL_LEAKS) {
+    assertRefusedWithoutTheSecret(() => libpqInvocation(url), `libpqInvocation, ${label}`);
+    assertRefusedWithoutTheSecret(() => psqlInvocation(url), `psqlInvocation, ${label}`);
+    assertRefusedWithoutTheSecret(() => psqlRunner(url)('SELECT 1'), `psqlRunner, ${label}`);
+    assertRefusedWithoutTheSecret(
+      () => psqlFileRunner(url, 'public')(down),
+      `psqlFileRunner, ${label}`,
+    );
+    assert.deepEqual(seen, [], label);
+  }
+});
+
+test('a URL the boundary accepts reaches psql with its password in the environment only', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'psql-boundary-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const down = join(dir, 'down.sql');
+  writeFileSync(down, 'BEGIN;\nSELECT 1;\nCOMMIT;\n');
+  const seen = interceptSpawnSync(t);
+
+  for (const [url, target, password] of [
+    // The encoded spellings of F1's three passwords: the controls that must keep working.
+    [
+      'postgresql://u:123%23A_SECRET@db.example/app?schema=audit',
+      'postgresql://u@db.example/app',
+      '123#A_SECRET',
+    ],
+    [
+      'postgresql://u:123%3FA_SECRET@db.example:5432/app?sslmode=require',
+      'postgresql://u@db.example:5432/app?sslmode=require',
+      '123?A_SECRET',
+    ],
+    [
+      'postgresql://u:1%2FA_SECRET%40@[::1]:5432/app',
+      'postgresql://u@[::1]:5432/app',
+      '1/A_SECRET@',
+    ],
+    [
+      'postgresql://db.example/app?password=A_SECRET%2B1',
+      'postgresql://db.example/app',
+      'A_SECRET+1',
+    ],
+    // A colon in a password is read alike by both: not ambiguous.
+    ['postgresql://u:a:A_SECRET@db.example/app', 'postgresql://u@db.example/app', 'a:A_SECRET'],
+    [
+      'postgresql://db.example/app?user=u&password=A_SECRET',
+      'postgresql://db.example/app?user=u',
+      'A_SECRET',
+    ],
+    ['postgresql://db.example/app?p%61ssword=A_SECRET', 'postgresql://db.example/app', 'A_SECRET'],
+    [
+      'postgres:///app?host=%2Fvar%2Frun%2Fpostgresql&options=-c%20TimeZone%3DUTC',
+      'postgres:///app?host=%2Fvar%2Frun%2Fpostgresql',
+      undefined,
+    ],
+    // No password: nothing is set, so an inherited one still applies.
+    ['postgresql://u@db.example/app', 'postgresql://u@db.example/app', undefined],
+  ]) {
+    seen.length = 0;
+    psqlRunner(url)('SELECT 1');
+    psqlFileRunner(url, 'public')(down);
+    assert.equal(seen.length, 2, url);
+    for (const { args, env } of seen) {
+      assert.equal(args[0], target);
+      assert.doesNotMatch(args.join(' '), SECRET_IN);
+      assert.equal(env.PGPASSWORD, password ?? process.env.PGPASSWORD);
+      assert.equal(env.PGOPTIONS, /options=/.test(url) ? '-c TimeZone=UTC' : undefined);
+    }
+  }
+});
+
+test('the command and the seed guard start no psql for such a URL', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'psql-boundary-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const seen = join(dir, 'seen');
+  writeFileSync(join(dir, 'psql'), `#!/bin/sh\nprintf '%s\\n' "$@" >> '${seen}'\nexit 0\n`, {
+    mode: 0o755,
+  });
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, PGSERVICE: '', PGOPTIONS: '' };
+  // Reached through a symlink of another name too: it must not exit 0 having done nothing.
+  const linked = join(dir, 'linked.mjs');
+  symlinkSync(PSQL_PRISMA_URL, linked);
+  const command = (script) => (url) =>
+    spawnSync('node', [script, 'DATABASE_URL_X', '-X'], {
+      encoding: 'utf8',
+      env: { ...env, DATABASE_URL_X: url },
+    });
+  const launches = [command(PSQL_PRISMA_URL), command(linked)];
+  // It stops earlier on a tree with no build, which would prove nothing; CI builds first.
+  if (
+    existsSync(join(ROOT, 'packages', 'config', 'dist', 'seed-guard.js')) ||
+    process.env.MIGRATION_LIB_TEST_DATABASE_REQUIRED === 'true'
+  ) {
+    launches.push((url) =>
+      spawnSync('node', [join(ROOT, 'scripts', 'verify-seed-guard.mjs'), '--with-database'], {
+        encoding: 'utf8',
+        env: { ...env, DATABASE_URL_ASSET: url },
+      }),
+    );
+  }
+  for (const launch of launches) {
+    for (const [label, url] of CREDENTIAL_LEAKS.slice(0, 4)) {
+      const run = launch(url);
+      assert.notEqual(run.status, 0, label);
+      assert.match(run.stderr, /its value is not repeated/, label);
+      assert.doesNotMatch(`${run.stdout}${run.stderr}`, SECRET_IN, label);
+      assert.equal(existsSync(seen), false, `${label}: psql was started`);
+    }
+  }
+});
+
+test(
+  'psql-prisma-url reaches the named schema, read-only when asked, against PostgreSQL (FU-128)',
+  { skip: !libDatabaseUrl && 'MIGRATION_LIB_TEST_DATABASE_URL is not set' },
+  () => {
+    const scratch = newScratchDatabase(LIB_PURPOSE, 'prisma_url');
+    createAsOwner(scratch);
+    try {
+      const must = (result) => assert.equal(result.status, 0, result.stderr);
+      must(
+        psqlAt(
+          libDatabaseUrl,
+          `CREATE TABLE public.place (name text); INSERT INTO public.place VALUES ('public');
+           CREATE SCHEMA other; CREATE TABLE other.place (name text); INSERT INTO other.place VALUES ('other');`,
+          scratch.name,
+        ),
+      );
+      const url = new URL(libDatabaseUrl);
+      url.pathname = `/${scratch.name}`;
+      url.search = '?schema=other&connection_limit=3';
+      const prismaUrl = url.toString();
+      const psql = (env, sql) =>
+        spawnSync(
+          'node',
+          [PSQL_PRISMA_URL, 'DATABASE_URL_X', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-f', '-'],
+          {
+            encoding: 'utf8',
+            input: sql,
+            env: { ...process.env, DATABASE_URL_X: prismaUrl, ...env },
+          },
+        );
+
+      // What this replaces: psql takes neither the URL nor, cut, the schema.
+      const raw = spawnSync('psql', [prismaUrl, '-X', '-c', 'SELECT 1'], { encoding: 'utf8' });
+      assert.notEqual(raw.status, 0);
+      assert.match(raw.stderr, /invalid URI query parameter: "schema"/);
+
+      const read = psql({ PGOPTIONS: '' }, 'SELECT name FROM place');
+      assert.equal(read.stdout.trim(), 'other', read.stderr);
+
+      const readOnly = psql(
+        { PGOPTIONS: '-c default_transaction_read_only=on' },
+        "INSERT INTO place VALUES ('written')",
+      );
+      assert.notEqual(readOnly.status, 0);
+      assert.match(readOnly.stderr, /read-only transaction/);
+
+      const failed = psql({ PGOPTIONS: '' }, 'SELECT * FROM no_such_table');
+      assert.notEqual(failed.status, 0, failed.stderr);
+      assert.match(failed.stderr, /no_such_table/);
+    } finally {
+      assert.equal(dropAsOwner(scratch).ok, true);
+    }
+  },
+);
 
 /**
  * Every source file the repository runs, scripts and services alike — never
@@ -1495,7 +2029,7 @@ test('our code puts no database url on a command line (D-045 follow-up; Prisma i
   // still receives the url as `--datasource` during migrate commands — a
   // third-party residual recorded as D-047 in docs/23, not covered here.
   const urlFlag = new RegExp(`['"]--${'url'}['"]`);
-  const spawnsPsql = /spawn(?:Sync)?\(\s*'psql'/;
+  const spawnsPsql = /(?:spawn|spawnSync|execFile|execFileSync)\(\s*'psql'/;
   const offenders = [];
   for (const file of runnableSources()) {
     const source = readFileSync(file, 'utf8');
@@ -1505,8 +2039,8 @@ test('our code puts no database url on a command line (D-045 follow-up; Prisma i
     }
     if (
       spawnsPsql.test(source) &&
-      source.includes('new URL(') &&
-      !source.includes('libpqInvocation(')
+      /\b(?:new URL|readUrl)\(/.test(source) &&
+      !/(?:libpq|psql)Invocation\(/.test(source)
     ) {
       offenders.push(`${name}: builds a url and starts psql without libpqInvocation`);
     }
@@ -1671,11 +2205,8 @@ const noForeign =
 
 /** Another role connected to `database` for `seconds`, once it is visibly there. */
 async function foreignSession(database, seconds) {
-  const target = new URL(foreignDatabaseUrl);
-  target.search = '';
-  target.pathname = `/${database}`;
-  const { target: psqlTarget, env } = libpqInvocation(target.toString());
-  const child = spawn('psql', [psqlTarget, '-X', '-q', '-c', `SELECT pg_sleep(${seconds})`], {
+  const { target, env } = libpqInvocationAt(foreignDatabaseUrl, database);
+  const child = spawn('psql', [target, '-X', '-q', '-c', `SELECT pg_sleep(${seconds})`], {
     stdio: 'ignore',
     env: { ...process.env, ...env },
   });
@@ -2514,4 +3045,280 @@ test('the runbook gives exactly the verifier command: -X and --single-transactio
     assert.match(invocation, /-X -q -v ON_ERROR_STOP=1 --single-transaction/, invocation);
   }
   assert.doesNotMatch(runbook, /خودشان `BEGIN … COMMIT` دارند/);
+});
+
+test('the probe of 20261107120000 over used data asks what its WARNING counts, word for word', () => {
+  const up = readFileSync(
+    join(
+      ROOT,
+      'services',
+      'economic-service',
+      'prisma',
+      'migrations',
+      '20261107120000_hold_funded_at_commit',
+      'migration.sql',
+    ),
+    'utf8',
+  );
+  const warning = up.slice(up.lastIndexOf('DO $$'));
+  assert.match(warning, /RAISE WARNING 'wallet_hold: holds naming a journal/);
+  assert.ok(warning.includes(`WHERE ${HOLD_UNPROVEN_SINCE_AT_COMMIT}`), warning);
+});
+
+// ---------------------------------------------------------------------------
+// Down chains in a rollback against real data (FU-240)
+// ---------------------------------------------------------------------------
+
+/** A service's migration names, sorted (`migrationNames`), and a reader for their migration.sql. */
+function serviceMigrations(service) {
+  const dir = join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations');
+  return {
+    names: migrationNames(service),
+    read: (name) => readFileSync(join(dir, name, 'migration.sql'), 'utf8'),
+  };
+}
+
+const UTC_CLOCK_DEFAULTS = '20261106140000_utc_clock_defaults';
+
+test('every rollback against real data leaves no newer migration applied under what it redefines', () => {
+  const checked = [];
+  for (const [service, entry] of Object.entries(EXPECTED)) {
+    if (!entry.dataRollback) continue;
+    const { names, read } = serviceMigrations(service);
+    const { problems } = downChainProblems(entry.dataRollback, names, read);
+    assert.deepEqual(problems, [], service);
+    checked.push(service);
+  }
+  // Every service that has one; a rollback the loop skipped would pass unseen.
+  assert.deepEqual(checked.sort(), [
+    'asset',
+    'construction',
+    'document',
+    'economic',
+    'identity',
+    'marketplace',
+  ]);
+});
+
+test("main's economic chains before #936's sync, which skipped 20261106140000, are refused by name", () => {
+  const { names, read } = serviceMigrations('economic');
+  const steps = EXPECTED.economic.dataRollback.steps.map((step) =>
+    Array.isArray(step.runDownScript)
+      ? { ...step, runDownScript: step.runDownScript.filter((name) => name !== UTC_CLOCK_DEFAULTS) }
+      : step,
+  );
+  const { problems } = downChainProblems({ ...EXPECTED.economic.dataRollback, steps }, names, read);
+  const named = problems.filter((problem) =>
+    problem.includes(`while ${UTC_CLOCK_DEFAULTS} stays applied`),
+  );
+  // The seven chains #936's sync completed (one of them runs twice), and its funded-hold step.
+  assert.ok(named.length >= 9, problems.join('\n'));
+  assert.equal(named.length, problems.length, problems.join('\n'));
+  for (const problem of named) {
+    assert.match(problem, /redefines [^:]*stamp_transaction_held_at/);
+    // The decision's default, wherever the chain takes its migration down too.
+    if (problem.includes('20261106120000_transaction_hold_decision')) {
+      assert.match(problem, /redefines [^:]*\btransaction_hold_decision\b/);
+    }
+    assert.match(problem, new RegExp(`List ${UTC_CLOCK_DEFAULTS} in the chain, before `));
+  }
+});
+
+/** Three migrations: A creates, B is independent of it, C redefines what A created. */
+function chainFixture(c) {
+  const sql = {
+    '1_a': `-- CREATE TABLE "commented_out" (id int);
+CREATE TABLE "t" ("id" INT, "x" INT);
+ALTER TABLE "t" ADD COLUMN "c" INT;
+CREATE OR REPLACE FUNCTION "f"() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;`,
+    '2_b': `CREATE TABLE "u" ("id" INT);`,
+    '3_c': c,
+  };
+  return { names: Object.keys(sql), read: (name) => sql[name] };
+}
+const run = (fixture, steps, migration = '1_a') =>
+  downChainProblems({ migration, label: 'probe', steps }, fixture.names, fixture.read);
+
+test('a chain that leaves a redefining migration applied is refused, naming it; an independent one is not', () => {
+  for (const redefinition of [
+    `ALTER TABLE "t" ALTER COLUMN "x" SET DEFAULT 2;`,
+    `ALTER TABLE public."t" ALTER COLUMN "c" SET DEFAULT 2;`,
+    `CREATE OR REPLACE FUNCTION f() RETURNS int AS $$ SELECT 2 $$ LANGUAGE sql;`,
+    `CREATE TRIGGER "g" BEFORE INSERT ON "t" FOR EACH ROW EXECUTE FUNCTION "f"();`,
+    `CREATE INDEX "i" ON "t" ("x");`,
+    `COMMENT ON COLUMN "t"."x" IS 'x';`,
+    `DROP FUNCTION "f"();`,
+  ]) {
+    const fixture = chainFixture(redefinition);
+    const steps = [
+      { label: 'down', runDownScript: ['1_a'] },
+      { label: 'up', reapply: true },
+    ];
+    const { problems, keptApplied } = run(fixture, steps);
+    assert.equal(problems.length, 1, `${redefinition}\n${problems.join('\n')}`);
+    assert.match(problems[0], /step 1 \("down"\): rolls back 1_a while 3_c stays applied/);
+    assert.match(problems[0], /List 3_c in the chain, before 1_a\./);
+    assert.doesNotMatch(problems[0], /2_b/);
+    assert.deepEqual(keptApplied.get(0), ['2_b', '3_c']);
+
+    // Listed, newest first: nothing to refuse, and only the independent one stays applied.
+    const listed = run(fixture, [
+      { label: 'down', runDownScript: ['3_c', '1_a'] },
+      { label: 'up', reapply: true },
+    ]);
+    assert.deepEqual(listed.problems, [], redefinition);
+    assert.deepEqual(listed.keptApplied.get(0), ['2_b']);
+  }
+  // A column A never added, of a table A never created, is not A's.
+  for (const unrelated of [
+    `ALTER TABLE "v" ALTER COLUMN "x" SET DEFAULT 2;`,
+    `ALTER TABLE "u" ADD COLUMN "c" INT;`,
+    `-- ALTER TABLE "t" ALTER COLUMN "x" SET DEFAULT 2;\nSELECT 'ALTER TABLE t';`,
+  ]) {
+    const { problems } = run(chainFixture(unrelated), [
+      { label: 'down', runDownScript: true },
+      { label: 'up', reapply: true },
+    ]);
+    assert.deepEqual(problems, [], unrelated);
+  }
+});
+
+test('what a migration creates and redefines, read past comments and strings', () => {
+  assert.deepEqual([...objectsCreated(chainFixture('').read('1_a'))].sort(), ['f', 't', 't.c']);
+  assert.deepEqual(
+    [
+      ...objectsRedefined(
+        `ALTER TABLE ONLY "Mixed"."T" ALTER COLUMN "x" DROP DEFAULT, DROP CONSTRAINT "k";
+         -- DROP TABLE "gone";
+         SELECT 'DROP TABLE nope';`,
+      ),
+    ].sort(),
+    ['T', 'T.x', 'k'],
+  );
+  assert.throws(() => objectsCreated(`SELECT 'unterminated`), /cannot be read as SQL/);
+});
+
+test('every step whose effect on the ledger cannot be told is refused', () => {
+  const fixture = chainFixture(`CREATE TABLE "w" ("id" INT);`);
+  const cases = [
+    [[{ label: 's', runDownScript: ['9_x'] }], /no such migration: 9_x/],
+    [[{ label: 's', runDownScript: [] }], /names no migration/],
+    [[{ label: 's', runDownScript: ['2_b', '3_c'] }], /runs newest first/],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 's', runDownScript: ['3_c'] },
+      ],
+      /step 2 \("s"\): rolls back 3_c, which is not applied/,
+    ],
+    [[{ label: 's', runDownScript: ['3_c'] }], /ends with 3_c rolled back/],
+    [[{ label: 's', deployMustFail: 'boom' }], /with no migration pending/],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+        { label: 's', runDownScript: ['2_b'] },
+      ],
+      /a down while a failed deploy is unresolved/,
+    ],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+        { label: 's', reapply: true },
+      ],
+      /a deploy while a failed deploy is unresolved/,
+    ],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+        { label: 's', resolveRolledBack: '2_b' },
+      ],
+      /resolves 2_b, which is not a pending migration/,
+    ],
+    [
+      [
+        { label: 'd', runDownScript: ['3_c'] },
+        { label: 'f', deployMustFail: 'boom' },
+      ],
+      /ends with a failed deploy unresolved/,
+    ],
+    [
+      [{ label: 's', sql: `DELETE FROM "_prisma_migrations" WHERE migration_name = '3_c';` }],
+      /writes _prisma_migrations/,
+    ],
+    [
+      [
+        {
+          label: 's',
+          sql: `DELETE FROM "_prisma_migrations" WHERE migration_name = '3_c' OR true AND rolled_back_at IS NOT NULL;`,
+        },
+      ],
+      /writes _prisma_migrations/,
+    ],
+    [
+      [
+        {
+          label: 's',
+          sql: `DO $$ BEGIN UPDATE _prisma_migrations SET rolled_back_at = now(); END $$;`,
+        },
+      ],
+      /writes _prisma_migrations/,
+    ],
+    [
+      [{ label: 's', sql: `INSERT INTO public._prisma_migrations (id) VALUES ('x');` }],
+      /writes _prisma_migrations/,
+    ],
+    [[{ label: 's' }], /a step of no known kind/],
+  ];
+  for (const [steps, problem] of cases) {
+    const { problems } = run(fixture, steps);
+    assert.ok(
+      problems.some((text) => problem.test(text)),
+      `${inspect(steps)}\n${problems.join('\n')}`,
+    );
+  }
+});
+
+test('refusals, failed deploys resolved as the runbook says, and the rolled-back cleanup are modelled', () => {
+  const fixture = chainFixture(`CREATE TABLE "w" ("id" INT);`);
+  const { problems, keptApplied } = run(fixture, [
+    // A refusal changes nothing, so a down of an older one under it needs no newer listed.
+    { label: 'refused', runDownScript: ['2_b'], mustFail: 'refusing' },
+    { label: 'down', runDownScript: ['3_c', '2_b'] },
+    { label: 'fails', deployMustFail: 'boom' },
+    { label: 'P3009', deployMustFail: 'P3009' },
+    // The deploy applied 2_b before 3_c failed.
+    { label: 'resolve', resolveRolledBack: '3_c' },
+    { label: 'down again', runDownScript: ['2_b'] },
+    { label: 'up', reapply: true },
+    {
+      label: 'cleanup',
+      sql: `DELETE FROM "_prisma_migrations" WHERE migration_name IN ('3_c') AND rolled_back_at IS NOT NULL;
+            SELECT count(*) FROM "_prisma_migrations";`,
+    },
+  ]);
+  assert.deepEqual(problems, []);
+  assert.equal(keptApplied.has(0), false);
+  assert.deepEqual(keptApplied.get(1), []);
+  assert.deepEqual(keptApplied.get(5), []);
+});
+
+test('the verifier refuses an unmodellable rollback before it runs, and proves where it ends exact', () => {
+  const runner = readFileSync(join(ROOT, 'scripts', 'verify-migration-reversible.mjs'), 'utf8');
+  const refusal = runner.indexOf('if (chainModel.problems.length > 0)');
+  assert.ok(refusal > 0 && refusal < runner.indexOf("mustRun(\n    'clean scratch schema'"));
+  const end = runner.indexOf("const context = 'the rollback against real data, at its end';");
+  const wholeChain = runner.indexOf('// --- down ---');
+  const dataSteps = runner.indexOf('for (const [stepIndex, step] of probe.steps.entries())');
+  assert.ok(dataSteps > 0 && end > dataSteps && end < wholeChain);
+  const proof = runner.slice(end, wholeChain);
+  assert.match(
+    proof,
+    /assertSnapshotScript\(metaSchema, POST_UP, targetSchema, context, undefined, \{\n\s+extensionHome,/,
+  );
+  assert.match(proof, /sql\(ledgerAssertionScript\(migrations, context\)\)/);
+  assert.match(proof, /if \(!exact\.ok\) fail\(/);
+  assert.match(proof, /if \(!ledger\.ok\)\s+fail\(/);
 });

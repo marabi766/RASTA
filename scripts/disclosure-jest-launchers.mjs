@@ -1,12 +1,25 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/verify-migration-reversible-lib.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'node:test only: spawnSync is intercepted (recorded, not run) for the psql URL refusal checks; real children are psql, Node helper scripts (psql-prisma-url, verify-seed-guard) and bash workflow steps with a recording fake node on PATH. No Jest, pnpm or turbo launch.',
+    sha256: {
+      'scripts/verify-migration-reversible-lib.test.mjs':
+        'dc9985598eb7b2ecdfb748d798989ff11572dacda52121439ef846f5693eb00b',
+      'scripts/verify-migration-reversible-lib.mjs':
+        '026816a0ceb1ecbdafbfd1998f6a75fdf51c460c57d77ed5d3a31cc1ca2b783c',
+      'scripts/psql-prisma-url.mjs':
+        '3e1f5eebfe297d80dbd539629a114610d6a2e6401ea4b697c2d0e8b1ecacbb58',
+    },
+  },
   'scripts/prepush-scope.test.mjs': {
     kind: 'non-jest',
     reaches:
       'Git fixture commands and Node environment probe; Turbo selection is mocked or --dry=json and missing-binary refusal never enters its JS launcher. No Jest or task execution.',
     sha256: {
       'scripts/prepush-scope.test.mjs':
-        '4f9d1329d3d25f39f4c558cbee2e1162098fc9514ce04e7f11e0f8f12552f07e',
+        '0b4a445f1f742b33b051723952b7d8ee74bd76648ef1e3c80e5a2a63aaf7028a',
       'scripts/prepush-scope-lib.mjs':
         'a7cb60ff2283945e9eee8a7bc9b83cbe05cdb680af0ea74e54afc561f3e66e13',
     },
@@ -17,7 +30,7 @@ export const JEST_LAUNCHERS = {
       'Package-local Jest binary; --selectProjects defaults to integration; whole-file and per-name runs differ only in test selection.',
     sha256: {
       'scripts/verify-test-independence.mjs':
-        '0f9ca1aa3fee4606560fcbd8fe32ce9debe08a74e0010b85426bd9eb846db7ad',
+        '73cdc9c671360b4d144a1fa8c1f29986db1647fd8faa1d13be519e8704ccb28d',
     },
   },
   'scripts/aggregation-evidence.mjs': {
@@ -41,7 +54,7 @@ export const JEST_LAUNCHERS = {
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
+        '4c9fde73cd620b61e184ac77da19e331cdb55d13f2f8ed5bbab2ed5d9c1a5fbe',
     },
   },
   'scripts/aggregation-evidence-cli.test.mjs': {
@@ -86,7 +99,7 @@ export const JEST_LAUNCHERS = {
       'scripts/run-test-phases.mjs':
         'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
+        '4c9fde73cd620b61e184ac77da19e331cdb55d13f2f8ed5bbab2ed5d9c1a5fbe',
     },
   },
   'scripts/check-kafka-credential-scope.test.mjs': {
@@ -151,16 +164,18 @@ export const JEST_LAUNCHERS = {
   'scripts/check-unit-step-concurrency.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
+      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; shell-semantics probes run bash -c with echo-only node/pnpm shims, real node on /dev/null (env-file probes) and the repo pnpm on a temporary manifest whose only script is echo. Jest/pnpm test/Node preload examples remain inert fixtures, never executed. Workspace manifests are listed through authoredFiles() (read-only git ls-files).',
     sha256: {
+      'scripts/ci-shell-text-lib.mjs':
+        'dba3e1b238617ba8e082efa309209e2330acc22215d25ab4831223a6c16f29ce',
       'scripts/ci-node-test-timeouts-lib.mjs':
-        '721791c653278351886ce612fe85e5743ee79b498c8a17d7eeb7fe799458f8f0',
+        '95c6254728b8b24be9f420aa88cce517285e997543bcd46c1f409124c6445d06',
       'scripts/check-unit-step-concurrency.test.mjs':
-        'd1787fc4deaca297028aabce0f460a61da5f9d14a3810f01e3a7d00d9544361b',
+        'e395fd8ef12cdc6910fa34b30dc18326fa5a6368d5d97a075704c0a95491c4a2',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':
-        '6888fb2191981366b42d2eb83c593eb29069ff2d9eb37203cae5c5723c0a5aad',
+        '34b0d346f234bf0a529d5541ae09f3801c5c756d41cc51ae97deffc9e5910a78',
     },
   },
   'scripts/exchange-deadline-rule.test.mjs': {
@@ -169,7 +184,33 @@ export const JEST_LAUNCHERS = {
       'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
     sha256: {
       'scripts/exchange-deadline-rule.test.mjs':
-        '1b3a35b144a1d10fcfec2b1a496e134d8f30c744c13d27845aa7bbc89676763c',
+        'c744d65515dff65bc511c293445a6deb56b696aac675e9151c5fe1594e9e8dc0',
+    },
+  },
+  'scripts/ci-integration-split.test.mjs': {
+    kind: 'empty-unit-probe',
+    reaches:
+      'Spawns git/pnpm workspace fixtures and asset Jest with runInBand. The pinned zero-match probe derives the real asset config, preserving setupFilesAfterEnv; only roots and unit testRegex change. No CLI argument reaches the child.',
+    sha256: {
+      'scripts/ci-integration-split.test.mjs':
+        '9db14ea8f986dc6046ef28b44041623745a7222b60c032967c7fb7a063a83978',
+      'scripts/ci-integration-split-lib.mjs':
+        '778de7fe530dd477aa75fbb4c324001b91253e4f124864582f5b570160014238',
+      'scripts/workspace-roots-lib.mjs':
+        'a66c5944fb6137f9952b0aa46752d28587c700f5f98baaa9b9ecf8f108313e07',
+    },
+  },
+  'scripts/raw-http-boundary-rule.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns Node ESLint config/fixture probes and scrubbed Git commands; subprocess API names in the AST guard are inspection fixtures, never Jest launches.',
+    sha256: {
+      'scripts/raw-http-boundary-rule.test.mjs':
+        '5eaa2ac9a55ef76d6cd2423f807de18c4303b8c81d0047cdac4713009a399b80',
+      'scripts/source-inventory.mjs':
+        'd130e1e0d7cfda45d547f088d6b1a8eb346a927d6c0c25fca5bdb675be3ba39c',
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
     },
   },
   'scripts/testing-dev-only.test.mjs': {
@@ -177,12 +218,14 @@ export const JEST_LAUNCHERS = {
     reaches:
       'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
     sha256: {
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/testing-dev-only.test.mjs':
-        '8d315c9824364fdbbd6795dc2cb86c0171cb7e65c60599fa299331934aa07c2d',
+        '70322e435d9e0f736c7189e0c5808388ab6d5f54673b474671172bfa7933f6b9',
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
-        '8dde8b52864b7b218461e7a822e0b5cf38bcb106d2ed1a90a9fc39031fdb278b',
+        '3466c4f1a151720eedbe2bdc4550503bf100695027f871aeae95bb0225c6bd08',
     },
   },
   'scripts/lint-scripts-registration.test.mjs': {
@@ -190,8 +233,56 @@ export const JEST_LAUNCHERS = {
     reaches:
       'Spawns git fixture commands and Turbo lint --dry=json snapshots; test runner names are registration fixtures, never executed.',
     sha256: {
+      'scripts/fixture-git-env.mjs':
+        '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/lint-scripts-registration.test.mjs':
-        '90f8b760685f446aa47d26ea57690220b35c87e73c38b02825098d6e1ff3e7a6',
+        '31355969c67278101cb08666e7e60ea3ec5fa2738a8bd71918bfe888f169ac2d',
+    },
+  },
+  'scripts/testing-dev-only.mjs': {
+    kind: 'non-jest',
+    inertArguments: true, // `image "$IMAGE"` / `tree <dir> <file>`: arguments name an image or a path
+    reaches:
+      'Spawns pnpm list --prod, docker image save/inspect and tar helpers through one run(command, args) wrapper whose callers pass literal commands; never Jest or a test script.',
+    sha256: {
+      'scripts/testing-dev-only.mjs':
+        '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
+    },
+  },
+  'scripts/supplier-privilege-split.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql, the Prisma CLI (migrate deploy) and bash on the supplier split script against a scratch PostgreSQL; the commands are literal at every call. No Jest.',
+    sha256: {
+      'scripts/supplier-privilege-split.pg.test.mjs':
+        'c12ce177b3d1263e274d14dc58d64c75878bdce15dd941d7a7d7aceb30a77f69',
+    },
+  },
+  'scripts/service-privilege-split-end-state.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql and bash against a scratch PostgreSQL (one injected spawn wrapper only rewrites a psql connection string); no Jest or test-script launch.',
+    sha256: {
+      'scripts/service-privilege-split-end-state.pg.test.mjs':
+        'e9cd41fc43710c141b72cdf1e7a54d693a5626937c30656860f4c67cda43f115',
+    },
+  },
+  'scripts/check-db-runtime-privileges.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql, bash scripts and the Prisma CLI (migrate deploy) against a scratch PostgreSQL; the commands are literal at every call. No Jest.',
+    sha256: {
+      'scripts/check-db-runtime-privileges.pg.test.mjs':
+        '10a179c9d24669bca20775371ea987f94567f4ecbafb3ff3d87607bd391ce956',
+    },
+  },
+  'scripts/backup-restore-drill.pg.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns psql, pg_dump and pg_restore through command(name, args); every caller passes one of those literals. No Jest or test-script launch.',
+    sha256: {
+      'scripts/backup-restore-drill.pg.test.mjs':
+        '83c8c84247384bd7f0c255a2d9e95c6bff2ff59c4095afece86490bd676b4b59',
     },
   },
 };

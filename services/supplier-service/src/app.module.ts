@@ -23,6 +23,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -54,7 +55,6 @@ import {
   SUPPLIER_DEAD_LETTER_TOPIC,
 } from './performance/performance.consumer';
 import { ENV, LOGGER } from './tokens';
-import { StrictQueryParserInstaller } from './http/strict-query-parser';
 import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
 
 /**
@@ -91,10 +91,10 @@ import { loadSupplierEnv, SERVICE_NAME, type SupplierEnv } from './config/env';
 @Module({
   controllers: [SupplierController, HealthController, MetricsController],
   providers: [
-    { provide: ENV, useFactory: () => loadSupplierEnv() },
-
-    // Query strings over the segment bound are a 400, never truncated (PR 699 F1).
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
     StrictQueryParserInstaller,
+
+    { provide: ENV, useFactory: () => loadSupplierEnv() },
 
     {
       provide: LOGGER,

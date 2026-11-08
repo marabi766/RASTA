@@ -26,6 +26,7 @@ import {
 } from '../organization/organization-hierarchy';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
+import { ORDER_HOLD_TRANSACTION_MS, ORDER_HOLD_WAIT_MS } from '../config/operation-budgets';
 import {
   disputesRaisedTotal,
   orderRefusalsTotal,
@@ -37,6 +38,7 @@ import { isUniqueViolation, violatedConstraint } from '../shared/prisma-errors';
 import type { RecordResponse } from '../shared/idempotency';
 import {
   OrderRepository,
+  type HeldOrderRow,
   type LockedOrderRow,
   ORDER_VIEW_INCLUDE,
   type SagaActivity,
@@ -119,6 +121,12 @@ function isOrderKeyIndex(target: string | undefined): boolean {
  * and goes out as a command to economic-service (ADR-040); this service only
  * ever records what that command reported.
  */
+/**
+ * The saga calls sent only from under the order's hold (`whileOrderHeld`, D-138):
+ * their call record is opened behind the same bounded wait (#836 with #895).
+ */
+const HELD_SAGA_CALLS: ReadonlySet<SagaActivity> = new Set<SagaActivity>(['authoriseSettlement']);
+
 @Injectable()
 export class OrderService {
   private readonly logger = new Logger(OrderService.name);
@@ -226,6 +234,8 @@ export class OrderService {
                 supplierOrganizationId: priced.supplierOrganizationId,
                 placedBy: actor,
                 status: 'PENDING',
+                // No send yet: the column's default says otherwise, for any other writer.
+                holdSendClaims: 0,
                 sagaStartRequestedAt: createdAt,
                 totalAmountMinor: priced.totalAmountMinor,
                 currency: priced.currency,
@@ -994,6 +1004,15 @@ export class OrderService {
             },
           }),
         );
+        // With the dispute, not after it: economic-service already holds it, and a
+        // saga that died between the two would leave it on no record (FU-104).
+        await this.repository.openSagaCall(
+          tx,
+          { id: order.id, organizationId: order.organizationId },
+          'resolveObligationDispute',
+          disputeId,
+          saga,
+        );
         await runUnscoped(
           'the saga records the dispute on an order on behalf of neither party',
           () => tx.order.update({ where: { id: order.id }, data: { status: 'DISPUTED' } }),
@@ -1219,6 +1238,106 @@ export class OrderService {
     return result;
   }
 
+  /**
+   * Runs `fn` on the order as it stands, and keeps it so until `fn` has answered
+   * (D-138): a saga step that asks another service for something a transition
+   * here would forbid. A status that cannot change until the answer is in leaves
+   * no gap between the check and the request. A dispute either commits first, and
+   * `fn` reads it, or waits behind the request.
+   *
+   * Across a call, as an operator's decision is, so `fn`'s budget comes from the
+   * commands waiting behind it (`ORDER_HOLD_SEND_DEADLINE_MS`). `fn` must not
+   * use `this.prisma.client` for a write that needs this row's lock. Past its wait
+   * it fails with nothing asked, and the activity's retry tries again.
+   */
+  async whileOrderHeld<T>(orderId: string, fn: (order: HeldOrderRow) => Promise<T>): Promise<T> {
+    return this.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${ORDER_HOLD_WAIT_MS}ms`}, true)`;
+        return fn(await this.repository.holdOrder(tx as ExtendedPrismaClient, orderId));
+      },
+      { timeout: ORDER_HOLD_TRANSACTION_MS },
+    );
+  }
+
+  /**
+   * See `OrderRepository.openSagaCall`.
+   *
+   * The record's foreign key takes a key-share lock on the order row, which a
+   * transition's `lockOrder` (`FOR UPDATE`) blocks. For a call the saga sends
+   * only from under the order's hold (`HELD_SAGA_CALLS`, D-138), the record is
+   * therefore opened behind that same hold and its bounded wait, and committed
+   * before anything is sent: behind a dispute in progress it waits for the
+   * commit, which the hold then reads; past `ORDER_HOLD_WAIT_MS` it fails with
+   * nothing opened or sent, and the activity's retry tries again (#836 with
+   * #895). Unbounded, the record's wait outlasted the hold's and let a send out
+   * after a transition that had held the row past it.
+   */
+  openSagaCall(
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+    command: SagaStep,
+  ): Promise<{ generation: number; started: boolean }> {
+    if (!HELD_SAGA_CALLS.has(operation)) {
+      return this.repository.openSagaCall(this.prisma.client, order, operation, subject, command);
+    }
+    return this.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${ORDER_HOLD_WAIT_MS}ms`}, true)`;
+        await this.repository.holdOrder(tx as ExtendedPrismaClient, order.id);
+        return this.repository.openSagaCall(
+          tx as ExtendedPrismaClient,
+          order,
+          operation,
+          subject,
+          command,
+        );
+      },
+      { timeout: ORDER_HOLD_TRANSACTION_MS },
+    );
+  }
+
+  /** See `OrderRepository.confirmSagaCall`. */
+  confirmSagaCall(
+    order: { id: string; organizationId: string },
+    operation: SagaActivity,
+    subject: string,
+    opening: { command: SagaStep; generation: number },
+  ): Promise<void> {
+    return this.repository.confirmSagaCall(this.prisma.client, order, operation, subject, opening);
+  }
+
+  /** See `OrderRepository.confirmSagaCallsOn`. */
+  confirmSagaCallsOn(
+    order: { id: string; organizationId: string },
+    operations: readonly SagaActivity[],
+    subject: string,
+  ): Promise<void> {
+    return this.repository.confirmSagaCallsOn(this.prisma.client, order, operations, subject);
+  }
+
+  /** See `OrderRepository.claimHoldSend`. */
+  claimHoldSend(
+    order: { id: string; organizationId: string },
+    proposed: string | undefined,
+  ): Promise<{ holdNotAfter: string | null; claims: number } | { closed: boolean }> {
+    return this.repository.claimHoldSend(this.prisma.client, order, proposed);
+  }
+
+  /** See `OrderRepository.closeHoldSendsOnRefusal`. */
+  closeHoldSendsOnRefusal(order: { id: string; organizationId: string }): Promise<boolean> {
+    return this.repository.closeHoldSendsOnRefusal(this.prisma.client, order);
+  }
+
+  /** See `OrderRepository.closeHoldSendsIfNoneCanLand`. */
+  closeHoldSendsIfNoneCanLand(
+    order: { id: string; organizationId: string },
+    marginMs: number,
+  ): Promise<boolean> {
+    return this.repository.closeHoldSendsIfNoneCanLand(this.prisma.client, order, marginMs);
+  }
+
   /** What the saga needs to know to drive an order without re-reading it. */
   async describe(orderId: string): Promise<{
     id: string;
@@ -1276,6 +1395,10 @@ export class OrderService {
     dispute: { id: string; reason: string; resolution: string | null } | null;
     /** `mirroredDisputeId`'s dispute on this order, when one was named. */
     mirroredDispute?: { id: string; resolution: string | null } | null;
+    /** The hold's fence as any run left it (D-144). Absent from a read recorded before it. */
+    holdNotAfter?: string | null;
+    holdSendsClosed?: boolean;
+    holdMayHaveSent?: boolean;
   }> {
     // One snapshot for all three reads: a resolution committing between them
     // would show the order DISPUTED with no OPEN dispute, and the saga stops
@@ -1313,6 +1436,9 @@ export class OrderService {
       cancellationReason: row.cancellationReason,
       dispute,
       ...(mirroredDispute === undefined ? {} : { mirroredDispute }),
+      holdNotAfter: row.holdNotAfter?.toISOString() ?? null,
+      holdSendsClosed: row.holdSendsClosedAt !== null,
+      holdMayHaveSent: row.holdSendClaims > 0,
     };
   }
 

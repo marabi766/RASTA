@@ -1,3 +1,4 @@
+import type { RequestNotChecked } from '@/lib/request-not-checked';
 import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { CreateDriverField, CreateDriverFormValues } from '@/lib/driver-fields';
@@ -12,6 +13,13 @@ import type { CreateDriverField, CreateDriverFormValues } from '@/lib/driver-fie
  */
 export type CreateDriverFormState =
   | { readonly kind: 'IDLE' }
+  | RequestNotChecked
+  | {
+      readonly kind: 'HELD';
+      readonly releaseToken?: string;
+      readonly submissionId: string;
+      readonly values: CreateDriverFormValues;
+    }
   /** The person's own values, kept so the form is not emptied under them. */
   | {
       readonly kind: 'INVALID';
@@ -25,6 +33,9 @@ export type CreateDriverFormState =
   | { readonly kind: 'REFUSED'; readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
-  | UnconfirmedWriteState;
+  | (UnconfirmedWriteState & {
+      readonly releaseToken?: string;
+      readonly values?: CreateDriverFormValues;
+    });
 
 export const IDLE_CREATE_DRIVER_FORM: CreateDriverFormState = { kind: 'IDLE' };

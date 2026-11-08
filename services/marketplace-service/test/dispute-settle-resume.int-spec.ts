@@ -1,4 +1,5 @@
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { createTemporalTestEnvironment } from './temporal-environment';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import type { WorkflowHandle } from '@temporalio/client';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
@@ -97,6 +98,8 @@ class EconomicLedger {
       organizationId: this.buyer,
       transactionType: 'MARKETPLACE_ORDER',
       status: this.status,
+      // This stand-in places its hold for real, so what HELD says is proven.
+      heldProven: this.status === 'HELD',
       sourceReference: orderId,
       disputeId: this.disputeId,
       disputedAt: this.disputedAt,
@@ -108,6 +111,8 @@ class EconomicLedger {
 
   client(): EconomicClient {
     return {
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       createObligation: async () => {
         this.effects.push('hold');
         return { id: this.transactionId };
@@ -178,12 +183,7 @@ describe('a pre-receipt dispute settled by an operator resumes the order (D-083,
   beforeAll(async () => {
     prisma = newPrisma();
     wiring = wire(prisma);
-    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
-      downloadDir
-        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
-        : undefined,
-    );
+    env = await createTemporalTestEnvironment();
   }, 300_000);
 
   afterAll(async () => {

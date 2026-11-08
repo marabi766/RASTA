@@ -1,4 +1,5 @@
 import base, { internalPlugin } from '../../eslint.config.mjs';
+import { code } from '../../scripts/lint-extensions.mjs';
 
 /**
  * The shared rules, plus this package's own generated output.
@@ -19,7 +20,7 @@ export default [
     // Playwright's request fixture, which src/expect.ts wraps in
     // guardRequestContext. The node:test unit tests of the harness are not
     // scenarios: they drive the transports themselves against loopback fakes.
-    files: ['**/*.ts'],
+    files: [code('**/*')],
     ignores: ['src/**/*.test.ts'],
     plugins: { internal: internalPlugin },
     rules: { 'internal/raw-http': ['error', { playwright: true }] },

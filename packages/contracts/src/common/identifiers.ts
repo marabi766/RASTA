@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { patternRefinement } from './pattern-refinement';
 
 /**
  * Rasta identifier scheme.
@@ -75,22 +76,23 @@ export const ID_PREFIXES = {
 
 export type IdPrefix = (typeof ID_PREFIXES)[keyof typeof ID_PREFIXES];
 
+/** The anchored pattern of a `prefix_<ULID>` identifier: the accepted set, exactly. */
+function prefixedIdPattern(prefix: IdPrefix): RegExp {
+  return new RegExp(`^${prefix}_${ULID_PATTERN.source.slice(1, -1)}$`);
+}
+
 /**
  * Builds a zod schema for one prefixed identifier, e.g. `AST_01JBQ...`.
  * Seeded/demo data may use readable ids (`ORG-UNION-YAZD`); those are accepted
  * only by {@link seedIdSchema} so they can never leak into a production path.
+ *
+ * The refinement tests the very pattern it publishes, so the runtime and the
+ * published document cannot disagree on which strings are identifiers.
  */
 export function prefixedIdSchema(prefix: IdPrefix) {
-  return z
-    .string()
-    .refine(
-      (value) => {
-        const [head, tail] = splitOnce(value, '_');
-        return head === prefix && tail !== undefined && ULID_PATTERN.test(tail);
-      },
-      { message: `Expected an identifier of the form ${prefix}_<ULID>` },
-    )
-    .describe(`${prefix} identifier`);
+  const pattern = prefixedIdPattern(prefix);
+  const check = patternRefinement(pattern, `Expected an identifier of the form ${prefix}_<ULID>`);
+  return z.string().check(check).describe(`${prefix} identifier`);
 }
 
 /** Accepts either a real prefixed ULID or a readable seed identifier. */
@@ -99,12 +101,6 @@ export function seedIdSchema(prefix: IdPrefix) {
     prefixedIdSchema(prefix),
     z.string().regex(new RegExp(`^${prefix}-[A-Z0-9-]{1,48}$`)),
   ]);
-}
-
-function splitOnce(value: string, separator: string): [string, string | undefined] {
-  const index = value.indexOf(separator);
-  if (index === -1) return [value, undefined];
-  return [value.slice(0, index), value.slice(index + separator.length)];
 }
 
 export const organizationIdSchema = seedIdSchema(ID_PREFIXES.organization);

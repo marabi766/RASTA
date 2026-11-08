@@ -97,3 +97,32 @@ Zod Schema ──┬──► اعتبارسنجی زمان اجرا (Backend)
 | مدل خطا و کدها             | § ۶٫۷ · `packages/contracts/src/common/errors.ts`              |
 | Idempotency                | § ۶٫۸                                                          |
 | Rate Limiting              | § ۶٫۹                                                          |
+
+FU-120: shared Zod conversion publishes string, number and array constraints only before a value-changing step.
+For example, `z.string().max(200).trim().min(1)` publishes `maxLength: 200`, with this description:
+“Constraints after a value-changing step are omitted; validation applies them to the transformed value.”
+Post-step lengths, patterns and formats remain enforced by the server. Overwrites (including trim,
+lowercase and normalization), arbitrary transforms, preprocessors and unrecognized checks are barriers.
+The registered `codePointLength` check is known to preserve its input. Opaque preprocessors publish an
+open schema with the marker, including numeric preprocessors; their output type is not a raw-input
+contract. Asset query parameters use this same converter as request bodies, including numeric
+fields; `numberInput` acceptance is unchanged. Query-object preprocessors are refused rather than publishing their output fields.
+The marker survives optional/nullable wrappers, descriptions and pipes. This intentionally describes
+less than all validation; it never presents a post-transform check as a raw-input check.
+
+FU-152: only pattern refinements created by the private registry's constructor are trusted as
+value-preserving; attaching a symbol to a check cannot grant trust. Both registered refinements
+and `.regex()` use the shared `publishablePattern` predicate (FU-181): `u` patterns or a
+conservative BMP-only no-flag grammar whose Unicode meaning is identical. Unknown syntax is omitted.
+Stateful `g`/`y` refinements throw at construction. Consumers **must compile published
+patterns with the Unicode `u` flag**, including Unicode property escapes. Patterns with any other
+flags are omitted: OpenAPI carries only their source and cannot preserve those flags' semantics.
+Other proven raw-input constraints remain published; runtime validation is unchanged.
+
+FU-181 captures original built-in check runners and definitions inside the pinned Zod patch.
+Converter trust refuses changed runners, forged kind strings and changed definitions. Only named
+value-preserving formats (regex, email, datetime, UUID) cross the raw-input barrier; URL checks
+may rewrite their input and remain barriers. Code-point and ISO zone constructors snapshot their
+own checks too, and zone publication uses the same pattern predicate. The input-preserving
+`parsableUrl()` helper has its own constructor-identity lookup; native Zod URL checks remain barriers. Unknown checks omit later
+constraints. Construction snapshots do not register arbitrary caller callbacks.

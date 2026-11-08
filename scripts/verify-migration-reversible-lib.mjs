@@ -2,7 +2,16 @@ import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.t
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { readUrl } from '../packages/config/src/url-reader.js';
+import { libpqInvocation } from './psql-prisma-url.mjs';
+
+export {
+  UNREADABLE_DATABASE_URL,
+  UNSAFE_DATABASE_PARAMETER,
+  UNUSABLE_PRISMA_OPTIONS,
+  UNUSABLE_PRISMA_SCHEMA,
+  libpqInvocation,
+  psqlInvocation,
+} from './psql-prisma-url.mjs';
 
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
@@ -665,6 +674,28 @@ export const ASSET_DATA_ROLLBACK = {
 };
 
 const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
+// Sits on top of the chain, and refuses a bare probe row: the steps writing one take it down first.
+const SETTLEMENT_CREATION_PROOF = '20261105120000_settlement_creation_proof';
+const TRANSACTION_HOLD_DECISION = '20261106120000_transaction_hold_decision';
+const TRANSACTION_FUNDED_HOLD = '20261106130000_transaction_funded_hold';
+// Between the two (#906, FU-188): it redefines 20261106130000's held_at stamp and the decision
+// default, so any rollback below it takes it down first, or the re-deploy would skip it.
+const UTC_CLOCK_DEFAULTS = '20261106140000_utc_clock_defaults';
+const HOLD_FUNDED_AT_COMMIT = '20261107120000_hold_funded_at_commit';
+
+/**
+ * The `held_at` of every probe row with no hold of its own, cleared with its stamp lifted: what an
+ * operator accepting its loss would do, since 20261106130000's down refuses it (FU-182).
+ */
+const HELD_AT_UNHELD_CLEARED = `
+ALTER TABLE "transaction" DISABLE TRIGGER "trg_transaction_held_at";
+UPDATE "transaction" t SET held_at = NULL
+ WHERE t.id LIKE 'TXN_MIGCHECK_%' AND NOT EXISTS (SELECT 1 FROM transaction_holds(t.id, t.organization_id));
+ALTER TABLE "transaction" ENABLE TRIGGER "trg_transaction_held_at";`;
+const HELD_AT_ACCEPTED = (probe) => ({
+  label: `${probe}: held_at's loss accepted for rows with no hold (in the probe: cleared)`,
+  sql: HELD_AT_UNHELD_CLEARED,
+});
 
 /** A transaction as the schema before business lines holds it (or after, with a line). */
 const TRANSACTION_MIGCHECK = (id, line = null) => `
@@ -688,6 +719,35 @@ VALUES ('${id}', 'ORG-MIGCHECK-PAYEE', '${transactionId}', ${ruleId ? `'${ruleId
 const COMMISSION_TRIGGER_HERE = `SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
    WHERE t.tgname = 'trg_commission_append_only' AND c.relnamespace = current_schema()::regnamespace`;
 
+/** `sql`, a probe commission row, with the proof of a settlement's creation (FU-097) out of its way. */
+const WITHOUT_COMMISSION_PROOF = (sql) => {
+  const toggle = (action) => `DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+              WHERE t.tgname = 'trg_commission_creation_proven'
+                AND c.relnamespace = current_schema()::regnamespace) THEN
+    EXECUTE 'ALTER TABLE "commission" ${action} TRIGGER "trg_commission_creation_proven"';
+  END IF;
+END $$;`;
+  return `${toggle('DISABLE')}\n${sql}\n${toggle('ENABLE')}`;
+};
+
+const TERMS_TRIGGER_HERE = `SELECT 1 FROM pg_trigger
+  WHERE tgname = 'trg_transaction_terms_fixed' AND tgrelid = '"transaction"'::regclass`;
+
+/** Removes probe obligations; an obligation is never deleted, so the owner lifts the guard, where it stands. */
+const TRANSACTION_MIGCHECK_REMOVE = (where) => `
+DO $$
+BEGIN
+  IF EXISTS (${TERMS_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "transaction" DISABLE TRIGGER "trg_transaction_terms_fixed"';
+  END IF;
+  DELETE FROM "transaction" WHERE ${where};
+  IF EXISTS (${TERMS_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "transaction" ENABLE TRIGGER "trg_transaction_terms_fixed"';
+  END IF;
+END $$;`;
+
 /** Removes every commission probe row; the owner lifts the append-only trigger for them only. */
 const COMMISSION_MIGCHECK_CLEANUP = `
 DO $$
@@ -701,7 +761,7 @@ BEGIN
   END IF;
 END $$;
 DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';
-DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%';`;
+${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%'`)}`;
 
 /**
  * Commission by business line (ADR-045, docs/23 D-057), rolled back and
@@ -717,7 +777,14 @@ DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TX
 const COMMISSION_BUSINESS_LINES_STEPS = [
   {
     label: 'commission: down to the schema before business lines (empty)',
-    runDownScript: [COMMISSION_BUSINESS_LINES],
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+      COMMISSION_BUSINESS_LINES,
+    ],
   },
   {
     label: 'commission: a priced and an unpriced charge, as the old engine wrote them',
@@ -840,13 +907,15 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
        VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100, now(), 'ACTIVE',
          'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
       TRANSACTION_MIGCHECK('TXN_MIGCHECK_LINE', 'PARTS'),
-      COMMISSION_MIGCHECK(
-        'CMS_MIGCHECK_LINE',
-        'TXN_MIGCHECK_LINE',
-        'CMR_MIGCHECK_LINE',
-        100,
-        10,
-        `'PARTS', 'RULE_APPLIED'`,
+      WITHOUT_COMMISSION_PROOF(
+        COMMISSION_MIGCHECK(
+          'CMS_MIGCHECK_LINE',
+          'TXN_MIGCHECK_LINE',
+          'CMR_MIGCHECK_LINE',
+          100,
+          10,
+          `'PARTS', 'RULE_APPLIED'`,
+        ),
       ),
     ].join('\n'),
   },
@@ -901,7 +970,9 @@ const COMMISSION_BUSINESS_LINES_STEPS = [
     label: 'commission: a charge with no rule behind it, which nothing can classify',
     sql: [
       TRANSACTION_MIGCHECK('TXN_MIGCHECK_ORPHAN'),
-      COMMISSION_MIGCHECK('CMS_MIGCHECK_ORPHAN', 'TXN_MIGCHECK_ORPHAN', null, 100, 10),
+      WITHOUT_COMMISSION_PROOF(
+        COMMISSION_MIGCHECK('CMS_MIGCHECK_ORPHAN', 'TXN_MIGCHECK_ORPHAN', null, 100, 10),
+      ),
     ].join('\n'),
   },
   {
@@ -1073,7 +1144,7 @@ const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
   {
     label: 'dispute resolution: clean up the probe rows',
     sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_DSP_%';
-          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_DSP_%';`,
+          ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_DSP_%'`)}`,
   },
 ];
 
@@ -1084,6 +1155,12 @@ const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_disput
  * whole-chain check of the newest one would find the chain changed.
  */
 const RESOLVED_DISPUTE_DOWNS = [
+  // These probes move a transaction to SETTLED with no settlement behind it.
+  HOLD_FUNDED_AT_COMMIT,
+  UTC_CLOCK_DEFAULTS,
+  TRANSACTION_FUNDED_HOLD,
+  TRANSACTION_HOLD_DECISION,
+  SETTLEMENT_CREATION_PROOF,
   '20261103121000_transaction_settlement_authority',
   '20261103120000_transaction_dispute_resolution_by_authority',
   TRANSACTION_RESOLVED_DISPUTE,
@@ -1222,6 +1299,7 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
         none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
       })}`,
   },
+  HELD_AT_ACCEPTED('resolved dispute'),
   {
     label: 'resolved dispute: down succeeds over attributed rows',
     runDownScript: RESOLVED_DISPUTE_DOWNS,
@@ -1266,7 +1344,7 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   {
     label: 'resolved dispute: clean up the probe rows',
     sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_RSD_%';
-          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_RSD_%';`,
+          ${TRANSACTION_MIGCHECK_REMOVE(`organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_RSD_%'`)}`,
   },
 ];
 
@@ -1526,6 +1604,16 @@ const SETTLEMENT_REVERSAL = '20261104120000_settlement_reversal';
  */
 const SETTLEMENT_REVERSAL_STEPS = [
   {
+    label: 'settlement reversal: the proof of creation goes first, these probes are bare rows',
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
+  },
+  {
     label: 'settlement reversal: a settled transaction, its settlement, and one open case',
     sql: `INSERT INTO "transaction" ("id", "organization_id", "counterparty_organization_id", "transaction_type",
             "status", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "occurred_at",
@@ -1578,6 +1666,17 @@ const SETTLEMENT_REVERSAL_STEPS = [
     sql: `DELETE FROM "settlement" WHERE id = 'STL_MIGCHECK_SRV';`,
     mustFail: 'append-only',
   },
+  HELD_AT_ACCEPTED('settlement reversal'),
+  {
+    label: 'settlement reversal: the proof of creation goes again, before the probe rows do',
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
+  },
   {
     label: 'settlement reversal: the probe rows are removed before the chain reversal',
     sql: `ALTER TABLE "settlement" DISABLE TRIGGER "trg_settlement_append_only";
@@ -1585,6 +1684,560 @@ const SETTLEMENT_REVERSAL_STEPS = [
           ALTER TABLE "settlement" ENABLE TRIGGER "trg_settlement_append_only";
           DELETE FROM "transaction" WHERE id = 'TXN_MIGCHECK_SRV';`,
   },
+];
+
+/**
+ * One hand-written settlement: transaction, commission, journal and legs, written
+ * with the proof of creation off, as a row from before it would be. Every field that
+ * is not told agrees, so each probe disagrees by exactly what it was told.
+ */
+const CREATION_PROOF_ROW = (suffix, options = {}) => {
+  const {
+    status = 'SETTLED',
+    payee = 'ORG-MIGCHECK-PAYEE',
+    settlementGross = 1000,
+    legGross = 1000,
+    journalId = `JRN_MIGCHECK_${suffix}`,
+    commissionJournal = `'JRN_MIGCHECK_${suffix}'`,
+    commission = true,
+    settlement = true,
+  } = options;
+  return `
+INSERT INTO "transaction" ("id", "organization_id", "counterparty_organization_id", "transaction_type",
+  "status", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "occurred_at",
+  "settled_at", "correlation_id", "updated_at", "created_by")
+VALUES ('TXN_MIGCHECK_${suffix}', 'ORG-MIGCHECK', 'ORG-MIGCHECK-PAYEE', 'LOGISTICS', '${status}', 1000, 0, 1000,
+  now(), ${status === 'SETTLED' ? 'now()' : 'NULL'}, 'COR-MIGCHECK', now(), 'USR-MIGCHECK');
+INSERT INTO "journal" ("id", "organization_id", "transaction_id", "journal_type", "description", "posted_at",
+  "posted_by", "correlation_id")
+VALUES ('JRN_MIGCHECK_${suffix}', 'ORG-MIGCHECK', 'TXN_MIGCHECK_${suffix}', 'SETTLEMENT', 'probe', now(),
+  'USR-MIGCHECK', 'COR-MIGCHECK');
+INSERT INTO "ledger_entry" ("id", "journal_id", "account_id", "organization_id", "direction", "amount_minor",
+  "currency", "posted_at")
+VALUES ('ENT_MIGCHECK_${suffix}_D', 'JRN_MIGCHECK_${suffix}', 'ACC_MIGCHECK_PAYER', 'ORG-MIGCHECK', 'DEBIT',
+        ${legGross}, 'IRR', now()),
+       ('ENT_MIGCHECK_${suffix}_C', 'JRN_MIGCHECK_${suffix}', 'ACC_MIGCHECK_PAYEE', 'ORG-MIGCHECK-PAYEE', 'CREDIT',
+        ${legGross}, 'IRR', now());
+${
+  commission
+    ? `INSERT INTO "commission" ("id", "organization_id", "transaction_id", "outcome", "rate_basis_points",
+  "gross_amount_minor", "amount_minor", "currency", "journal_id", "applied_at")
+VALUES ('CMS_MIGCHECK_${suffix}', 'ORG-MIGCHECK-PAYEE', 'TXN_MIGCHECK_${suffix}', 'NO_ACTIVE_RULE', 0,
+  1000, 0, 'IRR', ${commissionJournal}, now());`
+    : ''
+}
+${
+  settlement
+    ? `INSERT INTO "settlement" ("id", "organization_id", "transaction_id", "journal_id", "payer_organization_id",
+  "payee_organization_id", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "currency",
+  "settled_at", "settled_by")
+VALUES ('STL_MIGCHECK_${suffix}', 'ORG-MIGCHECK', 'TXN_MIGCHECK_${suffix}', '${journalId}', 'ORG-MIGCHECK',
+  '${payee}', ${settlementGross}, 0, ${settlementGross}, 'IRR', now(), 'USR-MIGCHECK');`
+    : ''
+}`;
+};
+
+const CREATION_PROOF_FORGED = [
+  'UNCHARGED',
+  'RESERVED_GONE',
+  'NOJOURNAL',
+  'UNSETTLED',
+  'FIGURES',
+  'PARTY',
+  'LEGS',
+  'RESERVED',
+  'NOJ_COMMISSION',
+];
+
+/** Removes probe rows by suffix; the owner lifts each guard in this one transaction only. */
+const CREATION_PROOF_REMOVE = (suffixes) => {
+  const ids = (prefix) => suffixes.map((suffix) => `'${prefix}_MIGCHECK_${suffix}'`).join(', ');
+  return `
+ALTER TABLE "settlement" DISABLE TRIGGER "trg_settlement_append_only";
+ALTER TABLE "commission" DISABLE TRIGGER "trg_commission_append_only";
+ALTER TABLE "ledger_entry" DISABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" DISABLE TRIGGER "trg_journal_immutable";
+DELETE FROM "settlement" WHERE "id" IN (${ids('STL')});
+DELETE FROM "commission" WHERE "id" IN (${ids('CMS')});
+DELETE FROM "ledger_entry" WHERE "journal_id" IN (${ids('JRN')});
+DELETE FROM "journal" WHERE "id" IN (${ids('JRN')});
+${TRANSACTION_MIGCHECK_REMOVE(`"id" IN (${ids('TXN')})`)}
+ALTER TABLE "settlement" ENABLE TRIGGER "trg_settlement_append_only";
+ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only";
+ALTER TABLE "ledger_entry" ENABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" ENABLE TRIGGER "trg_journal_immutable";`;
+};
+
+const CREATION_PROOF_FKS_VALIDATED = (validated) => `DO $$
+BEGIN
+  IF (SELECT count(*) FROM pg_constraint
+       WHERE conname IN ('settlement_journal_id_fkey', 'commission_journal_id_fkey')
+         AND connamespace = current_schema()::regnamespace AND convalidated = ${validated}) <> 2 THEN
+    RAISE EXCEPTION 'expected both journal foreign keys with convalidated = ${validated}';
+  END IF;
+END $$;`;
+
+/**
+ * `20261105120000_settlement_creation_proof` over rows it would now refuse, which CI's
+ * empty database never holds (FU-097): applied over them it changes none, records
+ * each with its reason, keeps them out of a reversal and leaves only the foreign key
+ * they break unvalidated; with them gone, up again validates both.
+ */
+const SETTLEMENT_CREATION_PROOF_STEPS = [
+  {
+    label: 'creation proof: rows from before it, one borne out and each kind of the unprovable',
+    sql: [
+      `INSERT INTO "ledger_account" ("id", "organization_id", "account_type", "account_code", "purpose", "currency", "created_by")
+       VALUES ('ACC_MIGCHECK_PAYER', 'ORG-MIGCHECK', 'LIABILITY', 'MIGCHECK-PAYER', 'WALLET', 'IRR', 'USR-MIGCHECK'),
+              ('ACC_MIGCHECK_PAYEE', 'ORG-MIGCHECK-PAYEE', 'LIABILITY', 'MIGCHECK-PAYEE', 'WALLET', 'IRR', 'USR-MIGCHECK');`,
+      CREATION_PROOF_ROW('BORNE'),
+      CREATION_PROOF_ROW('NOJOURNAL', { journalId: 'JRN_MIGCHECK_GONE' }),
+      CREATION_PROOF_ROW('UNSETTLED', { status: 'CREATED' }),
+      CREATION_PROOF_ROW('FIGURES', { settlementGross: 2000 }),
+      CREATION_PROOF_ROW('PARTY', { payee: 'ORG-MIGCHECK-ELSEWHERE' }),
+      CREATION_PROOF_ROW('LEGS', { legGross: 500 }),
+      CREATION_PROOF_ROW('RESERVED', { status: 'CREATED', settlement: false }),
+      CREATION_PROOF_ROW('NOJ_COMMISSION', { commissionJournal: 'NULL' }),
+      CREATION_PROOF_ROW('UNCHARGED', { commission: false }),
+      CREATION_PROOF_ROW('RESERVED_GONE', {
+        status: 'CREATED',
+        settlement: false,
+        commissionJournal: `'JRN_MIGCHECK_NEVER_POSTED'`,
+      }),
+    ].join('\n'),
+  },
+  { label: 'creation proof: up over them: the deploy goes through', reapply: true },
+  {
+    label: 'creation proof: each is found, with its reason, and the borne-out row is not',
+    sql: `DO $$
+          DECLARE
+            found TEXT;
+          BEGIN
+            SELECT string_agg(source_table || ':' || row_id || ':' || reason, ' '
+                              ORDER BY source_table, row_id COLLATE "C")
+              INTO found FROM "settlement_creation_quarantine";
+            IF found IS DISTINCT FROM
+               'commission:CMS_MIGCHECK_FIGURES:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_NOJOURNAL:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_NOJ_COMMISSION:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_PARTY:SETTLEMENT_DISAGREES '
+               || 'commission:CMS_MIGCHECK_RESERVED:SETTLEMENT_MISSING '
+               || 'commission:CMS_MIGCHECK_RESERVED_GONE:SETTLEMENT_MISSING '
+               || 'settlement:STL_MIGCHECK_FIGURES:TRANSACTION_DISAGREES '
+               || 'settlement:STL_MIGCHECK_LEGS:LEGS_DISAGREE '
+               || 'settlement:STL_MIGCHECK_NOJOURNAL:JOURNAL_MISSING '
+               || 'settlement:STL_MIGCHECK_PARTY:TRANSACTION_DISAGREES '
+               || 'settlement:STL_MIGCHECK_UNCHARGED:COMMISSION_MISSING '
+               || 'settlement:STL_MIGCHECK_UNSETTLED:TRANSACTION_NOT_SETTLED' THEN
+              RAISE EXCEPTION 'the quarantine holds: %', found;
+            END IF;
+            IF (SELECT count(*) FROM "settlement" WHERE "id" LIKE 'STL_MIGCHECK_%') <> 8 THEN
+              RAISE EXCEPTION 'the migration changed the rows it judged';
+            END IF;
+          END $$;
+          ${CREATION_PROOF_FKS_VALIDATED(false)}`,
+  },
+  {
+    label: 'creation proof: a foreign key left unvalidated still refuses a new row',
+    sql: `INSERT INTO "settlement" ("id", "organization_id", "transaction_id", "journal_id", "payer_organization_id",
+            "payee_organization_id", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "currency",
+            "settled_at", "settled_by")
+          VALUES ('STL_MIGCHECK_NEW', 'ORG-MIGCHECK', 'TXN_MIGCHECK_RESERVED', 'JRN_MIGCHECK_NEVER', 'ORG-MIGCHECK',
+            'ORG-MIGCHECK-PAYEE', 1000, 0, 1000, 'IRR', now(), 'USR-MIGCHECK');`,
+    mustFail: 'settlement_journal_id_fkey',
+  },
+  {
+    label: 'creation proof: a new row with a real journal is refused at commit',
+    sql: `INSERT INTO "settlement" ("id", "organization_id", "transaction_id", "journal_id", "payer_organization_id",
+            "payee_organization_id", "gross_amount_minor", "commission_amount_minor", "net_amount_minor", "currency",
+            "settled_at", "settled_by")
+          VALUES ('STL_MIGCHECK_NEW', 'ORG-MIGCHECK', 'TXN_MIGCHECK_RESERVED', 'JRN_MIGCHECK_RESERVED', 'ORG-MIGCHECK',
+            'ORG-MIGCHECK-PAYEE', 1000, 0, 1000, 'IRR', now(), 'USR-MIGCHECK');`,
+    mustFail: 'written together, by one transaction',
+  },
+  {
+    label: 'creation proof: a quarantined row backs no reversal',
+    sql: `INSERT INTO "settlement_reversal" ("id", "organization_id", "transaction_id", "settlement_id",
+            "source_type", "source_reference")
+          VALUES ('SRV_01MIGCHECK0000000000000001', 'ORG-MIGCHECK', 'TXN_MIGCHECK_FIGURES', 'STL_MIGCHECK_FIGURES',
+            'MANUAL', 'MIGCHECK-2');`,
+    mustFail: 'could not be proven',
+  },
+  {
+    label: 'creation proof: the borne-out row still opens a case, which is then removed',
+    sql: `INSERT INTO "settlement_reversal" ("id", "organization_id", "transaction_id", "settlement_id",
+            "source_type", "source_reference")
+          VALUES ('SRV_01MIGCHECK0000000000000002', 'ORG-MIGCHECK', 'TXN_MIGCHECK_BORNE', 'STL_MIGCHECK_BORNE',
+            'MANUAL', 'MIGCHECK-3');
+          ALTER TABLE "settlement_reversal" DISABLE TRIGGER "trg_settlement_reversal_no_delete";
+          DELETE FROM "settlement_reversal" WHERE id = 'SRV_01MIGCHECK0000000000000002';
+          ALTER TABLE "settlement_reversal" ENABLE TRIGGER "trg_settlement_reversal_no_delete";`,
+  },
+  {
+    label: 'creation proof: the quarantine is frozen',
+    sql: `DELETE FROM "settlement_creation_quarantine";`,
+    mustFail: 'fixed by its migration',
+  },
+  HELD_AT_ACCEPTED('creation proof'),
+  {
+    label: 'creation proof: down over them refuses nothing, and leaves every row',
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
+  },
+  {
+    label: 'creation proof: the rows are all there, and an owner clears the unprovable',
+    sql: `DO $$
+          BEGIN
+            IF (SELECT count(*) FROM "settlement" WHERE "id" LIKE 'STL_MIGCHECK_%') <> 8 THEN
+              RAISE EXCEPTION 'the rollback changed the rows';
+            END IF;
+          END $$;
+          ${CREATION_PROOF_REMOVE(CREATION_PROOF_FORGED)}`,
+  },
+  { label: 'creation proof: up with them gone', reapply: true },
+  {
+    label: 'creation proof: no quarantine, both foreign keys validated over the borne-out row',
+    sql: `DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM "settlement_creation_quarantine") THEN
+              RAISE EXCEPTION 'the quarantine holds a row that is borne out';
+            END IF;
+          END $$;
+          ${CREATION_PROOF_FKS_VALIDATED(true)}`,
+  },
+  {
+    label: 'creation proof: the last probe rows are removed before the chain reversal',
+    sql: `${CREATION_PROOF_REMOVE(['BORNE'])}
+          DELETE FROM "ledger_account" WHERE "id" IN ('ACC_MIGCHECK_PAYER', 'ACC_MIGCHECK_PAYEE');`,
+  },
+];
+
+const HOLD_DECISION_DOWNS = [
+  HOLD_FUNDED_AT_COMMIT,
+  UTC_CLOCK_DEFAULTS,
+  TRANSACTION_FUNDED_HOLD,
+  TRANSACTION_HOLD_DECISION,
+  SETTLEMENT_CREATION_PROOF,
+  SETTLEMENT_REVERSAL,
+  '20261103121000_transaction_settlement_authority',
+];
+/** A hold of `organization`, on `walletId`, naming a probe transaction. */
+const HOLD_DECISION_HOLD = (suffix, organization, walletId, type = 'TRANSACTION') => `
+INSERT INTO "wallet_hold" ("id", "organization_id", "wallet_id", "amount_minor", "currency", "reference",
+  "reference_type", "placed_at", "placed_by")
+VALUES ('HLD_MIGCHECK_HD_${suffix}_${organization === 'ORG-MIGCHECK' ? 'OWN' : 'FOREIGN'}', '${organization}',
+  '${walletId}', 1000, 'IRR', 'TXN_MIGCHECK_HD_${suffix}', '${type}', now(), 'USR-MIGCHECK');`;
+const HOLD_DECISION_FOREIGN = (suffix) =>
+  HOLD_DECISION_HOLD(suffix, 'ORG-MIGCHECK-PAYEE', 'WLT_MIGCHECK_HD_PAYEE');
+const HOLD_DECISION_FOUND = (expected) => `DO $$
+DECLARE
+  found TEXT;
+BEGIN
+  SELECT string_agg(replace(c.transaction_id, 'TXN_MIGCHECK_HD_', '') || ':' || c.outcome || ':' || t.status,
+                    ' ' ORDER BY c.transaction_id COLLATE "C")
+    INTO found
+    FROM "transaction_hold_reconciliation" c JOIN "transaction" t ON t.id = c.transaction_id
+   WHERE c.transaction_id LIKE 'TXN_MIGCHECK_HD_%';
+  IF found IS DISTINCT FROM '${expected}' THEN
+    RAISE EXCEPTION 'the reconciliation holds: %', found;
+  END IF;
+  IF (SELECT string_agg(status::text, ' ' ORDER BY id COLLATE "C") FROM "transaction"
+       WHERE id IN ('TXN_MIGCHECK_HD_OWN', 'TXN_MIGCHECK_HD_PURPOSE')) IS DISTINCT FROM 'HELD PENDING_SETTLEMENT' THEN
+    RAISE EXCEPTION 'a row whose decision was not another''s hold moved';
+  END IF;
+END $$;`;
+
+/**
+ * The rows 20261107120000's WARNING counts (its own WHERE, word for word; the lib test holds the
+ * two together): a hold naming a journal the new predicate no longer calls funding.
+ */
+export const HOLD_UNPROVEN_SINCE_AT_COMMIT = `h."placed_journal_id" IS NOT NULL AND NOT wallet_hold_funded(h."id")`;
+
+/**
+ * 20261107120000 over used data (#936 r1, F3): a hold placed before it, whose FUNDS_HELD journal
+ * credits escrow from PAYMENT_CLEARING, funded by 20261106130000's predicate. After the upgrade
+ * the WARNING counts it, and it is not funded: `WalletService.refundHold` answers HOLD_NOT_FUNDED
+ * (`wallet_hold_funded`, wallet.service.ts), and the database refuses the refund itself.
+ */
+const FUNDED_FROM_ELSEWHERE_STEPS = [
+  {
+    label: 'funded from elsewhere: down to the predicate before',
+    runDownScript: [HOLD_FUNDED_AT_COMMIT],
+  },
+  {
+    label: 'funded from elsewhere: a hold whose journal credits escrow from PAYMENT_CLEARING',
+    sql: `${TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_CLEARING')}
+INSERT INTO "ledger_account" ("id", "organization_id", "account_type", "account_code", "purpose", "currency", "created_by")
+VALUES ('ACC_MIGCHECK_HD_ESCROW', 'ORG-MIGCHECK', 'LIABILITY', 'MIGCHECK-HD-ESCROW', 'ESCROW', 'IRR', 'USR-MIGCHECK'),
+       ('ACC_MIGCHECK_HD_CLEARING', 'ORG-MIGCHECK', 'ASSET', 'MIGCHECK-HD-CLEARING', 'PAYMENT_CLEARING', 'IRR', 'USR-MIGCHECK');
+INSERT INTO "journal" ("id", "organization_id", "transaction_id", "journal_type", "description", "posted_at",
+  "posted_by", "correlation_id")
+VALUES ('JRN_MIGCHECK_HD_CLEARING', 'ORG-MIGCHECK', 'TXN_MIGCHECK_HD_CLEARING', 'FUNDS_HELD', 'probe', now(),
+  'USR-MIGCHECK', 'COR-MIGCHECK');
+INSERT INTO "ledger_entry" ("id", "journal_id", "account_id", "organization_id", "direction", "amount_minor",
+  "currency", "posted_at")
+VALUES ('ENT_MIGCHECK_HD_CLEARING_D', 'JRN_MIGCHECK_HD_CLEARING', 'ACC_MIGCHECK_HD_CLEARING', 'ORG-MIGCHECK',
+        'DEBIT', 1000, 'IRR', now()),
+       ('ENT_MIGCHECK_HD_CLEARING_C', 'JRN_MIGCHECK_HD_CLEARING', 'ACC_MIGCHECK_HD_ESCROW', 'ORG-MIGCHECK',
+        'CREDIT', 1000, 'IRR', now());
+INSERT INTO "wallet_hold" ("id", "organization_id", "wallet_id", "amount_minor", "currency", "reference",
+  "reference_type", "placed_at", "placed_by", "placed_journal_id")
+VALUES ('HLD_MIGCHECK_HD_CLEARING_OWN', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYER', 1000, 'IRR',
+  'TXN_MIGCHECK_HD_CLEARING', 'TRANSACTION', now(), 'USR-MIGCHECK', 'JRN_MIGCHECK_HD_CLEARING');
+DO $$
+BEGIN
+  IF NOT wallet_hold_funded('HLD_MIGCHECK_HD_CLEARING_OWN') THEN
+    RAISE EXCEPTION 'the predicate before 20261107120000 does not call the probe hold funded';
+  END IF;
+END $$;`,
+  },
+  { label: 'funded from elsewhere: up', reapply: true },
+  {
+    label: 'funded from elsewhere: the WARNING counts it, and it is not funded (HOLD_NOT_FUNDED)',
+    sql: `DO $$
+BEGIN
+  IF (SELECT string_agg(h.id || ' ' || h.status, ', ') FROM "wallet_hold" h
+       WHERE h.id LIKE 'HLD_MIGCHECK_HD_%' AND ${HOLD_UNPROVEN_SINCE_AT_COMMIT})
+     IS DISTINCT FROM 'HLD_MIGCHECK_HD_CLEARING_OWN ACTIVE' THEN
+    RAISE EXCEPTION 'the WARNING does not count exactly the hold funded from PAYMENT_CLEARING';
+  END IF;
+  IF wallet_hold_funded('HLD_MIGCHECK_HD_CLEARING_OWN') IS NOT FALSE THEN
+    RAISE EXCEPTION 'a hold funded from PAYMENT_CLEARING is still funded';
+  END IF;
+END $$;`,
+  },
+  {
+    label: 'funded from elsewhere: its refund is refused',
+    sql: `UPDATE "wallet_hold" SET status = 'REFUNDED', resolved_at = now(), resolved_by = 'USR-MIGCHECK'
+           WHERE id = 'HLD_MIGCHECK_HD_CLEARING_OWN';`,
+    mustFail: 'A hold never funded moves no money',
+  },
+  {
+    label:
+      'funded from elsewhere: its rows removed, the owner lifting each guard in this transaction only',
+    sql: `ALTER TABLE "wallet_hold" DISABLE TRIGGER "trg_wallet_hold_reference_bound";
+ALTER TABLE "ledger_entry" DISABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" DISABLE TRIGGER "trg_journal_immutable";
+DELETE FROM "wallet_hold" WHERE id = 'HLD_MIGCHECK_HD_CLEARING_OWN';
+DELETE FROM "ledger_entry" WHERE journal_id = 'JRN_MIGCHECK_HD_CLEARING';
+DELETE FROM "journal" WHERE id = 'JRN_MIGCHECK_HD_CLEARING';
+ALTER TABLE "wallet_hold" ENABLE TRIGGER "trg_wallet_hold_reference_bound";
+ALTER TABLE "ledger_entry" ENABLE TRIGGER "trg_ledger_entry_immutable";
+ALTER TABLE "journal" ENABLE TRIGGER "trg_journal_immutable";`,
+  },
+];
+
+/**
+ * What 20261103121000's own backfill decides from another organization's hold, run for
+ * real on rows from before it (#762 r2, F2): the one row provably put there is put back;
+ * the rest are left where they are and listed; a row with a hold of its own, or with only
+ * a hold for something else, is no such decision.
+ */
+const HOLD_DECISION_STEPS = [
+  {
+    label: 'hold decisions: down past the backfill',
+    runDownScript: HOLD_DECISION_DOWNS,
+  },
+  {
+    label: 'hold decisions: rows the backfill will judge, and one a resolution left in HELD',
+    sql: [
+      `INSERT INTO "ledger_account" ("id", "organization_id", "account_type", "account_code", "purpose", "currency", "created_by")
+       VALUES ('ACC_MIGCHECK_HD_PAYER', 'ORG-MIGCHECK', 'LIABILITY', 'MIGCHECK-HD-PAYER', 'WALLET', 'IRR', 'USR-MIGCHECK'),
+              ('ACC_MIGCHECK_HD_PAYEE', 'ORG-MIGCHECK-PAYEE', 'LIABILITY', 'MIGCHECK-HD-PAYEE', 'WALLET', 'IRR', 'USR-MIGCHECK');
+       INSERT INTO "wallet" ("id", "organization_id", "currency", "ledger_account_id", "updated_at")
+       VALUES ('WLT_MIGCHECK_HD_PAYER', 'ORG-MIGCHECK', 'IRR', 'ACC_MIGCHECK_HD_PAYER', now()),
+              ('WLT_MIGCHECK_HD_PAYEE', 'ORG-MIGCHECK-PAYEE', 'IRR', 'ACC_MIGCHECK_HD_PAYEE', now());`,
+      ...['RESTORED', 'OWN', 'PURPOSE', 'MOVED', 'GONE', 'TERMINAL', 'AUTHED', 'CLAIMED'].flatMap(
+        (suffix) => [
+          TRANSACTION_MIGCHECK(`TXN_MIGCHECK_HD_${suffix}`),
+          DISPUTE_MIGCHECK(
+            `TXN_MIGCHECK_HD_${suffix}`,
+            'resolved by a release that asked nothing',
+            '2026-10-01T10:00:00Z',
+            '2026-10-02T10:00:00Z',
+          ),
+        ],
+      ),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_AUTHORISED'),
+      `UPDATE "transaction" SET status = 'PENDING_SETTLEMENT' WHERE id = 'TXN_MIGCHECK_HD_AUTHORISED';`,
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_HELD'),
+      `UPDATE "transaction" SET status = 'HELD' WHERE id = 'TXN_MIGCHECK_HD_HELD';`,
+      ...['RESTORED', 'OWN', 'MOVED', 'GONE', 'TERMINAL', 'AUTHED', 'AUTHORISED', 'HELD'].map(
+        HOLD_DECISION_FOREIGN,
+      ),
+      HOLD_DECISION_HOLD('CLAIMED', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYEE'),
+      HOLD_DECISION_HOLD('OWN', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYER'),
+      HOLD_DECISION_HOLD('PURPOSE', 'ORG-MIGCHECK', 'WLT_MIGCHECK_HD_PAYER', 'OTHER'),
+    ].join('\n'),
+  },
+  { label: 'hold decisions: up, the real backfill first', reapply: true },
+  {
+    label: 'hold decisions: every row where it was proven to belong, or listed',
+    sql: HOLD_DECISION_FOUND(
+      'AUTHED:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'AUTHORISED:AUTHORISED_UNRECORDED_UNPROVEN:PENDING_SETTLEMENT ' +
+        'CLAIMED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'GONE:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'HELD:HELD_UNPROVEN:HELD ' +
+        'MOVED:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'RESTORED:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT ' +
+        'TERMINAL:RESTORED_TO_PENDING_SETTLEMENT:PENDING_SETTLEMENT',
+    ),
+  },
+  {
+    label: 'hold decisions: the list is frozen',
+    sql: `DELETE FROM "transaction_hold_reconciliation" WHERE transaction_id LIKE 'TXN_MIGCHECK_HD_%';`,
+    mustFail: 'fixed by its migration',
+  },
+  {
+    label: 'hold decisions: an operator decides a listed row',
+    sql: `SELECT decide_transaction_hold('TXN_MIGCHECK_HD_AUTHORISED', 'CONFIRMED', 'the verifier decides this');`,
+  },
+  {
+    label: 'hold decisions: a decision is not undone by a rollback',
+    runDownScript: [TRANSACTION_HOLD_DECISION],
+    mustFail: 'refusing to drop the decisions',
+  },
+  {
+    label: 'hold decisions: the decision is removed with its guard lifted',
+    sql: `ALTER TABLE "transaction_hold_decision" DISABLE TRIGGER "trg_transaction_hold_decision_guard";
+          DELETE FROM "transaction_hold_decision" WHERE transaction_id = 'TXN_MIGCHECK_HD_AUTHORISED';
+          ALTER TABLE "transaction_hold_decision" ENABLE TRIGGER "trg_transaction_hold_decision_guard";`,
+  },
+  {
+    label: 'hold decisions: a later move is not undone by the rollback',
+    sql: `UPDATE "transaction" SET settlement_authorised_at = now() WHERE id = 'TXN_MIGCHECK_HD_RESTORED';`,
+  },
+  HELD_AT_ACCEPTED('hold decisions'),
+  {
+    label: 'hold decisions: down',
+    runDownScript: [
+      HOLD_FUNDED_AT_COMMIT,
+      UTC_CLOCK_DEFAULTS,
+      TRANSACTION_FUNDED_HOLD,
+      TRANSACTION_HOLD_DECISION,
+      SETTLEMENT_CREATION_PROOF,
+    ],
+  },
+  {
+    label: 'hold decisions: down puts back only what up moved and nothing moved since',
+    sql: `DO $$
+          BEGIN
+            IF (SELECT string_agg(status::text, ' ' ORDER BY id COLLATE "C") FROM "transaction"
+                 WHERE id IN ('TXN_MIGCHECK_HD_AUTHED', 'TXN_MIGCHECK_HD_GONE', 'TXN_MIGCHECK_HD_MOVED',
+                              'TXN_MIGCHECK_HD_RESTORED', 'TXN_MIGCHECK_HD_TERMINAL'))
+               IS DISTINCT FROM 'HELD HELD HELD PENDING_SETTLEMENT HELD' THEN
+              RAISE EXCEPTION 'the rollback did not put them back as it should';
+            END IF;
+          END $$;`,
+  },
+  {
+    label:
+      'hold decisions: disputed again, foreign hold gone, refunded, authorised, and one with no record',
+    sql: `${TRANSACTION_MIGCHECK('TXN_MIGCHECK_HD_RESOLVED')}
+          ${DISPUTE_MIGCHECK('TXN_MIGCHECK_HD_RESOLVED', 'resolved since the backfill', '2026-10-03T10:00:00Z', '2026-10-04T10:00:00Z')}
+          UPDATE "transaction" SET status = 'REFUNDED' WHERE id = 'TXN_MIGCHECK_HD_RESOLVED';
+          ${HOLD_DECISION_FOREIGN('RESOLVED')}
+          UPDATE "transaction" SET status = 'REFUNDED' WHERE id = 'TXN_MIGCHECK_HD_TERMINAL';
+          UPDATE "transaction" SET settlement_authorised_at = now() WHERE id = 'TXN_MIGCHECK_HD_AUTHED';
+          ${RSD_DISPUTE('TXN_MIGCHECK_HD_MOVED', 'disputed again', '2026-10-05T10:00:00Z')}
+          ${RSD_MOVE('TXN_MIGCHECK_HD_MOVED', `status = 'HELD', dispute_resolved_at = '2026-10-06T10:00:00Z', dispute_resolved_by = 'USR-MIGCHECK-PLATFORM'`)}
+          DELETE FROM "wallet_hold" WHERE id = 'HLD_MIGCHECK_HD_GONE_FOREIGN';`,
+  },
+  { label: 'hold decisions: up over them', reapply: true },
+  {
+    label: 'hold decisions: none of those moved since is proven now: each stands, listed',
+    sql: HOLD_DECISION_FOUND(
+      'AUTHED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'AUTHORISED:AUTHORISED_UNRECORDED_UNPROVEN:PENDING_SETTLEMENT ' +
+        'CLAIMED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'GONE:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'HELD:HELD_UNPROVEN:HELD ' +
+        'MOVED:RETURNED_TO_HELD_UNPROVEN:HELD ' +
+        'RESOLVED:DISPUTE_RESOLVED_UNPROVEN:REFUNDED ' +
+        'RESTORED:RETURNED_TO_HELD_UNPROVEN:PENDING_SETTLEMENT ' +
+        'TERMINAL:RETURNED_TO_HELD_UNPROVEN:REFUNDED',
+    ),
+  },
+  {
+    label:
+      'funded holds, over rows in use: a hold with no journal proves nothing, and whatever claimed escrow is stamped and barred',
+    sql: `DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM "wallet_hold" WHERE id LIKE 'HLD_MIGCHECK_HD_%' AND wallet_hold_funded(id))
+               OR EXISTS (SELECT 1 FROM "transaction" WHERE id LIKE 'TXN_MIGCHECK_HD_%' AND transaction_held_proven(id)) THEN
+              RAISE EXCEPTION 'a hold no journal funded still counts';
+            END IF;
+            IF EXISTS (SELECT 1 FROM "transaction" WHERE id LIKE 'TXN_MIGCHECK_HD_%' AND status = 'HELD' AND held_at IS NULL) THEN
+              RAISE EXCEPTION 'a row HELD when the migration ran was not stamped';
+            END IF;
+            IF EXISTS (SELECT 1 FROM "transaction" t
+                         JOIN "transaction_hold_reconciliation" c ON c.transaction_id = t.id
+                        WHERE t.id LIKE 'TXN_MIGCHECK_HD_%'
+                          AND t.status IN ('HELD', 'PENDING_SETTLEMENT')
+                          AND NOT transaction_settlement_barred(t.id)) THEN
+              RAISE EXCEPTION 'a listed row with no funded hold is payable';
+            END IF;
+            IF NOT transaction_settlement_barred('TXN_MIGCHECK_HD_OWN') THEN
+              RAISE EXCEPTION 'a row on no list with an unfunded hold of its own is payable';
+            END IF;
+            -- Its only hold is for something else: it never claimed escrow, and stays as it was.
+            IF transaction_settlement_barred('TXN_MIGCHECK_HD_PURPOSE')
+               OR (SELECT held_at FROM "transaction" WHERE id = 'TXN_MIGCHECK_HD_PURPOSE') IS NOT NULL THEN
+              RAISE EXCEPTION 'a row that never claimed escrow was barred';
+            END IF;
+          END $$;`,
+  },
+  { label: 'funded holds: the newest rollback first', runDownScript: [HOLD_FUNDED_AT_COMMIT] },
+  {
+    label:
+      'funded holds: the rollback refuses while a row stamped HELD has no hold of its own (FU-182)',
+    runDownScript: [TRANSACTION_FUNDED_HOLD],
+    mustFail: 'refusing to drop held_at',
+  },
+  {
+    label:
+      'funded holds: an operator accepts the loss for those rows (in the probe: stamps cleared)',
+    sql: HELD_AT_UNHELD_CLEARED,
+  },
+  {
+    label: 'funded holds: down, over a row with a hold of its own',
+    runDownScript: [UTC_CLOCK_DEFAULTS, TRANSACTION_FUNDED_HOLD],
+  },
+  { label: 'funded holds: up again', reapply: true },
+  {
+    label: 'funded holds: up restamps the row with a hold of its own, and the row HELD now',
+    sql: `DO $$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM "transaction"
+                        WHERE id IN ('TXN_MIGCHECK_HD_OWN', 'TXN_MIGCHECK_HD_HELD') AND held_at IS NULL) THEN
+              RAISE EXCEPTION 'a row the backfill can tell was not restamped';
+            END IF;
+          END $$;`,
+  },
+  ...FUNDED_FROM_ELSEWHERE_STEPS,
+  {
+    label: 'hold decisions: the stamps cleared again, before the probe rows go',
+    sql: HELD_AT_UNHELD_CLEARED,
+  },
+  {
+    label: 'hold decisions: down past the backfill, before the probe rows go',
+    runDownScript: HOLD_DECISION_DOWNS,
+  },
+  {
+    label: 'hold decisions: the probe rows are removed',
+    sql: `DELETE FROM "wallet_hold" WHERE id LIKE 'HLD_MIGCHECK_HD_%';
+          DELETE FROM "wallet" WHERE id LIKE 'WLT_MIGCHECK_HD_%';
+          DELETE FROM "ledger_account" WHERE id LIKE 'ACC_MIGCHECK_HD_%';
+          DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_HD_%';
+          DELETE FROM "transaction" WHERE id LIKE 'TXN_MIGCHECK_HD_%';`,
+  },
+  { label: 'hold decisions: up with them gone', reapply: true },
 ];
 
 export const ECONOMIC_DATA_ROLLBACK = {
@@ -1748,6 +2401,8 @@ export const ECONOMIC_DATA_ROLLBACK = {
     ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
     ...TRANSACTION_RESOLVED_DISPUTE_STEPS,
     ...SETTLEMENT_REVERSAL_STEPS,
+    ...SETTLEMENT_CREATION_PROOF_STEPS,
+    ...HOLD_DECISION_STEPS,
   ],
 };
 
@@ -2233,6 +2888,12 @@ export const EXPECTED = {
       'settlement_authority_reconciliation',
       // A correction case on a settlement (RLG-002-1, docs/24 Q-76).
       'settlement_reversal',
+      // What 20261105120000 found on rows from before it could prove them (FU-097).
+      'settlement_creation_quarantine',
+      // What 20261105120000 found standing on a decision read from another's hold (#762 r2, F2).
+      'transaction_hold_reconciliation',
+      // Who decided a row of it, and why (FU-138).
+      'transaction_hold_decision',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2278,6 +2939,34 @@ export const EXPECTED = {
       'trg_settlement_append_only',
       'trg_settlement_no_truncate',
       'trg_ledger_account_identity_fixed',
+      // A settlement proves it happened when it is written (FU-097).
+      'trg_settlement_creation_quarantine_frozen',
+      'trg_settlement_creation_quarantine_no_truncate',
+      'trg_settlement_reversal_not_quarantined',
+      'trg_settlement_creation_proven',
+      'trg_commission_creation_proven',
+      'trg_commission_no_truncate',
+      'trg_transaction_settled_proven',
+      'trg_transaction_terms_fixed',
+      'trg_transaction_status_edges',
+      'trg_transaction_no_truncate',
+      'trg_wallet_hold_no_truncate',
+      'trg_wallet_hold_reference_bound',
+      'trg_wallet_owner_fixed',
+      'trg_transaction_id_unclaimed',
+      'trg_transaction_hold_reconciliation_frozen',
+      'trg_transaction_hold_reconciliation_no_truncate',
+      'trg_transaction_hold_decision_guard',
+      'trg_transaction_hold_decision_no_truncate',
+      // Money moves only against a funded hold of its own (FU-163, FU-164).
+      'trg_transaction_held_at',
+      'trg_wallet_hold_resolved_only_funded',
+      'trg_wallet_hold_inserted_only_funded',
+      'trg_wallet_hold_terms_fixed',
+      // A hold is funded at commit, by the payer's own money (FU-182).
+      'trg_wallet_hold_funded_at_commit',
+      'trg_ledger_entry_hold_journal_closed',
+      'trg_journal_hold_funding_final',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -2320,6 +3009,25 @@ export const EXPECTED = {
       'reject_settlement_reversal_journal_undo',
       'reject_settlement_mutation',
       'reject_ledger_account_identity_change',
+      'assert_settlement_creation_proven',
+      'reject_settlement_creation_quarantine_change',
+      'reject_settlement_reversal_of_quarantined',
+      'reject_commission_truncate',
+      'reject_transaction_terms_change',
+      'enforce_transaction_settlement_edges',
+      'transaction_holds',
+      'wallet_hold_funded',
+      'stamp_transaction_held_at',
+      'enforce_wallet_hold_resolved_only_funded',
+      'enforce_wallet_hold_terms_fixed',
+      'assert_wallet_hold_funded_at_commit',
+      'reject_hold_journal_leg',
+      'reject_hold_journal_reversal',
+      'reject_obligation_record_truncate',
+      'enforce_wallet_hold_reference',
+      'reject_wallet_owner_change',
+      'enforce_transaction_id_unclaimed',
+      'reject_transaction_hold_reconciliation_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -2353,6 +3061,12 @@ export const EXPECTED = {
       'settlement_reversal_transaction_id_fkey',
       'settlement_reversal_settlement_id_fkey',
       'settlement_reversal_journal_id_fkey',
+      'ck_settlement_creation_quarantine_source',
+      'ck_settlement_creation_quarantine_reason',
+      'ck_transaction_hold_reconciliation_outcome',
+      'transaction_hold_reconciliation_transaction_id_fkey',
+      'settlement_journal_id_fkey',
+      'commission_journal_id_fkey',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
@@ -2443,12 +3157,19 @@ export const EXPECTED = {
       'order_status_history',
       // 20261015120000_saga_step (D-053): replay records of saga activities.
       'saga_step',
+      // 20261105130000_saga_unconfirmed_call (FU-104): the record of unconfirmed economic calls.
+      'saga_unconfirmed_call',
+      // 20261106120000_saga_monitor_clock (#792 r1 F2): the forward-only reference of the money gauges.
+      'saga_monitor_clock',
       // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
       'return_request',
       'return_line',
       'return_status_history',
       // 20261017160000_return_dispatch_reservation (Q-133 (9)(a)): a reconciliation's release.
       'return_dispatch_release',
+      // 20261107130000_order_hold_deadline_backfill (FU-234): the backfill's append-only record.
+      'order_hold_deadline_backfill',
+      'order_hold_deadline_revocation',
     ],
     triggers: [
       'tg_return_request_guard',
@@ -2462,6 +3183,10 @@ export const EXPECTED = {
       'tg_return_dispatch_release_no_truncate',
       // 20261103130000_order_dispute_origin (D-083): where a dispute found its order.
       'trg_order_dispute_origin',
+      'tg_order_hold_deadline_backfill_guard',
+      'tg_order_hold_deadline_backfill_no_truncate',
+      'tg_order_hold_deadline_revocation_guard',
+      'tg_order_hold_deadline_revocation_no_truncate',
     ],
     functions: [
       'assign_order_dispute_origin',
@@ -2470,6 +3195,7 @@ export const EXPECTED = {
       'return_line_guard',
       'return_status_history_guard',
       'return_dispatch_release_guard',
+      'order_hold_deadline_audit_guard',
     ],
     constraints: [
       'ck_review_quality_rating',
@@ -2488,6 +3214,9 @@ export const EXPECTED = {
       'ck_return_dispatch_release_actors',
       'fk_return_dispatch_release_request',
       'ck_saga_step_key_not_blank',
+      'ck_saga_unconfirmed_call_not_blank',
+      'ck_saga_unconfirmed_call_command_whole',
+      'ck_saga_monitor_clock_single_row',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',
@@ -2503,6 +3232,10 @@ export const EXPECTED = {
       // RECEIPT_CONFIRMED without the buyer's recorded receipt.
       'ck_order_dispute_raised_from',
       'ck_order_receipt_confirmed_has_evidence',
+      'ck_order_hold_deadline_backfill_actor',
+      'ck_order_hold_deadline_revocation_actor',
+      'fk_order_hold_deadline_backfill_tenant',
+      'fk_order_hold_deadline_revocation_assignment',
     ],
     // Added by 20260929120100_order_idempotency_key_unique (review of #141):
     // one Idempotency-Key places at most one order per organization, even
@@ -3079,6 +3812,7 @@ export const EXPECTED = {
       'tg_deduction_rule_change_no_truncate',
       'tg_deduction_rule_change_effect',
       'tg_deduction_rule_insert',
+      'tg_statement_deduction_00_lock_rule',
     ],
     functions: [
       'contract_guard',
@@ -3089,6 +3823,7 @@ export const EXPECTED = {
       'deduction_rule_change_guard',
       'deduction_rule_change_effect',
       'deduction_rule_insert_guard',
+      'statement_deduction_lock_rule',
       'deduction_rule_name_is_canonical',
       'deduction_rule_name_key',
     ],
@@ -4233,6 +4968,295 @@ $ledger$;`;
 }
 
 // ---------------------------------------------------------------------------
+// Down chains in a rollback against real data (FU-240)
+//
+// A step's `runDownScript` list is run as written, and nothing made it name
+// every migration it has to. One that rolls back a migration while a newer one
+// stays applied leaves that newer one's ledger row in place: the next
+// `migrate deploy` re-applies only what the chain removed, and an object the
+// newer migration had redefined — a column default, a function body — comes
+// back in its older form. #906's 20261106140000_utc_clock_defaults sat above
+// economic's chains that way, and the whole-chain reversal after them compared
+// its down against the same lost state, so the check stayed green and proved
+// nothing (found on #936).
+//
+// Two guards, one before anything runs and one against the database:
+//
+//   - `downChainProblems` walks the steps against the ledger they leave (every
+//     migration applied at first, a deploy re-applies whatever is pending) and
+//     refuses a chain that rolls back a migration while a newer one that
+//     redefines one of its objects stays applied — naming that newer migration
+//     — and every step whose effect on the ledger it cannot tell: a down of a
+//     migration that is not applied, a chain out of order, a deploy or a down
+//     while a failed deploy is unresolved, a SQL step that writes the ledger.
+//     The rollback must also end with every migration applied, which the
+//     whole-chain reversal starts from. A newer migration that redefines
+//     nothing the chain rolls back may stay applied: most probes take one old
+//     migration down under many unrelated ones, and that state is the point.
+//   - the runner then asserts that the rollback ends where it began: exactly
+//     the deployed schema, every migration in the ledger. What the name
+//     matching below cannot see — a redefinition inside dynamic SQL, a probe's
+//     leftover — fails there, naming the migrations the chains left applied.
+// ---------------------------------------------------------------------------
+
+const SQL_NAME = String.raw`((?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*))*)`;
+const SQL_KIND = String.raw`(?:TABLE|(?:UNIQUE\s+)?INDEX|TYPE|FUNCTION|PROCEDURE|(?:CONSTRAINT\s+)?TRIGGER|(?:MATERIALIZED\s+)?VIEW|SEQUENCE|DOMAIN|POLICY|RULE)`;
+
+/** The parts of a possibly qualified, possibly quoted name, unquoted; unquoted parts folded. */
+function nameParts(text) {
+  const parts = [];
+  for (const [, quoted, bare] of text.matchAll(/"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*)/g)) {
+    parts.push(quoted === undefined ? bare.toLowerCase() : quoted.replaceAll('""', '"'));
+  }
+  return parts;
+}
+/** An object's own name: the last part, its schema dropped (each service owns one). */
+const objectName = (text) => nameParts(text).at(-1);
+
+/**
+ * A forward migration's statements, read as Prisma's deploy ran it: with
+ * standard_conforming_strings on, so a backslash in a plain string is only a character
+ * (which `lexSql` reports, for the down files it vets). Anything else it cannot read
+ * throws: then nothing can be said about what the migration changes.
+ */
+function lexedStatements(sql, what) {
+  const lexed = lexSql(sql);
+  const problems = lexed.problems.filter(
+    (problem) => !problem.startsWith('a backslash inside an ordinary'),
+  );
+  if (problems.length > 0) {
+    throw new Error(`${what} cannot be read as SQL: ${problems.join('; ')}`);
+  }
+  return lexed.statements;
+}
+
+/**
+ * What a migration creates: every object a `CREATE [OR REPLACE] <kind>` names, every
+ * constraint an `ADD CONSTRAINT` names, and `table.column` for every `ADD COLUMN`.
+ */
+export function objectsCreated(sql, what = 'migration.sql') {
+  const created = new Set();
+  for (const statement of lexedStatements(sql, what)) {
+    const create = new RegExp(
+      String.raw`^CREATE\s+(?:OR\s+REPLACE\s+)?${SQL_KIND}\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (create) created.add(objectName(create[1]));
+    for (const [, name] of statement.matchAll(
+      new RegExp(String.raw`\bADD\s+CONSTRAINT\s+${SQL_NAME}`, 'gi'),
+    )) {
+      created.add(objectName(name));
+    }
+    const table = new RegExp(
+      String.raw`^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (table) {
+      for (const [, column] of statement.matchAll(
+        new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?${SQL_NAME}`, 'gi'),
+      )) {
+        created.add(`${objectName(table[1])}.${objectName(column)}`);
+      }
+    }
+  }
+  return created;
+}
+
+/**
+ * What a migration changes of objects that exist before it: every object a
+ * `CREATE OR REPLACE`, `ALTER`, `DROP` or `COMMENT ON` names, every table a trigger,
+ * index, policy or rule is created `ON`, every constraint named anywhere, and
+ * `table.column` for a column it alters, drops, renames or comments on.
+ */
+export function objectsRedefined(sql, what = 'migration.sql') {
+  const touched = new Set();
+  for (const statement of lexedStatements(sql, what)) {
+    const head = new RegExp(
+      String.raw`^(?:CREATE\s+OR\s+REPLACE|ALTER|DROP|COMMENT\s+ON)\s+${SQL_KIND}\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (head) touched.add(objectName(head[1]));
+    const column = new RegExp(String.raw`^COMMENT\s+ON\s+COLUMN\s+${SQL_NAME}`, 'i').exec(
+      statement,
+    );
+    if (column) {
+      const parts = nameParts(column[1]);
+      touched.add(parts.at(-2));
+      touched.add(`${parts.at(-2)}.${parts.at(-1)}`);
+    }
+    if (/^(?:CREATE|COMMENT)\b/i.test(statement)) {
+      for (const [, table] of statement.matchAll(
+        new RegExp(String.raw`\bON\s+(?:ONLY\s+)?${SQL_NAME}`, 'gi'),
+      )) {
+        touched.add(objectName(table));
+      }
+    }
+    for (const [, name] of statement.matchAll(
+      new RegExp(String.raw`\bCONSTRAINT\s+(?:IF\s+EXISTS\s+)?${SQL_NAME}`, 'gi'),
+    )) {
+      touched.add(objectName(name));
+    }
+    const table = new RegExp(
+      String.raw`^ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${SQL_NAME}`,
+      'i',
+    ).exec(statement);
+    if (table) {
+      for (const [, name] of statement.matchAll(
+        new RegExp(
+          String.raw`\b(?:ALTER|DROP|RENAME)\s+COLUMN\s+(?:IF\s+EXISTS\s+)?${SQL_NAME}`,
+          'gi',
+        ),
+      )) {
+        touched.add(`${objectName(table[1])}.${objectName(name)}`);
+      }
+    }
+  }
+  return touched;
+}
+
+const LEDGER_WRITE =
+  /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?(?:"?[A-Za-z_][A-Za-z0-9_]*"?\s*\.\s*)?"?_prisma_migrations\b/gi;
+/** The one ledger write a probe may make: dropping the rows a resolved failure left. */
+const ROLLED_BACK_CLEANUP =
+  /^DELETE\s+FROM\s+"?_prisma_migrations"?\s+WHERE\s+(?:(?!\bOR\b)[\s\S])*\bAND\s+rolled_back_at\s+IS\s+NOT\s+NULL$/i;
+
+/** Whether a SQL step writes the ledger in any way but the rolled-back cleanup. */
+function writesLedger(sql) {
+  const written = [...sql.matchAll(LEDGER_WRITE)].length;
+  if (written === 0) return false;
+  const lexed = lexSql(sql);
+  if (lexed.problems.length > 0) return true;
+  // A write inside a DO body is invisible to the lexer, so counted on the raw text:
+  // every one must be a top-level cleanup statement.
+  return (
+    lexed.statements.filter((statement) => ROLLED_BACK_CLEANUP.test(statement)).length !== written
+  );
+}
+
+/**
+ * Every problem with a rollback's steps, as the ledger they leave tells it (see the
+ * section comment), and for each down step the newer migrations it leaves applied.
+ *
+ * `migrations` is the service's migration directory, sorted; `readSql(name)` returns a
+ * migration's migration.sql (and throws if there is none).
+ *
+ * @returns {{ problems: string[], keptApplied: Map<number, string[]> }}
+ */
+export function downChainProblems(dataRollback, migrations, readSql) {
+  const problems = [];
+  const keptApplied = new Map();
+  const known = new Set(migrations);
+  const applied = new Set(migrations);
+  let unresolvedFailure = false;
+  const sqlOf = new Map();
+  const read = (name) => {
+    if (!sqlOf.has(name)) sqlOf.set(name, readSql(name));
+    return sqlOf.get(name);
+  };
+  const created = (name) => objectsCreated(read(name), `${name}/migration.sql`);
+  const redefined = (name) => objectsRedefined(read(name), `${name}/migration.sql`);
+
+  for (const [index, step] of dataRollback.steps.entries()) {
+    const where = `step ${index + 1} ("${step.label}")`;
+    if (step.runDownScript) {
+      const chain = Array.isArray(step.runDownScript)
+        ? step.runDownScript
+        : [dataRollback.migration];
+      if (chain.length === 0) {
+        problems.push(`${where}: a down chain names no migration`);
+        continue;
+      }
+      if (unresolvedFailure) {
+        problems.push(
+          `${where}: a down while a failed deploy is unresolved — which migrations that deploy applied cannot be told`,
+        );
+        continue;
+      }
+      const unknown = chain.filter((name) => !known.has(name));
+      if (unknown.length > 0) {
+        problems.push(`${where}: no such migration: ${unknown.join(', ')}`);
+        continue;
+      }
+      const notApplied = chain.filter((name) => !applied.has(name));
+      if (notApplied.length > 0) {
+        problems.push(
+          `${where}: rolls back ${notApplied.join(', ')}, which is not applied at that point`,
+        );
+        continue;
+      }
+      if (chain.some((name, at) => at > 0 && chain[at - 1] <= name)) {
+        problems.push(`${where}: a down chain runs newest first: ${chain.join(', ')}`);
+        continue;
+      }
+      const oldest = chain.at(-1);
+      const kept = migrations.filter(
+        (name) => name > oldest && applied.has(name) && !chain.includes(name),
+      );
+      // A refusal must change nothing (the runner proves it), so it leaves the ledger as it was.
+      if (step.mustFail) continue;
+      keptApplied.set(index, kept);
+      for (const newer of kept) {
+        const rolledBelow = chain.filter((name) => name < newer);
+        const ours = new Set(rolledBelow.flatMap((name) => [...created(name)]));
+        const lost = [...redefined(newer)].filter((object) => ours.has(object)).sort();
+        if (lost.length > 0) {
+          problems.push(
+            `${where}: rolls back ${rolledBelow.join(', ')} while ${newer} stays applied, and ` +
+              `${newer} redefines ${lost.join(', ')}: the re-deploy would skip it and bring those back ` +
+              `in their older form. List ${newer} in the chain, before ${rolledBelow[0]}.`,
+          );
+        }
+      }
+      for (const name of chain) applied.delete(name);
+    } else if (step.reapply) {
+      if (unresolvedFailure) {
+        problems.push(
+          `${where}: a deploy while a failed deploy is unresolved is refused (P3009), not applied`,
+        );
+        continue;
+      }
+      for (const name of migrations) applied.add(name);
+    } else if (step.deployMustFail) {
+      if (unresolvedFailure) continue; // P3009: nothing is applied.
+      if (migrations.every((name) => applied.has(name))) {
+        problems.push(`${where}: a deploy that must fail, with no migration pending`);
+        continue;
+      }
+      unresolvedFailure = true;
+    } else if (step.resolveRolledBack) {
+      const name = step.resolveRolledBack;
+      if (!unresolvedFailure || !known.has(name) || applied.has(name)) {
+        problems.push(
+          `${where}: resolves ${name}, which is not a pending migration of a failed deploy`,
+        );
+        continue;
+      }
+      // The deploy applied, in order, everything pending before the one that failed.
+      for (const earlier of migrations) if (earlier < name) applied.add(earlier);
+      unresolvedFailure = false;
+    } else if (typeof step.sql === 'string') {
+      if (writesLedger(step.sql)) {
+        problems.push(
+          `${where}: writes _prisma_migrations other than by removing rolled-back rows, so what it leaves applied cannot be told`,
+        );
+      }
+    } else {
+      problems.push(`${where}: a step of no known kind`);
+    }
+  }
+  if (unresolvedFailure) {
+    problems.push('the rollback ends with a failed deploy unresolved');
+  }
+  const pending = migrations.filter((name) => !applied.has(name));
+  if (pending.length > 0) {
+    problems.push(
+      `the rollback ends with ${pending.join(', ')} rolled back; the whole-chain reversal starts from every migration applied`,
+    );
+  }
+  return { problems, keptApplied };
+}
+
+// ---------------------------------------------------------------------------
 // Scratch databases: one per run, marked, dropped only by the run that made it
 // ---------------------------------------------------------------------------
 
@@ -4376,70 +5400,6 @@ export function sqlstateFrom(stderr) {
     if (!code.startsWith('00') && !code.startsWith('01')) found = code;
   }
   return found;
-}
-
-/**
- * Query parameters only Prisma understands. Everything else — `sslmode`,
- * `sslrootcert`, `connect_timeout`, `application_name` and the rest of
- * libpq's — is kept, so psql connects exactly as configured.
- */
-const PRISMA_ONLY_PARAMETERS = [
-  'schema',
-  'connection_limit',
-  'pool_timeout',
-  'socket_timeout',
-  'pgbouncer',
-  'statement_cache_size',
-];
-
-/**
- * `target` with `params` as its query, each name and value percent-encoded.
- *
- * Not `URLSearchParams`: it writes a space as `+`, which libpq's URI parser
- * does not decode — `options=-c TimeZone=UTC` (L7-37) would reach the server
- * as `-c+TimeZone=UTC` and the connection be refused. Prisma reads either.
- */
-function withLibpqQuery(target, params) {
-  const query = params
-    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
-    .join('&');
-  target.search = '';
-  return query ? `${target.toString()}?${query}` : target.toString();
-}
-
-/**
- * What every libpq helper below refuses a URL that does not parse with: a fixed
- * text. `new URL`'s own error keeps the whole input on `.input`, which an
- * uncaught throw prints — the password included, since these run before it is
- * taken out (#385 r5).
- */
-export const UNREADABLE_DATABASE_URL =
-  'the database URL cannot be read as a URL, so it is not handed to psql; its value is not repeated';
-
-/** `url` as libpq should see it: Prisma's own parameters removed, libpq's kept. */
-export function libpqUrl(url) {
-  const target = readUrl(url, { refusal: UNREADABLE_DATABASE_URL });
-  const kept = [...target.searchParams].filter(([name]) => !PRISMA_ONLY_PARAMETERS.includes(name));
-  return withLibpqQuery(target, kept);
-}
-
-/**
- * How to hand `url` to psql without putting its password on the command line,
- * where any local user can read it (`ps`, `/proc/<pid>/cmdline`) for as long
- * as the process runs (D-045 follow-up). `target` is the libpq URL with the
- * password removed — from the userinfo and from a `password=` parameter alike
- * — and `env` carries it as `PGPASSWORD`, which libpq reads when the URL has
- * none. Spread `env` over the child's environment; it is empty when the URL
- * has no password, so an inherited `PGPASSWORD` or `.pgpass` still applies.
- */
-export function libpqInvocation(url) {
-  const target = readUrl(libpqUrl(url), { refusal: UNREADABLE_DATABASE_URL });
-  const password = target.password
-    ? decodeURIComponent(target.password)
-    : target.searchParams.get('password');
-  target.password = '';
-  const kept = [...target.searchParams].filter(([name]) => name !== 'password');
-  return { target: withLibpqQuery(target, kept), env: password ? { PGPASSWORD: password } : {} };
 }
 
 /**
@@ -4753,7 +5713,7 @@ export function downFileMode(sql) {
  * the commands it runs; psql has no such parameter, and an unqualified name in
  * a down would otherwise resolve against `public`. A separate `-c`, run before
  * the file in the same session, rather than `PGOPTIONS`, which a URL's own
- * `options` parameter would silently override.
+ * `options` parameter would replace.
  */
 export function psqlFileRunner(url, schema) {
   if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {

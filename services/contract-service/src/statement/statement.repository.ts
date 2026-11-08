@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
+import { Prisma } from '../generated/prisma';
 import type {
   Contract,
   DeductionRule,
@@ -245,7 +246,12 @@ export class StatementRepository {
     return rows.map((row) => row.id);
   }
 
-  /** The employer's deduction rules in force among `ids` (Q-96 (6)); any other id is not here. */
+  /**
+   * The selected rules in force, held FOR SHARE until this transaction commits (FU-089).
+   * Contract first, then rules in C id order; RETIRE takes just its one rule NO KEY UPDATE
+   * (#729), never a contract/statement. No upgrade or reverse edge. Rules are immutable except
+   * retirement; after a wait PostgreSQL rechecks retired_at, so a retired rule is absent.
+   */
   rulesInForce(
     tx: ExtendedPrismaClient,
     organizationId: string,
@@ -255,9 +261,15 @@ export class StatementRepository {
     return runUnscoped(
       'a statement applies the deduction rules its contract’s employer configured, named by that organization',
       () =>
-        tx.deductionRule.findMany({
-          where: { organizationId, id: { in: [...ids] }, retiredAt: null },
-        }),
+        tx.$queryRaw<DeductionRule[]>(Prisma.sql`
+          SELECT id, organization_id AS "organizationId", name, rate_bp AS "rateBp", base,
+                 created_at AS "createdAt", created_by AS "createdBy", retired_at AS "retiredAt",
+                 approved_change_id AS "approvedChangeId"
+            FROM deduction_rule
+           WHERE organization_id = ${organizationId}
+             AND id IN (${Prisma.join([...new Set(ids)].sort())}) AND retired_at IS NULL
+           ORDER BY id COLLATE "C" FOR SHARE
+        `),
     );
   }
 
