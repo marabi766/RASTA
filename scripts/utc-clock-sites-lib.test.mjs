@@ -1375,6 +1375,135 @@ test('FU-274 scan reaches opaque input without clock words', () => {
   );
 });
 
+// r1: the executor may consume text through data flow, outside its argument parentheses.
+const R1_FRAGMENTS = `'SEL' || chr(69) || 'CT 1 FROM task WHERE lease_until < n' || chr(111) || 'w()'`;
+for (const [probe, sql] of [
+  ['VALUES', `SELECT query_to_xml(q.s, true, false, NULL) FROM (VALUES (${R1_FRAGMENTS})) q(s)`],
+  ['subquery', `SELECT query_to_xml(q.s, true, false, NULL) FROM (SELECT ${R1_FRAGMENTS} AS s) q`],
+  ['CTE', `WITH q(s) AS (SELECT ${R1_FRAGMENTS}) SELECT query_to_xml(s, true, false, NULL) FROM q`],
+  ['LATERAL', `SELECT * FROM (VALUES (${R1_FRAGMENTS})) q(s), LATERAL ts_stat(q.s)`],
+  ['parameter', `SELECT query_to_xml($1, true, false, NULL)`],
+  ['direct control', `SELECT query_to_xml(${R1_FRAGMENTS}, true, false, NULL)`],
+]) {
+  test(`FU-274 r1 executor data flow: ${probe}`, () => {
+    assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+    assert.match(definitionProblems({ body: sql, header: '' }, r2Scope).join(), /R0/);
+    migrationRefused(`${sql};`);
+    migrationRefused(`DO $outer$<<job>> BEGIN PERFORM (${sql}); END job$outer$;`);
+  });
+}
+for (const call of [
+  'query_to_xml',
+  'query_to_xmlschema',
+  'query_to_xml_and_xmlschema',
+  'ts_stat',
+  'ts_rewrite',
+  'dblink_exec',
+  'dblink_send_query',
+  'cron.schedule',
+  'cron.schedule_in_database',
+  'pg_background_launch',
+  'pg_catalog."query_to_xml"',
+  '"pg_catalog".ts_stat',
+  '"cron"."schedule"',
+]) {
+  test(`FU-274 r1 executor without literal input: ${call}`, () => {
+    const body = `<<job>> DECLARE q text; BEGIN q := ${R1_FRAGMENTS}; PERFORM ${call}(q); END job`;
+    assert.match(problemsIn(`SELECT ${call}($1)`, r2Scope).join(), /R0/);
+    assert.match(definitionProblems({ body, header: '' }, r2Scope).join(), /R0/);
+    migrationRefused(`DO $outer$${body}$outer$;`);
+    migrationRefused(`DO $outer$<<job>> BEGIN PERFORM ${call}(q); END job$outer$;`);
+  });
+}
+test('FU-274 r1 executor in a headless string uses the same reader', () => {
+  const sql = `SELECT $b$ts_stat($1)$b$`;
+  assert.match(problemsIn(sql, r2Scope).join(), /R0/);
+  migrationRefused(`${sql};`);
+  migrationRefused(`DO $outer$BEGIN PERFORM $b$ts_stat($1)$b$; END$outer$;`);
+});
+
+// Each review body reaches the shared reader through production strings, one-shot migrations,
+// and DO-body strings. Routine DDL refusal alone must not mask a broken string reader.
+for (const [probe, kind, body] of [
+  [
+    'labeled EXECUTE',
+    'FUNCTION f() RETURNS void',
+    `<<l>> BEGIN EXECUTE 'UPDATE task SET lease_until = n' || 'ow()'; END`,
+  ],
+  [
+    'labeled INSERT',
+    'FUNCTION f() RETURNS void',
+    `<<l>> BEGIN INSERT INTO task (id) VALUES (1); END`,
+  ],
+  [
+    'procedure',
+    'PROCEDURE p()',
+    `<<l>> BEGIN EXECUTE 'UPDATE task SET lease_until = n' || 'ow()'; END`,
+  ],
+  [
+    'DECLARE then label',
+    'FUNCTION f() RETURNS void',
+    `DECLARE x int := 1; <<l>> BEGIN EXECUTE 'UPDATE task SET lease_until = n' || 'ow()'; END`,
+  ],
+  [
+    'empty DECLARE',
+    'FUNCTION f() RETURNS void',
+    `DECLARE BEGIN INSERT INTO task (id) VALUES (1); END`,
+  ],
+  [
+    'RETURN QUERY EXECUTE',
+    'FUNCTION f() RETURNS SETOF task',
+    `<<l>> BEGIN RETURN QUERY EXECUTE 'SEL' || chr(69) || 'CT * FROM task'; END`,
+  ],
+  ['BEGIN control', 'FUNCTION f() RETURNS void', `BEGIN INSERT INTO task (id) VALUES (1); END`],
+  [
+    'format EXECUTE',
+    'PROCEDURE p()',
+    `<<l>> DECLARE q text; BEGIN q := format('%s', 'pieces'); EXECUTE q; END`,
+  ],
+]) {
+  test(`FU-274 r1 body reader: ${probe}`, () => {
+    assert.match(
+      problemsIn(`CREATE ${kind} LANGUAGE plpgsql AS $b$${body}$b$`, r2Scope).join(),
+      /R0/,
+    );
+    assert.match(problemsIn(`SELECT $b$${body}$b$`, r2Scope).join(), /R0/);
+    migrationRefused(`SELECT $b$${body}$b$;`);
+    migrationRefused(`DO $outer$<<job>> BEGIN PERFORM $b$${body}$b$; END job$outer$;`);
+    assert.ok(definitionProblems({ body, header: '' }, r2Scope).length > 0);
+  });
+}
+for (const prefix of ['<<l>>', 'DECLARE', 'BEGIN', 'THEN', 'ELSE', 'LOOP', 'RETURN QUERY']) {
+  test(`FU-274 r1 statement start: ${prefix}`, () => {
+    assert.match(problemsIn(`${prefix} EXECUTE $1`, r2Scope).join(), /R0/);
+    assert.match(
+      problemsIn(`SELECT $b$${prefix} INSERT INTO task (id) VALUES (1)$b$`, r2Scope).join(),
+      /R0/,
+    );
+  });
+}
+for (const kind of [
+  'FUNCTION f() RETURNS void',
+  'OR REPLACE FUNCTION f() RETURNS void',
+  'PROCEDURE p()',
+]) {
+  test(`FU-274 r1 production routine DDL: ${kind}`, () => {
+    // No string or clock: routine creation is refused independently of body recognition.
+    assert.match(problemsIn(`CREATE ${kind} LANGUAGE plpgsql AS $1`, r2Scope).join(), /R0/);
+  });
+}
+test('FU-274 r1 source scan reaches both readers without clock words', () => {
+  for (const sql of [
+    `SELECT query_to_xml($1, true, false, NULL)`,
+    `CREATE PROCEDURE p() LANGUAGE plpgsql AS $$<<l>> BEGIN INSERT INTO task (id) VALUES (1); END$$`,
+    `SELECT $$<<l>> BEGIN INSERT INTO task (id) VALUES (1); END$$`,
+  ])
+    assert.match(
+      scanOf('x-service', R3_BASE, `export const sql = ${JSON.stringify(sql)};`).join(),
+      /R0/,
+    );
+});
+
 test('the repository passes', () => {
   assert.deepEqual(utcClockProblems(REPOSITORY), []);
 });
