@@ -1293,6 +1293,7 @@ for (const expression of [
       assert.match(problemsIn(sql, r2Scope).join(), /R0/);
       migrationRefused(sql);
       migrationRefused(`DO $$BEGIN PERFORM ${call}('c', ${expression}); END$$;`);
+      migrationRefused(`DO $$<<job>> BEGIN PERFORM ${call}('c', ${expression}); END job$$;`);
       assert.match(definitionProblems({ body: sql, header: '' }, r2Scope).join(), /R0/);
     });
   }
@@ -1340,6 +1341,15 @@ for (const modifier of ['TEMP', 'TEMPORARY', 'GLOBAL TEMPORARY', 'LOCAL TEMP']) 
     assert.match(problemsIn(`CREATE ${modifier} TABLE task (id text);`, r2Scope).join(), /R0/);
   });
 }
+for (const expression of [
+  `'INSERT' || chr(32) || 'INTO task (id) VALUES (1)'`,
+  `concat_ws(' ', 'INSERT', 'INTO task (id) VALUES (1)')`,
+  `format('%s INTO task (id) VALUES (1)', 'INSERT')`,
+])
+  test(`FU-274 labeled body: ${expression}`, () => {
+    migrationRefused(`DO $$<<job>> BEGIN PERFORM dblink_exec('c', ${expression}); END job$$;`);
+  });
+
 test('FU-274 value calls and prose remain readable', () => {
   for (const sql of [
     `SELECT pg_catalog.format('%s', concat_ws(' ', 'one', 'two'));`,

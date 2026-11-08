@@ -1217,7 +1217,7 @@ function unmodelledExtension(tokens, i = 0) {
 // Calls proven to consume values, never execute them as SQL. An unlisted call receiving a
 // string may execute an opaque expression built from it: do not try to evaluate fragments.
 const VALUE_CALLS = new Set(
-  'timezone date_trunc to_char lower upper coalesce nullif concat concat_ws format chr length octet_length convert_to encode decode substring replace hashtextextended pg_advisory_xact_lock set_config current_setting nextval has_table_privilege extract date_bin min max sum bool_and strpos jsonb_build_object hashtext translate string_agg int4send digest regexp_replace trim btrim count array_agg json_build_object json_agg pg_has_role has_database_privilege has_schema_privilege pg_try_advisory_xact_lock sha256 unnest tsrange greatest least'.split(
+  'timezone date_trunc to_char lower upper coalesce nullif concat concat_ws format chr length octet_length convert_to encode decode substring replace hashtextextended pg_advisory_xact_lock set_config current_setting nextval has_table_privilege extract date_bin min max sum bool_and strpos jsonb_build_object jsonb_populate_record hashtext translate string_agg int4send digest regexp_replace trim btrim count array_agg json_build_object json_agg pg_has_role has_database_privilege has_schema_privilege pg_try_advisory_xact_lock sha256 unnest tsrange greatest least'.split(
     ' ',
   ),
 );
@@ -1247,12 +1247,7 @@ function opaqueStringCall(tokens, i) {
  * value (first, or after a `;`), or it holds a clock call. Prose heads no statement.
  */
 function holdsSql(tokens, i) {
-  if (
-    (tokens.some((_, k) => headsStatement(tokens, k)) ||
-      isWord(tokens[0], 'return', 'perform', 'declare')) &&
-    opaqueStringCall(tokens, i)
-  )
-    return true;
+  if (opaqueStringCall(tokens, i)) return true;
   const values = chainValues(tokens, i);
   if (values === null) return true;
   return values.some((value) => {
@@ -1456,6 +1451,16 @@ export const REVIEWED_LITERALS = [
     file: 'services/construction-service/src/tender/tender-approval.errors.ts',
     text: 'execute (the tender changed, or the command is not the one approved); ask for approval again',
     why: 'a sentence of an error message that starts with "execute": no SQL is run from it',
+  },
+  {
+    file: 'services/api-gateway/src/proxy/rate-limiter.ts',
+    sha256: '77db5042c85ca53377753a751bc109e95837b778dabca7917c97c610f1512f4b',
+    why: 'Lua sliding-window script: redis.call executes Redis sorted-set commands, never SQL',
+  },
+  {
+    file: 'packages/contracts/src/common/__tests__/zod-stock-oracle.ts',
+    sha256: '7933cf2a7e2a89de22b992f171c83f70c959e8d2434dc092c041ca18d62a1d6e',
+    why: 'JavaScript child-process program: require loads modules, never SQL',
   },
 ];
 export const REVIEWED_FUNCTIONS = [
