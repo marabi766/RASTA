@@ -300,6 +300,7 @@ model Order {
   review       Review?
   sagaSteps    SagaStep[]
   sagaUnconfirmedCalls SagaUnconfirmedCall[]
+  holdDeadlineBackfill OrderHoldDeadlineBackfill?
 
   @@unique([organizationId, idempotencyKey], map: "uq_order_org_idempotency_key")
   @@unique([organizationId, id], map: "uq_order_tenant_id")
@@ -469,6 +470,27 @@ model SagaUnconfirmedCall {
   /// `ix_saga_unconfirmed_call_open`, which Prisma cannot express.
   @@id([organizationId, orderId, operation, subject], map: "saga_unconfirmed_call_pkey")
   @@map("saga_unconfirmed_call")
+}
+
+/// The audit trail of the legacy hold-deadline backfill (FU-234): one row per order it
+/// gave a deadline, written with that deadline. Only `src/ops/hold-deadline-backfill.ts` writes.
+model OrderHoldDeadlineBackfill {
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_order_hold_deadline_backfill_tenant", onUpdate: Restrict, onDelete: Cascade)
+
+  runId          String   @map("run_id")
+  assignedAt     DateTime @default(now()) @map("assigned_at") @db.Timestamptz(3)
+  /// The deadline given, and the order's status and send count when it was.
+  holdNotAfter   DateTime @map("hold_not_after") @db.Timestamptz(3)
+  status         String
+  holdSendClaims Int      @map("hold_send_claims")
+  /// The operator's instant since which every economic-service replica enforces D-150.
+  economicRuleSince DateTime @map("economic_rule_since") @db.Timestamptz(3)
+
+  @@id([organizationId, orderId], map: "order_hold_deadline_backfill_pkey")
+  @@map("order_hold_deadline_backfill")
 }
 
 model OrderDispute {

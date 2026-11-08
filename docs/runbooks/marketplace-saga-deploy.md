@@ -491,7 +491,8 @@ A saga whose first send predates protocol 10 carries no deadline, and economic-s
 refuses such a request (above), so its hold never lands, but the saga cannot know that from its
 row: nothing can prove it will not land, so that saga never
 takes this exit and waits as protocol 8 did. This is safe only because the platform has not
-launched: no real money waits on such a run. Before launch, drain them: every new send of
+launched: no real money waits on such a run. Before launch, drain them or give their rows a
+deadline (FU-234, below): every new send of
 theirs is refused, so each one not yet held waits for good with the alert on (fail-closed:
 nothing more is held for it; a hold it already placed is still found and followed). `hold_send_claims` defaults to 1 with no deadline, on every
 order the migration finds and any an older build places during the rollout (only `place` of this
@@ -504,6 +505,61 @@ terminal with nothing to refund; otherwise check the obligation at economic-serv
 it as part of the drain. Its input may still carry `economicKeyRetentionHours`
 from protocol 9; it decides nothing live. That exit is kept for replay alone, and a history
 that took it replays it. `HOLD_FENCE` decides what a live history does: changing it needs a new patch.
+
+**Legacy rows: giving them a deadline (FU-234).** A row with a send counted, no deadline and
+its sends open (every order the fence migration found, any an older build placed, and any a saga
+from before protocol 10 claimed) makes every send carry no deadline, so economic-service refuses
+each one (`HOLD_DEADLINE_REQUIRED`) and the saga waits for good. The backfill gives such a row a
+deadline, once, in bounded batches (`statement_timeout` 5 s, `lock_timeout` 3 s per batch), and
+records each one in `order_hold_deadline_backfill` in the same statement.
+
+- **The rule:** `hold_not_after = now() + 24 h` (the database clock, `HOLD_FENCE.sendWindowMs`, as
+  a first send gets) for a row with no obligation recorded and status `PENDING`, `CANCELLING`,
+  `CANCELLED` or `FAILED`. A row whose obligation is recorded is left alone (the hold landed), as
+  is a row with a deadline, with no send counted, or with its sends closed. Anything else is
+  refused and reported, never written.
+- **Why it shortens no hold window:** the sends such a row counted carried no deadline, and
+  economic-service has refused every such send since `--economic-rule-since`; an answer stored
+  before that is a hold that exists, and the lookup finds it. The row proves absence only past
+  the new deadline and the margin, more than 25 h after any of those sends could land, and only
+  while economic-service answers `orderHoldDeadlineRequired: true` (FU-233). Every later send
+  carries the new deadline. A saga that proposed an earlier deadline of its own takes a
+  `HOLD_DEADLINE_PASSED` as proof only once its send left past the row's deadline and margin.
+- **Script, not migration:** it needs a fact outside this database (since when economic-service
+  refuses), a dry run, commits per batch, and an operator choosing the moment it runs. A
+  migration runs at deploy, possibly before economic-service, in one short transaction.
+
+**When.** After economic-service at D-150 or later on every replica, the marketplace migrations
+(`20261107130000_order_hold_deadline_backfill` included) and protocol-11 workers. Take the
+instant the last replica older than D-150 stopped from the deploy record; the script refuses
+until the database clock is at least 1 h past it. Then, in the service's image, as its runtime
+role (`DATABASE_URL_MARKETPLACE`; a migrator credential in the environment is refused):
+
+    node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since 2026-11-08T09:00:00Z
+    node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since 2026-11-08T09:00:00Z --apply
+
+The first is the dry run (the default): it prints the plan and every refused row. `--batch-size`
+(1–1000, default 200) and `--max-batches` (default 100) bound an apply; a slice that leaves rows
+exits 1 with `remaining` above 0, and a rerun goes on from there. A rerun of a finished apply
+assigns nothing. Keep the output: each `assigned` line names the order, its status and deadline.
+
+**Verify.** The apply's summary has `converged: true` (exit 0). A refused row exits 1: look at it
+by hand and decide; do not edit it into a class. The `createObligation` alert of a `PENDING`
+order clears at its saga's next round, whose send carries the deadline and holds, or ends the
+order `FAILED` past the deadline and margin with nothing held. A saga whose first send predates
+protocol 10 and that sits in `LATE_HOLD_WATCH` keeps no deadline in its own state: end it by hand
+as above.
+
+**Roll back.** The runtime role cannot remove a deadline (the fence's trigger). Taking one back
+is safe for the money, as a row with a send counted and no deadline proves nothing, and it
+brings the wait back. As the migrator, in one transaction:
+`ALTER TABLE "order" DISABLE TRIGGER trg_order_hold_fence_only_forward;`, then
+`UPDATE "order" o SET hold_not_after = NULL FROM order_hold_deadline_backfill a WHERE
+a.run_id = $1 AND o.id = a.order_id AND o.organization_id = a.organization_id AND
+o.hold_not_after = a.hold_not_after AND o.economic_transaction_id IS NULL AND
+o.hold_sends_closed_at IS NULL;`, `DELETE FROM order_hold_deadline_backfill WHERE run_id = $1 AND
+order_id IN (those rows)`, and `ENABLE TRIGGER` again. A row that has since held or closed its
+sends keeps its deadline: what it proved stays proven.
 
 **Operator check: a hold on a closed order.** No longer the only guarantee: the fence is what
 stops a late request, and this check is a second look at it. Run it after an incident in this wait, and for

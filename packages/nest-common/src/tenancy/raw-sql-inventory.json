@@ -2534,6 +2534,41 @@
     "decision": "platform-wide: the open records of unconfirmed saga calls, for a platform reader never served to a party; identifiers and times only, each row carries its tenant, no amounts"
   },
   {
+    "file": "services/marketplace-service/src/ops/hold-deadline-backfill.ts",
+    "line": 83,
+    "hash": "4ce66afe4585a9bf31fa086bf69ee51fc1c8448f3567c9be09c12dbb555eb4d4",
+    "occurrence": 0,
+    "decision": "platform-wide: sets this operator transaction's own statement and lock timeouts; reads no table"
+  },
+  {
+    "file": "services/marketplace-service/src/ops/hold-deadline-backfill.ts",
+    "line": 90,
+    "hash": "1cd7d15e3658fad6c8804f7335740407ea512292436bd9773a2928b085c63279",
+    "occurrence": 0,
+    "decision": "platform-wide: FU-234 operator backfill counts legacy hold-fence order rows of every tenant by fixed predicates; counts only"
+  },
+  {
+    "file": "services/marketplace-service/src/ops/hold-deadline-backfill.ts",
+    "line": 95,
+    "hash": "1d4cf4939680856a2f4fa0f8b4bdaa594880c1ee781ff8c258daf1b6ec56557c",
+    "occurrence": 0,
+    "decision": "platform-wide: reads the database clock to compare with the operator's economic-service rule instant; reads no table"
+  },
+  {
+    "file": "services/marketplace-service/src/ops/hold-deadline-backfill.ts",
+    "line": 96,
+    "hash": "c813b058684ecbdd327a22b6b1563f3b1130f66ddda35274acea1cbbcc11a891",
+    "occurrence": 0,
+    "decision": "platform-wide: FU-234 operator backfill lists the legacy order rows it refuses, across tenants, for a person to review"
+  },
+  {
+    "file": "services/marketplace-service/src/ops/hold-deadline-backfill.ts",
+    "line": 123,
+    "hash": "17d4bedcd7021083c217a95995beeb9f938ca2c612a22ad8fbe2bec69ac9d017",
+    "occurrence": 0,
+    "decision": "platform-wide: FU-234 operator backfill gives legacy order rows of every tenant a hold deadline and records each in its tenant's audit row (organization_id copied from the order)"
+  },
+  {
     "file": "services/notification-service/src/notification/notification.repository.ts",
     "line": 159,
     "hash": "fb249fe3dac5b48761658d7b5fd36538feab40572abb5c8babba21f5db3b29c1",

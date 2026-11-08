@@ -36,6 +36,7 @@ export const TENANT_SCOPED_MODELS = [
   'IdempotencyKey',
   'SagaStep',
   'SagaUnconfirmedCall',
+  'OrderHoldDeadlineBackfill',
   // RUN-005: a return request is the buyer's, like the order it returns.
   'ReturnRequest',
   'ReturnLine',
