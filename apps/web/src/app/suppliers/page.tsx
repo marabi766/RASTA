@@ -6,7 +6,7 @@ import { currentSession } from '@/server/current-session';
 import { fetchSuppliers, type SupplierListQuery } from '@/server/suppliers';
 import { mintSubmissionId } from '@/server/submission';
 import { canRegisterSupplier, supplierActor } from '@/server/supplier-commands';
-import { RELEASE_PARAM, supplierWriteScope } from '@/server/supplier-unresolved';
+import { supplierWriteScope } from '@/server/supplier-unresolved';
 import { readUnresolved } from '@/server/unresolved-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -92,7 +92,7 @@ export default async function SuppliersPage({
                   session={session}
                   pending={unresolved}
                   supplierId={null}
-                  release={one(params[RELEASE_PARAM])}
+                  query={params}
                 />
                 <RegisterSupplierForm
                   key={unresolved.kind === 'NONE' ? 'open' : 'held'}

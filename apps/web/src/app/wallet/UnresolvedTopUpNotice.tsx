@@ -1,8 +1,9 @@
 import type { JSX } from 'react';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { Alert, Button } from '@/ui';
 import { CSRF_FIELD } from '@/lib/form-fields';
 import { releaseUnresolvedTopUp } from './actions';
-import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE, RELEASE_FIELD } from './form-state';
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE } from './form-state';
 
 /** Same explicit, signed compare-and-delete reconciliation as the project/demand notices. */
 type Props = { walletId: string; csrfToken: string; releaseToken: string };

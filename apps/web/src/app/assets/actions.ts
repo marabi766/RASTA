@@ -136,7 +136,8 @@ export async function releaseUnresolvedAssetRegistration(form: FormData): Promis
     session,
     form,
     back: '/assets',
-    release: assetRegistrationRequest.release,
+    subject: { surface: 'asset-registration' },
+    scope: assetRegistrationRequest.releaseScope,
     quietSuccess: true,
   });
 }

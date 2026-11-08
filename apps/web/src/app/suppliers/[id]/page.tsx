@@ -7,7 +7,7 @@ import { SUPPLIER_NOTICES } from '@/lib/supplier-commands';
 import { readFlash } from '@/server/flash';
 import { fetchSupplier } from '@/server/suppliers';
 import { supplierActor } from '@/server/supplier-commands';
-import { RELEASE_PARAM, supplierWriteScope } from '@/server/supplier-unresolved';
+import { supplierWriteScope } from '@/server/supplier-unresolved';
 import { readUnresolved } from '@/server/unresolved-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -74,7 +74,7 @@ export default async function SupplierPage({
           session={session}
           pending={unresolved}
           supplierId={id}
-          release={typeof query[RELEASE_PARAM] === 'string' ? query[RELEASE_PARAM] : undefined}
+          query={query}
         />
       </div>
       <div className="mt-4">
