@@ -1,15 +1,26 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { CancelledFailure } from '@temporalio/activity';
+import { MockActivityEnvironment } from '@temporalio/testing';
 import { registry } from '@rasta/observability';
 import { withRedirectProbe } from '@rasta/testing';
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
 import {
   EconomicClient,
   fundsOf,
+  heldProofMissing,
   idempotencyKeyFor,
   OBLIGATION_LOOKUP_PAGES,
   ObligationLookupIncomplete,
   type ObligationFunds,
 } from './economic.client';
 import type { MarketplaceEnv } from '../config/env';
+import {
+  ORDER_HOLD_SEND_DEADLINE_MS,
+  ORDER_HOLD_TRANSACTION_MS,
+  ORDER_HOLD_WAIT_MS,
+} from '../config/operation-budgets';
+import { PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS } from '@rasta/config';
 
 /**
  * The client that moves money (ADR-040).
@@ -139,6 +150,27 @@ describe('creating the obligation', () => {
     // Under the key the recovery's lookup asks for exactly (`findObligations`).
     expect(body.sourceType).toBe('ORDER');
     expect(request.headers['idempotency-key']).toBe(idempotencyKeyFor.hold('ORD_1'));
+  });
+
+  it.each([
+    ['carries the deadline it was given', '2026-11-07T00:00:00.000Z'],
+    ['carries none when it was given none', undefined],
+  ])('a hold %s', async (_name, holdNotAfter) => {
+    const { calls, impl } = stubFetch({ status: 201, body: { id: 'TXN_1' } });
+    globalThis.fetch = impl as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await client.createObligation({
+      orderId: 'ORD_1',
+      buyerOrganizationId: 'ORG-BUYER',
+      supplierOrganizationId: 'ORG-SUPPLIER',
+      totalAmountMinor: 1n,
+      currency: 'IRR',
+      correlationId: 'corr-1',
+      ...(holdNotAfter === undefined ? {} : { holdNotAfter }),
+    });
+    const body = calls[0]?.body as Record<string, unknown>;
+    expect(Object.hasOwn(body, 'holdNotAfter')).toBe(holdNotAfter !== undefined);
+    if (holdNotAfter !== undefined) expect(body.holdNotAfter).toBe(holdNotAfter);
   });
 
   it('signs the buyer’s organization into the token and sends no tenant header', async () => {
@@ -288,6 +320,9 @@ describe('a refusal keeps economic-service’s own error code', () => {
   });
 });
 
+/** `MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS`'s default: asked under the same lock. */
+const ORGANIZATION_REQUEST_DEFAULT_MS = 2_000;
+
 describe('one deadline covers the response body too (#502 r1 F1)', () => {
   const original = globalThis.fetch;
   afterEach(() => {
@@ -313,6 +348,42 @@ describe('one deadline covers the response body too (#502 r1 F1)', () => {
       }),
       { status: 200 },
     );
+
+  it('an authorisation holds the order row, so its deadline is the hold’s, not the configured one (FU-178)', async () => {
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      signals.push(init.signal!);
+      return stalledBody();
+    }) as unknown as typeof fetch;
+    const client = new EconomicClient(
+      { ...ENV, ECONOMIC_REQUEST_TIMEOUT_MS: 60_000 } as MarketplaceEnv,
+      recordingTokens().service as never,
+    );
+    const started = Date.now();
+
+    await expect(
+      client.authoriseSettlement({
+        orderId: 'ORD_1',
+        transactionId: 'TXN_1',
+        buyerOrganizationId: 'ORG-BUYER',
+        correlationId: 'corr-1',
+      }),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+
+    const took = Date.now() - started;
+    expect(took).toBeGreaterThanOrEqual(ORDER_HOLD_SEND_DEADLINE_MS - 50);
+    expect(took).toBeLessThan(ORDER_HOLD_SEND_DEADLINE_MS + 1_500);
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  it('the hold’s deadline leaves a waiting command its own transaction, and fits inside the hold’s', () => {
+    expect(ORDER_HOLD_SEND_DEADLINE_MS + ORGANIZATION_REQUEST_DEFAULT_MS).toBeLessThan(
+      PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+    );
+    expect(ORDER_HOLD_TRANSACTION_MS).toBeGreaterThan(
+      ORDER_HOLD_WAIT_MS + ORDER_HOLD_SEND_DEADLINE_MS,
+    );
+  });
 
   it('fails a stalled body as an unavailable service within the deadline, with the signal aborted', async () => {
     const signals: AbortSignal[] = [];
@@ -626,10 +697,107 @@ describe('finding the order’s obligation by its exact key (review of #334 roun
   });
 });
 
+describe('whether economic-service proves held funds (#824 r1, F3)', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  it.each<[string, { status: number; body: unknown }, boolean]>([
+    ['its explicit yes', { status: 200, body: { heldProven: true } }, true],
+    ['its explicit no', { status: 200, body: { heldProven: false } }, false],
+    ['a body that does not say', { status: 200, body: {} }, false],
+    ['a word for yes', { status: 200, body: { heldProven: 'true' } }, false],
+    ['no body', { status: 204, body: null }, false],
+    [
+      'an older release: the path reads as a transaction id',
+      { status: 404, body: { code: 'NOT_FOUND', message: 'Transaction not found' } },
+      false,
+    ],
+    ['an outage', { status: 503, body: { code: 'UPSTREAM_UNAVAILABLE', message: 'down' } }, false],
+  ])('%s', async (_case, response, proves) => {
+    const { impl, calls } = stubFetch(response);
+    globalThis.fetch = impl as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.provesHeldFunds()).resolves.toBe(proves);
+    expect(calls[0]!.url).toMatch(/\/v1\/transactions\/capabilities$/);
+  });
+
+  it('an unreachable service is a no, not a failure', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.provesHeldFunds()).resolves.toBe(false);
+  });
+
+  // FU-233: the D-150 rule the saga's order row depends on, asked the same way.
+  // Undefined: no answer was had. Never yes either.
+  it.each<[string, { status: number; body: unknown }, boolean | undefined]>([
+    ['its explicit yes', { status: 200, body: { orderHoldDeadlineRequired: true } }, true],
+    ['its explicit no', { status: 200, body: { orderHoldDeadlineRequired: false } }, false],
+    [
+      'a release before D-150: heldProven alone',
+      { status: 200, body: { heldProven: true } },
+      false,
+    ],
+    // Review of #948 r1, L2: what no release of economic-service sends is no answer, never
+    // its no: only a boolean, or the older release's shape, is one.
+    ['a word for yes', { status: 200, body: { orderHoldDeadlineRequired: 1 } }, undefined],
+    ['a string for yes', { status: 200, body: { orderHoldDeadlineRequired: 'true' } }, undefined],
+    ['an empty object', { status: 200, body: {} }, undefined],
+    ['an array', { status: 200, body: [] }, undefined],
+    [
+      'an array holding the shape',
+      { status: 200, body: [{ orderHoldDeadlineRequired: true }] },
+      undefined,
+    ],
+    ['a null field', { status: 200, body: { orderHoldDeadlineRequired: null } }, undefined],
+    [
+      'the field absent, heldProven not true',
+      { status: 200, body: { heldProven: false } },
+      undefined,
+    ],
+    ['a body that is no object', { status: 200, body: 'orderHoldDeadlineRequired' }, undefined],
+    ['no body', { status: 204, body: null }, undefined],
+    [
+      'an outage',
+      { status: 503, body: { code: 'UPSTREAM_UNAVAILABLE', message: 'down' } },
+      undefined,
+    ],
+  ])('the hold-deadline rule: %s', async (_case, response, requires) => {
+    const { impl, calls } = stubFetch(response);
+    globalThis.fetch = impl as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.requiresOrderHoldDeadline()).resolves.toBe(requires);
+    expect(calls[0]!.url).toMatch(/\/v1\/transactions\/capabilities$/);
+  });
+
+  // Review of #948 r1, L4: a cancelled activity's question is cancelled, not unanswered.
+  it('the hold-deadline rule, its activity cancelled: the cancellation, not an unanswered question', async () => {
+    globalThis.fetch = ((_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      })) as unknown as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    const activity = new MockActivityEnvironment();
+    const asked = activity.run(() => client.requiresOrderHoldDeadline());
+    activity.cancel();
+    await expect(asked).rejects.toBeInstanceOf(CancelledFailure);
+  });
+
+  it('the hold-deadline rule, unreachable: no answer, not a failure', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as typeof fetch;
+    const client = new EconomicClient(ENV, recordingTokens().service as never);
+    await expect(client.requiresOrderHoldDeadline()).resolves.toBeUndefined();
+  });
+});
+
 describe('what an obligation’s status says of its funds (review of #334 round 2, F1)', () => {
   // Every status economic-service has (its TransactionStatus enum), and ones it does not.
   it.each<[string, ObligationFunds]>([
-    ['HELD', 'HELD'],
     ['CREATED', 'NEVER_HELD'],
     ['PENDING_SETTLEMENT', 'UNPROVEN'],
     ['DISPUTED', 'UNPROVEN'],
@@ -640,7 +808,38 @@ describe('what an obligation’s status says of its funds (review of #334 round 
     ['A_STATUS_ADDED_LATER', 'UNPROVEN'],
     ['held', 'UNPROVEN'],
   ])('%s → %s', (status, funds) => {
-    expect(fundsOf(status)).toBe(funds);
+    // What a proof says of any other status: nothing.
+    expect(fundsOf({ status })).toBe(funds);
+    expect(fundsOf({ status, heldProven: true })).toBe(funds);
+  });
+
+  // The stand-ins elsewhere only say what this client reads: the owner must document that name.
+  it('reads the field economic-service documents, by that name', () => {
+    const documented = readFileSync(
+      join(__dirname, '../../../economic-service/src/openapi/transaction-view.ts'),
+      'utf8',
+    );
+    expect(documented).toMatch(/^\s+heldProven: \{$/m);
+  });
+
+  // #824 r1, F3: an older economic-service says nothing. That is no verdict, and no adoption.
+  it('only HELD with no proof field at all is a missing proof', () => {
+    expect(heldProofMissing({ status: 'HELD' })).toBe(true);
+    expect(heldProofMissing({ status: 'HELD', heldProven: true })).toBe(false);
+    expect(heldProofMissing({ status: 'HELD', heldProven: false })).toBe(false);
+    expect(heldProofMissing({ status: 'HELD', heldProven: null } as never)).toBe(false);
+    expect(heldProofMissing({ status: 'HELD', heldProven: 'true' } as never)).toBe(false);
+    expect(heldProofMissing({ status: 'PENDING_SETTLEMENT' })).toBe(false);
+  });
+
+  // #762 r3, F2: HELD with nothing in escrow. Only the proof makes it HELD.
+  it('HELD is HELD only with economic-service’s proof', () => {
+    expect(fundsOf({ status: 'HELD', heldProven: true })).toBe('HELD');
+    expect(fundsOf({ status: 'HELD', heldProven: false })).toBe('UNPROVEN');
+    expect(fundsOf({ status: 'HELD' })).toBe('UNPROVEN');
+    // A body nobody typed: anything but `true` proves nothing.
+    expect(fundsOf({ status: 'HELD', heldProven: 'true' } as never)).toBe('UNPROVEN');
+    expect(fundsOf({ status: 'HELD', heldProven: 1 } as never)).toBe('UNPROVEN');
   });
 });
 

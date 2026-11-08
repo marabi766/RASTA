@@ -477,17 +477,15 @@ the module sends:
 - the global object (`globalThis`, `window`, `self`, `global`, …) used as a value (alias,
   spread, destructuring, an argument such as `Reflect.get(globalThis, …)`), with a
   computed member (`globalThis[name]`), or with a raw member (`.fetch`). `typeof window`,
-  `'x' in globalThis`, a plain safe member (`globalThis.crypto`) and a symbol key stay legal;
+  `'x' in globalThis` and a plain safe member (`globalThis.crypto`) stay legal;
 - HTTP client modules (`undici`, `axios`, `node-fetch`, `got`, `superagent`, `ky`, …,
   `playwright`, `playwright-core`) imported, re-exported, `import x = require`d, loaded
   with `require`, `import()`, `module.require`, `process.getBuiltinModule` or an aliased
-  loader. A computed loader argument is refused unless it is provably a file
-  (`join(ROOT, …)`, `resolve(dir, …)`, `pathToFileURL(…).href`, directly or through a
-  `const`). From `node:http(s)`/`http2`, the client half (`request`, `get`, `connect`,
+  loader. Computed loader arguments are refused, including path builders and file URLs. From `node:http(s)`/`http2`, the client half (`request`, `get`, `connect`,
   `Agent`, `globalAgent`, `ClientRequest`, the default or namespace import) is refused,
   and the server half (`createServer`) is not; type-only imports are not references;
 - in the two E2E trees (option `playwright`), Playwright's unguarded API contexts:
-  `playwright.request`, `page.request`, `context.request`, a destructured `request`, and
+  `playwright.request`, `page.request`, `context.request`, a declarator-destructured `request`, and
   value imports of anything but `expect`, `defineConfig` and `devices` from
   `@playwright/test` (an unguarded `test` brings an unguarded `request` fixture).
 
@@ -506,17 +504,18 @@ has a reason, and that the list equals a pinned copy. An exempt file is exempt o
 file. **What each one exports is reviewed by hand**; the boundary cannot follow a raw sender
 handed out of an audited file:
 
-| Audited file                                        | What it exports                                                        | Reviewed                                                                                |
-| --------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `packages/nest-common/src/http/internal-fetch.ts`   | `internalFetch` (refuses the five statuses)                            | no raw sender exported                                                                  |
-| `apps/web/src/server/credential-fetch.ts`           | `credentialFetch`, its error                                           | no raw sender exported                                                                  |
-| `apps/web/src/server/signed-url-upload.ts`          | `putToSignedUrl` (`redirect: 'error'`, set after the caller's init)    | no raw sender exported                                                                  |
-| `apps/web/src/lib/session-refusal.ts`               | `sessionHasEnded` (a boolean), `isRedirect`                            | browser same-origin `/auth/session` with the browser's own cookie                       |
-| `scripts/credential-fetch.mjs`                      | `credentialFetch` for scripts                                          | no raw sender exported                                                                  |
-| `packages/testing/src/guarded-http.ts`              | `guardFetch`, `guardedFetch`, `globalFetchStub`, `guardRequestContext` | no raw sender exported                                                                  |
-| `packages/testing/src/redirect-probe.ts`            | `withRedirectProbe`: test servers, and `probe.fetch` = the real fetch  | **raw, by design**: for specs that stub the global; a test package (devDependency only) |
-| `tests/e2e/src/http.ts`                             | `send` (refuses the five statuses), errors, types                      | no raw sender exported                                                                  |
-| `tests/e2e/src/expect.ts`, `apps/web/e2e/expect.ts` | guarded `request` fixture, `newApiContext()`                           | no raw context exported                                                                 |
+| Audited file                                        | What it exports                                                            | Reviewed                                                                  |
+| --------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `packages/nest-common/src/http/internal-fetch.ts`   | `internalFetch` (refuses the five statuses)                                | no raw sender exported                                                    |
+| `apps/web/src/server/credential-fetch.ts`           | `credentialFetch`, its error                                               | no raw sender exported                                                    |
+| `apps/web/src/server/signed-url-upload.ts`          | `putToSignedUrl` (`redirect: 'error'`, set after the caller's init)        | no raw sender exported                                                    |
+| `apps/web/src/lib/session-refusal.ts`               | `sessionHasEnded` (a boolean), `isRedirect`                                | browser same-origin `/auth/session` with the browser's own cookie         |
+| `scripts/credential-fetch.mjs`                      | `credentialFetch` for scripts                                              | no raw sender exported                                                    |
+| `packages/config/src/credential-environment.js`     | `refuseAlteredEnvironment`, its error (FU-249)                             | sends nothing; reads the global dispatcher slot only                      |
+| `packages/testing/src/guarded-http.ts`              | `guardFetch`, `guardedFetch`, `globalFetchStub`, `guardRequestContext`     | no raw sender exported                                                    |
+| `packages/testing/src/redirect-probe.ts`            | `withRedirectProbe`: servers and a sender restricted to their live origins | captured fetch stays private; following controls reach only probe servers |
+| `tests/e2e/src/http.ts`                             | `send` (refuses the five statuses), errors, types                          | no raw sender exported                                                    |
+| `tests/e2e/src/expect.ts`, `apps/web/e2e/expect.ts` | guarded `request` fixture, `newApiContext()`                               | no raw context exported                                                   |
 
 Live suites (`*.live-spec.ts`) are in scope: the Keycloak projection-race spec sends the
 master-realm password grant and the admin bearer to the environment's `KEYCLOAK_URL`, so its
@@ -550,8 +549,8 @@ Unsupported method layouts abort setup; the installation sample is always dispos
 Regressions exercise parameter destructuring, assignment destructuring and `Reflect.get`
 against real loopback 307/308 redirects, all methods, and caller redirect overrides.
 `request-routes.ts` contains only hostile access helpers, outside E2E lint so the tests
-exercise the runtime boundary independently. N2's probe sender and lint escapes remain
-for the approved stacked B/C follow-ups; `RedirectProbe.fetch` is unchanged here.
+exercise the runtime boundary independently. Slice C below closes N2's probe sender
+and loader/global lint escapes.
 
 `guardFetch(sender)` is the same policy over an explicit `fetch` (`guardedFetch` is it
 over the global, read at call time); `globalFetchStub()` uses it on the `fetch` captured
@@ -560,3 +559,63 @@ before a test replaces the global, for the live spec's administrator (r2 F2).
 another origin on every method, all five statuses on both origins, overrides,
 non-redirect statuses, a control that shows an unguarded context following). One
 Playwright spec per harness proves the fixture wiring.
+
+Slice C (task 1247, stacked on #654): loader arguments must be literal; the old
+name-based path-builder exemption is removed. `createRequire` results and aliases
+are followed through their references; escaping loaders are refused. Ambient/type-only
+bindings cannot hide runtime globals. VM, string/URL module execution and Worker
+imports are refused; the static telemetry-only watchdog is explicitly audited.
+Node HTTP exports and global/imported process members use the same known-safe lists,
+so additions require review. Process object imports may only access proven-safe members;
+loader exports, unknown extraction, dynamic loads and unsafe re-exports are refused.
+Process listener results must be discarded, including named imports and aliases.
+Process registry holders (FU-127) may use module-local, non-exported `const` aliases
+and casts, `typeof`/strict null checks, and literal `Symbol.for('<string>')` keys
+(optionally through immutable aliases). Every declaration and reference is inspected,
+including writes and exports. Slots may be read or assigned a proven plain value;
+calling/tagging a slot would give it the process receiver and is refused.
+`Object.defineProperty` requires exactly an object-literal `{ value: ... }` descriptor
+and a discarded result. Plain values are literals, recursively plain object/array
+literals or the existing no-argument native `WeakMap` registry, optionally held in
+immutable aliases. Functions, classes, accessors, spreads and unknown values refuse.
+Both `Symbol` and `Object` must be unshadowed at the use; aliases, reassignment,
+property writes and indirect/reflected uses of these globals anywhere in the file
+invalidate the exemption, regardless of statement order. Global-object symbol slots
+use the same key/receiver/intrinsic checks. Exported loader aliases also refuse.
+This preserves the process-wide CLI refusal registry without granting an audited
+transport exemption. As with D-086/D-088, this source rule cannot attest to runtime
+patches in other modules or preloads; it is not a same-process JavaScript sandbox.
+Ordinary process listener callbacks receiving `this` remain the separate pre-existing
+N1-e follow-up; this change restricts registry slots and holder/loader declarations.
+Tooling that needs a computed workspace path uses `scripts/workspace-module.mjs`,
+which checks the real resolved path before loading a local build, generated Prisma
+client or Jest config; dependency paths, symlink escapes and outside paths are refused.
+The probe's captured sender now accepts only its own live origins and normalizes its
+input once. Its redirect target is always another probe server, preserving the
+following-client control. N1 parameter/assignment/reflection probes exercise the
+class guard from #654. L1 (`_innerFetch`/`route.fetch` and unknown prototype methods)
+and L2 (public request-route helpers) remain separate follow-up work under the size rule.
+
+## FU-249: never through an altered runtime
+
+Node's fetch builds its option objects inside Node, and they inherit from `Object.prototype`
+even when the caller's init has no prototype. A key set there reached every credentialed
+request: an inherited `dispatcher` received it (bearer header, internal token or signed URL
+included), and an inherited `body` was sent, with the credential, as the body of a request
+that had none. A replaced global dispatcher (undici's `Symbol.for('undici.globalDispatcher.1')`
+slot) received every request.
+
+`refuseAlteredEnvironment(transport)` (`packages/config/src/credential-environment.js`, plain
+CommonJS so the scripts load it unbuilt) runs before every send in `internalFetch`, the portal's
+`credentialFetch` and `putToSignedUrl`, and the scripts' `credentialFetch`. It throws
+`CredentialEnvironmentRefusedError` (no key, URL or credential in it) when `Object.prototype`
+(this realm's, and the one the transport was created in, which differs under jest's sandbox)
+has a key outside the ECMAScript set, or when the dispatcher slot is not the one present at
+load. It is a key scan and two identity checks, with no I/O. A pin in `scripts/credential-fetch.test.mjs`
+holds every `AUDITED_TRANSPORTS` entry to "checked before its one send" or to a named unchecked list.
+
+Limits: the check is a point in time, so pollution that lands after it, while undici is still
+reading options, is not seen. A dispatcher replaced before the module loads is taken as the real
+one. A replaced `globalThis.fetch` is not refused yet: Next.js replaces it after module load in
+production (`patchFetch`), and specs replace it in tests, so that needs a test-only seam first.
+The E2E harness transports (`packages/testing`, `tests/e2e`) are not checked yet.

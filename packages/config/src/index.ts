@@ -107,4 +107,17 @@ export {
   protectRedisReadyCheck,
 } from './sdk-diagnostics';
 
-export { clientFailureCode, commandFailure } from './command-failure';
+export {
+  REFUSAL_CODES,
+  clientFailureCode,
+  commandFailure,
+  markRefusal,
+  refusalCode,
+} from './command-failure';
+
+export {
+  CredentialEnvironmentRefusedError,
+  disownRefusal,
+  refuseAlteredEnvironment,
+  refusedBeforeSending,
+} from './credential-environment';

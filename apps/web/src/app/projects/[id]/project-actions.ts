@@ -55,7 +55,7 @@ type State<V, F extends string> = ProjectFormState<V, F>;
 export async function submitEditProject(
   projectId: string,
   place: ProjectPlace,
-  _previous: State<ProjectFormValues, ProjectField>,
+  previous: State<ProjectFormValues, ProjectField>,
   form: FormData,
 ): Promise<State<ProjectFormValues, ProjectField>> {
   return runProjectCommand(
@@ -69,6 +69,7 @@ export async function submitEditProject(
     },
     projectId,
     place,
+    previous,
     form,
   );
 }
@@ -76,7 +77,7 @@ export async function submitEditProject(
 export async function submitRequestApproval(
   projectId: string,
   place: ProjectPlace,
-  _previous: State<NoFormValues, never>,
+  previous: State<NoFormValues, never>,
   form: FormData,
 ): Promise<State<NoFormValues, never>> {
   return runProjectCommand(
@@ -89,6 +90,7 @@ export async function submitRequestApproval(
     },
     projectId,
     place,
+    previous,
     form,
   );
 }
@@ -96,7 +98,7 @@ export async function submitRequestApproval(
 export async function submitStartProject(
   projectId: string,
   place: ProjectPlace,
-  _previous: State<NoFormValues, never>,
+  previous: State<NoFormValues, never>,
   form: FormData,
 ): Promise<State<NoFormValues, never>> {
   return runProjectCommand(
@@ -109,6 +111,7 @@ export async function submitStartProject(
     },
     projectId,
     place,
+    previous,
     form,
   );
 }
@@ -116,7 +119,7 @@ export async function submitStartProject(
 export async function submitCompleteProject(
   projectId: string,
   place: ProjectPlace,
-  _previous: State<NoFormValues, never>,
+  previous: State<NoFormValues, never>,
   form: FormData,
 ): Promise<State<NoFormValues, never>> {
   return runProjectCommand(
@@ -129,6 +132,7 @@ export async function submitCompleteProject(
     },
     projectId,
     place,
+    previous,
     form,
   );
 }
@@ -136,7 +140,7 @@ export async function submitCompleteProject(
 export async function submitCancelProject(
   projectId: string,
   place: ProjectPlace,
-  _previous: State<CancelFormValues, CancelField>,
+  previous: State<CancelFormValues, CancelField>,
   form: FormData,
 ): Promise<State<CancelFormValues, CancelField>> {
   return runProjectCommand(
@@ -150,6 +154,7 @@ export async function submitCancelProject(
     },
     projectId,
     place,
+    previous,
     form,
   );
 }
@@ -157,7 +162,7 @@ export async function submitCancelProject(
 export async function submitGrantApproval(
   approvalId: string,
   place: ProjectPlace,
-  _previous: State<GrantFormValues, GrantField>,
+  previous: State<GrantFormValues, GrantField>,
   form: FormData,
 ): Promise<State<GrantFormValues, GrantField>> {
   return runProjectCommand(
@@ -171,6 +176,7 @@ export async function submitGrantApproval(
     },
     approvalId,
     place,
+    previous,
     form,
   );
 }
@@ -178,7 +184,7 @@ export async function submitGrantApproval(
 export async function submitRejectApproval(
   approvalId: string,
   place: ProjectPlace,
-  _previous: State<RejectFormValues, RejectField>,
+  previous: State<RejectFormValues, RejectField>,
   form: FormData,
 ): Promise<State<RejectFormValues, RejectField>> {
   return runProjectCommand(
@@ -192,6 +198,7 @@ export async function submitRejectApproval(
     },
     approvalId,
     place,
+    previous,
     form,
   );
 }

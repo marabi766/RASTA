@@ -1,3 +1,4 @@
+import type { RequestNotChecked } from '@/lib/request-not-checked';
 import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { RegisterAssetField, RegisterAssetFormValues } from '@/lib/asset-form-fields';
@@ -12,6 +13,13 @@ import type { RegisterAssetField, RegisterAssetFormValues } from '@/lib/asset-fo
  */
 export type RegisterAssetFormState =
   | { readonly kind: 'IDLE' }
+  | RequestNotChecked
+  | {
+      readonly kind: 'HELD';
+      readonly releaseToken?: string;
+      readonly submissionId: string;
+      readonly values: RegisterAssetFormValues;
+    }
   /** The person's own values, kept so the form is not emptied under them. */
   | {
       readonly kind: 'INVALID';
@@ -25,6 +33,9 @@ export type RegisterAssetFormState =
   | { readonly kind: 'REFUSED'; readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
-  | UnconfirmedWriteState;
+  | (UnconfirmedWriteState & {
+      readonly releaseToken?: string;
+      readonly values?: RegisterAssetFormValues;
+    });
 
 export const IDLE_REGISTER_ASSET_FORM: RegisterAssetFormState = { kind: 'IDLE' };

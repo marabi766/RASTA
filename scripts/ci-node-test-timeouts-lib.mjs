@@ -22,17 +22,41 @@
  * `npx`, `sh -c`, a pnpm call with options or arguments, a computed word, an
  * unlisted node option, a redirection - is refused, never assumed bounded.
  *
+ * ONE scanner (parseCommands) reads every command of the guard and of the watchdog
+ * check. Its grammar is CLOSED, everything outside it is refused: printable ASCII only,
+ * simple commands joined by a newline, `;` or `&&`, each one leading KNOWN_ENV assignments
+ * and then words of literals, quotes, plain `$NAME`/`${NAME}` and `$( )`/backticks read by
+ * the same grammar. The command word must be node, pnpm, turbo or an INERT_SHAPES entry used
+ * in its listed argument shape. So no
+ * arithmetic exists (`((`, `$((`, `$[`, `let`, `[[`, subscripts and unknown assignments are
+ * outside it) and no control flow: the first top-level command really runs. The execution
+ * context has one policy too: see contextProblems.
+ *
  * A step limit on every one of the quality job's ~35 `node --test` steps cannot
  * exist: the job budget rule (ci-integration-split-lib.mjs) adds step limits to the
  * job's setup allowance, and 35 limits do not fit in the job.
  */
+import { parseCommands } from './ci-shell-text-lib.mjs';
+
+/** The shared tokenizer lives in ci-shell-text-lib.mjs (FU-077); re-exported for existing callers. */
+export { parseCommands };
 export const MAX_FILE_BUDGET_MS = 540_000;
+/**
+ * FU-111: the former `quality` job is five parallel `quality-*` jobs and an aggregate
+ * named `quality`. Every `quality-*` job is read here, found by its prefix so a job added
+ * later is read too, never skipped; the aggregate runs no test.
+ */
+export const QUALITY_JOB_PREFIX = 'quality-';
 export const UNIT_STEP = {
-  job: 'quality',
+  job: 'quality-unit',
   step: 'Unit-step concurrency is bounded',
   script: 'test:unit-step-concurrency',
   maxMinutes: 10,
   watchdog: './scripts/test-stall-watchdog.mjs',
+  // FU-118: --require, not --import. On Node 22 the `node --test` runner (the parent)
+  // executes --require preloads but not --import ones, and the runner itself can hang
+  // (nodejs/node#62693); the watchdog guards it only when the runner loads it too.
+  preload: '--require',
 };
 /** Scripts the guard does not read, each with the reason; a stale entry is refused. */
 export const EXEMPT_SCRIPTS = {
@@ -40,140 +64,58 @@ export const EXEMPT_SCRIPTS = {
     'lint-scripts-registration.test.mjs pins its command shape (an option after --test throws)',
 };
 
-/** Commands that never run a root script or `node --test` by themselves. */
-const INERT_COMMANDS = new Set(['echo', 'true', 'turbo', 'eslint', 'prettier']);
-/** Words the shell treats as syntax in front of a command. */
-const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', 'time']);
-const CLOSERS = new Set(['fi', 'done', 'esac', '}']);
-/** `pnpm install` is the only pnpm built-in a quality step may use. */
-const PNPM_BUILTINS = new Set(
-  'add audit dlx env exec i install link list ls node outdated pack publish rebuild remove rm store up update x'.split(
+const operand = (value) => !value.startsWith('-');
+/**
+ * FU-077 R5: a command other than node, pnpm and turbo is inert - runs no root script and
+ * no `node --test` - only in one of these argument shapes, the ones this repository uses.
+ * Any other argument refuses, since many options load code the guard does not read
+ * (eslint -c/--rulesdir/--format, prettier --plugin/--config, jest --testRunner,
+ * tsc --build of another project). Words are compared one argv entry at a time.
+ */
+const INERT_SHAPES = {
+  echo: () => true, // prints its words; a substitution in them is read as a command of its own
+  true: (args) => args.length === 0,
+  eslint: (args) => args.length > 0 && args.every(operand),
+  prettier: (args) => args.length > 1 && args[0] === '--check' && args.slice(1).every(operand),
+  tsc: (args) =>
+    args[0] === '-p' &&
+    operand(args[1] ?? '-') &&
+    (args.length === 2 || (args.length === 3 && args[2] === '--noEmit')),
+  jest: (args) => {
+    const rest = [...args];
+    if (rest[0] === '--selectProjects' && operand(rest[1] ?? '-')) rest.splice(0, 2);
+    return rest.length === 0 || (rest.length === 1 && rest[0] === '--passWithNoTests');
+  },
+  prisma: (args) => args.length === 1 && args[0] === 'generate',
+};
+/**
+ * The only names a shell assignment or a YAML `env` of this job may set. Any other can
+ * change what a command means (NODE_OPTIONS, BASH_ENV, PATH, npm_config_script_shell, an
+ * arithmetic RANDOM): add one only after checking that the shell, node and pnpm ignore it.
+ */
+const KNOWN_ENV = new Set(
+  'NODE_VERSION PNPM_VERSION MINIO_IMAGE MC_IMAGE TRIVY_VERSION TEMPORAL_TEST_SERVER_DIR SERVICE_ENV_WITHHELD_PUSH_BEFORE SERVICE_ENV_WITHHELD_BASE base'.split(
     ' ',
   ),
 );
-/** Package scripts a workspace-targeted pnpm call may run; others cannot be read here. */
-const PACKAGE_SCRIPTS = new Set(['build', 'typecheck', 'lint']);
+/** What pnpm runs on its own: on install, and on a run that finds stale dependencies. */
+const INSTALL_SCRIPTS =
+  'pnpm:devPreinstall preinstall install postinstall preprepare prepare postprepare'.split(' ');
 const NODE_PLAIN_OPTIONS = new Set(['--test', '--no-warnings', '--enable-source-maps']);
-const NODE_VALUE_OPTIONS = /^--(?:test-concurrency|env-file|env-file-if-exists)=/;
+const NODE_VALUE_OPTIONS = /^--test-concurrency=/;
 const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:_.-]*$/;
 const BUDGET = /^[1-9][0-9]{0,8}$/;
-const MAX_DEPTH = 4;
-
-/**
- * Tokenize shell text into commands of words {value, dynamic}. `dynamic` marks a word
- * the shell computes ($var, globs, braces); command substitutions are parsed as
- * commands of their own. `problems` lists syntax that is not understood.
- */
-export function parseCommands(text, depth = 0) {
-  const commands = [];
-  const problems = [];
-  let words = [];
-  let word = null;
-  const endWord = () => {
-    if (word) words.push(word);
-    word = null;
-  };
-  const endCommand = () => {
-    endWord();
-    if (words.length) commands.push(words);
-    words = [];
-  };
-  const add = (char) => {
-    word ??= { value: '', dynamic: false };
-    word.value += char;
-  };
-  const markDynamic = () => {
-    add('');
-    word.dynamic = true;
-    word.cut ??= word.value.length; // the literal part before the first computed character
-  };
-  const substitute = (start, open, close) => {
-    // `start` indexes the opening bracket; returns the index of the closing one.
-    let level = 0;
-    for (let at = open === close ? start + 1 : start; at < text.length; at++) {
-      if (text[at] === open && open !== close) level++;
-      else if (text[at] === close && (open === close || --level === 0)) {
-        if (depth >= MAX_DEPTH) problems.push('command substitutions nested too deeply');
-        else {
-          const inner = parseCommands(text.slice(start + 1, at), depth + 1);
-          commands.push(...inner.commands);
-          problems.push(...inner.problems);
-        }
-        return at;
-      }
-    }
-    problems.push('unterminated command substitution');
-    return text.length;
-  };
-  const dollar = (at) => {
-    markDynamic();
-    const rest = text.slice(at + 1);
-    if (rest.startsWith('(')) return substitute(at + 1, '(', ')');
-    if (rest.startsWith('{'))
-      return rest.indexOf('}') < 0 ? text.length : at + 1 + rest.indexOf('}');
-    return at + (/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?!$-])/.exec(rest)?.[0].length ?? 0);
-  };
-  for (let at = 0; at < text.length; at++) {
-    const char = text[at];
-    if (char === '\\') {
-      if (text[at + 1] === '\n') at++;
-      else if (at + 1 < text.length) add(text[++at]);
-    } else if (char === "'") {
-      const end = text.indexOf("'", at + 1);
-      if (end < 0) {
-        problems.push('unterminated quote');
-        break;
-      }
-      add('');
-      for (const c of text.slice(at + 1, end)) add(c);
-      at = end;
-    } else if (char === '"') {
-      add('');
-      let closed = false;
-      for (at++; at < text.length; at++) {
-        if (text[at] === '"') {
-          closed = true;
-          break;
-        }
-        if (text[at] === '\\' && '"\\$`\n'.includes(text[at + 1] ?? 'x')) {
-          if (text[++at] !== '\n') add(text[at]);
-        } else if (text[at] === '$') at = dollar(at);
-        else if (text[at] === '`') {
-          markDynamic();
-          at = substitute(at, '`', '`');
-        } else add(text[at]);
-      }
-      if (!closed) problems.push('unterminated quote');
-    } else if (char === '$') {
-      at = dollar(at);
-    } else if (char === '`') {
-      markDynamic();
-      at = substitute(at, '`', '`');
-    } else if (char === '#' && !word) {
-      while (at + 1 < text.length && text[at + 1] !== '\n') at++;
-    } else if (char === '<' || char === '>') {
-      problems.push('redirection');
-    } else if ('\n;&|()'.includes(char)) {
-      endCommand();
-    } else if (char === ' ' || char === '\t' || char === '\r') {
-      endWord();
-    } else {
-      if ('*?[~{}'.includes(char)) markDynamic();
-      add(char);
-    }
-  }
-  endCommand();
-  return { commands, problems };
-}
-
 const clip = (words) =>
   words
     .map((entry) => entry.value)
     .join(' ')
     .slice(0, 80);
 const literal = (entries) => entries.every((entry) => !entry.dynamic);
+const sameWords = (words, expected) =>
+  words.length === expected.length &&
+  words.every((word, index) => !word.dynamic && word.value === expected[index]);
 
-function nodeCommand(args, found) {
+function nodeCommand(args, found, unconditional) {
   const options = { test: false, timeouts: [], imports: [] };
   const text = clip(
     ['node', ...args].map((value) => (typeof value === 'string' ? { value } : value)),
@@ -183,11 +125,12 @@ function nodeCommand(args, found) {
     const { value, dynamic } = args[at];
     if (dynamic) return found.problems.push(`a computed node option (${text})`);
     if (value === '--' || !value.startsWith('-') || value === '-') break; // first file argument
-    if (value === '--import') {
+    if (value === '--import' || value === '--require') {
       const next = args[++at];
-      if (!next || next.dynamic)
-        return found.problems.push(`a node --import without a plain value (${text})`);
-      options.imports.push(next.value);
+      // Any other preload is code the guard does not read, even inline (a data: URL).
+      if (next?.value !== UNIT_STEP.watchdog || next.dynamic)
+        return found.problems.push(`a node ${value} that is not the watchdog (${text})`);
+      options.imports.push(`${value} ${next.value}`);
     } else if (value.startsWith('--test-timeout=')) options.timeouts.push(value.slice(15));
     else if (value === '--test-timeout') options.timeouts.push('');
     else if (value === '--test') options.test = true;
@@ -195,55 +138,135 @@ function nodeCommand(args, found) {
       return found.problems.push(`an unlisted node option ${value} (${text})`);
   }
   if (!options.test) return;
-  found.nodeTests.push({ text, ...options });
+  found.nodeTests.push({ text, unconditional, ...options });
   const [budget] = options.timeouts;
   if (options.timeouts.length !== 1 || !BUDGET.test(budget) || Number(budget) > MAX_FILE_BUDGET_MS)
     found.timeouts.push(text);
 }
 
-function pnpmCommand(args, scripts, found) {
+/**
+ * The pnpm forms a quality step may use: `install --frozen-lockfile`, `run <root script>`
+ * and `--filter <read package> run <script>` (or `build`). Nothing else: a `--dir` or an
+ * unknown selector can select the root, a package that was not read is unproven.
+ */
+function pnpmCommand(args, scripts, packages, found) {
   const text = clip([{ value: 'pnpm' }, ...args]);
   if (!literal(args)) return found.problems.push(`a computed pnpm argument (${text})`);
   const values = args.map((entry) => entry.value);
-  if (values[0] === 'install' && values.slice(1).every((value) => /^--?[a-z-]+$/.test(value)))
-    return;
-  let at = 0;
-  while (['--filter', '-F', '--dir', '-C'].includes(values[at])) at += 2;
-  const targeted = at > 0;
-  const name = ['run', 'run-script'].includes(values[at]) ? values[at + 1] : values[at];
-  const explicit = name !== values[at];
-  const rest = values.slice(at + (explicit ? 2 : 1));
-  if (!name || !SCRIPT_NAME.test(name) || rest.length > 0 || (!explicit && PNPM_BUILTINS.has(name)))
-    return found.problems.push(`a pnpm form that is not "pnpm [run] <script>" (${text})`);
-  if (targeted) {
-    if (!PACKAGE_SCRIPTS.has(name))
-      found.problems.push(`a package script that is not read (${text})`);
-  } else if (!Object.hasOwn(scripts, name))
-    found.problems.push(`an unknown script ${name} (${text})`);
-  else found.follows.add(name);
+  for (const name of INSTALL_SCRIPTS) if (Object.hasOwn(scripts, name)) found.follows.add(name);
+  // FU-092: install runs the lifecycle hooks of EVERY workspace project, not only the root's
+  // (a package's `postinstall` that runs `node --test` hangs the install step the same way).
+  for (const [pkg, own] of Object.entries(packages))
+    for (const name of INSTALL_SCRIPTS)
+      if (Object.hasOwn(own, name)) packageScript(found, pkg, name, own[name]);
+  // FU-077 R4: argv boundaries are kept: `pnpm "install --frozen-lockfile"` is ONE word, which
+  // pnpm runs as a script of that name, not as an install.
+  if (values.length === 2 && values[0] === 'install' && values[1] === '--frozen-lockfile') return;
+  const filtered = values[0] === '--filter';
+  const rest = filtered ? values.slice(2) : values;
+  const name = rest[0] === 'run' ? rest[1] : filtered && rest[0] === 'build' ? 'build' : undefined;
+  if (name === undefined || !SCRIPT_NAME.test(name) || rest.length !== (rest[0] === 'run' ? 2 : 1))
+    return found.problems.push(`a pnpm form that is not "pnpm run <script>" (${text})`);
+  if (filtered && !Object.hasOwn(packages, values[1]))
+    return found.problems.push(`a pnpm --filter on a package that was not read (${text})`);
+  const target = filtered ? packages[values[1]] : scripts;
+  if (!Object.hasOwn(target, name))
+    return found.problems.push(`an unknown script ${name} (${text})`);
+  for (const script of [`pre${name}`, name, `post${name}`]) {
+    if (!Object.hasOwn(target, script)) continue;
+    if (filtered) packageScript(found, values[1], script, target[script]);
+    else found.follows.add(script);
+  }
+}
+
+/** One workspace package script, read once per command line. */
+function packageScript(found, pkg, name, text) {
+  const key = `${pkg} ${name}`;
+  if (found.read.has(key)) return;
+  found.read.add(key);
+  if (typeof text !== 'string') return found.problems.push(`${key} is not text`);
+  // A package script may not call pnpm or turbo again: no root scripts, packages or task graph.
+  const inner = analyse(text, {}, {});
+  found.nodeTests.push(...inner.nodeTests);
+  found.timeouts.push(...inner.timeouts.map((entry) => `${key}: ${entry}`));
+  found.problems.push(...inner.problems.map((reason) => `${key}: ${reason}`));
+}
+
+/**
+ * FU-077 R5: turbo runs package scripts, so it is never inert. Only `turbo run <task>`
+ * (optionally `--concurrency=<n>`) is read: the task and every task it runs in the task
+ * graph (`turbo` from turboTaskGraph: dependsOn and with edges), in every read package.
+ */
+function turboCommand(args, packages, turbo, found) {
+  const text = clip([{ value: 'turbo' }, ...args]);
+  const values = args.map((entry) => entry.value);
+  const [verb, task, ...rest] = values;
+  if (
+    !literal(args) ||
+    verb !== 'run' ||
+    !SCRIPT_NAME.test(task ?? '') ||
+    rest.length > 1 ||
+    !rest.every((value) => /^--concurrency=[1-9][0-9]?$/.test(value))
+  )
+    return found.problems.push(`a turbo form that is not "turbo run <task>" (${text})`);
+  if (!isMap(turbo)) return found.problems.push(`a turbo task graph that was not read (${text})`);
+  // A `pkg#task` (or a root `//#task`) entry runs a script outside this model: refused.
+  const scoped = Object.entries(turbo).find(
+    ([name, depends]) =>
+      name.includes('#') ||
+      !Array.isArray(depends) ||
+      depends.some((entry) => String(entry).includes('#')),
+  );
+  if (scoped) return found.problems.push(`a turbo task ${scoped[0]} that is not read (${text})`);
+  const tasks = new Set();
+  for (const queue = [task]; queue.length;) {
+    const name = queue.pop();
+    if (tasks.has(name)) continue;
+    if (!Array.isArray(turbo[name]))
+      return found.problems.push(
+        `a turbo task ${name} that the task graph does not hold (${text})`,
+      );
+    tasks.add(name);
+    queue.push(...turbo[name].map((entry) => String(entry).replace(/^\^/, '')));
+  }
+  for (const [pkg, own] of Object.entries(packages))
+    for (const name of tasks)
+      for (const script of [`pre${name}`, name, `post${name}`])
+        if (Object.hasOwn(own, script)) packageScript(found, pkg, script, own[script]);
 }
 
 /** What one command line runs: node --test commands, root scripts followed, unprovable parts. */
-export function analyse(text, scripts) {
-  const found = { nodeTests: [], timeouts: [], follows: new Set(), problems: [] };
+export function analyse(text, scripts, packages = {}, turbo = undefined) {
+  const found = { nodeTests: [], timeouts: [], follows: new Set(), problems: [], read: new Set() };
   const parsed = parseCommands(String(text));
   found.problems.push(...parsed.problems);
-  for (let words of parsed.commands) {
+  for (const [index, { words: written, depth }] of parsed.commands.entries()) {
+    let words = written;
     // Leading NAME=value assignments; the NAME= part must not itself be computed.
     const assignment = ({ value, cut = Infinity }) => {
       const name = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(value);
       return name !== null && name[0].length <= cut;
     };
-    while (words.length && assignment(words[0])) words = words.slice(1);
-    while (words.length && !words[0].dynamic && KEYWORDS.has(words[0].value))
-      words = words.slice(1);
-    if (!words.length || (!words[0].dynamic && CLOSERS.has(words[0].value))) continue;
+    for (; words.length && assignment(words[0]); words = words.slice(1)) {
+      const [name] = words[0].value.split('=');
+      if (!KNOWN_ENV.has(name)) found.problems.push(`an assignment to ${name} (${clip(written)})`);
+    }
+    if (!words.length) continue;
     const [command, ...args] = words;
     if (command.dynamic) found.problems.push(`a computed command word (${clip(words)})`);
-    else if (command.value === 'node') nodeCommand(args, found);
-    else if (command.value === 'pnpm') pnpmCommand(args, scripts, found);
-    else if (!INERT_COMMANDS.has(command.value))
+    else if (command.value === 'node')
+      nodeCommand(args, found, index === 0 && depth === 0 && words === written);
+    else if (command.value === 'pnpm') pnpmCommand(args, scripts, packages, found);
+    else if (command.value === 'turbo') turboCommand(args, packages, turbo, found);
+    else if (!Object.hasOwn(INERT_SHAPES, command.value))
       found.problems.push(`the command ${command.value} (${clip(words)})`);
+    else if (
+      (command.value !== 'echo' && !literal(args)) ||
+      !INERT_SHAPES[command.value](args.map((entry) => entry.value))
+    )
+      found.problems.push(
+        `an argument shape of ${command.value} that is not read (${clip(words)})`,
+      );
   }
   return found;
 }
@@ -272,8 +295,8 @@ export function runsNodeTest(text, scripts) {
   );
 }
 
-function textProblems(label, text, scripts, problems) {
-  const found = analyse(text, scripts);
+function textProblems(label, text, scripts, packages, turbo, problems) {
+  const found = analyse(text, scripts, packages, turbo);
   for (const text of found.timeouts)
     problems.push(
       `${label} runs node --test without exactly one --test-timeout=<ms> of at most ${MAX_FILE_BUDGET_MS} before the files: ${text}`,
@@ -283,26 +306,288 @@ function textProblems(label, text, scripts, problems) {
   return found;
 }
 
-export function nodeTestTimeoutProblems(doc, scripts) {
+const READABLE_SHELLS = new Set(['bash', 'sh']);
+const isMap = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * The execution context of every step of the job, resolved the way Actions does it
+ * (workflow defaults.run, then job defaults.run, then the step) and checked at each
+ * level that sets something: the shell must be a plain bash or sh, the directory the
+ * repository root (so a root script means the root script), and `env` a plain map
+ * of KNOWN_ENV names, the same policy as a shell assignment. Anything else is refused.
+ */
+function contextProblems(doc, job, id) {
   const problems = [];
-  const job = doc?.jobs?.[UNIT_STEP.job];
-  const steps = job?.steps;
-  if (!Array.isArray(steps)) return [`job ${UNIT_STEP.job} has no readable steps`];
-  // A different shell or directory changes what the command text means.
-  if (job.defaults?.run !== undefined)
-    problems.push(`job ${UNIT_STEP.job} sets defaults.run, so its commands cannot be read`);
-  const queue = [];
-  for (const step of steps) {
-    if (step?.run === undefined) continue;
-    // A command that cannot be read is not proven free of node --test.
-    if (typeof step.run !== 'string') {
-      problems.push(`step "${step.name}": run is not text`);
+  const levels = [
+    ['workflow', doc, doc?.defaults?.run, doc?.defaults],
+    ['job', job, job?.defaults?.run, job?.defaults],
+  ];
+  for (const [label, owner, run, defaults] of levels) {
+    const name = label === 'job' ? `job ${id}` : 'the workflow';
+    if (defaults !== undefined && !isMap(defaults))
+      problems.push(`${name} has defaults that cannot be read`);
+    else if (run !== undefined && !isMap(run))
+      problems.push(`${name} sets defaults.run to something that cannot be read`);
+    else if (isMap(run)) {
+      const shell = run.shell;
+      const unreadable =
+        Object.keys(run).some((key) => key !== 'shell') ||
+        (shell !== undefined && !READABLE_SHELLS.has(shell));
+      if (unreadable) problems.push(`${name} sets defaults.run, so its commands cannot be read`);
+    }
+    problems.push(...envProblems(name, owner?.env));
+  }
+  // FU-092: a job container changes the shell, the tools and the files every step sees.
+  if (job.container !== undefined)
+    problems.push(`job ${id} runs in a container, so its commands cannot be read`);
+  for (const step of job.steps) {
+    const name = `step "${step?.name}"`;
+    if (!isMap(step)) {
+      problems.push(`${name} cannot be read`);
       continue;
     }
-    if (step['working-directory'] !== undefined || !['bash', 'sh', undefined].includes(step.shell))
-      problems.push(`step "${step.name}" sets shell or working-directory, so it cannot be read`);
-    queue.push(...textProblems(`step "${step.name}"`, step.run, scripts, problems).follows);
+    if (
+      step['working-directory'] !== undefined ||
+      (step.shell !== undefined && !READABLE_SHELLS.has(step.shell))
+    )
+      problems.push(`${name} sets shell or working-directory, so it cannot be read`);
+    // A local action's own steps are not read here, so it could run any node --test.
+    if (typeof step.uses === 'string' && /^(?:\.|docker:)/.test(step.uses))
+      problems.push(`${name} uses ${step.uses}, which cannot be read`);
+    problems.push(...envProblems(name, step.env));
   }
+  return problems;
+}
+
+function envProblems(name, env) {
+  if (env === undefined) return [];
+  if (!isMap(env)) return [`${name} has an env that cannot be read`];
+  return Object.keys(env)
+    .filter((key) => !KNOWN_ENV.has(key))
+    .map((key) => `${name} sets ${key}, which may change what its commands mean`);
+}
+
+/**
+ * FU-092: pnpm settings that change what an install or a script run does (`script-shell`,
+ * `shell-emulator`, `node-options`, `ignore-scripts`, a `.pnpmfile.cjs` hook ...) are read
+ * from the places pnpm reads them: `.npmrc`, `pnpm-workspace.yaml` (parsed), the root
+ * manifest's `pnpm` field and the presence of a pnpmfile (PNPMFILE_NAMES). A setting outside the
+ * reviewed inert lists refuses; so does a file that cannot be read. Returns the problems.
+ */
+const INERT_NPMRC = new Set(
+  'public-hoist-pattern[] strict-peer-dependencies auto-install-peers min-release-age'.split(' '),
+);
+const INERT_WORKSPACE = new Set(
+  'packages catalog catalogs allowBuilds overrides blockExoticSubdeps minimumReleaseAge minimumReleaseAgeStrict minimumReleaseAgeExclude trustPolicy trustPolicyExclude patchedDependencies'.split(
+    ' ',
+  ),
+);
+/**
+ * PR #805 r2 F4: every file name pnpm reads as an install hook or as a package manifest, in ONE
+ * list (pnpm 11 loads `.pnpmfile.mjs` before `.pnpmfile.cjs`, and reads `package.json5` and
+ * `package.yaml` as manifests with their own lifecycle scripts). The enumeration of a workspace
+ * and the settings check both take these names; a name added here is read or refused everywhere.
+ */
+export const PNPMFILE_NAMES = ['.pnpmfile.cjs', '.pnpmfile.mjs'];
+export const MANIFEST_NAMES = ['package.json', 'package.json5', 'package.yaml'];
+
+/**
+ * The problems of one directory's file `names` (a listing): a pnpm hook runs code at install, and
+ * a manifest other than `package.json` is a package whose scripts this check does not read.
+ */
+export function pnpmInputProblems(directory, names) {
+  if (!Array.isArray(names)) return [`${directory} was not listed`];
+  const where = (name) => (directory === '.' ? name : `${directory}/${name}`);
+  return [
+    ...PNPMFILE_NAMES.filter((name) => names.includes(name)).map(
+      (name) => `${where(name)} may run code at install`,
+    ),
+    ...MANIFEST_NAMES.slice(1)
+      .filter((name) => names.includes(name))
+      .map((name) => `${where(name)} is a package manifest this check does not read`),
+  ];
+}
+
+export function pnpmSettingsProblems({ npmrc, workspace, manifestPnpm, pnpmfile } = {}) {
+  const problems = [];
+  if (typeof npmrc !== 'string') problems.push('.npmrc was not read');
+  else
+    for (const line of npmrc.split('\n').map((text) => text.trim())) {
+      if (line === '' || /^[#;]/.test(line)) continue;
+      const key = /^([^=\s]+)\s*=/.exec(line)?.[1];
+      if (key === undefined) problems.push(`.npmrc has a line that is not key=value: ${line}`);
+      else if (!INERT_NPMRC.has(key))
+        problems.push(`.npmrc sets ${key}, which may change how pnpm runs scripts`);
+    }
+  if (!isMap(workspace)) problems.push('pnpm-workspace.yaml was not read');
+  else
+    for (const key of Object.keys(workspace))
+      if (!INERT_WORKSPACE.has(key))
+        problems.push(`pnpm-workspace.yaml sets ${key}, which may change how pnpm runs scripts`);
+  if (manifestPnpm !== undefined)
+    problems.push('the root package.json has a pnpm field, which this check does not read');
+  if (pnpmfile !== false)
+    problems.push(
+      `a ${PNPMFILE_NAMES.join(' or ')} may run code at install (or was not looked for)`,
+    );
+  return problems;
+}
+
+// FU-077 r2 F1: the turbo task graph, read from every configuration with every edge kept.
+const TURBO_ROOT_KEYS = new Set(
+  '$schema ui globalDependencies globalEnv globalPassThroughEnv tasks remoteCache envMode daemon cacheDir concurrency dangerouslyDisablePackageManagerCheck noUpdateNotifier'.split(
+    ' ',
+  ),
+);
+const TURBO_PACKAGE_KEYS = new Set(['$schema', 'extends', 'tasks']);
+/** Task keys that add no task: `dependsOn` and `with` (tasks run alongside) are the edges. */
+const TURBO_TASK_KEYS = new Set(
+  'dependsOn with env passThroughEnv outputs cache inputs outputLogs persistent interactive interruptible'.split(
+    ' ',
+  ),
+);
+const TURBO_EDGES = ['dependsOn', 'with'];
+/** Every name turbo reads a configuration from, in the root and in each package. */
+export const TURBO_CONFIG_NAMES = ['turbo.json', 'turbo.jsonc'];
+
+/** JSON with comments, as turbo reads turbo.json and turbo.jsonc: comments outside strings dropped. */
+function parseJsonc(text) {
+  let out = '';
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at];
+    if (char === '"') {
+      const start = at;
+      for (at++; at < text.length && text[at] !== '"'; at++) if (text[at] === '\\') at++;
+      out += text.slice(start, at + 1);
+    } else if (char === '/' && text[at + 1] === '/') {
+      while (at < text.length && text[at] !== '\n') at++;
+      out += '\n';
+    } else if (char === '/' && text[at + 1] === '*') {
+      const end = text.indexOf('*/', at + 2);
+      if (end < 0) throw new Error('an unterminated comment');
+      at = end + 1;
+      out += ' ';
+    } else out += char;
+  }
+  return JSON.parse(out);
+}
+
+/**
+ * `configs`: { directory, files: { 'turbo.json'?: text, 'turbo.jsonc'?: text } } for the root
+ * (directory '.') and EVERY workspace package. Returns { turbo: task -> every task it runs
+ * (dependsOn and with, `^` dropped), problems }; with a problem `turbo` is undefined, so a turbo
+ * command refuses. Refused: unreadable JSON, both extensions in one directory, a root without a
+ * configuration, an unknown key at the top or in a task (it may add work this model does not
+ * read), a package `extends` other than ["//"], an edge list that is not strings, and a
+ * `$TURBO_EXTENDS$`-style microsyntax edge.
+ */
+export function turboTaskGraph(configs) {
+  const problems = [];
+  const turbo = {};
+  if (!configs.some(({ directory, files }) => directory === '.' && Object.keys(files).length))
+    problems.push('the root has no turbo.json');
+  for (const { directory, files } of configs) {
+    const names = Object.keys(files);
+    if (names.length > 1) problems.push(`${directory} has both ${names.join(' and ')}`);
+    for (const [file, text] of Object.entries(files)) {
+      const where = `${directory}/${file}`;
+      let config;
+      try {
+        config = parseJsonc(String(text));
+      } catch (error) {
+        problems.push(`${where} cannot be read (${error.message})`);
+        continue;
+      }
+      if (!isMap(config)) {
+        problems.push(`${where} is not an object`);
+        continue;
+      }
+      const known = directory === '.' ? TURBO_ROOT_KEYS : TURBO_PACKAGE_KEYS;
+      for (const key of Object.keys(config))
+        if (!known.has(key)) problems.push(`${where} sets ${key}, which this check does not read`);
+      if (
+        directory !== '.' &&
+        (!Array.isArray(config.extends) ||
+          config.extends.length !== 1 ||
+          config.extends[0] !== '//')
+      )
+        problems.push(`${where} extends something other than ["//"]`);
+      if (!isMap(config.tasks ?? {})) {
+        problems.push(`${where} has tasks that are not an object`);
+        continue;
+      }
+      for (const [name, task] of Object.entries(config.tasks ?? {})) {
+        if (!isMap(task)) {
+          problems.push(`${where} task ${name} is not an object`);
+          continue;
+        }
+        for (const key of Object.keys(task))
+          if (!TURBO_TASK_KEYS.has(key))
+            problems.push(`${where} task ${name} sets ${key}, which this check does not read`);
+        const edges = new Set(turbo[name] ?? []);
+        for (const key of TURBO_EDGES) {
+          const list = task[key] ?? [];
+          if (!Array.isArray(list) || !list.every((entry) => typeof entry === 'string')) {
+            problems.push(`${where} task ${name} has a ${key} that is not a list of task names`);
+            continue;
+          }
+          for (const entry of list) {
+            if (entry.includes('$'))
+              problems.push(`${where} task ${name} ${key} ${entry} is not a task name`);
+            edges.add(entry);
+          }
+        }
+        turbo[name] = [...edges];
+      }
+    }
+  }
+  return problems.length ? { turbo: undefined, problems } : { turbo, problems };
+}
+
+/**
+ * `packages`: the scripts of EVERY workspace package (a `--filter` on an unread one refuses).
+ * `workspace`: { turbo, problems } from turboTaskGraph (task -> every task it runs, from
+ * every turbo.json and turbo.jsonc); without it a turbo command refuses, so omitting it opens
+ * nothing.
+ */
+export function nodeTestTimeoutProblems(doc, scripts, packages = {}, workspace = {}) {
+  const problems = [];
+  const { turbo } = workspace;
+  for (const reason of workspace.problems ?? [])
+    problems.push(`the turbo task graph cannot be read: ${reason}`);
+  // FU-092: omitting the pnpm settings never opens the check (pnpmSettingsProblems output).
+  if (!Array.isArray(workspace.settings)) problems.push('the pnpm settings were not read');
+  else
+    for (const reason of workspace.settings)
+      problems.push(`the pnpm settings cannot be read: ${reason}`);
+  const ids = Object.keys(isMap(doc?.jobs) ? doc.jobs : {}).filter((id) =>
+    id.startsWith(QUALITY_JOB_PREFIX),
+  );
+  if (!ids.includes(UNIT_STEP.job)) return [`job ${UNIT_STEP.job} has no readable steps`];
+  const queue = [];
+  for (const id of ids) {
+    const job = doc.jobs[id];
+    const steps = job?.steps;
+    if (!Array.isArray(steps)) {
+      problems.push(`job ${id} has no readable steps`);
+      continue;
+    }
+    // A different shell, directory or shell-reading environment changes what the text means.
+    problems.push(...contextProblems(doc, job, id));
+    for (const step of steps) {
+      if (step?.run === undefined) continue;
+      // A command that cannot be read is not proven free of node --test.
+      if (typeof step.run !== 'string') {
+        problems.push(`step "${step.name}": run is not text`);
+        continue;
+      }
+      queue.push(
+        ...textProblems(`step "${step.name}"`, step.run, scripts, packages, turbo, problems)
+          .follows,
+      );
+    }
+  }
+  const steps = doc.jobs[UNIT_STEP.job].steps ?? [];
   const names = new Set();
   while (queue.length) {
     const name = queue.pop();
@@ -310,7 +595,10 @@ export function nodeTestTimeoutProblems(doc, scripts) {
     names.add(name);
     if (typeof scripts[name] !== 'string') problems.push(`script ${name} is not text`);
     else if (!Object.hasOwn(EXEMPT_SCRIPTS, name))
-      queue.push(...textProblems(`script ${name}`, scripts[name], scripts, problems).follows);
+      queue.push(
+        ...textProblems(`script ${name}`, scripts[name], scripts, packages, turbo, problems)
+          .follows,
+      );
   }
   for (const [name, reason] of Object.entries(EXEMPT_SCRIPTS))
     if (!reason || !names.has(name) || analyse(scripts[name], scripts).nodeTests.length === 0)
@@ -326,11 +614,35 @@ export function nodeTestTimeoutProblems(doc, scripts) {
     problems.push(
       `step "${UNIT_STEP.step}" timeout-minutes must be at most ${UNIT_STEP.maxMinutes}`,
     );
-  // The preload is an argument of the one node --test command, before its files.
-  const tests = analyse(scripts[UNIT_STEP.script] ?? '', scripts).nodeTests;
-  if (tests.length !== 1 || tests[0].imports.join('\n') !== UNIT_STEP.watchdog)
+  // The step must really run the script that carries the budget and the preload: being
+  // somewhere in the text is not running. Only this exact, unconditional command counts.
+  const unitRun = typeof unit.run === 'string' ? parseCommands(unit.run) : undefined;
+  const [only] = unitRun?.commands ?? [];
+  if (
+    unitRun?.problems.length !== 0 ||
+    unitRun.commands.length !== 1 ||
+    // argv entries compared one by one (FU-077 R4): a quoted newline does not join words
+    !sameWords(only.words, ['pnpm', 'run', UNIT_STEP.script]) ||
+    unit.if !== undefined ||
+    unit['continue-on-error'] !== undefined
+  )
     problems.push(
-      `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (--import ${UNIT_STEP.watchdog}) and nothing else, before its files`,
+      `step "${UNIT_STEP.step}" must run ${UNIT_STEP.script} unconditionally and nothing else`,
+    );
+  // The preload is an argument of the one node --test command, before its files, and that
+  // command is the first one of the script, so it really runs.
+  // Read by the same parser as every other command: a construct it refuses is not a preload.
+  const watched = analyse(scripts[UNIT_STEP.script] ?? '', scripts, packages, turbo);
+  const tests = watched.nodeTests;
+  if (
+    watched.problems.length > 0 ||
+    tests.length !== 1 ||
+    !tests[0].unconditional ||
+    tests[0].imports.length !== 1 ||
+    tests[0].imports[0] !== `${UNIT_STEP.preload} ${UNIT_STEP.watchdog}`
+  )
+    problems.push(
+      `${UNIT_STEP.script} must preload ${UNIT_STEP.watchdog} (${UNIT_STEP.preload} ${UNIT_STEP.watchdog}, which the runner loads too) and nothing else, before its files`,
     );
   return problems;
 }

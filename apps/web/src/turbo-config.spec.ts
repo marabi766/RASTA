@@ -1,8 +1,21 @@
 /**
  * @jest-environment node
  */
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { builtinModules } from 'node:module';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+
+import ts from 'typescript';
 
 import {
   declaredTestInputs,
@@ -49,6 +62,83 @@ describe('apps/web/turbo.json test inputs', () => {
   it('have no duplicates', () => {
     const inputs = inputsOf('test');
     expect(new Set(inputs).size).toBe(inputs.length);
+  });
+});
+
+/**
+ * Every file the portal's ESLint config loads, by its import closure (PR-949 F3): what a spec
+ * that runs ESLint (`write-classifier.guard.spec`) depends on. A local file that cannot be
+ * resolved, or a workspace package, is reported too: not walked is not proven declared.
+ */
+function lintConfigClosure(entry: string): { files: string[]; unproven: string[] } {
+  const files = new Set<string>();
+  const unproven: string[] = [];
+  const pending = [entry];
+  while (pending.length > 0) {
+    const file = pending.pop() as string;
+    if (files.has(file)) continue;
+    files.add(file);
+    const { importedFiles } = ts.preProcessFile(readFileSync(file, 'utf8'), true, true);
+    for (const { fileName: specifier } of importedFiles) {
+      if (specifier.startsWith('node:') || builtinModules.includes(specifier)) continue;
+      if (/^\.\.?\//.test(specifier)) {
+        const target = path.resolve(path.dirname(file), specifier);
+        if (existsSync(target)) pending.push(realpathSync(target));
+        else unproven.push(`${file}: ${specifier} resolves to no file`);
+        continue;
+      }
+      const name = specifier
+        .split('/')
+        .slice(0, specifier.startsWith('@') ? 2 : 1)
+        .join('/');
+      let dir = path.dirname(file);
+      while (!existsSync(path.join(dir, 'node_modules', name)) && dir !== path.dirname(dir))
+        dir = path.dirname(dir);
+      const installed = path.join(dir, 'node_modules', name);
+      if (
+        !existsSync(installed) ||
+        !realpathSync(installed).includes(`${path.sep}node_modules${path.sep}`)
+      )
+        unproven.push(`${file}: ${specifier} is not an installed package`);
+    }
+  }
+  return { files: [...files], unproven };
+}
+
+describe('the ESLint config a spec runs (PR-949 F3)', () => {
+  it('is a test input in every file it loads, so a new rule helper cannot replay a cached green', () => {
+    const { files, unproven } = lintConfigClosure(
+      path.join(REPO_ROOT, 'apps/web/eslint.config.mjs'),
+    );
+    expect(files.length).toBeGreaterThan(10);
+    expect(unproven).toEqual([]);
+    const declared = declaredTestInputs();
+    const missing = files.filter((file) => isOutsideInput(file) && !isDeclared(file, declared));
+    expect(missing.map((file) => path.relative(REPO_ROOT, file))).toEqual([]);
+  });
+
+  it('is live: a helper a rule loads is in the closure, and an unknown one is reported', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'lint-closure-'));
+    try {
+      writeFileSync(path.join(root, 'config.mjs'), "import r from './rule.mjs';\nimport 'x-none';");
+      writeFileSync(
+        path.join(root, 'rule.mjs'),
+        "import { h } from './helper.mjs';\nimport('./gone.mjs');",
+      );
+      writeFileSync(path.join(root, 'helper.mjs'), 'export const h = 1;');
+      const { files, unproven } = lintConfigClosure(path.join(root, 'config.mjs'));
+      expect(files.map((file) => path.basename(file)).sort()).toEqual([
+        'config.mjs',
+        'helper.mjs',
+        'rule.mjs',
+      ]);
+      expect(unproven).toEqual([
+        expect.stringContaining('config.mjs: x-none is not an installed package'),
+        expect.stringContaining('rule.mjs: ./gone.mjs resolves to no file'),
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -121,5 +211,22 @@ describe('the guard', () => {
     ]);
     expect(filesMatching('services/asset-service/src/no-such-dir/**')).toEqual([]);
     expect(filesMatching('services/asset-service/NOT-A-FILE.ts')).toEqual([]);
+  });
+
+  it('never opens git-ignored generated output while matching (regenerated mid-walk, FU-090)', () => {
+    // `db:generate` rewrites src/generated while checks run (a listed file can be gone:
+    // ENOENT). A directory that cannot be read stands in for that.
+    const root = mkdtempSync(path.join(tmpdir(), 'turbo-generated-'));
+    const unreadable = path.join(root, 'services/svc/src/generated/prisma');
+    try {
+      mkdirSync(unreadable, { recursive: true });
+      writeFileSync(path.join(root, 'services/svc/src/app.ts'), 'export {};\n');
+      chmodSync(unreadable, 0o000);
+      if (process.getuid?.() === 0) return; // root reads it anyway: nothing to prove
+      expect(filesMatching('services/svc/src/**', root)).toEqual(['services/svc/src/app.ts']);
+    } finally {
+      chmodSync(unreadable, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

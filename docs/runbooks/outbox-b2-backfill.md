@@ -156,8 +156,9 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --all
 ```
 
 اگر `pending_unsequenced` صفر باشد، آن سرویس کاری ندارد.
-اگر رویداد `refused` بیاید، **متن `reason` را بخوان و رفع کن** — تا وقتی
-Schema B1 مستقر نباشد، اجرا شروع نمی‌شود.
+اگر رویداد `refused` بیاید، **کد داخل `reason` را در جدول § «کدهای امتناع» پیدا کن و
+همان را رفع کن** — `reason` متن خود Guard را تکرار نمی‌کند (#581). تا وقتی Schema B1
+مستقر نباشد، اجرا شروع نمی‌شود.
 
 ---
 
@@ -241,7 +242,10 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply -
 | کد خروج   | ۱                                                                       |
 
 ```json
-{ "type": "refused", "reason": "No target selected. Pass --service <name> (repeatable) or --all. …" }
+{
+  "type": "refused",
+  "reason": "command refused (code usage); diagnostics withheld; prior work may have committed — reconcile before retrying"
+}
 ```
 
 #### مسیر ۲ — اجرای سرویسِ اعتبارسنجی‌شده
@@ -260,11 +264,12 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply -
 
 و سپس **دقیقاً یک نتیجهٔ سطح CLI** برای همان سرویس:
 
-| نتیجه        | رویداد                        | شمارندهٔ `summary` | معنا                                                                                                                                                                          |
-| ------------ | ----------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| همگرا شد     | ندارد (فقط همان `done`)       | `ok`               | `done.converged: true`                                                                                                                                                        |
-| ناتمام       | `incomplete` **پس از** `done` | `incomplete`       | بودجهٔ `--max-batches` تمام شد یا ردیف بدون توالی مانده                                                                                                                       |
-| امتناع سرویس | `refused` **به‌جای** `done`   | `refused`          | `DATABASE_URL_<SERVICE>` تنظیم نشده، نقش اجرا نیست (D-045)، نقض پیش‌شرط B1، Guard ترتیب، تاریخچهٔ پاک‌شده با Purge یا `*_mismatch` پس از نهایی‌سازی (§ «Purge زمان‌بندی‌شده») |
+| نتیجه           | رویداد                            | شمارندهٔ `summary` | معنا                                                                                                                                                                                        |
+| --------------- | --------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| همگرا شد        | ندارد (فقط همان `done`)           | `ok`               | `done.converged: true`                                                                                                                                                                      |
+| ناتمام          | `incomplete` **پس از** `done`     | `incomplete`       | بودجهٔ `--max-batches` تمام شد یا ردیف بدون توالی مانده                                                                                                                                     |
+| امتناع سرویس    | `refused` **به‌جای** `done`       | `refused`          | `DATABASE_URL_<SERVICE>` تنظیم نشده، نقش اجرا نیست (D-045)، نقض پیش‌شرط B1، Guard ترتیب، تاریخچهٔ پاک‌شده با Purge یا `*_mismatch` پس از نهایی‌سازی (§ «Purge زمان‌بندی‌شده»)               |
+| شکست بستن اتصال | `refused` با `"phase": "cleanup"` | `refused` (یک بار) | بستن اتصال سرویس پس از کارش شکست خورد. ممکن است پس از `done` یا پس از `refused` ـِ همان سرویس بیاید؛ سرویس فقط یک بار در `refused` شمرده می‌شود و سرویس‌های بعدی و `summary` همچنان می‌آیند |
 
 `incomplete` **خطا نیست** و عمداً از `refused` جداست: چیزی خراب نشده، اجرا
 مرزدار بوده. مثل هر رویداد دیگری فقط شمارش دارد — بدون Payload، URL یا Stack.
@@ -277,8 +282,19 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply -
 
 ```json
 { "type": "refused", "service": "economic",
-  "reason": "DATABASE_URL_ECONOMIC is not set. …" }
+  "reason": "command refused (code database-url-unset); diagnostics withheld; prior work may have committed — reconcile before retrying" }
 { "type": "summary", "mode": "apply", "services": 2, "ok": 1, "incomplete": 0, "refused": 1 }
+```
+
+شکست بستن اتصال، با همان سطر بسته و فیلد `phase` (کد Client ثبت‌شده یا `unknown`):
+
+```json
+{
+  "type": "refused",
+  "service": "document",
+  "phase": "cleanup",
+  "reason": "command failed (code unknown); diagnostics withheld; prior work may have committed — reconcile before retrying"
+}
 ```
 
 ```json
@@ -340,6 +356,51 @@ Autovacuum هم‌زمان جای آن را نمی‌گیرد.
 برای صف بزرگ، Apply را با `--max-batches` برش بزن و **میان برش‌ها** همین دستور را اجرا
 کن؛ این جای Vacuum میانی‌ای است که ADR-051 § R7 تجویز می‌کند. `--vacuum-every` حذف شده
 و با پیامی که به این بخش اشاره می‌کند رد می‌شود.
+
+---
+
+## کدهای امتناع (FU-022 / FU-023)
+
+هر دو CLI ـِ B2 و هفت CLI ـِ عملیاتی سرویس‌ها شکست را با گزارشگر بستهٔ مشترک
+(`packages/config/src/command-failure.js`) چاپ می‌کنند. متن خطا، Stack، `cause` و نام
+کلاس هرگز چاپ نمی‌شود؛ فقط یکی از این سه شکل دقیق:
+
+| شکل                                                                                                                 | چه وقت                                                                   |
+| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `command refused (code <refusal>); diagnostics withheld; prior work may have committed — reconcile before retrying` | یکی از Guardهای خود رستا رد کرد؛ `<refusal>` از جدول پایین است           |
+| `command failed (code <client>); diagnostics withheld; prior work may have committed — reconcile before retrying`   | شکست کتابخانه یا شبکه با کد ثبت‌شدهٔ Client (`ECONNREFUSED`، `P1001`، …) |
+| `command failed (code unknown); diagnostics withheld; prior work may have committed — reconcile before retrying`    | هر چیز دیگر — از جمله خطایی که فقط ادعای کد دارد (Fail Closed)           |
+
+در B2 این سطر مقدار `reason` ـِ رویداد `refused` است (با `service` اگر امتناع مال یک سرویس
+باشد، و `"phase": "cleanup"` اگر بستن اتصال شکست خورد)؛ در CLIهای سرویس تنها خط stderr
+است و کد خروج همان پیشین می‌ماند (۲، و ۱ برای `resolved-dispute-backfill` و `hold-deadline-backfill`). دنبالهٔ
+«prior work may have committed» عمدی است: برخی امتناع‌ها پس از دسته‌های Commit‌شده
+می‌آیند، پس پیش از تکرار، وضعیت را با § ۴ بسنج.
+
+| کد                        | Guard                                                                                            | کجا                           | چه بکنی                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------- |
+| `usage`                   | خط فرمان رد شد: گزینهٔ ناشناخته، مقدار نامعتبر یا جاافتاده، هدف نامشخص یا تکراری، سرویس ناشناخته | همه                           | فرمان را با گزینه‌های مستند همین Runbook یا Runbook همان CLI دوباره بنویس         |
+| `node-env`                | `NODE_ENV=production` یا مقداری ناشناخته                                                         | B2                            | B2 فقط برای development / test / ci است                                           |
+| `owner-credential`        | اعتبار مالک (مهاجر) در محیط فرمانی که با نقش اجرا کار می‌کند (D-045)                             | B2 Backfill، CLIهای سرویس     | `.env.migrator` را از محیط این فرمان بیرون ببر                                    |
+| `configuration`           | محیط سرویس اعتبارسنجی نشد (متغیر جاافتاده یا نامعتبر، ترکیب بودجهٔ fleet)                        | CLIهای سرویس                  | همان متغیرهایی را بررسی کن که سرویس هنگام راه‌اندازی می‌خواند                     |
+| `database-url-unset`      | `DATABASE_URL_<SERVICE>` (یا `…_MIGRATOR` برای Vacuum) تنظیم نشده                                | B2                            | متغیر همان سرویس را تنظیم کن؛ B2 هرگز `DATABASE_URL` مشترک را نمی‌خواند           |
+| `runtime-role`            | نقش وصل‌شده می‌تواند مثل مالک عمل کند (Preflight نقش اجرا، D-045)                                | B2 Backfill، CLIهای سرویس     | URL نقش اجرای همان سرویس را بده؛ امتیاز اضافه را پس بگیر (`db-role-split.md`)     |
+| `runtime-role-unverified` | Preflight نتوانست نقش را از پایگاه داده بپرسد (اتصال یا ورود شکست خورد)                          | B2 Backfill، CLIهای سرویس     | دسترسی پایگاه داده را درست کن و تکرار کن                                          |
+| `prisma-client-missing`   | Client ـِ Prisma ـِ سرویس ساخته نشده                                                             | B2                            | `pnpm db:generate`                                                                |
+| `b1-precondition`         | Schema ـِ B1 مستقر نیست                                                                          | B2 Backfill                   | سه Migration ـِ B1 را مستقر کن                                                    |
+| `history-purged`          | Purge تاریخچهٔ شماره‌گذاری‌شدهٔ یک Stream را پاک کرده (پیش از اجرا یا در میانهٔ آن)              | B2 Backfill                   | § «Purge زمان‌بندی‌شده»؛ دسته‌های پیشین Commit شده‌اند                            |
+| `ordering-violation`      | Guard ترتیب: در حین اجرا ردیف تازه نوشته شد                                                      | B2 Backfill                   | Producerهای سرویس را ساکن کن (§ «شرط سکون») و دوباره اجرا کن                      |
+| `no-progress`             | دسته ردیف انتخاب کرد و هیچ کدام را تخصیص نداد                                                    | B2 Backfill                   | متوقف شو و بررسی کن؛ تکرار نکن                                                    |
+| `verification-mismatch`   | پس از نهایی‌سازی یکی از `*_mismatch` صفر نیست                                                    | B2 Backfill                   | یک بار تکرار کن؛ اگر ماند، متوقف شو و بررسی کن (رویداد `verify` شمارش‌ها را دارد) |
+| `no-outbox-table`         | جدول Outbox روی `search_path` این اتصال نیست                                                     | B2 Vacuum                     | URL و Schema ـِ مهاجر همان سرویس را بررسی کن                                      |
+| `not-table-owner`         | نقش وصل‌شده مالک جدول نیست، پس PostgreSQL ـ VACUUM ـِ آن را بی‌صدا رد می‌شد                      | B2 Vacuum                     | `DATABASE_URL_<SERVICE>_MIGRATOR` را مهاجر همان سرویس بگذار                       |
+| `vacuum-unproven`         | VACUUM برگشت ولی شمارنده‌های جدول تکان نخوردند                                                   | B2 Vacuum                     | دوباره اجرا کن؛ هیچ چیز «Vacuum‌شده» گزارش نشده                                   |
+| `lag-unreadable`          | Topic مورد انتظار دیده نمی‌شود یا Partition ندارد، پس Lag خواندنی نیست                           | fleet `insurance:drain-check` | دسترسی Principal و Topicها را درست کن؛ این «تخلیه‌شده» نیست                       |
+| `economic-rule-unproven`  | ساعت پایگاه داده هنوز ۱ ساعت از `--economic-rule-since` نگذشته؛ D-150 ثابت نیست                  | marketplace backfill          | صبر کن یا لحظه را از سابقهٔ استقرار بردار؛ مهلتی داده نشده                        |
+
+مجموعهٔ کدها بسته است (`REFUSAL_CODES`)؛ کدی بیرون از آن هیچ خطایی را علامت نمی‌زند و
+همان `unknown` چاپ می‌شود. `scripts/command-refusal-codes.test.mjs` برای هر کد Guard واقعی
+را اجرا می‌کند و شکست می‌خورد اگر کدی بی آزمون یا آزمونی بی کد بماند.
 
 ---
 

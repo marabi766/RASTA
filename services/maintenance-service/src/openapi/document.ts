@@ -1,6 +1,13 @@
+import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
-import { toJsonSchema, type JsonSchema } from '@rasta/nest-common';
+import {
+  applyOperationSecurity,
+  routeAccessByOperation,
+  toJsonSchema,
+  type JsonSchema,
+  type ServiceRouteUsers,
+} from '@rasta/nest-common';
 import {
   approveRequestSchema,
   assignWorkshopSchema,
@@ -118,6 +125,48 @@ const STATUS_TEXT: Record<number, string> = {
   504: 'A service this operation depends on did not answer in time (UPSTREAM_TIMEOUT); retry',
 };
 
+/** The replay fence's header, as every keyed command reads it (FU-171, PM decision D-133). */
+const REPLAY_DEADLINE_PARAMETER = {
+  name: 'Idempotency-Replay-Deadline',
+  in: 'header',
+  required: false,
+  description:
+    'Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. ' +
+    'Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before sending again. ' +
+    'The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. ' +
+    'A value later than claim time + MAINTENANCE_IDEMPOTENCY_TTL_HOURS − B (B = 2 · MAINTENANCE_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. ' +
+    'A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Sending it needs an Idempotency-Key, or 400. Without the header nothing changes: an expired key is reusable.',
+  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
+};
+
+/** What the fence adds to the two refusals of a keyed command. */
+const KEYED_STATUS_TEXT: Record<number, string> = {
+  400: ' — also a missing or malformed Idempotency-Key, or an Idempotency-Replay-Deadline that is not one canonical integer, is later than the retention allows, or came with no key (the attempt did nothing)',
+  409: ' — also an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED), the same key still in flight (CONFLICT, with Retry-After), or an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have)',
+};
+
+/**
+ * Every `@AllowService` route (FU-075) and whether a user token is still
+ * admitted there. Which token a route takes is read from the guard's own
+ * metadata (`applyOperationSecurity`, @rasta/nest-common); this table states
+ * only what no decorator does — `users-refused` is enforced in the service
+ * (`source-fact.ts`, `asset-work-state.ts`, `transfer-clearance.ts`) — and must match the decorators exactly.
+ */
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/maintenance-requests/{id}': 'users-refused',
+  'GET /v1/internal/assets/{assetId}/maintenance-state': 'users-refused',
+  'POST /v1/internal/assets/{assetId}/transfer-clearance': 'users-refused',
+  'DELETE /v1/internal/assets/{assetId}/transfer-clearance/{fenceId}': 'users-refused',
+};
+
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
+
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
@@ -152,9 +201,14 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         content: { 'application/json': { schema: {} } },
       };
 
+      // FU-171: every keyed command reads it, through the one store — so publishing it
+      // follows from the key rather than from a list a new command could miss.
+      const keyed = operation.parameters?.some(isIdempotencyKeyHeader) ?? false;
+      if (keyed) operation.parameters?.push(REPLAY_DEADLINE_PARAMETER);
+
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
-          description: STATUS_TEXT[status] ?? 'Error',
+          description: `${STATUS_TEXT[status] ?? 'Error'}${keyed ? (KEYED_STATUS_TEXT[status] ?? '') : ''}`,
           content: {
             'application/json': { schema: { $ref: '#/components/schemas/ApiError' } },
           },
@@ -194,6 +248,11 @@ interface MutableOperation {
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;
+}
+
+function isIdempotencyKeyHeader(parameter: unknown): boolean {
+  const { in: location, name } = parameter as { in?: unknown; name?: unknown };
+  return location === 'header' && name === 'Idempotency-Key';
 }
 
 function isOperation(value: unknown): value is MutableOperation {

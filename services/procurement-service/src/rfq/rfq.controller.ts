@@ -1,7 +1,11 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import type { CursorPage } from '../demand/dto';
 import {
   cancelRfqSchema,
@@ -95,9 +99,9 @@ export class AggregationRfqController {
   async issue(
     @Param('id') id: string,
     @Body(zodPipe(issueRfqSchema)) dto: IssueRfqDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<RfqView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<RfqView>(
       ISSUE_RFQ_ENDPOINT,
       key,
@@ -154,11 +158,8 @@ export class RfqController {
       'RFQ_CANCELLED. Closing discloses nothing and needs no new role. ' +
       `${BUYER_COMMAND_NOTE} ${COMMAND_NOTE}`,
   })
-  async close(
-    @Param('id') id: string,
-    @Headers('idempotency-key') idempotencyKey?: string,
-  ): Promise<RfqView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+  async close(@Param('id') id: string, @Headers() headers: IdempotencyHeaders): Promise<RfqView> {
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<RfqView>(
       CLOSE_RFQ_ENDPOINT,
       key,
@@ -186,9 +187,9 @@ export class RfqController {
   async cancel(
     @Param('id') id: string,
     @Body(zodPipe(cancelRfqSchema)) dto: CancelRfqDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<RfqView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
+    const key = idempotentRequest(headers);
     const { result } = await this.idempotency.execute<RfqView>(
       CANCEL_RFQ_ENDPOINT,
       key,

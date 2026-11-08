@@ -1,7 +1,16 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { MAX_CONTENT_BYTES } from '@rasta/sealing';
 import type { z } from 'zod';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (
+    dir: string,
+    options?: { skip?: (name: string) => boolean; optional?: boolean },
+  ) => string[];
+};
+
 import { largestQuotationBody } from '../../test/quotation-body';
 import { cancelAggregationSchema, submitDemandSchema, withdrawDemandSchema } from '../demand/dto';
 import {
@@ -92,11 +101,9 @@ const LARGEST: Record<string, { schema: z.ZodType; body: unknown; accepted: bool
 };
 
 const sources = (directory: string): string[] =>
-  readdirSync(directory).flatMap((name) => {
-    const path = join(directory, name);
-    if (statSync(path).isDirectory()) return name === 'generated' ? [] : sources(path);
-    return name.endsWith('.ts') && !name.endsWith('.spec.ts') ? [path] : [];
-  });
+  authoredFiles(directory).filter(
+    (path) => basename(path).endsWith('.ts') && !basename(path).endsWith('.spec.ts'),
+  );
 
 const SRC = join(__dirname, '..');
 

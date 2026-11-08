@@ -83,6 +83,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
       counterpartyOrganizationId: org.supplier,
       transactionType: 'MARKETPLACE_ORDER',
       status: 'HELD',
+      heldProven: true,
       grossAmountMinor: '500000',
       commissionAmountMinor: '0',
       netAmountMinor: '500000',
@@ -106,6 +107,10 @@ describe('a dispute resolution retried after economic-service let its answer exp
       let raw = '';
       req.on('data', (chunk: Buffer) => (raw += chunk.toString()));
       req.on('end', () => {
+        // The capability question, of no organization: the D-150 release's answer (FU-233).
+        if (req.method === 'GET' && req.url === '/v1/transactions/capabilities') {
+          return answer(res, 200, { heldProven: true, orderHoldDeadlineRequired: true });
+        }
         // The saga's service token, for the buyer and nobody else.
         if (req.headers['x-internal-token'] !== `token-for-${org.buyer}`) {
           problems.push(`${req.method} ${req.url}: not the buyer's service token`);

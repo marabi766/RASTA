@@ -4,6 +4,11 @@ import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { CredentialRedirectRefusedError, credentialFetch } from './credential-fetch.mjs';
+import {
+  CredentialEnvironmentRefusedError,
+  refusedBeforeSending,
+} from '../packages/config/src/credential-environment.js';
+import { AUDITED_TRANSPORTS } from './raw-http-boundary-rule.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const SECRET = 'credential-sentinel-7f3a';
@@ -188,5 +193,151 @@ test('every credential transport copy refuses the same five statuses with manual
     assert.match(text, /void response\.body\?\.cancel\(\)\.catch\(\(\) => undefined\);/, file);
     if (file === 'tests/e2e/src/http.ts') assert.match(text, /\n\s+redirect: 'manual',\n/, file);
     else assert.match(text, /fetchImpl\(input, \{ \.\.\.init, redirect: 'manual' \}\)/, file);
+  }
+});
+
+// FU-249: Node's fetch reads inherited members of the option objects it builds,
+// even from an init with no prototype. Here, unlike under jest, this module and
+// Node's fetch share one realm and one global dispatcher slot.
+const capturedBy = (captured) => ({
+  dispatch(options, handler) {
+    captured.push(options.headers);
+    queueMicrotask(() => handler.onError(new Error('captured')));
+    return true;
+  },
+});
+
+async function environmentProbe(alter) {
+  const received = [];
+  const captured = [];
+  const { server, origin } = await listen((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      received.push(`${req.method} ${req.headers.authorization} ${body}`);
+      res.end('ok');
+    });
+  });
+  const restore = alter(capturedBy(captured));
+  try {
+    const outcome = await credentialFetch(`${origin}/api`, {
+      method: 'POST',
+      headers: { authorization: AUTH },
+    }).then(
+      () => 'sent',
+      (error) => error,
+    );
+    return { outcome, received, captured };
+  } finally {
+    restore();
+    await close(server);
+  }
+}
+
+for (const [name, alter] of [
+  [
+    'an inherited dispatcher',
+    (dispatcher) => {
+      Object.prototype.dispatcher = dispatcher;
+      return () => delete Object.prototype.dispatcher;
+    },
+  ],
+  [
+    'an inherited body',
+    () => {
+      Object.prototype.body = 'injected-body-sentinel';
+      return () => delete Object.prototype.body;
+    },
+  ],
+  [
+    'a replaced global dispatcher',
+    (dispatcher) => {
+      const slot = Symbol.for('undici.globalDispatcher.1');
+      const original = globalThis[slot];
+      globalThis[slot] = dispatcher;
+      return () => (globalThis[slot] = original);
+    },
+  ],
+])
+  test(`${name}: the credential is refused before anything is sent (FU-249)`, async () => {
+    const { outcome, received, captured } = await environmentProbe(alter);
+    assert.ok(outcome instanceof CredentialEnvironmentRefusedError, String(outcome));
+    assert.deepEqual(captured, []);
+    assert.deepEqual(received, []);
+  });
+
+test('an unaltered runtime still sends the credential (FU-249)', async () => {
+  const { outcome, received } = await environmentProbe(() => () => undefined);
+  assert.equal(outcome, 'sent');
+  assert.deepEqual(received, [`POST ${AUTH} `]);
+});
+
+test('its own refusal is known unsent; one escaping from its transport is not (FU-249)', async () => {
+  /** A fresh refusal of this transport's own check: marked, nothing sent. */
+  const ownRefusal = async () => {
+    Object.defineProperty(Object.prototype, 'fu249Probe', { value: 1, configurable: true });
+    try {
+      const own = await credentialFetch('http://127.0.0.1:9/', {}).catch((error) => error);
+      assert.ok(own instanceof CredentialEnvironmentRefusedError, String(own));
+      assert.equal(refusedBeforeSending(own), true);
+      return own;
+    } finally {
+      delete Object.prototype.fu249Probe;
+    }
+  };
+  // Thrown by the transport, or by the answer it returned: either way after the check.
+  for (const route of [
+    (own) => async () => {
+      throw own;
+    },
+    (own) => async () => ({
+      get status() {
+        throw own;
+      },
+    }),
+  ]) {
+    const own = await ownRefusal();
+    const escaped = await credentialFetch('http://127.0.0.1:9/', {}, route(own)).catch((e) => e);
+    assert.equal(escaped, own);
+    assert.equal(refusedBeforeSending(escaped), false);
+  }
+});
+
+test('every audited transport runs the environment check before it sends, or says why not', () => {
+  const CHECKED = {
+    'packages/nest-common/src/http/internal-fetch.ts': 'fetchImpl(input, { ...init, redirect',
+    'apps/web/src/server/credential-fetch.ts': 'fetchImpl(input, { ...init, redirect',
+    'apps/web/src/server/signed-url-upload.ts': 'fetchImpl(url, { ...init, method',
+    'scripts/credential-fetch.mjs': 'fetchImpl(input, { ...init, redirect',
+  };
+  // Not yet checked: listed in FU-249's STATUS as the next part, or no credential set by code.
+  const UNCHECKED = new Set([
+    'packages/config/src/credential-environment.js',
+    'apps/web/src/lib/session-refusal.ts',
+    'scripts/test-stall-watchdog.mjs',
+    'scripts/workspace-module.mjs',
+    'packages/testing/src/guarded-http.ts',
+    'packages/testing/src/redirect-probe.ts',
+    'tests/e2e/src/http.ts',
+    'tests/e2e/src/expect.ts',
+    'apps/web/e2e/expect.ts',
+  ]);
+  for (const file of Object.keys(AUDITED_TRANSPORTS)) {
+    assert.ok(Object.hasOwn(CHECKED, file) || UNCHECKED.has(file), `${file} is not classified`);
+  }
+  for (const [file, send] of Object.entries(CHECKED)) {
+    const text = readFileSync(`${root}${file}`, 'utf8');
+    const check = text.indexOf('  refuseAlteredEnvironment(fetchImpl);\n');
+    assert.ok(check > 0 && text.indexOf(send) > check, `${file}: the check precedes the send`);
+    assert.equal(text.split(send).length, 2, `${file}: one send`);
+    // Whatever the send throws is disowned: it may have sent (refusedBeforeSending).
+    const disowned = text.indexOf('    throw disownRefusal(error);\n');
+    assert.ok(disowned > text.indexOf(send), `${file}: the send's failure is disowned`);
+    assert.equal(text.split('disownRefusal(').length, 2, `${file}: one disown`);
+    assert.match(
+      text,
+      /from '(?:@rasta\/config|\.\.\/packages\/config\/src\/credential-environment\.js)';/,
+      file,
+    );
   }
 });

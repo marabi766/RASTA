@@ -1,5 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { basename, dirname, join, relative, sep } from 'node:path';
+import { parseTree, type Node as JsonNode, type ParseError } from 'jsonc-parser';
+import postcss, { CssSyntaxError } from 'postcss';
 import ts from 'typescript';
 
 import { nonStandardSpelling } from './orthography';
@@ -8,14 +10,12 @@ import { COMPILED_EXTENSIONS, workspacePackageDirs } from './server-action-disco
 /**
  * Which files the orthography guard reads, and what it reads in each.
  *
- * DISCOVERY. Every file of a checked type under the web app and under each
- * workspace package it depends on (`workspacePackageDirs`, the discovery the
- * server-action guard already uses), with two reasoned exclusions only:
- *  - dependencies and build output (`node_modules`, `.next`, `dist`, …): not authored;
- *  - a TEST-ONLY file (TEST_ONLY below) that no checked file imports. The build
- *    never compiles such a file; one a checked file imports is checked like any
- *    other, and so is everything it imports in turn.
- * A directory merely named `test` is NOT test-only: under `src/app` it is a route.
+ * DISCOVERY. Checked file types under the web app and its workspace packages
+ * (`workspacePackageDirs`). Dependency/build directory names and unimported
+ * TEST_ONLY names are excluded. These names do not prove production
+ * unreachability: routes under `app/dist`, package entry points and public
+ * scripts can still be missed (FU-018 R3, pending a separate discovery change).
+ * Imported test files are followed transitively; `app/test` is a route.
  *
  * CONTENT, decoded per rendering context, in addition to the file as written
  * (comments, identifiers, regex literals):
@@ -24,9 +24,14 @@ import { COMPILED_EXTENSIONS, workspacePackageDirs } from './server-action-disco
  *  - JSX text and JSX attribute strings: HTML character references decoded (only
  *    there — an "&#1610;" inside an ordinary JS string is not rendered as HTML);
  *  - CSS: CSS escapes decoded (only in CSS);
- *  - JSON: every string, JSON escapes decoded.
+ *  - JSON: every string, JSON escapes decoded. Strict JSON except root TS/Turbo
+ *    configuration files, whose grammars permit comments/trailing commas.
+ *    JSON and CSS parser diagnostics are refusals, including recovered parses.
  * FOLDED: `'a' + 'b'` (any nesting, parentheses, `as`/`satisfies`), a template
  * whose every substitution folds, and adjacent JSX text and `{'…'}` children.
+ * RENDERING LIMITS (FU-018 R2, pending): constituents are also checked, JSX
+ * non-rendering children break runs, and CSS continuations/adjacent content
+ * strings are not assembled. Extraction is not a complete rendered-text check.
  * OUT OF REACH: anything computed at run time — a string built from a variable
  * or a constant declared elsewhere (`const a = 'تا'; a + 'مین'`), `.join`,
  * `String.fromCharCode`, copy that arrives from a service.
@@ -235,23 +240,31 @@ function scriptTexts(file: string, source: string): Texts {
   return { texts, imports, failures };
 }
 
-function jsonTexts(file: string, source: string): Texts {
-  const sf = ts.parseJsonText(file, source);
-  const failures = (sf as unknown as { parseDiagnostics: ts.Diagnostic[] }).parseDiagnostics.map(
-    (d) => `${sf.getLineAndCharacterOfPosition(d.start ?? 0).line + 1}: parse error`,
-  );
+function jsonTexts(source: string, config = false): Texts {
+  const errors: ParseError[] = [];
+  const tree = parseTree(source, errors, {
+    disallowComments: !config,
+    allowTrailingComma: config,
+    allowEmptyContent: false,
+  });
+  const lineOf = (offset: number): number => source.slice(0, offset).split(/\r\n|\r|\n/).length;
+  const failures = errors.map((error) => `${lineOf(error.offset)}: parse error: JSON`);
   const texts: Array<[number, string]> = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isStringLiteral(node)) {
-      texts.push([sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, node.text]);
-    }
-    ts.forEachChild(node, visit);
+  const visit = (node: JsonNode): void => {
+    if (node.type === 'string') texts.push([lineOf(node.offset), node.value as string]);
+    node.children?.forEach(visit);
   };
-  visit(sf);
+  if (tree) visit(tree);
   return { texts, imports: [], failures };
 }
 
 function cssTexts(source: string): Texts {
+  try {
+    postcss.parse(source);
+  } catch (error) {
+    if (!(error instanceof CssSyntaxError)) throw error;
+    return { texts: [], imports: [], failures: [`${error.line ?? 1}: parse error: CSS`] };
+  }
   const imports: Array<[number, string]> = [];
   source.split('\n').forEach((line, index) => {
     for (const m of line.matchAll(/@import\s+(?:url\(\s*)?(['"]?)([^'")\s;]+)\1/g)) {
@@ -287,6 +300,21 @@ function resolveFile(base: string): string | undefined {
  * app; `repoRoot` holds `packages/`.
  */
 export function scanOrthography(repoRoot: string, appDir: string): OrthographyScan {
+  // Discovery treats an invalid manifest as "not a package". Validate first so
+  // malformed dependency metadata cannot silently remove a production root.
+  const manifests = [
+    join(appDir, 'package.json'),
+    ...readdirSync(join(repoRoot, 'packages'))
+      .map((name) => join(repoRoot, 'packages', name, 'package.json'))
+      .filter(existsSync),
+  ];
+  const metadataFailures = manifests.flatMap((file) =>
+    jsonTexts(readFileSync(file, 'utf8')).failures.map(
+      (failure) => `${relative(repoRoot, file)}:${failure}`,
+    ),
+  );
+  if (metadataFailures.length > 0)
+    return { checked: [], offenders: [], failures: metadataFailures };
   const roots = [appDir, ...workspacePackageDirs(repoRoot, appDir)];
   const workspaceNames = new Map<string, string>();
   for (const dir of roots.slice(1)) {
@@ -312,7 +340,12 @@ export function scanOrthography(repoRoot: string, appDir: string): OrthographySc
     const at = relative(repoRoot, file);
     const source = readFileSync(file, 'utf8');
     const found = /\.json$/.test(file)
-      ? jsonTexts(file, source)
+      ? jsonTexts(
+          source,
+          // JSONC belongs only to build-tool configs at scan roots, never copy JSON.
+          roots.includes(dirname(file)) &&
+            /^(tsconfig(?:\.[^.]+)?|turbo)\.json$/.test(basename(file)),
+        )
       : /\.css$/.test(file)
         ? cssTexts(source)
         : scriptTexts(file, source);

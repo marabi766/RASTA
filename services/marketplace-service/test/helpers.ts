@@ -7,6 +7,7 @@ import { EventPublisher } from '../src/events/publisher';
 import { IdempotencyStore } from '../src/shared/idempotency';
 import { OrderRepository, type SagaStep } from '../src/order/order.repository';
 import { OrderService } from '../src/order/order.service';
+import type { ResolveDisputeDto } from '../src/order/dto';
 import { ReturnRepository } from '../src/returns/return.repository';
 import { ReturnService } from '../src/returns/return.service';
 import type { ReturnGoodsOwner } from '../src/returns/return-goods';
@@ -107,6 +108,40 @@ export function testEnv(): MarketplaceEnv {
     INTERNAL_TOKEN_SECRET:
       process.env.INTERNAL_TOKEN_SECRET ?? 'integration_suite_unused_secret_32_chars',
   });
+}
+
+/**
+ * The dispute an order holds now — what an operator's decision names
+ * (`ResolveDisputeDto.disputeId`, D-083) — or, when it holds none, an
+ * identifier of the right shape that names no dispute, so a decision on an
+ * undisputed order reaches the refusal it is meant to meet.
+ */
+export async function openDisputeId(prisma: PrismaService, orderId: string): Promise<string> {
+  const open = await runUnscoped('the suite reads the dispute an order holds', () =>
+    prisma.client.orderDispute.findFirst({
+      where: { orderId, status: 'OPEN' },
+      orderBy: { raisedAt: 'desc' },
+      select: { id: true },
+    }),
+  );
+  return open?.id ?? NO_DISPUTE;
+}
+
+/** A dispute identifier of the right shape that no dispute has. */
+export const NO_DISPUTE = 'DSP_00000000000000000000000000';
+
+/**
+ * `OrderService.resolveDispute`, naming the order's open dispute as the
+ * operator's form does. Call it inside the operator's context.
+ */
+export async function resolveOpenDispute(
+  wiring: Pick<Wiring, 'prisma' | 'orders'>,
+  orderId: string,
+  dto: Omit<ResolveDisputeDto, 'disputeId'>,
+  record?: Parameters<OrderService['resolveDispute']>[2],
+) {
+  const disputeId = await openDisputeId(wiring.prisma, orderId);
+  return wiring.orders.resolveDispute(orderId, { ...dto, disputeId }, record);
 }
 
 export interface Wiring {
@@ -219,13 +254,26 @@ export function key(prefix: string): string {
  * `scheduledAt` is when the workflow scheduled it: now, unless the case needs
  * the gap a real saga leaves between two steps.
  */
-export function sagaStep(scheduledAt: Date = new Date()): SagaStep {
+export function sagaStep(scheduledAt: Date = scheduledNow()): SagaStep {
   return { key: `order-test/run-test/${ulid()}`, scheduledAt };
 }
 
 /**
- * Removes the return requests the named organizations wrote (RUN-005). The service never deletes
- * one — each table's trigger refuses it — so the suite's own removal goes through the **owner**
+ * Now, but later than any step this suite scheduled before, as Temporal
+ * schedules one workflow's activities: a call record is owned by the command
+ * scheduled last (#836 r1 R1), and two steps in one millisecond would be
+ * neither older nor newer.
+ */
+let lastScheduledMs = 0;
+function scheduledNow(): Date {
+  lastScheduledMs = Math.max(Date.now(), lastScheduledMs + 1);
+  return new Date(lastScheduledMs);
+}
+
+/**
+ * Removes the return requests the named organizations wrote (RUN-005), and the record of the
+ * hold-deadline backfill (FU-234). The service never deletes one — each table's trigger refuses
+ * it — so the suite's own removal goes through the **owner**
  * connection and lifts each guard for one transaction, never through the runtime client under
  * test, or the suites would teach the code to do it. Without the owner URL there is nothing it can
  * do, and a suite that wrote a return fails at the order delete that follows, saying why.
@@ -237,6 +285,9 @@ async function purgeReturns(orgs: readonly string[]): Promise<void> {
   try {
     await owner.$transaction(async (tx) => {
       for (const [table, trigger] of [
+        // FU-234: the hold-deadline backfill's record, append-only, restricting its orders.
+        ['order_hold_deadline_revocation', 'tg_order_hold_deadline_revocation_guard'],
+        ['order_hold_deadline_backfill', 'tg_order_hold_deadline_backfill_guard'],
         ['return_dispatch_release', 'tg_return_dispatch_release_guard'],
         ['return_status_history', 'tg_return_status_history_guard'],
         ['return_line', 'tg_return_line_guard'],

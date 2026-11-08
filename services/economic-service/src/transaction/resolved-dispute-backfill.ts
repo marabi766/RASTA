@@ -1,4 +1,8 @@
+import { markRefusal } from '@rasta/config';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
 
 /**
  * Attributes the resolutions recorded before `resolved_dispute_id` existed, in
@@ -89,8 +93,8 @@ export function parseResolvedDisputeBackfillArgs(
     const name = Object.hasOwn(FLAGS, flag) ? FLAGS[flag] : undefined;
     const value = argv[i + 1];
     // Not repeated: only an option that matched is ever echoed (#385 r6).
-    if (!name) throw new Error(`Unknown option at position ${i + 1}; it is not repeated`);
-    if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value`);
+    if (!name) throw usage(`Unknown option at position ${i + 1}; it is not repeated`);
+    if (value === undefined || value.startsWith('--')) throw usage(`${flag} needs a value`);
     i += 1;
     if (name === 'after') {
       options.after = value;
@@ -99,7 +103,7 @@ export function parseResolvedDisputeBackfillArgs(
     const [min, max] = BOUNDS[name as keyof typeof BOUNDS];
     const n = Number(value);
     if (!/^[0-9]+$/.test(value) || n < min || n > max) {
-      throw new Error(`${flag} must be an integer in ${min}..${max}`);
+      throw usage(`${flag} must be an integer in ${min}..${max}`);
     }
     (options as unknown as Record<string, number>)[name] = n;
   }

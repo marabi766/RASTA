@@ -4,11 +4,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadWebServerEnv } from './env';
-import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import {
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
+  PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
+} from '@rasta/contracts';
 import {
   MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
   MAX_REPLAY_MARGIN_SECONDS,
   MIN_REPLAY_MARGIN_MS,
+  procurementDemandWindowFits,
   projectCreateWindowFits,
   replayMarginCoversClockBudget,
 } from './unresolved-request-policy';
@@ -450,6 +454,30 @@ describe('the bid replay deadline', () => {
       defaults.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS;
     expect(window).toBe(3000);
     expect(PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS - (window + 30)).toBe(270);
+  });
+
+  // FU-156: the demand window against procurement-service's fence, by the same rule.
+  it('refuses to start when the demand window exceeds PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (boundary: = passes, +1 s refuses)', () => {
+    const at = (ttl: string, margin: string) =>
+      loadWebServerEnv({
+        ...REQUIRED,
+        WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS: ttl,
+        WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: margin,
+      });
+    expect(PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS).toBe(3300);
+    // 3600 − 330 = 3270; + 30 s = 3300 = K.
+    expect(at('1', '330').WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS).toBe(330);
+    expect(() => at('1', '329')).toThrow('WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS');
+    expect(() => at('2', '1800')).toThrow('WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS');
+    expect(() => at('24', '600')).toThrow('WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS');
+    expect(procurementDemandWindowFits(1, 330)).toBe(true);
+    expect(procurementDemandWindowFits(1, 329)).toBe(false);
+    // The defaults fit: 3 000 s + 30 s ≤ 3 300 s.
+    const defaults = loadWebServerEnv(REQUIRED);
+    expect(
+      defaults.WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS * 3600 -
+        defaults.WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS,
+    ).toBe(3000);
   });
 
   it('the shared maximum is the number the service tests against (one constant, packages/contracts)', () => {

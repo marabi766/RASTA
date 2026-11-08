@@ -1,4 +1,3 @@
-import { ERROR_CODES } from '@rasta/contracts';
 import { z } from 'zod';
 
 import {
@@ -28,7 +27,7 @@ import { tokenMemberships } from './realm-roles';
 import type { WebSession } from './session';
 import { sessionAuthority, type SessionTokens } from './session-organization';
 import { signPayload, verifyPayload } from './signed-payload';
-import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { isProvenRefusal, writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 
 /**
  * Registering a supplier, submitting, approving and rejecting a qualification,
@@ -203,9 +202,6 @@ export const APPROVE_FIELD_MAPPING = mappingOf<ApproveField>({ note: 'note' });
 export const REJECT_FIELD_MAPPING = mappingOf<RejectField>({ reason: 'reason', note: 'note' });
 export const REASON_FIELD_MAPPING = mappingOf<ReasonField>({ reason: 'reason' });
 
-/** The platform's documented error codes (docs/06 § 6.7). */
-const DOCUMENTED_CODES: ReadonlySet<string> = new Set(Object.values(ERROR_CODES));
-
 /**
  * Whether a failed write is **proven** not to have written anything, so the
  * form may say "nothing changed": a `4xx` that carries one of the platform's
@@ -222,7 +218,8 @@ const DOCUMENTED_CODES: ReadonlySet<string> = new Set(Object.values(ERROR_CODES)
  * PR 366, finding 3).
  */
 export function provenUnwritten(status: number, code: string | undefined): boolean {
-  return status >= 400 && status < 500 && code !== undefined && DOCUMENTED_CODES.has(code);
+  // The shared writer's one rule (PR-830 r1 F1): a documented code under its own status.
+  return isProvenRefusal(status, code);
 }
 
 // ---------------------------------------------------------------------------

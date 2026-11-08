@@ -3,34 +3,27 @@
 import { redirect } from 'next/navigation';
 
 import { FLASH_PARAM, REPLAY_FIELD } from '@/lib/form-fields';
-import { isProvenRefusalStatus, parseCreateForm, projectFormValues } from '@/lib/project-commands';
+import { parseCreateForm, projectFormValues } from '@/lib/project-commands';
 import { verifyCsrf } from '@/server/csrf';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
+import { settleRelease } from '@/server/release-feedback';
 import { createProject } from '@/server/project-commands';
+import { isProvenRefusal } from '@/server/write';
 import {
   checkCreateStamp,
   createBodyDigest,
   createStampTerms,
+  PROJECT_CREATE_RELEASE,
   PROJECT_CREATE_UNRESOLVED,
 } from '@/server/project-create-replay';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
-import {
-  releaseUnresolved,
-  reserveUnresolved,
-  settleUnresolved,
-} from '@/server/unresolved-request';
+import { reserveUnresolved, settleUnresolved } from '@/server/unresolved-request';
 import { MAX_CLOCK_SKEW_MS } from '@/server/unresolved-request-policy';
 
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-  type CreateProjectFormState,
-} from './form-state';
+import { type CreateProjectFormState } from './form-state';
 import { pageContext } from '@/server/page-context';
 import { withContext } from '@/lib/page-context';
-import { pageHref } from '@/server/page-context';
 
 /**
  * The `/projects` create form's server action.
@@ -115,6 +108,11 @@ export async function submitCreateProject(
       break;
   }
   const { attempt } = reserved;
+  // A refusal (or a send that never left) proves only that THIS attempt did nothing (PR-830 r1 F1):
+  // a retry's earlier attempt may have created the project. The store keeps the hold — a retry's
+  // REFUSED / NEVER_SENT puts it back to unresolved — and the person is told the same.
+  const refused = (state: CreateProjectFormState, correlationId: string): CreateProjectFormState =>
+    reserved.retry ? { kind: 'UNCONFIRMED', correlationId } : state;
 
   // Re-checked right before the dispatch, after the reservation: the process may have been paused
   // between the reserve and here (a stall, a slow store). UX only — a send this check lets through is
@@ -151,23 +149,32 @@ export async function submitCreateProject(
   switch (result.kind) {
     case 'INVALID':
       await settleUnresolved(attempt, 'REFUSED');
-      return {
-        kind: 'INVALID',
-        submissionId,
-        replay,
-        values,
-        fieldErrors: result.fieldErrors,
-        message: result.message,
-      };
+      return refused(
+        {
+          kind: 'INVALID',
+          submissionId,
+          replay,
+          values,
+          fieldErrors: result.fieldErrors,
+          message: result.message,
+        },
+        result.correlationId,
+      );
     case 'FORBIDDEN':
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FORBIDDEN', correlationId: result.correlationId };
+      return refused(
+        { kind: 'FORBIDDEN', correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'NOT_FOUND':
       // construction-service never answers 404 for this endpoint — there is no
       // referenced resource to be absent — but the type is shared across every
       // write, so it is handled rather than assumed away.
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
+      return refused(
+        { kind: 'FAILED', status: 404, correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'UNAVAILABLE':
       // The service's own clock is past the deadline this request carried: refused before it wrote
       // anything (`REPLAY_WINDOW_CLOSED`). That proves this attempt did nothing — never that an earlier
@@ -181,15 +188,22 @@ export async function submitCreateProject(
       // the hold this attempt made goes (or, for a retry, goes back).
       if (result.neverSent) {
         await settleUnresolved(attempt, 'NEVER_SENT');
-        return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+        return refused(
+          { kind: 'FAILED', status: result.status, correlationId: result.correlationId },
+          result.correlationId,
+        );
       }
-      // Only a 4xx proves nothing was created; a 5xx may follow the commit.
-      if (!isProvenRefusalStatus(result.status)) {
+      // Only a documented 4xx proves nothing was created (the writer's one rule); a 5xx may follow
+      // the commit.
+      if (!isProvenRefusal(result.status, result.code)) {
         await settleUnresolved(attempt, 'UNRESOLVED');
         return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
       }
       await settleUnresolved(attempt, 'REFUSED');
-      return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+      return refused(
+        { kind: 'FAILED', status: result.status, correlationId: result.correlationId },
+        result.correlationId,
+      );
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved".
       await settleUnresolved(attempt, 'UNRESOLVED');
@@ -223,16 +237,12 @@ export async function submitCreateProject(
 export async function releaseUnresolvedCreate(form: FormData): Promise<void> {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/projects');
-  if (!verifyCsrf(session, form).ok) redirect('/projects');
-  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/projects');
-  const outcome = await releaseUnresolved(
+  return settleRelease({
     session,
-    PROJECT_CREATE_UNRESOLVED,
-    form.get(RELEASE_FIELD),
-  );
-  redirect(
-    outcome === 'RELEASED' || outcome === 'GONE'
-      ? '/projects'
-      : pageHref(session, '/projects', { release: outcome }),
-  );
+    form,
+    back: '/projects',
+    subject: { surface: 'project-creation' },
+    scope: PROJECT_CREATE_RELEASE,
+    quietSuccess: true,
+  });
 }

@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -22,6 +23,7 @@ import {
   SHARED_INPUTS,
   classifyRun,
   imagesGateVerdict,
+  IMAGE_TEST_GATES,
   servicesToBuild,
 } from './container-scope-lib.mjs';
 import { maySkipBuildKitProof, probeBuildx } from './container-scope-buildx.mjs';
@@ -112,6 +114,7 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
     execFileSync('git', ['-C', dir, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: fixtureGitEnv(),
     }).trim();
   mkdirSync(join(dir, 'scripts'));
   for (const name of ['container-scope.mjs', 'container-scope-lib.mjs']) {
@@ -158,7 +161,7 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
       const result = spawnSync(
         process.execPath,
         [join(dir, 'scripts', 'container-scope.mjs'), ...args],
-        { encoding: 'utf8', env: { ...process.env, ...env } },
+        { encoding: 'utf8', env: { ...fixtureGitEnv(), ...env } },
       );
       assert.equal(result.status, 0, result.stderr);
       // stdout is always exactly one JSON line, even on warning paths.
@@ -175,7 +178,7 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
       const result = spawnSync(
         process.execPath,
         [join(dir, 'scripts', 'container-scope.mjs'), ...args],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', env: fixtureGitEnv() },
       );
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, `${JSON.stringify(JSON.parse(result.stdout))}\n`);
@@ -183,6 +186,32 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
     },
   };
 }
+
+test('temporary Git histories ignore inherited repository, index and config redirects', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'container-git-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Model a Git hook without pointing at any shared repository or index.
+  const redirects = {
+    GIT_DIR: join(root, 'redirect', '.git'),
+    GIT_WORK_TREE: join(root, 'redirect'),
+    GIT_INDEX_FILE: join(root, 'redirect', 'index'),
+    GIT_OBJECT_DIRECTORY: join(root, 'redirect', 'objects'),
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.bare',
+    GIT_CONFIG_VALUE_0: 'true',
+  };
+  const previous = Object.fromEntries(Object.keys(redirects).map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, redirects);
+  const f = fixture(t);
+  assert.deepEqual(f.run(), []);
+  assert.deepEqual(JSON.parse(f.raw().stdout), []);
+});
 
 test('CLI: identical base/HEAD workflow contributes no images', (t) => {
   assert.deepEqual(fixture(t).run(), []);
@@ -335,12 +364,12 @@ test('the aggregate check states its contract and claims nothing about the host'
   }
 });
 
-test('the aggregate check is "Images built and scanned", always runs and reads both image jobs', () => {
+test('the aggregate check is "Images built and scanned", always runs and reads both image jobs and every test gate', () => {
   const { jobs } = parseYaml(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8'));
   const images = jobs.images;
   assert.equal(images.name, 'Images built and scanned');
   assert.equal(images.if, '${{ always() }}');
-  assert.deepEqual(images.needs, ['container-scope', 'containers']);
+  assert.deepEqual(images.needs, ['container-scope', 'containers', ...IMAGE_TEST_GATES]);
   const gate = images.steps.at(-1);
   assert.equal(gate.env.NEEDS, '${{ toJSON(needs) }}');
   assert.equal(gate.run, 'node scripts/container-scope-gate.mjs');
@@ -672,6 +701,7 @@ function proofGuard(t, edit, { deleteTests = false } = {}) {
   const f = fixture(t);
   for (const name of [
     'container-scope.test.mjs',
+    'fixture-git-env.mjs',
     'container-scope-proof.mjs',
     'container-scope-buildx.mjs',
   ]) {
@@ -957,9 +987,13 @@ test('CLI --run takes no other argument', (t) => {
 // ---------------------------------------------------------------------------
 // The aggregate check "Images built and scanned".
 // ---------------------------------------------------------------------------
-const needs = (mode, services, containers, scope = 'success') => ({
+const needs = (mode, services, containers, scope = 'success', gates = {}) => ({
   'container-scope': { result: scope, outputs: { mode, services: JSON.stringify(services) } },
   containers: { result: containers },
+  // The test jobs the check demands beside the images (FU-111): all green unless a case says not.
+  ...Object.fromEntries(
+    IMAGE_TEST_GATES.map((name) => [name, { result: gates[name] ?? 'success' }]),
+  ),
 });
 
 for (const [name, input, ok] of [
@@ -1020,6 +1054,89 @@ for (const [name, input, ok] of [
 test('images check: an ordinary PR says the images are built on the train', () => {
   assert.equal(imagesGateVerdict(needs('pr', [], 'skipped')).message, IMAGES_ON_TRAIN_NOTE);
   assert.match(IMAGES_ON_TRAIN_NOTE, /merge train \(mq\/train-\*\) and on main/);
+});
+
+// FU-111: the images are built beside the tests, so a failed test must turn this check red
+// wherever images were selected, whatever the image job did.
+for (const gate of IMAGE_TEST_GATES) {
+  for (const result of ['failure', 'cancelled', 'skipped']) {
+    for (const [mode, services] of [
+      ['train', ['fleet-service']],
+      ['main', ALL],
+      ['unknown', ALL],
+    ]) {
+      test(`images check: ${mode} with every image built but ${gate} ${result} is red`, () => {
+        const verdict = imagesGateVerdict(
+          needs(mode, services, 'success', 'success', { [gate]: result }),
+        );
+        assert.equal(verdict.ok, false, verdict.message);
+        assert.match(verdict.message, new RegExp(`${gate} ${result}`));
+      });
+    }
+  }
+
+  test(`images check: ${gate} missing from needs, or unreadable, is red`, () => {
+    const missing = needs('train', ['fleet-service'], 'success');
+    delete missing[gate];
+    assert.equal(imagesGateVerdict(missing).ok, false);
+    assert.match(imagesGateVerdict(missing).message, new RegExp(`${gate} missing`));
+    const unreadable = needs('train', ['fleet-service'], 'success');
+    unreadable[gate] = { result: ['success'] };
+    assert.equal(imagesGateVerdict(unreadable).ok, false);
+    unreadable[gate] = 'success';
+    assert.equal(imagesGateVerdict(unreadable).ok, false);
+  });
+
+  test(`images check: an ordinary PR and a docs-only train do not wait on ${gate}`, () => {
+    assert.equal(
+      imagesGateVerdict(needs('pr', [], 'skipped', 'success', { [gate]: 'failure' })).ok,
+      true,
+    );
+    assert.equal(
+      imagesGateVerdict(needs('train', [], 'skipped', 'success', { [gate]: 'failure' })).ok,
+      true,
+    );
+  });
+}
+
+test('images check: every failing gate is named, in the declared order', () => {
+  const verdict = imagesGateVerdict(
+    needs('train', ['fleet-service'], 'success', 'success', {
+      e2e: 'failure',
+      quality: 'cancelled',
+    }),
+  );
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.message, /^quality cancelled, e2e failure:/);
+});
+
+test('workflow: images are built beside the tests and the check demands every test gate', () => {
+  const jobs = parseYaml(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')).jobs;
+  // Exact lists: a test gate added to or dropped from either side is a decision, not a drift.
+  assert.deepEqual(jobs.containers.needs, ['container-scope', 'trivy-db']);
+  assert.deepEqual(jobs.images.needs, ['container-scope', 'containers', ...IMAGE_TEST_GATES]);
+  assert.deepEqual(IMAGE_TEST_GATES, [
+    'quality',
+    'security',
+    'integration',
+    'migration-reversibility',
+    'e2e',
+  ]);
+  const condition = String(jobs.containers.if);
+  assert.match(condition, /!cancelled\(\)/);
+  assert.match(condition, /needs\.container-scope\.result == 'success'/);
+  assert.match(condition, /needs\.container-scope\.outputs\.services != '\[\]'/);
+  for (const gate of IMAGE_TEST_GATES)
+    assert.doesNotMatch(condition, new RegExp(`needs\\.${gate}\\b`));
+  // The aggregate decides itself: always(), and the required name is unchanged.
+  assert.equal(String(jobs.images.if).replace(/\s+/g, ''), '${{always()}}');
+  assert.equal(jobs.images.name, 'Images built and scanned');
+  // No test job waits for an image job: that was the serial tail this change removed.
+  for (const [id, job] of Object.entries(jobs)) {
+    if (id === 'images') continue;
+    const waits = [job.needs ?? []].flat();
+    assert.ok(!waits.includes('containers') && !waits.includes('images'), `${id} waits for images`);
+  }
 });
 
 function runGate(t, value, extraEnv = {}) {
@@ -1128,7 +1245,11 @@ test('maySkipBuildKitProof: only a missing tool outside CI may skip', () => {
 // Run the real BuildKit test of this suite under a docker of our choosing.
 function buildKitProofUnder(t, dockerDir, ci) {
   const f = fixture(t);
-  for (const name of ['container-scope.test.mjs', 'container-scope-buildx.mjs']) {
+  for (const name of [
+    'container-scope.test.mjs',
+    'container-scope-buildx.mjs',
+    'fixture-git-env.mjs',
+  ]) {
     copyFileSync(join(root, 'scripts', name), join(f.dir, 'scripts', name));
   }
   copyFileSync(join(root, '.dockerignore'), join(f.dir, '.dockerignore'));

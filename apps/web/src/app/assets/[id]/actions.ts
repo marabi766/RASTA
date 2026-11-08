@@ -16,6 +16,7 @@ import {
   updateAssetFormValues,
 } from '@/server/asset-commands';
 
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
 import type { UpdateAssetFormState } from './form-state';
 import { pageContext } from '@/server/page-context';
 import { withContext } from '@/lib/page-context';
@@ -45,9 +46,13 @@ import { withContext } from '@/lib/page-context';
 
 export async function submitUpdateAsset(
   assetId: string,
-  _previous: UpdateAssetFormState,
+  previous: UpdateAssetFormState,
   form: FormData,
 ): Promise<UpdateAssetFormState> {
+  return keepUnconfirmed(previous, form, () => attemptUpdateAsset(assetId, form));
+}
+
+async function attemptUpdateAsset(assetId: string, form: FormData): Promise<UpdateAssetFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 

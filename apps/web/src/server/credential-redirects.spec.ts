@@ -11,6 +11,7 @@ import { actingAccessToken } from '@/test/session-token';
 import { CredentialRedirectRefusedError } from './credential-fetch';
 import {
   callGateway,
+  callGatewayWrite,
   GatewayNeverSentError,
   GatewayOutcomeUnknownError,
   GatewayRequestError,
@@ -127,6 +128,9 @@ const settled = <T>(promise: Promise<T>): Promise<unknown> =>
     (error: unknown) => error,
   );
 
+/** The read entry, typed to take the write shape so one table drives both entries. */
+const readEntry = callGateway as typeof callGatewayWrite;
+
 describe('gateway calls carry the bearer token to the gateway only', () => {
   const bodies: string[] = [];
   const onRequest = (_request: unknown, body: string) => void bodies.push(body);
@@ -144,7 +148,7 @@ describe('gateway calls carry the bearer token to the gateway only', () => {
             const write = method !== 'GET';
             const { result: error, logs } = await withCapturedOutput(() =>
               settled(
-                callGateway({
+                (write ? callGatewayWrite : readEntry)({
                   baseUrl: probe.baseUrl,
                   path: '/v1/memberships/MEM_1/revoke',
                   credential: tenantCredential({
@@ -301,7 +305,7 @@ describe('non-redirect statuses keep their meaning', () => {
   });
 
   const call = (method: 'GET' | 'POST' = 'GET') =>
-    callGateway<unknown>({
+    (method === 'GET' ? readEntry : callGatewayWrite)<unknown>({
       baseUrl,
       path: '/v1/x',
       credential: tenantCredential({ accessToken: ACCESS_TOKEN, organizationId: 'ORG_01J8' }),
@@ -339,7 +343,7 @@ describe('non-redirect statuses keep their meaning', () => {
 describe('gateway request shape is unchanged', () => {
   it('sends the same headers, cache and deadline signal, with redirects manual', async () => {
     const seen: RequestInit[] = [];
-    await callGateway({
+    await callGatewayWrite({
       baseUrl: 'http://gateway.test:3000',
       path: '/v1/x',
       credential: tenantCredential({ accessToken: ACCESS_TOKEN, organizationId: 'ORG_01J8' }),

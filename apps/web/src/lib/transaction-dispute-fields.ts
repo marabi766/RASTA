@@ -1,3 +1,4 @@
+import { TRANSACTION_TEXT_BOUNDS } from '@rasta/contracts';
 /**
  * The shape of the two dispute commands on `/transactions/[id]`: their names,
  * field names, the limits they mirror, the roles and states they are offered
@@ -47,10 +48,10 @@ export const DISPUTE_COMMAND_FIELDS: Readonly<Record<DisputeCommand, DisputeFiel
   RESOLVE_DISPUTE: 'resolution',
 };
 
-/** Copied from `transaction/dto.ts` (both `.trim().min(10).max(1000)`); the service enforces them again. */
+/** `transaction/dto.ts` reads the same table (`TRANSACTION_TEXT_BOUNDS`); the service enforces them again. */
 export const DISPUTE_FIELD_LIMITS: Readonly<Record<DisputeField, { min: number; max: number }>> = {
-  reason: { min: 10, max: 1000 },
-  resolution: { min: 10, max: 1000 },
+  reason: TRANSACTION_TEXT_BOUNDS.disputeReason,
+  resolution: TRANSACTION_TEXT_BOUNDS.disputeResolution,
 };
 
 /**
@@ -115,7 +116,7 @@ export const DISPUTE_COMMAND_CONSEQUENCES: Readonly<Record<DisputeCommand, strin
     'فقط رسیدگی صریح یک شخص یا بازگشت وجه آن را از این وضعیت بیرون می‌برد.',
   RESOLVE_DISPUTE:
     'با رسیدگی، اعتراض برداشته می‌شود و تراکنش به جایی برمی‌گردد که مجوز تسویه‌اش اجازه می‌دهد: ' +
-    'اگر تسویه پیش‌تر مجاز شده بود به صف «در انتظار تسویه»، وگرنه «در وثیقه» می‌ماند تا مجوز برسد. ' +
+    'اگر تسویه پیش‌تر مجاز شده و سابقهٔ وثیقه مانعش نباشد به صف «در انتظار تسویه»، وگرنه به وضعیت پیش از مجوز برمی‌گردد و می‌ماند تا مجوز برسد. ' +
     'این کار تسویه نمی‌کند، مجوز تسویه نمی‌دهد و وجهی را بازنمی‌گرداند؛ تسویه اقدامی جدا و بعدی است.',
 };
 

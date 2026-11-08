@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { plainText, numberInput } from '@rasta/contracts';
+import {
+  plainText,
+  numberInput,
+  boundsForAll,
+  isWithin,
+  textWithin,
+  TRANSACTION_TEXT_BOUNDS,
+} from '@rasta/contracts';
 import { RESPONSIBILITY_ATTRIBUTION } from '../events/events';
 
 /**
@@ -108,24 +115,69 @@ export const raiseDisputeSchema = z
      * A dispute stops settlement completely and indefinitely. Whoever has to
      * resolve it needs to know what it is about, and a one-word reason is how
      * a dispute becomes permanent by neglect.
+     *
+     * The saga sends it as the economic dispute's `reason`, so it is bounded
+     * by that body's own bounds (`TRANSACTION_TEXT_BOUNDS`, FU-134).
      */
-    reason: plainText().min(10).max(1000),
+    reason: textWithin(plainText(), TRANSACTION_TEXT_BOUNDS.disputeReason),
   })
   .strict();
 
 export type RaiseDisputeDto = z.infer<typeof raiseDisputeSchema>;
 
+/**
+ * The bounds of a REFUND resolution: it is sent both as the economic
+ * resolution and as the refund's or cancellation's reason, so it must fit both.
+ */
+export const REFUND_RESOLUTION_BOUNDS = boundsForAll(
+  TRANSACTION_TEXT_BOUNDS.disputeResolution,
+  TRANSACTION_TEXT_BOUNDS.closingReason,
+);
+
+/** The refusal of a REFUND resolution that does not fit; it repeats nothing of the input (S-09). */
+export const REFUND_RESOLUTION_OUT_OF_BOUNDS =
+  `A REFUND resolution is also the refund's reason: between ${REFUND_RESOLUTION_BOUNDS.min} and ` +
+  `${REFUND_RESOLUTION_BOUNDS.max} characters`;
+
 export const resolveDisputeSchema = z
   .object({
     /**
+     * The dispute this decision is about: the order's open dispute as the
+     * operator saw it (`openDisputeId` on the order). Refused `409 CONFLICT`,
+     * `details[].code` `DISPUTE_DECISION_STALE`, unless the order still holds
+     * exactly that dispute — a decision about one dispute never decides another
+     * raised since.
+     */
+    disputeId: z
+      .string()
+      .regex(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/, 'disputeId must be a dispute identifier'),
+    /**
      * What happens to the money.
      *
-     * `SETTLE` returns the order to the settlement path; `REFUND` cancels it
-     * and returns the held funds. There is no third option, because a dispute
-     * that is neither settled nor refunded leaves the money held forever.
+     * `SETTLE` lifts the dispute and resumes the order where the dispute found
+     * it (D-083). It does not settle, and it does not confirm receipt: a dispute
+     * raised after the buyer confirmed receipt returns the order to
+     * `RECEIPT_CONFIRMED`, and the saga settles it; one raised before returns it
+     * to `FUNDS_HELD`, `CONFIRMED` or `AWAITING_RECEIPT_CONFIRMATION`, and
+     * settlement still waits for the supplier's delivery and the buyer's
+     * confirmation — reminders only, never automatic (ADR-043). A dispute whose
+     * origin is not recorded is refused SETTLE (`DISPUTE_ORIGIN_UNKNOWN`).
+     * `REFUND` cancels the order and returns the held funds. There is no third
+     * option, because a dispute that is neither settled nor refunded leaves the
+     * money held forever.
      */
     outcome: z.enum(['SETTLE', 'REFUND']),
-    resolution: plainText().min(10).max(1000),
+    /**
+     * Sent by the saga as the economic resolution (either outcome), and on
+     * REFUND also as the refund's or cancellation's `reason`: it becomes the
+     * order's `cancellationReason`. So it is bounded by every body it goes into
+     * — on REFUND by {@link REFUND_RESOLUTION_BOUNDS}, refused below (FU-134).
+     */
+    resolution: textWithin(plainText(), TRANSACTION_TEXT_BOUNDS.disputeResolution).describe(
+      `At most ${TRANSACTION_TEXT_BOUNDS.disputeResolution.max} characters; with outcome REFUND ` +
+        `at most ${TRANSACTION_TEXT_BOUNDS.closingReason.max}, because a REFUND resolution is also ` +
+        "the refund's reason. A longer one is refused with VALIDATION_FAILED before anything changes.",
+    ),
     /**
      * Who the operator holds responsible (ADR-052 §§ 1-b, 4 rule 13).
      *
@@ -137,13 +189,28 @@ export const resolveDisputeSchema = z
      */
     responsibility: z.enum(RESPONSIBILITY_ATTRIBUTION),
   })
-  .strict();
+  .strict()
+  // Refused here, before any state changes, rather than by economic-service
+  // inside the saga once the order is CANCELLING: there the refund's refusal
+  // ended the saga with the funds held (FU-134). Not shortened either: the
+  // operator's words are the record, and shortening them would happen in the
+  // saga, out of the operator's sight.
+  .superRefine((dto, ctx) => {
+    if (dto.outcome === 'REFUND' && !isWithin(dto.resolution, REFUND_RESOLUTION_BOUNDS)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resolution'],
+        message: REFUND_RESOLUTION_OUT_OF_BOUNDS,
+      });
+    }
+  });
 
 export type ResolveDisputeDto = z.infer<typeof resolveDisputeSchema>;
 
 export const cancelOrderSchema = z
   .object({
-    reason: plainText().min(3).max(500),
+    /** The saga sends it as the refund's or cancellation's `reason`, so it has that body's bounds. */
+    reason: textWithin(plainText(), TRANSACTION_TEXT_BOUNDS.closingReason),
   })
   .strict();
 
@@ -204,6 +271,12 @@ export interface OrderView {
   lines: OrderLineView[];
   economicTransactionId: string | null;
   economicSettlementId: string | null;
+  /**
+   * The dispute the order holds now, or null. What an operator's decision
+   * names (`resolveDisputeSchema.disputeId`), so the decision is about the
+   * dispute the operator saw.
+   */
+  openDisputeId: string | null;
   /**
    * Whether the supplier's qualification could be checked (ADR-041).
    *

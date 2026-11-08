@@ -2,6 +2,7 @@ import { eligibilityClockSql } from '@rasta/testing';
 import { setEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import { PrismaClient } from '../src/generated/prisma';
 import {
   asActor,
   cleanup,
@@ -11,6 +12,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  ownerDatabaseUrl,
 } from './helpers';
 import { PaymentService } from '../src/payment/payment.service';
 import { PaymentReconciler } from '../src/payment/payment-reconciler';
@@ -847,6 +849,97 @@ describe('the payment reconciler (real database)', () => {
         await expectRecordedRefund(made);
       }
       expect(ask).not.toHaveBeenCalled();
+    });
+
+    /** A row from before the guard: its hold, for an intent's refund, on someone's wallet. */
+    const plantRefundHold = async (organizationId: string, walletId: string, reference: string) => {
+      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      try {
+        await owner.$transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
+          await tx.$executeRawUnsafe(
+            `ALTER TABLE wallet_hold DISABLE TRIGGER trg_wallet_hold_reference_bound`,
+          );
+          await tx.$executeRawUnsafe(
+            `INSERT INTO wallet_hold (id, organization_id, wallet_id, amount_minor, currency,
+                                      reference, reference_type, placed_at, placed_by)
+             VALUES ($1, $2, $3, 370, 'IRR', $4, 'PAYMENT_REFUND', now(), 'itest')`,
+            `HLD_${ulid()}`,
+            organizationId,
+            walletId,
+            reference,
+          );
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(
+            `ALTER TABLE wallet_hold ENABLE TRIGGER trg_wallet_hold_reference_bound`,
+          );
+        });
+      } finally {
+        await owner.$disconnect();
+      }
+    };
+
+    // #762 r2, F2: another organization's hold takes no intent's refund from it.
+    it('refunds an intent another organization’s refund hold names, and leaves that hold', async () => {
+      const organizationId = `${org.b}-HOLD-FOREIGN`;
+      const made = await topUp(organizationId, 370n);
+      await plantRefundHold(`${org.c}-HOLD-FOREIGN`, made.walletId, made.intentId);
+      await refundBy(organizationId, made.intentId);
+      expect(await intentOf(made.intentId)).toMatchObject({ status: 'REFUNDED' });
+      expect(await reversalsOf(made.intentId)).toBe(1);
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({
+        available: 0n,
+        ledger: 0n,
+      });
+      const holds = await runUnscoped('the suite reads the holds', () =>
+        prisma.client.walletHold.findMany({
+          where: { reference: made.intentId },
+          select: { organizationId: true, status: true },
+        }),
+      );
+      expect(holds).toEqual(
+        expect.arrayContaining([
+          { organizationId: `${org.c}-HOLD-FOREIGN`, status: 'ACTIVE' },
+          expect.objectContaining({ organizationId, status: 'REFUNDED' }),
+        ]),
+      );
+    });
+
+    // #762 r2, F2: what keeps a task open is the intent's own refund hold, not another's.
+    it('closes such a task over a refund hold another organization left on the wallet', async () => {
+      const organizationId = `${org.b}-HEAL-FOREIGN`;
+      const made = await topUp(organizationId, 370n);
+      jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
+      await expect(refundBy(organizationId, made.intentId)).rejects.toThrow('connection reset');
+      const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
+      await refundBy(organizationId, made.intentId);
+      b0.mockRestore();
+      await plantRefundHold(`${org.c}-HEAL-FOREIGN`, made.walletId, made.intentId);
+      // Pushed out, so only the healing pass can close it: the claim would close it too.
+      await runUnscoped('the suite pushes the task out', () =>
+        prisma.client.$executeRawUnsafe(
+          eligibilityClockSql`UPDATE payment_reconciliation_task
+              SET status = CASE WHEN payment_intent_id = $2 THEN 'ESCALATED'::"PaymentReconciliationStatus"
+                                ELSE status END,
+                  escalated_at = CASE WHEN payment_intent_id = $2 THEN now() ELSE escalated_at END,
+                  next_attempt_at = now() + interval '1 hour'
+            WHERE payment_intent_id IN ($1, $2)`,
+          made.intentId,
+          // Escalates no one: the reviewed probe above, for its push only.
+          '',
+        ),
+      );
+
+      const outcome = await sweeperWith().runOnce();
+
+      expect(outcome.healedClosed).toBeGreaterThanOrEqual(1);
+      expect(await tasksOf(made.intentId)).toEqual([
+        expect.objectContaining({
+          status: 'DONE',
+          resolution: 'NOTHING_TO_RECONCILE',
+          resolvedBy: 'PAYMENT_RECONCILER',
+        }),
+      ]);
     });
 
     /** The database clock, for a cursor that starts just before this test's rows. */

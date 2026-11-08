@@ -491,6 +491,11 @@ export const EXEMPTIONS = {
       reason:
         "the payment reconciler's heal pass reads the intents a refund left unfinished across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial, empty in the normal case",
     },
+    ux_settlement_reversal_source: {
+      index: 'settlement_reversal (source_type, source_reference)',
+      reason:
+        'the invariant that makes a correction case idempotent (RLG-002): one source is one fact across every tenant, and widening the key with organization_id would let a redelivered event open a second case under another organization',
+    },
     ix_payment_reconciliation_open_window: {
       index: 'payment_reconciliation_task (created_at, id)',
       reason:
@@ -525,8 +530,8 @@ export const EXEMPTIONS = {
       reason: `one leg per (transaction, role) — an invariant of one transaction; ${perParentUnique('transaction_id')}; ${PARENT_LOAD}`,
     },
     uq_wallet_hold_active_reference: {
-      index: 'wallet_hold (wallet_id, reference)',
-      reason: `one live hold per (wallet, reference) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
+      index: 'wallet_hold (wallet_id, organization_id, reference, reference_type)',
+      reason: `one live hold per (wallet, owner, reference, purpose) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
     },
   },
 };
