@@ -20,6 +20,7 @@ export type ReleaseSurface =
   | 'asset-registration'
   | 'driver-creation'
   | 'project-creation'
+  | 'project-need-creation'
   | 'demand-submission'
   | 'supplier-write'
   | 'supplier-record';
@@ -34,6 +35,7 @@ const WHAT_TO_CHECK = {
   'asset-registration': 'فهرست دارایی‌ها',
   'driver-creation': 'فهرست رانندگان',
   'project-creation': 'فهرست پروژه‌ها',
+  'project-need-creation': 'نیازهای این پروژه',
   'demand-submission': 'فهرست نیازها',
   'supplier-write': 'فهرست تأمین‌کنندگان',
   'supplier-record': 'پرونده‌ی این تأمین‌کننده',

@@ -103,6 +103,10 @@ const NO_SESSION_REDIRECTS = new Map<string, { args: () => unknown[]; to: string
     { args: () => [new FormData()], to: '/login?returnTo=/projects' },
   ],
   [
+    actionKey('apps/web/src/app/projects/[id]/need-add-actions.ts', 'releaseUnresolvedNeed'),
+    { args: () => ['PRJ_1', new FormData()], to: '/login?returnTo=%2Fprojects%2FPRJ_1' },
+  ],
+  [
     actionKey('apps/web/src/app/suppliers/supplier-actions.ts', 'reconcileSupplierWrite'),
     { args: () => [null, new FormData()], to: '/login?returnTo=%2Fsuppliers' },
   ],

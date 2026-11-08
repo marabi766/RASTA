@@ -25,6 +25,7 @@
     "test": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/docs/api/construction-service.openapi.json",
         "$TURBO_ROOT$/docs/api/inventory-service.openapi.json",
         "$TURBO_ROOT$/packages/config/src/**",
         "$TURBO_ROOT$/packages/config/eslint.config.mjs",
@@ -64,6 +65,7 @@
     "test:unit": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/docs/api/construction-service.openapi.json",
         "$TURBO_ROOT$/docs/api/inventory-service.openapi.json",
         "$TURBO_ROOT$/packages/config/src/**",
         "$TURBO_ROOT$/packages/config/eslint.config.mjs",

@@ -289,6 +289,7 @@ export const MAPPING_EXCLUSIONS: Readonly<Record<string, string>> = {
   'server/repair-order-commands:mappingOf': ONLY_BUILDS_EXPORTED,
   'server/asset-records:mappingOf': ONLY_BUILDS_EXPORTED,
   'server/project-commands:mappingOf': ONLY_BUILDS_EXPORTED,
+  'server/project-need-commands:mappingOf': ONLY_BUILDS_EXPORTED,
   'server/asset-lifecycle-commands:mappingOf': ONLY_BUILDS_EXPORTED,
 };
 

@@ -18,7 +18,7 @@ import { webServers } from './e2e/web-servers';
  */
 /** The specs that also run at a phone's viewport: read-only, see the project. */
 const MOBILE_SPECS =
-  /(accessibility|tenant-isolation|asset-lifecycle|asset-records|asset-documents-availability|inventory-commands)\.spec\.ts$/;
+  /(accessibility|tenant-isolation|asset-lifecycle|asset-records|asset-documents-availability|inventory-commands|project-needs)\.spec\.ts$/;
 
 /**
  * The phone-layout suite (`e2e/mobile-layout.spec.ts`) runs against its own copy
@@ -81,6 +81,8 @@ export default defineConfig({
       // second writer.
       // `inventory-commands.spec.ts` is of the same kind: every run creates its own
       // warehouse, so a phone is a second viewport and not a second writer.
+      // `project-needs.spec.ts` is the same: every test makes its own project (and its
+      // needs) through the gateway.
       // Accessibility and tenant isolation are exactly what a second viewport
       // can change — layout, reflow, what is reachable — so those run on both.
       name: 'mobile',
