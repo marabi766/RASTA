@@ -6,10 +6,13 @@
  *
  * A credential is never sent to a redirect target, including one on the same
  * origin: 301/302/303/307/308 is refused before the body is read, and the error
- * names no URL, Location, body or credential. Every other status (304 included)
+ * names no URL, Location, body or credential, and nothing is sent through an
+ * altered runtime (`refuseAlteredEnvironment`, FU-249). Every other status (304 included)
  * is returned as is. `credential-fetch.test.mjs` proves it over real HTTP and
  * pins this copy's statuses, and the portal's, to the original.
  */
+import { refuseAlteredEnvironment } from '../packages/config/src/credential-environment.js';
+
 export class CredentialRedirectRefusedError extends Error {
   constructor() {
     super('Credential-bearing redirect refused');
@@ -24,6 +27,8 @@ export class CredentialRedirectRefusedError extends Error {
  * @returns {Promise<Response>}
  */
 export async function credentialFetch(input, init = {}, fetchImpl = fetch) {
+  // Before anything is sent: no credential through an altered runtime (FU-249).
+  refuseAlteredEnvironment(fetchImpl);
   // Set after init so a caller cannot override this policy.
   const response = await fetchImpl(input, { ...init, redirect: 'manual' });
   if ([301, 302, 303, 307, 308].includes(response.status)) {

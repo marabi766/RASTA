@@ -1,3 +1,5 @@
+import { refuseAlteredEnvironment } from '@rasta/config';
+
 /**
  * What {@link credentialFetch} throws for a redirect: a transport failure,
  * never an answer. Carries no URL, Location, body or credential, so a caller
@@ -21,13 +23,16 @@ export class CredentialRedirectRefusedError extends Error {
  * origin, and a redirect is never an answer. `scripts/credential-fetch.test.mjs`
  * pins this copy's statuses to the original. Method, headers, body, `cache`,
  * the deadline signal and every non-redirect status (304 included) stay the
- * caller's: the request is sent exactly as given, once.
+ * caller's: the request is sent exactly as given, once — and never through an
+ * altered runtime (`refuseAlteredEnvironment`, `CredentialEnvironmentRefusedError`).
  */
 export async function credentialFetch(
   input: Parameters<typeof fetch>[0],
   init: Omit<RequestInit, 'redirect'>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {
+  // Before anything is sent: no credential through an altered runtime (FU-249).
+  refuseAlteredEnvironment(fetchImpl);
   // Set after init so even untyped callers cannot override this policy.
   const response = await fetchImpl(input, { ...init, redirect: 'manual' });
   // Fetch redirects only these five statuses. 300 offers choices and 305 is
