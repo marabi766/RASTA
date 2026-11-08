@@ -286,7 +286,7 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
       );
       expect(failure).toBeInstanceOf(AggregateError);
       expect(failure?.errors.map((e: Error) => e.message)).toEqual([
-        'a stuck owner: still running at the 300 ms deadline (1000 ms after the watches began, if it was already spent)',
+        'a stuck owner: still running at the 300 ms deadline (at least 1000 ms after the watches began)',
         'an unobservable owner: census unreadable',
         'process 0: did not exit by the 300 ms deadline (at least 500 ms after the kill)',
         'cleanup: cleanup refused',
@@ -298,201 +298,6 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     }
     await releaseHold(dir); // the registered writer's own sweep still happens
   });
-
-  const stuckChild = (): ChildProcess =>
-    Object.assign(new EventEmitter(), {
-      pid: 0,
-      exitCode: null,
-      signalCode: null,
-      kill: () => true,
-    }) as unknown as ChildProcess;
-  const settle = (p: Promise<void>): Promise<AggregateError | undefined> =>
-    p.then(
-      () => undefined,
-      (error: AggregateError) => error,
-    );
-
-  it('(FU-232) the whole teardown is capped by its budget: stuck processes cost one budget, leftovers are reported and the cleanup still runs', async () => {
-    const local = ownedProcesses();
-    for (let i = 0; i < 3; i += 1) local.own(stuckChild());
-    local.watch('a stuck owner', () => false);
-    let cleaned = false;
-    local.afterJoin(() => {
-      cleaned = true;
-    });
-    const started = Date.now();
-    const pending = local.teardown(400);
-    expect(local.unjoined).toBe(true); // set before anything is awaited
-    const failure = await settle(pending);
-    expect(Date.now() - started).toBeLessThan(1_200); // main: 400 + 3 x 400
-    expect(failure?.errors).toHaveLength(4);
-    expect(cleaned).toBe(true);
-    expect(local.unjoined).toBe(true); // a leftover is reported, never dropped
-  });
-
-  it('(FU-232 r2) a shutdown request that never settles is inside the same deadline', async () => {
-    const local = ownedProcesses();
-    local.signal(() => new Promise<void>(() => {}));
-    let cleaned = false;
-    local.afterJoin(() => {
-      cleaned = true;
-    });
-    const started = Date.now();
-    const failure = await settle(local.teardown(300));
-    expect(Date.now() - started).toBeLessThan(1_500); // 7105169c: never settles
-    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
-      'shutdown request: did not finish by the 300 ms deadline',
-    ]);
-    expect(cleaned).toBe(true);
-    expect(local.unjoined).toBe(true);
-  });
-
-  it('(FU-232 r2) a teardown that overlaps a running one shares it: it cannot report "joined" first', async () => {
-    const local = ownedProcesses();
-    local.own(stuckChild());
-    local.signal(() => sleep(100)); // keeps the first teardown in flight
-    const first = settle(local.teardown(400));
-    await sleep(20);
-    const second = settle(local.teardown());
-    expect(local.unjoined).toBe(true);
-    const failure = await second; // 7105169c: resolves clean while the first still runs
-    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
-      'process 0: did not exit by the 400 ms deadline (at least 500 ms after the kill)',
-    ]);
-    expect(await first).toBe(failure);
-    expect(local.unjoined).toBe(true);
-  });
-
-  it('(FU-232 r2) a clean teardown after a failed one does not clear the leftover flag', async () => {
-    const local = ownedProcesses();
-    local.own(stuckChild());
-    expect(await settle(local.teardown(200))).toBeInstanceOf(AggregateError);
-    await local.teardown(); // nothing registered any more: the leftover is gone from every list
-    expect(local.unjoined).toBe(true); // 7105169c: false, the leftover pid is forgotten
-  });
-
-  /** A fake child that dies when killed, and records that it was. */
-  const mortalChild = (): ChildProcess & { killed: boolean; killedAt: number } => {
-    const child = Object.assign(new EventEmitter(), {
-      pid: 0,
-      exitCode: null as number | null,
-      signalCode: null as string | null,
-      killed: false,
-      killedAt: 0,
-      kill() {
-        child.killed = true;
-        child.killedAt = Date.now();
-        child.signalCode = 'SIGKILL';
-        setImmediate(() => child.emit('exit', null));
-        return true;
-      },
-    });
-    return child as unknown as ChildProcess & { killed: boolean; killedAt: number };
-  };
-
-  it('(FU-248 F2) the join budget is the one deadline, not a second budget per process', async () => {
-    // ms=400 cannot tell: the 500 ms join grace is longer than a second budget there.
-    const local = ownedProcesses();
-    for (let i = 0; i < 3; i += 1) local.own(stuckChild());
-    local.watch('a stuck owner', () => false);
-    const started = Date.now();
-    const failure = await settle(local.teardown(2_000));
-    expect(failure?.errors).toHaveLength(4);
-    // 2000 (watch) + 500 (join grace); a per-process `sleep(ms)` join costs 2000 + 2000.
-    expect(Date.now() - started).toBeLessThan(3_500);
-  });
-
-  it('(FU-248 F4) the cleanup message names the real bound, not "within ms"', async () => {
-    const local = ownedProcesses();
-    local.afterJoin(() => new Promise<void>(() => {}));
-    const failure = await settle(local.teardown(100));
-    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
-      'cleanup: not finished by the 100 ms deadline (at least 1000 ms after the cleanup began)',
-    ]);
-  });
-
-  it('(FU-248) a watched owner is not given up after one poll when the deadline is already spent', async () => {
-    const local = ownedProcesses();
-    const parent = mortalChild();
-    local.own(parent);
-    local.signal(() => new Promise<void>(() => {})); // spends the whole 100 ms budget
-    const endsAt = Date.now() + 400; // the owner ends 300 ms after the budget is spent
-    local.watch('a slow owner', () => Date.now() >= endsAt);
-    const failure = await settle(local.teardown(100));
-    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
-      'shutdown request: did not finish by the 100 ms deadline',
-    ]); // the watch saw the owner end: no watch failure
-    expect(parent.killedAt).toBeGreaterThanOrEqual(endsAt); // its parent was killed only after that
-  });
-
-  it('(FU-252 N1a) a call that arrives mid-run is covered by the same teardown, including what registers after it began', async () => {
-    const local = ownedProcesses();
-    local.afterJoin(() => sleep(150)); // keeps the first run in its cleanup phase
-    const first = settle(local.teardown());
-    await sleep(30); // the first run has already collected its lists
-    const late = mortalChild();
-    local.own(late);
-    let requested = false;
-    local.signal(() => void (requested = true));
-    let polled = false;
-    local.watch('a late owner', () => (polled = true));
-    let cleaned = false;
-    local.afterJoin(() => void (cleaned = true));
-    const second = settle(local.teardown());
-    expect(local.unjoined).toBe(true);
-    expect(await second).toBeUndefined();
-    expect(await first).toBeUndefined();
-    // Every kind of late registration was handled before either caller was told "joined".
-    expect([late.killed, requested, polled, cleaned]).toEqual([true, true, true, true]);
-    expect(local.unjoined).toBe(false);
-  });
-
-  it('(FU-252 N1a) a failure in an earlier round stays when a later round is clean', async () => {
-    const local = ownedProcesses();
-    local.own(stuckChild());
-    local.afterJoin(() => sleep(50));
-    const first = settle(local.teardown(300));
-    await sleep(20);
-    local.own(mortalChild());
-    const failure = await first;
-    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
-      'process 0: did not exit by the 300 ms deadline (at least 500 ms after the kill)',
-    ]);
-    expect(await settle(local.teardown())).toBeUndefined(); // nothing left to join,
-    expect(local.unjoined).toBe(true); // yet the failure is never forgotten
-  });
-
-  it.each([
-    ['a child', (o: ReturnType<typeof ownedProcesses>) => o.own(mortalChild())],
-    ['a shutdown request', (o: ReturnType<typeof ownedProcesses>) => o.signal(() => {})],
-    ['a watch', (o: ReturnType<typeof ownedProcesses>) => o.watch('late', () => true)],
-    ['a cleanup step', (o: ReturnType<typeof ownedProcesses>) => o.afterJoin(() => {})],
-  ])(
-    '(FU-252 N1b) %s registered after a finished teardown is unjoined until a teardown handles it',
-    async (_kind, register) => {
-      const local = ownedProcesses();
-      await local.teardown();
-      expect(local.unjoined).toBe(false);
-      register(local); // e.g. a case body the runner abandoned keeps calling `startWriter`
-      expect(local.unjoined).toBe(true);
-      await local.teardown();
-      expect(local.unjoined).toBe(false);
-    },
-  );
-
-  it('(FU-252) registrations that never stop are reported after a bounded number of rounds', async () => {
-    const local = ownedProcesses();
-    const again = async (): Promise<void> => {
-      await sleep(5);
-      local.afterJoin(again); // every round registers the next one
-    };
-    local.afterJoin(again);
-    const failure = await settle(local.teardown(2_000));
-    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
-      'registrations kept arriving: not drained after 5 rounds',
-    ]);
-    expect(local.unjoined).toBe(true);
-  }, 15_000);
 
   it('(FU-248) a process census that does not answer is killed at its bound and proves nothing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'census-'));
@@ -517,12 +322,266 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     }
   });
 
-  it('(FU-232) a cleanup step that hangs is cut off by the budget, not awaited forever', async () => {
-    const local = ownedProcesses();
-    local.afterJoin(() => new Promise<void>(() => {}));
-    const started = Date.now();
-    await expect(local.teardown(300)).rejects.toThrow('fixture processes not joined');
-    expect(Date.now() - started).toBeLessThan(2_000);
+  const stuckChild = (): ChildProcess =>
+    Object.assign(new EventEmitter(), {
+      pid: 0,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    }) as unknown as ChildProcess;
+  const settle = (p: Promise<void>): Promise<AggregateError | undefined> =>
+    p.then(
+      () => undefined,
+      (error: AggregateError) => error,
+    );
+
+  /** A fake child that dies when killed, and records (on the clock in force) when it was. */
+  const mortalChild = (): ChildProcess & { killed: boolean; killedAt: number } => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 0,
+      exitCode: null as number | null,
+      signalCode: null as string | null,
+      killed: false,
+      killedAt: 0,
+      kill() {
+        child.killed = true;
+        child.killedAt = Date.now();
+        child.signalCode = 'SIGKILL';
+        setImmediate(() => child.emit('exit', null));
+        return true;
+      },
+    });
+    return child as unknown as ChildProcess & { killed: boolean; killedAt: number };
+  };
+
+  /**
+   * Every case below is about WHEN the teardown gives up, so it runs on a virtual clock (FU-263):
+   * `Date.now()`, `setTimeout` and `setImmediate` are jest's fakes and time moves only when the
+   * case advances it. An assertion is then an exact instant, never a margin against how late a
+   * starved event loop wakes up — a real-timer `Date.now()` predicate raced the teardown's own
+   * timers and lost on loaded CI. Cases with real processes stay above, on real time.
+   */
+  describe('on a virtual clock', () => {
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    });
+    afterEach(() => {
+      jest.useRealTimers(); // before the outer afterEach: its teardown joins real processes
+    });
+    /** Runs the virtual clock until no timer is left, then the teardown's result. */
+    const run = async <T>(pending: Promise<T>): Promise<T> => {
+      await jest.runAllTimersAsync();
+      return pending;
+    };
+
+    it('(FU-232) the whole teardown is capped by its budget: stuck processes cost one budget, leftovers are reported and the cleanup still runs', async () => {
+      const local = ownedProcesses();
+      for (let i = 0; i < 3; i += 1) local.own(stuckChild());
+      local.watch('a stuck owner', () => false);
+      let cleaned = false;
+      local.afterJoin(() => {
+        cleaned = true;
+      });
+      const started = Date.now();
+      const pending = local.teardown(400);
+      expect(local.unjoined).toBe(true); // set before anything is awaited
+      const failure = await run(settle(pending));
+      // The watch grace (1000) then ONE join grace (500); a join per process costs 1000 + 3 x 500.
+      expect(Date.now() - started).toBe(1_500);
+      expect(failure?.errors).toHaveLength(4);
+      expect(cleaned).toBe(true);
+      expect(local.unjoined).toBe(true); // a leftover is reported, never dropped
+    });
+
+    it('(FU-232 r2) a shutdown request that never settles is inside the same deadline', async () => {
+      const local = ownedProcesses();
+      local.signal(() => new Promise<void>(() => {}));
+      let cleaned = false;
+      local.afterJoin(() => {
+        cleaned = true;
+      });
+      const started = Date.now();
+      const failure = await run(settle(local.teardown(300)));
+      expect(Date.now() - started).toBe(300); // 7105169c: never settles
+      expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+        'shutdown request: did not finish by the 300 ms deadline',
+      ]);
+      expect(cleaned).toBe(true);
+      expect(local.unjoined).toBe(true);
+    });
+
+    it('(FU-232 r2) a teardown that overlaps a running one shares it: it cannot report "joined" first', async () => {
+      const local = ownedProcesses();
+      local.own(stuckChild());
+      local.signal(() => sleep(100)); // keeps the first teardown in flight
+      const first = settle(local.teardown(400));
+      await jest.advanceTimersByTimeAsync(20); // the first is still in its shutdown requests
+      const second = settle(local.teardown());
+      expect(local.unjoined).toBe(true);
+      const failure = await run(second); // 7105169c: resolves clean while the first still runs
+      expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+        'process 0: did not exit by the 400 ms deadline (at least 500 ms after the kill)',
+      ]);
+      expect(await first).toBe(failure);
+      expect(local.unjoined).toBe(true);
+    });
+
+    it('(FU-232 r2) a clean teardown after a failed one does not clear the leftover flag', async () => {
+      const local = ownedProcesses();
+      local.own(stuckChild());
+      expect(await run(settle(local.teardown(200)))).toBeInstanceOf(AggregateError);
+      await run(local.teardown()); // nothing registered any more: the leftover is gone from every list
+      expect(local.unjoined).toBe(true); // 7105169c: false, the leftover pid is forgotten
+    });
+
+    it('(FU-248 F2) the join budget is the one deadline, not a second budget per process', async () => {
+      // ms=400 cannot tell: the 500 ms join grace is longer than a second budget there.
+      const local = ownedProcesses();
+      for (let i = 0; i < 3; i += 1) local.own(stuckChild());
+      local.watch('a stuck owner', () => false);
+      const started = Date.now();
+      const failure = await run(settle(local.teardown(2_000)));
+      expect(failure?.errors).toHaveLength(4);
+      // 2000 (watch) + 500 (join grace); a per-process `sleep(ms)` join costs 2000 + 2000.
+      expect(Date.now() - started).toBe(2_500);
+    });
+
+    it('(FU-248 F4) the cleanup message names the real bound, not "within ms"', async () => {
+      const local = ownedProcesses();
+      local.afterJoin(() => new Promise<void>(() => {}));
+      const failure = await run(settle(local.teardown(100)));
+      expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+        'cleanup: not finished by the 100 ms deadline (at least 1000 ms after the cleanup began)',
+      ]);
+    });
+
+    it.each([
+      [
+        'is already spent',
+        (): Promise<void> => new Promise<void>(() => {}), // cut off at the 100 ms deadline
+        ['shutdown request: did not finish by the 100 ms deadline'],
+      ],
+      // FU-263: 1 ms left is what a real timer armed for the deadline leaves ~1 % of the time. A
+      // watch that ended with the deadline polled once there and gave up its owner.
+      ['has 1 ms left', (): Promise<void> => sleep(99), []],
+    ])(
+      '(FU-248, FU-263) a watched owner is not given up after one poll when the deadline %s',
+      async (_when, request, expected) => {
+        const local = ownedProcesses();
+        const parent = mortalChild();
+        local.own(parent);
+        local.signal(request);
+        const endsAt = Date.now() + 400; // the owner ends 300 ms after the budget
+        local.watch('a slow owner', () => Date.now() >= endsAt);
+        const failure = await run(settle(local.teardown(100)));
+        expect(failure?.errors.map((e: Error) => e.message) ?? []).toEqual(expected); // no watch failure
+        // Its parent was killed at the first poll that saw it end (polls every 25 ms), not before.
+        expect(parent.killedAt - endsAt).toBeGreaterThanOrEqual(0);
+        expect(parent.killedAt - endsAt).toBeLessThan(25);
+      },
+    );
+
+    it('(FU-263) a watch that never sees its owner end is reported at its own floor, whatever the deadline left', async () => {
+      const local = ownedProcesses();
+      local.signal(() => sleep(99));
+      local.watch('a stuck owner', () => false);
+      const started = Date.now();
+      const failure = await run(settle(local.teardown(100)));
+      expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+        'a stuck owner: still running at the 100 ms deadline (at least 1000 ms after the watches began)',
+      ]);
+      expect(Date.now() - started).toBe(99 + 1_000);
+    });
+
+    it('(FU-263) a wall-clock step (NTP) neither spends nor stretches the budget: the teardown runs on a monotonic clock', async () => {
+      const local = ownedProcesses();
+      local.watch('a stuck owner', () => false);
+      const started = performance.now();
+      const pending = settle(local.teardown(2_000));
+      await jest.advanceTimersByTimeAsync(100);
+      jest.setSystemTime(Date.now() + 3_600_000); // the wall clock jumps an hour ahead
+      const failure = await run(pending);
+      expect(failure?.errors).toHaveLength(1);
+      expect(performance.now() - started).toBe(2_000); // `Date.now()`: given up at 100 ms
+    });
+
+    it('(FU-252 N1a) a call that arrives mid-run is covered by the same teardown, including what registers after it began', async () => {
+      const local = ownedProcesses();
+      local.afterJoin(() => sleep(150)); // keeps the first run in its cleanup phase
+      const first = settle(local.teardown());
+      await jest.advanceTimersByTimeAsync(30); // the first run has already collected its lists
+      const late = mortalChild();
+      local.own(late);
+      let requested = false;
+      local.signal(() => void (requested = true));
+      let polled = false;
+      local.watch('a late owner', () => (polled = true));
+      let cleaned = false;
+      local.afterJoin(() => void (cleaned = true));
+      const second = settle(local.teardown());
+      expect(local.unjoined).toBe(true);
+      expect(await run(second)).toBeUndefined();
+      expect(await first).toBeUndefined();
+      // Every kind of late registration was handled before either caller was told "joined".
+      expect([late.killed, requested, polled, cleaned]).toEqual([true, true, true, true]);
+      expect(local.unjoined).toBe(false);
+    });
+
+    it('(FU-252 N1a) a failure in an earlier round stays when a later round is clean', async () => {
+      const local = ownedProcesses();
+      local.own(stuckChild());
+      local.afterJoin(() => sleep(50));
+      const first = settle(local.teardown(300));
+      await jest.advanceTimersByTimeAsync(20); // inside the join of the stuck child
+      local.own(mortalChild());
+      const failure = await run(first);
+      expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+        'process 0: did not exit by the 300 ms deadline (at least 500 ms after the kill)',
+      ]);
+      expect(await run(settle(local.teardown()))).toBeUndefined(); // nothing left to join,
+      expect(local.unjoined).toBe(true); // yet the failure is never forgotten
+    });
+
+    it.each([
+      ['a child', (o: ReturnType<typeof ownedProcesses>) => o.own(mortalChild())],
+      ['a shutdown request', (o: ReturnType<typeof ownedProcesses>) => o.signal(() => {})],
+      ['a watch', (o: ReturnType<typeof ownedProcesses>) => o.watch('late', () => true)],
+      ['a cleanup step', (o: ReturnType<typeof ownedProcesses>) => o.afterJoin(() => {})],
+    ])(
+      '(FU-252 N1b) %s registered after a finished teardown is unjoined until a teardown handles it',
+      async (_kind, register) => {
+        const local = ownedProcesses();
+        await run(local.teardown());
+        expect(local.unjoined).toBe(false);
+        register(local); // e.g. a case body the runner abandoned keeps calling `startWriter`
+        expect(local.unjoined).toBe(true);
+        await run(local.teardown());
+        expect(local.unjoined).toBe(false);
+      },
+    );
+
+    it('(FU-252) registrations that never stop are reported after a bounded number of rounds', async () => {
+      const local = ownedProcesses();
+      const again = async (): Promise<void> => {
+        await sleep(5);
+        local.afterJoin(again); // every round registers the next one
+      };
+      local.afterJoin(again);
+      const failure = await run(settle(local.teardown(2_000)));
+      expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+        'registrations kept arriving: not drained after 5 rounds',
+      ]);
+      expect(local.unjoined).toBe(true);
+    });
+
+    it('(FU-232) a cleanup step that hangs is cut off by the budget, not awaited forever', async () => {
+      const local = ownedProcesses();
+      local.afterJoin(() => new Promise<void>(() => {}));
+      const started = Date.now();
+      const failure = await run(settle(local.teardown(300))); // handled before the clock runs
+      expect(failure?.message).toBe('fixture processes not joined');
+      expect(Date.now() - started).toBe(1_000); // the step grace: a hung step ends there
+    });
   });
 
   it('(F2) a writer connected but not yet accepted by its owner does no work, and the sweep leaves none held', async () => {
