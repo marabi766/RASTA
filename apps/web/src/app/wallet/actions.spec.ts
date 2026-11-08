@@ -24,6 +24,7 @@ import {
 } from '@/server/unresolved-request-store';
 import { pageContext } from '@/server/page-context';
 import { readReleaseFeedback, releaseFeedback } from '@/server/release-feedback';
+import { claimsOf, withoutExpiry } from '@/test/minted-tokens';
 import { actingAccessToken } from '@/test/session-token';
 
 /**
@@ -277,16 +278,21 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
         submissionId: submission,
         values: { amountMinor: '1000' },
       });
+      // Each answer carries a token minted on its own call (`exp` moves with the clock).
       expect(
-        await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '2000' })),
-      ).toEqual(reloaded);
-      expect(
-        await submitTopUp(
-          WALLET_ID,
-          IDLE_TOP_UP_FORM,
-          formData({ amountMinor: '2000' }, { submission }),
+        withoutExpiry(
+          await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '2000' })),
         ),
-      ).toEqual(reloaded);
+      ).toEqual(withoutExpiry(reloaded));
+      expect(
+        withoutExpiry(
+          await submitTopUp(
+            WALLET_ID,
+            IDLE_TOP_UP_FORM,
+            formData({ amountMinor: '2000' }, { submission }),
+          ),
+        ),
+      ).toEqual(withoutExpiry(reloaded));
       expect(topUpWallet).toHaveBeenCalledTimes(1);
     },
   );
@@ -295,7 +301,9 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
     await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
     const page = await WalletPage({ searchParams: Promise.resolve({}) });
-    expect(page.props.children.props.topUpState).toEqual(await restoreTopUp(SESSION, WALLET_ID));
+    expect(withoutExpiry(page.props.children.props.topUpState)).toEqual(
+      withoutExpiry(await restoreTopUp(SESSION, WALLET_ID)),
+    );
     expect(page.props.children.props.submissionId).toBe(
       page.props.children.props.topUpState.submissionId,
     );
@@ -355,12 +363,38 @@ describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
     const held = await restoreTopUp(SESSION, WALLET_ID);
     expect(held.kind).toBe('HELD');
     expect(
-      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '3000' })),
-    ).toEqual(held);
+      withoutExpiry(
+        await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '3000' })),
+      ),
+    ).toEqual(withoutExpiry(held));
     expect(topUpWallet).toHaveBeenCalledTimes(1);
     finish({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
     await first;
-    expect(await restoreTopUp(SESSION, WALLET_ID)).toEqual(held);
+    expect(withoutExpiry(await restoreTopUp(SESSION, WALLET_ID))).toEqual(withoutExpiry(held));
+  });
+
+  it('FU-256: a restore re-mints the release token, and two restores a second apart name the same hold', async () => {
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    const edge = Math.floor(Date.now() / 1000) * 1000 + 999;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(edge);
+    const first = await restoreTopUp(SESSION, WALLET_ID);
+    clock.mockReturnValue(edge + 2);
+    const second = await restoreTopUp(SESSION, WALLET_ID);
+    if (first.kind !== 'HELD' || second.kind !== 'HELD') throw new Error('missing hold');
+    // The two answers straddle a second boundary: the tokens differ, only in their lifetime.
+    expect(second.releaseToken).not.toBe(first.releaseToken);
+    const { exp: firstExp, ...firstNames } = claimsOf(first.releaseToken) ?? {};
+    const { exp: secondExp, ...secondNames } = claimsOf(second.releaseToken) ?? {};
+    expect(secondExp).toBe((firstExp as number) + 1);
+    expect(secondNames).toEqual(firstNames);
+    expect(Object.keys(firstNames).sort()).toEqual(['id', 'scope']);
+    expect(withoutExpiry(second)).toEqual(withoutExpiry(first));
+    // Either token releases the same record.
+    clock.mockRestore();
+    expect(await releaseUnresolved(SESSION, topUpScope(WALLET_ID), first.releaseToken)).toBe(
+      'RELEASED',
+    );
   });
 
   it('keeps the hold after an unexpected exception and isolates organization and person', async () => {
