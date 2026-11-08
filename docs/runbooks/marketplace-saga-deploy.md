@@ -597,13 +597,36 @@ brings the wait back. Nothing is deleted: each deadline taken back is recorded i
 `order_hold_deadline_revocation`. As the migrator, in one transaction, with the `runId` of the
 run's summary:
 
-    { printf '\\set run_id %s\n\\set operator %s\n\\set ticket %s\n' \
-        '<runId>' 'jane.doe@example.org' 'OPS-1235'
-      cat services/marketplace-service/prisma/ops/hold-deadline-revoke.sql
-    } | node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 \
-      --single-transaction -f -
+```bash
+node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 \
+  --single-transaction -f - <<'SQL'
+\set run_id '<runId>'
+\set operator 'jane.doe@example.org'
+\set ticket 'OPS-1235'
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '30s';
+ALTER TABLE "order" DISABLE TRIGGER "trg_order_hold_fence_only_forward";
+WITH taken AS (
+  UPDATE "order" AS o SET "hold_not_after" = NULL
+    FROM "order_hold_deadline_backfill" AS a
+   WHERE a."run_id" = :'run_id'
+     AND o."organization_id" = a."organization_id" AND o."id" = a."order_id"
+     AND o."hold_not_after" = a."hold_not_after"
+     AND o."economic_transaction_id" IS NULL AND o."hold_sends_closed_at" IS NULL
+  RETURNING a."organization_id", a."order_id", a."hold_not_after"
+)
+INSERT INTO "order_hold_deadline_revocation"
+  ("organization_id", "order_id", "hold_not_after", "revoked_by", "ticket")
+SELECT "organization_id", "order_id", "hold_not_after", :'operator', :'ticket' FROM taken
+RETURNING "organization_id", "order_id", "hold_not_after";
+ALTER TABLE "order" ENABLE TRIGGER "trg_order_hold_fence_only_forward";
+SQL
+```
 
-It disables the fence's trigger under `lock_timeout` 3 s (an ACCESS EXCLUSIVE lock on `order`:
+Set the three values first (`scripts/psql-prisma-url.mjs` passes no `-v` but `ON_ERROR_STOP`):
+an unset one is a syntax error and a blank one the revocation table's CHECK, and either rolls
+back everything. The block is the one `test/hold-deadline-backfill.int-spec.ts` runs. It
+disables the fence's trigger under `lock_timeout` 3 s (an ACCESS EXCLUSIVE lock on `order`:
 refused rather than stalling the sagas behind it), takes back each deadline of that run still on
 its order with no hold and its sends open, records each, prints them, and enables the trigger
 again. A row that has since held or closed its sends keeps its deadline: what it proved stays

@@ -502,8 +502,8 @@ model OrderHoldDeadlineBackfill {
   @@map("order_hold_deadline_backfill")
 }
 
-/// A deadline the backfill gave and an operator took back (`prisma/ops/hold-deadline-revoke.sql`,
-/// as the migrator). Append-only, like the row it names.
+/// A deadline the backfill gave and an operator took back (the runbook's "Roll back" block, as
+/// the migrator). Append-only, like the row it names.
 model OrderHoldDeadlineRevocation {
   organizationId String   @map("organization_id")
   orderId        String   @map("order_id")

@@ -6,7 +6,7 @@
 -- `src/ops/hold-deadline-backfill.ts`, run by an operator, gives such a row a deadline;
 -- `order_hold_deadline_backfill` is what it gave, written in the same statement as the
 -- deadline, and `order_hold_deadline_revocation` is a deadline taken back
--- (`prisma/ops/hold-deadline-revoke.sql`, run by an operator as the migrator).
+-- (docs/runbooks/marketplace-saga-deploy.md, "Roll back", run by an operator as the migrator).
 --
 -- Append-only (AGENTS.md S-06; as `ck_return_history_append_only`): no role changes, erases
 -- or truncates a row, and an order with a record cannot be deleted (RESTRICT). Each row says

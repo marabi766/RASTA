@@ -19,9 +19,24 @@ const MIGRATION = join(
   __dirname,
   '../prisma/migrations/20261107130000_order_hold_deadline_backfill',
 );
+const RUNBOOK = join(__dirname, '../../../docs/runbooks/marketplace-saga-deploy.md');
+/**
+ * The runbook's "Roll back" block, verbatim: the psql script between `<<'SQL'` and `SQL`. Its
+ * `\set` lines must be exactly the three values the operator gives; the test gives its own.
+ */
+function runbookRollback(): string {
+  const doc = readFileSync(RUNBOOK, 'utf8');
+  const start = doc.indexOf("<<'SQL'\n", doc.indexOf('**Roll back.**'));
+  const end = doc.indexOf('\nSQL\n', start);
+  if (start < 0 || end < 0) throw new Error('the runbook has no rollback block');
+  const script = doc.slice(start + "<<'SQL'\n".length, end);
+  const sets = [...script.matchAll(/^\\set (\w+) /gm)].map((m) => m[1]);
+  expect(sets).toEqual(['run_id', 'operator', 'ticket']);
+  return script.replace(/^\\set .*$/gm, '');
+}
 /** A psql script's statements, its `:'name'` variables bound as literals (test values only). */
-function statements(file: string, vars: Record<string, string> = {}): string[] {
-  const sql = readFileSync(file, 'utf8').replace(/^--.*$/gm, '');
+function statements(script: string, vars: Record<string, string> = {}): string[] {
+  const sql = script.replace(/^--.*$/gm, '');
   const bound = sql.replace(/:'(\w+)'/g, (_all, name: string) => {
     const value = vars[name];
     if (value === undefined || !/^[\w.@-]*$/.test(value)) throw new Error(`no safe value: ${name}`);
@@ -316,7 +331,7 @@ describe('the legacy hold-deadline backfill (PostgreSQL)', () => {
       where: { id: held.id },
       data: { economicTransactionId: id('TXN') },
     });
-    const revoke = statements(join(__dirname, '../prisma/ops/hold-deadline-revoke.sql'), {
+    const revoke = statements(runbookRollback(), {
       run_id: report.runId,
       operator: 'jane.doe@example.org',
       ticket: 'OPS-1335',
@@ -347,9 +362,10 @@ describe('the legacy hold-deadline backfill (PostgreSQL)', () => {
       owner.$executeRaw`DELETE FROM order_hold_deadline_revocation WHERE order_id = ${taken.id}`,
     ).rejects.toThrow(/ck_order_hold_deadline_audit_append_only/);
     // The fence's trigger is on again, and a later run gives a new deadline, a new row.
-    await expect(
-      owner.order.update({ where: { id: held.id }, data: { holdNotAfter: null } }),
-    ).rejects.toThrow();
+    expect(
+      await owner.$queryRaw`SELECT tgenabled FROM pg_trigger
+        WHERE tgname = 'trg_order_hold_fence_only_forward'`,
+    ).toEqual([{ tgenabled: 'O' }]);
     await run();
     expect(await audit(taken)).toHaveLength(2);
   });
@@ -357,7 +373,7 @@ describe('the legacy hold-deadline backfill (PostgreSQL)', () => {
   it('the migration’s down.sql refuses while the record has rows', async () => {
     await run();
     expect(await owner.orderHoldDeadlineBackfill.count()).toBeGreaterThan(0);
-    const down = statements(join(MIGRATION, 'down.sql'));
+    const down = statements(readFileSync(join(MIGRATION, 'down.sql'), 'utf8'));
     // In a transaction rolled back whatever happens: DDL is transactional.
     const reached: string[] = [];
     await expect(
