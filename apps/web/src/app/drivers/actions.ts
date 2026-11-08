@@ -1,14 +1,9 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-} from '@/app/projects/form-state';
-
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { settleRelease } from '@/server/release-feedback';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { createDriver, createDriverFormValues, parseCreateDriverForm } from '@/server/drivers';
 
@@ -113,8 +108,11 @@ async function attemptCreateDriver(form: FormData): Promise<CreateDriverFormStat
 export async function releaseUnresolvedDriverCreation(form: FormData): Promise<void> {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/drivers');
-  if (!verifyCsrf(session, form).ok) redirect('/drivers');
-  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/drivers');
-  await driverCreationRequest.release(session, form.get(RELEASE_FIELD));
-  redirect('/drivers');
+  return settleRelease({
+    session,
+    form,
+    back: '/drivers',
+    release: driverCreationRequest.release,
+    quietSuccess: true,
+  });
 }

@@ -4,7 +4,7 @@ import type { z } from 'zod';
 
 import { toPersianDigits } from '@/lib/format';
 import {
-  callGateway,
+  callGatewayWrite,
   GatewayNeverSentError,
   GatewayOutcomeUnknownError,
   GatewayRequestError,
@@ -357,7 +357,7 @@ async function dispatchWrite<S extends z.ZodTypeAny, F extends string>(
   call: WriteCall<S, F>,
 ): Promise<WriteResult<z.infer<S>, F>> {
   try {
-    const response = await callGateway<unknown>({
+    const response = await callGatewayWrite<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: call.path,
       method: call.method ?? 'POST',
