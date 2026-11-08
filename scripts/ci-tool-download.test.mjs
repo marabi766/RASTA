@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { BACKOFF, TOOLS, download, transient } from './ci-tool-download.mjs';
 
 const root = new URL('../', import.meta.url).pathname;
@@ -119,10 +120,8 @@ function releaseCoverage(source) {
   );
 }
 test('every workflow and composite rejects release downloads outside the helper', () => {
-  for (const file of readdirSync(join(root, '.github/workflows')))
-    releaseCoverage(read(`.github/workflows/${file}`));
-  for (const dir of readdirSync(join(root, '.github/actions')))
-    releaseCoverage(read(`.github/actions/${dir}/action.yml`));
+  for (const file of authoredFiles(join(root, '.github')))
+    if (/\.ya?ml$/.test(file)) releaseCoverage(readFileSync(file, 'utf8'));
   const jobs = parse(read('.github/workflows/ci.yml')).jobs;
   for (const [job, name] of [
     ['security', 'gitleaks'],
