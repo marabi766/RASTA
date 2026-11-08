@@ -65,8 +65,9 @@
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
-# readonly: the tools below run from this one directory (FU-159, scripts/check-dockerfile-pins-lib.mjs)
-readonly KAFKA_BIN="${KAFKA_BIN:-/opt/kafka/bin}"
+# readonly, a literal, first: the tools below run from this one directory (FU-159/FU-224, READONLY_FORM in
+# scripts/check-dockerfile-pins-lib.mjs). The broker test points a COPY of this directory at its wrapper tools.
+readonly KAFKA_BIN=/opt/kafka/bin
 BOOTSTRAP="${KAFKA_BOOTSTRAP:-kafka:9094}"
 PARTITIONS="${KAFKA_TOPIC_PARTITIONS:-3}"
 REPLICATION="${KAFKA_TOPIC_REPLICATION:-1}"

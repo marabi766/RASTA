@@ -21,7 +21,9 @@
  *   - the gateway: outside the writer and the gateway itself, only a named import
  *     of a reviewed export, and `callGateway` only ever called as a read — an
  *     object literal with no method other than `GET`, no body, no idempotency key
- *     and no replay deadline, each a plain property (no getter or method);
+ *     and no replay deadline — and the gateway refuses anything else at run time
+ *     (`callGateway` sends only GET, from a snapshot of own data properties;
+ *     `callGatewayWrite` is the writer's entry and nobody else may import it);
  *   - a transport (`credentialFetch`, `putToSignedUrl`): only its reviewed
  *     importers, by a named import, used only as the callee of a call;
  *   - a package or node builtin: only the reviewed ones (a client library or
@@ -193,10 +195,15 @@ function findingsIn(graph: Graph): string[] {
         if (edge.how !== 'import' || edge.whole)
           findings.push(`${at} reaches the gateway other than by a named import`);
         for (const name of edge.names) {
-          if (!GATEWAY_EXPORTS.has(name.imported))
+          if (
+            !GATEWAY_EXPORTS.has(name.imported) &&
+            !(id === 'src/server/write.ts' && name.imported === 'callGatewayWrite')
+          )
             findings.push(`${at} imports ${name.imported} from the gateway, not reviewed`);
           if (name.imported === 'callGateway')
             (EXEMPT.has(id) ? transportNames : gatewayNames).add(name.local);
+          // The write entry: only the writer imports it, and only calls it.
+          if (name.imported === 'callGatewayWrite') transportNames.add(name.local);
         }
       }
     }
@@ -379,6 +386,17 @@ const PROBES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   'a gateway require': { 'a.js': "const g = require('../server/gateway.ts');" },
   'a load it cannot name': { 'a.ts': 'await import(where);' },
   'a property of something else': { 'a.ts': 'mod.callGateway({ path });' },
+  'callGatewayWrite outside the writer': {
+    'a.ts':
+      "import { callGatewayWrite } from '@/server/gateway';\ncallGatewayWrite({ path, method: 'POST' });",
+  },
+  'callGatewayWrite aliased outside the writer': {
+    'a.ts':
+      "import { callGatewayWrite as get } from '../server/gateway.ts';\nget({ path, method: 'POST' });",
+  },
+  'callGatewayWrite re-exported': {
+    'a.ts': "export { callGatewayWrite } from '../server/gateway';",
+  },
   'an unreviewed gateway export': {
     'a.ts': "import { gatewayPost } from '@/server/gateway';\ngatewayPost();",
   },
@@ -498,6 +516,63 @@ it('lets a reviewed importer only call a transport, never hand it on', () => {
     'probe.ts:2 uses a transport as a value',
     'probe.ts:3 uses a transport as a value',
   ]);
+});
+
+/**
+ * What the writer hands out: only callGatewayWrite's reviewed wrappers. An export the list does not
+ * name (a declaration, a list, a re-export, a default) is refused, so write.ts cannot pass on an
+ * unclassified write entry while the import rule above still holds (FU-219).
+ */
+const WRITER_VALUE_EXPORTS = [
+  'GENERIC_REFUSAL_MESSAGE',
+  'MAX_IN_PROGRESS_WAIT_SECONDS',
+  'isProvenRefusal',
+  'mapProblemToFields',
+  'reportUnmappedMessage',
+  'writeThroughGateway',
+];
+
+function valueExportsOf(source: string): string[] {
+  const file = ts.createSourceFile('write.ts', source, ts.ScriptTarget.Latest, true);
+  const names: string[] = [];
+  for (const statement of file.statements) {
+    if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) continue;
+    if (ts.isExportDeclaration(statement)) {
+      if (statement.isTypeOnly) continue;
+      names.push(`export ${statement.getText(file)}`);
+    } else if (ts.isExportAssignment(statement)) names.push('export default');
+    else if (
+      ts
+        .getModifiers(statement as ts.HasModifiers)
+        ?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+    ) {
+      if (ts.isVariableStatement(statement))
+        for (const declaration of statement.declarationList.declarations)
+          names.push(declaration.name.getText(file));
+      else
+        names.push((statement as ts.DeclarationStatement).name?.getText(file) ?? 'export default');
+    }
+  }
+  return names.sort();
+}
+
+it('lets the writer export only its reviewed wrappers of the write entry', () => {
+  expect(valueExportsOf(readFileSync(join(WEB_ROOT, 'src/server/write.ts'), 'utf8'))).toEqual(
+    [...WRITER_VALUE_EXPORTS].sort(),
+  );
+  for (const added of [
+    'export const send = (c: never) => callGatewayWrite(c);',
+    'export { callGatewayWrite as send };',
+    'export * from "./gateway";',
+    'export default dispatchWrite;',
+    'export async function send() {}',
+    'export class Send {}',
+    'export enum Send { A }',
+  ])
+    expect(valueExportsOf(added)).not.toEqual([]);
+  expect(
+    valueExportsOf('export type T = 1;\nexport interface I {}\nexport type { X } from "./x";'),
+  ).toEqual([]);
 });
 
 describe('the guard, on each way a write could bypass the writer', () => {
