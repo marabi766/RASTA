@@ -22,12 +22,14 @@ export interface OwnedProcesses {
   afterJoin(step: () => void | Promise<void>): void;
   /**
    * The WHOLE teardown is capped by `ms`: shutdown requests are cut off at the deadline; watches,
-   * kill joins and cleanup steps end at the deadline too, but each gets a short grace when the
-   * budget is already spent (watches 1000 ms from their start, so an owner is never given up after
-   * a single poll; joins at least 500 ms after the kill; steps at least 1000 ms after the cleanup
-   * began). What is still running
-   * is SIGKILLed, the cleanup steps still run, and the leftover is REPORTED. Whatever is registered
-   * while it runs (a case body the runner abandoned keeps calling `own()`) is drained in further
+   * kill joins and cleanup steps end at the deadline too, but never before a short grace of their
+   * own (watches at least 1000 ms after they began, so an owner is never given up after a single
+   * poll; joins at least 500 ms after the kill; steps at least 1000 ms after the cleanup began).
+   * Every grace is a FLOOR, never a choice made by comparing the clock with the deadline: a timer
+   * armed for the deadline fires up to 1 ms before the clock reaches it (FU-263), and a phase
+   * that ends 1 ms before the deadline needs the grace as much as one that ends after it. What is
+   * still running is SIGKILLed, the cleanup steps still run, and the leftover is REPORTED.
+   * Whatever is registered while it runs (a case body the runner abandoned keeps calling `own()`) is drained in further
    * rounds against the same deadline (at most 5; registrations that never stop are reported).
    */
   teardown(ms?: number): Promise<void>;
@@ -60,6 +62,8 @@ export function ownedProcesses(): OwnedProcesses {
   const watched: { what: string; ended: () => boolean }[] = [];
   const steps: (() => void | Promise<void>)[] = [];
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  // Monotonic, like the timers: a wall-clock step (NTP) can neither spend nor stretch the budget.
+  const now = (): number => performance.now();
   const settled = (child: ChildProcess): boolean =>
     child.exitCode !== null || child.signalCode !== null;
 
@@ -97,7 +101,7 @@ export function ownedProcesses(): OwnedProcesses {
   };
 
   async function drain(ms: number): Promise<void> {
-    const deadline = Date.now() + ms;
+    const deadline = now() + ms;
     const failures: Error[] = [];
     for (let n = 0; registered() > 0; n += 1) {
       if (n === MAX_ROUNDS) {
@@ -125,7 +129,7 @@ export function ownedProcesses(): OwnedProcesses {
       const timedOut = new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error(`did not finish by the ${ms} ms deadline`)),
-          Math.max(deadline - Date.now(), 0),
+          Math.max(deadline - now(), 0),
         );
       });
       await attempt('shutdown request', () =>
@@ -133,9 +137,9 @@ export function ownedProcesses(): OwnedProcesses {
       ).finally(() => clearTimeout(timer));
     }
     // Watched processes first: a parent must not be killed before the process it spawned is
-    // known to have ended, or that process is orphaned out of reach.
-    // Only a deadline that is ALREADY spent gets the grace: otherwise the watches end with it.
-    const watchEnd = Date.now() < deadline ? deadline : Date.now() + WATCH_GRACE_MS;
+    // known to have ended, or that process is orphaned out of reach. The grace is a floor (FU-263):
+    // `deadline` alone leaves 0-1 ms, one poll, whenever the requests ended just before it.
+    const watchEnd = Math.max(deadline, now() + WATCH_GRACE_MS);
     for (const { what, ended } of watched.splice(0)) {
       let done = false;
       for (;;) {
@@ -145,13 +149,13 @@ export function ownedProcesses(): OwnedProcesses {
           failures.push(new Error(`${what}: ${(error as Error).message}`));
           done = true; // reported; nothing more can be observed
         }
-        if (done || Date.now() >= watchEnd) break;
+        if (done || now() >= watchEnd) break;
         await sleep(25);
       }
       if (!done)
         failures.push(
           new Error(
-            `${what}: still running at the ${ms} ms deadline (${WATCH_GRACE_MS} ms after the watches began, if it was already spent)`,
+            `${what}: still running at the ${bound(ms, WATCH_GRACE_MS, 'the watches began')}`,
           ),
         );
     }
@@ -162,7 +166,7 @@ export function ownedProcesses(): OwnedProcesses {
     const joins = pending.map(async ({ child, exited }) => {
       const joined = await Promise.race([
         exited.then(() => true),
-        sleep(Math.max(deadline - Date.now(), JOIN_GRACE_MS)).then(() => false),
+        sleep(Math.max(deadline - now(), JOIN_GRACE_MS)).then(() => false),
       ]);
       if (!joined)
         failures.push(
@@ -174,9 +178,9 @@ export function ownedProcesses(): OwnedProcesses {
     await Promise.all(joins);
     // The cleanup steps always run (they release what the processes held); a short grace beyond
     // the budget keeps a hung step from holding the hook past its own timeout.
-    const stepEnd = Math.max(deadline, Date.now() + STEP_GRACE_MS);
+    const stepEnd = Math.max(deadline, now() + STEP_GRACE_MS);
     for (const step of steps.splice(0)) {
-      const left = Math.max(stepEnd - Date.now(), 0);
+      const left = Math.max(stepEnd - now(), 0);
       let timer: NodeJS.Timeout | undefined;
       const timedOut = new Promise<never>((_, reject) => {
         timer = setTimeout(
