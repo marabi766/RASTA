@@ -437,7 +437,7 @@ for (const [workspace, base] of [
 // The allowlist: short, exact files, each with a reason.
 test('every audited transport is one existing file with a reason, never a directory', () => {
   for (const [file, reason] of Object.entries(AUDITED_TRANSPORTS)) {
-    assert.match(file, /^[\w@.-]+(?:\/[\w@.[\]-]+)+\.(?:ts|tsx|mjs)$/, file);
+    assert.match(file, /^[\w@.-]+(?:\/[\w@.[\]-]+)+\.(?:ts|tsx|mjs|js)$/, file);
     assert.doesNotMatch(file, /[*?{}!]|\/$/, file);
     assert.ok(statSync(`${ROOT}${file}`).isFile(), file);
     assert.ok(reason.length >= 30, `${file}: say why it may reach raw HTTP`);
@@ -448,6 +448,7 @@ test('every audited transport is one existing file with a reason, never a direct
     'apps/web/src/lib/session-refusal.ts',
     'apps/web/src/server/credential-fetch.ts',
     'apps/web/src/server/signed-url-upload.ts',
+    'packages/config/src/credential-environment.js',
     'packages/nest-common/src/http/internal-fetch.ts',
     'packages/testing/src/guarded-http.ts',
     'packages/testing/src/redirect-probe.ts',

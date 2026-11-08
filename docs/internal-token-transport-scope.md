@@ -511,6 +511,7 @@ handed out of an audited file:
 | `apps/web/src/server/signed-url-upload.ts`          | `putToSignedUrl` (`redirect: 'error'`, set after the caller's init)        | no raw sender exported                                                    |
 | `apps/web/src/lib/session-refusal.ts`               | `sessionHasEnded` (a boolean), `isRedirect`                                | browser same-origin `/auth/session` with the browser's own cookie         |
 | `scripts/credential-fetch.mjs`                      | `credentialFetch` for scripts                                              | no raw sender exported                                                    |
+| `packages/config/src/credential-environment.js`     | `refuseAlteredEnvironment`, its error (FU-249)                             | sends nothing; reads the global dispatcher slot only                      |
 | `packages/testing/src/guarded-http.ts`              | `guardFetch`, `guardedFetch`, `globalFetchStub`, `guardRequestContext`     | no raw sender exported                                                    |
 | `packages/testing/src/redirect-probe.ts`            | `withRedirectProbe`: servers and a sender restricted to their live origins | captured fetch stays private; following controls reach only probe servers |
 | `tests/e2e/src/http.ts`                             | `send` (refuses the five statuses), errors, types                          | no raw sender exported                                                    |
@@ -594,3 +595,27 @@ input once. Its redirect target is always another probe server, preserving the
 following-client control. N1 parameter/assignment/reflection probes exercise the
 class guard from #654. L1 (`_innerFetch`/`route.fetch` and unknown prototype methods)
 and L2 (public request-route helpers) remain separate follow-up work under the size rule.
+
+## FU-249: never through an altered runtime
+
+Node's fetch builds its option objects inside Node, and they inherit from `Object.prototype`
+even when the caller's init has no prototype. A key set there reached every credentialed
+request: an inherited `dispatcher` received it (bearer header, internal token or signed URL
+included), and an inherited `body` was sent, with the credential, as the body of a request
+that had none. A replaced global dispatcher (undici's `Symbol.for('undici.globalDispatcher.1')`
+slot) received every request.
+
+`refuseAlteredEnvironment(transport)` (`packages/config/src/credential-environment.js`, plain
+CommonJS so the scripts load it unbuilt) runs before every send in `internalFetch`, the portal's
+`credentialFetch` and `putToSignedUrl`, and the scripts' `credentialFetch`. It throws
+`CredentialEnvironmentRefusedError` (no key, URL or credential in it) when `Object.prototype`
+(this realm's, and the one the transport was created in, which differs under jest's sandbox)
+has a key outside the ECMAScript set, or when the dispatcher slot is not the one present at
+load. It is a key scan and two identity checks, with no I/O. A pin in `scripts/credential-fetch.test.mjs`
+holds every `AUDITED_TRANSPORTS` entry to "checked before its one send" or to a named unchecked list.
+
+Limits: the check is a point in time, so pollution that lands after it, while undici is still
+reading options, is not seen. A dispatcher replaced before the module loads is taken as the real
+one. A replaced `globalThis.fetch` is not refused yet: Next.js replaces it after module load in
+production (`patchFetch`), and specs replace it in tests, so that needs a test-only seam first.
+The E2E harness transports (`packages/testing`, `tests/e2e`) are not checked yet.

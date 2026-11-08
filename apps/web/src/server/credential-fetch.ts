@@ -1,3 +1,5 @@
+import { disownRefusal, refuseAlteredEnvironment } from '@rasta/config';
+
 /**
  * What {@link credentialFetch} throws for a redirect: a transport failure,
  * never an answer. Carries no URL, Location, body or credential, so a caller
@@ -21,23 +23,31 @@ export class CredentialRedirectRefusedError extends Error {
  * origin, and a redirect is never an answer. `scripts/credential-fetch.test.mjs`
  * pins this copy's statuses to the original. Method, headers, body, `cache`,
  * the deadline signal and every non-redirect status (304 included) stay the
- * caller's: the request is sent exactly as given, once.
+ * caller's: the request is sent exactly as given, once — and never through an
+ * altered runtime (`refuseAlteredEnvironment`, `CredentialEnvironmentRefusedError`).
  */
 export async function credentialFetch(
   input: Parameters<typeof fetch>[0],
   init: Omit<RequestInit, 'redirect'>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {
-  // Set after init so even untyped callers cannot override this policy.
-  const response = await fetchImpl(input, { ...init, redirect: 'manual' });
-  // Fetch redirects only these five statuses. 300 offers choices and 305 is
-  // deprecated; neither navigates with manual fetch. Preserve their existing
-  // caller-defined semantics, like 304 (cache revalidation) and unknown 3xx.
-  if ([301, 302, 303, 307, 308].includes(response.status)) {
-    // Cleanup must not delay the verdict past the caller's deadline.
-    void response.body?.cancel().catch(() => undefined);
-    // No URL, Location, body, token or upstream message in the error.
-    throw new CredentialRedirectRefusedError();
+  // Before anything is sent: no credential through an altered runtime (FU-249).
+  refuseAlteredEnvironment(fetchImpl);
+  try {
+    // Set after init so even untyped callers cannot override this policy.
+    const response = await fetchImpl(input, { ...init, redirect: 'manual' });
+    // Fetch redirects only these five statuses. 300 offers choices and 305 is
+    // deprecated; neither navigates with manual fetch. Preserve their existing
+    // caller-defined semantics, like 304 (cache revalidation) and unknown 3xx.
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      // Cleanup must not delay the verdict past the caller's deadline.
+      void response.body?.cancel().catch(() => undefined);
+      // No URL, Location, body, token or upstream message in the error.
+      throw new CredentialRedirectRefusedError();
+    }
+    return response;
+  } catch (error) {
+    // Thrown after the check, so the request may have left: never this call's own refusal.
+    throw disownRefusal(error);
   }
-  return response;
 }

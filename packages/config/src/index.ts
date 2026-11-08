@@ -114,3 +114,10 @@ export {
   markRefusal,
   refusalCode,
 } from './command-failure';
+
+export {
+  CredentialEnvironmentRefusedError,
+  disownRefusal,
+  refuseAlteredEnvironment,
+  refusedBeforeSending,
+} from './credential-environment';
