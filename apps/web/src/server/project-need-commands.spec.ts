@@ -12,6 +12,7 @@ import {
 import {
   addNeed,
   checkNeedStamp,
+  fenceOf,
   mayAddNeed,
   mintNeedSubmission,
   needEditDigests,
@@ -28,11 +29,12 @@ import {
 } from './project-need-commands';
 import type { WebSession } from './session';
 import { signPayload } from './signed-payload';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The need commands against a fake gateway: the path, the method and the body of
- * every call, that only adding sends an `Idempotency-Key` (and no replay deadline,
- * which the endpoint does not read), how every documented answer is told in fixed
+ * every call, that only adding sends an `Idempotency-Key` and its replay deadline,
+ * that all four carry the project version (the parent fence, #615), how every documented answer is told in fixed
  * words, who is drawn which form, and what the baseline and the add stamp carry.
  */
 
@@ -48,7 +50,8 @@ const session = (): WebSession => ({
   subject: 'user-1',
   username: 'u',
   organizationId: 'ORG-A',
-  accessToken: 'access-token-value',
+  // Acting for ORG-A, as a sign-in pins it: every gateway call carries this organization (#541).
+  accessToken: actingAccessToken('ORG-A', ['ORGANIZATION_ADMIN']),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -102,12 +105,22 @@ describe('the baseline', () => {
     projectId: 'PRJ_1',
     command: 'withdraw',
     version: 4,
+    projectVersion: 7,
     status: 'DRAFT',
     digests: null,
   };
 
-  it('opens for the session and command it was minted for, and carries the version and both ids', () => {
+  it('opens for the session and command it was minted for, and carries both versions and both ids', () => {
     expect(openNeedBaseline(S, sealNeedBaseline(S, BASE), 'withdraw')).toEqual(BASE);
+    expect(fenceOf(BASE)).toEqual({ expectedVersion: 4, expectedProjectVersion: 7 });
+  });
+
+  it('does not open without the project version: a baseline that names no episode cannot be fenced (F2)', () => {
+    const unfenced = Object.fromEntries(
+      Object.entries(BASE).filter(([key]) => key !== 'projectVersion'),
+    );
+    const token = signPayload(S, 'project-need-baseline', unfenced, 60);
+    expect(openNeedBaseline(S, token, 'withdraw')).toBeNull();
   });
 
   it('does not open for another command, another login, a forgery or a token of another purpose', () => {
@@ -123,7 +136,15 @@ describe('the baseline', () => {
   });
 
   it('refuses a command it does not know, a version of zero, a status that is empty and an add', () => {
-    for (const bad of [{ command: 'delete' }, { command: 'add' }, { version: 0 }, { status: '' }]) {
+    for (const bad of [
+      { command: 'delete' },
+      { command: 'add' },
+      { version: 0 },
+      { projectVersion: 0 },
+      { projectVersion: 2_147_483_648 },
+      { projectVersion: '7' },
+      { status: '' },
+    ]) {
       const token = signPayload(S, 'project-need-baseline', { ...BASE, ...bad }, 60);
       expect(openNeedBaseline(S, token, 'withdraw')).toBeNull();
     }
@@ -172,16 +193,21 @@ describe('the baseline', () => {
 describe('the add stamp', () => {
   it('opens for this login, this submission id and this project, until the end of the window', () => {
     const now = Date.now();
-    const { id, replay } = mintNeedSubmission(S, 'PRJ_1', now);
+    const { id, replay } = mintNeedSubmission(S, 'PRJ_1', 7, now);
     expect(checkNeedStamp(S, replay, id, 'PRJ_1', now)).toBe('OK');
-    expect(needStampTerms(S, replay, id, 'PRJ_1', now)).toMatchObject({ issuedAt: now });
+    expect(needStampTerms(S, replay, id, 'PRJ_1', now)).toEqual({
+      issuedAt: now,
+      deadline: now + 3_000_000,
+      windowMs: 3_000_000,
+      projectVersion: 7,
+    });
     // The default window: one hour less ten minutes.
     expect(checkNeedStamp(S, replay, id, 'PRJ_1', now + 3_000_000)).toBe('OK');
     expect(checkNeedStamp(S, replay, id, 'PRJ_1', now + 3_000_001)).toBe('EXPIRED');
   });
 
   it('is nobody else’s: another project, id, login, a forgery, or the project create’s own stamp', () => {
-    const { id, replay } = mintNeedSubmission(S, 'PRJ_1');
+    const { id, replay } = mintNeedSubmission(S, 'PRJ_1', 7);
     expect(checkNeedStamp(S, replay, id, 'PRJ_2')).toBeNull();
     expect(checkNeedStamp(S, replay, 'sub_other', 'PRJ_1')).toBeNull();
     expect(checkNeedStamp({ ...S, csrfToken: 'another-login' }, replay, id, 'PRJ_1')).toBeNull();
@@ -194,6 +220,18 @@ describe('the add stamp', () => {
       60,
     );
     expect(checkNeedStamp(S, created, id, 'PRJ_1')).toBeNull();
+  });
+
+  it('is refused when it names no project version: such an add cannot be fenced to its episode (F2)', () => {
+    const now = Date.now();
+    const unfenced = signPayload(
+      S,
+      'project-need-create-replay',
+      { submissionId: 'sub_x', target: 'PRJ_1', issuedAt: now, deadline: now + 60_000 },
+      60,
+    );
+    expect(needStampTerms(S, unfenced, 'sub_x', 'PRJ_1', now)).toBeNull();
+    expect(checkNeedStamp(S, unfenced, 'sub_x', 'PRJ_1', now)).toBeNull();
   });
 });
 
@@ -238,6 +276,9 @@ const problem = (
 });
 
 const SUBMISSION = 'sub_0123456789abcdef0123456789abcdef0123456789';
+const DEADLINE = 1_900_000_000_000;
+const FENCE = { expectedVersion: 3, expectedProjectVersion: 7 } as const;
+const ADD_BODY = { title: 'بتن', description: 'شرح', quantity: '2.5', expectedProjectVersion: 7 };
 
 describe('what is sent to the gateway', () => {
   const OK = { id: 'NED_1' };
@@ -253,41 +294,34 @@ describe('what is sent to the gateway', () => {
       name: 'add',
       method: 'POST',
       path: '/v1/projects/PRJ_1/needs',
-      body: { title: 'بتن', description: 'شرح', quantity: '2.5' },
+      body: ADD_BODY,
       keyed: true,
-      run: (impl) =>
-        addNeed(
-          S,
-          'PRJ_1',
-          { title: 'بتن', description: 'شرح', quantity: '2.5' },
-          SUBMISSION,
-          impl,
-        ),
+      run: (impl) => addNeed(S, 'PRJ_1', ADD_BODY, SUBMISSION, DEADLINE, impl),
     },
     {
       name: 'edit',
       method: 'PATCH',
       path: '/v1/projects/PRJ_1/needs/NED_1',
-      body: { title: 'بتن شمالی', quantity: null, expectedVersion: 3 },
+      body: { title: 'بتن شمالی', quantity: null, expectedVersion: 3, expectedProjectVersion: 7 },
       keyed: false,
       run: (impl) =>
-        updateNeed(S, 'PRJ_1', 'NED_1', { title: 'بتن شمالی', quantity: null }, 3, impl),
+        updateNeed(S, 'PRJ_1', 'NED_1', { title: 'بتن شمالی', quantity: null }, FENCE, impl),
     },
     {
       name: 'submit',
       method: 'POST',
       path: '/v1/projects/PRJ_1/needs/NED_1/submit',
-      body: { expectedVersion: 3 },
+      body: { expectedVersion: 3, expectedProjectVersion: 7 },
       keyed: false,
-      run: (impl) => submitNeed(S, 'PRJ_1', 'NED_1', 3, impl),
+      run: (impl) => submitNeed(S, 'PRJ_1', 'NED_1', FENCE, impl),
     },
     {
       name: 'withdraw',
       method: 'POST',
       path: '/v1/projects/PRJ_1/needs/NED_1/withdraw',
-      body: { reason: 'دیگر لازم نیست', expectedVersion: 3 },
+      body: { reason: 'دیگر لازم نیست', expectedVersion: 3, expectedProjectVersion: 7 },
       keyed: false,
-      run: (impl) => withdrawNeed(S, 'PRJ_1', 'NED_1', { reason: 'دیگر لازم نیست' }, 3, impl),
+      run: (impl) => withdrawNeed(S, 'PRJ_1', 'NED_1', { reason: 'دیگر لازم نیست' }, FENCE, impl),
     },
   ];
 
@@ -300,23 +334,47 @@ describe('what is sent to the gateway', () => {
     expect(seen[0]!.body).toEqual(call.body);
   });
 
-  it.each(CALLS)('$name sends an Idempotency-Key only when it is the add', async (call) => {
+  it.each(CALLS)(
+    '$name sends an Idempotency-Key and its replay deadline only when it is the add (F1)',
+    async (call) => {
+      const { impl, seen } = gateway(200, OK);
+      await call.run(impl);
+      expect(seen[0]!.headers.get('idempotency-key')).toBe(call.keyed ? SUBMISSION : null);
+      // The service refuses an execution past this deadline on its own clock (#615).
+      expect(seen[0]!.headers.get('idempotency-replay-deadline')).toBe(
+        call.keyed ? String(DEADLINE) : null,
+      );
+    },
+  );
+
+  it.each(CALLS)('$name carries the project version it was drawn at (F2)', async (call) => {
     const { impl, seen } = gateway(200, OK);
     await call.run(impl);
-    expect(seen[0]!.headers.get('idempotency-key')).toBe(call.keyed ? SUBMISSION : null);
-    // The add endpoint reads no replay deadline, so none is sent for any call.
-    expect(seen[0]!.headers.get('idempotency-replay-deadline')).toBeNull();
+    expect(seen[0]!.body).toMatchObject({ expectedProjectVersion: 7 });
+  });
+
+  it('a body field cannot stand in for the fence: the fence is written last', async () => {
+    const { impl, seen } = gateway(200, OK);
+    await updateNeed(
+      S,
+      'PRJ_1',
+      'NED_1',
+      { title: 'x', expectedProjectVersion: 99 } as unknown as { title: string },
+      FENCE,
+      impl,
+    );
+    expect(seen[0]!.body).toMatchObject({ expectedVersion: 3, expectedProjectVersion: 7 });
   });
 
   it('encodes a project or need id that carries a path character', async () => {
     const { impl, seen } = gateway(200, OK);
-    await submitNeed(S, 'PRJ/1', 'NED 1', 3, impl);
+    await submitNeed(S, 'PRJ/1', 'NED 1', FENCE, impl);
     expect(seen[0]!.url).toBe('http://gateway.test:3000/v1/projects/PRJ%2F1/needs/NED%201/submit');
   });
 
   it('takes an answer without an id as unconfirmed: the write may have happened', async () => {
     const { impl } = gateway(200, { nothing: true });
-    expect(await submitNeed(S, 'PRJ_1', 'NED_1', 3, impl)).toMatchObject({
+    expect(await submitNeed(S, 'PRJ_1', 'NED_1', FENCE, impl)).toMatchObject({
       kind: 'UNKNOWN_OUTCOME',
     });
   });
@@ -324,12 +382,12 @@ describe('what is sent to the gateway', () => {
 
 describe('how every documented answer is told', () => {
   const run = (status: number, body: unknown, headers: Record<string, string> = {}) =>
-    updateNeed(S, 'PRJ_1', 'NED_1', { title: 'عنوان' }, 3, gateway(status, body, headers).impl);
+    updateNeed(S, 'PRJ_1', 'NED_1', { title: 'عنوان' }, FENCE, gateway(status, body, headers).impl);
 
   it('maps a validation detail onto its field, in fixed words for an unknown rule', async () => {
     const result = await run(
       400,
-      problem('VALIDATION_ERROR', 'Request validation failed', [
+      problem('VALIDATION_FAILED', 'Request validation failed', [
         { path: 'quantity', message: 'A quantity is a positive decimal string' },
         { path: 'estimatedCostMinor', message: 'The amount exceeds the largest storable value' },
         { path: 'unexpected', message: 'Unrecognized key(s) in object' },
@@ -353,11 +411,36 @@ describe('how every documented answer is told', () => {
     const result = await addNeed(
       S,
       'PRJ_1',
-      { title: 'عنوان', description: 'شرح' },
+      { title: 'عنوان', description: 'شرح', expectedProjectVersion: 7 },
       SUBMISSION,
+      DEADLINE,
       gateway(409, problem('IDEMPOTENCY_KEY_REUSED', 'x')).impl,
     );
     expect(result).toMatchObject({ kind: 'INVALID', message: NEED_KEY_REUSED_MESSAGE });
+  });
+
+  it('tells the service’s closed replay window from every other 409 (F1)', async () => {
+    const result = await addNeed(
+      S,
+      'PRJ_1',
+      ADD_BODY,
+      SUBMISSION,
+      DEADLINE,
+      gateway(409, problem('REPLAY_WINDOW_CLOSED', 'x')).impl,
+    );
+    expect(result).toMatchObject({ kind: 'UNAVAILABLE', replayWindowClosed: true });
+  });
+
+  it('says a moved project (the parent fence) as stale, for the add too (F2)', async () => {
+    const result = await addNeed(
+      S,
+      'PRJ_1',
+      ADD_BODY,
+      SUBMISSION,
+      DEADLINE,
+      gateway(409, problem('OPTIMISTIC_LOCK_FAILED', 'Project')).impl,
+    );
+    expect(result).toMatchObject({ kind: 'INVALID', message: STALE_MESSAGE });
   });
 
   it('tells a first request still in flight (409 with Retry-After) from a conflict', async () => {
@@ -365,8 +448,9 @@ describe('how every documented answer is told', () => {
       addNeed(
         S,
         'PRJ_1',
-        { title: 'عنوان', description: 'شرح' },
+        { title: 'عنوان', description: 'شرح', expectedProjectVersion: 7 },
         SUBMISSION,
+        DEADLINE,
         gateway(409, problem('CONFLICT', 'in flight'), headers).impl,
       );
     expect(await add({ 'retry-after': '1' })).toMatchObject({ kind: 'IN_PROGRESS' });
@@ -399,10 +483,11 @@ describe('how every documented answer is told', () => {
     });
   });
 
-  it.each([500, 502, 503])('keeps a %i as unavailable, with its status', async (status) => {
+  // A 5xx may follow the commit (a read after it failed, a reset after it): unconfirmed, decided once in
+  // `write.ts` for every writer (FU-189) — never "nothing changed".
+  it.each([500, 502, 503])('takes a %i as unconfirmed, not as a refusal', async (status) => {
     expect(await run(status, problem('INTERNAL_ERROR', 'boom'))).toMatchObject({
-      kind: 'UNAVAILABLE',
-      status,
+      kind: 'UNKNOWN_OUTCOME',
     });
   });
 

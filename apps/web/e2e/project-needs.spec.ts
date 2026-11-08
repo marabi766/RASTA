@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { guardedFetch } from '@rasta/testing';
 
+import { expect, test, type Page } from './expect';
 import { installLiveSession } from './live-session';
 
 /**
@@ -22,6 +23,8 @@ import { installLiveSession } from './live-session';
  * - the forms the page draws, for a person and a project status, are accepted by
  *   the real service, and each command lands on the real record (add, submit,
  *   withdraw — read back through the API);
+ * - a form drawn before the project moved to a new version is refused by the
+ *   service's parent fence and writes nothing (#615, F2);
  * - the page, with needs in two statuses and every disclosure open, has no WCAG 2.1
  *   AA violation and does not scroll sideways, on both viewports;
  * - tenant isolation: ORG-DEH-0002 reads nothing of ORG-DEH-0001's project or needs
@@ -72,14 +75,14 @@ interface Written {
 }
 
 async function call(
-  request: APIRequestContext,
   token: string,
   method: 'GET' | 'POST' | 'PATCH',
   path: string,
   expected: number,
   data?: unknown,
 ): Promise<unknown> {
-  const response = await request.fetch(gatewayUrl(path), {
+  // Credentials only through the redirect-refusing transport (`@rasta/testing`).
+  const response = await guardedFetch(gatewayUrl(path), {
     method,
     headers: {
       authorization: `Bearer ${token}`,
@@ -88,18 +91,15 @@ async function call(
         ? { 'idempotency-key': `e2e-needs-${randomUUID()}` }
         : {}),
     },
-    ...(data === undefined ? {} : { data }),
+    ...(data === undefined ? {} : { body: JSON.stringify(data) }),
   });
-  expect(response.status(), `${method} ${path}: ${await response.text()}`).toBe(expected);
-  return response.json();
+  const text = await response.text();
+  expect(response.status, `${method} ${path}: ${text}`).toBe(expected);
+  return text === '' ? null : (JSON.parse(text) as unknown);
 }
 
-async function createProject(
-  request: APIRequestContext,
-  token: string,
-  title: string,
-): Promise<Written> {
-  return (await call(request, token, 'POST', '/v1/projects', 201, {
+async function createProject(token: string, title: string): Promise<Written> {
+  return (await call(token, 'POST', '/v1/projects', 201, {
     title,
     operationType: 'road',
     scopeOfWork: 'E2E project needs fixture (EXP-004)',
@@ -108,13 +108,10 @@ async function createProject(
   })) as Written;
 }
 
-async function createNeed(
-  request: APIRequestContext,
-  token: string,
-  projectId: string,
-  title: string,
-): Promise<Written> {
-  return (await call(request, token, 'POST', `/v1/projects/${projectId}/needs`, 201, {
+/** Every need command carries the project version it was decided against (#615, the parent fence). */
+async function createNeed(token: string, project: Written, title: string): Promise<Written> {
+  return (await call(token, 'POST', `/v1/projects/${project.id}/needs`, 201, {
+    expectedProjectVersion: project.version,
     title,
     description: 'شرح نیاز برای آزمون',
     quantity: '25.5',
@@ -129,12 +126,8 @@ interface NeedRecord {
   readonly withdrawalReason: string | null;
 }
 
-async function needsOf(
-  request: APIRequestContext,
-  token: string,
-  projectId: string,
-): Promise<NeedRecord[]> {
-  const page = (await call(request, token, 'GET', `/v1/projects/${projectId}/needs`, 200)) as {
+async function needsOf(token: string, projectId: string): Promise<NeedRecord[]> {
+  const page = (await call(token, 'GET', `/v1/projects/${projectId}/needs`, 200)) as {
     items: NeedRecord[];
   };
   return page.items;
@@ -153,20 +146,15 @@ test.describe('a project’s needs, live (EXP-004)', () => {
 
   test('the page with needs in two statuses and every form open has no axe violation and fits the screen', async ({
     page,
-    request,
   }) => {
     const { accessToken } = await installLiveSession(page.context(), 'orgAdmin');
-    const project = await createProject(request, accessToken, `پروژه نیازها ${RUN}-axe`);
-    const draft = await createNeed(request, accessToken, project.id, `نیاز پیش‌نویس ${RUN}-axe`);
-    const sent = await createNeed(request, accessToken, project.id, `نیاز ارسال‌شده ${RUN}-axe`);
-    await call(
-      request,
-      accessToken,
-      'POST',
-      `/v1/projects/${project.id}/needs/${sent.id}/submit`,
-      200,
-      { expectedVersion: sent.version },
-    );
+    const project = await createProject(accessToken, `پروژه نیازها ${RUN}-axe`);
+    const draft = await createNeed(accessToken, project, `نیاز پیش‌نویس ${RUN}-axe`);
+    const sent = await createNeed(accessToken, project, `نیاز ارسال‌شده ${RUN}-axe`);
+    await call(accessToken, 'POST', `/v1/projects/${project.id}/needs/${sent.id}/submit`, 200, {
+      expectedVersion: sent.version,
+      expectedProjectVersion: project.version,
+    });
 
     await page.goto(`/projects/${project.id}`);
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
@@ -192,10 +180,9 @@ test.describe('a project’s needs, live (EXP-004)', () => {
 
   test('a need is added, sent and withdrawn through the forms, and each lands on the real record', async ({
     page,
-    request,
   }) => {
     const { accessToken } = await installLiveSession(page.context(), 'orgAdmin');
-    const project = await createProject(request, accessToken, `پروژه نیازها ${RUN}-forms`);
+    const project = await createProject(accessToken, `پروژه نیازها ${RUN}-forms`);
     const title = `بتن آماده ${RUN}-forms`;
     const reason = `دیگر لازم نیست — ${RUN}`;
 
@@ -216,7 +203,7 @@ test.describe('a project’s needs, live (EXP-004)', () => {
     await expect(item).toBeVisible();
     await expect(item.getByText('پیش‌نویس', { exact: true })).toBeVisible();
 
-    const added = await needsOf(request, accessToken, project.id);
+    const added = await needsOf(accessToken, project.id);
     expect(added).toHaveLength(1);
     expect(added[0]).toMatchObject({ status: 'DRAFT', version: 1 });
 
@@ -225,7 +212,7 @@ test.describe('a project’s needs, live (EXP-004)', () => {
     await expect(item.getByText('ارسال‌شده', { exact: true })).toBeVisible();
     // Submitted: it is no longer edited, only withdrawn.
     await expect(item.getByRole('button', { name: /^ارسال «/ })).toHaveCount(0);
-    expect((await needsOf(request, accessToken, project.id))[0]).toMatchObject({
+    expect((await needsOf(accessToken, project.id))[0]).toMatchObject({
       status: 'SUBMITTED',
     });
 
@@ -236,22 +223,60 @@ test.describe('a project’s needs, live (EXP-004)', () => {
     await expect(item.getByText('پس‌گرفته', { exact: true })).toBeVisible();
     await expect(item.locator('summary')).toHaveCount(0);
 
-    expect((await needsOf(request, accessToken, project.id))[0]).toMatchObject({
+    expect((await needsOf(accessToken, project.id))[0]).toMatchObject({
       status: 'WITHDRAWN',
       withdrawalReason: reason,
     });
   });
 
+  test('a need form drawn before the project moved to a new version changes nothing (F2, #615)', async ({
+    page,
+  }) => {
+    const { accessToken } = await installLiveSession(page.context(), 'orgAdmin');
+    const project = await createProject(accessToken, `پروژه نیازها ${RUN}-episode`);
+    const title = `نیاز دوره پیشین ${RUN}-episode`;
+    const need = await createNeed(accessToken, project, title);
+
+    // The forms are drawn now, at this project version.
+    await page.goto(`/projects/${project.id}`);
+    const item = page.getByRole('listitem').filter({ hasText: title });
+    await expect(item.getByRole('button', { name: /^ارسال «/ })).toBeVisible();
+
+    // Meanwhile the project moves on (as an approval round moves it): the need's own version does not.
+    await call(accessToken, 'PATCH', `/v1/projects/${project.id}`, 200, {
+      expectedVersion: project.version,
+      title: `پروژه نیازها ${RUN}-episode-2`,
+    });
+
+    // The old form is pressed: refused under the project lock, said as stale, nothing written.
+    await item.getByRole('button', { name: /^ارسال «/ }).click();
+    await expect(page.getByText(/این بار چیزی نوشته نشد/)).toBeVisible();
+    expect((await needsOf(accessToken, project.id))[0]).toMatchObject({
+      id: need.id,
+      status: 'DRAFT',
+      version: need.version,
+    });
+    // The fresh page draws the forms of the new episode, and those act.
+    await page
+      .getByRole('listitem')
+      .filter({ hasText: title })
+      .getByRole('button', { name: /^ارسال «/ })
+      .click();
+    await expect(page.getByText('نیاز به محدوده پروژه فرستاده شد.')).toBeVisible();
+    expect((await needsOf(accessToken, project.id))[0]).toMatchObject({
+      status: 'SUBMITTED',
+    });
+  });
+
   test('ORG-DEH-0002 reads nothing of ORG-DEH-0001’s project or needs and changes nothing', async ({
     browser,
-    request,
   }) => {
     const ownerContext = await browser.newContext();
     const owner = await installLiveSession(ownerContext, 'orgAdmin');
     await ownerContext.close();
     const title = `نیاز خصوصی ${RUN}-iso`;
-    const project = await createProject(request, owner.accessToken, `پروژه نیازها ${RUN}-iso`);
-    const need = await createNeed(request, owner.accessToken, project.id, title);
+    const project = await createProject(owner.accessToken, `پروژه نیازها ${RUN}-iso`);
+    const need = await createNeed(owner.accessToken, project, title);
 
     // Through the portal, as the other organization's administrator.
     const otherContext = await browser.newContext();
@@ -267,26 +292,32 @@ test.describe('a project’s needs, live (EXP-004)', () => {
     }
 
     // Through the gateway directly: the project and its needs are absent, not forbidden.
-    await call(request, other.accessToken, 'GET', `/v1/projects/${project.id}/needs`, 404);
-    await call(request, other.accessToken, 'POST', `/v1/projects/${project.id}/needs`, 404, {
+    await call(other.accessToken, 'GET', `/v1/projects/${project.id}/needs`, 404);
+    // Well-formed bodies, the right versions included: refused for the tenant, not for validation.
+    const fence = { expectedProjectVersion: project.version };
+    await call(other.accessToken, 'POST', `/v1/projects/${project.id}/needs`, 404, {
+      ...fence,
       title: 'نیاز تزریق‌شده',
       description: 'شرح',
     });
     const base = `/v1/projects/${project.id}/needs/${need.id}`;
-    await call(request, other.accessToken, 'PATCH', base, 404, {
+    await call(other.accessToken, 'PATCH', base, 404, {
+      ...fence,
       expectedVersion: need.version,
       title: 'تغییر از سازمان دیگر',
     });
-    await call(request, other.accessToken, 'POST', `${base}/submit`, 404, {
+    await call(other.accessToken, 'POST', `${base}/submit`, 404, {
+      ...fence,
       expectedVersion: need.version,
     });
-    await call(request, other.accessToken, 'POST', `${base}/withdraw`, 404, {
+    await call(other.accessToken, 'POST', `${base}/withdraw`, 404, {
+      ...fence,
       expectedVersion: need.version,
       reason: 'پس‌گرفتن از سازمان دیگر',
     });
 
     // Nothing moved: one need, still the owner's draft, at the version it had.
-    const after = await needsOf(request, owner.accessToken, project.id);
+    const after = await needsOf(owner.accessToken, project.id);
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ id: need.id, status: 'DRAFT', version: need.version });
   });

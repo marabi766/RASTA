@@ -1,15 +1,13 @@
 import { redirect } from 'next/navigation';
 
 import { BASELINE_FIELD, FLASH_PARAM } from '@/lib/form-fields';
-import {
-  isProvenRefusalStatus,
-  STALE_MESSAGE,
-  type ParsedProjectForm,
-} from '@/lib/project-commands';
+import { withContext } from '@/lib/page-context';
+import { STALE_MESSAGE, type ParsedProjectForm } from '@/lib/project-commands';
 import type { NeedCommand, NeedNotice } from '@/lib/project-need-commands';
 import { verifyCsrf } from '@/server/csrf';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
+import { pageContext } from '@/server/page-context';
 import {
   openNeedBaseline,
   type NeedBaseline,
@@ -17,7 +15,8 @@ import {
 } from '@/server/project-need-commands';
 import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
-import type { WriteResult } from '@/server/write';
+import { keepUnconfirmed } from '@/server/unconfirmed-retry';
+import { isProvenRefusal, type WriteResult } from '@/server/write';
 
 import type { ProjectFormState } from './project-form-state';
 
@@ -48,7 +47,10 @@ import type { ProjectFormState } from './project-form-state';
  * saying nothing was written this time (`stale`). The result is the same family of
  * states as the project's commands (`ProjectFormState`), so a lost answer is
  * `UNCONFIRMED` and never "nothing changed": none of these calls takes a key, and
- * the portal does not send them again for the person.
+ * the portal does not send them again for the person. A second press after an
+ * `UNCONFIRMED` answer is held to the shared rule (`server/unconfirmed-retry.ts`,
+ * FU-173): no refusal of it — a `429` before the service saw the versions, the
+ * `409` the first press may itself have caused — reads as "nothing changed".
  */
 
 export interface NeedCommandSpec<V, B, F extends string> {
@@ -63,12 +65,27 @@ export interface NeedCommandSpec<V, B, F extends string> {
   ) => Promise<WriteResult<WrittenNeed, F>>;
 }
 
-const landing = (projectId: string, flash: string): string =>
-  `/projects/${encodeURIComponent(projectId)}?${FLASH_PARAM}=${flash}`;
+/** The project's own page, in the organization this login acts for (`ctx`): a bare query is read by no page. */
+const landing = (session: WebSession, projectId: string, flash: string): string =>
+  withContext(
+    pageContext(session),
+    `/projects/${encodeURIComponent(projectId)}?${FLASH_PARAM}=${flash}`,
+  );
 
 export async function runNeedCommand<V, B, F extends string>(
   command: NeedCommandSpec<V, B, F>,
   /** The page's own project and need, bound by the form — never fields of it. */
+  projectId: string,
+  needId: string,
+  /** The form's state before this post: a retry of an unresolved send stays unresolved (FU-173). */
+  previous: ProjectFormState<V, F>,
+  form: FormData,
+): Promise<ProjectFormState<V, F>> {
+  return keepUnconfirmed(previous, form, () => attempt(command, projectId, needId, form));
+}
+
+async function attempt<V, B, F extends string>(
+  command: NeedCommandSpec<V, B, F>,
   projectId: string,
   needId: string,
   form: FormData,
@@ -112,7 +129,7 @@ export async function runNeedCommand<V, B, F extends string>(
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the needs again, so it shows what the command did.
-    redirect(landing(projectId, mintFlash(session, projectId, command.notice)));
+    redirect(landing(session, projectId, mintFlash(session, projectId, command.notice)));
   }
 
   switch (result.kind) {
@@ -120,7 +137,7 @@ export async function runNeedCommand<V, B, F extends string>(
       if (result.message === STALE_MESSAGE) {
         // The same stale baseline would conflict again, so the typed values are
         // not offered back for another try: the person sees the page as it is.
-        redirect(landing(projectId, mintFlash(session, projectId, 'stale')));
+        redirect(landing(session, projectId, mintFlash(session, projectId, 'stale')));
       }
       return {
         kind: 'INVALID',
@@ -138,10 +155,10 @@ export async function runNeedCommand<V, B, F extends string>(
       if (result.neverSent) {
         return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
       }
-      // "Nothing was changed" otherwise only for a refusal that proves it (4xx). A 5xx may
-      // follow the commit (the answer is built by a read after it), so it is as
+      // "Nothing was changed" otherwise only for a refusal the platform proved (a documented 4xx
+      // code under its own status, `isProvenRefusal`). A 5xx may follow the commit, so it is as
       // unconfirmed as a dropped connection.
-      if (!isProvenRefusalStatus(result.status)) {
+      if (!isProvenRefusal(result.status, result.code)) {
         return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
       }
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };

@@ -99,14 +99,14 @@ export const projectNeedSchema = z.object({
   projectId: z.string(),
   title: z.string(),
   description: z.string(),
-  quantity: z.string().nullable().default(null),
-  unit: z.string().nullable().default(null),
-  estimatedCostMinor: minorUnits.nullable().default(null),
+  quantity: z.string().nullable().prefault(null),
+  unit: z.string().nullable().prefault(null),
+  estimatedCostMinor: minorUnits.nullable().prefault(null),
   status: z.string(),
   createdAt: utcInstant,
-  submittedAt: utcInstant.nullable().default(null),
-  withdrawnAt: utcInstant.nullable().default(null),
-  withdrawalReason: z.string().nullable().default(null),
+  submittedAt: utcInstant.nullable().prefault(null),
+  withdrawnAt: utcInstant.nullable().prefault(null),
+  withdrawalReason: z.string().nullable().prefault(null),
   version: z.number().int().min(1),
 });
 
@@ -114,8 +114,8 @@ export type ProjectNeed = z.infer<typeof projectNeedSchema>;
 
 const needPageSchema = z.object({
   items: z.array(projectNeedSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type ProjectNeedPage = z.infer<typeof needPageSchema>;

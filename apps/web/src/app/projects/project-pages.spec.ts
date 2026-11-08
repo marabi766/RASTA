@@ -86,7 +86,7 @@ const { PROJECT_CREATE_UNRESOLVED, mintCreateSubmission } =
 const { NeedsSection } = require('./[id]/NeedsSection') as typeof import('./[id]/NeedsSection');
 const { openNeedBaseline } =
   require('@/server/project-need-commands') as typeof import('@/server/project-need-commands');
-const { mintNeedSubmission, needCreateScope } =
+const { mintNeedSubmission, needCreateScope, needStampTerms } =
   require('@/server/project-need-commands') as typeof import('@/server/project-need-commands');
 const { releaseUnresolved } =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
@@ -463,10 +463,13 @@ describe('/projects/[id] — the needs', () => {
     mockAnswers['fetchExecutionPolicy'] = OPEN;
     return DetailPage({
       params: Promise.resolve({ id: 'PRJ_1' }),
-      searchParams: Promise.resolve({
-        ...options.query,
-        ...(options.flash ? { flash: options.flash } : {}),
-      }),
+      // As the portal draws its URLs: bound to the organization the login acts for (`ctx`).
+      searchParams: Promise.resolve(
+        boundQuery(mockSession.current, {
+          ...options.query,
+          ...(options.flash ? { flash: options.flash } : {}),
+        }),
+      ),
     });
   }
 
@@ -530,6 +533,8 @@ describe('/projects/[id] — the needs', () => {
         projectId: 'PRJ_1',
         command,
         version: 4,
+        // The editing episode the page was drawn in: the project's version (F2).
+        projectVersion: 5,
         status: 'DRAFT',
       });
       // …and for no other command.
@@ -547,7 +552,15 @@ describe('/projects/[id] — the needs', () => {
     // A submitted need is signed at its own status and version.
     expect(
       openNeedBaseline(session, tokens['NED_2']!.withdraw!.baseline, 'withdraw'),
-    ).toMatchObject({ needId: 'NED_2', status: 'SUBMITTED', version: 4 });
+    ).toMatchObject({ needId: 'NED_2', status: 'SUBMITTED', version: 4, projectVersion: 5 });
+  });
+
+  it('draws no need command and no add form for a project the service sent without a version (F2)', async () => {
+    const tree = await withNeeds('DRAFT', {
+      project: { kind: 'OK', data: PROJECT('DRAFT', { version: undefined }) },
+    });
+    expect(sectionOf(tree).tokens).toEqual({});
+    expect(sectionOf(tree).add).toEqual({ kind: 'NOT_OFFERED', reason: 'VERSION' });
   });
 
   it('draws every need’s edit form from its own record, with the quantity in canonical form', async () => {
@@ -567,14 +580,15 @@ describe('/projects/[id] — the needs', () => {
 
   it('draws no command for a reader, for the oversight role or for a token with no organization — and reads no hold for them', async () => {
     const hold = async (session: ReturnType<typeof signedInWith>) => {
-      const sent = mintNeedSubmission(session, 'PRJ_1');
+      const sent = mintNeedSubmission(session, 'PRJ_1', 5);
+      const terms = needStampTerms(session, sent.replay, sent.id, 'PRJ_1')!;
       const reserved = await reserveUnresolved(session, needCreateScope('PRJ_1'), {
         key: sent.id,
         digest: 'digest',
         ref: sent.replay,
-        issuedAt: Date.now(),
-        deadline: null,
-        windowMs: null,
+        issuedAt: terms.issuedAt,
+        deadline: terms.deadline,
+        windowMs: terms.windowMs,
       });
       if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
       await settleUnresolved(reserved.attempt, 'UNRESOLVED');
@@ -601,20 +615,26 @@ describe('/projects/[id] — the needs', () => {
     const add = sectionOf(tree).add;
     if (add.kind !== 'FORM') throw new Error(add.kind);
     expect(add.submission.id).toMatch(/^sub_/);
-    expect(add.submission.replay).toEqual(expect.any(String));
+    const session = mockSession.current as Parameters<typeof needStampTerms>[0];
+    // Signed for this project at the version the page read: the editing episode (F2).
+    expect(
+      needStampTerms(session, add.submission.replay, add.submission.id, 'PRJ_1'),
+    ).toMatchObject({ projectVersion: 5 });
+    expect(needStampTerms(session, add.submission.replay, add.submission.id, 'PRJ_2')).toBeNull();
   });
 
   describe('an unresolved add', () => {
     const remember = async () => {
       const session = mockSession.current as ReturnType<typeof signedInWith>;
-      const sent = mintNeedSubmission(session, 'PRJ_1');
+      const sent = mintNeedSubmission(session, 'PRJ_1', 5);
+      const terms = needStampTerms(session, sent.replay, sent.id, 'PRJ_1')!;
       const reserved = await reserveUnresolved(session, needCreateScope('PRJ_1'), {
         key: sent.id,
         digest: 'digest',
         ref: sent.replay,
-        issuedAt: Date.now(),
-        deadline: null,
-        windowMs: null,
+        issuedAt: terms.issuedAt,
+        deadline: terms.deadline,
+        windowMs: terms.windowMs,
       });
       if (reserved.kind !== 'RESERVED') throw new Error(reserved.kind);
       // The response that would have carried the news is lost: only the server's record remains.
@@ -677,16 +697,31 @@ describe('/projects/[id] — the needs', () => {
       expect(sent.id).toMatch(/^sub_/);
     });
 
-    it('passes a refused release on, and nothing else the query says', async () => {
-      for (const [release, expected] of [
-        ['STALE', 'STALE'],
-        ['IN_PROGRESS', 'IN_PROGRESS'],
-        ['RELEASED', null],
-        ['anything', null],
-      ] as const) {
-        expect(sectionOf(await withNeeds('DRAFT', { query: { release } })).releaseRefused).toBe(
-          expected,
+    it('passes a signed release outcome on — for this project only — and no bare word', async () => {
+      await remember();
+      const session = mockSession.current as Parameters<typeof releaseFeedback>[0];
+      const subject = { surface: 'project-need-creation', target: 'PRJ_1' } as const;
+      for (const outcome of ['STALE', 'IN_PROGRESS', 'CONSENT_MISSING'] as const) {
+        const release = releaseFeedback(session, subject, outcome);
+        expect(sectionOf(await withNeeds('DRAFT', { query: { release } })).releaseOutcome).toBe(
+          outcome,
         );
+      }
+      // A replayed success does not hide the hold that is there now.
+      const released = releaseFeedback(session, subject, 'RELEASED');
+      expect(
+        sectionOf(await withNeeds('DRAFT', { query: { release: released } })).releaseOutcome,
+      ).toBeUndefined();
+      // Another project's outcome, another surface's, and an unsigned word are read by no one here.
+      for (const release of [
+        releaseFeedback(session, { ...subject, target: 'PRJ_2' }, 'STALE'),
+        releaseFeedback(session, { surface: 'project-creation' }, 'STALE'),
+        'STALE',
+        'IN_PROGRESS',
+      ]) {
+        expect(
+          sectionOf(await withNeeds('DRAFT', { query: { release } })).releaseOutcome,
+        ).toBeUndefined();
       }
     });
   });

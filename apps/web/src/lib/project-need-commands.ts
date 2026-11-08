@@ -1,3 +1,4 @@
+import { ownText } from '@/lib/own-key';
 import { normalizePersianText, toLatinDigits, toPersianDigits } from './format';
 import { PERSIAN_DECIMAL_SEPARATOR } from './format/codepoints';
 import {
@@ -24,16 +25,16 @@ import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
  *   its status together with its project's (`needCommandsFrom`, pinned to the
  *   service's source by `project-need-commands.contract.spec.ts`). The service
  *   decides again on every send.
- * - An `Idempotency-Key` on adding a need alone. Editing, submitting and
- *   withdrawing carry the `expectedVersion` the page was drawn at.
- * - No `Idempotency-Replay-Deadline` on adding a need (the controller reads only
- *   the key): the service cannot refuse a resend past its own retention, so an
- *   unresolved add is never sent again by the portal (`project-need-create` is
- *   `retry: false` in `unresolved-request-policy.ts`).
+ * - An `Idempotency-Key` on adding a need alone, with the signed stamp's
+ *   `Idempotency-Replay-Deadline` (#615): the service refuses an execution past it.
+ *   An unresolved add is still never sent again by the portal (`project-need-create`
+ *   is `retry: false` in `unresolved-request-policy.ts`). Editing, submitting and
+ *   withdrawing carry the `expectedVersion` the page was drawn at, and all four the
+ *   project's `expectedProjectVersion` (the editing episode).
  * - No way to delete a need, or to edit a submitted one: withdraw it and add a new
  *   one (the service's rule).
  *
- * Wording: new text on these screens carries no hamza and no combining hamza.
+ * Wording: standard Persian orthography (owner decision B, 2026-10-24; `src/test/orthography.ts`).
  */
 
 export const NEED_COMMANDS = ['add', 'edit', 'submit', 'withdraw'] as const;
@@ -53,9 +54,8 @@ export const NEED_STATUS_LABELS: Readonly<Record<NeedStatus, string>> = {
 };
 
 export function needStatusLabel(status: string): string {
-  return (NEED_STATUSES as readonly string[]).includes(status)
-    ? NEED_STATUS_LABELS[status as NeedStatus]
-    : status;
+  // By own key only: a service status named like an inherited property reads as itself.
+  return ownText(NEED_STATUS_LABELS, status) ?? status;
 }
 
 /** The project statuses in which its needs change (`EDITABLE_PROJECT_STATES`). */
@@ -478,10 +478,6 @@ export const NEED_LIST_UNREAD_MESSAGE =
 export const NEED_PENDING_CAPACITY_MESSAGE =
   'شمار درخواست‌های روشن‌نشده این نشست به سقف رسیده است و چیزی فرستاده نشد. ' +
   'نخست درخواست‌های روشن‌نشده را بررسی و رها کنید.';
-
-/** The release form was drawn for a request that has since changed. */
-export const NEED_RELEASE_STALE_MESSAGE =
-  'درخواست روشن‌نشده از زمان باز شدن این صفحه تغییر کرده است و چیزی تغییر نکرد. صفحه را تازه کنید و دوباره بررسی کنید.';
 
 /** The first request is still being processed by the service (`409 CONFLICT` with `Retry-After`). */
 export const NEED_STILL_PROCESSING_MESSAGE =

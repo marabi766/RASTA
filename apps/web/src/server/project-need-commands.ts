@@ -23,6 +23,7 @@ import {
   type WithdrawNeedField,
 } from '@/lib/project-need-commands';
 
+import { ReleaseScope } from './release-scope';
 import { replayStamps } from './replay-stamp';
 import type { WebSession } from './session';
 import { signPayload, verifyPayload } from './signed-payload';
@@ -45,14 +46,29 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
  * `POST /v1/projects/{id}/needs` is the only call here that takes an
  * `Idempotency-Key`: the service stores it, bound to the caller and the project,
  * and answers the same key and body with the first response (`409 CONFLICT` with
- * `Retry-After` while the first is in flight). It takes **no**
- * `Idempotency-Replay-Deadline`, so the service cannot refuse a resend past its
- * own retention; the portal therefore never resends an unresolved add
- * (`project-need-create`: `retry: false`). Every other call carries the
- * `expectedVersion` its page was drawn at, from the signed baseline; the first
- * send moves the version, so a second send of the same form is a `409` and not a
- * second write, and no key is sent for them (the controller reads none, the
- * OpenAPI document lists none).
+ * `Retry-After` while the first is in flight). Every add also carries the signed
+ * stamp's deadline as `Idempotency-Replay-Deadline` (#615, D-065): the service
+ * compares it with the clock that expires its key and refuses a later execution
+ * with `409 REPLAY_WINDOW_CLOSED` before it writes, so a form posted again after
+ * the key is gone — its portal record settled or not, the process paused or not —
+ * is refused by the owner of the key, not by a portal clock. The portal still
+ * never resends an unresolved add for the person (`project-need-create`:
+ * `retry: false`). Every other call carries the `expectedVersion` its page was
+ * drawn at, from the signed baseline; the first send moves the version, so a
+ * second send of the same form is a `409` and not a second write, and no key is
+ * sent for them (the controller reads none, the OpenAPI document lists none).
+ *
+ * ## The editing episode (the parent fence)
+ *
+ * A need belongs to the project's editing episode the page was drawn in. A
+ * request for approval and its answer move the **project's** version and leave
+ * every need's version alone, so a need's own version cannot tell an old episode
+ * from a new one. Every one of the four commands therefore carries
+ * `expectedProjectVersion` — the project version the page read, signed into the
+ * add's stamp and into each baseline, never a field of a form — and
+ * construction-service compares it under the project's row lock before anything
+ * else (`409 OPTIMISTIC_LOCK_FAILED`). A form from an earlier episode cannot act
+ * in a later one.
  *
  * ## What a command acts on
  *
@@ -125,26 +141,57 @@ export const WITHDRAW_NEED_FIELD_MAPPING = mappingOf<WithdrawNeedField>({ reason
 const answerSchema = z.object({ id: z.string().min(1) });
 export type WrittenNeed = z.infer<typeof answerSchema>;
 
+/** Exactly the two fence fields, after the body's own: a body key can never stand in for one. */
+const fenceFields = (fence: NeedFence): NeedFence => ({
+  expectedVersion: fence.expectedVersion,
+  expectedProjectVersion: fence.expectedProjectVersion,
+});
+
 const needsPath = (projectId: string): string =>
   `/v1/projects/${encodeURIComponent(projectId)}/needs`;
 const needPath = (projectId: string, needId: string): string =>
   `${needsPath(projectId)}/${encodeURIComponent(needId)}`;
 
+/** The editing episode a command was drawn in: the project's version, as the page read it. */
+export interface ParentFence {
+  readonly expectedProjectVersion: number;
+}
+
+/** What an existing need's command is fenced by: its own version and its project's. */
+export interface NeedFence extends ParentFence {
+  readonly expectedVersion: number;
+}
+
+/** The fence a baseline signs, as the request carries it. */
+export function fenceOf(baseline: NeedBaseline): NeedFence {
+  return { expectedVersion: baseline.version, expectedProjectVersion: baseline.projectVersion };
+}
+
+/** The add as it is sent — and digested: the parent fence is part of the canonical body. */
+export type AddNeedRequest = AddNeedBody & ParentFence;
+
+export function addNeedRequest(body: AddNeedBody, expectedProjectVersion: number): AddNeedRequest {
+  return { ...body, expectedProjectVersion };
+}
+
 /**
- * Adding a need. The submission id is the `Idempotency-Key`; no replay deadline is sent, because the
- * endpoint reads none (the contract spec pins that), and the caller never sends the same request twice.
+ * Adding a need. The submission id is the `Idempotency-Key` and `replayDeadline` (ms since the epoch,
+ * from the signed stamp) its `Idempotency-Replay-Deadline`: construction-service refuses an execution
+ * past it on its own clock (`409 REPLAY_WINDOW_CLOSED`). Required here, so an add cannot leave without one.
  */
 export const addNeed = (
   session: WebSession,
   projectId: string,
-  body: AddNeedBody,
+  body: AddNeedRequest,
   submissionId: string,
+  replayDeadline: number,
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenNeed, NeedField>> =>
   writeThroughGateway(session, {
     path: needsPath(projectId),
     body,
     submissionId,
+    replayDeadline,
     schema: answerSchema,
     mapping: NEED_FIELD_MAPPING,
     fetchImpl,
@@ -155,13 +202,13 @@ export const updateNeed = (
   projectId: string,
   needId: string,
   body: UpdateNeedBody,
-  expectedVersion: number,
+  fence: NeedFence,
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenNeed, NeedField>> =>
   writeThroughGateway(session, {
     path: needPath(projectId, needId),
     method: 'PATCH',
-    body: { ...body, expectedVersion },
+    body: { ...body, ...fenceFields(fence) },
     schema: answerSchema,
     mapping: NEED_FIELD_MAPPING,
     idempotency: 'NONE',
@@ -172,12 +219,12 @@ export const submitNeed = (
   session: WebSession,
   projectId: string,
   needId: string,
-  expectedVersion: number,
+  fence: NeedFence,
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenNeed, never>> =>
   writeThroughGateway(session, {
     path: `${needPath(projectId, needId)}/submit`,
-    body: { expectedVersion },
+    body: fenceFields(fence),
     schema: answerSchema,
     mapping: NO_NEED_FIELD_MAPPING,
     idempotency: 'NONE',
@@ -189,12 +236,12 @@ export const withdrawNeed = (
   projectId: string,
   needId: string,
   body: { readonly reason: string },
-  expectedVersion: number,
+  fence: NeedFence,
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenNeed, WithdrawNeedField>> =>
   writeThroughGateway(session, {
     path: `${needPath(projectId, needId)}/withdraw`,
-    body: { ...body, expectedVersion },
+    body: { ...body, ...fenceFields(fence) },
     schema: answerSchema,
     mapping: WITHDRAW_NEED_FIELD_MAPPING,
     idempotency: 'NONE',
@@ -233,6 +280,11 @@ const baselineSchema = z.object({
   projectId: z.string().min(1).max(200),
   command: z.string().refine(isNeedCommand),
   version: z.number().int().min(1),
+  /**
+   * The project's version when the page was drawn: the editing episode this command belongs to.
+   * Required — a baseline signed before it was carried opens as nothing (fail closed).
+   */
+  projectVersion: z.number().int().min(1).max(2_147_483_647),
   /** The need's status as the page showed it. */
   status: z.string().min(1).max(40),
   /** Digests of the edit form's fields as drawn; null for every other command. */
@@ -244,6 +296,7 @@ export interface NeedBaseline {
   readonly projectId: string;
   readonly command: NeedCommand;
   readonly version: number;
+  readonly projectVersion: number;
   readonly status: string;
   readonly digests: Readonly<Record<string, string>> | null;
 }
@@ -300,19 +353,43 @@ export function openNeedBaseline(
 
 const ADD_STAMPS = replayStamps('project-need-create-replay');
 
-/** A fresh submission id for a project's add form, with its stamp — signed for that project. */
-export function mintNeedSubmission(
+/** The add stamp for `submissionId`, signed for that project at `projectVersion` (as `mintCreateStamp`). */
+export function mintNeedStamp(
   session: WebSession,
+  submissionId: string,
   projectId: string,
+  projectVersion: number,
   now?: number,
-): { readonly id: string; readonly replay: string } {
-  return ADD_STAMPS.mintSubmission(session, projectId, now);
+): string {
+  return ADD_STAMPS.mint(session, submissionId, projectId, now, undefined, projectVersion);
 }
 
 /**
- * What a stamp this login holds for this project says about the add's time: when it was issued, its
- * effective deadline (the signed one or the current configuration's, whichever is earlier). Null for a
- * stamp that is not ours, not for this submission id or not for this project.
+ * A fresh submission id for a project's add form, with its stamp — signed for that project at the
+ * version the page read (the editing episode the add belongs to).
+ */
+export function mintNeedSubmission(
+  session: WebSession,
+  projectId: string,
+  projectVersion: number,
+  now?: number,
+): { readonly id: string; readonly replay: string } {
+  return ADD_STAMPS.mintSubmission(session, projectId, now, undefined, projectVersion);
+}
+
+/** What an add stamp says: its time terms and the project version it was drawn at. */
+export interface NeedStampTerms {
+  readonly issuedAt: number;
+  readonly deadline: number;
+  readonly windowMs: number;
+  readonly projectVersion: number;
+}
+
+/**
+ * What a stamp this login holds for this project says about the add: when it was issued, its effective
+ * deadline (the signed one or the current configuration's, whichever is earlier), the window, and the
+ * project version it was drawn at. Null for a stamp that is not ours, not for this submission id or
+ * project, or that names no project version (fail closed: such a stamp cannot be fenced).
  */
 export function needStampTerms(
   session: WebSession,
@@ -320,8 +397,15 @@ export function needStampTerms(
   submissionId: string,
   projectId: string,
   now?: number,
-): { readonly issuedAt: number; readonly deadline: number } | null {
-  return ADD_STAMPS.terms(session, token, submissionId, projectId, now);
+): NeedStampTerms | null {
+  const terms = ADD_STAMPS.terms(session, token, submissionId, projectId, now);
+  if (terms === null || terms.version === null) return null;
+  return {
+    issuedAt: terms.issuedAt,
+    deadline: terms.deadline,
+    windowMs: terms.windowMs,
+    projectVersion: terms.version,
+  };
 }
 
 /** `OK` while the add may still be sent, `EXPIRED` past its window, `null` for a stamp that is not this project's. */
@@ -330,9 +414,11 @@ export function checkNeedStamp(
   token: unknown,
   submissionId: string,
   projectId: string,
-  now?: number,
+  now: number = Date.now(),
 ): 'OK' | 'EXPIRED' | null {
-  return ADD_STAMPS.check(session, token, submissionId, projectId, now);
+  const terms = needStampTerms(session, token, submissionId, projectId, now);
+  if (terms === null) return null;
+  return now > terms.deadline ? 'EXPIRED' : 'OK';
 }
 
 /** Where a project's unresolved add is kept (`server/unresolved-request.ts`); the organization comes from the login. */
@@ -341,6 +427,11 @@ export function needCreateScope(projectId: string): {
   readonly target: string;
 } {
   return { purpose: 'project-need-create', target: projectId };
+}
+
+/** What a project's add release acts on (`settleRelease`); made here, in `server/`, only. */
+export function needCreateRelease(projectId: string): ReleaseScope {
+  return ReleaseScope.of(needCreateScope(projectId));
 }
 
 /** The digest the unresolved add carries: of the body as it is sent. */

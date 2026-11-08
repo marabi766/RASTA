@@ -18,7 +18,6 @@ import {
   NEED_PENDING_CAPACITY_MESSAGE,
   NEED_PENDING_UNCHECKED_MESSAGE,
   NEED_PROJECT_LOCKED_MESSAGE,
-  NEED_RELEASE_STALE_MESSAGE,
   NEED_STATE_MESSAGE,
   NEED_STILL_PROCESSING_MESSAGE,
   NEED_UNAVAILABLE_MESSAGE,
@@ -32,6 +31,9 @@ import {
 import { STALE_MESSAGE } from '@/lib/project-commands';
 import type { ProjectNeed, ProjectNeedPage, ReadResult } from '@/server/projects';
 import type { UnresolvedRequest } from '@/server/unresolved-request';
+
+import { releaseMessage } from '@/lib/release-messages';
+import { nonStandardSpelling } from '@/test/orthography';
 
 import { NeedsSection, type AddNeedSlot, type NeedTokens } from './NeedsSection';
 import {
@@ -65,13 +67,15 @@ jest.mock('./need-actions', () => {
     (...args: unknown[]) =>
       act_(name, args[args.length - 1] as FormData);
   return {
-    submitAddNeed: named('add'),
     submitEditNeed: named('edit'),
     submitSubmitNeed: named('submit'),
     submitWithdrawNeed: named('withdraw'),
-    releaseUnresolvedNeed: () => undefined,
   };
 });
+jest.mock('./need-add-actions', () => ({
+  submitAddNeed: (...args: unknown[]) => act_('add', args[args.length - 1] as FormData),
+  releaseUnresolvedNeed: () => undefined,
+}));
 jest.mock('next/link', () => ({
   __esModule: true,
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
@@ -115,11 +119,8 @@ const field = (container: HTMLElement, name: string) =>
 
 beforeEach(() => act_.mockReset());
 
-/** Built from code points so this file carries none: hamza, its carriers, and the combining hamza. */
-const HAMZA = new RegExp(
-  `[${[0x0621, 0x0623, 0x0624, 0x0625, 0x0626, 0x0654].map((c) => String.fromCodePoint(c)).join('')}]`,
-  'u',
-);
+/** Standard Persian orthography (owner decision B, 2026-10-24): the shared guard, `src/test/orthography.ts`. */
+const standard = (text: string | null | undefined) => nonStandardSpelling(text ?? '');
 
 const FORMS = [
   {
@@ -223,7 +224,7 @@ describe.each(FORMS)('the $name form', (form) => {
     const { container } = form.render();
     await send(container);
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).not.toMatch(HAMZA);
+    expect(standard(alert.textContent)).toBeNull();
   });
 
   it('says a refusal the service put on no field in a message, with no axe violation', async () => {
@@ -368,7 +369,7 @@ describe('the add form’s own states', () => {
       await send(container);
       const alert = await screen.findByRole(state.kind === 'PROCESSING' ? 'status' : 'alert');
       expect(alert).toHaveTextContent(message.slice(0, 40));
-      expect(alert.textContent).not.toMatch(HAMZA);
+      expect(standard(alert.textContent)).toBeNull();
       if ('values' in state) expect(field(container, 'title')).toHaveValue(values.title);
       expect(await axe(container)).toHaveNoViolations();
     },
@@ -482,7 +483,7 @@ function section(props: Partial<React.ComponentProps<typeof NeedsSection>> = {})
       tokens={tokens}
       editValues={editValues}
       add={{ kind: 'FORM', submission: ADD_SUBMISSION }}
-      releaseRefused={null}
+      context="ctx-tag"
       {...props}
     />,
   );
@@ -533,7 +534,8 @@ describe('the list', () => {
     section({ result: PAGE([NEED()], { hasMore: true, nextCursor: 'CUR/2' }) });
     expect(screen.getByRole('link', { name: 'نیازهای بعدی' })).toHaveAttribute(
       'href',
-      `/projects/${PROJECT_ID}?needs=CUR%2F2`,
+      // In the page's organization (`ctx`): a bare query is read by no page (PR 405 r2 F2).
+      `/projects/${PROJECT_ID}?needs=CUR%2F2&ctx=ctx-tag`,
     );
     section({ result: PAGE([NEED()], { hasMore: true, nextCursor: null }) });
     expect(screen.getByText('نیازهای بیشتری هست که از اینجا دیده نمی‌شود.')).toBeInTheDocument();
@@ -617,12 +619,23 @@ describe('under the list', () => {
     ).toBeInTheDocument();
   });
 
-  it.each([
-    ['STALE', NEED_RELEASE_STALE_MESSAGE],
-    ['IN_PROGRESS', NEED_HELD_IN_PROGRESS_MESSAGE],
-  ] as const)('a release that did nothing (%s) is said', (releaseRefused, text) => {
-    section({ releaseRefused });
-    expect(screen.getByText(text)).toBeInTheDocument();
+  it.each(['STALE', 'IN_PROGRESS', 'CONSENT_MISSING', 'CSRF_REFUSED', 'GONE'] as const)(
+    'a release outcome (%s) is said in the shared release words for this surface',
+    (releaseOutcome) => {
+      section({ releaseOutcome });
+      expect(
+        screen.getByText(releaseMessage(releaseOutcome, 'project-need-creation')),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it('says nothing about a release when there was none', () => {
+    section();
+    for (const outcome of ['STALE', 'IN_PROGRESS'] as const) {
+      expect(
+        screen.queryByText(releaseMessage(outcome, 'project-need-creation')),
+      ).not.toBeInTheDocument();
+    }
   });
 });
 
@@ -672,7 +685,7 @@ describe('the whole section', () => {
   ];
 
   it.each(states)(
-    '%s: has no axe violation, no physical-direction utility and no hamza',
+    '%s: has no axe violation, no physical-direction utility and standard orthography',
     async (_name, draw) => {
       const { container } = draw();
       expect(await axe(container)).toHaveNoViolations();
@@ -681,7 +694,7 @@ describe('the whole section', () => {
       container.querySelectorAll('details').forEach((details) => details.setAttribute('open', ''));
       expect(await axe(container)).toHaveNoViolations();
       const own = (container.textContent ?? '').replace(/[«»]/g, '');
-      expect(own).not.toMatch(HAMZA);
+      expect(standard(own)).toBeNull();
     },
   );
 });
@@ -705,7 +718,6 @@ describe('the fixed words', () => {
     NEED_PENDING_CAPACITY_MESSAGE,
     NEED_PENDING_UNCHECKED_MESSAGE,
     NEED_PROJECT_LOCKED_MESSAGE,
-    NEED_RELEASE_STALE_MESSAGE,
     NEED_STATE_MESSAGE,
     NEED_STILL_PROCESSING_MESSAGE,
     NEED_UNAVAILABLE_MESSAGE,
@@ -714,8 +726,8 @@ describe('the fixed words', () => {
     STALE_MESSAGE,
   ];
 
-  it('carry no hamza, no combining hamza and no confusable decimal mark typed as a letter', () => {
-    for (const text of ALL_TEXT) expect(text).not.toMatch(HAMZA);
+  it('follow standard Persian orthography (no hamza-less spelling, no combining hamza)', () => {
+    expect(ALL_TEXT.filter((text) => standard(text) !== null)).toEqual([]);
   });
 
   it('are all non-empty, distinct from the service’s own English', () => {

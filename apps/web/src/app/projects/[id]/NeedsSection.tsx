@@ -11,11 +11,11 @@ import {
   StatusBadge,
 } from '@/ui';
 import { PERSIAN_DECIMAL_SEPARATOR, formatJalaliDateLong, toPersianDigits } from '@/lib/format';
+import { ownValue } from '@/lib/own-key';
+import { contextHref } from '@/lib/page-context';
 import {
   NEED_COMMAND_LABELS,
   NEED_PENDING_UNCHECKED_MESSAGE,
-  NEED_RELEASE_STALE_MESSAGE,
-  NEED_HELD_IN_PROGRESS_MESSAGE,
   NEED_LIST_UNREAD_MESSAGE,
   needStatusLabel,
   type NeedCommand,
@@ -23,6 +23,8 @@ import {
 } from '@/lib/project-need-commands';
 import type { ProjectNeed, ProjectNeedPage, ReadResult } from '@/server/projects';
 import type { UnresolvedRequest } from '@/server/unresolved-request';
+
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 
 import { formatEstimate } from '../ProjectsScreen';
 import { AddNeedForm, EditNeedForm, SubmitNeedForm, WithdrawNeedForm } from './NeedForms';
@@ -48,7 +50,7 @@ import { UnresolvedNeedNotice } from './UnresolvedNeedNotice';
 export interface NeedToken {
   /** Minted for this render and bound to this session. */
   readonly submissionId: string;
-  /** Signed for this command, this need and its version. */
+  /** Signed for this command, this need, its version and the project's (the editing episode). */
   readonly baseline: string;
 }
 
@@ -72,10 +74,13 @@ export type AddNeedSlot =
   | { readonly kind: 'UNCHECKED' }
   /** The needs could not be read: no form, because an add is only sent after the needs were checked. */
   | { readonly kind: 'LIST_UNREAD' }
-  | { readonly kind: 'NOT_OFFERED'; readonly reason: 'ROLE' | 'STATUS' };
+  /** `VERSION`: the project read carried no version, so no add could be fenced to its episode. */
+  | { readonly kind: 'NOT_OFFERED'; readonly reason: 'ROLE' | 'STATUS' | 'VERSION' };
 
 export interface NeedsSectionProps {
   readonly projectId: string;
+  /** The page's organization tag (`ctx`): every link this draws with a query carries it. */
+  readonly context: string;
   readonly csrfToken: string;
   readonly result: ReadResult<ProjectNeedPage>;
   /** The cursor this page was read with; null on the first page. */
@@ -84,8 +89,8 @@ export interface NeedsSectionProps {
   /** Each need's record as its edit form's text, by need id. */
   readonly editValues: Readonly<Record<string, NeedFormValues>>;
   readonly add: AddNeedSlot;
-  /** Why the last release did nothing (`?release=`), when it did not. */
-  readonly releaseRefused: 'STALE' | 'IN_PROGRESS' | null;
+  /** What the last release did, read from its signed outcome (`readReleaseFeedback`); none without one. */
+  readonly releaseOutcome?: string;
 }
 
 function quantityText(need: ProjectNeed): string {
@@ -164,12 +169,13 @@ function NeedList({
   result,
   cursor,
   projectId,
+  context,
   csrfToken,
   tokens,
   editValues,
 }: Pick<
   NeedsSectionProps,
-  'result' | 'cursor' | 'projectId' | 'csrfToken' | 'tokens' | 'editValues'
+  'result' | 'cursor' | 'projectId' | 'context' | 'csrfToken' | 'tokens' | 'editValues'
 >) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="نیازهای این پروژه در اختیار شما نیست." />;
@@ -192,10 +198,10 @@ function NeedList({
   }
 
   const page = result.data;
+  const path = `/projects/${encodeURIComponent(projectId)}`;
+  // The first page is the bare path (the default view); a cursor travels in the page's organization.
   const href = (next: string | null) =>
-    next === null
-      ? `/projects/${encodeURIComponent(projectId)}`
-      : `/projects/${encodeURIComponent(projectId)}?needs=${encodeURIComponent(next)}`;
+    next === null ? path : contextHref(context, path, { needs: next });
 
   return (
     <>
@@ -216,8 +222,8 @@ function NeedList({
               need={need}
               projectId={projectId}
               csrfToken={csrfToken}
-              tokens={tokens[need.id] ?? {}}
-              editValues={editValues[need.id]}
+              tokens={ownValue(tokens, need.id) ?? {}}
+              editValues={ownValue(editValues, need.id)}
             />
           ))}
         </ul>
@@ -280,7 +286,9 @@ function AddArea({
           description={
             add.reason === 'ROLE'
               ? 'نقش شما اجازه تغییر پروژه ندارد. نقش‌های مجاز را تنظیمات استقرار تعیین می‌کند.'
-              : 'نیازها فقط تا وقتی پروژه پیش‌نویس یا نیازمند اصلاح است تغییر می‌کنند.'
+              : add.reason === 'VERSION'
+                ? 'نسخه پروژه از سرویس نیامد و بدون آن فرمانی فرستاده نمی‌شود.'
+                : 'نیازها فقط تا وقتی پروژه پیش‌نویس یا نیازمند اصلاح است تغییر می‌کنند.'
           }
         />
       );
@@ -289,13 +297,14 @@ function AddArea({
 
 export function NeedsSection({
   projectId,
+  context,
   csrfToken,
   result,
   cursor,
   tokens,
   editValues,
   add,
-  releaseRefused,
+  releaseOutcome,
 }: NeedsSectionProps) {
   return (
     <Section
@@ -303,17 +312,12 @@ export function NeedsSection({
       title="فهرست نیازها"
       description="هر نیاز یک سطر از آنچه پروژه لازم دارد است. نیاز پیش‌نویس ویرایش و ارسال می‌شود، نیاز ارسال‌شده فقط پس گرفته می‌شود. سرویس پروژه‌ها در هر ارسال دوباره تصمیم می‌گیرد."
     >
-      {releaseRefused ? (
-        <Alert tone="warning">
-          {releaseRefused === 'IN_PROGRESS'
-            ? NEED_HELD_IN_PROGRESS_MESSAGE
-            : NEED_RELEASE_STALE_MESSAGE}
-        </Alert>
-      ) : null}
+      <ReleaseFeedback surface="project-need-creation" outcome={releaseOutcome} />
       <NeedList
         result={result}
         cursor={cursor}
         projectId={projectId}
+        context={context}
         csrfToken={csrfToken}
         tokens={tokens}
         editValues={editValues}

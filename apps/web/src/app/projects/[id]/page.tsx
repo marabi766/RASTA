@@ -42,6 +42,7 @@ import {
   type ProjectDetail,
   type ProjectNeed,
 } from '@/server/projects';
+import { readReleaseFeedback } from '@/server/release-feedback';
 import { readUnresolved, releaseToken } from '@/server/unresolved-request';
 import type { WebSession } from '@/server/session';
 import { mintSubmissionId } from '@/server/submission';
@@ -62,8 +63,8 @@ import {
   actingScope,
   sessionWriteRoles,
 } from '@/server/session-organization';
-import { pageParams } from '@/server/page-context';
-import { setOwn } from '@/lib/own-key';
+import { pageContext, pageParams } from '@/server/page-context';
+import { ownValue, setOwn } from '@/lib/own-key';
 
 /**
  * The `/projects/[id]` route — جزئیات پروژه (docs/16 § ۱۶٫۶).
@@ -152,10 +153,14 @@ function needEditValuesOf(need: ProjectNeed): NeedFormValues {
   });
 }
 
-/** For each need the commands its status and its project's offer, each with a baseline signed for it. */
+/**
+ * For each need the commands its status and its project's offer, each with a baseline signed for it —
+ * and for the project version the page read: the editing episode the command belongs to. Without a
+ * project version nothing is drawn (the page never signs a fence it does not know).
+ */
 function needTokens(
   session: WebSession,
-  project: ProjectDetail,
+  project: ProjectDetail & { version: number },
   needs: readonly ProjectNeed[],
   editValues: Readonly<Record<string, NeedFormValues>>,
   canWrite: boolean,
@@ -172,7 +177,7 @@ function needTokens(
     });
     const own: Partial<Record<NeedCommand, { submissionId: string; baseline: string }>> = {};
     for (const command of offered) {
-      const values = editValues[need.id];
+      const values = ownValue(editValues, need.id);
       own[command] = {
         submissionId: mintSubmissionId(session),
         baseline: sealNeedBaseline(session, {
@@ -180,12 +185,13 @@ function needTokens(
           projectId: project.id,
           command,
           version: need.version,
+          projectVersion: project.version,
           status: need.status,
           digests: command === 'edit' && values ? needEditDigests(values) : null,
         }),
       };
     }
-    tokens[need.id] = own;
+    setOwn(tokens, need.id, own);
   }
   return tokens;
 }
@@ -200,6 +206,8 @@ function addSlot(input: {
   readonly session: WebSession;
   readonly projectId: string;
   readonly projectStatus: string;
+  /** The project version the page read; undefined when the read carried none. */
+  readonly projectVersion: number | undefined;
   readonly canWrite: boolean;
   readonly listRead: boolean;
   readonly pending: Awaited<ReturnType<typeof readUnresolved>> | null;
@@ -215,9 +223,13 @@ function addSlot(input: {
     };
   }
   if (!offered) return { kind: 'NOT_OFFERED', reason: 'STATUS' };
+  if (input.projectVersion === undefined) return { kind: 'NOT_OFFERED', reason: 'VERSION' };
   if (pending === null || pending.kind === 'UNAVAILABLE') return { kind: 'UNCHECKED' };
   if (!input.listRead) return { kind: 'LIST_UNREAD' };
-  return { kind: 'FORM', submission: mintNeedSubmission(input.session, input.projectId) };
+  return {
+    kind: 'FORM',
+    submission: mintNeedSubmission(input.session, input.projectId, input.projectVersion),
+  };
 }
 
 /** The statuses in which the approval policy decides whether the next step can be taken. */
@@ -273,19 +285,33 @@ export default async function ProjectPage({
   const needEditValues = Object.fromEntries(
     needList.map((need) => [need.id, needEditValuesOf(need)]),
   );
-  const needCommandTokens = project
-    ? needTokens(session, project, needList, needEditValues, canWrite)
-    : {};
+  const needCommandTokens =
+    project && project.version !== undefined
+      ? needTokens(
+          session,
+          { ...project, version: project.version },
+          needList,
+          needEditValues,
+          canWrite,
+        )
+      : {};
   const add = addSlot({
     session,
     projectId: id,
     projectStatus: project?.status ?? '',
+    projectVersion: project?.version,
     canWrite,
     listRead: needsRead.kind === 'OK',
     pending: pendingAdd,
   });
-  const release = typeof query.release === 'string' ? query.release : undefined;
-  const releaseRefused = release === 'STALE' || release === 'IN_PROGRESS' ? release : null;
+  // Signed, for this login, this surface and this project; a newer hold (or an unreadable store)
+  // hides a replayed success.
+  const releaseOutcome = readReleaseFeedback(
+    session,
+    { surface: 'project-need-creation', target: id },
+    query,
+    pendingAdd?.kind === 'NONE',
+  );
 
   const flash = query[FLASH_PARAM];
 
@@ -322,13 +348,14 @@ export default async function ProjectPage({
             project ? (
               <NeedsSection
                 projectId={id}
+                context={pageContext(session)}
                 csrfToken={session.csrfToken}
                 result={needsRead}
                 cursor={needsCursor}
                 tokens={needCommandTokens}
                 editValues={needEditValues}
                 add={add}
-                releaseRefused={releaseRefused}
+                releaseOutcome={releaseOutcome}
               />
             ) : undefined
           }

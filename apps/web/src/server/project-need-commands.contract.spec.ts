@@ -141,7 +141,7 @@ describe('the endpoints', () => {
     }
   });
 
-  it('take an Idempotency-Key on the add alone, and read no replay deadline anywhere', () => {
+  it('take an Idempotency-Key on the add alone, and the add its replay deadline (F1, #615)', () => {
     const idempotent = setOf('IDEMPOTENT');
     expect(idempotent).toContain('POST /v1/projects/{id}/needs');
     for (const [, , , route] of WRITES.slice(1)) expect(idempotent).not.toContain(route);
@@ -150,15 +150,23 @@ describe('the endpoints', () => {
     for (const [method] of WRITES.slice(1)) {
       expect(handlerText(method)).not.toContain('@Headers(');
     }
-    // The add reads no `Idempotency-Replay-Deadline`: the service cannot refuse a resend past its
-    // own retention, so `project-need-create` is `retry: false`. The day this fails, switch the
-    // purpose to `retry: true, deadline: 'REQUIRED'` (like `project-create`) and send the deadline.
-    expect(controllerText).toContain("@Headers('idempotency-replay-deadline')");
-    expect(handlerText('addNeed')).not.toContain('idempotency-replay-deadline');
-    expect(handlerText('addNeed')).not.toContain('parseReplayDeadline');
+    // The add reads `Idempotency-Replay-Deadline`, parsed as project creation's, and hands it to the
+    // shared claim admission: the service refuses an execution past the deadline on the clock that
+    // expires its key. The portal sends the signed stamp's (`addNeed`, `project-need-create`: REQUIRED).
+    expect(handlerText('addNeed')).toContain("@Headers('idempotency-replay-deadline')");
+    expect(handlerText('addNeed')).toContain(
+      'returnthis.needs.add(id,dto,key,parseReplayDeadline(replayDeadline,key))',
+    );
+    const service = squash(needService)!;
+    expect(service).toContain('replayDeadlineMs?:number');
+    expect(service).toMatch(/201,work,undefined,replayDeadlineMs,\)/);
 
     const add = openapi.paths['/v1/projects/{id}/needs']!['post']!;
-    expect((add.parameters ?? []).map((p) => p.name).sort()).toEqual(['Idempotency-Key', 'id']);
+    expect((add.parameters ?? []).map((p) => p.name).sort()).toEqual([
+      'Idempotency-Key',
+      'Idempotency-Replay-Deadline',
+      'id',
+    ]);
     for (const [, , , route] of WRITES.slice(1)) {
       const [verb, path] = route.split(' ') as [string, string];
       expect(
@@ -167,10 +175,9 @@ describe('the endpoints', () => {
     }
   });
 
-  it('are compare-and-set on the version, as the OpenAPI document says (VERSIONED)', () => {
+  it('are compare-and-set on a version, as the OpenAPI document says (VERSIONED): all four (#615)', () => {
     const versioned = setOf('VERSIONED');
-    for (const [, , , route] of WRITES.slice(1)) expect(versioned).toContain(route);
-    expect(versioned).not.toContain('POST /v1/projects/{id}/needs');
+    for (const [, , , route] of WRITES) expect(versioned).toContain(route);
   });
 
   it('are exactly the need writes the screens use', () => {
@@ -199,13 +206,36 @@ describe('the request bodies', () => {
   it('are the fields the forms send — and the service refuses any other (.strict())', () => {
     const fields = ['title', 'description', 'quantity', 'unit', 'estimatedCostMinor'];
     // The form's `estimatedCost` is sent as `estimatedCostMinor`.
-    expect(keys('createNeedSchema')).toEqual([...fields].sort());
+    // Every body carries the parent fence (#615); a new add without it is refused by the service.
+    expect(keys('createNeedSchema')).toEqual([...fields, 'expectedProjectVersion'].sort());
     expect(NEED_FIELDS.filter((f) => f !== 'estimatedCost').sort()).toEqual(
       fields.filter((f) => f !== 'estimatedCostMinor').sort(),
     );
-    expect(keys('updateNeedSchema')).toEqual([...fields, 'expectedVersion'].sort());
-    expect(keys('submitNeedSchema')).toEqual(['expectedVersion']);
-    expect(keys('withdrawNeedSchema')).toEqual(['expectedVersion', 'reason']);
+    expect(keys('updateNeedSchema')).toEqual(
+      [...fields, 'expectedProjectVersion', 'expectedVersion'].sort(),
+    );
+    expect(keys('submitNeedSchema')).toEqual(['expectedProjectVersion', 'expectedVersion']);
+    expect(keys('withdrawNeedSchema')).toEqual([
+      'expectedProjectVersion',
+      'expectedVersion',
+      'reason',
+    ]);
+    for (const name of [
+      'createNeedSchema',
+      'updateNeedSchema',
+      'submitNeedSchema',
+      'withdrawNeedSchema',
+    ]) {
+      expect(squash(schemaProperties(dto, name).get('expectedProjectVersion'))).toBe(
+        'expectedVersion',
+      );
+    }
+    // The add's controller schema lets an old completed key replay its old body; a NEW claim without
+    // the fence is refused inside the work, before anything is written.
+    expect(handlerText('addNeed')).toContain('zodPipe(replayableCreateNeedSchema)');
+    expect(squash(needService)).toContain(
+      "if(dto.expectedProjectVersion===undefined){throwRastaError.validation([{path:'expectedProjectVersion'",
+    );
     for (const name of [
       'createNeedSchema',
       'updateNeedSchema',
@@ -225,7 +255,7 @@ describe('the request bodies', () => {
       expect(squash(props.get(name))).not.toContain('nullable');
     }
     expect(squash(topLevelConst(dto, 'updateNeedSchema').getText())).toContain(
-      "Object.keys(value).some((key)=>key!=='expectedVersion')",
+      "Object.keys(value).some((key)=>key!=='expectedVersion'&&key!=='expectedProjectVersion',)",
     );
   });
 
@@ -317,11 +347,21 @@ describe('which command a need offers', () => {
 
   it('every need command first locks the project and checks it is editable — the server-side re-check', () => {
     const service = squash(needService)!;
-    // add, update, submit, withdraw: four commands, four locks.
+    // add, update, submit, withdraw: four commands, four locks — each with the parent fence (F2, #615).
     expect(
-      service.match(/awaitthis\.lockEditableProject\(tx,organizationId,projectId\)/g),
-    ).toHaveLength(4);
-    expect(service).toContain('assertProjectEditable(projectId,locked.status)');
+      service.match(
+        /awaitthis\.lockEditableProject\(tx,organizationId,projectId,expectedProjectVersion\)/g,
+      ),
+    ).toHaveLength(1);
+    expect(
+      service.match(
+        /awaitthis\.lockEditableProject\(tx,organizationId,projectId,dto\.expectedProjectVersion\)/g,
+      ),
+    ).toHaveLength(3);
+    // Under the lock, the version first, then editability: a later episode is refused as stale.
+    expect(service).toContain(
+      "if(locked.version!==expectedProjectVersion){versionConflictsTotal.inc({service:SERVICE_NAME,aggregate:'Project'});throwRastaError.optimisticLockFailed('Project',projectId);}assertProjectEditable(projectId,locked.status)",
+    );
     // An edit also needs the need to be a draft; submit and withdraw follow the transition table.
     expect(service).toContain('assertNeedEditable(needId,need.statusasNeedStateName)');
     expect(service).toContain(

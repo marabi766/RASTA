@@ -14,9 +14,12 @@ import {
   mintNeedSubmission,
   needCreateScope,
   needEditDigests,
+  needStampTerms,
   sealNeedBaseline,
   type NeedBaseline,
 } from '@/server/project-need-commands';
+import type { ReleaseSubject } from '@/server/release-feedback';
+import { signPayload } from '@/server/signed-payload';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import { readUnresolved, releaseToken, useUnresolvedStore } from '@/server/unresolved-request';
@@ -25,6 +28,8 @@ import {
   UnresolvedStoreUnavailable,
 } from '@/server/unresolved-request-store';
 import { withForgedMac } from '@/test/forged-token';
+import { feedbackFor } from '@/test/release-query';
+import { actingAccessToken } from '@/test/session-token';
 
 import { IDLE_ADD_NEED_FORM } from './need-form-state';
 import { IDLE_PROJECT_FORM } from './project-form-state';
@@ -69,14 +74,18 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const actions = require('./need-actions') as typeof import('./need-actions');
+/* eslint-disable @typescript-eslint/no-require-imports */
+const actions = {
+  ...(require('./need-actions') as typeof import('./need-actions')),
+  ...(require('./need-add-actions') as typeof import('./need-add-actions')),
+};
+/* eslint-enable @typescript-eslint/no-require-imports */
 
 const SESSION = {
   subject: 'user-1',
   username: 'owner',
   organizationId: 'ORG-OWNER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-OWNER', ['ORGANIZATION_ADMIN']),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -88,6 +97,9 @@ const OTHER_PROJECT_ID = 'PRJ_01J00000000000000000000099';
 const NEED_ID = 'NED_01J00000000000000000000000';
 const OTHER_NEED_ID = 'NED_01J00000000000000000000099';
 const VERSION = 3;
+/** The project's version when the page was drawn: the editing episode (F2). */
+const PROJECT_VERSION = 9;
+const FENCE = { expectedVersion: VERSION, expectedProjectVersion: PROJECT_VERSION };
 
 const INITIAL = {
   title: 'بتن آماده',
@@ -118,7 +130,7 @@ const CASES: readonly Case[] = [
     send: updateNeed,
     valid: { ...INITIAL, title: 'بتن آماده شمالی' },
     notice: 'needUpdated',
-    args: [{ title: 'بتن آماده شمالی' }, VERSION],
+    args: [{ title: 'بتن آماده شمالی' }, FENCE],
     invalid: { ...INITIAL, title: 'ا' },
     invalidField: 'title',
   },
@@ -129,7 +141,7 @@ const CASES: readonly Case[] = [
     send: submitNeed,
     valid: {},
     notice: 'needSubmitted',
-    args: [VERSION],
+    args: [FENCE],
     invalid: null,
     invalidField: null,
   },
@@ -140,7 +152,7 @@ const CASES: readonly Case[] = [
     send: withdrawNeed,
     valid: { reason: 'دیگر لازم نیست' },
     notice: 'needWithdrawn',
-    args: [{ reason: 'دیگر لازم نیست' }, VERSION],
+    args: [{ reason: 'دیگر لازم نیست' }, FENCE],
     invalid: { reason: 'کوتاه' },
     invalidField: 'reason',
   },
@@ -156,6 +168,7 @@ function baselineFor(
     projectId: PROJECT_ID,
     command: testCase.command,
     version: VERSION,
+    projectVersion: PROJECT_VERSION,
     status: 'DRAFT',
     digests: null,
     ...testCase.baseline,
@@ -315,6 +328,8 @@ describe.each(CASES)('$command', (testCase) => {
         projectId: OTHER_PROJECT_ID,
         expectedVersion: '99',
         version: '99',
+        expectedProjectVersion: '99',
+        projectVersion: '99',
         organizationId: 'ORG-FORGED',
       };
       await redirectedTo(testCase.submit(formData(testCase, fields)));
@@ -323,6 +338,51 @@ describe.each(CASES)('$command', (testCase) => {
         NEED_ID,
         ...testCase.args,
       ]);
+    });
+
+    it('is fenced to the editing episode it was drawn in: the project version comes from its baseline (F2)', async () => {
+      // Drawn at project version 4; an approval round since moved the project on and left the need's
+      // version alone. The form still sends 4, and construction-service refuses it under the project
+      // lock (409 OPTIMISTIC_LOCK_FAILED, said as stale) — the old confirmation cannot act now.
+      const earlier = baselineFor(testCase, { projectVersion: 4 });
+      testCase.send.mockResolvedValue({
+        kind: 'INVALID',
+        fieldErrors: {},
+        message: STALE_MESSAGE,
+        correlationId: 'corr-409',
+      });
+      const url = await redirectedTo(
+        testCase.submit(formData(testCase, undefined, { baseline: earlier })),
+      );
+      expect(testCase.send.mock.calls[0]!.at(-1)).toEqual({
+        expectedVersion: VERSION,
+        expectedProjectVersion: 4,
+      });
+      expect(readFlash(SESSION, url.searchParams.get('flash'), PROJECT_ID, ['stale'])).toBe(
+        'stale',
+      );
+      expect(testCase.send).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a baseline that names no project version — it could not be fenced (F2, fail closed)', async () => {
+      const unfenced = signPayload(
+        SESSION,
+        'project-need-baseline',
+        {
+          needId: NEED_ID,
+          projectId: PROJECT_ID,
+          command: testCase.command,
+          version: VERSION,
+          status: 'DRAFT',
+          digests: testCase.baseline.digests ?? null,
+        },
+        60,
+      );
+      expect(await testCase.submit(formData(testCase, undefined, { baseline: unfenced }))).toEqual({
+        kind: 'REFUSED',
+        reason: 'BASELINE',
+      });
+      expect(sent()).toHaveLength(0);
     });
   });
 
@@ -370,12 +430,17 @@ describe.each(CASES)('$command', (testCase) => {
         { kind: 'NOT_FOUND', correlationId: 'c2' },
       ],
       [
-        { kind: 'UNAVAILABLE', status: 401, correlationId: 'c3' },
+        { kind: 'UNAVAILABLE', status: 401, code: 'UNAUTHENTICATED', correlationId: 'c3' },
         { kind: 'FAILED', status: 401, correlationId: 'c3' },
       ],
       [
-        { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+        { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c3' },
         { kind: 'FAILED', status: 429, correlationId: 'c3' },
+      ],
+      // A 4xx without a documented code proves nothing (the writer's one rule).
+      [
+        { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+        { kind: 'UNCONFIRMED', correlationId: 'c3' },
       ],
       // Provably never left the portal: nothing was changed.
       [
@@ -402,8 +467,34 @@ describe.each(CASES)('$command', (testCase) => {
       ],
     ])('answers %j with %j and sends exactly once', async (result, expected) => {
       testCase.send.mockResolvedValue(result);
-      expect(await run()).toEqual(expected);
+      expect(await run()).toEqual(
+        // An unresolved answer names the request it is about (FU-173), so a second press is held to it.
+        expected.kind === 'UNCONFIRMED'
+          ? { ...expected, submissionId: expect.stringMatching(/^sub_/) }
+          : expected,
+      );
       expect(testCase.send).toHaveBeenCalledTimes(1);
+    });
+
+    it('a second press after an unconfirmed answer stays UNCONFIRMED whatever refuses it (FU-173)', async () => {
+      testCase.send.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'c-first' });
+      const form = formData(testCase);
+      const first = (await testCase.submit(form)) as { kind: string; submissionId: string };
+      expect(first).toMatchObject({ kind: 'UNCONFIRMED', correlationId: 'c-first' });
+      // The same form again; this time a proven refusal (a 429 before the service saw the versions,
+      // or the 409 the first press itself caused) — still not "nothing changed".
+      testCase.send.mockResolvedValue({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'c-second',
+      });
+      const again = await (testCase.command === 'edit'
+        ? actions.submitEditNeed(PROJECT_ID, NEED_ID, first as never, form)
+        : testCase.command === 'submit'
+          ? actions.submitSubmitNeed(PROJECT_ID, NEED_ID, first as never, form)
+          : actions.submitWithdrawNeed(PROJECT_ID, NEED_ID, first as never, form));
+      expect(again).toMatchObject({ kind: 'UNCONFIRMED', correlationId: 'c-first' });
     });
   });
 });
@@ -419,7 +510,7 @@ describe('edit', () => {
     );
     expect(updateNeed.mock.calls[0]!.slice(3)).toEqual([
       { description: 'شرح تازه', quantity: null, estimatedCostMinor: null },
-      VERSION,
+      FENCE,
     ]);
   });
 
@@ -520,7 +611,10 @@ describe('add', () => {
     description: 'بتن با مقاومت بالا',
     quantity: '25.5',
     unit: 'متر مکعب',
+    expectedProjectVersion: PROJECT_VERSION,
   };
+  const deadlineOf = (submission: { id: string; replay: string }): number =>
+    needStampTerms(SESSION, submission.replay, submission.id, PROJECT_ID)!.deadline;
 
   function addForm(
     options: {
@@ -529,7 +623,8 @@ describe('add', () => {
       submission?: { id: string; replay: string } | { id: string; replay: null };
     } = {},
   ): FormData {
-    const submission = options.submission ?? mintNeedSubmission(SESSION, PROJECT_ID);
+    const submission =
+      options.submission ?? mintNeedSubmission(SESSION, PROJECT_ID, PROJECT_VERSION);
     const form = new FormData();
     for (const [key, value] of Object.entries(options.fields ?? VALID)) form.set(key, value);
     const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
@@ -558,9 +653,13 @@ describe('add', () => {
     });
 
     it('refuses a missing, forged, earlier-login or other-project stamp', async () => {
-      const own = mintNeedSubmission(SESSION, PROJECT_ID);
-      const earlier = mintNeedSubmission({ ...SESSION, csrfToken: 'an-earlier-login' }, PROJECT_ID);
-      const elsewhere = mintNeedSubmission(SESSION, OTHER_PROJECT_ID);
+      const own = mintNeedSubmission(SESSION, PROJECT_ID, PROJECT_VERSION);
+      const earlier = mintNeedSubmission(
+        { ...SESSION, csrfToken: 'an-earlier-login' },
+        PROJECT_ID,
+        PROJECT_VERSION,
+      );
+      const elsewhere = mintNeedSubmission(SESSION, OTHER_PROJECT_ID, PROJECT_VERSION);
       for (const replay of [
         null,
         'not-a-token',
@@ -583,7 +682,12 @@ describe('add', () => {
     });
 
     it('sends nothing past the stamp deadline and says the needs must be checked first', async () => {
-      const longAgo = mintNeedSubmission(SESSION, PROJECT_ID, Date.now() - 48 * 60 * 60 * 1000);
+      const longAgo = mintNeedSubmission(
+        SESSION,
+        PROJECT_ID,
+        PROJECT_VERSION,
+        Date.now() - 48 * 60 * 60 * 1000,
+      );
       const state = await add(addForm({ submission: longAgo }));
       expect(state).toMatchObject({ kind: 'EXPIRED' });
       expect(sent()).toHaveLength(0);
@@ -619,12 +723,18 @@ describe('add', () => {
   });
 
   describe('what is sent', () => {
-    it('sends the body under the submission id as its key — no replay deadline, no other argument', async () => {
-      const submission = mintNeedSubmission(SESSION, PROJECT_ID);
+    it('sends the body with its project version, under the submission id as its key, with the signed deadline', async () => {
+      const submission = mintNeedSubmission(SESSION, PROJECT_ID, PROJECT_VERSION);
       const url = await redirectedTo(add(addForm({ submission })));
 
       expect(addNeed).toHaveBeenCalledTimes(1);
-      expect(addNeed.mock.calls[0]).toEqual([SESSION, PROJECT_ID, BODY, submission.id]);
+      expect(addNeed.mock.calls[0]).toEqual([
+        SESSION,
+        PROJECT_ID,
+        BODY,
+        submission.id,
+        deadlineOf(submission),
+      ]);
       expect(url.pathname).toBe(`/projects/${PROJECT_ID}`);
       const flash = url.searchParams.get('flash');
       expect(readFlash(SESSION, flash, PROJECT_ID, ['needAdded'])).toBe('needAdded');
@@ -649,7 +759,82 @@ describe('add', () => {
         ),
       );
       expect(addNeed.mock.calls[0]![1]).toBe(PROJECT_ID);
-      expect(addNeed.mock.calls[0]![2]).toEqual({ title: 'بتن آماده', description: 'شرح' });
+      expect(addNeed.mock.calls[0]![2]).toEqual({
+        title: 'بتن آماده',
+        description: 'شرح',
+        expectedProjectVersion: PROJECT_VERSION,
+      });
+    });
+
+    it('is fenced to the editing episode its stamp was drawn in, whatever the form says (F2)', async () => {
+      const earlier = mintNeedSubmission(SESSION, PROJECT_ID, 4);
+      await redirectedTo(
+        add(
+          addForm({
+            submission: earlier,
+            fields: { ...VALID, expectedProjectVersion: '99', projectVersion: '99' },
+          }),
+        ),
+      );
+      expect(addNeed.mock.calls[0]![2]).toEqual({ ...BODY, expectedProjectVersion: 4 });
+    });
+
+    it('refuses a stamp that names no project version — it could not be fenced (F2, fail closed)', async () => {
+      const now = Date.now();
+      const id = mintSubmissionId(SESSION);
+      const unfenced = signPayload(
+        SESSION,
+        'project-need-create-replay',
+        { submissionId: id, target: PROJECT_ID, issuedAt: now, deadline: now + 600_000 },
+        60,
+      );
+      expect(await add(addForm({ submission: { id, replay: unfenced } }))).toEqual({
+        kind: 'REFUSED',
+        reason: 'SUBMISSION',
+      });
+      expect(sent()).toHaveLength(0);
+    });
+
+    it('sends nothing when the store hands back no deadline (fail closed)', async () => {
+      const store = memoryUnresolvedStore();
+      useUnresolvedStore({
+        ...store,
+        reserve: async (...args: Parameters<typeof store.reserve>) => {
+          const reply = await store.reserve(...args);
+          return reply.kind === 'RESERVED'
+            ? { ...reply, record: { ...reply.record, deadline: 'NONE' } }
+            : reply;
+        },
+      } as typeof store);
+      expect(await add(addForm())).toMatchObject({ kind: 'EXPIRED' });
+      expect(sent()).toHaveLength(0);
+    });
+  });
+
+  describe('a confirmed add, posted again (F1)', () => {
+    it('carries the same signed deadline: the service, not the portal, refuses it once its key is gone', async () => {
+      const submission = mintNeedSubmission(SESSION, PROJECT_ID, PROJECT_VERSION);
+      await redirectedTo(add(addForm({ submission })));
+      // CONFIRMED deletes the portal's record: nothing here remembers the first press.
+      expect(await readUnresolved(SESSION, needCreateScope(PROJECT_ID))).toEqual({ kind: 'NONE' });
+
+      // The same signed form again — a lost redirect, a second tab, a paused process resuming later.
+      // It is dispatched with the deadline signed at issue and the same key and body, so the service
+      // either replays the first answer (key still kept) or refuses it on its own clock
+      // (REPLAY_WINDOW_CLOSED): never a second need.
+      addNeed.mockResolvedValue({
+        kind: 'UNAVAILABLE',
+        status: 409,
+        code: 'REPLAY_WINDOW_CLOSED',
+        replayWindowClosed: true,
+        correlationId: 'c-late',
+      });
+      expect(await add(addForm({ submission }))).toMatchObject({ kind: 'EXPIRED' });
+      expect(addNeed).toHaveBeenCalledTimes(2);
+      expect(addNeed.mock.calls[1]).toEqual(addNeed.mock.calls[0]);
+      expect(addNeed.mock.calls[1]![4]).toBe(deadlineOf(submission));
+      // A proven refusal of this attempt: nothing is held for it.
+      expect(await readUnresolved(SESSION, needCreateScope(PROJECT_ID))).toEqual({ kind: 'NONE' });
     });
   });
 
@@ -661,13 +846,16 @@ describe('add', () => {
       ],
       ['FORBIDDEN', { kind: 'FORBIDDEN', correlationId: 'c' }],
       ['NOT_FOUND', { kind: 'NOT_FOUND', correlationId: 'c' }],
-      ['a 4xx', { kind: 'UNAVAILABLE', status: 429, correlationId: 'c' }],
+      [
+        'a 4xx',
+        { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c' },
+      ],
       ['never sent', { kind: 'UNAVAILABLE', status: 503, neverSent: true, correlationId: 'c' }],
     ])(
       '%s is a proven refusal: nothing is held, the same form may be sent again',
       async (_n, result) => {
         addNeed.mockResolvedValue(result);
-        const submission = mintNeedSubmission(SESSION, PROJECT_ID);
+        const submission = mintNeedSubmission(SESSION, PROJECT_ID, PROJECT_VERSION);
         const first = (await add(addForm({ submission }))) as { kind: string };
         expect(first.kind).not.toBe('UNCONFIRMED');
         expect(await readUnresolved(SESSION, needCreateScope(PROJECT_ID))).toEqual({
@@ -699,7 +887,7 @@ describe('add', () => {
       '%s is unresolved: held, and never sent a second time by this portal',
       async (_name, result, expected) => {
         addNeed.mockResolvedValue(result);
-        const submission = mintNeedSubmission(SESSION, PROJECT_ID);
+        const submission = mintNeedSubmission(SESSION, PROJECT_ID, PROJECT_VERSION);
         expect(await add(addForm({ submission }))).toEqual(expected);
 
         const pending = await readUnresolved(SESSION, needCreateScope(PROJECT_ID));
@@ -718,7 +906,7 @@ describe('add', () => {
         // Another project's add is its own scope.
         await redirectedTo(
           add(
-            addForm({ submission: mintNeedSubmission(SESSION, OTHER_PROJECT_ID) }),
+            addForm({ submission: mintNeedSubmission(SESSION, OTHER_PROJECT_ID, PROJECT_VERSION) }),
             OTHER_PROJECT_ID,
           ),
         );
@@ -755,13 +943,16 @@ describe('add', () => {
       return form;
     };
 
+    const SUBJECT: ReleaseSubject = { surface: 'project-need-creation', target: PROJECT_ID };
+    const outcomeOf = (url: URL, subject = SUBJECT, idle = false) =>
+      feedbackFor(SESSION, subject, url.searchParams.get('release'), idle);
+
     it('lets go of the request only with the confirmation, and then a new form is sent', async () => {
       const token = await leaveUnresolved();
 
       for (const form of [releaseForm(token, null), releaseForm(token, 'no')]) {
-        expect((await redirectedTo(actions.releaseUnresolvedNeed(PROJECT_ID, form))).search).toBe(
-          '',
-        );
+        const url = await redirectedTo(actions.releaseUnresolvedNeed(PROJECT_ID, form));
+        expect(outcomeOf(url)).toBe('CONSENT_MISSING');
       }
       expect(await readUnresolved(SESSION, needCreateScope(PROJECT_ID))).toMatchObject({
         kind: 'PENDING',
@@ -778,11 +969,17 @@ describe('add', () => {
 
     it('does nothing for a wrong CSRF token, another project, or a token for an older record', async () => {
       const token = await leaveUnresolved();
-      await redirectedTo(actions.releaseUnresolvedNeed(PROJECT_ID, releaseForm(token, 'yes', 'x')));
+      const forged = await redirectedTo(
+        actions.releaseUnresolvedNeed(PROJECT_ID, releaseForm(token, 'yes', 'x')),
+      );
+      expect(outcomeOf(forged)).toBe('CSRF_REFUSED');
       const elsewhere = await redirectedTo(
         actions.releaseUnresolvedNeed(OTHER_PROJECT_ID, releaseForm(token)),
       );
-      expect(elsewhere.searchParams.get('release')).toBe('STALE');
+      expect(elsewhere.pathname).toBe(`/projects/${OTHER_PROJECT_ID}`);
+      expect(outcomeOf(elsewhere, { ...SUBJECT, target: OTHER_PROJECT_ID })).toBe('STALE');
+      // Namespaced to its project: another project's page reads nothing from it.
+      expect(outcomeOf(elsewhere)).toBeUndefined();
       expect(await readUnresolved(SESSION, needCreateScope(PROJECT_ID))).toMatchObject({
         kind: 'PENDING',
       });

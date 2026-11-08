@@ -6,10 +6,9 @@ import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
  * What the add-need form knows after an attempt.
  *
  * Adding a need is the one need call that takes an `Idempotency-Key`, so it has the
- * states of a keyed create. It is **never sent again** when its answer was lost
- * (`project-need-create` is `retry: false`: the endpoint takes no replay deadline,
- * so the service cannot refuse a resend past its own retention), so there is no
- * "retry after the wait" state: a request the service is still processing is
+ * states of a keyed create. The portal **never sends it again** when its answer was
+ * lost (`project-need-create` is `retry: false`; the service refuses any execution
+ * past the stamp's deadline itself), so there is no "retry after the wait" state: a request the service is still processing is
  * `PROCESSING`, an unresolved one is held until the person has looked at the
  * project's needs. A module of its own because `need-actions.ts` is a `'use server'`
  * file and may export only async functions.
@@ -60,10 +59,3 @@ export type AddNeedFormState =
   | { readonly kind: 'CAPACITY'; readonly values: NeedFormValues };
 
 export const IDLE_ADD_NEED_FORM: AddNeedFormState = { kind: 'IDLE' };
-
-/** The checkbox that must be ticked to let go of an unresolved add. */
-export const CONFIRM_DUPLICATE_NEED_FIELD = 'confirmDuplicate';
-export const CONFIRM_DUPLICATE_NEED_VALUE = 'yes';
-
-/** The hidden field of the release form: the signed name of the record it was drawn for. */
-export const RELEASE_NEED_FIELD = 'release';

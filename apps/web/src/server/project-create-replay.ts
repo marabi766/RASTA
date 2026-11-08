@@ -59,8 +59,12 @@ export function createStampTerms(
   submissionId: string,
   now: number = Date.now(),
   env: ReplayEnv = webServerEnv(),
-): StampTerms | null {
-  return STAMPS.terms(session, token, submissionId, '', now, env);
+): Omit<StampTerms, 'version'> | null {
+  const terms = STAMPS.terms(session, token, submissionId, '', now, env);
+  // A project create is about no versioned parent: its terms are the time terms alone.
+  return terms === null
+    ? null
+    : { issuedAt: terms.issuedAt, deadline: terms.deadline, windowMs: terms.windowMs };
 }
 
 /** A fresh submission id for the create form, with its stamp. */

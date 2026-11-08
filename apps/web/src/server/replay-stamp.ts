@@ -32,6 +32,12 @@ import { mintSubmissionId } from './submission';
  * Bound to this login (`signed-payload.ts`) and, when the create is *about*
  * something (a need is created under one project), to that target: a stamp drawn
  * for one project does not open for another. Readable, not secret.
+ *
+ * A create *under* a versioned parent also signs the parent's version as the page
+ * read it (`version`): a need is added to the project's editing episode the form
+ * was drawn in, and construction-service compares it under the project's row lock
+ * (`expectedProjectVersion`). The caller takes it from the stamp, never from a
+ * field of the form; a stamp minted without one has `version: null`.
  */
 
 /** The signature's own expiry: far beyond any window, so "too late" is not "forged". */
@@ -40,7 +46,7 @@ const TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const stampSchema = z.object({
   submissionId: z.string().min(1).max(200),
   /** What the create is about (a project id); `''` for a create about nothing. */
-  target: z.string().max(200).default(''),
+  target: z.string().max(200).prefault(''),
   /** When the page signed it, milliseconds since the epoch, server clock. */
   issuedAt: z.number().int().nonnegative(),
   /**
@@ -50,6 +56,8 @@ const stampSchema = z.object({
    * raised later cannot lengthen it.
    */
   deadline: z.number().int().nonnegative(),
+  /** The parent's version when the page drew the form; null for a create about no versioned parent. */
+  version: z.number().int().min(1).max(2_147_483_647).nullable().prefault(null),
 });
 
 export type ReplayEnv = Pick<
@@ -69,16 +77,19 @@ export interface StampTerms {
   readonly issuedAt: number;
   readonly deadline: number;
   readonly windowMs: number;
+  /** The parent version signed at issue (`null` when none was). */
+  readonly version: number | null;
 }
 
 export interface ReplayStamps {
-  /** The stamp for `submissionId` (about `target`), from `now`. */
+  /** The stamp for `submissionId` (about `target`, at the parent's `version`), from `now`. */
   readonly mint: (
     session: WebSession,
     submissionId: string,
     target?: string,
     now?: number,
     env?: ReplayEnv,
+    version?: number | null,
   ) => string;
   /** A fresh submission id with its stamp. */
   readonly mintSubmission: (
@@ -86,6 +97,7 @@ export interface ReplayStamps {
     target?: string,
     now?: number,
     env?: ReplayEnv,
+    version?: number | null,
   ) => { readonly id: string; readonly replay: string };
   /**
    * What a stamp this login holds says about the request's time: when it was issued, its effective
@@ -133,6 +145,7 @@ export function replayStamps(purpose: string): ReplayStamps {
       issuedAt: payload.issuedAt,
       deadline: Math.min(payload.deadline, payload.issuedAt + windowMs),
       windowMs,
+      version: payload.version,
     };
   };
 
@@ -142,12 +155,14 @@ export function replayStamps(purpose: string): ReplayStamps {
     target = '',
     now = Date.now(),
     env = webServerEnv(),
+    version = null,
   ) => {
     const deadline = now + createReplayWindowSeconds(env) * 1000;
     return signPayload(
       session,
       purpose,
-      { submissionId, target, issuedAt: now, deadline },
+      // No `version` key at all without one: a create stamp stays the bytes it was.
+      { submissionId, target, issuedAt: now, deadline, ...(version === null ? {} : { version }) },
       TOKEN_TTL_SECONDS,
       now,
     );
@@ -155,9 +170,15 @@ export function replayStamps(purpose: string): ReplayStamps {
 
   return {
     mint,
-    mintSubmission: (session, target = '', now = Date.now(), env = webServerEnv()) => {
+    mintSubmission: (
+      session,
+      target = '',
+      now = Date.now(),
+      env = webServerEnv(),
+      version = null,
+    ) => {
       const id = mintSubmissionId(session);
-      return { id, replay: mint(session, id, target, now, env) };
+      return { id, replay: mint(session, id, target, now, env, version) };
     },
     terms,
     check: (session, token, submissionId, target = '', now = Date.now(), env = webServerEnv()) => {

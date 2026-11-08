@@ -26,12 +26,13 @@ describe('FU-217/FU-222/FU-253 release messages', () => {
   it.each(Object.keys(STORE_ANSWERS))('covers the store answer %s', (answer) => {
     expect(RELEASE_TEMPLATES).toHaveProperty(answer);
   });
-  it('knows all seven surfaces', () => {
+  it('knows all eight surfaces', () => {
     expect([...RELEASE_SURFACES].sort()).toEqual([
       'asset-registration',
       'demand-submission',
       'driver-creation',
       'project-creation',
+      'project-need-creation',
       'supplier-record',
       'supplier-write',
       'wallet',
