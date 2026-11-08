@@ -23,6 +23,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -98,6 +99,9 @@ const CONSUMED_TOPICS = [
 @Module({
   controllers: [AssetController, AssetInternalController, HealthController, MetricsController],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadAssetEnv() },
 
     {

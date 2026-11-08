@@ -10,7 +10,7 @@
  * dynamic commands via env/matrix (including composites/reusable workflows),
  * versioned npx/pnpm dlx launchers, and aliases running recursive Jest.
  * Finite modelled lexical grammar (everything else REFUSES with its construct):
- * LF/CRLF/CR; space/tab; backslash escapes/continuations; single/double quotes;
+ * LF (CR and other controls refuse: ci-shell-text-lib.mjs); space/tab; backslash escapes/continuations; single/double quotes;
  * word-start comments; literal words; ; && || | & and newline separators;
  * balanced () / standalone {} groups; control-word prefixes; assignments;
  * < > >> <& >& redirects; << / <<- with literal bare/single/double-quoted
@@ -56,24 +56,21 @@
  * This exemption applies only to repo scripts, never workflow run blocks.
  */
 import { parse as parseYaml } from 'yaml';
+import { shellTextProblem } from './ci-shell-text-lib.mjs';
 
-export const BOUNDED = { workflow: 'ci.yml', job: 'quality', step: 'Unit tests' };
+export const BOUNDED = { workflow: 'ci.yml', job: 'quality-unit', step: 'Unit tests' };
 export const BOUNDED_COMMAND = 'pnpm run test:unit:ci';
 
-export const UNBOUNDED_EXCEPTIONS = [
-  {
-    workflow: 'ci.yml',
-    job: 'integration-security',
-    step: 'Tenant isolation and authorization tests',
-    command:
-      'pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"',
-    reason: 'The filtered integration-security phase is outside the measured quality unit step.',
-  },
-];
+// FU-185: the filtered security unit rerun was removed; no unbounded unit runs remain.
+export const UNBOUNDED_EXCEPTIONS = [];
 
 /** One extractor for every run block; source stays exact for the exception identity. */
 function logicalCommands(script, opaqueFragments = false) {
-  script = script.replace(/\r\n?/g, '\n');
+  // FU-077 R1: the shared character policy, never a CR -> LF rewrite (bash reads CR as a
+  // word character, so a rewrite can turn a running command into a comment).
+  // Its own opaque-atom marker (\0) is the one control character it writes itself.
+  const unreadable = shellTextProblem(opaqueFragments ? script.replaceAll('\0', '') : script);
+  if (unreadable) throw new Error(`unsupported shell construct: ${unreadable}`);
   const commands = [];
   let i = 0;
   const refuse = (construct) => {
@@ -740,11 +737,14 @@ function shellArguments(args) {
 // Same unit-launch spellings as unbounded(), intentionally an over-approximation
 // before shell parsing. Never evaluate the script to discover its contents.
 function hasUnitToken(text) {
-  const literal = text.replace(/\\\r?\n|\\\r/g, '').replace(/[\\'"]/g, '');
+  // FU-077 R1: text the shared policy refuses is never exempted as token-free (a CR is a
+  // word character to bash, so it cannot be a separator here): it is parsed, and refused.
+  if (shellTextProblem(text)) return true;
+  const literal = text.replace(/\\\n/g, '').replace(/[\\'"]/g, '');
   return (
     /test:unit|run-test-phases\.mjs/.test(literal) ||
-    /\bpnpm\b[^\n\r;&|]*\b(?:test|t)\b/.test(literal) ||
-    /\bturbo\b[^\n\r;&|]*\btest\b/.test(literal)
+    /\bpnpm\b[^\n;&|]*\b(?:test|t)\b/.test(literal) ||
+    /\bturbo\b[^\n;&|]*\btest\b/.test(literal)
   );
 }
 
@@ -889,10 +889,7 @@ export function parsedProblems(docs, rootScripts, context = {}) {
       if (typeof step.run !== 'string') continue;
       // Keep the accepted exception's whole-line identity, even in compound commands.
       const exactLines = new Set(
-        step.run
-          .replace(/\r\n?/g, '\n')
-          .split('\n')
-          .map((line) => line.trim()),
+        step.run.split('\n').map((line) => line.trim()), // CR refuses in logicalCommands
       );
       let commands;
       try {
@@ -923,7 +920,7 @@ export function parsedProblems(docs, rootScripts, context = {}) {
     }
   }
   if (bounded !== 1)
-    problems.push(`quality must have exactly one Unit tests step, found ${bounded}`);
+    problems.push(`quality-unit must have exactly one Unit tests step, found ${bounded}`);
   for (const [entry, count] of exceptionUses) {
     if (count !== 1)
       problems.push(

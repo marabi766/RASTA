@@ -34,7 +34,7 @@ import type { RequestCommandFormState } from './form-state';
  */
 
 export async function submitAssignWorkshop(
-  _previous: RequestCommandFormState<AssignWorkshopFormValues, AssignWorkshopField>,
+  previous: RequestCommandFormState<AssignWorkshopFormValues, AssignWorkshopField>,
   form: FormData,
 ): Promise<RequestCommandFormState<AssignWorkshopFormValues, AssignWorkshopField>> {
   return run(
@@ -44,12 +44,13 @@ export async function submitAssignWorkshop(
       parse: parseAssignWorkshopForm,
       send: assignWorkshop,
     },
+    previous,
     form,
   );
 }
 
 export async function submitApproveRequest(
-  _previous: RequestCommandFormState<ApproveRequestFormValues, ApproveRequestField>,
+  previous: RequestCommandFormState<ApproveRequestFormValues, ApproveRequestField>,
   form: FormData,
 ): Promise<RequestCommandFormState<ApproveRequestFormValues, ApproveRequestField>> {
   return run(
@@ -75,12 +76,13 @@ export async function submitApproveRequest(
       lookAgain: (message) =>
         message === APPROVAL_TOTAL_CHANGED_MESSAGE ? 'costChanged' : undefined,
     },
+    previous,
     form,
   );
 }
 
 export async function submitCancelRequest(
-  _previous: RequestCommandFormState<CancelRequestFormValues, CancelRequestField>,
+  previous: RequestCommandFormState<CancelRequestFormValues, CancelRequestField>,
   form: FormData,
 ): Promise<RequestCommandFormState<CancelRequestFormValues, CancelRequestField>> {
   return run(
@@ -90,6 +92,7 @@ export async function submitCancelRequest(
       parse: parseCancelRequestForm,
       send: cancelRequest,
     },
+    previous,
     form,
   );
 }

@@ -28,7 +28,6 @@ import { urlWithSchema } from './outbox-b2-fixture.mjs';
 import {
   UNREADABLE_DATABASE_URL,
   libpqInvocation,
-  libpqUrl,
   psqlFileRunner,
   psqlRunner,
 } from './verify-migration-reversible-lib.mjs';
@@ -143,7 +142,6 @@ test('verify-seed-guard.mjs --with-database refuses the URL by name, before psql
 });
 
 for (const [name, call] of [
-  ['libpqUrl', () => libpqUrl(UNREADABLE)],
   ['libpqInvocation', () => libpqInvocation(UNREADABLE)],
   ['psqlRunner', () => psqlRunner(UNREADABLE)],
   ['psqlFileRunner', () => psqlFileRunner(UNREADABLE, 'public')],
@@ -296,9 +294,7 @@ for (const [script, args, text] of ECHOES) {
   test(`${script} ${args.map((arg) => (/sentinel|JZ97/.test(arg) ? '<sentinel>' : arg)).join(' ')}: refused without echoing it`, () => {
     assertRefusedWith(
       cli(script, args, cleanEnv({}), 60_000),
-      script.startsWith('outbox-b2-')
-        ? 'command failed (code unknown); diagnostics withheld'
-        : text,
+      script.startsWith('outbox-b2-') ? 'command refused (code usage); diagnostics withheld' : text,
       script,
     );
   });
@@ -379,7 +375,7 @@ Module._load = function(id, ...args) {
           role: 'rasta_asset', sessionRole: 'rasta_asset', database: 'asset',
           superuser: false, createDb: false, createRole: false, bypassRls: false,
           ownsDatabase: false, ownedSchemas: [], ownsRelationIn: [],
-          createOnDatabase: false, createOnSchemas: [], memberOf: [],
+          createOnDatabase: false, createOnSchemas: [], memberOf: [], timeZone: 'UTC',
         }];
         process.stdout.write('probe: preflight client opened\\n');
       } else if (phase.startsWith('second-')) {

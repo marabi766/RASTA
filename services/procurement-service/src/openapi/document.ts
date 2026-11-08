@@ -180,12 +180,20 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/rfqs': listRfqsQuerySchema,
 };
 
+/** The replay fence's header, as every keyed command reads it (FU-156, PM decision D-125). */
+const REPLAY_DEADLINE_DESCRIPTION =
+  'Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be executed under its Idempotency-Key. ' +
+  "Past it on this service's clock the request is refused with 409 REPLAY_WINDOW_CLOSED before anything is read or written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. " +
+  'Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. ' +
+  'A value later than claim time + PROCUREMENT_IDEMPOTENCY_TTL_HOURS − B (B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; the portal and this service are bound to PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuse to start when their settings break it. ' +
+  'A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.';
+
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
-  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
+  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: a role PROCUREMENT_DEMAND_ROLES (on an aggregation’s cancel and RFQ, and an RFQ’s close and cancel, PROCUREMENT_RFQ_ISSUER_ROLES; on the RFQs a supplier is invited to, PROCUREMENT_SUPPLIER_ROLES) does not grant in the organization the request acts for (INSUFFICIENT_ROLE), the oversight role (AUDITOR), the platform administrator (SYSTEM_ADMIN, whatever organization it selected — it never acts for a buyer), a service-to-service token, a caller acting for no organization, or — on a command — a user token without the platform user id. Refused before anything is read, so it discloses nothing.',
   404: 'Not found — also returned for a demand, aggregation or RFQ of any other organization, and for an RFQ that does not invite the caller’s organization (on an RFQ’s close and cancel, an invited supplier too), so its existence is never disclosed.',
-  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.',
+  409: 'On a command: an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After); an Idempotency-Replay-Deadline that has passed on the service clock (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the window of the product opened or ended by another request at the same moment, more than a few times (CONFLICT, with Retry-After — retry); on withdraw and cancel, `expectedVersion` that is not the current version of the demand or aggregation (OPTIMISTIC_LOCK_FAILED — reload and retry); on an aggregation’s cancel and on an RFQ’s issue, a READY aggregation whose end is still being recorded (CONFLICT, with Retry-After — retry); on an RFQ’s issue and cancel, `expectedVersion` that is not the current version of the aggregation or RFQ (OPTIMISTIC_LOCK_FAILED), whichever command moved it.',
   422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): on submit, a demand that would take the total of the window it joins past 2147483647, the most an RFQ and a purchase order can state (AGGREGATION_QUANTITY_LIMIT_EXCEEDED; nothing is written), or one that would join a window already holding PROCUREMENT_WINDOW_MAX_LIVE_DEMANDS live demands, a technical limit that keeps the window’s close within one transaction (AGGREGATION_DEMAND_LIMIT_REACHED; the demand is not written, but a window that was due to end under EXTEND keeps the extension the same request made, with its AGGREGATION_WINDOW_EXTENDED event, so a full window still moves on); on withdraw, a demand that is not SUBMITTED (DEMAND_NOT_SUBMITTED) or whose window has ended — its aggregation is no longer OPEN, or the database clock is at or past closesAt (AGGREGATION_WINDOW_ENDED: the demand set is frozen); on cancel, an aggregation that is not READY (AGGREGATION_NOT_READY); on an RFQ’s issue, an aggregation that is not READY, a deadline not after the database clock, an invitee not eligible to supply goods now, the buyer as an invitee, or more invitees than PROCUREMENT_RFQ_MAX_INVITEES (AGGREGATION_NOT_READY, QUOTATION_CLOSING_NOT_IN_FUTURE, INVITEE_NOT_ELIGIBLE, INVITEE_IS_BUYER, INVITEE_LIMIT_EXCEEDED); on an RFQ’s close, before its deadline or once cancelled (QUOTATION_DEADLINE_NOT_REACHED, RFQ_CANCELLED); on its cancel, a reason code not on PROCUREMENT_RFQ_CANCELLATION_CODES or an AWARDED or CANCELLED RFQ (CANCELLATION_CODE_NOT_ALLOWED, RFQ_NOT_CANCELLABLE).',
   500: 'Unexpected server error.',
   503: 'A service this command must ask first, fail closed, is unavailable, and nothing is written (UPSTREAM_UNAVAILABLE): supplier-service, for an invitee’s standing — unreachable, or answering anything but its contract — or no key-encryption key configured (PROCUREMENT_RFQ_KEKS) to wrap the RFQ’s sealing key.',
@@ -289,7 +297,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       if (idempotent) {
         // Nest's `@ApiHeader` has no schema; replaced with the truth: required, bounded.
         operation.parameters = operation.parameters.filter(
-          (parameter) => !isHeader(parameter, 'idempotency-key'),
+          (parameter) =>
+            !isHeader(parameter, 'idempotency-key') &&
+            !isHeader(parameter, 'idempotency-replay-deadline'),
         );
         operation.parameters.push({
           name: 'Idempotency-Key',
@@ -298,6 +308,14 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           description:
             'Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for PROCUREMENT_IDEMPOTENCY_TTL_HOURS (24 by default).',
           schema: { type: 'string', minLength: 8, maxLength: 255 },
+        });
+        // FU-156: every keyed command reads it, through the one store (`shared/idempotency.ts`).
+        operation.parameters.push({
+          name: 'Idempotency-Replay-Deadline',
+          in: 'header',
+          required: false,
+          description: REPLAY_DEADLINE_DESCRIPTION,
+          schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
         });
       }
 

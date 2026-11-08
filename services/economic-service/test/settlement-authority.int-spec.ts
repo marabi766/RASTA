@@ -6,7 +6,7 @@ import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id, ownerDatabaseUrl } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE, ownerDatabaseUrl } from './helpers';
 
 /**
  * Settlement needs settlement authority, whatever the status says (D-083;
@@ -133,6 +133,7 @@ describe('settlement needs settlement authority, whatever the status says (D-083
       grossAmountMinor: AMOUNT.toString(),
       currency: 'IRR',
       holdFunds: true,
+      holdNotAfter: ORDER_HOLD_DEADLINE,
       ...(kind === 'ORDER' ? { sourceType: 'ORDER', sourceReference: orderId } : {}),
     };
     const created =
@@ -292,7 +293,7 @@ describe('settlement needs settlement authority, whatever the status says (D-083
             `UPDATE "transaction" SET status = 'SETTLED' WHERE id = $1`,
             transactionId,
           ),
-        ).rejects.toThrow(/trg_transaction_settlement_authority|settles only once/);
+        ).rejects.toThrow(/settles only from a funded hold/);
         throw new Error('rolled back: the probe keeps nothing');
       })
       .catch((error: Error) => {

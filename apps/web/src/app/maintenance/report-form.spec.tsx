@@ -47,6 +47,23 @@ function renderForm(
   );
 }
 
+describe('an unconfirmed send (PR-880 r1 F1)', () => {
+  it('is resent under its own key and values, not the page’s — after "edit and send as new" they differ', () => {
+    const values = { ...EMPTY_REPORT_REQUEST_FORM, assetId: 'AST_B', title: 'عنوانی دیگر' };
+    const { container } = renderForm({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-b',
+      submissionId: 'sub_BBBBBBBBBBBBBBBBBBBB',
+      values,
+    });
+    expect(container.querySelector(`input[name="${SUBMISSION_FIELD}"]`)).toHaveValue(
+      'sub_BBBBBBBBBBBBBBBBBBBB',
+    );
+    expect(container.querySelector('[name="title"]')).toHaveValue('عنوانی دیگر');
+    expect(container.querySelector('[name="assetId"]')).toHaveValue('AST_B');
+  });
+});
+
 describe('the report form at rest', () => {
   it('carries the session CSRF token and the submission id it was rendered with', () => {
     const { container } = renderForm();

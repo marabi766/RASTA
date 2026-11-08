@@ -41,7 +41,7 @@
 // -----------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
@@ -94,7 +94,7 @@ function toPattern(fullName) {
  * this script exists to catch, so it is worth not having.
  */
 const jestPackageJson = createRequire(path.join(cwd, 'noop.js')).resolve('jest/package.json');
-const jestBin = createRequire(import.meta.url)(jestPackageJson).bin;
+const jestBin = JSON.parse(readFileSync(jestPackageJson, 'utf8')).bin;
 const jestEntry = path.join(
   path.dirname(jestPackageJson),
   typeof jestBin === 'string' ? jestBin : jestBin.jest,

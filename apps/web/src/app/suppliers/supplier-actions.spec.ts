@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 import { BASELINE_FIELD } from '@/lib/form-fields';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { STALE_MESSAGE, type SupplierCommand, type SupplierNotice } from '@/lib/supplier-commands';
 import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
@@ -11,7 +13,6 @@ import { sealSupplierBaseline } from '@/server/supplier-commands';
 import {
   RECONCILED_FIELD,
   RECONCILED_VALUE,
-  RELEASE_FIELD,
   supplierWriteScope,
 } from '@/server/supplier-unresolved';
 import { withForgedMac } from '@/test/forged-token';
@@ -503,6 +504,17 @@ function unreachable(over: Partial<ReturnType<typeof memoryUnresolvedStore>> = {
   } as ReturnType<typeof memoryUnresolvedStore>;
 }
 
+/** What a reconciliation redirect says happened: the signed `release` parameter, read for this login. */
+const said = (url: URL, supplierId: string | null = SUPPLIER_ID) =>
+  feedbackFor(
+    SESSION,
+    supplierId === null
+      ? { surface: 'supplier-write' }
+      : { surface: 'supplier-record', target: supplierId },
+    url.searchParams.get('release'),
+    true,
+  );
+
 describe.each(CASES)('$command — an unresolved write', (testCase) => {
   const run = (form: FormData = formData(testCase)) => testCase.submit(SUPPLIER_ID, form);
   /** The first press: sent, answer ambiguous. Returns the submission id it was sent under. */
@@ -624,6 +636,7 @@ describe.each(CASES)('$command — an unresolved write', (testCase) => {
     const token = await tokenFor(SUPPLIER_ID);
     const url = await reconcile(token, false);
     expect(url.pathname).toBe(`/suppliers/${SUPPLIER_ID}`);
+    expect(said(url)).toBe('CONSENT_MISSING');
     expect(await run()).toEqual({ kind: 'UNCONFIRMED', correlationId: first });
     expect(sent()).toHaveLength(0);
 
@@ -640,15 +653,16 @@ describe.each(CASES)('$command — an unresolved write', (testCase) => {
   it('is not released by a post with a wrong CSRF token, no session or no token', async () => {
     const first = await lose();
     const token = await tokenFor(SUPPLIER_ID);
-    await redirectedTo(
+    const forged = await redirectedTo(
       actions.reconcileSupplierWrite(SUPPLIER_ID, reconcileForm(token, true, 'someone-elses')),
     );
+    expect(said(forged)).toBe('CSRF_REFUSED');
     currentSession.mockResolvedValue(null);
     await redirectedTo(actions.reconcileSupplierWrite(SUPPLIER_ID, reconcileForm(token)));
     currentSession.mockResolvedValue(SESSION);
     for (const bad of [null, 'not-a-token', withForgedMac(token)]) {
       const url = await reconcile(bad);
-      expect(url.searchParams.get('release')).toBe('STALE');
+      expect(said(url)).toBe('STALE');
     }
     expect(await run()).toEqual({ kind: 'UNCONFIRMED', correlationId: first });
   });
@@ -666,7 +680,7 @@ describe.each(CASES)('$command — an unresolved write', (testCase) => {
     expect(c2).not.toBe(c1);
 
     const url = await reconcile(tokenA); // tab A, stale
-    expect(url.searchParams.get('release')).toBe('STALE');
+    expect(said(url)).toBe('STALE');
 
     // C2 is still held: a fresh command is not sent.
     expect(await run(formData(testCase))).toEqual({ kind: 'UNCONFIRMED', correlationId: c2 });
@@ -690,7 +704,7 @@ describe.each(CASES)('$command — an unresolved write', (testCase) => {
     expect(testCase.send).toHaveBeenCalledTimes(1);
     // Tab B's reconciliation cannot release a send that is under way either.
     const token = await tokenFor(SUPPLIER_ID);
-    expect((await reconcile(token)).searchParams.get('release')).toBe('IN_PROGRESS');
+    expect(said(await reconcile(token))).toBe('IN_PROGRESS');
 
     finish({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-a' });
     expect(await tabA).toEqual({ kind: 'UNCONFIRMED', correlationId: 'corr-a' });

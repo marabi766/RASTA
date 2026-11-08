@@ -1,5 +1,9 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
+const { authoredFiles } = require('../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 import request from 'supertest';
 import type { Server } from 'node:http';
 import type { PrismaService } from '../src/prisma/prisma.service';
@@ -406,19 +410,7 @@ describe('audit read authorization (real PostgreSQL, real guards)', () => {
   });
 });
 
-/** Every `.ts` file under a directory, excluding the generated Prisma client. */
+/** Every authored `.ts` file under a directory (the generated Prisma client is git-ignored output). */
 function typescriptSourcesUnder(root: string): string[] {
-  const found: string[] = [];
-
-  const walk = (directory: string): void => {
-    for (const entry of readdirSync(directory)) {
-      if (entry === 'generated' || entry === 'node_modules') continue;
-      const path = join(directory, entry);
-      if (statSync(path).isDirectory()) walk(path);
-      else if (entry.endsWith('.ts')) found.push(path);
-    }
-  };
-
-  walk(root);
-  return found;
+  return authoredFiles(root).filter((path) => path.endsWith('.ts'));
 }

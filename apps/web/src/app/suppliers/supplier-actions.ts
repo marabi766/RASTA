@@ -25,16 +25,13 @@ import {
   type SubmitField,
   type SubmitFormValues,
 } from '@/lib/supplier-commands';
-import { verifyCsrf } from '@/server/csrf';
 import { currentSession } from '@/server/current-session';
 import {
   RECONCILED_FIELD,
   RECONCILED_VALUE,
-  RELEASE_FIELD,
-  RELEASE_PARAM,
-  supplierWriteScope,
+  supplierReleaseScope,
 } from '@/server/supplier-unresolved';
-import { releaseUnresolved } from '@/server/unresolved-request';
+import { settleRelease } from '@/server/release-feedback';
 import {
   approveQualification,
   rejectQualification,
@@ -45,7 +42,6 @@ import {
 
 import type { SupplierFormState } from './supplier-form-state';
 import { runOnSupplier, runRegister } from './supplier-runner';
-import { pageHref } from '@/server/page-context';
 
 /**
  * The six supplier commands. They run through `supplier-runner.ts`.
@@ -199,16 +195,17 @@ export async function reconcileSupplierWrite(
   const back = supplierId === null ? '/suppliers' : `/suppliers/${encodeURIComponent(supplierId)}`;
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(back)}`);
-  if (!verifyCsrf(session, form).ok) redirect(back);
-  if (form.get(RECONCILED_FIELD) !== RECONCILED_VALUE) redirect(back);
-  const outcome = await releaseUnresolved(
+  return settleRelease({
     session,
-    supplierWriteScope(supplierId),
-    form.get(RELEASE_FIELD),
-  );
-  redirect(
-    outcome === 'RELEASED' || outcome === 'GONE'
-      ? back
-      : pageHref(session, back, { [RELEASE_PARAM]: outcome }),
-  );
+    form,
+    back,
+    subject:
+      supplierId === null
+        ? { surface: 'supplier-write' }
+        : { surface: 'supplier-record', target: supplierId },
+    scope: supplierReleaseScope(supplierId),
+    quietSuccess: true,
+    // The box on this form says "I re-read the record", not the duplicate-risk box.
+    consent: { field: RECONCILED_FIELD, value: RECONCILED_VALUE },
+  });
 }

@@ -22,6 +22,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -105,6 +106,9 @@ import {
     MetricsController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadProcurementEnv() },
 
     {
@@ -201,8 +205,10 @@ import {
     // Idempotent commands (docs/06 § 6.8): this service's own store for every command.
     {
       provide: IdempotencyStore,
-      inject: [PrismaService, ENV],
-      useFactory: (prisma: PrismaService, env: ProcurementEnv) => new IdempotencyStore(prisma, env),
+      inject: [PrismaService, ENV, DatabaseClock],
+      // The database clock is the replay fence's last word (FU-156): read after the claim's insert.
+      useFactory: (prisma: PrismaService, env: ProcurementEnv, clock: DatabaseClock) =>
+        new IdempotencyStore(prisma, env, clock),
     },
 
     {

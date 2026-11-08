@@ -1,9 +1,9 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { settleRelease } from '@/server/release-feedback';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { mintFlash } from '@/server/flash';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
@@ -13,6 +13,8 @@ import {
   registerAssetFormValues,
 } from '@/server/asset-commands';
 
+import { assetRegistrationRequest } from '@/server/create-request';
+import { keepUnconfirmedWith } from '@/server/unconfirmed-retry';
 import type { RegisterAssetFormState } from './form-state';
 import { pageContext } from '@/server/page-context';
 import { withContext } from '@/lib/page-context';
@@ -27,9 +29,27 @@ import { withContext } from '@/lib/page-context';
  */
 
 export async function submitRegisterAsset(
-  _previous: RegisterAssetFormState,
+  previous: RegisterAssetFormState,
   form: FormData,
 ): Promise<RegisterAssetFormState> {
+  return keepUnconfirmedWith(
+    previous,
+    form,
+    () => attemptRegisterAsset(form),
+    (correlationId, state, held) => ({
+      kind: 'UNCONFIRMED',
+      correlationId,
+      releaseToken:
+        'releaseToken' in state
+          ? state.releaseToken
+          : 'releaseToken' in held
+            ? held.releaseToken
+            : undefined,
+    }),
+  );
+}
+
+async function attemptRegisterAsset(form: FormData): Promise<RegisterAssetFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
@@ -44,7 +64,10 @@ export async function submitRegisterAsset(
     return { kind: 'REFUSED', reason: 'SUBMISSION' };
   }
 
-  const values = registerAssetFormValues(form);
+  const restored = await assetRegistrationRequest.restore(session);
+  if (restored.kind !== 'IDLE') return restored;
+
+  const values = assetRegistrationRequest.values(registerAssetFormValues(form));
   const parsed = parseRegisterAssetForm(values);
   if (!parsed.ok) {
     return {
@@ -56,7 +79,15 @@ export async function submitRegisterAsset(
     };
   }
 
-  const result = await registerAsset(session, parsed.request, submissionId);
+  const sent = await assetRegistrationRequest.send(
+    session,
+    submissionId,
+    values,
+    parsed.request,
+    () => registerAsset(session, parsed.request, submissionId),
+  );
+  if (sent.kind !== 'RESULT') return sent;
+  const result = sent.result;
 
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
@@ -95,4 +126,18 @@ export async function submitRegisterAsset(
       // form again after the wait is answered with its result.
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
+}
+
+/** Reconciliation only: compare-and-delete of the signed record, never a domain write. */
+export async function releaseUnresolvedAssetRegistration(form: FormData): Promise<void> {
+  const session = await currentSession();
+  if (!session) redirect('/login?returnTo=/assets');
+  return settleRelease({
+    session,
+    form,
+    back: '/assets',
+    subject: { surface: 'asset-registration' },
+    scope: assetRegistrationRequest.releaseScope,
+    quietSuccess: true,
+  });
 }

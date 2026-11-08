@@ -127,3 +127,29 @@ describe.each(['partReference', 'sourceReference'])('recordPartSchema.%s', (path
     },
   );
 });
+
+// FU-184: every decimal-string field shares the raw, untrimmed grammar.
+describe.each<[z.ZodType, string]>([
+  [createScheduleSchema, 'intervalHours'],
+  [createScheduleSchema, 'intervalKilometres'],
+  [createScheduleSchema, 'leadHours'],
+  [createScheduleSchema, 'leadKilometres'],
+  [createScheduleSchema, 'lastServicedHourMeter'],
+  [createScheduleSchema, 'lastServicedOdometer'],
+  [updateScheduleSchema, 'intervalHours'],
+  [updateScheduleSchema, 'intervalKilometres'],
+  [updateScheduleSchema, 'leadHours'],
+  [updateScheduleSchema, 'leadKilometres'],
+  [updateScheduleSchema, 'lastServicedHourMeter'],
+  [updateScheduleSchema, 'lastServicedOdometer'],
+  [recordPartSchema, 'quantity'],
+  [recordLabourSchema, 'hours'],
+])('decimal transport %s.%s', (schema, path) => {
+  const field = fieldOf(schema, path);
+  it('accepts decimal text and refuses surrounding whitespace', () => {
+    expect(field.safeParse('1.5').success).toBe(true);
+    for (const value of [' 1.5', '1.5 ', ' 1.5 ', '\t1.5', '1.5\n', '1e-400', '-0']) {
+      expect(field.safeParse(value).success).toBe(false);
+    }
+  });
+});

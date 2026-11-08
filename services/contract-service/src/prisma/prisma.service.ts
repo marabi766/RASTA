@@ -31,6 +31,7 @@ export const TENANT_SCOPED_MODELS = [
   'AmendmentSignatureReview',
   'Milestone',
   'DeductionRule',
+  'DeductionRuleChange',
   'Statement',
   'StatementLine',
   'StatementDeduction',

@@ -7,8 +7,8 @@
 --
 -- Applied with:
 --
---   psql "$DATABASE_URL_ECONOMIC" -v ON_ERROR_STOP=1 \
---     -f prisma/migrations/20260828202043_init_economic/down.sql
+--   node scripts/psql-prisma-url.mjs DATABASE_URL_ECONOMIC -v ON_ERROR_STOP=1 \
+--     -f services/economic-service/prisma/migrations/20260828202043_init_economic/down.sql
 --
 -- and verified in CI by `scripts/verify-migration-reversible.mjs`, which runs
 -- up → down → up against a throwaway database. A down script that is written

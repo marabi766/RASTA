@@ -618,26 +618,10 @@ export const PENDING_CAPACITY_MESSAGE =
   'شمار درخواست‌های روشن‌نشده این نشست به سقف رسیده است و چیزی فرستاده نشد. ' +
   'نخست درخواست‌های روشن‌نشده را بررسی و رها کنید.';
 
-/** The release form was drawn for a request that has since changed. */
-export const RELEASE_STALE_MESSAGE =
-  'درخواست روشن‌نشده از زمان باز شدن این صفحه تغییر کرده است و چیزی تغییر نکرد. صفحه را تازه کنید و دوباره بررسی کنید.';
-
 /** An unresolved create exists and this post is a different request. */
 export const HELD_OTHER_MESSAGE =
   'درخواست پیشینی هنوز روشن نشده است و درخواست دیگری فرستاده نشد. صفحه را تازه کنید؛ ' +
   'نخست همان درخواست را بفرستید یا پس از بررسی فهرست کامل پروژه‌ها، با پذیرفتن خطر تکرار، درخواست تازه بفرستید.';
-
-/**
- * Whether a refusal status proves the command was not applied. Only a 4xx does:
- * the gateway or the service answered before doing anything. A 5xx may follow a
- * commit — construction-service commits, then reads the record again to answer,
- * and that read can fail, as can the gateway while relaying the answer — so no
- * 5xx (503 included: the portal cannot tell the gateway's from the service's) is
- * "nothing changed". Those are unconfirmed.
- */
-export function isProvenRefusalStatus(status: number): boolean {
-  return status >= 400 && status < 500;
-}
 
 export function projectFailureText(status: number): string {
   if (status === 401) return SESSION_REFUSAL_MESSAGES.NO_SESSION;

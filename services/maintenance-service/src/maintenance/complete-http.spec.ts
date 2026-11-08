@@ -32,7 +32,7 @@ describe('POST /v1/repair-orders/:id/complete', () => {
       controllers: [RepairOrderController],
       providers: [
         { provide: RepairOrderService, useValue: { complete, assertAccessible: jest.fn() } },
-        { provide: IdempotencyStore, useValue: { execute } },
+        { provide: IdempotencyStore, useValue: { execute, assertAdmissible: jest.fn() } },
       ],
     }).compile();
     app = moduleRef.createNestApplication();

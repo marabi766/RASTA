@@ -1,4 +1,4 @@
-import { enrichOpenApiDocument, INTERNAL_TOKEN_SCHEME } from './document';
+import { enrichOpenApiDocument } from './document';
 import { INVALID_CURSOR_MESSAGE } from '../shared/cursor';
 import type { OpenAPIObject } from '@nestjs/swagger';
 
@@ -347,27 +347,19 @@ describe('enrichOpenApiDocument', () => {
       };
     };
 
-    it('declares the internal token as an apiKey in X-Internal-Token, not a bearer token', () => {
-      const { enriched } = enrichedWith(INTERNAL);
-
-      expect(enriched.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME]).toMatchObject({
-        type: 'apiKey',
-        in: 'header',
-        name: 'X-Internal-Token',
-      });
-    });
-
-    it('requires that scheme alone on an internal route, with its own 403 and 404', () => {
+    // Its `security` is `publishOperationSecurity`'s, from the guard's metadata (FU-075,
+    // `operation-security.spec.ts`); the scheme is declared by @rasta/nest-common.
+    it('gives a route that refuses every user its own 403 and 404', () => {
       const { operation } = enrichedWith(INTERNAL);
 
-      expect(operation.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
+      expect(operation.security).toBeUndefined();
       expect(Object.keys(operation.responses).sort()).toEqual(['200', '401', '403', '404', '500']);
       expect(operation.responses['403']?.description).toContain('user token');
       expect(operation.responses['403']?.description).toContain('signed for no organization');
       expect(operation.responses['404']?.description).toContain('internal token is signed for');
     });
 
-    it('gives a public route neither the internal scheme nor the internal wording', () => {
+    it('gives any other route the ordinary wording', () => {
       const { operation } = enrichedWith('/v1/transactions/{id}');
 
       expect(operation.security).toBeUndefined();
@@ -402,8 +394,11 @@ describe('enrichOpenApiDocument', () => {
       expect(array).not.toHaveProperty('minItems');
       expect(array).not.toHaveProperty('maxItems');
     }
-    // Only array bounds are held back: a string's bounds are published.
-    expect(JSON.stringify(recognition)).toContain('"maxLength":80');
+    // Recognition names are bounded after trimming, not on the raw text.
+    expect(JSON.stringify(recognition)).toContain(
+      'Constraints after a value-changing step are omitted',
+    );
+    expect(JSON.stringify(recognition)).not.toContain('"maxLength":80');
   });
 
   it('leaves a route it knows nothing about with a success response and no body', () => {

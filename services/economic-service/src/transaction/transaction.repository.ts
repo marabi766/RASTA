@@ -123,19 +123,14 @@ export class TransactionRepository {
                  source_reference                AS "sourceReference",
                  correlation_id                  AS "correlationId",
                  dispute_id                      AS "disputeId",
-                 (settlement_authorised_at IS NOT NULL
-                  OR EXISTS (
-                    SELECT 1
-                      FROM settlement_authority_reconciliation
-                     WHERE settlement_authority_reconciliation.transaction_id = "transaction".id
-                       AND settlement_authority_reconciliation.outcome = 'AUTHORISED_UNRECORDED'
-                  ))                             AS "settlementAuthorised",
+                 transaction_settlement_authorised(id, settlement_authorised_at IS NOT NULL)
+                                                 AS "settlementAuthorised",
+                 transaction_settlement_barred(id)
+                                                 AS "settlementBarred",
                  EXISTS (
                    SELECT 1
-                     FROM wallet_hold
-                    WHERE wallet_hold.reference = "transaction".id
-                      AND wallet_hold.reference_type = 'TRANSACTION'
-                      AND wallet_hold.status = 'ACTIVE'
+                     FROM transaction_holds("transaction".id, "transaction".organization_id) AS hold
+                    WHERE hold.status = 'ACTIVE'
                  )                               AS "fundsHeld"
             FROM "transaction"
            WHERE id = ${id}
@@ -191,6 +186,25 @@ export class TransactionRepository {
         include: { legs: true, commission: true, settlement: true },
       }),
     );
+  }
+
+  /**
+   * Which of these transactions the database proves are what HELD says
+   * (`transaction_held_proven`): the ids come from rows the caller may already read.
+   */
+  async heldProven(
+    ids: string[],
+    client: ExtendedPrismaClient = this.client,
+  ): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    const rows = await runUnscoped(
+      'a hold proves a status the caller, payer or payee, has already been allowed to read',
+      () =>
+        client.$queryRaw<{ id: string }[]>`
+          SELECT id FROM "transaction" WHERE id = ANY(${ids}::text[]) AND transaction_held_proven(id)
+        `,
+    );
+    return new Set(rows.map((row) => row.id));
   }
 
   findByIdempotencyKey(organizationId: string, idempotencyKey: string) {
@@ -362,11 +376,15 @@ export interface LockedTransaction {
    * a resolved dispute returns it, and whether it may settle (D-083).
    * Authorised is `settlement_authorised_at`, or an authorisation older than
    * that column which migration 20261103121000 proved and recorded
-   * (`settlement_authority_reconciliation`). The hold is read, not locked — only
-   * a settlement or a refund releases it, and both lock this row first.
+   * (`settlement_authority_reconciliation`), and never while the row's hold
+   * decision is unresolved (`transaction_settlement_authorised`). The hold is
+   * read, not locked — only a settlement or a refund releases it, and both lock
+   * this row first.
    */
   settlementAuthorised: boolean;
   fundsHeld: boolean;
+  /** Its hold record bars it from settling (`transaction_settlement_barred`, D-123). */
+  settlementBarred: boolean;
 }
 
 export interface TransactionRow {

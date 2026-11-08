@@ -35,8 +35,10 @@ model Organization {
 
   /// Human-facing identifier, e.g. a national registry code. Optional because
   /// not every organization type has one, and the platform must not require a
-  /// registry it does not control.
-  externalCode String? @unique @map("external_code")
+  /// registry it does not control. Unique by its canonical key, not its bytes
+  /// (`ux_organization_external_code_key`, FU-084): an expression index, which
+  /// Prisma cannot model, so it lives in the migration only.
+  externalCode String? @map("external_code")
 
   name      String
   shortName String? @map("short_name")

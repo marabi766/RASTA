@@ -1,5 +1,6 @@
 import { RastaError } from '@rasta/nest-common';
 import type { TransactionStatus } from '../generated/prisma';
+import { STATEMENT_SOURCE_TYPE } from './dto';
 
 /**
  * The transaction lifecycle, as an explicit state machine.
@@ -23,6 +24,9 @@ import type { TransactionStatus } from '../generated/prisma';
  *      ├──► PENDING_SETTLEMENT     (an obligation with no escrow — ADR-032)
  *      ├──► CANCELLED
  *      └──► FAILED
+ *
+ *   SETTLED ──► PARTIALLY_REVERSED ──► REVERSED     (only by REVERSE_SETTLEMENT)
+ *      └───────────────────────────────────▲
  * ```
  *
  * ## The two rules that are controls rather than conveniences
@@ -37,7 +41,8 @@ import type { TransactionStatus } from '../generated/prisma';
  * transaction to where its recorded authority stands ({@link resolvedStatus}):
  * `PENDING_SETTLEMENT` when settlement was authorised, or when nothing was
  * ever held (an ADR-032 obligation, authorised when recorded); `HELD` when
- * funds are escrowed and no authorisation is recorded. It used to send every
+ * funds are escrowed and no authorisation is recorded, or its hold record bars
+ * it (D-123). It used to send every
  * dispute to `PENDING_SETTLEMENT`, so an order's obligation disputed before
  * its buyer confirmed receipt came out of the dispute settlement-ready with
  * no receipt behind it (marketplace audit F1, PM decision D-083).
@@ -52,6 +57,13 @@ import type { TransactionStatus } from '../generated/prisma';
  * a status written by an older release is not proof of it. A resolution made
  * before D-083 left escrowed, never-authorised rows in `PENDING_SETTLEMENT`;
  * the status alone would pay them (review of #623 round 1, F1).
+ *
+ * **A settlement is undone only by a reversal, and only as far as money moved.**
+ * `REVERSE_SETTLEMENT` is the one edge out of `SETTLED`. Its target is what the
+ * applied reversals add up to ({@link reversedStatus}; docs/24 Q-76, D-115 A),
+ * never `PENDING_SETTLEMENT`: no hold is re-established. The database holds the
+ * same rule (migration 20261104120000_settlement_reversal). No route takes this
+ * edge yet.
  */
 
 /** What can happen to a transaction. Named for the act, not for the state. */
@@ -63,7 +75,8 @@ export type TransactionEvent =
   | 'CANCEL'
   | 'FAIL'
   | 'DISPUTE'
-  | 'RESOLVE_DISPUTE';
+  | 'RESOLVE_DISPUTE'
+  | 'REVERSE_SETTLEMENT';
 
 /**
  * The target of `RESOLVE_DISPUTE`: not one status, but the one of
@@ -73,12 +86,15 @@ export type TransactionEvent =
  */
 type ByAuthority = 'BY_AUTHORITY';
 
+/** The target of `REVERSE_SETTLEMENT`: as far as the applied reversals go ({@link reversedStatus}). */
+type ByReversedAmount = 'BY_REVERSED_AMOUNT';
+
 /** Every status a resolved dispute can return a transaction to. */
 export const RESOLUTION_TARGETS = ['HELD', 'PENDING_SETTLEMENT'] as const;
 
 const TRANSITIONS: Record<
   TransactionStatus,
-  Partial<Record<TransactionEvent, TransactionStatus | ByAuthority>>
+  Partial<Record<TransactionEvent, TransactionStatus | ByAuthority | ByReversedAmount>>
 > = {
   CREATED: {
     HOLD_PLACED: 'HELD',
@@ -104,7 +120,9 @@ const TRANSITIONS: Record<
     RESOLVE_DISPUTE: 'BY_AUTHORITY',
     REFUND: 'REFUNDED',
   },
-  SETTLED: {},
+  SETTLED: { REVERSE_SETTLEMENT: 'BY_REVERSED_AMOUNT' },
+  PARTIALLY_REVERSED: { REVERSE_SETTLEMENT: 'BY_REVERSED_AMOUNT' },
+  REVERSED: {},
   REFUNDED: {},
   CANCELLED: {},
   FAILED: {},
@@ -112,7 +130,7 @@ const TRANSITIONS: Record<
 
 /** Terminal states. Nothing leaves them, by any route. */
 export const TERMINAL_STATUSES: readonly TransactionStatus[] = [
-  'SETTLED',
+  'REVERSED',
   'REFUNDED',
   'CANCELLED',
   'FAILED',
@@ -131,17 +149,28 @@ export function canTransition(from: TransactionStatus, event: TransactionEvent):
  * {@link resolvedStatus} decides from, read under the row lock.
  */
 export interface SettlementAuthority {
-  /** `settlement_authorised_at` is set: settlement was authorised. */
+  /**
+   * Settlement was authorised (`transaction_settlement_authorised`): never while
+   * the row's hold decision is unresolved, whatever the columns say.
+   */
   readonly settlementAuthorised: boolean;
-  /** An ACTIVE wallet hold names the transaction: its funds are escrowed. */
+  /** The payer's own ACTIVE hold for this transaction (`transaction_holds`): its funds are escrowed. */
   readonly fundsHeld: boolean;
+  /**
+   * `transaction_settlement_barred`: it has claimed escrow (a hold record, a hold
+   * of its own in any status, or having been `HELD`) and has no funded hold of its
+   * own for its terms, or its hold record is undecided. A decision or an
+   * authorisation pays nothing by itself (D-123, D-130). Anything but `false` is
+   * barred.
+   */
+  readonly settlementBarred: boolean;
 }
 
 /**
  * Where a resolved dispute leaves a transaction: as settlement-ready as its
  * recorded authority makes it, and no more (D-083).
  *
- * - Authorised (`settlement_authorised_at`): `PENDING_SETTLEMENT`. Nothing
+ * - Authorised (`settlement_authorised_at`): `PENDING_SETTLEMENT`. Nothing else
  *   moves an authorised transaction back to `HELD`, so that is where its
  *   dispute found it.
  * - Escrowed and never authorised: `HELD`. Where a dispute raised from `HELD`
@@ -149,9 +178,12 @@ export interface SettlementAuthority {
  *   resolution sent to `PENDING_SETTLEMENT` with no authorisation, or that was
  *   authorised before 20260926120000 recorded the instant: settlement then
  *   needs an authorisation first, which is the side to err on with money.
- * - No escrow: `PENDING_SETTLEMENT`. A `DISPUTED` transaction with no active
- *   hold was never `HELD` — a hold is released only by settling or refunding,
- *   both terminal — so it is an ADR-032 obligation, authorised when recorded.
+ * - No escrow, and none ever claimed: `PENDING_SETTLEMENT`. It is an ADR-032
+ *   obligation, authorised when recorded.
+ * - Barred (`transaction_settlement_barred`): `HELD`, unproven, whatever else it
+ *   says. It has claimed escrow and has no funded hold of its own for its terms,
+ *   so it is not ready to settle. From there it can take that hold and an
+ *   authorisation, or be refunded (D-123, D-130).
  */
 export function resolvedStatus(
   authority: SettlementAuthority,
@@ -161,15 +193,29 @@ export function resolvedStatus(
 
 /**
  * The one rule both a resolution and a settlement decide from: a transaction
- * may be settlement-ready only when its settlement was authorised, or when
- * nothing is held for it (an ADR-032 obligation, authorised when recorded).
- * Enforced in the database too (`trg_transaction_settlement_authority`,
+ * may be settlement-ready only when no hold record bars it, and its settlement
+ * was authorised or nothing is held for it (an ADR-032 obligation, authorised
+ * when recorded). Enforced in the database too (`trg_transaction_settlement_authority`,
  * `trg_wallet_hold_release_settlement_authority`, migration
  * 20261103121000_transaction_settlement_authority).
  */
 export function isSettlementReady(authority: SettlementAuthority): boolean {
-  return authority.settlementAuthorised || !authority.fundsHeld;
+  return (
+    authority.settlementBarred === false && (authority.settlementAuthorised || !authority.fundsHeld)
+  );
 }
+
+export const SETTLEMENT_BARRED =
+  'This transaction settles only from a funded hold of its own for its exact terms, with any hold record on it decided first; nothing pays it from the spendable balance';
+
+/**
+ * No hold can be placed on a statement's obligation and it refuses a refund
+ * (`refuseStatementWithdrawal`), so a barred one has no way forward: the owner's
+ * question (D-130). The operator is told that, and not sent to a decision that
+ * cannot help.
+ */
+export const STATEMENT_SETTLEMENT_BARRED =
+  "This statement's obligation is barred by a hold on record: it cannot be paid, refunded or cancelled until the product owner decides; see the transaction-hold-decision runbook";
 
 /**
  * Refuses to settle an escrowed transaction whose settlement was never
@@ -177,13 +223,54 @@ export function isSettlementReady(authority: SettlementAuthority): boolean {
  * `INVALID_STATE_TRANSITION` (409), as the state machine refuses: the
  * transaction has to be authorised first, and no retry changes that.
  */
-export function assertSettlementReady(transactionId: string, authority: SettlementAuthority): void {
+export function assertSettlementReady(
+  transactionId: string,
+  authority: SettlementAuthority,
+  sourceType: string | null = null,
+): void {
+  if (authority.settlementBarred !== false) {
+    throw new RastaError(
+      'INVALID_STATE_TRANSITION',
+      sourceType === STATEMENT_SOURCE_TYPE ? STATEMENT_SETTLEMENT_BARRED : SETTLEMENT_BARRED,
+      { internalContext: { transactionId, sourceType, ...authority } },
+    );
+  }
   if (isSettlementReady(authority)) return;
   throw new RastaError(
     'INVALID_STATE_TRANSITION',
     'A transaction whose funds are held cannot be settled before its settlement is authorised',
     { internalContext: { transactionId, ...authority } },
   );
+}
+
+/** How far a settlement has been reversed, in minor units: what {@link reversedStatus} decides from. */
+export interface ReversalProgress {
+  /** The settlement's gross. */
+  readonly settlementGrossMinor: bigint;
+  /** Σ gross of its applied reversals, including the one being applied. */
+  readonly reversedGrossMinor: bigint;
+}
+
+/**
+ * `REVERSED` when the whole gross has been reversed, `PARTIALLY_REVERSED` while
+ * some of it has (D-115 A). Nothing reversed, or more than was settled, is not a
+ * reversal at all: refused rather than rounded to the nearer status.
+ */
+export function reversedStatus(progress: ReversalProgress): 'PARTIALLY_REVERSED' | 'REVERSED' {
+  const { settlementGrossMinor, reversedGrossMinor } = progress;
+  if (reversedGrossMinor <= 0n || reversedGrossMinor > settlementGrossMinor) {
+    throw new RastaError(
+      'INVALID_STATE_TRANSITION',
+      'A settlement is reversed by more than nothing and by no more than it settled',
+      {
+        internalContext: {
+          settlementGrossMinor: settlementGrossMinor.toString(),
+          reversedGrossMinor: reversedGrossMinor.toString(),
+        },
+      },
+    );
+  }
+  return reversedGrossMinor === settlementGrossMinor ? 'REVERSED' : 'PARTIALLY_REVERSED';
 }
 
 /**
@@ -210,11 +297,13 @@ export function nextStatus(
   from: TransactionStatus,
   event: TransactionEvent,
   /**
-   * Required for `RESOLVE_DISPUTE` from `DISPUTED`, whose target depends on
-   * it; unread by every other move. Absent where it is required, the move is
-   * refused rather than guessed.
+   * The facts a move whose target depends on them decides from:
+   * {@link SettlementAuthority} for `RESOLVE_DISPUTE` from `DISPUTED`,
+   * {@link ReversalProgress} for `REVERSE_SETTLEMENT`; unread by every other
+   * move. Absent or of the other kind where required, the move is refused rather
+   * than guessed.
    */
-  authority?: SettlementAuthority,
+  facts?: SettlementAuthority | ReversalProgress,
 ): TransactionStatus {
   const to = TRANSITIONS[from][event];
   if (!to) {
@@ -224,13 +313,19 @@ export function nextStatus(
       { internalContext: { transactionId, from, event } },
     );
   }
+  if (to === 'BY_REVERSED_AMOUNT') {
+    if (!facts || !('settlementGrossMinor' in facts)) {
+      throw new Error(`Reversing transaction ${transactionId}'s settlement needs its progress`);
+    }
+    return reversedStatus(facts);
+  }
   if (to !== 'BY_AUTHORITY') return to;
-  if (!authority) {
+  if (!facts || !('settlementAuthorised' in facts)) {
     throw new Error(
       `Resolving transaction ${transactionId}'s dispute needs its settlement authority`,
     );
   }
-  return resolvedStatus(authority);
+  return resolvedStatus(facts);
 }
 
 function describe(event: TransactionEvent): string {
@@ -251,6 +346,8 @@ function describe(event: TransactionEvent): string {
       return 'be disputed';
     case 'RESOLVE_DISPUTE':
       return 'have a dispute resolved';
+    case 'REVERSE_SETTLEMENT':
+      return 'have its settlement reversed';
   }
 }
 

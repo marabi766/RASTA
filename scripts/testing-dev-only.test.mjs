@@ -1,7 +1,16 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -1958,4 +1967,73 @@ test('importing the checker runs no command, whatever argv[1] is; running it doe
   });
   assert.equal(run.status, 2);
   assert.match(run.stderr, /^usage: node scripts\/testing-dev-only\.mjs/);
+});
+
+// ---- 4. Generated output rewritten while the sweep runs (FU-090) ------------
+
+/**
+ * `db:generate` rewrites git-ignored src/generated while checks run, so a path the sweep
+ * listed can be gone (ENOENT). The sweep still covers generated clients on purpose; a
+ * vanished ignored path is re-swept once, everything else fails at once.
+ */
+const GENERATED = 'services/svc/src/generated/prisma';
+const git = (root, ...args) =>
+  spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: fixtureGitEnv() }).status;
+const gitFixture = (t, { track = false } = {}) => {
+  const root = fixture(t);
+  assert.equal(git(root, 'init', '-q'), 0);
+  writeFileSync(join(root, '.gitignore'), '**/src/generated/\n');
+  if (track) assert.equal(git(root, 'add', '-f', `${GENERATED}/index.js`), 0);
+  return root;
+};
+/** A readdir that fails with a real-shaped ENOENT `times` times on `path`, else reads. */
+const vanishing = (root, path, times) => {
+  const seen = { calls: 0, failures: 0 };
+  const readdir = (dir, options) => {
+    seen.calls += 1;
+    if (dir === join(root, path) && seen.failures < times) {
+      seen.failures += 1;
+      throw Object.assign(new Error(`ENOENT: no such file or directory, scandir '${dir}'`), {
+        code: 'ENOENT',
+        path: dir,
+      });
+    }
+    return readdirSync(dir, options);
+  };
+  return { readdir, seen };
+};
+
+test('an ignored generated directory that vanishes once is re-swept and the result is the same', (t) => {
+  const root = gitFixture(t);
+  const clean = sourceProblems(root);
+  const { readdir, seen } = vanishing(root, GENERATED, 1);
+  assert.deepEqual(sourceProblems(root, { readdir }), clean);
+  assert.equal(seen.failures, 1);
+});
+
+test('a generated directory that keeps vanishing fails loudly after one re-sweep', (t) => {
+  const root = gitFixture(t);
+  const { readdir, seen } = vanishing(root, GENERATED, 99);
+  assert.throws(() => sourceProblems(root, { readdir }), { code: 'ENOENT' });
+  assert.equal(seen.failures, 2);
+});
+
+test('a tracked file that is missing always fails, with no re-sweep', (t) => {
+  const root = gitFixture(t, { track: true });
+  const { readdir, seen } = vanishing(root, GENERATED, 1);
+  assert.throws(() => sourceProblems(root, { readdir }), { code: 'ENOENT' });
+  assert.equal(seen.failures, 1);
+});
+
+test('an unreadable Git answer, or a vanished path outside generated/, is never a race', (t) => {
+  // Not a Git repository: "ignored" cannot be proved, so the first ENOENT is final.
+  const plain = fixture(t);
+  const first = vanishing(plain, GENERATED, 1);
+  assert.throws(() => sourceProblems(plain, { readdir: first.readdir }), { code: 'ENOENT' });
+  assert.equal(first.seen.failures, 1);
+  const repo = gitFixture(t);
+  writeFileSync(join(repo, '.gitignore'), 'services/svc/src/\n'); // ignored, but not generated
+  const second = vanishing(repo, 'services/svc/src', 1);
+  assert.throws(() => sourceProblems(repo, { readdir: second.readdir }), { code: 'ENOENT' });
+  assert.equal(second.seen.failures, 1);
 });

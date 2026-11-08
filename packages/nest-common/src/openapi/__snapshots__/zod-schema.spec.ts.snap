@@ -5,8 +5,7 @@ exports[`toJsonSchema publishes every construct the services use 1`] = `
   "additionalProperties": false,
   "properties": {
     "codePoints": {
-      "maxLength": 500,
-      "minLength": 2,
+      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
       "type": "string",
     },
     "count": {
@@ -44,7 +43,9 @@ exports[`toJsonSchema publishes every construct the services use 1`] = `
       "type": "boolean",
     },
     "instant": {
+      "description": "ISO 8601 instant that ends in \`Z\` or a numeric offset within ±14:00 (\`+03:30\`, \`+0330\`); an offset beyond ±14:00, which RFC 3339 allows, is invalid here.",
       "format": "date-time",
+      "pattern": "(?:Z|[+-](?:(?:0\\d|1[0-3]):?[0-5]\\d|14:?00))$",
       "type": "string",
     },
     "lines": {
@@ -73,6 +74,7 @@ exports[`toJsonSchema publishes every construct the services use 1`] = `
       "type": "number",
     },
     "refined": {
+      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
       "type": "string",
     },
     "status": {
@@ -91,7 +93,6 @@ exports[`toJsonSchema publishes every construct the services use 1`] = `
     "text": {
       "maxLength": 10,
       "minLength": 1,
-      "pattern": "^[a-z]+$",
       "type": "string",
     },
     "transformed": {

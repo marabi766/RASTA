@@ -532,7 +532,7 @@ exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/tra
     "details": [
       {
         "code": "invalid_enum_value",
-        "message": "Invalid enum value. Expected 'CREATED' | 'HELD' | 'PENDING_SETTLEMENT' | 'DISPUTED' | 'SETTLED' | 'REFUNDED' | 'CANCELLED' | 'FAILED'",
+        "message": "Invalid enum value. Expected 'CREATED' | 'HELD' | 'PENDING_SETTLEMENT' | 'DISPUTED' | 'SETTLED' | 'PARTIALLY_REVERSED' | 'REVERSED' | 'REFUNDED' | 'CANCELLED' | 'FAILED'",
         "path": "status",
       },
     ],
@@ -592,8 +592,8 @@ exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/tra
   "limitFraction": {
     "details": [
       {
-        "code": "invalid_type",
-        "message": "Expected integer, received float",
+        "code": "custom",
+        "message": "Expected an integer in decimal notation",
         "path": "limit",
       },
     ],
@@ -602,8 +602,8 @@ exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/tra
   "limitText": {
     "details": [
       {
-        "code": "invalid_type",
-        "message": "Expected number, received nan",
+        "code": "custom",
+        "message": "Expected an integer in decimal notation",
         "path": "limit",
       },
     ],

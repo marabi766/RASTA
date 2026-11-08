@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * A resolved dispute returns a transaction to where its settlement authority
@@ -73,6 +73,7 @@ describe('a resolved dispute returns a transaction to where its settlement autho
         sourceType: 'ORDER',
         sourceReference: orderId,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     expect(created.body.status).toBe('HELD');

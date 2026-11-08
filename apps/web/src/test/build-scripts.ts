@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -31,10 +32,58 @@ export function runModule(code: string): { out: unknown; stdout: string; stderr:
   };
 }
 
-/** Whether a process (or, negative, a process group) may exist. */
-export const alive = (target: number): boolean => {
+type ProcessTarget = number | { group: number };
+const positivePid = (pid: number): boolean => Number.isSafeInteger(pid) && pid > 0;
+const signalTarget = (target: ProcessTarget): number => {
+  const pid = typeof target === 'number' ? target : target.group;
+  if (!positivePid(pid))
+    throw new Error(
+      `invalid pid ${pid}: expected a positive integer; use { group: pgid } explicitly for a process group`,
+    );
+  return typeof target === 'number' ? pid : -pid;
+};
+const targetName = (target: ProcessTarget): string => {
+  const pid = signalTarget(target);
+  return `${pid < 0 ? 'process group' : 'pid'} ${Math.abs(pid)}`;
+};
+
+type ChildRecord = { pid: number; group: number; capturePath: string };
+export function waitForPidFile(file: string, json?: false, ms?: number): Promise<number>;
+export function waitForPidFile(file: string, json: true, ms?: number): Promise<ChildRecord>;
+/** Existence is not readiness: retry empty/partial writes, but never return an invalid PID. */
+export async function waitForPidFile(
+  file: string,
+  json = false,
+  ms = 15_000,
+): Promise<number | ChildRecord> {
+  const deadline = performance.now() + ms;
+  for (;;) {
+    try {
+      const text = readFileSync(file, 'utf8').trim();
+      const value: ChildRecord | number = JSON.parse(
+        json ? text : /^\d+$/.test(text) ? text : 'null',
+      );
+      if (!json && typeof value === 'number' && positivePid(value)) return value;
+      if (json && value && typeof value === 'object') {
+        const { pid, group, capturePath } = value;
+        const validIds = positivePid(pid) && positivePid(group);
+        if (validIds && typeof capturePath === 'string' && capturePath.length > 0) return value;
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== 'ENOENT')
+        throw error;
+    }
+    if (performance.now() >= deadline)
+      throw new Error(`pid file ${file}: no complete positive integer pid record within ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/** Whether a process, or an explicitly selected process group, may exist. */
+export const alive = (target: ProcessTarget): boolean => {
+  const pid = signalTarget(target);
   try {
-    process.kill(target, 0);
+    process.kill(pid, 0);
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ESRCH';
@@ -46,14 +95,14 @@ export const alive = (target: number): boolean => {
  * and be reaped (a zombie still answers a signal-0 probe), after the sender's `kill` returned.
  * So "it ended" is a bounded wait, never a single probe (FU-038: an instant `alive()` right
  * after a group kill found the linger process still there and turned main red).
- * Fails, naming the pid (negative: the group), when the target outlives `ms`.
+ * Fails, naming the pid or explicit group, when the target outlives `ms`.
  */
-export async function waitGone(target: number, what: string, ms = 15_000): Promise<void> {
+export async function waitGone(target: ProcessTarget, what: string, ms = 15_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (alive(target) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
   if (alive(target)) {
     throw new Error(
-      `${what}: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still alive ${ms} ms after it should have ended`,
+      `${what}: ${targetName(target)} still alive ${ms} ms after it should have ended`,
     );
   }
 }
@@ -69,7 +118,7 @@ const STAT = /^[DIKPRSTtWXxZ][<NLsl+]*$/;
 const UNPROVEN = 'cannot prove a writer is gone';
 
 /**
- * Members of each of `targets` (a pid, or, negative, a process group) that are LIVE right
+ * Members of each of `targets` (a pid or an explicit process group) that are LIVE right
  * now, aligned with `targets`: ONE `ps` snapshot of pid, pgid and state for all of them (a
  * second snapshot taken later is a second moment, FU-040 r2 F1), minus zombies. A zombie has
  * released its memory and its files, so it cannot write, but it still answers `kill(pid, 0)`
@@ -77,10 +126,21 @@ const UNPROVEN = 'cannot prove a writer is gone';
  * state can. `waitpid` is not an option: these are grandchildren of the build, not children of
  * the test. Fails closed: every row must be a complete `pid pgid stat` of the grammar, and the
  * calling process (known live) must be in the census, so a snapshot that cannot be taken, read
- * or is incomplete proves nothing and throws (`ps`: test seam).
+ * or is incomplete proves nothing and throws (`ps`, `timeoutMs`: test seams). The snapshot is
+ * bounded: a `ps` that does not answer in time is killed and counts as no snapshot.
  */
-export function liveMembers(targets: readonly number[], ps = 'ps'): number[][] {
-  const census = spawnSync(ps, ['-axo', 'pid=,pgid=,stat='], { encoding: 'utf8' });
+export const CENSUS_TIMEOUT_MS = 10_000;
+export function liveMembers(
+  targets: readonly ProcessTarget[],
+  ps = 'ps',
+  timeoutMs = CENSUS_TIMEOUT_MS,
+): number[][] {
+  const ids = targets.map(signalTarget);
+  const census = spawnSync(ps, ['-axo', 'pid=,pgid=,stat='], {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  });
   if (census.status !== 0) throw new Error(`process census failed: ${UNPROVEN}`);
   const rows = census.stdout
     .trim()
@@ -96,7 +156,7 @@ export function liveMembers(targets: readonly number[], ps = 'ps'): number[][] {
   if (!rows.some((row) => row.pid === process.pid && row.live)) {
     throw new Error(`process census incomplete (the calling process is missing): ${UNPROVEN}`);
   }
-  return targets.map((target) =>
+  return ids.map((target) =>
     rows
       .filter((row) => row.live && (target < 0 ? row.pgid === -target : row.pid === target))
       .map((row) => row.pid),
@@ -115,7 +175,7 @@ export function liveMembers(targets: readonly number[], ps = 'ps'): number[][] {
  * within its budget (FU-040). No target proves nothing, so it throws.
  */
 export async function goneAtBoundary(
-  targets: ReadonlyArray<readonly [target: number, what: string]>,
+  targets: ReadonlyArray<readonly [target: ProcessTarget, what: string]>,
   ms?: number,
 ): Promise<void> {
   if (targets.length === 0) throw new Error(`no process to check at the boundary: ${UNPROVEN}`);
@@ -124,7 +184,7 @@ export async function goneAtBoundary(
     live[i].length === 0
       ? []
       : [
-          `${what}: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still has a live writer (${live[i].join(', ')}) at the point the lock was released`,
+          `${what}: ${targetName(target)} still has a live writer (${live[i].join(', ')}) at the point the lock was released`,
         ],
   );
   if (refused.length > 0) throw new Error(refused.join('\n'));
@@ -213,8 +273,10 @@ const DRIVER = `
   let uncertain = false;
   const afterSpawn = async ({ pid, group, capturePath }) => {
     scratch = dirname(capturePath);
-    writeFileSync(join(dir, 'driver-child-' + process.pid + '.json'), JSON.stringify({ pid, group, capturePath }));
-    if (options.recordChild) writeFileSync(options.recordChild, JSON.stringify({ pid, group, capturePath }));
+    for (const file of [join(dir, 'driver-child-' + process.pid + '.json'), options.recordChild].filter(Boolean)) {
+      writeFileSync(file + '.tmp', JSON.stringify({ pid, group, capturePath }));
+      renameSync(file + '.tmp', file);
+    }
     if (options.afterSpawn === 'kill') process.kill(process.pid, 'SIGKILL');
     if (options.afterSpawn === 'throw') throw new Error('injected');
     if (options.afterSpawn === 'readonly-lock') chmodSync(lockDir, 0o500);
@@ -467,6 +529,14 @@ export interface Plan {
   };
   /** Stays alive this long before it writes its output (to be signalled meanwhile). */
   holdMs?: number;
+  /**
+   * Stays alive until the test calls `releaseHold(dir)` (FU-199), never on a timer: a case
+   * that asserts a writer is STILL alive after waiting for something else must not race the
+   * writer's own clock against a loaded runner. Its lifetime is a connection to its owner (FU-216):
+   * it ends the moment the owner's end closes, whatever became of the owner (exit, zombie, crash)
+   * — never a probe of the owner's pid, which a zombie or a reused pid still answers.
+   */
+  holdUntilRelease?: boolean;
   unresponsive?: 'ignore' | 'sync';
   /** Exits with this code instead of writing the output. */
   exit?: number;
@@ -508,7 +578,10 @@ export function plantFakeNext(root: string): { nextFrom: string; fault: string }
 const [ms, loadsAfterMs, ignoreTerm, startupMs] = process.argv.slice(2).map(Number);
 if (startupMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupMs);
 if (ignoreTerm) process.on('SIGTERM', () => {});
-fs.writeFileSync('linger.pid', String(process.pid));
+// Atomic: a reader that sees linger.pid sees the whole pid (FU-095: an empty file read as pid 0,
+// and kill(0, 0) probes the test's own group, so it never "ended").
+fs.writeFileSync('linger.pid.tmp', String(process.pid));
+fs.renameSync('linger.pid.tmp', 'linger.pid');
 const timer = setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-linger', String(Date.now())); }, 50);
 if (loadsAfterMs > 0) setTimeout(() => require('../server/config.js').default('phase-production-build', process.cwd()).catch(() => {}), loadsAfterMs);
 setTimeout(() => { clearInterval(timer); fs.writeFileSync('linger.done', ''); }, ms);
@@ -530,6 +603,22 @@ const plan = JSON.parse(fs.readFileSync(path.join(dir, 'plan.json'), 'utf8'));
 const load = () => require('../server/config.js').default('phase-production-build', dir);
 const worker = path.join(__dirname, '../build/worker.js');
 (async () => {
+  if (plan.releaseFile && !plan.ownerSocket) process.exit(73); // a hold without an owner: refuse
+  if (plan.ownerSocket) {
+    // The writer's lifetime is this connection (FU-216): the kernel closes the owner's end when the
+    // owner exits in any way, a zombie included, and a refused connection means no owner at all.
+    // A connect the kernel completes is not yet a registered writer: the owner may not have accepted
+    // it (F2). The writer does no work until the owner ACKNOWLEDGES the connection, which it does
+    // only after registering it; an owner that closes instead (a fenced sweep) ends it with 72.
+    await new Promise((resolve) => {
+      const socket = require('net').connect(plan.ownerSocket);
+      socket.on('error', () => process.exit(72));
+      socket.on('close', () => process.exit(72));
+      socket.once('data', () => { socket.unref(); resolve(); });
+      socket.on('data', () => {});
+      socket.once('connect', () => { try { fs.writeFileSync(path.join(dir, 'connected-' + process.pid), ''); } catch {} });
+    });
+  }
   fs.writeFileSync(path.join(dir, 'ran-' + process.pid), '');
   for (let i = 0; i < (plan.rootLoads ?? 1); i += 1) { try { await load(); } catch {} }
   for (const via of plan.workers ?? []) {
@@ -555,6 +644,14 @@ const worker = path.join(__dirname, '../build/worker.js');
   if (plan.unresponsive) fs.writeFileSync('unresponsive.ready', '');
   if (plan.unresponsive === 'sync') { for (;;) {} }
   if (plan.holdMs) await new Promise((r) => setTimeout(r, plan.holdMs));
+  if (plan.releaseFile) {
+    // Held by the test, not by a timer; the owner connection above ends it if the owner is gone,
+    // and so does the fixture directory itself being removed.
+    while (!fs.existsSync(plan.releaseFile)) {
+      if (!fs.existsSync(dir)) process.exit(72);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
   if (plan.exit) process.exit(plan.exit);
   fs.mkdirSync(path.join(dir, '.next/server'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.next/BUILD_ID'), 'fake-' + process.pid);
@@ -607,9 +704,132 @@ wt.Worker = class extends OriginalWorker {
   return { nextFrom: root, fault };
 }
 
-/** A package directory for the fake `next`, with its plan. */
-export function plantFakeApp(dir: string, plan: Plan): void {
+export const HOLD_RELEASE = 'hold-release';
+export const HOLD_SOCKET = 'hold.sock';
+
+/** The owner's side of one held writer: the test process serves the socket the writer connects to. */
+interface Hold {
+  server: Server;
+  /** Writers that ever connected, and those whose end is still open. */
+  seen: number;
+  live: Set<Socket>;
+  marker: string;
+  failure?: Error;
+  done: boolean;
+  /** No new writer is accepted any more (the sweep's fence); registered ones are still joined. */
+  fenced: boolean;
+}
+const holds = new Map<string, Hold>();
+
+function openHold(dir: string): Hold {
+  const socket = join(dir, HOLD_SOCKET);
+  if (Buffer.byteLength(socket) > 100) throw new Error(`${socket}: too long for a unix socket`);
+  const hold: Hold = {
+    server: createServer(),
+    seen: 0,
+    live: new Set(),
+    marker: join(dir, HOLD_RELEASE),
+    done: false,
+    fenced: false,
+  };
+  hold.server.on('connection', (connection) => {
+    connection.on('error', () => {});
+    connection.on('data', () => {});
+    if (hold.fenced) {
+      connection.destroy(); // accepted after the fence: refused, it never worked (no acknowledgement)
+      return;
+    }
+    hold.seen += 1;
+    hold.live.add(connection);
+    // The writer's end closing is the writer ending: the kernel closes it at exit.
+    connection.on('close', () => hold.live.delete(connection));
+    connection.write('1'); // registered: only now may the writer start its work
+  });
+  hold.server.on('error', (error) => {
+    hold.failure = error;
+  });
+  hold.server.unref();
+  hold.server.listen(socket);
+  return hold;
+}
+
+/**
+ * A package directory for the fake `next`, with its plan. With `holdUntilRelease` the test
+ * process becomes the writer's owner (`'test'`), or the case brings its own owner that serves
+ * `HOLD_SOCKET` in `dir` (`'external'`).
+ */
+export function plantFakeApp(dir: string, plan: Plan, owner: 'test' | 'external' = 'test'): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'package.json'), '{"name":"fixture","version":"0.0.0"}');
-  writeFileSync(join(dir, 'plan.json'), JSON.stringify(plan));
+  if (plan.holdUntilRelease && owner === 'test') holds.set(dir, openHold(dir));
+  const hold = plan.holdUntilRelease
+    ? { releaseFile: join(dir, HOLD_RELEASE), ownerSocket: join(dir, HOLD_SOCKET) }
+    : {};
+  writeFileSync(join(dir, 'plan.json'), JSON.stringify({ ...plan, ...hold }));
+}
+
+/** Directories whose writer is connected and has not ended: nothing may be removed under them. */
+export function heldWriters(): string[] {
+  return [...holds].filter(([, hold]) => hold.live.size > 0).map(([dir]) => dir);
+}
+
+const closeHold = (hold: Hold): Promise<void> =>
+  new Promise((resolve) => {
+    hold.done = true;
+    hold.fenced = true;
+    hold.server.close(() => resolve()); // also refuses a writer that starts late
+  });
+
+/**
+ * Lets the fake `next` of `dir` finish and JOINS it: returns only once the writer's end of its
+ * owner connection is closed (it ended), within `ms`, else throws and keeps the writer on
+ * `heldWriters()` — a release the writer has not acted on is not a release (FU-216), so the marker
+ * stays and nothing is removed under it. A directory planted without `holdUntilRelease` is a test
+ * bug and throws, unless `lenient` (the end-of-case sweep over every directory); a lenient release
+ * of a writer that never connected just closes the owner's end, which refuses a late writer.
+ */
+export async function releaseHold(
+  dir: string,
+  options: { lenient?: boolean; ms?: number } = {},
+): Promise<void> {
+  const { lenient = false, ms = 15_000 } = options;
+  const hold = holds.get(dir);
+  if (!hold) {
+    if (lenient) return;
+    throw new Error(`${dir}: planted without holdUntilRelease`);
+  }
+  if (hold.done) return;
+  const deadline = Date.now() + ms;
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
+  // The sweep fences FIRST (FU-216 F2): nothing is accepted from here on, so a writer whose connect
+  // the kernel completed but this process has not yet accepted is refused (it was never
+  // acknowledged, so it did no work), and every writer that WAS accepted is in `live` to be joined.
+  // A strict release still waits for its writer to connect, so it fences only once it has one.
+  if (lenient) hold.fenced = true;
+  try {
+    writeFileSync(hold.marker, '');
+  } catch (error) {
+    if (!(lenient && (error as NodeJS.ErrnoException).code === 'ENOENT')) throw error;
+  }
+  if (!lenient) {
+    while (hold.seen === 0 && !hold.failure && Date.now() < deadline) await tick();
+    if (hold.failure) throw hold.failure;
+    if (hold.seen === 0) throw new Error(`${dir}: no writer connected within ${ms} ms`);
+  }
+  while (hold.live.size > 0 && Date.now() < deadline) await tick();
+  if (hold.live.size > 0) throw new Error(`${dir}: writer still held ${ms} ms after its release`);
+  await closeHold(hold);
+}
+
+/** The end-of-case sweep: release and join every directory, reporting all that failed. */
+export async function releaseAll(dirs: Iterable<string>): Promise<void> {
+  const failures: Error[] = [];
+  for (const dir of dirs) {
+    try {
+      await releaseHold(dir, { lenient: true });
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  if (failures.length > 0) throw new AggregateError(failures, 'held writers not released');
 }

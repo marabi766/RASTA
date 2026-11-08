@@ -15,7 +15,7 @@ import {
   TableScroll,
 } from '@/ui';
 import {
-  transactionStatusLabel,
+  presentTransactionStatus,
   transactionStatusOptions,
   transactionTypeLabel,
   transactionTypeOptions,
@@ -33,7 +33,10 @@ import type {
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { demoModeOf } from '@/lib/demo-mode';
 import { providerNotice } from '@/lib/wallet-fields';
+import type { TopUpFormState } from './form-state';
 import { TopUpForm } from './TopUpForm';
+import { UnresolvedTopUpNotice } from './UnresolvedTopUpNotice';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 import { withContext, type InContext } from '@/lib/page-context';
 import { ContextField } from '@/app/ContextField';
 
@@ -70,6 +73,8 @@ export interface WalletScreenProps {
   readonly query: InContext<TransactionListQuery>;
   readonly csrfToken: string;
   readonly submissionId: string;
+  readonly topUpState?: TopUpFormState;
+  readonly releaseOutcome?: string;
 }
 
 function hrefWith(
@@ -261,7 +266,7 @@ function TransactionRows({
                 <td className="p-3">
                   <StatusBadge
                     status={transaction.status}
-                    label={transactionStatusLabel(transaction.status)}
+                    label={presentTransactionStatus(transaction)}
                   />
                 </td>
                 <td className="p-3 text-content-muted">
@@ -296,8 +301,12 @@ export function WalletScreen({
   query,
   csrfToken,
   submissionId,
+  topUpState,
+  releaseOutcome,
 }: WalletScreenProps) {
   const filtered = Boolean(query.status || query.transactionType);
+  const releaseKey =
+    topUpState && 'releaseToken' in topUpState ? topUpState.releaseToken : undefined;
 
   return (
     <>
@@ -330,15 +339,25 @@ export function WalletScreen({
           </Section>
 
           <Section headingId="top-up" title="افزایش موجودی">
+            <ReleaseFeedback surface="wallet" outcome={releaseOutcome} />
+            {provider.kind !== 'OK' && releaseKey ? (
+              <UnresolvedTopUpNotice
+                walletId={wallet.data.id}
+                csrfToken={csrfToken}
+                releaseToken={releaseKey}
+              />
+            ) : null}
             {provider.kind === 'OK' ? (
               <>
                 {/* Worded here from the provider's `simulated` flag, never the service's
                     English sentence; the «حالت نمایشی» label itself is drawn once, above. */}
                 <Alert tone="info">{providerNotice(provider.data.simulated)}</Alert>
                 <TopUpForm
+                  key={releaseKey ?? submissionId}
                   walletId={wallet.data.id}
                   csrfToken={csrfToken}
                   submissionId={submissionId}
+                  initialState={topUpState}
                 />
               </>
             ) : (

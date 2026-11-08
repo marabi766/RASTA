@@ -2,7 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * What a marketplace saga step gets when it is retried after this service let
@@ -77,6 +77,7 @@ describe('a saga command retried after its stored answer expired', () => {
         sourceType: 'ORDER',
         sourceReference: order,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     return created.body;

@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * A transaction's dispute follows its source (docs/24 Q-138), and the dispute
@@ -81,6 +81,7 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
         sourceType: 'ORDER',
         sourceReference: orderId,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
     expect(created.body.status).toBe('HELD');

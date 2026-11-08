@@ -411,12 +411,12 @@ describe.each(CASES)('$command', (testCase) => {
       [
         'UNKNOWN_OUTCOME',
         { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },
-        { kind: 'UNCONFIRMED', correlationId: 'c4' },
+        { kind: 'UNCONFIRMED', correlationId: 'c4', submissionId: expect.any(String) },
       ],
       [
         'IN_PROGRESS',
         { kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'c5' },
-        { kind: 'UNCONFIRMED', correlationId: 'c5' },
+        { kind: 'UNCONFIRMED', correlationId: 'c5', submissionId: expect.any(String) },
       ],
     ])('says %s without claiming more than it knows', async (_name, result, state) => {
       testCase.send.mockResolvedValue(result);

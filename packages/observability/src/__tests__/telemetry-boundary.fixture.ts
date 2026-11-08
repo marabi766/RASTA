@@ -104,7 +104,10 @@ async function main(): Promise<Record<string, unknown>> {
   if (mode === 'twice') {
     const first = refusalOf(() => initTelemetry({ serviceName: 'telemetry-boundary-fixture' }));
     const afterFirst = leftBehind('http');
+    // A refused start's releases fence a retry until they settled (#749 r2 F1).
+    await shutdownTelemetry();
     const second = refusalOf(() => initTelemetry({ serviceName: 'telemetry-boundary-fixture' }));
+    await shutdownTelemetry();
     for (const name of removeAfter.split(',').filter(Boolean)) delete process.env[name];
     const exporter = new CountingExporter();
     const third = refusalOf(() =>

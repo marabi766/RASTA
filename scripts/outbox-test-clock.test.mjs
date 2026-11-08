@@ -3,10 +3,11 @@
 // this repository; the rest pin each refusal on small fixtures, so a mutant
 // that disables a refusal branch fails here.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import test from 'node:test';
 import ts from 'typescript';
 import {
@@ -21,6 +22,7 @@ import {
   templateHash,
 } from './eligibility-clock-guard.mjs';
 import { stripComments } from './eligibility-clock-sql.mjs';
+import { workspaceDirectories } from './workspace-roots-lib.mjs';
 
 // #452's clock rule (one reading per object literal), from main: the tests at the end use it.
 /**
@@ -91,33 +93,16 @@ function clockHazards(source, file = '') {
   return errors;
 }
 
-const SKIPPED_DIRECTORIES = new Set([
-  'node_modules',
-  'dist',
-  '.next',
-  '.turbo',
-  'coverage',
-  'playwright-report',
-  'test-results',
-]);
-
-function sourceFiles(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    if (SKIPPED_DIRECTORIES.has(entry.name)) return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? sourceFiles(path) : [path];
-  });
-}
-
 /**
  * Test code wherever it lives: every TypeScript file under a `test/` or `e2e/`
  * directory (helpers included) and every spec beside the source, in services,
  * packages, the portal and tests/e2e.
  */
 function testCodeFiles(repository) {
-  return ['services', 'packages', 'apps', 'tests']
-    .filter((top) => readdirSync(repository).includes(top))
-    .flatMap((top) => sourceFiles(join(repository, top)))
+  // Members come from pnpm-workspace.yaml (fails closed), not from four hard-coded roots;
+  // each member is read through the authored-source inventory (git's own file list).
+  return workspaceDirectories(repository)
+    .flatMap((directory) => authoredFiles(join(repository, directory), { base: repository }))
     .map((path) => relative(repository, path))
     .filter(
       (path) =>
@@ -165,6 +150,8 @@ function repository(files, run) {
   const dir = mkdtempSync(join(tmpdir(), 'eligibility-guard-'));
   const base = {
     'package.json': '{"name":"fixture-root","scripts":{}}',
+    'pnpm-workspace.yaml':
+      "packages:\n  - 'apps/*'\n  - 'services/*'\n  - 'packages/*'\n  - 'tests/*'\n",
     'services/sample/package.json': '{"name":"@rasta/sample"}',
     'services/sample/prisma/schema.prisma': [
       'model Hold {',
@@ -876,7 +863,10 @@ test('claim SQL retains the unqualified transaction clock required by the bounda
   const source = readFileSync(join(root, 'packages/nest-common/src/outbox/outbox-sql.ts'), 'utf8');
   const start = source.indexOf('export async function claimPendingSql');
   const claim = source.slice(start, source.indexOf('export async function', start + 1));
-  assert.ok(claim.includes('<= now()'), 'claim SQL must use unqualified now()');
+  assert.ok(claim.includes('<= ${OUTBOX_NOW}'), 'claim SQL must use typed UTC time');
+  const clock = /export const OUTBOX_NOW = `([\s\S]*?)`;/.exec(source)?.[1] ?? '';
+  assert.ok(clock.includes('jsonb_populate_record('), 'typed through the table');
+  assert.ok(clock.includes("now() AT TIME ZONE 'UTC'"), 'clock must use unqualified now()');
   assert.doesNotMatch(
     claim,
     /pg_catalog\.now|CURRENT_TIMESTAMP|(?:transaction|statement|clock)_timestamp/i,
@@ -933,6 +923,16 @@ test('the clock rule scans test code beside the source, in packages, the portal 
       'tests/e2e/specs/sample.e2e-spec.ts',
       'tests/e2e/src/fixture.ts',
     ];
+    // The fixture declares its workspace like the real repository: members are
+    // what pnpm-workspace.yaml names, each with a manifest.
+    writeFileSync(
+      join(fixture, 'pnpm-workspace.yaml'),
+      "packages:\n  - 'apps/*'\n  - 'services/*'\n  - 'packages/*'\n  - 'tests/*'\n",
+    );
+    for (const member of ['services/sample-service', 'packages/sample', 'apps/web', 'tests/e2e']) {
+      mkdirSync(join(fixture, member), { recursive: true });
+      writeFileSync(join(fixture, member, 'package.json'), '{}');
+    }
     for (const file of [...files, 'services/sample-service/src/sample.service.ts']) {
       mkdirSync(join(fixture, file, '..'), { recursive: true });
       writeFileSync(join(fixture, file), twice);
@@ -946,6 +946,28 @@ test('the clock rule scans test code beside the source, in packages, the portal 
       new Set(files),
     );
   } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('test-code discovery never descends into git-ignored generated output (FU-090)', () => {
+  // `db:generate` rewrites src/generated while checks run: a directory listed a moment
+  // ago can be gone (ENOENT). A directory that cannot be read stands in for that: the
+  // walk must not open it, wherever it sits, and must still find the authored spec.
+  const fixture = mkdtempSync(join(tmpdir(), 'outbox-clock-generated-'));
+  const unreadable = join(fixture, 'services/sample-service/src/generated/prisma');
+  try {
+    // Members come from pnpm-workspace.yaml (FU-028 reader fails closed without it).
+    writeFileSync(join(fixture, 'pnpm-workspace.yaml'), "packages:\n  - 'services/*'\n");
+    mkdirSync(unreadable, { recursive: true });
+    writeFileSync(join(fixture, 'services/sample-service/package.json'), '{}');
+    mkdirSync(join(fixture, 'services/sample-service/src/test'), { recursive: true });
+    writeFileSync(join(fixture, 'services/sample-service/src/test/a.ts'), 'export {};\n');
+    chmodSync(unreadable, 0o000);
+    if (process.getuid?.() === 0) return; // root reads it anyway: nothing to prove
+    assert.deepEqual(testCodeFiles(fixture), ['services/sample-service/src/test/a.ts']);
+  } finally {
+    chmodSync(unreadable, 0o755);
     rmSync(fixture, { recursive: true, force: true });
   }
 });

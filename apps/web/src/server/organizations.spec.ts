@@ -166,11 +166,11 @@ describe('updateOrganization', () => {
   it('maps a service field error back onto the field that caused it', async () => {
     const { impl } = answering(
       {
-        code: 'VALIDATION_ERROR',
+        code: 'VALIDATION_FAILED',
         message: 'invalid',
         details: [{ path: 'name', message: 'Name already in use' }],
       },
-      422,
+      400,
     );
 
     const result = await withFetch(impl, () =>
