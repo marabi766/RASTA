@@ -14,6 +14,7 @@ export function patternRefinement(pattern: RegExp, message: string): z.core.$Zod
   // Own the regex: a caller changing the supplied RegExp must not change validation.
   const owned = new RegExp(pattern.source, pattern.flags);
   const predicate = (value: string): boolean => owned.test(value);
+  // eslint-disable-next-line zod/coercion-boundary -- Reviewed predicate: only RegExp#test on the owned regex above; no conversion, no write to the value.
   const check = z.refine<string>(predicate, { message });
   PATTERN_REFINEMENTS.set(check, { pattern: owned, predicate, unchanged: unchangedCheck(check) });
   return check;

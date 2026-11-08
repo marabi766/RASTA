@@ -98,7 +98,7 @@ const pins = {
     '494b7b001527a51ca94be8b1241faabb61bec293b849aac6a564a4c1bf0acf87',
   ],
   'packages/contracts/src/common/pattern-refinement.ts':
-    '0ef5ec0e5383f56e34e9d7b96fb7206a9bf301ccbf1a168330a0177270e442c8',
+    '8cf337a699b83791b252e502de334b86ac4aa7ee809ccdd24360200b47db8adf',
   'packages/contracts/src/common/text.ts':
     '34eafe5378f3a41f3aaa19510f970df9d520119a90a000fd2a67b7d4b510fbe7',
   'packages/contracts/src/index.ts': [

@@ -544,6 +544,7 @@ describe('toJsonSchema', () => {
   });
 
   it('FU-152 refuses a forged published-pattern marker on a mutating check', () => {
+    // eslint-disable-next-line zod/coercion-boundary -- Diagnostic schema: a mutating check must never be published as a pattern.
     const mutating = z.check<string>((payload) => {
       payload.value = payload.value.trim();
     });

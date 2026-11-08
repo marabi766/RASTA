@@ -115,33 +115,58 @@ const SCHEMA_VALIDATORS = new Set(
     ' ',
   ),
 );
+// Signatures are selected by module/version, then routed through one analyzer.
+const CALLBACK_REGISTRY = [
+  { modules: /^zod(?:\/|$)/, names: 'preprocess', slot: 0, strict: true },
+  {
+    modules: /^zod(?:\/|$)/,
+    names: 'transform overwrite refine refinement superRefine custom check',
+    slot: 0,
+  },
+  { modules: /^zod(?:\/v3(?:\/|$)|$)/, names: 'effect transformer', fields: 1, input: 0 },
+];
 const CALLBACK_APIS = new Set(['preprocess', 'transform', 'overwrite']);
+
 // Callback slots and definition fields are capabilities, independent of call/new syntax.
-const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
+const callbackSignature = ({ name, owner, raw, receiverSchema, zodSource } = {}) => {
   if (!raw && !receiverSchema) return {};
   const init = name === 'init';
   const legacyCreate = name === 'create' && owner === 'ZodEffects';
   if (name === 'create' || init) name = owner;
-  if (name === 'createWithPreprocess') return { slot: 0 };
+  if (name === 'createWithPreprocess') return { slot: 0, strict: true };
   const api = name?.replace(/^_/, '');
-  const offset = raw && name?.startsWith('_') && ['transform'].includes(api) ? 1 : 0;
+  const entry =
+    (!receiverSchema || CALLBACK_APIS.has(api)) &&
+    CALLBACK_REGISTRY.find(
+      (item) => item.names.split(' ').includes(api) && (!zodSource || item.modules.test(zodSource)),
+    );
+  const offset =
+    raw && name?.startsWith('_') && ['transform', 'custom', 'refine'].includes(api) ? 1 : 0;
   return {
-    slot: CALLBACK_APIS.has(api) ? offset : undefined,
+    slot: entry?.slot === undefined ? undefined : entry.slot + offset,
+    strict: entry?.strict,
+    optional: api === 'custom',
+    input: legacyCreate ? 0 : entry?.input,
+    metadata: !!entry && ['refine', 'refinement', 'superRefine', 'custom', 'check'].includes(api),
     guardOptions: receiverSchema
       ? { min: 1, max: 1, length: 1, regex: 1, refine: 1, nonempty: 0 }[api]
       : undefined,
     fields:
-      api === 'codec'
+      entry?.fields ??
+      (entry && ['refine', 'refinement', 'superRefine', 'custom', 'check'].includes(api)
+        ? 1 + offset
+        : undefined) ??
+      (api === 'codec'
         ? 2
         : ['clone', 'constructor'].includes(api)
           ? (name === 'clone' && !receiverSchema) || init
             ? 1
             : 0
-          : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|CheckOverwrite)/.test(api)
+          : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|Custom|Check)/.test(api)
             ? init || legacyCreate
               ? 1
               : 0
-            : undefined,
+            : undefined),
   };
 };
 const unwrap = (node) => {
@@ -300,6 +325,7 @@ export default {
         return container ? { container, ambiguous: result.ambiguous } : undefined;
       }
       return {
+        zodSource: result.zodSource,
         receiver: result.schema ? receiver : undefined,
         raw:
           (result.raw ||
@@ -373,7 +399,7 @@ export default {
         for (const def of v.defs) {
           if (imported(def)) {
             const name = def.node.imported?.name ?? def.node.imported?.value;
-            return { raw: capability(name), name };
+            return { raw: capability(name), name, zodSource: def.parent.source.value };
           }
           if (def.type === 'Variable') {
             let result = origin(def.node.init, next);
@@ -419,7 +445,7 @@ export default {
       }
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         if (globalName(node.callee, 'require') && zodModule(constant(node.arguments[0])))
-          return { raw: true };
+          return { raw: true, zodSource: constant(node.arguments[0]) };
         const factory = origin(node.callee, seen);
         if (factory) {
           if (factory.elementMethod) return { schema: true, ambiguous: factory.ambiguous };
@@ -436,12 +462,13 @@ export default {
             ) && input?.schema;
           return {
             raw: false,
+            zodSource: factory.zodSource,
             schema: !!inputSchema || (!data && !!(factory.raw || factory.receiverSchema)),
           };
         }
       }
       if (node.type === 'ImportExpression' && zodModule(constant(node.source)))
-        return { raw: true };
+        return { raw: true, zodSource: constant(node.source) };
     };
     const walk = (node, visit) => {
       if (!node) return;
@@ -740,7 +767,9 @@ export default {
         }
         const callbacks = [];
         const callbackInputs = new Map();
-        if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
+        const callbackModes = new Map();
+        if (api.slot !== undefined && !(api.optional && absent(node.arguments[api.slot])))
+          callbacks.push(node.arguments[api.slot]);
         // JavaScript keeps the last of duplicate keys; a definition field named
         // twice has no single readable value, so it is refused, never proven.
         const prop = (definition, name) => {
@@ -784,11 +813,20 @@ export default {
             fields(def.node.init, seen, input);
             return;
           }
+          if (
+            api.metadata &&
+            (typeof constant(definition) === 'string' ||
+              definition.type === 'TemplateLiteral' ||
+              (definition.type === 'CallExpression' &&
+                reviewedHelper(definition.callee) === 'string'))
+          )
+            return;
           if (definition.type !== 'ObjectExpression') {
             if (api.fields !== index) report(definition, 'preprocess');
             return;
           }
           for (const field of definition.properties) {
+            if (key(field) === 'when' && absent(field.value)) continue;
             if (field.type === 'SpreadElement' && absent(field.argument)) continue;
             if (
               field.type === 'SpreadElement' ||
@@ -800,15 +838,29 @@ export default {
               continue;
             }
             if (
-              ['transform', 'preprocess', 'tx', 'decode', 'encode', 'reverseTransform'].includes(
-                key(field),
-              )
+              [
+                'transform',
+                'preprocess',
+                'refinement',
+                'fn',
+                'when',
+                'tx',
+                'decode',
+                'encode',
+                'reverseTransform',
+              ].includes(key(field))
             ) {
               callbacks.push(field.value);
+              const type = constant(prop(definition, 'type'));
+              callbackModes.set(
+                field.value,
+                key(field) === 'preprocess' ||
+                  (key(field) === 'transform' && type === 'preprocess'),
+              );
               if (
-                key(field) === 'transform' &&
+                ['transform', 'refinement'].includes(key(field)) &&
                 input &&
-                constant(prop(definition, 'type')) === 'transform'
+                ['transform', 'refinement'].includes(type)
               )
                 callbackInputs.set(field.value, input);
               if (factory.name === 'codec')
@@ -826,9 +878,7 @@ export default {
           fields(
             node.arguments[api.fields],
             new Set(),
-            factory.name === 'create' && factory.owner === 'ZodEffects'
-              ? node.arguments[0]
-              : undefined,
+            api.input === undefined ? undefined : node.arguments[api.input],
           );
         if (!callbacks.length) return;
         let callback;
@@ -846,7 +896,7 @@ export default {
         };
         // Follow local helper bodies; opaque helpers cannot prove that conversion
         // is guarded. Only the audited Number helper may call Number itself.
-        const strict = factory.name === 'preprocess';
+        let strict;
         // Only metadata may accompany a proof of a schema's output type.
         // Checks/when callbacks can rewrite a value after primitive validation.
         const proofOptions = (raw) => {
@@ -1320,6 +1370,7 @@ export default {
           return true;
         };
         for (const raw of callbacks) {
+          strict = callbackModes.get(raw) ?? api.strict;
           callback = unwrap(raw);
           callbackFn = localFunction(callback);
           callbackInput = callbackInputs.get(raw);

@@ -245,9 +245,9 @@ const positives = [
 import { Linter } from 'eslint';
 import assert from 'node:assert/strict';
 const linter = new Linter();
-const messages = (code) =>
+const messages = (code, module) =>
   linter.verify(
-    z + code,
+    (module ? `import * as z from '${module}'; ` : z) + code,
     [
       {
         languageOptions: { parser: tseslint.parser },
@@ -1331,6 +1331,60 @@ it('FU-069b respects compiler aliases and module suffixes', () => {
   }
 });
 
+// FU-068 direct APIs: namespace slots and executable constructor definitions.
+for (const code of [
+  `z.effect(z.unknown(),{type:'transform',transform:Number});`,
+  `z.transformer(z.unknown(),{type:'preprocess',transform:Number});`,
+  `z.transformer(z.unknown(),{type:'transform',transform:(v,ctx,n=Number(v))=>n});`,
+  `z.refine(v=>{v.n=Number(v.n);return true});`,
+  `z.superRefine((v,ctx,n=Number(v))=>{});`,
+  `z.check(p=>{p.value=Number(p.value)});`,
+  `z.custom(v=>{v.n=Number(v.n);return true});`,
+  `new z.ZodCustom({type:'custom',fn:Number});`,
+  `z.ZodCustom.init({}, {type:'custom',fn:Number});`,
+  `new z.ZodEffects({schema:z.unknown(),effect:{type:'refinement',refinement:Number}});`,
+  `new z.core.$ZodCheckOverwrite({check:'overwrite',tx:v=>v,when:p=>{p.value=Number(p.value);return false}});`,
+  `new z.core.$ZodCheckMinLength({minimum:0,when:p=>{p.value=Number(p.value);return false}});`,
+  `z.refine(()=>true,{when:(p,n=Number(p.value))=>true});`,
+  `z.core._refine(z.ZodCustom,Number);`,
+  `z.core._custom(z.ZodCustom,Number);`,
+  `z.core._superRefine((v,ctx,n=Number(v))=>{});`,
+  `z.core._check(p=>{p.value=Number(p.value)});`,
+  `z.effect(z.string(),{type:'preprocess',transform:v=>typeof v==='string'?Number(v):v});`,
+  `z.ZodEffects.createWithPreprocess(v=>typeof v==='string'?Number(v):v,z.number());`,
+])
+  it(`FU-068 direct callback refuses: ${code}`, () => assert.ok(messages(code).length, code));
+for (const code of [
+  `z.custom();`,
+  `z.custom(v=>typeof v==='string');`,
+  `z.superRefine((v,ctx)=>ctx.addIssue({code:'custom'}));`,
+  `z.effect(z.string(),{type:'transform',transform:Number});`,
+  `z.ZodEffects.create(z.string(),{type:'refinement',refinement:Number});`,
+  `z.effect(z.unknown(),{type:'preprocess',transform:v=>typeof v==='string'?v.trim():v});`,
+])
+  it(`FU-068 direct callback preserves: ${code}`, () => assert.deepEqual(messages(code), []));
+
+for (const [module, code] of [
+  ['zod/v3', `z.effect(z.unknown(),{type:'transform',transform:Number});`],
+  ['zod/v3', `z.transformer(z.unknown(),{type:'preprocess',transform:Number});`],
+  ['zod/mini', `z.custom(Number);`],
+  ['zod/mini', `z.check(p=>{p.value=Number(p.value)});`],
+  ['zod/v4/core', `z._refine(z.$ZodCustom,Number);`],
+])
+  it(`FU-068 module callback refuses: ${module} ${code}`, () =>
+    assert.ok(messages(code, module).length, code));
+it('FU-068 optional when shares the absence proof', () => {
+  assert.deepEqual(
+    messages(`new z.core.$ZodCheckOverwrite({check:'overwrite',tx:v=>v,when:undefined});`),
+    [],
+  );
+  assert.ok(
+    messages(
+      `function f(undefined){new z.core.$ZodCheckOverwrite({check:'overwrite',tx:v=>v,when:undefined});}`,
+    ).length,
+  );
+});
+
 // PR #730 r1 F1: only a receiverless callback takes the pipe's upstream as its
 // input; a method-form callback's input is its own receiver chain.
 for (const code of [
@@ -1356,6 +1410,7 @@ for (const code of [
 // field named twice is refused instead of read first-match.
 for (const code of [
   `z.ZodEffects.create(z.string(), {type:'transform', transform:Number, type:'preprocess'});`,
+  `z.ZodEffects.create(z.string(), {type:'refinement', refinement:Number, type:'preprocess'});`,
   `z.ZodEffects.create(z.string(), {type:'transform', transform:v=>v.trim(), 'type':'transform'});`,
   `new z.ZodEffects({schema:z.string(), effect:{type:'transform',transform:Number}, schema:z.unknown()});`,
   `new z.ZodCodec({type:'pipe',in:z.string(),out:z.number(),transform:Number,reverseTransform:v=>v,in:z.unknown()});`,
