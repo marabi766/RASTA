@@ -38,6 +38,9 @@ jest.mock('@/server/project-commands', () => ({
 jest.mock('@/server/demand-commands', () => ({
   ...jest.requireActual('@/server/demand-commands'),
 }));
+jest.mock('@/server/project-need-commands', () => ({
+  ...jest.requireActual('@/server/project-need-commands'),
+}));
 jest.mock('@/server/supplier-commands', () => ({
   ...jest.requireActual('@/server/supplier-commands'),
 }));
@@ -47,6 +50,8 @@ const pending =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
 const projects = require('@/server/project-commands') as typeof import('@/server/project-commands');
 const demands = require('@/server/demand-commands') as typeof import('@/server/demand-commands');
+const needs =
+  require('@/server/project-need-commands') as typeof import('@/server/project-need-commands');
 const suppliers =
   require('@/server/supplier-commands') as typeof import('@/server/supplier-commands');
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -129,6 +134,10 @@ const OWN_MECHANISM: Readonly<
     'server/unresolved-request.ts',
   ],
   'apps/web/src/app/projects/actions.ts': ['SERVER_STORE', 'server/unresolved-request.ts'],
+  'apps/web/src/app/projects/[id]/need-add-actions.ts': [
+    'SERVER_STORE',
+    'server/unresolved-request.ts',
+  ],
   'apps/web/src/app/wallet/actions.ts': ['SERVER_STORE', 'server/top-up-request.ts'],
   'apps/web/src/app/assets/actions.ts': ['SERVER_STORE', 'server/create-request.ts'],
   'apps/web/src/app/drivers/actions.ts': ['SERVER_STORE', 'server/create-request.ts'],
@@ -167,6 +176,13 @@ const SERVER_STORE: Readonly<
       releaseUnresolvedCreate: 'Explicit reconciliation; compare-and-delete, no domain write.',
     },
     tests: 'app/projects/actions.spec.ts',
+  },
+  'apps/web/src/app/projects/[id]/need-add-actions.ts': {
+    writes: ['submitAddNeed'],
+    exemptions: {
+      releaseUnresolvedNeed: 'Explicit reconciliation; compare-and-delete, no domain write.',
+    },
+    tests: 'app/projects/[id]/need-actions.spec.ts',
   },
   'apps/web/src/app/procurement/demands/demand-actions.ts': {
     writes: ['submitDemandRequest'],
@@ -323,6 +339,7 @@ type StoreMode = 'REPLAY' | 'RECONCILE' | 'PREVIOUS';
 // prettier-ignore
 const STORE_BEHAVIOURS: Readonly<Record<string, Readonly<Record<string, StoreMode>>>> = {
   'apps/web/src/app/projects/actions.ts': { submitCreateProject: 'REPLAY' },
+  'apps/web/src/app/projects/[id]/need-add-actions.ts': { submitAddNeed: 'REPLAY' },
   'apps/web/src/app/procurement/demands/demand-actions.ts': { submitDemandRequest: 'REPLAY' },
   'apps/web/src/app/wallet/actions.ts': { submitTopUp: 'PREVIOUS' },
   'apps/web/src/app/assets/actions.ts': { submitRegisterAsset: 'PREVIOUS' },
@@ -375,7 +392,11 @@ describe.each(STORE_WRITES)('$label (SERVER_STORE behaviour)', ({ action, export
       'title=test&operationType=test&locationDescription=test&scopeOfWork=test&estimatedCost=1000&productId=PRD_01J00000000000000000000000&quantity=1&amountMinor=1000',
     )) form.set(key, value);
     form.set('replay', exported === 'submitCreateProject'
-      ? mintCreateStamp(session, submissionId) : mintDemandStamp(session, submissionId));
+      ? mintCreateStamp(session, submissionId)
+      : exported === 'submitAddNeed'
+        ? needs.mintNeedStamp(session, submissionId, 'ID_1', 1)
+        : mintDemandStamp(session, submissionId));
+    if (exported === 'submitAddNeed') form.set('description', 'شرح نیاز آزمون');
     jest.spyOn(suppliers, 'openSupplierBaseline').mockImplementation((_session, _token, command) => ({
       command, supplierId: 'ID_1',
       qualificationId: /^(APPROVE|REJECT)/.test(command) ? 'QUA_1' : null,
@@ -398,6 +419,7 @@ describe.each(STORE_WRITES)('$label (SERVER_STORE behaviour)', ({ action, export
     } as const;
     const projectSend = jest.spyOn(projects, 'createProject').mockResolvedValue(refusal);
     const demandSend = jest.spyOn(demands, 'submitDemand').mockResolvedValue(refusal);
+    const needSend = jest.spyOn(needs, 'addNeed').mockResolvedValue(refusal);
     const network = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unexpected dispatch'));
     const ids = Array.from({ length: Math.max(0, action.length - 2) }, (_, i) => `ID_${i + 1}`);
     const previous = { kind, submissionId, correlationId: 'COR-FIRST' };
@@ -407,7 +429,7 @@ describe.each(STORE_WRITES)('$label (SERVER_STORE behaviour)', ({ action, export
       kind: 'UNCONFIRMED', ...(mode === 'PREVIOUS' ? { correlationId: 'COR-FIRST' } : {}),
     });
     storeSession = session;
-    projectSend.mockClear(); demandSend.mockClear(); network.mockClear();
+    projectSend.mockClear(); demandSend.mockClear(); needSend.mockClear(); network.mockClear();
     reserve.mockResolvedValue({ kind: 'HELD', reason: 'OTHER_REQUEST', request: record });
     read.mockResolvedValue({
       kind: 'PENDING', now: Date.now(),
@@ -418,6 +440,7 @@ describe.each(STORE_WRITES)('$label (SERVER_STORE behaviour)', ({ action, export
     });
     expect(projectSend).not.toHaveBeenCalled();
     expect(demandSend).not.toHaveBeenCalled();
+    expect(needSend).not.toHaveBeenCalled();
     expect(network).not.toHaveBeenCalled();
   });
 });

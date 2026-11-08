@@ -18,6 +18,7 @@ import type { GatewayEnv } from '../config/env';
 import { SERVICE_NAMES, type ServiceUrls } from '../config/routes';
 import { GatewayController } from './gateway.controller';
 import { ProxyService, READINESS_PATH, type ProxyOptions } from './proxy.service';
+import { RevocationGate } from '../revocation/revocation-gate';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
 
 /**
@@ -72,6 +73,8 @@ interface Upstream {
   ready: boolean;
   /** The gateway's readiness checks received. */
   checks: number;
+  /** Answers `GET /health/ready` instead of `ready`, when a test sets it. */
+  readyAnswer?: Behaviour;
   close: () => Promise<void>;
 }
 
@@ -85,6 +88,14 @@ async function startUpstream(): Promise<Upstream> {
   const server: Server = createServer((req, res) => {
     if (req.url === READINESS_PATH) {
       upstream.checks += 1;
+      if (upstream.readyAnswer)
+        return upstream.readyAnswer({
+          method: req.method ?? '',
+          url: req.url,
+          headers: req.headers,
+          res,
+          abandoned: false,
+        });
       return answer(res, upstream.ready ? 200 : 503, { ready: upstream.ready });
     }
     const exchange: Exchange = {
@@ -199,7 +210,7 @@ async function startGateway(
     // These specs are about recovery. Who may open a circuit: circuit-organizations.spec.ts.
     proxyOptions,
   );
-  const controller = new GatewayController(proxy, limiter, PLATFORM_ENV);
+  const controller = new GatewayController(proxy, limiter, PLATFORM_ENV, RevocationGate.off());
   const filter = new AllExceptionsFilter(quietLogger as never);
 
   const app = new ExpressAdapter().getInstance();
@@ -423,6 +434,27 @@ describe('HALF_OPEN admits exactly one probe', () => {
       open: false,
       state: 'CLOSED',
     });
+  });
+
+  it('a 200 readiness answer whose body passes the byte ceiling is not ready (PR #722 r1 F1)', async () => {
+    gateway = await startGateway(upstream, {
+      timeoutMs: 4000,
+      failureThreshold: 1,
+      resetAfterMs: COOLDOWN_MS,
+    });
+    await openThenCool(upstream, gateway);
+    upstream.behaviour = ({ res }) => answer(res, 400, { code: 'VALIDATION_FAILED' });
+    // Chunked, no content-length: only counting the bytes read can refuse it.
+    upstream.readyAnswer = ({ res }) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      const chunk = Buffer.alloc(1024 * 1024, 0x20);
+      for (let i = 0; i < 9; i += 1) res.write(chunk);
+      res.end('{}');
+    };
+
+    expect((await gateway.send(USERS).answer).status).toBe(400);
+    expect(upstream.checks).toBe(2);
+    expect(gateway.proxy.circuitStates().identity?.state).toBe('HALF_OPEN');
   });
 });
 

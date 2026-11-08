@@ -375,6 +375,56 @@ describe('a success with no body', () => {
     expect(response.correlationId).toEqual(expect.any(String));
   });
 
+  it('takes no success heard after the deadline: a late 204 is an unknown outcome (PR #722 r2 F2)', async () => {
+    let now = 1_000;
+    const clock = jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const late = (async () => {
+      now += 60_000;
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+    try {
+      const error = await callGatewayWrite({
+        baseUrl: GATEWAY,
+        path: '/v1/memberships/MBR_1/revoke',
+        method: 'POST',
+        credential: CREDENTIAL,
+        timeoutMs: 100,
+        fetchImpl: late,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayOutcomeUnknownError);
+      expect(error).toMatchObject({ reason: 'TRANSPORT' });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('takes no success whose parsing crossed the deadline (PR #722 r2 F2)', async () => {
+    let now = 1_000;
+    const clock = jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const nativeParse = JSON.parse.bind(JSON);
+    const crossing = jest.spyOn(JSON, 'parse').mockImplementation(((text: string) => {
+      now += 60_000;
+      return nativeParse(text) as unknown;
+    }) as typeof JSON.parse);
+    try {
+      const error = await callGateway({
+        baseUrl: GATEWAY,
+        path: '/v1/assets',
+        credential: CREDENTIAL,
+        timeoutMs: 100,
+        fetchImpl: (async () =>
+          new Response('{"id":"A"}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })) as unknown as typeof fetch,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GatewayOutcomeUnknownError);
+    } finally {
+      crossing.mockRestore();
+      clock.mockRestore();
+    }
+  });
+
   it('reads an explicitly empty 200 the same way', async () => {
     const response = await callGatewayWrite({
       baseUrl: GATEWAY,

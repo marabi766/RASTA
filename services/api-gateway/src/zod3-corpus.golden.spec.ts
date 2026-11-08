@@ -63,6 +63,9 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
     {
       SERVICE_NAME: 'Sample',
       PORT: 0.5,
+      // #381's two required settings, valid: the case is about PORT and its refinement.
+      GATEWAY_REVOCATION_LIST: 'off',
+      KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: '10',
       REDIS_URL: 'x',
       OIDC_ISSUER_URL: 'https://example.test',
       OIDC_JWKS_URI: 'https://example.test',
@@ -92,6 +95,9 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
     {
       SERVICE_NAME: 'Sample',
       PORT: Number.POSITIVE_INFINITY,
+      // #381's two required settings, valid: the case is about PORT and its refinement.
+      GATEWAY_REVOCATION_LIST: 'off',
+      KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: '10',
       REDIS_URL: 'x',
       OIDC_ISSUER_URL: 'https://example.test',
       OIDC_JWKS_URI: 'https://example.test',
@@ -124,6 +130,9 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
       SERVICE_NAME: 'Sample',
       SERVICE_VERSION: 'Sample',
       PORT: 1,
+      // #381's two required settings, valid: the case is about PORT and its refinement.
+      GATEWAY_REVOCATION_LIST: 'off',
+      KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS: '10',
       OTEL_EXPORTER_OTLP_ENDPOINT: 'https://example.test',
       OTEL_TRACES_ENABLED: 'Sample',
       OTEL_SERVICE_NAMESPACE: 'Sample',

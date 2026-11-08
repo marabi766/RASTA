@@ -1024,3 +1024,87 @@ describe('KeycloakAdminClient: a redirect is never followed, and never an answer
     expect(source.match(/internalFetch\(/g)).toHaveLength(1);
   });
 });
+
+describe('KeycloakAdminClient: decoding and the deadline on every return (PR #722 r2 F2/F3)', () => {
+  const originalFetch = globalThis.fetch;
+  const bom = (body: unknown, init?: ResponseInit) =>
+    new Response(
+      new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(JSON.stringify(body))]),
+      init,
+    );
+  let admin: () => Response;
+  let onAdmin: () => void = () => undefined;
+  beforeEach(() => {
+    onAdmin = () => undefined;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith('/token')) {
+        return bom({ access_token: 'admin-token', expires_in: 300 });
+      }
+      onAdmin();
+      return admin();
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
+
+  const client = () =>
+    new KeycloakAdminClient({
+      baseUrl: 'http://keycloak.test',
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-tests',
+      enabled: true,
+      requestTimeoutMs: 100,
+    });
+
+  it('reads a BOM-prefixed token and account list as Fetch does', async () => {
+    admin = () => bom([{ id: 'kc-1', username: 'applicant', enabled: true, attributes: {} }]);
+    await expect(client().findAccountByUsername('applicant')).resolves.toMatchObject({
+      id: 'kc-1',
+    });
+  });
+
+  it('takes no account list whose parsing crossed the deadline', async () => {
+    admin = () => new Response(JSON.stringify([]));
+    const keycloak = client();
+    let now = 1_000;
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const parse = JSON.parse.bind(JSON);
+    jest.spyOn(JSON, 'parse').mockImplementation(((text: string) => {
+      // The token's parse stays in time; the account list's crosses.
+      if (text.startsWith('[')) now += 60_000;
+      return parse(text) as unknown;
+    }) as typeof JSON.parse);
+    await expect(keycloak.findAccountByUsername('nobody')).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      cause: { reason: 'deadline' },
+    });
+  });
+
+  it('takes no header-only answer heard after the deadline: a late 201 is the deadline’s', async () => {
+    admin = () =>
+      new Response(null, {
+        status: 201,
+        headers: { location: 'http://keycloak.test/admin/realms/rasta/users/0b5c-11ef' },
+      });
+    let now = 1_000;
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
+    onAdmin = () => {
+      now += 60_000;
+    };
+    await expect(
+      client().createUser({
+        username: 'applicant',
+        email: 'applicant@example.test',
+        firstName: 'A',
+        lastName: 'B',
+        userId: 'USR_1',
+      }),
+    ).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      cause: { operation: 'admin', reason: 'deadline' },
+    });
+  });
+});

@@ -1789,7 +1789,14 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
     sql: [
       `INSERT INTO "ledger_account" ("id", "organization_id", "account_type", "account_code", "purpose", "currency", "created_by")
        VALUES ('ACC_MIGCHECK_PAYER', 'ORG-MIGCHECK', 'LIABILITY', 'MIGCHECK-PAYER', 'WALLET', 'IRR', 'USR-MIGCHECK'),
-              ('ACC_MIGCHECK_PAYEE', 'ORG-MIGCHECK-PAYEE', 'LIABILITY', 'MIGCHECK-PAYEE', 'WALLET', 'IRR', 'USR-MIGCHECK');`,
+              ('ACC_MIGCHECK_PAYEE', 'ORG-MIGCHECK-PAYEE', 'LIABILITY', 'MIGCHECK-PAYEE', 'WALLET', 'IRR', 'USR-MIGCHECK'),
+              ('ACC_MIGCHECK_CLEARING', 'ORG-MIGCHECK', 'ASSET', 'MIGCHECK-CLEARING', 'PAYMENT_CLEARING', 'IRR', 'USR-MIGCHECK');
+       -- The payer's wallet holds what the rows debit: it never sums below zero (FU-228).
+       INSERT INTO "journal" ("id", "organization_id", "journal_type", "description", "posted_at", "posted_by", "correlation_id")
+       VALUES ('JRN_MIGCHECK_FUND', 'ORG-MIGCHECK', 'WALLET_TOP_UP', 'probe', now(), 'USR-MIGCHECK', 'COR-MIGCHECK');
+       INSERT INTO "ledger_entry" ("id", "journal_id", "account_id", "organization_id", "direction", "amount_minor", "currency", "posted_at")
+       VALUES ('ENT_MIGCHECK_FUND_D', 'JRN_MIGCHECK_FUND', 'ACC_MIGCHECK_CLEARING', 'ORG-MIGCHECK', 'DEBIT', 100000, 'IRR', now()),
+              ('ENT_MIGCHECK_FUND_C', 'JRN_MIGCHECK_FUND', 'ACC_MIGCHECK_PAYER', 'ORG-MIGCHECK', 'CREDIT', 100000, 'IRR', now());`,
       CREATION_PROOF_ROW('BORNE'),
       CREATION_PROOF_ROW('NOJOURNAL', { journalId: 'JRN_MIGCHECK_GONE' }),
       CREATION_PROOF_ROW('UNSETTLED', { status: 'CREATED' }),
@@ -1912,8 +1919,9 @@ const SETTLEMENT_CREATION_PROOF_STEPS = [
   },
   {
     label: 'creation proof: the last probe rows are removed before the chain reversal',
-    sql: `${CREATION_PROOF_REMOVE(['BORNE'])}
-          DELETE FROM "ledger_account" WHERE "id" IN ('ACC_MIGCHECK_PAYER', 'ACC_MIGCHECK_PAYEE');`,
+    sql: `${CREATION_PROOF_REMOVE(['BORNE', 'FUND'])}
+          DELETE FROM "ledger_account"
+           WHERE "id" IN ('ACC_MIGCHECK_PAYER', 'ACC_MIGCHECK_PAYEE', 'ACC_MIGCHECK_CLEARING');`,
   },
 ];
 
@@ -2967,6 +2975,8 @@ export const EXPECTED = {
       'trg_wallet_hold_funded_at_commit',
       'trg_ledger_entry_hold_journal_closed',
       'trg_journal_hold_funding_final',
+      // A wallet or escrow account never sums below zero at commit (FU-228).
+      'trg_ledger_entry_wallet_covered',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: [
@@ -3023,6 +3033,7 @@ export const EXPECTED = {
       'assert_wallet_hold_funded_at_commit',
       'reject_hold_journal_leg',
       'reject_hold_journal_reversal',
+      'assert_wallet_account_covered',
       'reject_obligation_record_truncate',
       'enforce_wallet_hold_reference',
       'reject_wallet_owner_change',

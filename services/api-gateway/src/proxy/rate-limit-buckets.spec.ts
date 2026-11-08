@@ -3,6 +3,7 @@ import { GatewayController } from './gateway.controller';
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
 import type { ProxyService } from './proxy.service';
+import { RevocationGate } from '../revocation/revocation-gate';
 import type { GatewayEnv } from '../config/env';
 
 /**
@@ -89,7 +90,7 @@ const response = () =>
 
 function gateway() {
   const { limiter, clock } = slidingWindowLimiter();
-  const controller = new GatewayController(proxy, limiter, env);
+  const controller = new GatewayController(proxy, limiter, env, RevocationGate.off());
   /** 'ok', or 'limited' for the gateway's 429. */
   const send = async (context: RequestContext, method: string, url: string) => {
     const request = {

@@ -886,3 +886,61 @@ export async function removeRewardRules(ruleIds: readonly string[]): Promise<voi
  * without one (D-150), as only a build that counts nothing sends it so.
  */
 export const ORDER_HOLD_DEADLINE = '2999-01-01T00:00:00.000Z';
+
+/**
+ * Money in a WALLET or ESCROW account a fixture is about to debit by hand (FU-228).
+ *
+ * Such an account never sums below zero at commit (`trg_ledger_entry_wallet_covered`), so a fixture
+ * that moves money out of one it never funded credits the shortfall first, from the same
+ * organization's reward expense in that currency, as the owner. Nothing is written when the account
+ * already holds `amountMinor`, or has another purpose. Like any hand-written leg, it leaves the
+ * wallet row to the next recompute.
+ */
+export async function coverByHand(accountId: string, amountMinor: bigint): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      const [account] = await tx.$queryRawUnsafe<
+        { organization_id: string; currency: string; balance: bigint }[]
+      >(
+        `SELECT a.organization_id, a.currency,
+                COALESCE((SELECT SUM(CASE e.direction WHEN 'CREDIT' THEN e.amount_minor ELSE -e.amount_minor END)
+                            FROM ledger_entry e WHERE e.account_id = a.id), 0)::bigint AS balance
+           FROM ledger_account a WHERE a.id = $1 AND a.purpose IN ('WALLET', 'ESCROW')`,
+        accountId,
+      );
+      if (!account || account.balance >= amountMinor) return;
+      const { organization_id: organizationId, currency } = account;
+      await tx.$executeRawUnsafe(
+        `INSERT INTO ledger_account (id, organization_id, account_type, account_code, purpose, currency, created_by)
+         VALUES ($1, $2, 'EXPENSE', $3, 'REWARD_EXPENSE', $4, 'itest') ON CONFLICT DO NOTHING`,
+        `ACC_${ulid()}`,
+        organizationId,
+        `ITEST-COVER-${ulid()}`,
+        currency,
+      );
+      const journalId = `JRN_COVER_${ulid()}`;
+      await tx.$executeRawUnsafe(
+        `INSERT INTO journal (id, organization_id, journal_type, description, posted_at, posted_by, correlation_id)
+         VALUES ($1, $2, 'REWARD_GRANT', 'covers a hand-written debit', now(), 'itest', 'itest')`,
+        journalId,
+        organizationId,
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO ledger_entry (id, journal_id, account_id, organization_id, direction, amount_minor, currency, posted_at)
+         SELECT 'LGE_' || md5(a.id || $1), $1, a.id, a.organization_id,
+                (CASE WHEN a.id = $2 THEN 'CREDIT' ELSE 'DEBIT' END)::"EntryDirection", $3, a.currency, now()
+           FROM ledger_account a
+          WHERE a.id = $2
+             OR (a.organization_id = $4 AND a.purpose = 'REWARD_EXPENSE' AND a.currency = $5)`,
+        journalId,
+        accountId,
+        amountMinor - account.balance,
+        organizationId,
+        currency,
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}

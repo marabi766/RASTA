@@ -1,4 +1,4 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { z } from 'zod';
 import {
   RastaError,
@@ -6,7 +6,6 @@ import {
   upstreamExchange,
   type InternalTokenService,
 } from '@rasta/nest-common';
-import { readCapped } from '../award/award-source.client';
 import { SERVICE_NAME } from '../config/env';
 import { obligationFactSchema, type ObligationFact } from './obligation-confirm';
 
@@ -115,7 +114,7 @@ export class ObligationSourceClient implements ObligationSource {
           throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
         }
 
-        const text = await readCapped(response, MAX_OBLIGATION_BYTES);
+        const text = await readCappedText(response, MAX_OBLIGATION_BYTES);
         if (text === null) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
         const body: unknown = JSON.parse(text);
 

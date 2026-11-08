@@ -7,6 +7,7 @@ import { GatewayController } from '../proxy/gateway.controller';
 import { GATEWAY_ENV } from '../tokens';
 import { ProxyService } from '../proxy/proxy.service';
 import { RateLimiter } from '../proxy/rate-limiter';
+import { RevocationGate } from '../revocation/revocation-gate';
 
 /** What the routes themselves declare, before the shared error envelope is published. */
 export function gatewayRouteDocument(app: INestApplication, version = '0.1.0'): OpenAPIObject {
@@ -36,7 +37,7 @@ export function buildGatewayOpenApiDocument(
 @Module({
   controllers: [GatewayHealthController, GatewayMetricsController, GatewayController],
   providers: [
-    ...[ProxyService, RateLimiter].map((provide) => ({ provide, useValue: {} })),
+    ...[ProxyService, RateLimiter, RevocationGate].map((provide) => ({ provide, useValue: {} })),
     { provide: GATEWAY_ENV, useValue: {} },
   ],
 })

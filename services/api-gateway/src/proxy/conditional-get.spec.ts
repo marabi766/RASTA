@@ -6,6 +6,7 @@ import request from 'supertest';
 import type { Request, Response } from 'express';
 import { InternalTokenService, runWithContext } from '@rasta/nest-common';
 import { ProxyService } from './proxy.service';
+import { RevocationGate } from '../revocation/revocation-gate';
 import { GatewayController } from './gateway.controller';
 import type { RateLimiter } from './rate-limiter';
 
@@ -63,6 +64,7 @@ describe('gateway conditional GET against Express', () => {
           GATEWAY_RATE_LIMIT_WINDOW_MS: 60000,
           GATEWAY_TENANT_RATE_LIMIT_MAX: 100,
         } as never,
+        RevocationGate.off(),
       );
       const edge = new ExpressAdapter().getInstance();
       edge.get('/v1/users/me', (req: Request, res: Response) => {

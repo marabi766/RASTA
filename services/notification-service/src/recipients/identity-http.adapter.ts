@@ -1,4 +1,9 @@
-import { InternalHttpClient, exchangeWithDeadline, type InternalSender } from '@rasta/nest-common';
+import {
+  InternalHttpClient,
+  exchangeWithDeadline,
+  readBoundedText,
+  type InternalSender,
+} from '@rasta/nest-common';
 import { z } from 'zod';
 import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
@@ -11,6 +16,9 @@ import {
   type RecipientQuery,
   type RecipientResolution,
 } from './recipient.port';
+
+/** Byte ceiling of the peer's answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 1024 * 1024;
 
 /**
  * Recipient resolution over identity-service's REST API (ADR-054 § 1).
@@ -149,7 +157,9 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
     // One deadline for the whole exchange, body included: identity answering
     // `200` and then stalling would otherwise hold this batch — and, with it,
     // every later tick of the worker, which skips while a batch is in flight.
-    let answer: { ok: boolean; status: number; text: string | undefined };
+    // Parsed inside the exchange, so its deadline check before it returns
+    // covers parsing too (PR #722 r2 F2).
+    let answer: { ok: boolean; status: number; json: { readonly value: unknown } | undefined };
     try {
       answer = await exchangeWithDeadline(
         this.options.timeoutMs,
@@ -167,7 +177,9 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
         async (response) => ({
           ok: response.ok,
           status: response.status,
-          text: response.ok ? await response.text() : undefined,
+          json: response.ok
+            ? parseJson(await readBoundedText(response, MAX_ANSWER_BYTES))
+            : undefined,
         }),
       );
     } catch (error) {
@@ -190,10 +202,8 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
       );
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(answer.text ?? '');
-    } catch {
+    const parsed = answer.json?.value;
+    if (answer.json === undefined) {
       throw new RecipientResolutionError(
         RESOLUTION_FAILURE_REASONS.MALFORMED_RESPONSE,
         'identity-service answered with a body that is not JSON',
@@ -208,5 +218,14 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
       );
     }
     return page.data;
+  }
+}
+
+/** The parsed body, or `undefined` when it is not JSON. */
+function parseJson(text: string): { readonly value: unknown } | undefined {
+  try {
+    return { value: JSON.parse(text) as unknown };
+  } catch {
+    return undefined;
   }
 }
