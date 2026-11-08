@@ -23,6 +23,8 @@ export const AUDITED_TRANSPORTS = Object.freeze({
   'scripts/workspace-module.mjs':
     'runtime-checked local workspace loads only; refuses dependency paths and escapes before loading',
   'scripts/credential-fetch.mjs': 'credentialFetch for root scripts (the Grafana probe)',
+  'packages/config/src/credential-environment.js':
+    'refuseAlteredEnvironment: reads the global dispatcher slot to compare it with load; sends nothing (FU-249)',
   'packages/testing/src/guarded-http.ts':
     'guardedFetch and guardRequestContext: the E2E helper transport, refuses every redirect',
   'packages/testing/src/redirect-probe.ts':

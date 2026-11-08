@@ -1,3 +1,5 @@
+import { refuseAlteredEnvironment } from '@rasta/config';
+
 /**
  * What {@link internalFetch} throws for a redirect: a transport failure, never
  * an answer. Typed, so a caller that must tell "refused" from "may have been
@@ -18,12 +20,16 @@ export class RedirectRefusedError extends Error {
  *
  * A redirect is a transport failure, never an authoritative answer. Reject it
  * before reading its body so each client uses its existing unavailable path.
+ * Nothing is sent through an altered runtime: `refuseAlteredEnvironment`
+ * (@rasta/config) throws `CredentialEnvironmentRefusedError` first (FU-249).
  */
 export async function internalFetch(
   input: Parameters<typeof fetch>[0],
   init: Omit<RequestInit, 'redirect'>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {
+  // Before anything is sent: no credential through an altered runtime (FU-249).
+  refuseAlteredEnvironment(fetchImpl);
   // Set after init so even untyped callers cannot override this policy.
   const response = await fetchImpl(input, { ...init, redirect: 'manual' });
   // Fetch redirects only these five statuses. 300 offers choices and 305 is

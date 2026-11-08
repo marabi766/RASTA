@@ -61,6 +61,12 @@ const ALLOWED = Object.freeze([
     reason: 'the reader itself: the native error is discarded, a fixed text is thrown',
   },
   {
+    file: 'packages/config/src/credential-environment.js',
+    call: 'Object.getOwnPropertyDescriptor(globalThis, DISPATCHER_SLOT)',
+    reason:
+      "reads Node's global dispatcher slot (a symbol key) to compare it with load (FU-249); parses no URL",
+  },
+  {
     file: 'packages/contracts/src/common/parsable-url.ts',
     call: 'new URL(payload.value)',
     reason:
