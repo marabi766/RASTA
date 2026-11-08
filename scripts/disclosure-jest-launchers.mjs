@@ -236,7 +236,7 @@ export const JEST_LAUNCHERS = {
       'scripts/fixture-git-env.mjs':
         '0b60132dc4c925129b0f29fe1ef86e5717ae8616e78171d65b58a71404d77391',
       'scripts/lint-scripts-registration.test.mjs':
-        '31355969c67278101cb08666e7e60ea3ec5fa2738a8bd71918bfe888f169ac2d',
+        'a80cfef328904aeabc6b8d4fff0b208ef93d7c9bac7ed50aa9714062226b38c6',
     },
   },
   'scripts/testing-dev-only.mjs': {
