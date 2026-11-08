@@ -59,11 +59,12 @@
  * script and shell.
  */
 import { spawnSync } from 'node:child_process';
-import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { workspaceManifestFiles } from './workspace-roots-lib.mjs';
 
 export const AGGREGATE_JOB = 'integration';
 export const AGGREGATE_NAME = 'Integration and security tests';
@@ -99,39 +100,10 @@ export { INTEGRATION_PARTITIONS };
 
 /** Read every configured workspace root; never infer membership from the registry. */
 export function discoverIntegrationPackages(root = ROOT) {
-  const patterns = parseYaml(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8'))?.packages;
-  if (!Array.isArray(patterns) || patterns.length === 0) {
-    throw new Error('pnpm-workspace.yaml must declare nonempty packages');
-  }
-  for (const pattern of patterns) {
-    if (
-      typeof pattern !== 'string' ||
-      pattern.replace(/^!/, '').length === 0 ||
-      isAbsolute(pattern.replace(/^!/, '')) ||
-      pattern.includes('..') ||
-      pattern.includes('\\')
-    ) {
-      throw new Error('workspace package patterns must be relative globs inside the repository');
-    }
-  }
-  const manifests = globSync(
-    patterns
-      .filter((pattern) => !pattern.startsWith('!'))
-      .map((pattern) => `${pattern}/package.json`),
-    {
-      cwd: root,
-      exclude: [
-        '**/node_modules/**',
-        ...patterns
-          .filter((pattern) => pattern.startsWith('!'))
-          .map((pattern) => `${pattern.slice(1)}/package.json`),
-      ],
-    },
-  );
+  // Membership is the shared, fail-closed reader's (scripts/workspace-roots-lib.mjs).
+  const manifests = workspaceManifestFiles(root);
   const names = new Set();
-  for (const file of new Set(manifests)) {
-    // pnpm includes the repository root implicitly; it orchestrates, never shards.
-    if (resolve(root, file) === resolve(root, 'package.json')) continue;
+  for (const file of manifests) {
     const manifest = JSON.parse(readFileSync(join(root, file), 'utf8'));
     if (!Object.hasOwn(manifest.scripts ?? {}, 'test:integration')) continue;
     if (
@@ -253,6 +225,7 @@ export const STEP_INVENTORY = Object.freeze({
           shard,
           run: withKafka('tests', `pnpm run test:integration --shard=${shard} -- --verbose`),
           env: {
+            TEMPORAL_TEST_SERVER_DIR: '${{ runner.temp }}/temporal-test-server',
             KAFKA_SECRETS_DIR: '${{ runner.temp }}/rasta-kafka-secrets',
             NODE_ENV: 'test',
             KAFKA_BROKERS: 'localhost:9092',
@@ -344,7 +317,7 @@ export const STEP_INVENTORY = Object.freeze({
     'pnpm run test:backup-restore-drill-pg',
   ),
   'Economic coverage gate': coverageGate('economic'),
-  'Marketplace coverage gate': coverageGate('marketplace'),
+  'Marketplace coverage gate': coverageGate('marketplace', {}, 14),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
   'Supplier coverage gate': coverageGate('supplier'),
   // 11 = ceil(429 s x 1.5 / 60): the slowest of the last 20 green runs took 429 s.
@@ -366,14 +339,14 @@ export const STEP_INVENTORY = Object.freeze({
     env: { ...KAFKA_TESTS, ...databases('MAINTENANCE') },
     timeout: 8,
   },
-  'Tenant isolation and authorization tests': {
+  'Tenant isolation and financial invariant tests': {
     run: withKafka(
       'tests',
-      'pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"',
       'pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose',
     ),
     env: { ...KAFKA_TESTS, ...databases(...SERVICES), ...BUCKET, ...SCANNER },
-    timeout: 10,
+    // FU-185: integration-only p95 349 s; 480 / 349 = 1.38 (see timing report).
+    timeout: 8,
   },
   'Outbox stream-sequence protocol (ADR-051 B3)': {
     run: ['pnpm run test:outbox-b3'],
@@ -436,7 +409,8 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  * of the job took in those steps over the last 20 green CI runs on main and
  * `mq/train-*` (2026-10-29, GitHub job listings). A job that has step limits
  * is refused here without an entry, rather than assumed to need no setup.
- * Measured maxima, in seconds: suites 298, security 309, critical 281,
+ * Security was re-measured for FU-185 below; the other historical maxima
+ * in seconds: suites 298, critical 281,
  * coverage 310, backup drill 92, migration chain 135 (per shard), migration
  * guards 253, trivy-db 5. `quality-unit` (FU-111): its one limited step is the
  * unit-step concurrency step (74-87 s in green runs); the rest of the job is
@@ -453,6 +427,8 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-construction': 8,
   'integration-economic': 8,
   'integration-contract': 8,
+  // FU-185, Nov 5-6 main window 42091919570..42295730635 (20 successes):
+  // unbounded steps plus bookkeeping p95/max 324/328 s; ceil(1.3 * 328 / 60) = 8.
   'integration-security': 8,
   'integration-coverage-critical': 8,
   'integration-coverage': 8,
@@ -553,14 +529,14 @@ const budgetTable = (table) => new Map(Object.entries(table));
 /** The inventory by step name; a step's name comes from the workflow, so no plain-object lookup. */
 const INVENTORY = new Map(Object.entries(STEP_INVENTORY));
 
-export function checkIntegrationSplitText(text) {
+export function checkIntegrationSplitText(text, root = ROOT) {
   let workflow;
   try {
     workflow = parseYaml(text);
   } catch (error) {
     return [`ci.yml is not valid YAML: ${error.message}`];
   }
-  return checkIntegrationSplit(workflow);
+  return checkIntegrationSplit(workflow, root);
 }
 
 /** FU-027: ownership, command inventory and executable workflow must agree on step keys. */
@@ -617,9 +593,9 @@ export function integrationPartitionStepProblems(
   return problems;
 }
 
-export function checkIntegrationSplit(workflow) {
+export function checkIntegrationSplit(workflow, root = ROOT) {
   const problems = [
-    ...integrationPartitionProblems(),
+    ...integrationPartitionProblems(INTEGRATION_PARTITIONS, root),
     ...integrationPartitionStepProblems(workflow),
   ];
   // Inspect the exact plan the executable runner consumes, not only ownership.
@@ -661,8 +637,9 @@ export function checkIntegrationSplit(workflow) {
       problems.push(`${name}: effective execution failed: ${error.message}`);
     }
   }
-  problems.push(...integrationPartitionProblems(effective));
+  problems.push(...integrationPartitionProblems(effective, root));
   problems.push(...qualitySplitProblems(workflow));
+  problems.push(...unitCoverageProblems(root));
   if (stressCount !== 1)
     problems.push(`expected exactly one exclusive stress phase, found ${stressCount}`);
   const jobs = isMapping(workflow?.jobs) ? workflow.jobs : {};
@@ -809,6 +786,55 @@ export function checkIntegrationSplit(workflow) {
   return problems;
 }
 
+/** FU-185: removing the filtered unit rerun is safe only while the full gate covers it. */
+export function unitCoverageProblems(root = ROOT) {
+  const problems = [];
+  const scripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
+  if (scripts?.['test:unit:ci'] !== 'turbo run test:unit --concurrency=3')
+    problems.push('unit coverage: test:unit:ci must run every workspace without filters');
+  for (const file of workspaceManifestFiles(root)) {
+    const { scripts = {} } = JSON.parse(readFileSync(join(root, file), 'utf8'));
+    // Every workspace needs test:unit, including those without test. There are
+    // no missing-unit exemptions. The Node workspace has an exact allowlist:
+    // broadening it requires review of the files the required gate will run.
+    const nodeUnit =
+      file === 'tests/e2e/package.json'
+        ? 'node --test --test-timeout=300000 src/target-guard.test.ts src/kafka-observer.test.ts src/actor.test.ts src/keycloak-transport.test.ts src/expect.test.ts src/guarded-http.test.ts'
+        : null;
+    // All current unit projects contain tests. Refuse passWithNoTests entirely
+    // so a config typo or removal of the last spec makes quality-unit fail.
+    // Legacy test may keep that flag; it cannot weaken the required unit task.
+    const normalize = (command) =>
+      typeof command === 'string' && /^jest(?: --selectProjects unit)?$/.test(command)
+        ? command
+        : null;
+    const unit =
+      nodeUnit === null
+        ? normalize(scripts['test:unit'])
+        : scripts['test:unit'] === nodeUnit
+          ? nodeUnit
+          : null;
+    if (
+      unit === null ||
+      (Object.hasOwn(scripts, 'test') &&
+        unit !==
+          normalize(
+            typeof scripts.test === 'string'
+              ? scripts.test.replace(' --passWithNoTests', '')
+              : scripts.test,
+          )) ||
+      scripts.pretest ||
+      scripts.posttest ||
+      scripts['pretest:unit'] ||
+      scripts['posttest:unit']
+    )
+      problems.push(
+        `${file}: unit coverage requires an allowlisted test:unit without passWithNoTests and equivalent test selection when present`,
+      );
+  }
+  return problems;
+}
+
 /**
  * FU-111: the required check "Lint, types and unit tests" is an aggregate of
  * the parallel `quality-*` jobs, and nothing may let it pass without every one
@@ -892,6 +918,11 @@ export function qualitySplitProblems(workflow) {
       }
     }
   }
+  const unitRuns = (jobs['quality-unit']?.steps ?? []).filter(
+    (step) => step.name === 'Unit tests' && step.run === 'pnpm run test:unit:ci',
+  );
+  if (unitRuns.length !== 1)
+    problems.push('quality-unit must run the unfiltered Unit tests step exactly once');
   const gate = jobs[QUALITY_GATE_JOB];
   const gateRuns = (Array.isArray(gate?.steps) ? gate.steps : []).filter(
     (step) => isMapping(step) && step.run === 'pnpm run typecheck',

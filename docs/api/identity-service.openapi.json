@@ -44,13 +44,100 @@
           }
         },
         "summary": "Switch which organization subsequent requests act for",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "organizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  }
+                },
+                "required": ["organizationId"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/users": {
       "get": {
         "operationId": "UserController_list_v1",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["PENDING", "ACTIVE", "SUSPENDED", "DEACTIVATED"]
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SYSTEM_ADMIN",
+                "UNION_ADMIN",
+                "ORGANIZATION_ADMIN",
+                "FLEET_MANAGER",
+                "DRIVER",
+                "OPERATOR",
+                "PROCUREMENT_USER",
+                "SUPPLIER",
+                "WORKSHOP",
+                "CONTRACTOR",
+                "AUDITOR"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -89,7 +176,82 @@
           }
         },
         "summary": "Create an already-approved user",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "email": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "firstName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "lastName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "phone": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "organizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  },
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  }
+                },
+                "required": [
+                  "username",
+                  "email",
+                  "firstName",
+                  "lastName",
+                  "organizationId",
+                  "roles"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/users/{id}/organizations": {
@@ -103,6 +265,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "Z$",
+              "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
             }
           }
         ],
@@ -227,7 +400,33 @@
           }
         },
         "summary": "Update a user profile",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "firstName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "lastName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "phone": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
+                    "nullable": true
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/users/{id}/memberships": {
@@ -259,7 +458,61 @@
           }
         },
         "summary": "Add the user to an organization",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "organizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  },
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  },
+                  "validUntil": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "Z$",
+                    "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
+                  }
+                },
+                "required": ["organizationId", "roles"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/memberships/{id}/roles": {
@@ -292,7 +545,47 @@
           }
         },
         "summary": "Replace the roles held in this organization",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  },
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  }
+                },
+                "required": ["roles", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/memberships/{id}/revoke": {
@@ -325,7 +618,26 @@
           }
         },
         "summary": "Revoke a membership",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  }
+                },
+                "required": ["reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/registration-requests": {
@@ -349,12 +661,140 @@
           }
         },
         "summary": "Submit a request to join the platform",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "email": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "firstName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "lastName": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "phone": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "requestedOrganizationId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^ORG_[0-9A-HJKMNP-TV-Z]{26}$",
+                        "description": "ORG identifier"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^ORG-[A-Z0-9-]{1,48}$"
+                      }
+                    ]
+                  },
+                  "requestedRoles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  },
+                  "justification": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "documentRefs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                    },
+                    "maxItems": 10,
+                    "default": []
+                  }
+                },
+                "required": [
+                  "username",
+                  "email",
+                  "firstName",
+                  "lastName",
+                  "requestedOrganizationId",
+                  "requestedRoles"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       },
       "get": {
         "description": "Requests for the organizations the reviewer may provision into (their own, or every organization for a role in USER_PROVISIONING_CROSS_ORG_ROLES), oldest first, filtered by `status` and the exact `username`. The submission answer carries no id, so this is where a reviewer finds a request.",
         "operationId": "RegistrationController_listRequests_v1",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["PENDING", "APPROVED", "REJECTED"]
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": ""
@@ -404,7 +844,41 @@
           }
         },
         "summary": "Approve a registration and provision the account",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "SYSTEM_ADMIN",
+                        "UNION_ADMIN",
+                        "ORGANIZATION_ADMIN",
+                        "FLEET_MANAGER",
+                        "DRIVER",
+                        "OPERATOR",
+                        "PROCUREMENT_USER",
+                        "SUPPLIER",
+                        "WORKSHOP",
+                        "CONTRACTOR",
+                        "AUDITOR"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 11
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/registration-requests/{id}/reject": {
@@ -437,7 +911,26 @@
           }
         },
         "summary": "Reject a registration, with a required reason",
-        "tags": ["identity"]
+        "tags": ["identity"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  }
+                },
+                "required": ["reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/v1/audit-corrections": {
@@ -471,7 +964,136 @@
           }
         },
         "summary": "Correct an audit record by appending a linked correction (SYSTEM_ADMIN)",
-        "tags": ["audit-corrections"]
+        "tags": ["audit-corrections"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "auditEventId": {
+                    "type": "string",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "(?:Z|[+-](?:(?:0\\d|1[0-3]):?[0-5]\\d|14:?00))$",
+                    "description": "ISO 8601 instant that ends in `Z` or a numeric offset within ±14:00 (`+03:30`, `+0330`); an offset beyond ±14:00, which RFC 3339 allows, is invalid here."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                  },
+                  "changes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
+                        },
+                        "from": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "maxLength": 2000
+                                },
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "boolean"
+                                },
+                                {}
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "redacted": {
+                                  "const": true
+                                }
+                              },
+                              "required": ["redacted"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "hash": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                }
+                              },
+                              "required": ["hash"],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "to": {
+                          "anyOf": [
+                            {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "maxLength": 2000
+                                },
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "boolean"
+                                },
+                                {}
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "redacted": {
+                                  "const": true
+                                }
+                              },
+                              "required": ["redacted"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "hash": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                }
+                              },
+                              "required": ["hash"],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": ["field", "from", "to"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 50
+                  }
+                },
+                "required": ["auditEventId", "occurredAt", "reason", "changes"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/health/live": {

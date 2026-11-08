@@ -1208,6 +1208,10 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 - **ریسک باقی‌مانده:** فقط اتصالی که خودش منطقهٔ زمانی دیگری بخواهد (`PGTZ`، `options` یا `SET TimeZone`)، یا Roleی
   بیرون از این مجموعه که پیش‌فرض TimeZone خودش را دارد (مثلاً ابزار BI؛ پیش‌فرض Role بر پیش‌فرض پایگاه داده مقدم است)،
   لحظهٔ خام را جابه‌جا می‌نویسد یا می‌خواند (با تهران ۳٫۵ ساعت) و هیچ خطایی نمی‌دهد. مقایسهٔ این ستون‌ها با `now()` در همان نشست هم به همین دلیل وابسته به منطقهٔ زمانی نشست است.
+- **بستن کلاس (FU-188):** ساعت‌های SQL خام روی ستون‌های `timestamp(3)` همه `AT TIME ZONE 'UTC'` دارند و
+  `pnpm check:utc-clock-sites` بازگشت ساعت بی‌منطقه را رد می‌کند؛ کلاینت هر سرویس نشستِ غیر UTC را در همان تراکنشِ کار رد می‌کند
+  (docs/11 § ۱۱٫۲). پیش‌فرض `CURRENT_TIMESTAMP` فقط روی ستون‌هایی عوض شد که SQL خام یا تابع به آن تکیه می‌کند یا مهلت‌اند؛ ۸۵ ستون
+  دیگر را Prisma با مقدار خودش می‌نویسد، و همان بررسی `INSERT` خام را نگه می‌دارد.
 - **کنترل (تا رفع):** اتصالِ تازه فقط از `withUtcSession` (`@rasta/config` یا `scripts/prisma-lib.mjs`)؛ پیش‌فرض
   `timezone` سرور و Roleها UTC؛ ستونِ لحظهٔ تازه `TIMESTAMPTZ` (`@db.Timestamptz`).
 - **رفع:** انتقال این ستون‌ها به `timestamptz` با Migrationهای قابل بازگشت به‌ازای هر سرویس، همراه `@db.Timestamptz(3)`
@@ -1724,9 +1728,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   جای این Gate را نمی‌گیرد. توالی: همهٔ نمونه‌های قدیمی متوقف (Scale به صفر، نه Rolling Update) ⇐ Gate ⇐ فقط با کد خروج ۰
   نسخهٔ جدید بالا می‌آید:
   Gate همیشه از **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout انتشار هدف اجرا نکن:
-  `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… MARKETPLACE_TARGET_PACKAGE_JSON=… node scripts/marketplace-saga-drain-check.mjs`
+  `TEMPORAL_ADDRESS=… TEMPORAL_NAMESPACE=… MARKETPLACE_TEMPORAL_TASK_QUEUE=… MARKETPLACE_TARGET_PACKAGE_JSON=… MARKETPLACE_SAGA_STOP_TIME=… DATABASE_URL_MARKETPLACE=… node scripts/marketplace-saga-drain-check.mjs`
   — سه مقدار Temporal همان‌هایی که سرویس با آن‌ها اجرا می‌شود؛ Manifest بدون ویرایش از Image ـِ هدف استخراج می‌شود،
-  هر چهار متغیر اجباری و بی پیش‌فرض‌اند. Gate با Query ـِ Visibility
+  همهٔ متغیرها اجباری و بی پیش‌فرض‌اند؛ `DATABASE_URL_MARKETPLACE` برای رکوردهای فراخوانی باز است که هر کدام استقرار را می‌بندد (FU-221). Gate با Query ـِ Visibility
   `WorkflowType="orderSaga" AND ExecutionStatus="Running"` Workflowها را می‌شمارد و فهرست می‌کند
   (`temporal workflow count` / `temporal workflow list --query … --output json`، هیچ اجرایی — `workflowId` و `runId` با هم —
   دو بار فهرست نشود، شمار با شمار اجراهای یکتا یکی باشد و تا پایان عوض نشود؛ Codex دور ۴ روی #283: `[A, A]` با شمار ۲ جای

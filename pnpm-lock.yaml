@@ -31,7 +31,7 @@ overrides:
   body-parser@<2.4.0: 2.4.0
 
 patchedDependencies:
-  zod@4.6.7: 6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2
+  zod@4.6.7: 63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37
 
 importers:
 
@@ -87,7 +87,7 @@ importers:
         version: 1.5.0
       '@hookform/resolvers':
         specifier: ^5.9.1
-        version: 5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))
+        version: 5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37))
       '@radix-ui/react-label':
         specifier: ^2.1.15
         version: 2.1.15(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -132,7 +132,7 @@ importers:
         version: 3.7.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@axe-core/playwright':
         specifier: ^4.13.0
@@ -214,7 +214,7 @@ importers:
         version: link:../contracts
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@swc/core':
         specifier: ^1.10.7
@@ -242,7 +242,7 @@ importers:
     dependencies:
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@swc/core':
         specifier: ^1.10.7
@@ -322,7 +322,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/common':
         specifier: ^11.0.0
@@ -378,9 +378,15 @@ importers:
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
+      '@opentelemetry/api-logs':
+        specifier: ^0.221.0
+        version: 0.221.0
       '@opentelemetry/auto-instrumentations-node':
         specifier: ^0.79.0
         version: 0.79.0(@opentelemetry/api@1.9.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(supports-color@8.1.1)
+      '@opentelemetry/exporter-prometheus':
+        specifier: ^0.221.0
+        version: 0.221.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/exporter-trace-otlp-http':
         specifier: ^0.221.0
         version: 0.221.0(@opentelemetry/api@1.9.1)
@@ -544,7 +550,7 @@ importers:
         version: 7.8.2
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -644,7 +650,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@rasta/testing':
         specifier: workspace:*
@@ -738,7 +744,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -835,7 +841,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -935,7 +941,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1035,7 +1041,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1141,7 +1147,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1238,7 +1244,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1335,7 +1341,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1435,7 +1441,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1535,7 +1541,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1635,7 +1641,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1747,7 +1753,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1767,6 +1773,9 @@ importers:
       '@swc/jest':
         specifier: ^0.2.37
         version: 0.2.39(@swc/core@1.16.1(@swc/helpers@0.5.23))
+      '@temporalio/nyc-test-coverage':
+        specifier: ^1.25.0
+        version: 1.25.0(@temporalio/common@1.25.0(long@5.3.2)(protobufjs@8.8.1))(@temporalio/worker@1.25.0(@swc/helpers@0.5.23)(esbuild@0.28.2)(lightningcss@1.32.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.1)(sharp@0.35.5(@types/node@22.20.1)))(@temporalio/workflow@1.25.0(long@5.3.2)(protobufjs@8.8.1))(supports-color@8.1.1)(typescript@5.9.3)(webpack@5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1)))
       '@temporalio/testing':
         specifier: ^1.25.0
         version: 1.25.0(@swc/helpers@0.5.23)(esbuild@0.28.2)(lightningcss@1.32.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.1)(sharp@0.35.5(@types/node@22.20.1))
@@ -1850,7 +1859,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1950,7 +1959,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -2050,7 +2059,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -2150,7 +2159,7 @@ importers:
         version: 2.4.0
       zod:
         specifier: 'catalog:'
-        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+        version: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -4564,6 +4573,15 @@ packages:
       long: ^5.3.2
       protobufjs: ^8.7.1
 
+  '@temporalio/nyc-test-coverage@1.25.0':
+    resolution: {integrity: sha512-yk6LvUr+QMI9IVDuWeni54gpDxC3gNn8wzoOyTP4Ad22cKYQBSHs4aSrAmksjMq2KL+qg+xfVnG090+otml3yQ==}
+    engines: {node: '>= 20.3.0'}
+    peerDependencies:
+      '@temporalio/common': 1.25.0
+      '@temporalio/worker': 1.25.0
+      '@temporalio/workflow': 1.25.0
+      webpack: ^5.106.2
+
   '@temporalio/proto@1.25.0':
     resolution: {integrity: sha512-cZF6C1F4ZHWrVwrDNW6hTB7HvBi1sofqPWxQrqJq0b9hPE21y5IU5rTNEUx3Ju6G03xqdpwdH0LECAul0KAi2Q==}
     engines: {node: '>= 20.3.0'}
@@ -5099,11 +5117,6 @@ packages:
     resolution: {integrity: sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA==}
     engines: {node: 18 || 20 || >=22}
 
-  baseline-browser-mapping@2.11.19:
-    resolution: {integrity: sha512-Grytf1xOxOEMTGRwx6rLGKkTabd4vMg3VrKdj/7joCmV0qgh4QwMMO6xh34YEXQqirAuUdgQGa5orJQQ+69RBw==}
-    engines: {node: '>=6.0.0'}
-    hasBin: true
-
   baseline-browser-mapping@2.11.34:
     resolution: {integrity: sha512-Aqr8mA1kIvyJ3UY5YAY7ib8LSo1DmDMbMnVqGPtsKW1LxaFQFwn9Eb3yvq2fUKJsRvaXjnAV7R5osqETapzNiA==}
     engines: {node: '>=6.0.0'}
@@ -5139,11 +5152,6 @@ packages:
   braces@3.0.3:
     resolution: {integrity: sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==}
     engines: {node: '>=8'}
-
-  browserslist@4.28.8:
-    resolution: {integrity: sha512-V2NpofLblG64mfOtSgDhOJESZEGogzDMBv/q+W6oc4LXWP/q75eOXoOaaOu1EOadB9U4Bwx/e0yzbvwKH8zalA==}
-    engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
-    hasBin: true
 
   browserslist@4.29.5:
     resolution: {integrity: sha512-khTmKu5NGYTotqcYo8Bew2k4RAE9PuXRSFRXG2lQBrCEQHyeQ/vX6gKMxfokwywBsLiXZMnHsmWMG1pnO8J7uQ==}
@@ -5481,9 +5489,6 @@ packages:
 
   effect@3.21.0:
     resolution: {integrity: sha512-PPN80qRokCd1f015IANNhrwOnLO7GrrMQfk4/lnZRE/8j7UPWrNNjPV0uBrZutI/nHzernbW+J0hdqQysHiSnQ==}
-
-  electron-to-chromium@1.5.414:
-    resolution: {integrity: sha512-aYlviXiaXBbzvKgyALpcMmqa3Np3sDr0XnZbEG62n2UpZFbEcjQ4EEMOLGzVPhwVnwTz0lvKY+GcARbunuHekw==}
 
   electron-to-chromium@1.5.467:
     resolution: {integrity: sha512-Nw9X371rtZmYcBSnEijnCDONILjs93biCZO34juC7MBOmK8E+GFnyD4T/WvyrlJkppul7oxg6TwvtKst9SODTw==}
@@ -6774,10 +6779,6 @@ packages:
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
 
-  node-releases@2.0.53:
-    resolution: {integrity: sha512-D9UOmYG3UH1V+ENW56t5QXBwJw1YEY18ruVeus89Rw+SyIgjPkCO84bRzO3uNIYosJbNwiabWVn48o3uJLjxFQ==}
-    engines: {node: '>=18'}
-
   node-releases@2.0.60:
     resolution: {integrity: sha512-OmO8+GM1JUZqXET720VrJCwkjUCXmCMQm0Z3UDDRbfNLHS4NEAvY60j5jiFv0tkKw2PNNlqOLhahVmwJIOLDIQ==}
     engines: {node: '>=18'}
@@ -7558,6 +7559,17 @@ packages:
     peerDependencies:
       typescript: '>=4.8.4'
 
+  ts-loader@9.6.2:
+    resolution: {integrity: sha512-R4iuczmtgxvtuI556s+hTZ6/7Ee03VCAk/l/M8LY1OAsUgB7YydsCxkgq9D9pKRaD7GJqUi2u8fp9zZP/ufjKA==}
+    engines: {node: '>=12.0.0'}
+    peerDependencies:
+      loader-utils: '*'
+      typescript: '*'
+      webpack: ^4.0.0 || ^5.0.0
+    peerDependenciesMeta:
+      loader-utils:
+        optional: true
+
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
@@ -7651,12 +7663,6 @@ packages:
   unpipe@1.0.0:
     resolution: {integrity: sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==}
     engines: {node: '>= 0.8'}
-
-  update-browserslist-db@1.3.1:
-    resolution: {integrity: sha512-ZZ61DsRsOnakl74HAmp3oSN4aXUmEWXf+i/yv0h7tIBfICc3VdrFErQKUUKPgu3AMsTUMbcongALEN4l6GSUrQ==}
-    hasBin: true
-    peerDependencies:
-      browserslist: '>= 4.21.0'
 
   update-browserslist-db@1.3.4:
     resolution: {integrity: sha512-t8wonIOdQyOjtPd2VktlBu6QjTVTks6v8bSi7kd0r2Vll8TK1JYDZtRRdbmCHOAMphkZgrzK+L+vXK4pyZ8t4A==}
@@ -8053,7 +8059,7 @@ snapshots:
     dependencies:
       '@babel/compat-data': 7.29.7
       '@babel/helper-validator-option': 7.29.7
-      browserslist: 4.28.8
+      browserslist: 4.29.5
       lru-cache: 5.1.1
       semver: 6.3.1
 
@@ -8365,7 +8371,7 @@ snapshots:
       protobufjs: 7.6.5
       yargs: 17.7.3
 
-  '@hookform/resolvers@5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))':
+  '@hookform/resolvers@5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37))':
     dependencies:
       '@standard-schema/utils': 0.3.0
       react-hook-form: 7.88.0(react@19.3.0)
@@ -8375,7 +8381,7 @@ snapshots:
       ajv: 8.20.0
       ajv-formats: 2.1.1(ajv@8.20.0)
       effect: 3.21.0
-      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+      zod: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -10187,6 +10193,21 @@ snapshots:
       nexus-rpc: 0.0.3
       protobufjs: 8.8.1
 
+  '@temporalio/nyc-test-coverage@1.25.0(@temporalio/common@1.25.0(long@5.3.2)(protobufjs@8.8.1))(@temporalio/worker@1.25.0(@swc/helpers@0.5.23)(esbuild@0.28.2)(lightningcss@1.32.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.1)(sharp@0.35.5(@types/node@22.20.1)))(@temporalio/workflow@1.25.0(long@5.3.2)(protobufjs@8.8.1))(supports-color@8.1.1)(typescript@5.9.3)(webpack@5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1)))':
+    dependencies:
+      '@temporalio/common': 1.25.0(long@5.3.2)(protobufjs@8.8.1)
+      '@temporalio/worker': 1.25.0(@swc/helpers@0.5.23)(esbuild@0.28.2)(lightningcss@1.32.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.1)(sharp@0.35.5(@types/node@22.20.1))
+      '@temporalio/workflow': 1.25.0(long@5.3.2)(protobufjs@8.8.1)
+      convert-source-map: 2.0.0
+      istanbul-lib-coverage: 3.2.2
+      istanbul-lib-instrument: 6.0.3(supports-color@8.1.1)
+      ts-loader: 9.6.2(typescript@5.9.3)(webpack@5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1)))
+      webpack: 5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1))
+    transitivePeerDependencies:
+      - loader-utils
+      - supports-color
+      - typescript
+
   '@temporalio/proto@1.25.0':
     dependencies:
       long: 5.3.2
@@ -10899,8 +10920,6 @@ snapshots:
 
   balanced-match@4.0.4: {}
 
-  baseline-browser-mapping@2.11.19: {}
-
   baseline-browser-mapping@2.11.34: {}
 
   bignumber.js@9.3.1: {}
@@ -10950,14 +10969,6 @@ snapshots:
   braces@3.0.3:
     dependencies:
       fill-range: 7.1.1
-
-  browserslist@4.28.8:
-    dependencies:
-      baseline-browser-mapping: 2.11.19
-      caniuse-lite: 1.0.30001810
-      electron-to-chromium: 1.5.414
-      node-releases: 2.0.53
-      update-browserslist-db: 1.3.1(browserslist@4.28.8)
 
   browserslist@4.29.5:
     dependencies:
@@ -11248,8 +11259,6 @@ snapshots:
       '@standard-schema/spec': 1.1.0
       fast-check: 3.23.2
 
-  electron-to-chromium@1.5.414: {}
-
   electron-to-chromium@1.5.467: {}
 
   emittery@0.13.1: {}
@@ -11450,8 +11459,8 @@ snapshots:
       '@babel/parser': 7.29.8
       eslint: 9.39.5(jiti@2.7.0)(supports-color@8.1.1)
       hermes-parser: 0.25.1
-      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
-      zod-validation-error: 4.0.2(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))
+      zod: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
+      zod-validation-error: 4.0.2(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37))
     transitivePeerDependencies:
       - supports-color
 
@@ -12840,8 +12849,6 @@ snapshots:
 
   node-int64@0.4.0: {}
 
-  node-releases@2.0.53: {}
-
   node-releases@2.0.60: {}
 
   nodemailer@10.0.10: {}
@@ -13148,7 +13155,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
-      '@types/node': 22.20.1
+      '@types/node': 22.20.5
       long: 5.3.2
 
   protobufjs@8.8.1:
@@ -13715,6 +13722,14 @@ snapshots:
     dependencies:
       typescript: 5.9.3
 
+  ts-loader@9.6.2(typescript@5.9.3)(webpack@5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1))):
+    dependencies:
+      chalk: 4.1.2
+      picomatch: 4.0.7
+      source-map: 0.7.6
+      typescript: 5.9.3
+      webpack: 5.112.2(@swc/core@1.16.1(@swc/helpers@0.5.23))(esbuild@0.28.2)(lightningcss@1.32.0)(postcss@8.5.28)(sharp@0.35.5(@types/node@22.20.1))
+
   tslib@2.8.1: {}
 
   tsx@4.23.12:
@@ -13823,12 +13838,6 @@ snapshots:
   universalify@0.2.0: {}
 
   unpipe@1.0.0: {}
-
-  update-browserslist-db@1.3.1(browserslist@4.28.8):
-    dependencies:
-      browserslist: 4.28.8
-      escalade: 3.2.0
-      picocolors: 1.1.1
 
   update-browserslist-db@1.3.4(browserslist@4.29.5):
     dependencies:
@@ -14056,8 +14065,8 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
-  zod-validation-error@4.0.2(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)):
+  zod-validation-error@4.0.2(zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)):
     dependencies:
-      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+      zod: 4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37)
 
-  zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2): {}
+  zod@4.6.7(patch_hash=63a948075528dc90b1b14f06db2ff47653d17547154fcd9ab14cfc56a6f5cf37): {}

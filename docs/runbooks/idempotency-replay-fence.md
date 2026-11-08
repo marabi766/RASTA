@@ -33,6 +33,24 @@ construction-service برای `POST /v1/projects` هدر `Idempotency-Replay-Dea
 - کاهش `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` ردیف موجود را کوتاه نمی‌کند (`expires_at` و `replay_deadline_at` ذخیره‌شده حاکم‌اند)؛ پاک‌سازی از
   skew روز استفاده می‌کند. پنجره‌ی فراخوان (پرتال: `WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS − WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS`) باید کوتاه‌تر از نگهداشت سرویس بماند.
 
+### inventory-service (FU-171، تصمیم PM D-133)
+
+همان حصار برای **هر ۱۳ فرمان کلیددار** inventory-service، از یک ورودی (`idempotentRequest` در `shared/idempotency.ts`). هدر هنوز اختیاری است و
+نبودنش رفتار امروز را نگه می‌دارد؛ پرتال هنوز آن را نمی‌فرستد. این فرمان‌ها ستون ددلاین و Migration ندارند: پاسخ کامل‌شده تا `max(تکمیل + نگهداشت، H + B)`
+می‌ماند. ساعت پایگاه‌داده پس از هر انتظار تازه خوانده می‌شود: درون تراکنش درج Claim، پس از درج ناموفق و خواندن ردیف، و پس از نگهبان دسترسی؛ پس پاسخ ذخیره‌شده هم
+پس از `H` بازپخش نمی‌شود. `B = 2·INVENTORY_CLOCK_SKEW_SECONDS + ۷ ثانیه`. سرویس بالا نمی‌آید مگر
+`INVENTORY_IDEMPOTENCY_TTL_HOURS·۳۶۰۰ − B − INVENTORY_CLOCK_SKEW_SECONDS ≥ INVENTORY_MAX_REPLAY_WINDOW_SECONDS` (۳۳۰۰ ثانیه). **هشدار بدهید** وقتی اختلاف NTP
+هر نمونه‌ی inventory یا پایگاه‌داده‌اش از نصف `INVENTORY_CLOCK_SKEW_SECONDS` بیشتر شد. **بازگشت:** فقط بازگرداندن کد؛ داده‌ای تغییر نکرده است.
+
+### maintenance-service (FU-171، تصمیم PM D-133)
+
+همان حصار برای **هر ۷ فرمان کلیددار** maintenance-service، از یک ورودی (`idempotentRequest` و `optionalIdempotentRequest` در `maintenance/idempotency.ts`). هدر هنوز اختیاری است و
+نبودنش رفتار امروز را نگه می‌دارد؛ پرتال هنوز آن را نمی‌فرستد. ددلاین بدون کلید روی `POST /v1/maintenance-requests` با `400` رد می‌شود. این فرمان‌ها ستون ددلاین و Migration ندارند: پاسخ کامل‌شده تا `max(تکمیل + نگهداشت، H + B)`
+می‌ماند. ساعت پایگاه‌داده پس از هر انتظار تازه خوانده می‌شود: درون تراکنش درج Claim، و پس از درج ناموفق و خواندن ردیف؛ پس پاسخ ذخیره‌شده هم
+پس از `H` بازپخش نمی‌شود. `B = 2·MAINTENANCE_CLOCK_SKEW_SECONDS + ۷ ثانیه`. سرویس بالا نمی‌آید مگر
+`MAINTENANCE_IDEMPOTENCY_TTL_HOURS·۳۶۰۰ − B − MAINTENANCE_CLOCK_SKEW_SECONDS ≥ MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS` (۳۳۰۰ ثانیه). **هشدار بدهید** وقتی اختلاف NTP
+هر نمونه‌ی maintenance یا پایگاه‌داده‌اش از نصف `MAINTENANCE_CLOCK_SKEW_SECONDS` بیشتر شد. **بازگشت:** فقط بازگرداندن کد؛ داده‌ای تغییر نکرده است.
+
 ## ۳. وقتی کاربر `REPLAY_WINDOW_CLOSED` دید
 
 پرتال می‌گوید فهرست پروژه‌ها را بررسی کند (فهرست صفحه‌بندی و فیلترشده است؛ نبودن پروژه دلیل نیست). این پاسخ فقط ثابت می‌کند **همین تلاش** چیزی ننوشت؛

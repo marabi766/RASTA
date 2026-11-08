@@ -54,7 +54,7 @@ export function canonicalDeductionRuleName(raw: string): string | null {
 }
 
 /**
- * What makes two names one name: `deduction_rule_name_key` of migration 20261104210000, which is what
+ * What makes two names one name: `deduction_rule_name_key` of migration 20261108100000, which is what
  * the database refuses by. The name is stored and shown as typed; this is only ever compared.
  *
  * It folds A-Z and nothing else, as the database must (an index cannot follow a collation). That is

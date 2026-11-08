@@ -373,7 +373,7 @@ Autovacuum هم‌زمان جای آن را نمی‌گیرد.
 
 در B2 این سطر مقدار `reason` ـِ رویداد `refused` است (با `service` اگر امتناع مال یک سرویس
 باشد، و `"phase": "cleanup"` اگر بستن اتصال شکست خورد)؛ در CLIهای سرویس تنها خط stderr
-است و کد خروج همان پیشین می‌ماند (۲، و ۱ برای `resolved-dispute-backfill`). دنبالهٔ
+است و کد خروج همان پیشین می‌ماند (۲، و ۱ برای `resolved-dispute-backfill` و `hold-deadline-backfill`). دنبالهٔ
 «prior work may have committed» عمدی است: برخی امتناع‌ها پس از دسته‌های Commit‌شده
 می‌آیند، پس پیش از تکرار، وضعیت را با § ۴ بسنج.
 
@@ -396,6 +396,7 @@ Autovacuum هم‌زمان جای آن را نمی‌گیرد.
 | `not-table-owner`         | نقش وصل‌شده مالک جدول نیست، پس PostgreSQL ـ VACUUM ـِ آن را بی‌صدا رد می‌شد                      | B2 Vacuum                     | `DATABASE_URL_<SERVICE>_MIGRATOR` را مهاجر همان سرویس بگذار                       |
 | `vacuum-unproven`         | VACUUM برگشت ولی شمارنده‌های جدول تکان نخوردند                                                   | B2 Vacuum                     | دوباره اجرا کن؛ هیچ چیز «Vacuum‌شده» گزارش نشده                                   |
 | `lag-unreadable`          | Topic مورد انتظار دیده نمی‌شود یا Partition ندارد، پس Lag خواندنی نیست                           | fleet `insurance:drain-check` | دسترسی Principal و Topicها را درست کن؛ این «تخلیه‌شده» نیست                       |
+| `economic-rule-unproven`  | ساعت پایگاه داده هنوز ۱ ساعت از `--economic-rule-since` نگذشته؛ D-150 ثابت نیست                  | marketplace backfill          | صبر کن یا لحظه را از سابقهٔ استقرار بردار؛ مهلتی داده نشده                        |
 
 مجموعهٔ کدها بسته است (`REFUSAL_CODES`)؛ کدی بیرون از آن هیچ خطایی را علامت نمی‌زند و
 همان `unknown` چاپ می‌شود. `scripts/command-refusal-codes.test.mjs` برای هر کد Guard واقعی

@@ -152,7 +152,7 @@ export const SOURCE_FILE = 'ci-trivy-db-source.json';
  * cannot leave the DB check guarding a release nobody scans.
  */
 export const SCANNED_BASES = Object.freeze({
-  'node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402': '3.24',
+  'node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202': '3.24',
   'clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d':
     '3.24',
 });

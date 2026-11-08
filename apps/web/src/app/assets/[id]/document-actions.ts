@@ -1,5 +1,6 @@
 'use server';
 
+import { keepUnconfirmedWith } from '@/server/unconfirmed-retry';
 import type { DocumentFormState } from './document-form-state';
 import { runAttachDocument } from './document-runner';
 
@@ -13,8 +14,23 @@ import { runAttachDocument } from './document-runner';
  */
 export async function submitAttachDocument(
   assetId: string,
-  _previous: DocumentFormState,
+  previous: DocumentFormState,
   form: FormData,
 ): Promise<DocumentFormState> {
-  return runAttachDocument(assetId, form);
+  return keepUnconfirmedWith(
+    previous,
+    form,
+    () => runAttachDocument(assetId, form),
+    // A resend must not upload the file again: the token the retry came back with,
+    // else the one the form already held (both are opened again on the next post).
+    (correlationId, state, held) => ({
+      kind: 'UNCONFIRMED',
+      correlationId,
+      resume: resumeOf(state) ?? resumeOf(held),
+    }),
+  );
+}
+
+function resumeOf(state: DocumentFormState): string | null {
+  return 'resume' in state && typeof state.resume === 'string' ? state.resume : null;
 }

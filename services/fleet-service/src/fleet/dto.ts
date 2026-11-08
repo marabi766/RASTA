@@ -47,7 +47,6 @@ export const assignmentEndReasonSchema = z.enum(ASSIGNMENT_END_REASONS);
 const quantity = (maxIntegerDigits: number) =>
   z
     .string()
-    .trim()
     .regex(/^\d+(\.\d{1,2})?$/, 'Expected a non-negative number with at most two decimals')
     .transform(canonicalQuantity)
     .refine((value) => (value.split('.')[0] ?? '').length <= maxIntegerDigits, {
@@ -83,7 +82,8 @@ export function canonicalQuantity(value: string): string {
  * value cannot tell apart is not told apart here either.
  */
 export function canonicalInstant(value: string): string {
-  return new Date(value).toISOString();
+  if (typeof value === 'string') return new Date(value).toISOString();
+  throw new TypeError('Expected a validated timestamp');
 }
 
 /**

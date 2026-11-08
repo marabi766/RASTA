@@ -65,7 +65,8 @@ const send = (socket: Socket, message: object): void => {
   socket.write(JSON.stringify(message) + '\n');
 };
 /** A reaped child's number: its group is absent (observation only, never signalled). */
-const absentGroup = (): number => spawnSync(process.execPath, ['-e', '1']).pid as number;
+const absentGroup = (): number =>
+  spawnSync(process.execPath, ['-e', '1'], { timeout: 30_000 }).pid as number;
 /** A live group of our own, stopped through its parent-held handle. */
 const owned: ChildProcess[] = [];
 const liveGroup = (): number => {

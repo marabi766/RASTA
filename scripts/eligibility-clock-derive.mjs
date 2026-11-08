@@ -17,28 +17,15 @@
 // A comparison of a DateTime column with a value whose origin cannot be
 // proved, and every clock use outside a comparison, assignment, VALUES list
 // or projection, throws unless a reviewed SITE entry classifies it.
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import ts from 'typescript';
+import { authoredFiles } from './authored-source-inventory.cjs';
 import { PLACEHOLDER, analyse, columnsIn, projectionAliases } from './eligibility-clock-sql.mjs';
 
+/** Every authored file under `dir` ([] when it does not exist); git-ignored output is never opened. */
 export function files(dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  return entries.flatMap((entry) => {
-    if (
-      ['node_modules', 'generated', 'dist', '.git', 'coverage', '.turbo', '.next'].includes(
-        entry.name,
-      )
-    )
-      return [];
-    const path = join(dir, entry.name);
-    return entry.isDirectory() ? files(path) : [path];
-  });
+  return authoredFiles(dir, { optional: true });
 }
 
 export const SOURCE = /\.(?:[cm]?[jt]sx?)$/;
@@ -100,6 +87,7 @@ export function readSchemas(repository) {
           field: f[1],
           type: f[2],
           location: `${relative(repository, path)}:${n + 1}`,
+          declaration: l,
         });
         fields.set(f[1], column);
       }
@@ -197,6 +185,9 @@ export function sqlOf(node) {
 
 const CLOCK_TEXT =
   /(?:\b(?:now|clock_timestamp|statement_timestamp|transaction_timestamp)\s*\(\s*\)|\b(?:current_timestamp|localtimestamp|current_date|current_time|localtime)\b)/i;
+
+/** Constants holding SQL that reads the database clock, which the flow follows into a statement. */
+const CLOCK_CONSTANTS = new Set(['OUTBOX_NOW']);
 
 export function createFlow(repository) {
   const sources = new Map(); // local -> {ast, path}
@@ -448,6 +439,16 @@ export function createFlow(repository) {
       return 'unknown';
     }
     if (ts.isIdentifier(node)) {
+      // The outbox clock is one constant, spliced into every statement (FU-188).
+      const fragment = CLOCK_CONSTANTS.has(node.text) ? scopeDeclaration(node) : undefined;
+      if (
+        fragment?.kind === 'variable' &&
+        fragment.node.initializer &&
+        ts.isNoSubstitutionTemplateLiteral(fragment.node.initializer) &&
+        CLOCK_TEXT.test(fragment.node.initializer.text)
+      ) {
+        return 'clock';
+      }
       const d = scopeDeclaration(node);
       if (!d) return 'unknown';
       if (d.kind === 'variable') {
@@ -561,7 +562,7 @@ const UNSAFE = new Set([
   'query',
 ]);
 
-function sqlLiterals(ast) {
+export function sqlLiterals(ast) {
   const out = [];
   walk(ast, (node) => {
     if (!(ts.isStringLiteralLike(node) || ts.isTemplateExpression(node))) return;

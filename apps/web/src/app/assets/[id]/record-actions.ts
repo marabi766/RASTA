@@ -31,7 +31,7 @@ type State<V, F extends string> = RecordFormState<V, F>;
 
 export async function submitRecordPolicy(
   assetId: string,
-  _previous: State<RecordPolicyFormValues, RecordPolicyField>,
+  previous: State<RecordPolicyFormValues, RecordPolicyField>,
   form: FormData,
 ): Promise<State<RecordPolicyFormValues, RecordPolicyField>> {
   return runRecord(
@@ -43,13 +43,14 @@ export async function submitRecordPolicy(
       send: recordInsurancePolicy,
     },
     assetId,
+    previous,
     form,
   );
 }
 
 export async function submitRecordInspection(
   assetId: string,
-  _previous: State<RecordInspectionFormValues, RecordInspectionField>,
+  previous: State<RecordInspectionFormValues, RecordInspectionField>,
   form: FormData,
 ): Promise<State<RecordInspectionFormValues, RecordInspectionField>> {
   return runRecord(
@@ -61,6 +62,7 @@ export async function submitRecordInspection(
       send: recordInspection,
     },
     assetId,
+    previous,
     form,
   );
 }

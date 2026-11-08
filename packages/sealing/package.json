@@ -14,7 +14,7 @@
     "lint": "eslint src",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --passWithNoTests",
-    "test:unit": "jest --passWithNoTests"
+    "test:unit": "jest"
   },
   "devDependencies": {
     "@swc/core": "^1.10.7",

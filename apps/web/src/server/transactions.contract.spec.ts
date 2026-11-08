@@ -3,6 +3,7 @@
  */
 import ts from 'typescript';
 import { z } from 'zod';
+import { TRANSACTION_TEXT_BOUNDS } from '@rasta/contracts';
 
 import {
   DISPUTE_COMMAND_FIELDS,
@@ -162,7 +163,10 @@ describe('the roles the portal mirrors', () => {
  */
 const SENT_IDENTITY: Readonly<Record<DisputeCommand, Readonly<Record<string, string>>>> = {
   DISPUTE: {},
-  RESOLVE_DISPUTE: { disputeId: 'disputeId:z.string().trim().min(1).max(64).optional()' },
+  // An identifier: economic-service never rewrites its line endings (task 129).
+  RESOLVE_DISPUTE: {
+    disputeId: 'disputeId:identifier(z.string().trim().min(1).max(64)).optional()',
+  },
 };
 
 /**
@@ -173,6 +177,15 @@ const OPTIONAL_UNSENT: Readonly<Record<DisputeCommand, Readonly<Record<string, s
   DISPUTE: {},
   RESOLVE_DISPUTE: {},
 };
+
+/** Which `TRANSACTION_TEXT_BOUNDS` entry bounds each field the portal sends. */
+const BOUNDS_ENTRY = {
+  reason: 'disputeReason',
+  resolution: 'disputeResolution',
+} as const satisfies Record<
+  (typeof DISPUTE_COMMAND_FIELDS)[DisputeCommand],
+  keyof typeof TRANSACTION_TEXT_BOUNDS
+>;
 
 describe('the bodies', () => {
   it.each(DISPUTE_COMMAND_TABLE)(
@@ -191,8 +204,13 @@ describe('the bodies', () => {
       for (const declaration of [...Object.values(sent), ...Object.values(extras)]) {
         expect(schema).toContain(declaration);
       }
-      const { min, max } = DISPUTE_FIELD_LIMITS[field];
-      expect(schema).toContain(`${field}:z.string().trim().min(${min}).max(${max})`);
+      // Both sides read one table (FU-134): the service's field is bounded by
+      // its entry, and the portal's limits are that entry.
+      const entry = BOUNDS_ENTRY[field];
+      expect(schema).toContain(
+        `${field}:keptTextWithin(z.string().trim(),TRANSACTION_TEXT_BOUNDS.${entry})`,
+      );
+      expect(DISPUTE_FIELD_LIMITS[field]).toEqual(TRANSACTION_TEXT_BOUNDS[entry]);
     },
   );
 
@@ -298,7 +316,8 @@ describe('the answer the portal reads', () => {
     '`%s` is always sent, so the portal requires it — nullable exactly when the service says `| null`',
     (field) => {
       expect(viewFields.has(field)).toBe(true);
-      expect(shape[field]!.isOptional()).toBe(false);
+      // The one exception: absent from an older service, it reads as not proven, in words.
+      expect(shape[field]!.isOptional()).toBe(field === 'heldProven');
       expect(shape[field]!.isNullable()).toBe(viewFields.get(field));
       // Built for every row, not on some paths only.
       expect(views).toMatch(new RegExp(`\\b${field}:`));

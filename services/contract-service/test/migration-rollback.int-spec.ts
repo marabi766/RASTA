@@ -130,7 +130,8 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
-  const RULE_NAME_FOLD = '20261104210000_deduction_rule_name_fold';
+  const RULE_NAME_FOLD = '20261108100000_deduction_rule_name_fold';
+  const STATEMENT_RULE_LOCK = '20261105160000_statement_deduction_rule_lock';
   const RULE_LOCK_ORDER = '20261104200000_deduction_rule_lock_order';
   const RULE_CHANGES = '20261104100000_deduction_rule_changes';
   const SETTLEMENT = '20261017160000_statement_settlement';
@@ -1155,6 +1156,15 @@ describe('each down.sql, run whole with psql --file', () => {
     });
   });
 
+  it('statement_deduction_rule_lock (FU-089) down restores the previous shape and functions', () => {
+    const migration = '20261105160000_statement_deduction_rule_lock';
+    const schema = scratch(migration);
+    expect(psql(schema, ['--file', down(migration)])).toEqual({ ok: true, out: '' });
+    const previous = scratch(RULE_LOCK_ORDER);
+    expect(shape(schema)).toBe(shape(previous));
+    expect(functions(schema)).toBe(functions(previous));
+  });
+
   it('deduction_rule_lock_order (FU-060) changes only trigger bodies: down restores them exactly', () => {
     const schema = scratch(RULE_LOCK_ORDER);
     const result = psql(schema, ['--file', down(RULE_LOCK_ORDER)]);
@@ -1243,7 +1253,7 @@ describe('each down.sql, run whole with psql --file', () => {
     ])(
       '%s of one new key stop it with nothing changed; the runbook query names them first',
       (_what, index, rows) => {
-        const schema = scratch(RULE_LOCK_ORDER);
+        const schema = scratch(STATEMENT_RULE_LOCK);
         for (const row of rows) mustRun(schema, ['-c', row]);
         expect(collisions(schema)).toMatch(/DRC_a|DDR_a/);
         const [before, guards, held] = [shape(schema), functions(schema), indexes(schema)];
@@ -1255,7 +1265,7 @@ describe('each down.sql, run whole with psql --file', () => {
     );
 
     it('a retired rule, or a CREATE waiting behind a rule in force, stops nothing: the query and the migration agree', () => {
-      const schema = scratch(RULE_LOCK_ORDER);
+      const schema = scratch(STATEMENT_RULE_LOCK);
       mustRun(schema, ['-c', inForce('a', 'Tax')]);
       mustRun(schema, ['-c', retired('a')]);
       mustRun(schema, ['-c', inForce('b', 'TAX')]);
@@ -1286,7 +1296,7 @@ describe('each down.sql, run whole with psql --file', () => {
       expect(result.out).toBe('');
       expect(result.ok).toBe(true);
       expect(rows(schema)).toBe(kept);
-      const previous = scratch(RULE_LOCK_ORDER);
+      const previous = scratch(STATEMENT_RULE_LOCK);
       const before = [shape(previous), functions(previous), indexes(previous)].map((one) =>
         one.replaceAll(previous, ''),
       );

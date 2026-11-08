@@ -4,6 +4,8 @@ import { parsableUrl, legacyParse } from '@rasta/contracts';
 import {
   MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
   MAX_REPLAY_MARGIN_SECONDS,
+  MIN_REPLAY_MARGIN_MS,
+  procurementDemandWindowFits,
   projectCreateWindowFits,
   replayMarginCoversClockBudget,
 } from './unresolved-request-policy';
@@ -67,6 +69,13 @@ const OVERSIGHT_ROLE = 'AUDITOR';
 
 /** The platform administrator, whom inventory-service refuses too (Q-103). */
 const PLATFORM_ROLE = 'SYSTEM_ADMIN';
+
+/**
+ * The smallest `WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS`. procurement-service refuses a
+ * passed deadline on its own clock (FU-156); this margin is kept as a second guard,
+ * wide enough to absorb a wait inside the service on its own.
+ */
+const PROCUREMENT_MIN_REPLAY_MARGIN_SECONDS = 5 * 60;
 
 /**
  * A comma-separated role list, trimmed, empty elements dropped, never naming the
@@ -477,6 +486,52 @@ const schema = z.object({
     .max(30 * 60)
     .prefault(10 * 60),
 
+  /**
+   * Which roles are offered the demand screens and the demand form
+   * (`/procurement/demands`, `server/demand-commands.ts`).
+   *
+   * This **mirrors** procurement-service's `PROCUREMENT_DEMAND_ROLES` (default
+   * `PROCUREMENT_USER,ORGANIZATION_ADMIN`) and must be changed together with it.
+   * It decides only what is drawn; the service decides on every request. The
+   * service refuses `AUDITOR` and `SYSTEM_ADMIN` whatever its configuration says
+   * and refuses to start naming either, so the portal does the same.
+   */
+  WEB_PROCUREMENT_DEMAND_ROLES: roleList(
+    'WEB_PROCUREMENT_DEMAND_ROLES',
+    'PROCUREMENT_USER,ORGANIZATION_ADMIN',
+    [PLATFORM_ROLE],
+  ),
+
+  /**
+   * How long, in hours, procurement-service answers a demand command re-sent
+   * under its original key with its stored response instead of running it again
+   * (`server/demand-replay.ts`). A demand submitted again under a fresh record is
+   * a second demand in the window, so past this window the portal never re-sends.
+   *
+   * This **mirrors** procurement-service's `PROCUREMENT_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168; the service's default is 24) and must be changed
+   * together with it, or set lower. The default is that setting's floor.
+   */
+  WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a demand
+   * command, in seconds. Every send carries its deadline as
+   * `Idempotency-Replay-Deadline`, which procurement-service refuses on its own
+   * clock once passed (FU-156): that is the guarantee, and this margin a second
+   * guard — two clock skews and one request (`MIN_REPLAY_MARGIN_MS`) plus a wait
+   * inside the service, so the floor stays five minutes. The window (retention
+   * less this margin, plus the portal's 30 s allowance) may not exceed
+   * `PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s), or the
+   * portal refuses to start (`loadWebServerEnv`).
+   */
+  WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(Math.max(MIN_REPLAY_MARGIN_MS / 1000, PROCUREMENT_MIN_REPLAY_MARGIN_SECONDS))
+    .max(MAX_REPLAY_MARGIN_SECONDS)
+    .prefault(10 * 60),
+
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
     .prefault('true')
@@ -526,6 +581,16 @@ export function loadWebServerEnv(
     )
   ) {
     missing.push('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+  }
+  // The demand window against procurement-service's fence, by the same shared-constant rule (FU-156).
+  if (
+    parsed.success &&
+    !procurementDemandWindowFits(
+      parsed.data.WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS,
+      parsed.data.WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS,
+    )
+  ) {
+    missing.push('WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS');
   }
 
   if (!parsed.success || missing.length > 0) {

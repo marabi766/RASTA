@@ -1,4 +1,4 @@
-import { render } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { TopUpForm } from './TopUpForm';
@@ -10,14 +10,15 @@ import type { TopUpFormState } from './form-state';
  * rendered directly without a server action actually running.
  */
 
-let currentState: TopUpFormState = { kind: 'IDLE' };
+let currentState: TopUpFormState | undefined;
 let pending = false;
 
 jest.mock('react', () => {
   const actual = jest.requireActual('react');
   return {
     ...actual,
-    useActionState: () => [currentState, '/wallet#action', pending] as const,
+    useActionState: (_action: unknown, initial: TopUpFormState) =>
+      [currentState ?? initial, '/wallet#action', pending] as const,
   };
 });
 
@@ -101,4 +102,31 @@ describe('TopUpForm', () => {
     const { container } = renderForm();
     expect(await axe(container)).toHaveNoViolations();
   });
+});
+
+it('hydrates the held key and amount, and disables editing and submission after a reload', () => {
+  currentState = undefined;
+  const { container, getByRole } = render(
+    <TopUpForm
+      walletId="WLT_1"
+      csrfToken={CSRF}
+      submissionId="fresh-key"
+      initialState={{ kind: 'HELD', submissionId: SUBMISSION, values: { amountMinor: '1000' } }}
+    />,
+  );
+  expect(container.querySelector('[name="submission"]')).toHaveValue(SUBMISSION);
+  expect(container.querySelector('[name="amountMinor"]')).toHaveValue('1000');
+  expect(container.querySelector('[name="amountMinor"]')).toHaveAttribute('readonly');
+  expect(getByRole('button')).toBeDisabled();
+});
+
+it('replaces edited values with the server-held amount when another tab wins the reservation', () => {
+  const view = renderForm();
+  const input = view.container.querySelector('[name="amountMinor"]')!;
+  fireEvent.change(input, { target: { value: '2000' } });
+  currentState = { kind: 'HELD', submissionId: SUBMISSION, values: { amountMinor: '1000' } };
+  view.rerender(<TopUpForm walletId="WLT_1" csrfToken={CSRF} submissionId="other-tab-key" />);
+  expect(view.container.querySelector('[name="amountMinor"]')).toHaveValue('1000');
+  expect(view.container.querySelector('[name="submission"]')).toHaveValue(SUBMISSION);
+  expect(view.getByRole('button')).toBeDisabled();
 });

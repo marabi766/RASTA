@@ -29,9 +29,10 @@ import type { RateLimiter, RateLimitRule } from './rate-limiter';
  * `GatewayController`, which forwards with the real `fetch` to an upstream that answers late.
  */
 
-/** Both deadlines short, so the test is quick: 300 ms for everything, 5 s for the tender routes. */
+/** Answering routes get scheduling headroom; deadline cases use a silent upstream. */
 const DEFAULT_DEADLINE_MS = 300;
-const TENDER_DEADLINE_MS = 5_000;
+const TENDER_DEADLINE_MS = 60_000;
+const BOUNDED_TENDER_DEADLINE_MS = 5_000;
 /** Late for every route but the two tender routes. */
 const SLOW_UPSTREAM_MS = 1_200;
 
@@ -59,7 +60,8 @@ const userContext: RequestContext = {
 
 interface Upstream {
   url: string;
-  delayMs: number;
+  /** Undefined means never answer, so no response timer can race a deadline. */
+  delayMs: number | undefined;
   received: string[];
   close: () => Promise<void>;
 }
@@ -68,6 +70,7 @@ async function startUpstream(): Promise<Upstream> {
   const upstream = { delayMs: 0, received: [] as string[] } as Upstream;
   const server: Server = createServer((req, res) => {
     upstream.received.push(`${req.method} ${req.url}`);
+    if (upstream.delayMs === undefined) return;
     const timer = setTimeout(() => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"ok":true}');
@@ -166,13 +169,16 @@ describe('the tender opening routes wait for construction-service (Codex r2 on #
   });
   let upstream: Upstream;
   let gateway: Awaited<ReturnType<typeof startGateway>>;
+  let deadlineTimers: jest.SpiedFunction<typeof setTimeout>;
 
   beforeEach(async () => {
+    deadlineTimers = jest.spyOn(globalThis, 'setTimeout');
     upstream = await startUpstream();
     upstream.delayMs = SLOW_UPSTREAM_MS;
     gateway = await startGateway(upstream, env);
   });
   afterEach(async () => {
+    deadlineTimers.mockRestore();
     await gateway.close();
     await upstream.close();
   });
@@ -213,11 +219,13 @@ describe('the tender opening routes wait for construction-service (Codex r2 on #
     ['GET', '/v1/projects/TND_1/bids'],
     ['POST', '/v1/projects/TND_1/open-bids'],
   ])('%s %s: keeps the default deadline (504 UPSTREAM_TIMEOUT)', async (method, path) => {
+    upstream.delayMs = undefined;
     const response = await gateway.send(method, path);
 
     expect(response.status).toBe(504);
     expect(JSON.parse(response.body)).toEqual({ code: 'UPSTREAM_TIMEOUT' });
-    expect(response.elapsedMs).toBeLessThan(SLOW_UPSTREAM_MS);
+    expect(response.elapsedMs).toBeGreaterThanOrEqual(DEFAULT_DEADLINE_MS - 50);
+    expect(deadlineTimers).toHaveBeenCalledWith(expect.any(Function), DEFAULT_DEADLINE_MS);
   });
 
   // A HEAD answer has no body: only the status and the time are compared.
@@ -240,21 +248,32 @@ describe('the tender opening routes wait for construction-service (Codex r2 on #
     ['POST', '/v1/tenders/TND_1/open%2Dbids'],
     ['GET', '/v1/tenders/TND_1//bids'],
   ])('%s %s: keeps the default deadline', async (method, path) => {
+    upstream.delayMs = undefined;
     const response = await gateway.send(method, path);
 
     expect(response.status).toBe(504);
-    expect(response.elapsedMs).toBeLessThan(SLOW_UPSTREAM_MS);
+    expect(response.elapsedMs).toBeGreaterThanOrEqual(DEFAULT_DEADLINE_MS - 50);
+    expect(deadlineTimers).toHaveBeenCalledWith(expect.any(Function), DEFAULT_DEADLINE_MS);
   });
 
   it('still bounds the tender routes: an opening past GATEWAY_TENDER_OPEN_TIMEOUT_MS is UPSTREAM_TIMEOUT', async () => {
-    upstream.delayMs = TENDER_DEADLINE_MS + 1_000;
+    upstream.delayMs = undefined;
+    await gateway.close();
+    gateway = await startGateway(
+      upstream,
+      loadGatewayEnv({
+        ...BASE_ENV,
+        GATEWAY_UPSTREAM_TIMEOUT_MS: String(DEFAULT_DEADLINE_MS),
+        GATEWAY_TENDER_OPEN_TIMEOUT_MS: String(BOUNDED_TENDER_DEADLINE_MS),
+      }),
+    );
 
     const response = await gateway.send('POST', '/v1/tenders/TND_1/open-bids');
 
     expect(response.status).toBe(504);
     expect(JSON.parse(response.body)).toEqual({ code: 'UPSTREAM_TIMEOUT' });
-    expect(response.elapsedMs).toBeGreaterThanOrEqual(TENDER_DEADLINE_MS - 50);
-    expect(response.elapsedMs).toBeLessThan(TENDER_DEADLINE_MS + 1_000);
+    expect(response.elapsedMs).toBeGreaterThanOrEqual(BOUNDED_TENDER_DEADLINE_MS - 50);
+    expect(deadlineTimers).toHaveBeenCalledWith(expect.any(Function), BOUNDED_TENDER_DEADLINE_MS);
   });
 });
 

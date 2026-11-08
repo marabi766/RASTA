@@ -17,6 +17,10 @@
  * connection gets it, and raw `$queryRaw` and interactive transactions with
  * it.
  *
+ * Behind a transaction-pooling PgBouncer this option is dropped, so it is the
+ * second line only. `@rasta/nest-common`'s `utc-session.ts` refuses, in the
+ * transaction that does the work, any session this did not reach (FU-188).
+ *
  * Infrastructure, not business logic (A-03): it decides how a connection is
  * opened, never what is done on it.
  */

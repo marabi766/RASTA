@@ -18,11 +18,12 @@ describe('the constructs the notification DTOs are built from', () => {
       properties: Record<string, Record<string, unknown>>;
       required?: string[];
     };
-    expect(schema.properties.limit).toMatchObject({
+    expect(schema.properties.limit).toEqual({
       type: 'integer',
       minimum: 1,
       maximum: 200,
       default: 25,
+      description: 'Page size. Defaults to 25; above 200 is refused.',
     });
     expect(schema.properties.state).toMatchObject({ enum: ['UNREAD', 'READ', 'DISMISSED'] });
     expect(schema.properties.cursor).toMatchObject({ type: 'string' });

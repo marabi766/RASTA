@@ -133,7 +133,7 @@ describe('staged scalar-FK inventory', () => {
       for (const field of match[2]!.matchAll(/^\s*(\w+)\s+[^\n]*@relation\([^\n]*fields:\s*\[/gm))
         relations.push(`${match[1]}.${field[1]}`);
     }
-    expect(relations).toHaveLength(12);
+    expect(relations).toHaveLength(15);
     for (const relation of relations)
       expect(scalarRelationPolicy('marketplace', relation)).not.toBe('UNCLASSIFIED');
   });

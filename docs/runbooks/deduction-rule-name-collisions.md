@@ -1,4 +1,4 @@
-# Runbook: برخورد نام ردیف کسر پیش از Migration `20261104210000` (FU-083)
+# Runbook: برخورد نام ردیف کسر پیش از Migration `20261108100000` (FU-083)
 
 **شدت:** ⚪ عملیاتی · **هشدار محرک:** ندارد — پیش از استقرار این Migration اجرا می‌شود.
 
@@ -15,6 +15,6 @@ SELECT organization_id, held, translate(name, U&'ABCDEFGHIJKLMNOPQRSTUVWXYZ\0020
 اگر Migration پیش از این کار اجرا و متوقف شده باشد، هیچ ردیف، تابع یا Indexی تغییر نکرده، اما Prisma با `P3009` هر Deploy بعدی را رد می‌کند. پیش از Resolve ثابت کن که تلاش ناموفق برگشته است: خروجی `SELECT pg_get_functiondef('deduction_rule_name_key(text)'::regprocedure);` باید هنوز `replace` را نشان دهد، نه `translate`. پس از برطرف‌کردن برخوردها، به‌عنوان مالک Migration و با Credential از env (`.env.migrator`، نه خط فرمان):
 
 ```bash
-pnpm --dir services/contract-service exec node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate resolve --rolled-back 20261104210000_deduction_rule_name_fold
+pnpm --dir services/contract-service exec node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate resolve --rolled-back 20261108100000_deduction_rule_name_fold
 pnpm --dir services/contract-service db:migrate
 ```

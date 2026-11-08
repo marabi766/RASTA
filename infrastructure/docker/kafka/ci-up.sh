@@ -29,10 +29,14 @@
 # every step runs as the same runner user, so test code pointed at a secrets
 # directory can read it; deployments inject only each service's own secret.
 set -euo pipefail
+# The broker image, declared first and read only: the image-pin check (scripts/check-dockerfile-pins-lib.mjs,
+# READONLY_FORM) reads no other spelling, so the reference below is the one that runs (FU-224). Change it
+# there, in docs/runbooks/infrastructure-image-update.md's table, never by an environment variable.
+readonly IMAGE=apache/kafka:3.9.0@sha256:fbc7d7c428e3755cf36518d4976596002477e4c052d1f80b5b9eafd06d0fff2f
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/../../.." && pwd)"
-IMAGE="${KAFKA_IMAGE:-apache/kafka:3.9.0@sha256:fbc7d7c428e3755cf36518d4976596002477e4c052d1f80b5b9eafd06d0fff2f}"
+readonly ROOT
 NAME="${KAFKA_CONTAINER_NAME:-rasta-ci-kafka}"
 TLS_DIR="${KAFKA_TLS_DIR:-${RUNNER_TEMP:-/tmp}/rasta-kafka-tls}"
 SECRETS_DIR="${KAFKA_SECRETS_DIR:?KAFKA_SECRETS_DIR must name the secrets directory for services and the observer}"
@@ -67,7 +71,7 @@ done < "${HERE}/principals.${PROFILE}.txt"
 
 mkdir -p "${SECRETS_DIR}" "${ADMIN_SECRETS_DIR}"
 chmod 700 "${SECRETS_DIR}" "${ADMIN_SECRETS_DIR}"
-env_flags=()
+env_names=()
 for principal in "${principals[@]}"; do
   variable="$(password_variable "${principal}")"
   # A service's and the observer's go where the test steps may read them;
@@ -83,9 +87,9 @@ for principal in "${principals[@]}"; do
     export "${variable}=${value}"
   fi
   (umask 077 && printf '%s' "${!variable}" > "${directory}/${variable}")
-  # `-e NAME` without a value: docker copies it from this environment, so no
-  # password appears on a command line.
-  env_flags+=(-e "${variable}")
+  # A name without a value in an --env-file: docker copies it from this environment, so no
+  # password appears on a command line or in a file.
+  env_names+=("${variable}")
 done
 publish KAFKA_BROKERS localhost:9092
 publish KAFKA_SSL true
@@ -102,13 +106,16 @@ trap on_error ERR
 # The first `docker run` below would pull the image implicitly, and under
 # `set -e` one registry 502 would end the bootstrap. The helper retries
 # transient errors only and refuses a reference not pinned by digest.
-"${ROOT}/scripts/ci-pull-image.sh" "${IMAGE}"
+# From the repository root (every workflow step runs it from there): the check reads the file by this path.
+scripts/ci-pull-image.sh "${IMAGE}"
 mkdir -p "${TLS_DIR}"
 docker run --rm --user 0 \
   -v "${TLS_DIR}:/tls" -v "${HERE}:/bootstrap:ro" \
   --entrypoint bash "${IMAGE}" /bootstrap/tls.sh
 
 # ---------------------------------------------------------------- 3. broker
+# The names of the credential variables, one per line: `--env-file` copies each value from this environment.
+printf '%s\n' "${env_names[@]}" > "${TLS_DIR}/broker.env"
 docker rm -f "${NAME}" >/dev/null 2>&1 || true
 docker run -d --name "${NAME}" --hostname kafka -p 9092:9092 \
   -v "${TLS_DIR}:/tls:ro" -v "${HERE}:/bootstrap:ro" \
@@ -116,7 +123,7 @@ docker run -d --name "${NAME}" --hostname kafka -p 9092:9092 \
   -e KAFKA_ADVERTISED_EXTERNAL=localhost:9092 \
   -e KAFKA_ADVERTISED_BROKER=kafka:9094 \
   -e KAFKA_ACL_PROFILE="${PROFILE}" \
-  "${env_flags[@]}" \
+  --env-file "${TLS_DIR}/broker.env" \
   --entrypoint /bootstrap/broker-entrypoint.sh "${IMAGE}" >/dev/null
 
 ready=0

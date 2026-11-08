@@ -62,26 +62,12 @@ function submissionOf(state: { kind: string; submissionId?: string }, minted: st
   return state.kind === 'INVALID' && state.submissionId ? state.submissionId : minted;
 }
 
-/**
- * Said for a `503` on a command that asks the owning services about open work
- * (change status, decommission): one of them did not answer, so asset-service
- * cannot say whether the machine is free — and it answers "unavailable" even
- * when the other service reported open work, because a definitive "blocked by
- * open work" from half the picture would be wrong in the other direction too
- * (docs/24 Q-94). Nothing was written.
- */
-export const OPEN_WORK_CHECK_UNAVAILABLE_MESSAGE =
-  'بررسی کار باز این دارایی ممکن نشد، چون یکی از سرویس‌های ناوگان یا تعمیرات موقتاً پاسخ نمی‌دهد. چیزی تغییر نکرد. کمی بعد دوباره تلاش کنید.';
-
 function Banner({
   state,
   forbidden,
-  asksOwners = false,
 }: {
   state: LifecycleFormState<unknown, string>;
   forbidden: string;
-  /** The command checks open work with the owning services, so a 503 means that check. */
-  asksOwners?: boolean;
 }) {
   switch (state.kind) {
     case 'INVALID':
@@ -112,13 +98,9 @@ function Banner({
     case 'UNCONFIRMED':
       return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
     case 'FAILED':
-      if (asksOwners && state.status === 503) {
-        return (
-          <Alert tone="warning">
-            {OPEN_WORK_CHECK_UNAVAILABLE_MESSAGE} کد پیگیری: {state.correlationId}
-          </Alert>
-        );
-      }
+      // A proven refusal or a send that never left this portal. A 503 the platform
+      // answered — the open-work check of docs/24 Q-94 included, which the portal
+      // cannot tell from a reset after the commit — is UNCONFIRMED (FU-189).
       return (
         <Alert tone="danger">
           انجام نشد و چیزی تغییر نکرد. می‌توانید دوباره بفرستید. کد پیگیری: {state.correlationId}
@@ -183,11 +165,7 @@ export function ChangeStatusForm({
   return (
     <form action={action} className="flex flex-col gap-4">
       <Hidden {...identity} submissionId={submissionOf(state, identity.submissionId)} />
-      <Banner
-        state={state}
-        forbidden="اجازهٔ تغییر وضعیت دارایی به شما داده نشده است."
-        asksOwners
-      />
+      <Banner state={state} forbidden="اجازهٔ تغییر وضعیت دارایی به شما داده نشده است." />
 
       <p className="text-sm text-content-muted">
         وضعیت فعلی: <strong>{assetStatusLabel(currentStatus)}</strong>. «در تخصیص» و «در تعمیر» را
@@ -335,7 +313,7 @@ export function DecommissionAssetForm({
     <Disclosure summary="اسقاط این دارایی…" open={state.kind !== 'IDLE'}>
       <form action={action} className="flex flex-col gap-4">
         <Hidden {...identity} submissionId={submissionOf(state, identity.submissionId)} />
-        <Banner state={state} forbidden="اجازهٔ اسقاط دارایی به شما داده نشده است." asksOwners />
+        <Banner state={state} forbidden="اجازهٔ اسقاط دارایی به شما داده نشده است." />
 
         {/* Not an `Alert`: that is a live region and this is standing text, read
             once the person opens the form. A second `role="alert"` beside the

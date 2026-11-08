@@ -2,11 +2,15 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, EmptyState, PageHeader, Section, TopBar } from '@/ui';
 import type { DriverPicker } from '@/lib/driver-fields';
 import { currentSession } from '@/server/current-session';
+import { readReleaseFeedback } from '@/server/release-feedback';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
 import { loadDriverRoster, type DriverRoster } from '@/server/driver-roster';
-import { mintSubmissionId } from '@/server/submission';
+import { driverCreationRequest } from '@/server/create-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
+import { releaseUnresolvedDriverCreation } from './actions';
+import { UnresolvedRegistrationNotice } from '@/app/UnresolvedRegistrationNotice';
 import { NewDriverForm } from './NewDriverForm';
 import {
   actingOrganizationLabel,
@@ -75,6 +79,8 @@ export default async function DriversPage({
         ? { kind: 'PICK', candidates: roster.candidates }
         : { kind: 'ID', reason: roster.reason };
 
+  const createState = await driverCreationRequest.restore(session);
+
   return (
     <AppShell
       key={actingScope(session)}
@@ -90,6 +96,22 @@ export default async function DriversPage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
     >
+      <ReleaseFeedback
+        outcome={readReleaseFeedback(
+          session,
+          '/drivers',
+          one(params.release),
+          createState.kind === 'IDLE',
+        )}
+      />
+      {!manage && 'releaseToken' in createState && createState.releaseToken ? (
+        <UnresolvedRegistrationNotice
+          csrfToken={session.csrfToken}
+          releaseToken={createState.releaseToken}
+          href="/drivers"
+          action={releaseUnresolvedDriverCreation}
+        />
+      ) : null}
       <PageHeader
         title="راننده و تخصیص"
         description="رانندگان این سازمان، شمارهٔ گواهینامه و اعتبار آن، و ثبت راننده تازه."
@@ -97,7 +119,9 @@ export default async function DriversPage({
 
       {picker ? (
         <Section headingId="new-driver" title="ثبت راننده" className="mt-4">
-          {picker.kind === 'PICK' && picker.candidates.length === 0 ? (
+          {createState?.kind === 'IDLE' &&
+          picker.kind === 'PICK' &&
+          picker.candidates.length === 0 ? (
             // The whole member list was read: nobody is left to register.
             <EmptyState
               title="عضوی که هنوز راننده نباشد در این سازمان نیست"
@@ -105,8 +129,12 @@ export default async function DriversPage({
             />
           ) : (
             <NewDriverForm
+              key={
+                'releaseToken' in createState ? createState.releaseToken : createState.submissionId
+              }
               csrfToken={session.csrfToken}
-              submissionId={mintSubmissionId(session)}
+              submissionId={createState?.submissionId ?? ''}
+              initialState={createState ?? undefined}
               picker={picker}
             />
           )}

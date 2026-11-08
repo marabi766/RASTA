@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, RedirectRefusedError, internalFetch } from '@rasta/nest-common';
+import { RastaError, RedirectRefusedError, foldAsciiCase, internalFetch } from '@rasta/nest-common';
 import {
   PLATFORM_ATTRIBUTE_NAMES,
   provenanceOnly,
@@ -538,7 +538,9 @@ export class KeycloakAdminClient {
    * account no user row points at (`approveRegistration`). Usernames are
    * case-insensitive in Keycloak, which stores them lower-cased; `exact=true`
    * stops `foo` from matching `foobar`, and the comparison below stops
-   * anything else.
+   * anything else. It folds A–Z only, as `user_login_key` does (FU-084 r2):
+   * a username is printable ASCII, and an account whose name only Unicode
+   * case mapping makes equal (the Kelvin sign) is not this one.
    */
   async findAccountByUsername(username: string): Promise<KeycloakAccount | null> {
     if (!this.options.enabled) return null;
@@ -552,7 +554,9 @@ export class KeycloakAdminClient {
       });
     }
     const found = ((await response.json()) as KeycloakUserRepresentation[]).find(
-      (account) => account.username?.toLowerCase() === username.toLowerCase(),
+      (account) =>
+        account.username !== undefined &&
+        foldAsciiCase(account.username) === foldAsciiCase(username),
     );
     return found ? toAccount(found) : null;
   }

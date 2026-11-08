@@ -274,7 +274,8 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
                takeover_at > COALESCE(${at ?? null}::timestamp, clock_timestamp() AT TIME ZONE 'UTC') AS live,
                account_missing_at IS NOT NULL AS account_missing,
                reassert_failures,
-               EXTRACT(EPOCH FROM next_reassert_at - (clock_timestamp() AT TIME ZONE 'UTC'))::float AS next_in
+               EXTRACT(EPOCH FROM next_reassert_at -
+                 COALESCE(${at ?? null}::timestamp, clock_timestamp() AT TIME ZONE 'UTC'))::float AS next_in
           FROM keycloak_write_attempt WHERE user_id = ${userId}
          ORDER BY started_at, attempt_id`
     ).map((row) => ({
@@ -2155,6 +2156,32 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
   // -------------------------------------------------------------------------
 
   describe('the durable backoffs cannot overflow (#402 r2 F4)', () => {
+    const backoffAt = new Date('2100-01-01T00:00:00.123Z');
+
+    // FU-155: freeze a sub-millisecond database instant. TIMESTAMP(3) rounds
+    // .123927 up to .124, so the original SQL measures 960.001 > 960 against
+    // the floored anchor, with no clock movement. Only the clock source
+    // is replaced; production’s truncation and cap/counter expressions run in PG.
+    const onClock = (query: unknown): TemplateStringsArray => {
+      if (!Array.isArray(query)) throw new Error('expected a tagged SQL backoff query');
+      const instant = "TIMESTAMPTZ '2100-01-01T00:00:00.123927Z'";
+      const parts = query.map((part: string) => part.replaceAll('clock_timestamp()', instant));
+      return Object.assign(parts, { raw: parts });
+    };
+
+    beforeEach(() => {
+      for (const client of [prisma.client, fencing.pool.client]) {
+        const execute = client.$executeRaw.bind(client);
+        const read = client.$queryRaw.bind(client);
+        jest
+          .spyOn(client, '$executeRaw')
+          .mockImplementation((query, ...values) => execute(onClock(query), ...values));
+        jest
+          .spyOn(client, '$queryRaw')
+          .mockImplementation((query, ...values) => read(onClock(query), ...values));
+      }
+    });
+
     it.each([1023, 2_147_483_647])(
       'a re-assertion counter of %i: deferred by the capped interval, the counter capped',
       async (failures) => {
@@ -2167,10 +2194,35 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
                   now() - interval '10 minutes', now() - interval '10 minutes',
                   now() - interval '8 minutes', now() - interval '8 minutes', ${failures})`;
         await fencing.fences.deferReassert(s.userId, 60, 16);
-        const [deferred] = await fencesOf(s.userId);
+        // Compare with the write’s truncated millisecond, with no tolerance.
+        const [deferred] = await fencesOf(s.userId, backoffAt);
         expect(deferred!.reassertFailures).toBe(Math.min(failures + 1, 1_000_000));
-        expect(deferred!.nextIn).toBeGreaterThan(60 * 16 - 5);
-        expect(deferred!.nextIn).toBeLessThanOrEqual(60 * 16);
+        expect(deferred!.nextIn).toBe(60 * 16);
+      },
+    );
+
+    it.each([1023, 2_147_483_647])(
+      'an intake counter of %i: deferred by the capped interval at millisecond precision',
+      async (attempts) => {
+        const intake = await prisma.client.registrationIntake.create({
+          data: {
+            id: `REGI_${ulid()}`,
+            submission: {},
+            attempts,
+            actorType: 'ANONYMOUS',
+            correlationId: ulid(),
+          },
+        });
+        try {
+          await repository.deferRegistrationIntake(intake.id, 60, 16);
+          const deferred = await prisma.client.registrationIntake.findUniqueOrThrow({
+            where: { id: intake.id },
+          });
+          expect(deferred.attempts).toBe(Math.min(attempts + 1, 1_000_000));
+          expect(deferred.nextAttemptAt.getTime() - backoffAt.getTime()).toBe(60 * 16 * 1000);
+        } finally {
+          await prisma.client.registrationIntake.delete({ where: { id: intake.id } });
+        }
       },
     );
 
@@ -2193,12 +2245,11 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
           () =>
             prisma.client.$queryRaw<Array<{ failures: number; retry_in: number }>>`
             SELECT lapse_failures AS failures,
-                   EXTRACT(EPOCH FROM lapse_retry_at - (clock_timestamp() AT TIME ZONE 'UTC'))::float AS retry_in
+                   EXTRACT(EPOCH FROM lapse_retry_at - ${backoffAt}::timestamp)::float AS retry_in
               FROM membership WHERE id = ${membershipId}`,
         );
         expect(row!.failures).toBe(Math.min(failures + 1, 1_000_000));
-        expect(row!.retry_in).toBeGreaterThan(60 * 16 - 5);
-        expect(row!.retry_in).toBeLessThanOrEqual(60 * 16);
+        expect(row!.retry_in).toBe(60 * 16);
       },
     );
   });

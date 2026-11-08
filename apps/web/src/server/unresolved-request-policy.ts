@@ -1,4 +1,7 @@
-import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import {
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
+  PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS,
+} from '@rasta/contracts';
 
 /**
  * What every unresolved-request purpose is allowed to do, and the one time
@@ -11,6 +14,7 @@ import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
  * | purpose          | retry | deadline   | stored as                         |
  * | ---------------- | ----- | ---------- | --------------------------------- |
  * | `project-create` | true  | `REQUIRED` | a finite integer (ms since epoch) |
+ * | `procurement-demand` | true | `REQUIRED` | a finite integer (ms since epoch) |
  *
  *   - `retry` — may an unresolved record with the very same key and body be
  *     sent again. True only where the service answers a repeated key with the
@@ -100,13 +104,26 @@ export type DeadlineMode = 'REQUIRED' | 'NONE';
 
 export interface PurposePolicy {
   readonly retry: boolean;
+  /** Money holds survive login rotation and logout; kept in a separate capacity index. */
+  readonly identity?: 'PERSON';
   readonly deadline: DeadlineMode;
 }
 
 const PURPOSES: Readonly<Record<string, PurposePolicy>> = {
   'project-create': { retry: true, deadline: 'REQUIRED' },
+  // These creates have no service-side replay fence: reconcile ambiguous outcomes, never resend.
+  'asset-register': { retry: false, deadline: 'NONE' },
+  'driver-create': { retry: false, deadline: 'NONE' },
+  'wallet-top-up': { retry: false, deadline: 'NONE', identity: 'PERSON' },
   // supplier-service has no Idempotency-Key and no expiry: never resent, no deadline.
   'supplier-write': { retry: false, deadline: 'NONE' },
+  // procurement-service answers a repeated Idempotency-Key with the first result while it keeps the
+  // key (`PROCUREMENT_IDEMPOTENCY_TTL_HOURS`, counted from the stored answer): resent within the
+  // deadline `server/demand-replay.ts` signs, never after. EXCEPTION to D-065 above: procurement-service
+  // has NO replay fence (no `Idempotency-Replay-Deadline`), so for this purpose the portal's deadline and
+  // its margin (`WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS`, at least 5 min) ARE the guarantee, under the
+  // stated clock budget. A service-side fence is proposed as a follow-up.
+  'procurement-demand': { retry: true, deadline: 'REQUIRED' },
 };
 
 /** The table, as the scripts receive it. A function so a test can stand in extra purposes. */
@@ -142,6 +159,19 @@ export function projectCreateWindowFits(ttlHours: number, marginSeconds: number)
   return (
     windowSeconds * 1000 + MAX_CLOCK_SKEW_MS <= PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS * 1000
   );
+}
+
+/**
+ * The same boot check for the demand window (FU-156, PM decision D-125): procurement-service refuses a
+ * replay deadline later than `claim + TTL − B` and refuses to boot unless `TTL − B − skew ≥ K`, with
+ * K = `PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS`. The portal refuses to boot unless
+ *
+ *     window + MAX_CLOCK_SKEW_MS ≤ K          window = WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS · 3600
+ *                                                       − WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS
+ */
+export function procurementDemandWindowFits(ttlHours: number, marginSeconds: number): boolean {
+  const windowSeconds = ttlHours * 3600 - marginSeconds;
+  return windowSeconds * 1000 + MAX_CLOCK_SKEW_MS <= PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS * 1000;
 }
 
 /** The largest `WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS` the setting's schema accepts. */
