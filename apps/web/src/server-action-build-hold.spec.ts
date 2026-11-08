@@ -59,6 +59,10 @@ setInterval(() => {
 }, 20);`;
 // The owner's parent never returns to its event loop, so nothing reaps the owner: it ends a zombie.
 const PARENT = `const cp = require('child_process');
+const fs0 = require('fs'), path0 = require('path');
+// Written whole or not at all: the fixture reads it only once it exists.
+fs0.writeFileSync(path0.join(process.argv[1], 'parent.pid.tmp'), String(process.pid));
+fs0.renameSync(path0.join(process.argv[1], 'parent.pid.tmp'), path0.join(process.argv[1], 'parent.pid'));
 const owner = cp.spawn(process.execPath, ['-e', ${JSON.stringify(OWNER)}, process.argv[1]], { stdio: 'ignore' });
 // Before anything else can happen, so the fixture knows what to wait for (to observe, never to signal).
 const fs = require('fs'), path = require('path');
@@ -73,7 +77,7 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
   let n = 0;
   const owned = ownedProcesses();
   const dirs: string[] = [];
-  let leftovers = false;
+  let kept = false;
   const app = (plan: Plan, owner?: 'external'): string => {
     n += 1;
     const dir = join(root, `app-${n}`);
@@ -112,12 +116,12 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
   afterEach(async () => {
     // Joins every process and the held writers; a failure fails THIS case and keeps the root.
     await owned.teardown().catch((error) => {
-      leftovers = true;
+      kept = true; // a failed case keeps the root; a hook the runner abandons is seen by `unjoined`
       throw error;
     });
   });
   afterAll(() => {
-    if (leftovers) throw new Error(`${root}: kept, fixture processes were not joined`);
+    if (kept || owned.unjoined) throw new Error(`${root}: kept, fixture processes were not joined`);
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -126,7 +130,10 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
    * case that fails at any later point still ends it — through its shutdown channel (`owner-exit`,
    * or the removal of the directory), never a signal to a saved pid.
    */
-  const startOwner = async (dir: string): Promise<{ ownerPid: number; parent: ChildProcess }> => {
+  const startOwner = async (
+    dir: string,
+    readyMs?: number,
+  ): Promise<{ ownerPid: number; parent: ChildProcess }> => {
     const { child: parent } = owned.own(
       spawn(process.execPath, ['-e', PARENT, dir], { stdio: 'ignore' }),
     );
@@ -149,7 +156,7 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
       const pid = spawnedPid();
       return pid === undefined ? parentSettled() : liveMembers([pid])[0].length === 0;
     });
-    await waitFor(() => existsSync(join(dir, 'owner.pid')));
+    await waitFor(() => existsSync(join(dir, 'owner.pid')), readyMs);
     return { ownerPid: Number(readFileSync(join(dir, 'owner.pid'), 'utf8')), parent };
   };
   /** An owner that has exited and stays unreaped (`zombie`), or one that is gone altogether. */
@@ -237,6 +244,17 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     expect(heldWriters()).toEqual([]);
   });
 
+  it('(F1) a setup that fails while it waits for its owner leaves no parent running', async () => {
+    const dir = app({}, 'external');
+    mkdirSync(join(dir, 'owner.pid.tmp')); // the owner cannot write its pid: setup fails at the wait
+    await expect(startOwner(dir, 300)).rejects.toThrow();
+    await waitFor(() => existsSync(join(dir, 'parent.pid')));
+    const parentPid = Number(readFileSync(join(dir, 'parent.pid'), 'utf8'));
+    expect(liveMembers([parentPid])[0]).toEqual([parentPid]); // it would run on, out of reach
+    await owned.teardown();
+    expect(liveMembers([parentPid])[0]).toEqual([]);
+  });
+
   it('(F1) a teardown that cannot prove a process ended REPORTS it, and does not swallow the rest', async () => {
     const dir = app({ holdUntilRelease: true });
     const writer = startWriter(dir);
@@ -247,15 +265,16 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
       signalCode: null,
       kill: () => true, // a process that does not die
     }) as unknown as ChildProcess;
-    owned.own(stuck);
-    owned.watch('a stuck owner', () => false);
-    owned.watch('an unobservable owner', () => {
+    const failing = ownedProcesses(); // a failed teardown leaves its instance unjoined for good
+    failing.own(stuck);
+    failing.watch('a stuck owner', () => false);
+    failing.watch('an unobservable owner', () => {
       throw new Error('census unreadable');
     });
-    owned.afterJoin(() => {
+    failing.afterJoin(() => {
       throw new Error('cleanup refused');
     });
-    const failure = await owned.teardown(300).then(
+    const failure = await failing.teardown(300).then(
       () => undefined,
       (error: AggregateError) => error,
     );
@@ -263,11 +282,90 @@ describe('a held fake writer ends with its owner and with its release (FU-216)',
     expect(failure?.errors.map((e: Error) => e.message)).toEqual([
       'a stuck owner: still running 300 ms after its shutdown request',
       'an unobservable owner: census unreadable',
-      'process 0: did not exit 300 ms after SIGKILL',
+      'process 0: did not exit by the 300 ms deadline',
       'cleanup: cleanup refused',
     ]);
-    await waitFor(() => writer.child.exitCode !== null || writer.child.signalCode !== null);
     await releaseHold(dir); // the registered writer's own sweep still happens
+  });
+
+  const stuckChild = (): ChildProcess =>
+    Object.assign(new EventEmitter(), {
+      pid: 0,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    }) as unknown as ChildProcess;
+  const settle = (p: Promise<void>): Promise<AggregateError | undefined> =>
+    p.then(
+      () => undefined,
+      (error: AggregateError) => error,
+    );
+
+  it('(FU-232) the whole teardown is capped by its budget: stuck processes cost one budget, leftovers are reported and the cleanup still runs', async () => {
+    const local = ownedProcesses();
+    for (let i = 0; i < 3; i += 1) local.own(stuckChild());
+    local.watch('a stuck owner', () => false);
+    let cleaned = false;
+    local.afterJoin(() => {
+      cleaned = true;
+    });
+    const started = Date.now();
+    const pending = local.teardown(400);
+    expect(local.unjoined).toBe(true); // set before anything is awaited
+    const failure = await settle(pending);
+    expect(Date.now() - started).toBeLessThan(1_200); // main: 400 + 3 x 400
+    expect(failure?.errors).toHaveLength(4);
+    expect(cleaned).toBe(true);
+    expect(local.unjoined).toBe(true); // a leftover is reported, never dropped
+  });
+
+  it('(FU-232 r2) a shutdown request that never settles is inside the same deadline', async () => {
+    const local = ownedProcesses();
+    local.signal(() => new Promise<void>(() => {}));
+    let cleaned = false;
+    local.afterJoin(() => {
+      cleaned = true;
+    });
+    const started = Date.now();
+    const failure = await settle(local.teardown(300));
+    expect(Date.now() - started).toBeLessThan(1_500); // 7105169c: never settles
+    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+      'shutdown request: did not finish by the 300 ms deadline',
+    ]);
+    expect(cleaned).toBe(true);
+    expect(local.unjoined).toBe(true);
+  });
+
+  it('(FU-232 r2) a teardown that overlaps a running one shares it: it cannot report "joined" first', async () => {
+    const local = ownedProcesses();
+    local.own(stuckChild());
+    local.signal(() => sleep(100)); // keeps the first teardown in flight
+    const first = settle(local.teardown(400));
+    await sleep(20);
+    const second = settle(local.teardown());
+    expect(local.unjoined).toBe(true);
+    const failure = await second; // 7105169c: resolves clean while the first still runs
+    expect(failure?.errors.map((e: Error) => e.message)).toEqual([
+      'process 0: did not exit by the 400 ms deadline',
+    ]);
+    expect(await first).toBe(failure);
+    expect(local.unjoined).toBe(true);
+  });
+
+  it('(FU-232 r2) a clean teardown after a failed one does not clear the leftover flag', async () => {
+    const local = ownedProcesses();
+    local.own(stuckChild());
+    expect(await settle(local.teardown(200))).toBeInstanceOf(AggregateError);
+    await local.teardown(); // nothing registered any more: the leftover is gone from every list
+    expect(local.unjoined).toBe(true); // 7105169c: false, the leftover pid is forgotten
+  });
+
+  it('(FU-232) a cleanup step that hangs is cut off by the budget, not awaited forever', async () => {
+    const local = ownedProcesses();
+    local.afterJoin(() => new Promise<void>(() => {}));
+    const started = Date.now();
+    await expect(local.teardown(300)).rejects.toThrow('fixture processes not joined');
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it('(F2) a writer connected but not yet accepted by its owner does no work, and the sweep leaves none held', async () => {
