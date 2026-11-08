@@ -18,8 +18,11 @@
 // an explicit grammar, and what falls outside it counts as unsafe, never as absent:
 //   - relations: FROM lists (every comma), JOIN, DELETE … USING, INSERT/MERGE INTO and UPDATE
 //     targets (`UPDATE ONLY (t)`); a name resolves to a replayed public table, a listed
-//     catalogue relation or a CTE, else it is unresolved (`other.t`, `pg_missing`);
-//   - strings by their decoded value (dollar quotes, E'…' and U&'…' escapes);
+//     catalogue relation or a CTE in its WITH's scope, else it is unresolved (`other.t`,
+//     `pg_missing`, `"PUBLIC".t`); a table named anywhere else (`NULL::t`) counts for R1;
+//   - strings by their decoded value (dollar quotes, E'…' and U&'…' escapes), U&"…" names;
+//   - R0 (PR #979 r1): SQL in a string, a DO or EXECUTE statement, a UESCAPE, a session
+//     setting that may move names (search_path, SET ROLE, set_config() of an unlisted one);
 //   - types as PostgreSQL reads them (`pg_catalog.timestamp`, `"timestamp"`);
 //   - a pin: grouping, `AT TIME ZONE 'UTC'` or timezone('UTC', …), then date_trunc() or a cast
 //     to plain timestamp, used where nothing converts it back (no coalesce(), CASE branch,
@@ -28,6 +31,8 @@
 //   - migrations: a statement, ALTER action, trigger binding or DO block it does not model, a
 //     partition's own defaults or column ALTERs, DDL or EXECUTE in a routine; conditional DDL
 //     (IF [NOT] EXISTS) as PostgreSQL runs it. DDL or EXECUTE in a DO block goes to review.
+//     A column definition is read from its tokens; a session setting, CREATE SCHEMA, a second
+//     CREATE of a known name, a quoted name its patterns would cut or fold: refused.
 // A reviewed exemption is bound to what its review relied on: a routine to its signature,
 // body, trigger bindings and the column types of the tables it fires on or names; a DO block
 // to its body and migration; a literal to its text and the column types it `assumes`.
@@ -55,7 +60,7 @@ import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { authoredFiles } from './authored-source-inventory.cjs';
 import { productionFiles, readSchemas, sqlLiterals } from './eligibility-clock-derive.mjs';
-import { lex, stripComments } from './eligibility-clock-sql.mjs';
+import { lex as lexSql, stripComments } from './eligibility-clock-sql.mjs';
 
 const CALLS = new Set(['now', 'clock_timestamp', 'statement_timestamp', 'transaction_timestamp']);
 const KEYWORD_CLOCK = 'current_timestamp';
@@ -96,6 +101,30 @@ const unicodeUnescape = (body) =>
     /\\(?:([0-9a-f]{4})|\+([0-9a-f]{6})|(\\))/gi,
     (_, a, b, slash) => slash ?? chr(parseInt(a ?? b, 16)),
   );
+
+/**
+ * Tokens, each `U&"…"` read as the one identifier PostgreSQL reads (PR #979 r1 F1: `U&"\006Eow"()`
+ * is now()). With UESCAPE its escapes are not decoded here: `unreadable`, so refused.
+ */
+function lex(text) {
+  const tokens = [];
+  for (const t of lexSql(text)) {
+    const [u, amp] = [tokens.at(-2), tokens.at(-1)];
+    if (t.type === 'quoted' && isOp(amp, '&') && isWord(u, 'u') && u.start + 2 === t.start) {
+      const value = unicodeUnescape(t.value);
+      tokens.splice(-2, 2, {
+        ...t,
+        value,
+        lower: value.toLowerCase(),
+        start: u.start,
+        unicode: true,
+      });
+    } else if (isWord(t, 'uescape') && tokens.at(-1)?.unicode) {
+      tokens.push({ ...t, unreadable: true });
+    } else tokens.push(t);
+  }
+  return tokens;
+}
 
 /**
  * What a string token may mean, decoded as PostgreSQL decodes it (PR #906 r2 F2): a dollar
@@ -302,7 +331,7 @@ const PROVEN_DEFAULT_CALLS = new Set([...CALLS, KEYWORD_CLOCK, 'timezone', 'date
 
 /** A default expression's verdict: it depends, or may depend, on the session's zone. */
 function defaultDependsOnSession(expression) {
-  const tokens = lex(expression);
+  const tokens = typeof expression === 'string' ? lex(expression) : expression;
   return (
     clocksIn(tokens).some((clock) => !clock.utc) ||
     tokens.some(
@@ -333,19 +362,20 @@ const DROP_VIEW = statementRe(
 const ALTER_TABLE = String.raw`ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(ONLY\s+)?${IDENT}\s+`;
 const RENAME_TABLE = statementRe(String.raw`${ALTER_TABLE}RENAME\s+TO\s+${NAME}`);
 const ALTER_ACTIONS = statementRe(String.raw`${ALTER_TABLE}([\s\S]+)$`);
-const ADD_COLUMN = statementRe(
-  String.raw`ADD\s+(?:COLUMN\s+)?(IF\s+NOT\s+EXISTS\s+)?${NAME}\s+([\s\S]+)$`,
-);
 const DROP_COLUMN = statementRe(String.raw`DROP\s+(?:COLUMN\s+)?(IF\s+EXISTS\s+)?${NAME}`);
 const RENAME_COLUMN = statementRe(String.raw`RENAME\s+(?:COLUMN\s+)?${NAME}\s+TO\s+${NAME}`);
 const ALTER_COLUMN = String.raw`ALTER\s+(?:COLUMN\s+)?${NAME}\s+`;
 const SET_TYPE = statementRe(String.raw`${ALTER_COLUMN}(?:SET\s+DATA\s+)?TYPE\s+([\s\S]+)$`);
 const SET_DEFAULT = statementRe(String.raw`${ALTER_COLUMN}SET\s+DEFAULT\s+([\s\S]+)$`);
 const DROP_DEFAULT = statementRe(String.raw`${ALTER_COLUMN}DROP\s+DEFAULT`);
-const NOT_A_COLUMN = /^(?:CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|CHECK|EXCLUDE|LIKE)$/i;
-const COLUMN_DEFINITION = /^\s*"?(\w+)"?\s+([\s\S]+)$/;
-const DEFAULT_CLAUSE =
-  /\bDEFAULT\s+(.+?)(?:\s+(?:NOT\s+NULL|NULL|CHECK|REFERENCES|CONSTRAINT|UNIQUE|PRIMARY|GENERATED)\b.*)?\s*$/is;
+const NOT_A_COLUMN = ['constraint', 'primary', 'unique', 'foreign', 'check', 'exclude'];
+// The words that open a column constraint: what may follow a column's type. Those main's
+// migrations do not use (COLLATE, DEFERRABLE, INITIALLY, MATCH, NULLS …) are refused.
+const COLUMN_CLAUSE = new Set(
+  'constraint not null default check primary unique references generated collate deferrable initially'.split(
+    ' ',
+  ),
+);
 
 // ALTER TABLE actions that cannot change a column's type or default, and hold no expression.
 const INERT_ALTER_ACTION =
@@ -353,7 +383,7 @@ const INERT_ALTER_ACTION =
 // Statement heads with no column type, default or routine body of their own. A clock in one of
 // these is refused below, unless the head is one-shot: it ran once, when the migration applied.
 const INERT_HEADS =
-  /^(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX|ALTER\s+INDEX|CREATE\s+TYPE|ALTER\s+TYPE|DROP\s+TYPE|CREATE\s+EXTENSION|CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER|DROP\s+TRIGGER|COMMENT|GRANT|REVOKE|SET|RESET|LOCK|BEGIN|COMMIT|ALTER\s+DEFAULT\s+PRIVILEGES|CREATE\s+POLICY|ALTER\s+POLICY|DROP\s+POLICY|CREATE\s+SEQUENCE|ALTER\s+SEQUENCE|DROP\s+SEQUENCE|CREATE\s+SCHEMA|ANALYZE|TRUNCATE)\b/i;
+  /^(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX|ALTER\s+INDEX|CREATE\s+TYPE|ALTER\s+TYPE|DROP\s+TYPE|CREATE\s+EXTENSION|CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER|DROP\s+TRIGGER|COMMENT|GRANT|REVOKE|SET|RESET|LOCK|BEGIN|COMMIT|ALTER\s+DEFAULT\s+PRIVILEGES|CREATE\s+POLICY|ALTER\s+POLICY|DROP\s+POLICY|CREATE\s+SEQUENCE|ALTER\s+SEQUENCE|DROP\s+SEQUENCE|ANALYZE|TRUNCATE)\b/i;
 const ONE_SHOT_HEADS = /^(?:INSERT|UPDATE|DELETE|SELECT|WITH)\b/i;
 const CREATE_TRIGGER = /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i;
 const TRIGGER_BINDING =
@@ -411,7 +441,7 @@ function statementsOf(raw) {
     }
     if (isOp(t, '(')) depth += 1;
     if (isOp(t, ')') && (depth -= 1) < 0) unreadable = true;
-    if (t.unterminated) unreadable = true;
+    if (t.unterminated || t.unreadable) unreadable = true;
     tokens.push(t);
   }
   flush(text.length);
@@ -420,33 +450,115 @@ function statementsOf(raw) {
 
 const columnType = (definition) => typeAt(lex(definition), 0).kind;
 
-function columnFacts(definition) {
-  const expression = DEFAULT_CLAUSE.exec(definition)?.[1];
-  return {
-    type: columnType(definition),
-    sessionDefault: expression !== undefined && defaultDependsOnSession(expression),
-  };
-}
-
 const hasBareClock = (text) => clocksIn(lex(text)).some((clock) => !clock.utc);
 
-/** A CHECK, generated column or the like holding a bare clock: a live expression nothing reads. */
-function clockOutsideDefault(definition) {
-  const expression = DEFAULT_CLAUSE.exec(definition)?.[1] ?? '';
-  return hasBareClock(definition.replace(expression, ' '));
+/** The end of the expression at tokens[k]: the next column clause at its depth (CASE … END and
+ * parentheses nest; `IS [NOT] NULL` is part of it). */
+function expressionEnd(tokens, k) {
+  for (let i = k, depth = 0; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (isOp(t, '(') || isWord(t, 'case')) depth += 1;
+    else if (isOp(t, ')') || isWord(t, 'end')) depth -= 1;
+    else if (
+      i > k &&
+      depth === 0 &&
+      COLUMN_CLAUSE.has(t.type === 'word' && t.lower) &&
+      !isWord(tokens[i - 1], 'is') &&
+      !(isWord(tokens[i - 1], 'not') && isWord(tokens[i - 2], 'is'))
+    )
+      return i;
+  }
+  return tokens.length;
+}
+
+/** The index after `REFERENCES t [(c)] [ON DELETE|UPDATE action]…` at tokens[k], or -1. */
+function referencesEnd(tokens, k) {
+  let j = nameOf(tokens[k]) && isOp(tokens[k + 1], '.') ? k + 2 : k;
+  if (!nameOf(tokens[j])) return -1;
+  j = isOp(tokens[j + 1], '(') ? closing(tokens, j + 1) + 1 : j + 1;
+  while (isWord(tokens[j], 'on') && isWord(tokens[j + 1], 'delete', 'update')) {
+    const [a, b] = [tokens[j + 2], tokens[j + 3]];
+    if (isWord(a, 'cascade', 'restrict')) j += 3;
+    else if (
+      (isWord(a, 'no') && isWord(b, 'action')) ||
+      (isWord(a, 'set') && isWord(b, 'null', 'default'))
+    )
+      j += 4;
+    else return -1;
+  }
+  return j;
+}
+
+/**
+ * A column definition read from its tokens (PR #979 r1 F4): the name is token 0, the type what
+ * stands before its first clause, each clause by its grammar, the DEFAULT up to the next clause.
+ * What it does not read, and a bare clock outside the DEFAULT, is `{refused}`.
+ */
+function readColumn(tokens) {
+  const refused = {
+    refused: `a column definition not read: ${tokens.map((t) => t.value).join(' ')}`,
+  };
+  if (tokens[0]?.type !== 'word' && tokens[0]?.type !== 'quoted') return refused;
+  let k = 1;
+  while (k < tokens.length && !COLUMN_CLAUSE.has(tokens[k].type === 'word' && tokens[k].lower))
+    k = isOp(tokens[k], '(') ? closing(tokens, k) + 1 : k + 1;
+  const type = typeAt(tokens, 1);
+  if (k === 1 || (type.kind !== 'other' && type.end !== k - 1)) return refused;
+  let [sessionDefault, from, to] = [false, k, k];
+  while (k < tokens.length) {
+    const [t, next] = [tokens[k], tokens[k + 1]];
+    if (isWord(t, 'constraint') && nameOf(next)) k += 2;
+    else if (isWord(t, 'not') && isWord(next, 'null')) k += 2;
+    else if (isWord(t, 'null', 'unique')) k += 1;
+    else if (isWord(t, 'primary') && isWord(next, 'key')) k += 2;
+    else if (isWord(t, 'check') && isOp(next, '(')) k = closing(tokens, k + 1) + 1;
+    else if (isWord(t, 'references') && referencesEnd(tokens, k + 1) > 0)
+      k = referencesEnd(tokens, k + 1);
+    else if (isWord(t, 'default') && k + 1 < tokens.length) {
+      [from, to] = [k + 1, expressionEnd(tokens, k + 1)];
+      sessionDefault = defaultDependsOnSession(tokens.slice(from, to));
+      k = to;
+    } else if (isWord(t, 'generated')) {
+      const as = isWord(next, 'always')
+        ? k + 2
+        : isWord(next, 'by') && isWord(tokens[k + 2], 'default')
+          ? k + 3
+          : -1;
+      if (!isWord(tokens[as], 'as')) return refused;
+      if (isWord(tokens[as + 1], 'identity'))
+        k = isOp(tokens[as + 2], '(') ? closing(tokens, as + 2) + 1 : as + 2;
+      else if (isOp(tokens[as + 1], '(') && isWord(tokens[closing(tokens, as + 1) + 1], 'stored'))
+        k = closing(tokens, as + 1) + 2;
+      else return refused;
+    } else return refused;
+  }
+  if (clocksIn(tokens).some((clock) => !clock.utc && (clock.index < from || clock.index >= to))) {
+    return { refused: `a clock outside a DEFAULT: ${tokens.map((t) => t.value).join(' ')}` };
+  }
+  return { name: tokens[0].value, facts: { type: type.kind, sessionDefault } };
 }
 
 /** Applies one action; answers what is not modelled, or undefined. */
 function applyAlterAction(columns, action) {
   const missing = (column) => `ALTER on unknown column ${column}`;
-  if (clockOutsideDefault(action)) return `a clock outside a DEFAULT: ${action.trim()}`;
+  const tokens = lex(action);
+  const add = isWord(tokens[0], 'add') && !INERT_ALTER_ACTION.test(action);
+  // A clock outside a DEFAULT (a CHECK, a USING): a live expression nothing reads.
+  if (!add && !SET_DEFAULT.test(action) && hasBareClock(action))
+    return `a clock outside a DEFAULT: ${action.trim()}`;
   let a;
   if (INERT_ALTER_ACTION.test(action)) return undefined;
-  if ((a = ADD_COLUMN.exec(action))) {
-    if (NOT_A_COLUMN.test(a[2])) return `a constraint not modelled: ${action.trim()}`;
+  if (add) {
+    let k = isWord(tokens[1], 'column') ? 2 : 1;
+    const ifNotExists = isWord(tokens[k], 'if') && isWord(tokens[k + 1], 'not');
+    if (ifNotExists && isWord(tokens[k + 2], 'exists')) k += 3;
+    if (isWord(tokens[k], ...NOT_A_COLUMN)) return `a constraint not modelled: ${action.trim()}`;
+    const column = readColumn(tokens.slice(k));
+    if (column.refused) return column.refused;
     // As PostgreSQL does: IF NOT EXISTS keeps a column there (and its default), a second ADD fails.
-    if (columns.has(a[2])) return a[1] ? undefined : `ADD of a column already there: ${a[2]}`;
-    columns.set(a[2], columnFacts(a[3].trim()));
+    if (columns.has(column.name))
+      return ifNotExists ? undefined : `ADD of a column already there: ${column.name}`;
+    columns.set(column.name, column.facts);
   } else if ((a = DROP_COLUMN.exec(action))) {
     if (!a[1] && !columns.has(a[2])) return missing(a[2]);
     columns.delete(a[2]);
@@ -528,11 +640,16 @@ function readCreateTable({ tokens, text }, columns) {
   for (const part of topLevelParts(
     text.slice(tokens[open].start - base + 1, tokens[close].start - base),
   )) {
-    if (clockOutsideDefault(part)) return `a clock outside a DEFAULT: ${part.trim()}`;
-    const c = COLUMN_DEFINITION.exec(part);
-    if (/^\s*LIKE\b/i.test(part)) return `a CREATE TABLE form not modelled: ${part.trim()}`;
-    if (!c && part.trim()) return `a column definition not read: ${part.trim()}`;
-    if (c && !NOT_A_COLUMN.test(c[1])) columns.set(c[1], columnFacts(c[2].trim()));
+    const tokens = lex(part);
+    if (isWord(tokens[0], 'like')) return `a CREATE TABLE form not modelled: ${part.trim()}`;
+    if (isWord(tokens[0], ...NOT_A_COLUMN)) {
+      if (hasBareClock(part)) return `a clock outside a DEFAULT: ${part.trim()}`;
+      continue;
+    }
+    if (tokens.length === 0) continue;
+    const column = readColumn(tokens);
+    if (column.refused) return column.refused;
+    columns.set(column.name, column.facts);
   }
   return undefined;
 }
@@ -564,17 +681,43 @@ export function replayMigrations(texts) {
         );
         continue;
       }
+      // Read as PostgreSQL reads it, or refused (PR #979 r1 F3, F4): a session setting (a
+      // routine's body is read where it runs), a quoted name the patterns below would cut
+      // (`"lease until"`) or fold (`"PUBLIC".task` is no public table).
+      const misread = statement.tokens.find(
+        (t, i) =>
+          t.type === 'quoted' &&
+          (!/^\w+$/.test(t.value) ||
+            (isOp(statement.tokens[i + 1], '.') && t.value !== t.value.toLowerCase())),
+      );
+      if (sessionChange(statement.tokens)) {
+        refuse(`a session setting that may move names: ${firstLine(text)}`);
+        continue;
+      }
+      if (misread) {
+        refuse(`a quoted name the replay cannot read: "${misread.value}"`);
+        continue;
+      }
       const routine = readRoutine(statement);
       if (routine?.refused) {
         refuse(routine.refused);
       } else if (routine) {
-        functions.set(routine.key, routine);
+        // A second CREATE (no OR REPLACE) of a known name is another schema's: not modelled.
+        if (functions.has(routine.key) && !/^CREATE\s+OR\s+REPLACE\b/i.test(text))
+          refuse(`a second CREATE of routine ${routine.key}`);
+        else functions.set(routine.key, routine);
       } else if ((m = VIEW.exec(text))) {
-        views.set(m[1], { name: m[1], body: text, header: '' });
+        if (views.has(m[1]) && !/^CREATE\s+OR\s+REPLACE\b/i.test(text))
+          refuse(`a second CREATE of view ${m[1]}`);
+        else views.set(m[1], { name: m[1], body: text, header: '' });
       } else if ((m = DROP_VIEW.exec(text))) {
         views.delete(m[1]);
       } else if ((m = PARTITION_OF.exec(text))) {
         if (/\bIF\s+NOT\s+EXISTS\b/i.test(m[0]) && tables.has(m[1])) continue;
+        if (tables.has(m[1])) {
+          refuse(`a second CREATE of table ${m[1]}`);
+          continue;
+        }
         if (!tables.has(m[2])) {
           refuse(`PARTITION OF unknown table ${m[2]}`);
           continue;
@@ -589,6 +732,11 @@ export function replayMigrations(texts) {
         if (isOp(rest, '(')) refuse(`partition column options not modelled: ${firstLine(text)}`);
       } else if ((m = CREATE_TABLE.exec(text))) {
         if (/\bIF\s+NOT\s+EXISTS\b/i.test(text.slice(0, m[0].length)) && tables.has(m[1])) continue;
+        // PostgreSQL refuses a second CREATE of a name in one schema: another schema's (F3).
+        if (tables.has(m[1])) {
+          refuse(`a second CREATE of table ${m[1]}`);
+          continue;
+        }
         const columns = new Map();
         tables.set(m[1], columns);
         const problem = readCreateTable(statement, columns);
@@ -627,7 +775,7 @@ export function replayMigrations(texts) {
           continue;
         }
         for (const action of topLevelParts(actions)) {
-          const inert = INERT_ALTER_ACTION.test(action) && !clockOutsideDefault(action);
+          const inert = INERT_ALTER_ACTION.test(action) && !hasBareClock(action);
           const problem =
             partitioned.has(table) && !inert
               ? `a column ALTER in a partition tree is not modelled: ${action.trim()}`
@@ -645,6 +793,8 @@ export function replayMigrations(texts) {
           (language >= 0 && !isWord(statement.tokens[language + 1], 'plpgsql'))
         ) {
           refuse(`a DO block not read: ${firstLine(text)}`);
+        } else if (bodies.some(sessionChange)) {
+          refuse(`a session setting that may move names: ${firstLine(text)}`);
         } else if (bodies.some(ddlIn)) {
           doBlocks.push({ head: firstLine(text), body: statement.tokens[at].value, migration });
         }
@@ -674,6 +824,11 @@ export function replayMigrations(texts) {
         }
       } else if (!ONE_SHOT_HEADS.test(text)) {
         refuse(`a migration statement not modelled: ${firstLine(text)}`);
+      } else if (
+        statement.tokens.some((t, i) => t.type === 'string' && holdsSql(statement.tokens, i))
+      ) {
+        // SQL in a string of a one-shot statement may run later (a scheduled job): not read.
+        refuse(`SQL in a string of a one-shot statement: ${firstLine(text)}`);
       }
     }
   }
@@ -717,13 +872,15 @@ function relationAt(tokens, j, call = true) {
     return inner && isOp(tokens[inner.end + 1], ')') ? { ...inner, end: inner.end + 1 } : inner;
   }
   if (t?.type === 'placeholder' && !isOp(tokens[at + 1], '.')) return { dynamic: true, end: at };
-  const first = t?.type === 'placeholder' ? null : nameOf(t);
+  // A quoted name keeps its case (PR #979 r1 F3): `"PUBLIC".t`, `"Task"` are other relations.
+  const relationName = (u) => (u?.type === 'quoted' ? u.value : nameOf(u));
+  const first = t?.type === 'placeholder' ? null : relationName(t);
   if (first === null && t?.type !== 'placeholder') return { unreadable: true, end: at };
   let [schema, table, end] = [null, first, at];
   if (isOp(tokens[at + 1], '.')) {
     if (tokens[at + 2]?.type === 'placeholder') return { dynamic: true, end: at + 2 };
     // `${schema}.table`: only the schema is spliced.
-    [schema, table, end] = [first, nameOf(tokens[at + 2]), at + 2];
+    [schema, table, end] = [first, relationName(tokens[at + 2]), at + 2];
     if (table === null) return { unreadable: true, end };
   }
   // A set-returning call: its columns are not typed here, so it is unresolved, never skipped.
@@ -740,21 +897,40 @@ function afterAlias(tokens, k) {
   return at;
 }
 
-/** WITH names: `name [(columns)] AS [[NOT] MATERIALIZED] (`. */
-function cteNames(tokens) {
-  const names = new Set();
+/** The index ending the statement or subquery tokens[i] stands in: its `)` or `;`, or the end. */
+function scopeEnd(tokens, i) {
+  for (let k = i, depth = 0; k < tokens.length; k += 1) {
+    if (isOp(tokens[k], '(')) depth += 1;
+    else if (isOp(tokens[k], ')') && (depth -= 1) < 0) return k;
+    else if (depth === 0 && isOp(tokens[k], ';')) return k;
+  }
+  return tokens.length;
+}
+
+/**
+ * WITH names and where each is seen (PR #979 r1 F2), read by the grammar `WITH [RECURSIVE] name
+ * [(columns)] AS [[NOT] MATERIALIZED] (…) [, …]` (a WINDOW definition is none): from the end of
+ * its own body (from its body, if RECURSIVE) to the end of the statement or subquery it heads.
+ */
+function cteScopes(tokens) {
+  const scopes = [];
   tokens.forEach((t, i) => {
-    if (
-      nameOf(t) === null ||
-      !(isWord(tokens[i - 1], 'with', 'recursive') || isOp(tokens[i - 1], ','))
-    )
-      return;
-    let k = isOp(tokens[i + 1], '(') ? closing(tokens, i + 1) + 1 : i + 1;
-    if (!isWord(tokens[k], 'as')) return;
-    k += isWord(tokens[k + 1], 'not') ? 3 : isWord(tokens[k + 1], 'materialized') ? 2 : 1;
-    if (isOp(tokens[k], '(')) names.add(nameOf(t));
+    if (!isWord(t, 'with')) return;
+    const recursive = isWord(tokens[i + 1], 'recursive');
+    const to = scopeEnd(tokens, i);
+    for (let k = recursive ? i + 2 : i + 1; nameOf(tokens[k]) !== null;) {
+      let j = isOp(tokens[k + 1], '(') ? closing(tokens, k + 1) + 1 : k + 1;
+      if (!isWord(tokens[j], 'as')) break;
+      j += isWord(tokens[j + 1], 'not') ? 3 : isWord(tokens[j + 1], 'materialized') ? 2 : 1;
+      if (!isOp(tokens[j], '(')) break;
+      const body = closing(tokens, j);
+      const name = tokens[k].type === 'quoted' ? tokens[k].value : nameOf(tokens[k]);
+      scopes.push({ name, from: recursive ? j : body, to });
+      if (!isOp(tokens[body + 1], ',')) break;
+      k = body + 2;
+    }
   });
-  return names;
+  return scopes;
 }
 
 /**
@@ -763,13 +939,17 @@ function cteNames(tokens) {
  * never skipped (PR #906 r2 F2: `UPDATE ONLY (task)`, `FROM a, task`).
  */
 export function relationsIn(tokens) {
-  const ctes = cteNames(tokens);
+  const scopes = cteScopes(tokens);
   const refs = [];
   const writes = [];
   const read = (j, keyword, call) => {
     const rel = relationAt(tokens, j, call);
-    const cte = keyword !== 'update' && keyword !== 'delete' && rel?.schema === null;
-    if (rel) refs.push({ ...rel, keyword, cte: cte && ctes.has(rel.table) });
+    const cte =
+      keyword !== 'update' &&
+      keyword !== 'delete' &&
+      rel?.schema === null &&
+      scopes.some(({ name, from, to }) => name === rel.table && from < j && j <= to);
+    if (rel) refs.push({ ...rel, keyword, cte });
     return rel;
   };
   for (let i = 0; i < tokens.length; i += 1) {
@@ -846,12 +1026,84 @@ function lexAll(text) {
   }
 }
 
+// Settings that move no name to another schema; any other may (search_path, SCHEMA, ROLE and
+// SESSION AUTHORIZATION through "$user", RESET ALL). A custom `a.b` setting moves none.
+const KEEPS_NAMES = new Set(
+  'lock_timeout statement_timeout idle_in_transaction_session_timeout enable_sort constraints time timezone'.split(
+    ' ',
+  ),
+);
+const keepsNames = (tokens, k) => KEEPS_NAMES.has(nameOf(tokens[k])) || isOp(tokens[k + 1], '.');
+
+/**
+ * A session setting the guard cannot prove moves no name (PR #979 r1 F3): a SET or RESET at a
+ * statement's head, a set_config() of a setting not named by a listed literal, search_path
+ * named anywhere. Each may move every unqualified name to another schema. (SQL in a string is
+ * refused as such; a DO body is read here too.)
+ */
+function sessionChange(tokens) {
+  return tokens.some((t, i) => {
+    const head =
+      i === 0 || isOp(tokens[i - 1], ';') || isWord(tokens[i - 1], 'begin', 'then', 'else', 'loop');
+    if (head && isWord(t, 'set', 'reset'))
+      return !keepsNames(tokens, isWord(tokens[i + 1], 'local', 'session') ? i + 2 : i + 1);
+    if (nameOf(t) === 'set_config' && isOp(tokens[i + 1], '(')) {
+      const setting =
+        tokens[i + 2]?.type === 'string' && isOp(tokens[i + 3], ',') && stringValues(tokens, i + 2);
+      return (
+        !setting || !setting.every((v) => KEEPS_NAMES.has(v.toLowerCase()) || /^\w+\.\w+$/.test(v))
+      );
+    }
+    return nameOf(t) === 'search_path'; // `ALTER … SET search_path`, a routine's SET clause
+  });
+}
+
+// A statement begins with one of these, at the start of a text or after a semicolon.
+const STATEMENT_HEADS = new Set(
+  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare'.split(
+    ' ',
+  ),
+);
+/** Whether tokens[i] heads a statement: a head word, first or after `;`, with more after it. */
+const headsStatement = (tokens, i) =>
+  (i === 0 || isOp(tokens[i - 1], ';')) &&
+  STATEMENT_HEADS.has(tokens[i]?.type === 'word' && tokens[i].lower) &&
+  i + 1 < tokens.length;
+
+/** Whether the string at tokens[i] holds SQL: it starts as a statement or holds a clock call. */
+function holdsSql(tokens, i) {
+  return (stringValues(tokens, i) ?? []).some((value) => {
+    const inner = lex(value); // prose is no SQL: `the signer's` lexes, but heads no statement
+    return (
+      headsStatement(inner, 0) || clocksIn(inner).some((c) => inner[c.index].type !== 'string')
+    );
+  });
+}
+
+/**
+ * What the guard cannot read in a text, or null (PR #979 r1 F1): it is refused, never read as
+ * absent. A U& identifier with UESCAPE, a string it cannot decode, SQL inside a string (DO $$…$$,
+ * EXECUTE '…', a scheduled job), a DO or EXECUTE statement, and a search_path change.
+ */
+function unreadableIn(tokens) {
+  for (const [i, t] of tokens.entries()) {
+    if (t.unreadable) return 'a U&"…" identifier with UESCAPE';
+    if (headsStatement(tokens, i) && isWord(t, 'do', 'execute')) return `a ${t.lower} statement`;
+    if (t.type !== 'string') continue;
+    if (!stringValues(tokens, i)) return `a string: ${t.value}`;
+    if (holdsSql(tokens, i)) return `SQL in a string: ${t.value.slice(0, 60)}`;
+  }
+  return sessionChange(tokens) ? 'a session setting that may move names' : null;
+}
+
 /**
  * What is wrong with one SQL text, given table -> columns. `tables` is every table
  * this text may mean (one service's, or every service's for a shared package).
  */
 export function problemsIn(text, tables) {
   const tokens = lexAll(text);
+  const unreadable = unreadableIn(tokens);
+  if (unreadable) return [`R0 what the guard cannot read: ${unreadable}`];
   const problems = [];
   const clocks = clocksIn(tokens);
   const { refs, writes } = relationsIn(tokens);
@@ -882,7 +1134,12 @@ export function problemsIn(text, tables) {
           .join(''),
       );
     const positional = writes.some((write) => write.kind === 'insert' && !write.listed);
-    const columns = named.flatMap((ref) =>
+    // A table is named wherever its name stands unqualified, not only in FROM (F2:
+    // `jsonb_populate_record(NULL::task, $1)`): each such name counts for R1.
+    const mentioned = tokens
+      .filter((t, i) => tables.has(nameOf(t)) && !isOp(tokens[i - 1], '.'))
+      .map((t) => ({ table: nameOf(t) }));
+    const columns = [...named, ...mentioned].flatMap((ref) =>
       (tables.get(ref.table) ?? []).flatMap((columnsOfTable) =>
         [...columnsOfTable]
           .filter(
@@ -978,6 +1235,11 @@ export const REVIEWED_LITERALS = [
     assumes: { 'order.saga_start_delivered_at': 'ts' },
     why: 'CASE WHEN … THEN <pinned> ELSE NULL END into saga_start_delivered_at, timestamp(3)',
   },
+  {
+    file: 'services/construction-service/src/tender/tender-approval.errors.ts',
+    text: 'execute (the tender changed, or the command is not the one approved); ask for approval again',
+    why: 'a sentence of an error message that starts with "execute": no SQL is run from it',
+  },
 ];
 export const REVIEWED_FUNCTIONS = [
   {
@@ -1009,6 +1271,12 @@ export const REVIEWED_FUNCTIONS = [
     name: 'award_standing_check_guard',
     sha256: '5dda1c8af723c33d7723387713306a7406654963db1225d228b2444061b862fc',
     why: 'every clock is compared with tender_award_standing_check columns, all timestamptz; the tender.created_at it matched is another table',
+  },
+  {
+    service: 'economic-service',
+    name: 'commission_rule_scope_change',
+    sha256: 'e6ff44532499976df88f04c51186e429c548c50c3c5410bfaa1bbad7a2fdb05e',
+    why: "set_config(setting, …) of setting := 'rasta.commission_rule_scope_' || to_hex(…), never search_path; its clock is pinned",
   },
 ];
 
@@ -1123,7 +1391,7 @@ export function definitionProblems({ body, header }, tables, firesOn = []) {
 /** Everything `problemsIn` can answer on has one of these; the rest skips the lexer. */
 // An escape (`E'\x6eow'`, `U&'\006e…'`) or a dollar quote can spell a clock without its letters.
 const RELEVANT_TEXT =
-  /now|clock_timestamp|statement_timestamp|transaction_timestamp|current_timestamp|localtime|current_time|current_date|timeofday|today|tomorrow|yesterday|insert|merge|default|\\|&'|\$\w*\$/i;
+  /now|clock_timestamp|statement_timestamp|transaction_timestamp|current_timestamp|localtime|current_time|current_date|timeofday|today|tomorrow|yesterday|insert|merge|default|update|execute|\bdo\b|search_path|set_config|uescape|\\|&'|&"|\$\w*\$/i;
 
 /** The text of `new SomethingError('...')`, never SQL. */
 function isErrorMessage(node) {

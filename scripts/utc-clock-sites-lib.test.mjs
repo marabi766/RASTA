@@ -249,7 +249,7 @@ for (const [name, sql] of [
   ['a cast reading', `SELECT clock_timestamp()::timestamptz(3) AS now`],
   ['an insert naming the columns', `INSERT INTO task (id, due_at, added_at) VALUES ($1, $2, $3)`],
   ['a comment', `-- now()\nSELECT 1`],
-  ['a string', `SELECT 'now()' FROM task WHERE lease_until IS NULL`],
+  ['a string', `SELECT 'now and then, a word in a sentence' FROM task WHERE lease_until IS NULL`],
   // PR #906 r1 F2: the reviewer's false positive, and the class.
   ['a parenthesized clock', `UPDATE task SET lease_until = (clock_timestamp()) AT TIME ZONE 'UTC'`],
   ['nested parentheses', `UPDATE task SET lease_until = ((now())) AT TIME ZONE 'UTC'`],
@@ -871,6 +871,191 @@ test('a reviewed DO block covers its reviewed content only', () => {
     scanOf(entry.service, `DO $$BEGIN EXECUTE 'CREATE VIEW v AS SELECT 1'; END$$;`).join(),
     /DDL in a DO block/,
   );
+});
+
+// PR #979 r1: what the guard cannot read is refused, never read as absent.
+for (const [name, sql] of [
+  // F1: a U& identifier, SQL in a string, a DO or EXECUTE statement (the review's probes).
+  ['F1 a U& clock', String.raw`UPDATE task SET lease_until = U&"\006Eow"()`],
+  ['F1 a U& clock with UESCAPE', `UPDATE task SET lease_until = U&"!006Eow" UESCAPE '!' ()`],
+  ['F1 a U& column', String.raw`UPDATE task SET U&"lease\005Funtil" = now()`],
+  ['F1 a DO block', `DO $$ BEGIN UPDATE task SET lease_until = now(); END $$`],
+  ['F1 EXECUTE', `SELECT 1 FROM aware; EXECUTE 'UPDATE task SET lease_until = now()'`],
+  ['F1 a DO block with no SQL', `DO $$ BEGIN NULL; END $$`],
+  ['F1 EXECUTE of a prepared statement', `SELECT 1 FROM aware; EXECUTE stamp_task`],
+  // The class: SQL in any string (a scheduled job), a string it cannot decode, a search_path.
+  [
+    'F1 SQL in a string',
+    `SELECT cron.schedule('j', '* * * * *', 'INSERT INTO task (id) VALUES (1)')`,
+  ],
+  ['F1 a clock call in a string', `SELECT 1 FROM aware WHERE id = $1 AND 'now()' IS NOT NULL`],
+  ['F1 a string with UESCAPE', `SELECT 1 FROM aware WHERE id = U&'!0061' UESCAPE '!'`],
+  ['F3 a search_path change', `SET search_path TO shadow`],
+  ['F3 a setting not named', `SELECT set_config($1, 'shadow', true) FROM aware`],
+  ['F3 SET ROLE ("$user" is on the search_path)', `SET ROLE tenant_owner`],
+  ['F3 set_config of the role', `SELECT set_config('role', 'tenant_owner', false)`],
+  ['F3 a quoted schema keeps its case', `UPDATE "PUBLIC".aware SET seen_at = now()`],
+  ['F3 a quoted table keeps its case', `UPDATE "Aware" SET seen_at = now()`],
+  // F2: the two forms main refused, and a table named outside FROM.
+  [
+    'F2 a subquery CTE',
+    `SELECT 1 FROM (WITH task AS (SELECT 1 AS id) SELECT id FROM task) s, task, aware WHERE task.lease_until < now()`,
+  ],
+  [
+    'F2 a WINDOW name',
+    `SELECT 1 FROM task, aware WHERE task.lease_until < now() WINDOW w AS (), task AS (ORDER BY 1)`,
+  ],
+  [
+    'F2 a table in a cast',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(NULL::task, $1)).lease_until < now()`,
+  ],
+  // The class: a CTE name outside its WITH's scope is a relation to resolve (`x` is none).
+  [
+    'F2 out of its subquery',
+    `SELECT 1 FROM (WITH x AS (SELECT 1 AS id) SELECT id FROM x) s, x, aware WHERE x.at < now()`,
+  ],
+  ['F2 a WINDOW', `SELECT 1 FROM x, aware WHERE x.at < now() WINDOW w AS (), x AS (ORDER BY 1)`],
+  [
+    'F2 after a WINDOW',
+    `SELECT 1 FROM aware WINDOW w AS (), x AS (ORDER BY 1) ORDER BY (SELECT max(at) FROM x WHERE at < now())`,
+  ],
+  ['F2 in its own body', `WITH x AS (SELECT at FROM x WHERE at < now()) SELECT 1 FROM x, aware`],
+  [
+    'F2 a DELETE target is no CTE',
+    `WITH x AS (SELECT 1) DELETE FROM x USING aware WHERE x.at < now()`,
+  ],
+]) {
+  test(`unreadable is refused (PR #979 r1): ${name}`, () => {
+    assert.notEqual(problemsIn(sql, scope).length, 0, sql);
+  });
+}
+
+for (const [name, sql] of [
+  [
+    'prose in a string',
+    `SELECT 1 FROM aware WHERE note = 'it''s an update of a row' AND seen_at < now()`,
+  ],
+  ['a statement word alone', `SELECT 1 FROM aware WHERE kind = 'UPDATE' AND seen_at < now()`],
+  ['a named setting', `SELECT set_config('lock_timeout', $1, true)`],
+  ['a SET that moves no name', `SET LOCAL lock_timeout = '1s'; SET app.tenant = 'x'`],
+  ['a CTE in its scope', `WITH x AS (SELECT 1 AS id) SELECT now() FROM x, aware`],
+  ['a quoted CTE in its scope', `WITH "X" AS (SELECT 1 AS id) SELECT now() FROM "X", aware`],
+  [
+    'a recursive CTE in its body',
+    `WITH RECURSIVE x AS (SELECT 1 AS id UNION SELECT id FROM x) SELECT now() FROM x, aware`,
+  ],
+]) {
+  test(`readable is read (PR #979 r1): ${name}`, () => {
+    assert.deepEqual(problemsIn(sql, scope), []);
+  });
+}
+
+const BASE = `CREATE TABLE task (id text, lease_until timestamp(3), due_at timestamp(3));`;
+for (const [name, sql] of [
+  // F3: the review's probes, then the class: a search_path change anywhere, a second CREATE.
+  ['F3 SET search_path', `CREATE SCHEMA s; SET search_path TO s; CREATE TABLE task (id text);`],
+  ['F3 set_config', `SELECT set_config('search_path', 's2', false);`],
+  [
+    'F3 "PUBLIC"',
+    `CREATE SCHEMA "PUBLIC"; CREATE TABLE "PUBLIC".task (lease_until timestamptz(3));`,
+  ],
+  ['F3 "Public"', `ALTER TABLE "Public".task ALTER COLUMN lease_until TYPE timestamptz(3);`],
+  ['F3 a second CREATE TABLE', `CREATE TABLE task (id text, lease_until timestamptz(3));`],
+  ['F3 RESET', `RESET search_path;`],
+  ['F3 a setting not named', `SELECT set_config(concat('search', '_path'), 's', false);`],
+  ['F3 a DO block', `DO $$BEGIN PERFORM set_config('search_path', 's', false); END$$;`],
+  ['F3 a DO block setting one not named', `DO $$BEGIN PERFORM set_config(v, 's', false); END$$;`],
+  ['F3 SET SCHEMA', `SET SCHEMA 'shadow';`],
+  ['F3 RESET ALL', `RESET ALL;`],
+  ['F3 a DO block SET ROLE', `DO $$BEGIN SET ROLE tenant_owner; END$$;`],
+  ['F3 CREATE SCHEMA ("$user")', `CREATE SCHEMA rasta;`],
+  [
+    'F3 a routine header',
+    `CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql SET search_path = s AS $$BEGIN NULL; END$$;`,
+  ],
+  ['F3 a second PARTITION OF', `CREATE TABLE task PARTITION OF task DEFAULT;`],
+  ['F3 a second view', `CREATE VIEW v AS SELECT 1; CREATE VIEW v AS SELECT 2;`],
+  [
+    'F3 a second routine',
+    `CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 2';`,
+  ],
+  // F4: a quoted name the patterns would cut; the class: every quoted name they read.
+  ['F4 a name with a space', `CREATE TABLE t (id text, "lease until" timestamp(3) DEFAULT now());`],
+  ['F4 ADD COLUMN', `ALTER TABLE task ADD COLUMN "held until" timestamp(3) DEFAULT now();`],
+  ['F4 DROP COLUMN', `ALTER TABLE task DROP COLUMN "lease_until x";`],
+  [
+    'F4 DROP FUNCTION',
+    `CREATE FUNCTION my() RETURNS int LANGUAGE sql AS 'SELECT 1'; DROP FUNCTION "my fn"();`,
+  ],
+  [
+    'F4 U& with UESCAPE',
+    `ALTER TABLE task ADD COLUMN U&"at" UESCAPE '!' timestamp(3) DEFAULT now();`,
+  ],
+  // F4: a column definition read from its tokens, what it does not read refused.
+  ['F4 a clause not read', `CREATE TABLE t (at timestamp(3) DEFAULT now() COLLATE "C");`],
+  ['F4 a type not read', `CREATE TABLE t (at timestamp(3) varying);`],
+  ['F4 a word after a clause', `CREATE TABLE t (at timestamp(3) NOT NULL whatever);`],
+  [
+    'F4 a clock in a CHECK after DEFAULT',
+    `CREATE TABLE t (at timestamptz(3) DEFAULT now() CHECK (at < now()));`,
+  ],
+  // F1 in a migration: SQL in a string of a one-shot statement may run later.
+  [
+    'F1 a scheduled job',
+    `SELECT cron.schedule('j', '* * * * *', $$UPDATE task SET lease_until = now()$$);`,
+  ],
+]) {
+  test(`a migration the replay cannot read is refused (PR #979 r1): ${name}`, () => {
+    assert.notEqual(replayMigrations([BASE, sql]).unmodelled.length, 0, sql);
+  });
+}
+
+test('F3: a setting that moves no name replays', () => {
+  const { unmodelled } = replayMigrations([
+    BASE,
+    `SET LOCAL lock_timeout = '5s'; SET CONSTRAINTS ALL IMMEDIATE; SELECT set_config('statement_timeout', '0', true);
+     DO $$BEGIN SET LOCAL statement_timeout = 0; PERFORM set_config('rasta.x', '1', true); END$$;`,
+  ]);
+  assert.deepEqual(unmodelled, []);
+});
+
+test('F4: a DEFAULT is read to its end, past CASE … NULL … END and IS [NOT] NULL', () => {
+  const at = (definition) => replaying(`CREATE TABLE t (${definition});`).tables.get('t').get('at');
+  assert.deepEqual(
+    at(`at timestamp(3) DEFAULT CASE WHEN true IS NULL THEN NULL ELSE my_clock() END`),
+    { type: 'ts', sessionDefault: true },
+  );
+  assert.equal(
+    at(`at timestamp(3) DEFAULT CASE WHEN x IS NOT NULL THEN NULL ELSE now() END NOT NULL`)
+      .sessionDefault,
+    true,
+  );
+  assert.equal(at(`at timestamp(3) DEFAULT NULL NOT NULL`).sessionDefault, false);
+  const flags = `CREATE TABLE f (a boolean DEFAULT 1 IS NOT NULL AND true, b boolean DEFAULT 2 IS NULL OR false);`;
+  assert.deepEqual(replaying(flags).unmodelled, []);
+  const added = replayMigrations([
+    BASE,
+    `ALTER TABLE task ADD COLUMN at timestamp(3) DEFAULT CASE WHEN true IS NULL THEN NULL ELSE my_clock() END;`,
+  ]);
+  assert.equal(added.tables.get('task').get('at').sessionDefault, true);
+});
+
+test('F4: the clauses main uses are read, and a U& name is its decoded name', () => {
+  const { tables: t, unmodelled } = replayMigrations([
+    `CREATE TABLE s (id text PRIMARY KEY);
+     CREATE TABLE t (
+       "at" TIMESTAMP(3) NOT NULL DEFAULT (now() AT TIME ZONE 'UTC') CONSTRAINT c CHECK (at IS NOT NULL),
+       v BIGINT GENERATED ALWAYS AS IDENTITY NOT NULL,
+       w BIGINT GENERATED BY DEFAULT AS IDENTITY (START 1) UNIQUE,
+       s_id TEXT NULL REFERENCES s(id) ON DELETE SET NULL ON UPDATE CASCADE,
+       due TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP REFERENCES s (id) ON DELETE NO ACTION
+     );`,
+    String.raw`ALTER TABLE t ADD COLUMN U&"held\005Fat" timestamp(3) DEFAULT now();`,
+  ]);
+  assert.deepEqual(unmodelled, []);
+  assert.deepEqual(t.get('t').get('at'), { type: 'ts', sessionDefault: false });
+  assert.deepEqual(t.get('t').get('due'), { type: 'ts', sessionDefault: true });
+  assert.deepEqual(t.get('t').get('held_at'), { type: 'ts', sessionDefault: true });
 });
 
 test('the repository passes', () => {
