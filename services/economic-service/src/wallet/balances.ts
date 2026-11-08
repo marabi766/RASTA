@@ -1,4 +1,6 @@
+import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
+import { Prisma } from '../generated/prisma';
 
 /**
  * The wallet invariant, as pure functions (docs/10 § 10.3, ADR-013, ADR-034).
@@ -87,4 +89,38 @@ export function assertSufficient(walletId: string, balances: Balances, amountMin
   if (balances.availableBalanceMinor < amountMinor) {
     throw RastaError.insufficientBalance(walletId);
   }
+}
+
+/**
+ * What `trg_ledger_entry_wallet_covered` refuses with (20261108120000, FU-228): at commit, a WALLET
+ * or ESCROW account that sums below zero. The words are matched because a refusal at COMMIT reaches
+ * Prisma with neither its SQLSTATE nor its constraint, only its text.
+ */
+export const WALLET_ACCOUNT_COVERED_REFUSAL =
+  'At commit, a wallet or escrow account never sums below zero';
+
+/**
+ * The database's two guards of this invariant, as the error a caller should see.
+ *
+ * `ck_wallet_balances` refuses a projection below zero where it is written, and
+ * `trg_ledger_entry_wallet_covered` refuses the ledger below zero at commit. Either way the
+ * transaction rolled back, so it is a proven refusal: `422 INSUFFICIENT_BALANCE`, not a 500. Only a
+ * driver error carrying one of those two is mapped; the driver's text goes nowhere.
+ */
+export function walletBelowZeroRefusal(error: unknown): RastaError | null {
+  if (
+    !(error instanceof Prisma.PrismaClientKnownRequestError) &&
+    !(error instanceof Prisma.PrismaClientUnknownRequestError)
+  ) {
+    return null;
+  }
+  const guard = error.message.includes(WALLET_ACCOUNT_COVERED_REFUSAL)
+    ? 'trg_ledger_entry_wallet_covered'
+    : /"ck_wallet_balances"/.test(error.message)
+      ? 'ck_wallet_balances'
+      : null;
+  if (guard === null) return null;
+  return new RastaError(ERROR_CODES.INSUFFICIENT_BALANCE, 'Insufficient available balance', {
+    internalContext: { reason: 'LEDGER_BELOW_ZERO', guard },
+  });
 }

@@ -287,7 +287,9 @@ describe('journal reversal refusals (real database)', () => {
 
   it('refuses to reverse a reversal, through the ledger’s own rule', async () => {
     // The one type no record owns: the ledger itself refuses it, and nothing
-    // is written either.
+    // is written either. The top-up's money is spent by the cases above, so the wallet is funded
+    // again first: a reversal that overdraws it is refused at commit (FU-228).
+    await fundWallet(wiring, payer, 5_000_000n);
     const reversal = await asActor({ organizationId: payer }, () =>
       prisma.transaction((tx) =>
         wiring.ledger.reverse(
