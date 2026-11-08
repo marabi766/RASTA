@@ -3198,6 +3198,11 @@ export const EXPECTED = {
       'tg_order_hold_deadline_backfill_no_truncate',
       'tg_order_hold_deadline_revocation_guard',
       'tg_order_hold_deadline_revocation_no_truncate',
+      // 20261108120200_order_line_price_immutable (D-156): what a line agreed to never changes.
+      'tg_order_line_price_guard',
+      'tg_order_line_no_truncate',
+      'tg_offer_price_history_guard',
+      'tg_offer_price_history_no_truncate',
     ],
     functions: [
       'assign_order_dispute_origin',
@@ -3207,6 +3212,8 @@ export const EXPECTED = {
       'return_status_history_guard',
       'return_dispatch_release_guard',
       'order_hold_deadline_audit_guard',
+      'order_line_price_guard',
+      'offer_price_history_guard',
     ],
     constraints: [
       'ck_review_quality_rating',

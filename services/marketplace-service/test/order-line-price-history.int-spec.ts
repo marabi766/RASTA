@@ -7,13 +7,14 @@ import { asActor, cleanup, id, key, newPrisma, publishOffer, tenants, wire } fro
 
 /**
  * D-156 in the database: an order line's price is one its offer published at the
- * version the line names (fk_order_line_price_history).
+ * version the line names (fk_order_line_price_history), and neither the agreed
+ * columns of a line nor a history row ever change (the two guards).
  *
  * Every refusal is asserted with raw SQL, not through the service — the service
  * is not the only writer a database has. Schema-changing steps (rolling the
- * migrations back and forward over a used table) run on the owner's connection
- * inside a transaction that is always rolled back: DDL is transactional, so the
- * shared schema is untouched.
+ * three migrations back and forward over a used table, dropping a foreign key to
+ * reach a TRUNCATE) run on the owner's connection inside a transaction that is
+ * always rolled back: DDL is transactional, so the shared schema is untouched.
  */
 
 jest.setTimeout(60_000);
@@ -22,6 +23,7 @@ const MIGRATIONS = join(__dirname, '../prisma/migrations');
 const CHAIN = [
   '20261108120000_order_line_price_history_precheck',
   '20261108120100_order_line_price_history_fk',
+  '20261108120200_order_line_price_immutable',
 ] as const;
 
 /** A script's statements; a dollar-quoted body is one. Its own BEGIN/COMMIT and ledger row are the harness's. */
@@ -56,6 +58,7 @@ describe('an order line agrees to a published offer price, in the database (D-15
   /** A used table: lines at v1 from two buyers, a reprice to v2, a line at v2. */
   let offerId: string;
   let lineAtV1: string;
+  let lineAtV2: string;
   let orderAtV1: string;
   /** An offer nobody ordered, for lines inserted by hand. */
   let unordered: string;
@@ -86,9 +89,10 @@ describe('an order line agrees to a published offer price, in the database (D-15
     const first = await place(1, 'ph-v1-a');
     await place(1, 'ph-v1-b', org.other);
     await asSupplier(() => wiring.catalogue.updateOffer(offerId, { unitPriceMinor: '125000' }));
-    await place(2, 'ph-v2');
+    const second = await place(2, 'ph-v2');
     orderAtV1 = first.id;
     lineAtV1 = first.lines[0]!.id;
+    lineAtV2 = second.lines[0]!.id;
   });
 
   afterAll(async () => {
@@ -221,5 +225,96 @@ describe('an order line agrees to a published offer price, in the database (D-15
     await expect(owner.$executeRaw`DELETE FROM offer WHERE id = ${offerId}`).rejects.toThrow(
       /order_line_offer_id_fkey|fk_order_line_price_history/,
     );
+  });
+
+  // ---- the guards, by raw SQL --------------------------------------------------------
+
+  it.each([
+    ['unit_price_minor', 'unit_price_minor = unit_price_minor + 1'],
+    ['quantity', 'quantity = quantity + 1'],
+    ['line_total_minor', 'line_total_minor = line_total_minor + 1'],
+    ['currency', `currency = 'USD'`],
+    ['offer_version', 'offer_version = 1'],
+    ['offer_id', `offer_id = '${'OFR_ELSEWHERE'}'`],
+  ])('refuses an UPDATE of a line’s %s, even by the owner', async (_column, set) => {
+    // The v2 line: `offer_version = 1` with v1's price absent would otherwise be
+    // a key violation; the guard answers first, whatever the change.
+    await expect(
+      owner.$executeRawUnsafe(`UPDATE order_line SET ${set} WHERE id = $1`, lineAtV2),
+    ).rejects.toThrow(/ck_order_line_price_immutable/);
+  });
+
+  it('refuses the same UPDATE from the runtime role', async () => {
+    await expect(
+      runUnscoped(
+        'the suite attempts the write the guard exists to refuse',
+        () =>
+          prisma.client
+            .$executeRaw`UPDATE order_line SET unit_price_minor = 1, line_total_minor = quantity
+                                    WHERE id = ${lineAtV1}`,
+      ),
+    ).rejects.toThrow(/ck_order_line_price_immutable/);
+  });
+
+  it('lets a line’s other columns keep their own rules (the guard is not all-or-nothing)', async () => {
+    await rolledBack(async (tx) => {
+      expect(
+        await tx.$executeRaw`UPDATE order_line SET product_name = 'renamed' WHERE id = ${lineAtV1}`,
+      ).toBe(1);
+      // A no-op write of an agreed column is not a change.
+      expect(
+        await tx.$executeRaw`UPDATE order_line SET unit_price_minor = unit_price_minor WHERE id = ${lineAtV1}`,
+      ).toBe(1);
+    });
+  });
+
+  it.each([
+    ['unit_price_minor', 'unit_price_minor = unit_price_minor + 1'],
+    ['currency', `currency = 'USD'`],
+    ['changed_by', `changed_by = 'someone-else'`],
+  ])('refuses an UPDATE of a price history row’s %s', async (_column, set) => {
+    await expect(
+      owner.$executeRawUnsafe(
+        `UPDATE offer_price_history SET ${set} WHERE offer_id = $1 AND version = 2`,
+        offerId,
+      ),
+    ).rejects.toThrow(/ck_offer_price_history_immutable/);
+  });
+
+  /** TRUNCATE of `table` alone: every foreign key into it is dropped first (and rolled back). */
+  async function truncateAlone(tx: PrismaClient, table: string, disable?: string): Promise<void> {
+    const references = await tx.$queryRawUnsafe<{ conname: string; child: string }[]>(
+      `SELECT conname, conrelid::regclass::text AS child FROM pg_constraint
+        WHERE contype = 'f' AND confrelid = $1::regclass`,
+      table,
+    );
+    for (const { conname, child } of references) {
+      await tx.$executeRawUnsafe(`ALTER TABLE ${child} DROP CONSTRAINT "${conname}"`);
+    }
+    if (disable) await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER "${disable}"`);
+    await tx.$executeRawUnsafe(`TRUNCATE ${table}`);
+  }
+
+  it.each([
+    [
+      'order_line',
+      'tg_order_line_no_truncate',
+      /ck_order_line_price_immutable: .*TRUNCATE refused/,
+    ],
+    [
+      'offer_price_history',
+      'tg_offer_price_history_no_truncate',
+      /ck_offer_price_history_immutable: .*TRUNCATE refused/,
+    ],
+  ])('refuses a TRUNCATE of %s — by its own trigger', async (table, trigger, refusal) => {
+    let refused: unknown;
+    await rolledBack(async (tx) => {
+      refused = await truncateAlone(tx, table).catch((error: unknown) => error);
+    });
+    expect(String(refused)).toMatch(refusal);
+    // And it is the trigger that refuses: without it the same TRUNCATE succeeds.
+    await rolledBack(async (tx) => {
+      await truncateAlone(tx, table, trigger);
+    });
   });
 });

@@ -197,8 +197,8 @@ model OfferPriceHistory {
   changedAt DateTime @default(now()) @map("changed_at")
   changedBy String   @map("changed_by")
 
-  /// The lines that agreed to this price (D-156); a row one names is never
-  /// removed (fk_order_line_price_history, RESTRICT).
+  /// The lines that agreed to this price (D-156). Every row is immutable
+  /// (tg_offer_price_history_guard); one a line names is never removed.
   orderLines OrderLine[]
 
   @@unique([offerId, version], map: "uq_offer_price_version")
@@ -342,7 +342,8 @@ model OrderLine {
 
   /// The database's proof of the price: (offer, version, unit price, currency)
   /// is a row the offer published. Cross-tenant by design: the line is the
-  /// buyer's, the history the supplier's.
+  /// buyer's, the history the supplier's. The six agreed columns are immutable
+  /// (tg_order_line_price_guard).
   priceHistory OfferPriceHistory @relation(fields: [offerId, offerVersion, unitPriceMinor, currency], references: [offerId, version, unitPriceMinor, currency], map: "fk_order_line_price_history", onUpdate: Restrict, onDelete: Restrict)
 
   /// A snapshot for display, so a completed order still reads correctly after
