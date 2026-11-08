@@ -3,6 +3,7 @@ import { join, relative, resolve } from 'node:path';
 
 // git-ignored output (installs, build output, generated clients another task may be
 // regenerating) is never listed: the authored-source inventory (FU-102).
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
 const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
   authoredFiles: (dir: string) => string[];
 };
