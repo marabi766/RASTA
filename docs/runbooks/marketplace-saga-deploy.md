@@ -525,41 +525,67 @@ records each one in `order_hold_deadline_backfill` in the same statement.
   while economic-service answers `orderHoldDeadlineRequired: true` (FU-233). Every later send
   carries the new deadline. A saga that proposed an earlier deadline of its own takes a
   `HOLD_DEADLINE_PASSED` as proof only once its send left past the row's deadline and margin.
+- **Who, what, when, from where (S-06):** each deadline is a row of `order_hold_deadline_backfill`:
+  the order, the deadline, its status and send count then, the run, the rule instant, `--operator`
+  and `--ticket` (both required), and the session's login role and client address as the database
+  saw them. A deadline taken back is a row of `order_hold_deadline_revocation` beside it. Both are
+  append-only: a trigger refuses every UPDATE, DELETE and TRUNCATE, an order with a record cannot be
+  deleted, and the migration's `down.sql` refuses once a deadline was given.
 - **Script, not migration:** it needs a fact outside this database (since when economic-service
   refuses), a dry run, commits per batch, and an operator choosing the moment it runs. A
   migration runs at deploy, possibly before economic-service, in one short transaction.
 
 **When.** After economic-service at D-150 or later on every replica, the marketplace migrations
 (`20261107130000_order_hold_deadline_backfill` included) and protocol-11 workers. Take the
-instant the last replica older than D-150 stopped from the deploy record; the script refuses
-until the database clock is at least 1 h past it. Then, in the service's image, as its runtime
-role (`DATABASE_URL_MARKETPLACE`; a migrator credential in the environment is refused):
+instant the last replica older than D-150 stopped from the deploy record. The script refuses
+(`usage`) an instant that is not exactly one (2026-02-30, 24:00 and the like are not rolled over)
+or is before D-150 reached main (2026-11-07T16:20:23Z, #812), and refuses
+(`economic-rule-unproven`) until the database clock is at least 1 h past it. Then, in the
+service's image, as its runtime role (`DATABASE_URL_MARKETPLACE`; a migrator credential in the
+environment is refused), naming yourself and the change ticket:
 
-    node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since 2026-11-08T09:00:00Z
-    node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since 2026-11-08T09:00:00Z --apply
+    node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since 2026-11-08T09:00:00Z \
+      --operator jane.doe@example.org --ticket OPS-1234
+    node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since 2026-11-08T09:00:00Z \
+      --operator jane.doe@example.org --ticket OPS-1234 --apply
 
 The first is the dry run (the default): it prints the plan and every refused row. `--batch-size`
 (1–1000, default 200) and `--max-batches` (default 100) bound an apply; a slice that leaves rows
 exits 1 with `remaining` above 0, and a rerun goes on from there. A rerun of a finished apply
 assigns nothing. Keep the output: each `assigned` line names the order, its status and deadline.
+A failure prints one line on stderr, `command refused (code …)` or `command failed (code …)`
+(codes: `outbox-b2-backfill.md`, refusal codes); nothing else of the error is shown.
 
 **Verify.** The apply's summary has `converged: true` (exit 0). A refused row exits 1: look at it
 by hand and decide; do not edit it into a class. The `createObligation` alert of a `PENDING`
-order clears at its saga's next round, whose send carries the deadline and holds, or ends the
-order `FAILED` past the deadline and margin with nothing held. A saga whose first send predates
-protocol 10 and that sits in `LATE_HOLD_WATCH` keeps no deadline in its own state: end it by hand
-as above.
+order whose saga started at protocol 10 or later clears at its next round: the send carries the
+row's deadline and holds, or the saga ends the order `FAILED` past its deadline and margin with
+nothing held. A saga whose history predates protocol 10 keeps no deadline in its own state,
+whatever its phase, so a deadline on the row alone never ends it. Its sends now carry the
+deadline, so a hold can land, but one refused for a business reason (`INSUFFICIENT_BALANCE`)
+until past the deadline gets `HOLD_DEADLINE_PASSED` from then on and the saga waits, in
+`CREATING_OBLIGATION` as in `LATE_HOLD_WATCH`. List such sagas after the deadline and margin (the
+alert still on, the row's `hold_not_after` past) and end each by hand once the lookup shows
+nothing held, as above.
 
 **Roll back.** The runtime role cannot remove a deadline (the fence's trigger). Taking one back
 is safe for the money, as a row with a send counted and no deadline proves nothing, and it
-brings the wait back. As the migrator, in one transaction:
-`ALTER TABLE "order" DISABLE TRIGGER trg_order_hold_fence_only_forward;`, then
-`UPDATE "order" o SET hold_not_after = NULL FROM order_hold_deadline_backfill a WHERE
-a.run_id = $1 AND o.id = a.order_id AND o.organization_id = a.organization_id AND
-o.hold_not_after = a.hold_not_after AND o.economic_transaction_id IS NULL AND
-o.hold_sends_closed_at IS NULL;`, `DELETE FROM order_hold_deadline_backfill WHERE run_id = $1 AND
-order_id IN (those rows)`, and `ENABLE TRIGGER` again. A row that has since held or closed its
-sends keeps its deadline: what it proved stays proven.
+brings the wait back. Nothing is deleted: each deadline taken back is recorded in
+`order_hold_deadline_revocation`. As the migrator, in one transaction, with the `runId` of the
+run's summary:
+
+    { printf '\\set run_id %s\n\\set operator %s\n\\set ticket %s\n' \
+        '<runId>' 'jane.doe@example.org' 'OPS-1235'
+      cat services/marketplace-service/prisma/ops/hold-deadline-revoke.sql
+    } | node scripts/psql-prisma-url.mjs DATABASE_URL_MARKETPLACE_MIGRATOR -X -v ON_ERROR_STOP=1 \
+      --single-transaction -f -
+
+It disables the fence's trigger under `lock_timeout` 3 s (an ACCESS EXCLUSIVE lock on `order`:
+refused rather than stalling the sagas behind it), takes back each deadline of that run still on
+its order with no hold and its sends open, records each, prints them, and enables the trigger
+again. A row that has since held or closed its sends keeps its deadline: what it proved stays
+proven. A second run takes back nothing. A later backfill gives a row taken back a new deadline,
+a new row.
 
 **Operator check: a hold on a closed order.** No longer the only guarantee: the fence is what
 stops a late request, and this check is a second look at it. Run it after an incident in this wait, and for

@@ -1,8 +1,10 @@
-// FU-234: `node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since <instant> [--apply]`,
-// run by an operator in the service's image, with its environment, as its runtime role (D-045). A dry run unless
-// `--apply`. NDJSON on stdout; exit 0 only when nothing is left to assign and nothing was
-// refused. See docs/runbooks/marketplace-saga-deploy.md, "Legacy rows".
-import { assertNoMigratorCredentials } from '@rasta/config';
+// FU-234: `node dist/ops/hold-deadline-backfill.cli.js --economic-rule-since <instant>
+// --operator <who> --ticket <change> [--apply]`, run by an operator in the service's image, with
+// its environment, as its runtime role (D-045). A dry run unless `--apply`. NDJSON on stdout;
+// exit 0 only when nothing is left to assign and nothing was refused. A failure is one closed
+// line on stderr (`commandFailure`: a refusal's code, never a foreign message), exit 1.
+// See docs/runbooks/marketplace-saga-deploy.md, "Legacy rows".
+import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { loadMarketplaceEnv, SERVICE_NAME } from '../config/env';
 import { PrismaClient } from '../generated/prisma';
@@ -13,8 +15,8 @@ const emit = (event: Record<string, unknown>) =>
   process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 
 async function main(): Promise<void> {
-  assertNoMigratorCredentials(process.env);
   const options = parseBackfillArgs(process.argv.slice(2));
+  assertNoMigratorCredentials(process.env);
   const env = loadMarketplaceEnv();
   // D-045: connected as the runtime role, proven before any other query.
   await preflightRuntimeRole(
@@ -37,6 +39,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  emit({ event: 'failed', message: error instanceof Error ? error.message : String(error) });
+  process.stderr.write(`${commandFailure(error)}\n`);
   process.exitCode = 1;
 });

@@ -88,10 +88,12 @@ const SAME_TENANT = new Set(
   OrderHoldDeadlineBackfill.order
 `),
 );
-// RUN-005 migrations already enforce (organization_id, return_request_id).
+// RUN-005 migrations already enforce (organization_id, return_request_id); FU-234 the
+// revocation its (organization_id, order_id, hold_not_after) onto the assignment.
 const PROTECTED_BY_COMPOSITE_FK = new Set(
   listed(`
   ReturnLine.returnRequest ReturnStatusHistory.returnRequest ReturnDispatchRelease.returnRequest
+  OrderHoldDeadlineRevocation.assignment
 `),
 );
 

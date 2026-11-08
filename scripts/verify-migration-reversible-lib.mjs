@@ -3167,6 +3167,9 @@ export const EXPECTED = {
       'return_status_history',
       // 20261017160000_return_dispatch_reservation (Q-133 (9)(a)): a reconciliation's release.
       'return_dispatch_release',
+      // 20261107130000_order_hold_deadline_backfill (FU-234): the backfill's append-only record.
+      'order_hold_deadline_backfill',
+      'order_hold_deadline_revocation',
     ],
     triggers: [
       'tg_return_request_guard',
@@ -3180,6 +3183,10 @@ export const EXPECTED = {
       'tg_return_dispatch_release_no_truncate',
       // 20261103130000_order_dispute_origin (D-083): where a dispute found its order.
       'trg_order_dispute_origin',
+      'tg_order_hold_deadline_backfill_guard',
+      'tg_order_hold_deadline_backfill_no_truncate',
+      'tg_order_hold_deadline_revocation_guard',
+      'tg_order_hold_deadline_revocation_no_truncate',
     ],
     functions: [
       'assign_order_dispute_origin',
@@ -3188,6 +3195,7 @@ export const EXPECTED = {
       'return_line_guard',
       'return_status_history_guard',
       'return_dispatch_release_guard',
+      'order_hold_deadline_audit_guard',
     ],
     constraints: [
       'ck_review_quality_rating',
@@ -3224,6 +3232,10 @@ export const EXPECTED = {
       // RECEIPT_CONFIRMED without the buyer's recorded receipt.
       'ck_order_dispute_raised_from',
       'ck_order_receipt_confirmed_has_evidence',
+      'ck_order_hold_deadline_backfill_actor',
+      'ck_order_hold_deadline_revocation_actor',
+      'fk_order_hold_deadline_backfill_tenant',
+      'fk_order_hold_deadline_revocation_assignment',
     ],
     // Added by 20260929120100_order_idempotency_key_unique (review of #141):
     // one Idempotency-Key places at most one order per organization, even

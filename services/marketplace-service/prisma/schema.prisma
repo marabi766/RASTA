@@ -300,7 +300,7 @@ model Order {
   review       Review?
   sagaSteps    SagaStep[]
   sagaUnconfirmedCalls SagaUnconfirmedCall[]
-  holdDeadlineBackfill OrderHoldDeadlineBackfill?
+  holdDeadlineBackfills OrderHoldDeadlineBackfill[]
 
   @@unique([organizationId, idempotencyKey], map: "uq_order_org_idempotency_key")
   @@unique([organizationId, id], map: "uq_order_tenant_id")
@@ -472,25 +472,54 @@ model SagaUnconfirmedCall {
   @@map("saga_unconfirmed_call")
 }
 
-/// The audit trail of the legacy hold-deadline backfill (FU-234): one row per order it
-/// gave a deadline, written with that deadline. Only `src/ops/hold-deadline-backfill.ts` writes.
+/// The audit trail of the legacy hold-deadline backfill (FU-234): one row per deadline it
+/// gave, written with that deadline. Append-only (S-06): a trigger refuses UPDATE, DELETE and
+/// TRUNCATE. Only `src/ops/hold-deadline-backfill.ts` writes.
 model OrderHoldDeadlineBackfill {
   organizationId String @map("organization_id")
 
   orderId String @map("order_id")
-  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_order_hold_deadline_backfill_tenant", onUpdate: Restrict, onDelete: Cascade)
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_order_hold_deadline_backfill_tenant", onUpdate: Restrict, onDelete: Restrict)
 
-  runId          String   @map("run_id")
-  assignedAt     DateTime @default(now()) @map("assigned_at") @db.Timestamptz(3)
   /// The deadline given, and the order's status and send count when it was.
   holdNotAfter   DateTime @map("hold_not_after") @db.Timestamptz(3)
+  runId          String   @map("run_id")
+  assignedAt     DateTime @default(now()) @map("assigned_at") @db.Timestamptz(3)
   status         String
   holdSendClaims Int      @map("hold_send_claims")
   /// The operator's instant since which every economic-service replica enforces D-150.
   economicRuleSince DateTime @map("economic_rule_since") @db.Timestamptz(3)
+  /// Who ran it, under which ticket (`--operator`, `--ticket`).
+  operator String
+  ticket   String
+  /// Stamped by the database: the session's login role and the client's address.
+  dbRole     String @map("db_role")
+  clientAddr String @map("client_addr")
 
-  @@id([organizationId, orderId], map: "order_hold_deadline_backfill_pkey")
+  revocation OrderHoldDeadlineRevocation?
+
+  @@id([organizationId, orderId, holdNotAfter], map: "order_hold_deadline_backfill_pkey")
   @@map("order_hold_deadline_backfill")
+}
+
+/// A deadline the backfill gave and an operator took back (`prisma/ops/hold-deadline-revoke.sql`,
+/// as the migrator). Append-only, like the row it names.
+model OrderHoldDeadlineRevocation {
+  organizationId String   @map("organization_id")
+  orderId        String   @map("order_id")
+  holdNotAfter   DateTime @map("hold_not_after") @db.Timestamptz(3)
+
+  assignment OrderHoldDeadlineBackfill @relation(fields: [organizationId, orderId, holdNotAfter], references: [organizationId, orderId, holdNotAfter], map: "fk_order_hold_deadline_revocation_assignment", onUpdate: Restrict, onDelete: Restrict)
+
+  revokedAt DateTime @default(now()) @map("revoked_at") @db.Timestamptz(3)
+  revokedBy String   @map("revoked_by")
+  ticket    String
+  /// Stamped by the database: the session's login role and the client's address.
+  dbRole     String @map("db_role")
+  clientAddr String @map("client_addr")
+
+  @@id([organizationId, orderId, holdNotAfter], map: "order_hold_deadline_revocation_pkey")
+  @@map("order_hold_deadline_revocation")
 }
 
 model OrderDispute {
