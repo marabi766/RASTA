@@ -422,8 +422,24 @@ tests:
               operation: authoriseSettlement
             exp_annotations:
               summary: A saga's authoriseSettlement call is unconfirmed
-              description: economic-service has given no answer proving the call changed nothing, so its outcome is unknown. The saga keeps trying and moves nothing else; the log names the order.
+              description: economic-service has given no answer proving the call changed nothing, or refused it while the funds may still be held. The saga keeps trying and moves nothing else; the log names the order and the refusal.
               runbook: docs/runbooks/marketplace-saga-deploy.md
       - eval_time: 8h
         alertname: RastaMarketplaceSagaEconomicCallUnconfirmed
         exp_alerts: []
+  - interval: 1h
+    input_series:
+      # A refund refused on its first attempt with the funds held (D-127): hourly rounds.
+      - series: 'rasta_marketplace_saga_economic_call_unconfirmed_total{service="marketplace-service",operation="compensate"}'
+        values: '0 1 2 3'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: RastaMarketplaceSagaEconomicCallUnconfirmed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              operation: compensate
+            exp_annotations:
+              summary: A saga's compensate call is unconfirmed
+              description: economic-service has given no answer proving the call changed nothing, or refused it while the funds may still be held. The saga keeps trying and moves nothing else; the log names the order and the refusal.
+              runbook: docs/runbooks/marketplace-saga-deploy.md

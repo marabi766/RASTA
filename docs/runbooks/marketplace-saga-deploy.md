@@ -243,7 +243,7 @@ in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON` and
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
 `name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
-support (this build: 11); an absent field means protocol **0**, the strictest legacy
+support (this build: 12); an absent field means protocol **0**, the strictest legacy
 capability, so pre-protocol images are checked without modifying their manifests.
 Unreadable manifests, wrong names and malformed/unknown protocol values block
 even an empty queue.
@@ -266,7 +266,7 @@ bypass the gate: it must preserve both continuation state and patched commands.
 Each later `patched()` id raises the protocol (`PATCH_PROTOCOL` in the gate):
 `dispute-settle-resumes-order` requires **2**, `dispute-release-durable-wait-v1`
 **3**, `economic-call-durable-wait-v1` **4**, `economic-sibling-call-durable-wait-v1`
-**5**, `saga-owed-work-durable-v1` **6**, `authorisation-order-fence-v1` **7**, `economic-hold-call-durable-wait-v1` **8**, `economic-hold-refusal-exit-v1` **9**, `economic-hold-send-fence-v1` **10**, `economic-hold-fence-on-order-v1` **11**. A marker the gate does not list blocks every target until the gate learns
+**5**, `saga-owed-work-durable-v1` **6**, `authorisation-order-fence-v1` **7**, `economic-hold-call-durable-wait-v1` **8**, `economic-hold-refusal-exit-v1` **9**, `economic-hold-send-fence-v1` **10**, `economic-hold-fence-on-order-v1` **11**, `economic-refusal-reconciles-held-v1` **12**. A marker the gate does not list blocks every target until the gate learns
 it; a continuation's `resume` fields prove the same before its first marker
 (`reminderDue`: 2, `releaseRounds`: 3, `unconfirmedCall`: 4, `siblingCall`: 5, `outstandingWork`: 6, `holdCall`: 8, `lateHoldWatch`: 9, `holdNotAfter`: 10; any unlisted field blocks; so does an
 unlisted start input field). A target must declare at least what any inspected
@@ -352,11 +352,12 @@ economic-service is that slow, the call goes unconfirmed here and the next attem
 reads the obligation first. A party's command that times out behind the lock is a 5xx
 it can retry under its own key.
 
-Only a refusal the activity marks as proof ends the saga, with the funds held for a
-person and no alert of its own: its own refusal, by the receipt guard or the send,
-with a code in `PROVEN_REFUSALS` (`economic-refusal.ts`), on the first attempt this
-run scheduled. A `temporal workflow reset` starts a new run with first attempts and no
-memory of the old ones, so read the obligation before resetting such a saga. A code
+Only a refusal the activity marks as proof says the call changed nothing: its own refusal,
+by the receipt guard or the send, with a code in `PROVEN_REFUSALS` (`economic-refusal.ts`),
+on the first attempt this run scheduled. It no longer ends the saga while the money may be
+held (protocol 12, D-127; see "Refused on its first attempt" below). A `temporal workflow
+reset` starts a new run with first attempts and no memory of the old ones, so read the
+obligation before resetting such a saga. A code
 says nothing of the attempts before it, so once any attempt went unconfirmed no code
 ends the wait: not a listed 4xx, not a routing or configuration fault, not a failed
 read of the order or of the obligation (`RECONCILIATION_READ_FAILED`). From then on
@@ -590,6 +591,7 @@ local step. It stays and reports rounds on the same alert, under the operation i
 | `ORDER_UNREADABLE`                                           | a read of the order was refused past the saga's first read, with no other work owed                                                                                                                    | the read answering                                                                               |
 | `OBLIGATION_NOT_HELD`, `OBLIGATION_MISMATCH` at `CANCELLING` | the lookup found an obligation the saga cannot refund: other terms, or a status such as `SETTLED`, `DISPUTED`, `PENDING_SETTLEMENT` or `CREATED`                                                       | a person reconciling it                                                                          |
 | `OBLIGATION_RECONCILIATION`                                  | the owner's status is terminal and the order cannot follow it: a refund told `SETTLED`, a filing told final with the order still `DISPUTED`, an authorisation told `REFUNDED`, `CANCELLED` or `FAILED` | the order leaving that status (an operator's decision, or a person's correction at `CANCELLING`) |
+| `OBLIGATION_RECONCILIATION`, a round naming a refusal code   | the refund, filing or authorisation was refused on its first attempt with the money possibly held (D-127, below)                                                                                       | the call answering, or the owner's terminal status as above                                      |
 
 The owner's status decides, and only for a refund or a filing that can no longer land.
 `REFUNDED`, `CANCELLED` or `FAILED` at a cancellation means no money is left to return,
@@ -604,6 +606,29 @@ failed attempts still end the saga with `SETTLEMENT_EXHAUSTED` for a human
 (`docs/08` § 8.4). A refused `recordReminder` holds nothing up: it is reported, and the
 next window records one. Only a refused first read, with nothing yet sent, still ends
 the saga.
+
+### Refused on its first attempt (D-127, protocol 12)
+
+A refund, filing or authorisation refused on its first attempt (`FORBIDDEN`, `NOT_FOUND`,
+`BUSINESS_RULE_VIOLATION` or another code in `PROVEN_REFUSALS`) changed nothing, but that
+does not return the money. The saga reads the order's obligation once. Only if it is that
+transaction, terminal, with its funds `RETURNED` or `NEVER_HELD` (`CREATED` excluded), does
+the refusal still end the saga as before. Anything else waits: `HELD`, `SETTLED`, another
+transaction, none at all, other terms, or a lookup that fails. The phase is
+`OBLIGATION_RECONCILIATION`, each round is counted under the call's `operation` on
+`RastaMarketplaceSagaEconomicCallUnconfirmed` with the refusal code in the log, and each
+round sends the call again under the same key, in doubt. So a refusal whose cause a person
+removes (a role, a rule) is answered on the next round or at the signal above. Once the
+obligation is terminal, its status decides as in the table: a refund confirmed (`REFUNDED`),
+or funds returned or never held, lets `markCancelled` run; `SETTLED`, or any other status,
+never cancels the order. The doubt is carried across a rollover, so no later round ends on
+a code. **Do not terminate a saga in this wait** to clear the alert: read the obligation at
+economic-service, remove the refusal's cause or settle it by hand, then send the signal;
+for an order `RECEIPT_CONFIRMED` with no receipt, follow `marketplace-receipt-evidence.md`
+instead and settle nothing. A build below protocol 12 that picks up a run continued from
+this wait keeps waiting in doubt, showing the call's `*_UNCONFIRMED` phase.
+A history from before protocol 12 that ended on such a refusal replays that end
+(fixtures `pre-fu158-*`).
 
 Protocol 6 is forward-only like the others. Every exit above replays its old end from a
 history without `saga-owed-work-durable-v1` (fixtures `pre-fu117r2-*`). A refund, filing,
