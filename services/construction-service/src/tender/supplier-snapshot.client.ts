@@ -1,11 +1,10 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
-import { readCapped } from '../organization/organization-directory';
 
 /** The service that knows who is qualified and who is suspended. */
 export const SUPPLIER_SERVICE = 'supplier-service';
@@ -146,7 +145,7 @@ export class SupplierSnapshotClient implements StandingSnapshotSource, StandingO
           );
           throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
         }
-        const text = await readCapped(response, MAX_SNAPSHOT_BYTES);
+        const text = await readCappedText(response, MAX_SNAPSHOT_BYTES);
         if (text === null) {
           this.logger.warn('supplier-service answered a snapshot page over the size bound');
           throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);

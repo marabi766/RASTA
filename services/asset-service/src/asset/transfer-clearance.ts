@@ -4,11 +4,15 @@ import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import {
   RastaError,
+  readBoundedText,
   tryGetContext,
   upstreamExchange,
   type InternalTokenService,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
+
+/** Byte ceiling of the peer's answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 1024 * 1024;
 
 /**
  * Asks the services that own a machine's open work whether it has any, and
@@ -173,7 +177,7 @@ export class TransferClearanceClient implements TransferClearance {
     if (response.status === 404 || response.status === 409) {
       // Only the owner's own refusal counts as an answer: the platform error
       // body, naming the machine or the state. A proxy's 404 proves nothing.
-      const body = platformErrorSchema.safeParse(await readJson(response, owner));
+      const body = platformErrorSchema.safeParse(jsonOf(response, owner));
       const recognised =
         body.success &&
         ((response.status === 404 &&
@@ -192,7 +196,7 @@ export class TransferClearanceClient implements TransferClearance {
     }
     if (response.status !== 200) throw RastaError.upstreamUnavailable(owner);
 
-    const parsed = answerSchemas[owner].safeParse(await readJson(response, owner));
+    const parsed = answerSchemas[owner].safeParse(jsonOf(response, owner));
     if (!parsed.success) throw RastaError.upstreamUnavailable(owner);
     const body = parsed.data as {
       assetId: string;
@@ -248,7 +252,7 @@ export class TransferClearanceClient implements TransferClearance {
     method: 'POST' | 'DELETE',
     path: string,
     body?: string,
-  ): Promise<Response> {
+  ): Promise<PeerAnswer> {
     const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
       from: SERVICE_NAME,
       to: owner,
@@ -264,7 +268,9 @@ export class TransferClearanceClient implements TransferClearance {
 
     // The body is read inside the deadline too, and an answer that arrives
     // after it is not taken, even from a transport that ignored the abort.
-    const { status, text } = await upstreamExchange(
+    // Parsed inside the exchange, so its deadline check before it returns
+    // covers parsing too (PR #722 r2 F2).
+    return upstreamExchange(
       owner,
       this.options.timeoutMs,
       (signal) =>
@@ -274,16 +280,31 @@ export class TransferClearanceClient implements TransferClearance {
           body,
           signal,
         }),
-      async (response) => ({ status: response.status, text: await response.text() }),
+      async (response) => ({
+        status: response.status,
+        body: parseJson(await readBoundedText(response, MAX_ANSWER_BYTES)),
+      }),
     );
-    return new Response(text.length > 0 ? text : null, { status });
   }
 }
 
-async function readJson(response: Response, owner: WorkOwner): Promise<unknown> {
+/** A body that is not JSON (an empty one included). */
+const NOT_JSON = Symbol('NOT_JSON');
+
+interface PeerAnswer {
+  readonly status: number;
+  readonly body: unknown;
+}
+
+function parseJson(text: string): unknown {
   try {
-    return await response.json();
+    return JSON.parse(text) as unknown;
   } catch {
-    throw RastaError.upstreamUnavailable(owner);
+    return NOT_JSON;
   }
+}
+
+function jsonOf(answer: PeerAnswer, owner: WorkOwner): unknown {
+  if (answer.body === NOT_JSON) throw RastaError.upstreamUnavailable(owner);
+  return answer.body;
 }

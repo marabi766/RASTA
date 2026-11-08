@@ -57,6 +57,14 @@ export { TokenVerifier } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
 export { RedirectRefusedError, internalFetch } from './http/internal-fetch';
 export {
+  BodyTooLargeError,
+  BoundedBodyCollector,
+  readBoundedJson,
+  readBoundedText,
+  readCappedText,
+  type CappedReadOptions,
+} from './http/bounded-body';
+export {
   ExchangeCancelledError,
   ExchangeDeadlineError,
   exchangeWithDeadline,

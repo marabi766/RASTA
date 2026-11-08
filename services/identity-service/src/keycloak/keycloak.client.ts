@@ -1,7 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { refusedBeforeSending } from '@rasta/config';
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, RedirectRefusedError, foldAsciiCase, internalFetch } from '@rasta/nest-common';
+import {
+  RastaError,
+  RedirectRefusedError,
+  foldAsciiCase,
+  internalFetch,
+  readBoundedJson,
+} from '@rasta/nest-common';
 import {
   PLATFORM_ATTRIBUTE_NAMES,
   provenanceOnly,
@@ -231,6 +237,12 @@ export const KEYCLOAK_REQUEST_TIMEOUT_MS = 10_000;
  * rather than a bare `TimeoutError` or `TypeError` from `fetch`. Nothing of
  * the request is carried, so neither a token nor a secret can reach a log.
  */
+/** Byte ceiling of a Keycloak answer, decoded (PR #722 r1 F1). */
+const MAX_KEYCLOAK_BODY_BYTES = 1024 * 1024;
+
+/** The monotonic deadline of each admin call's response, for reading its body. */
+const adminDeadlines = new WeakMap<Response, number>();
+
 async function unreachableAsUpstream<T>(operation: string, call: () => Promise<T>): Promise<T> {
   try {
     return await call();
@@ -285,6 +297,18 @@ export class KeycloakAdminClient {
     return cancel ? AbortSignal.any([timeout, cancel]) : timeout;
   }
 
+  /**
+   * The JSON body of a response `send` returned, bounded in bytes and checked
+   * against the call's monotonic deadline between chunks: the timer behind
+   * `deadline()` cannot fire while an always-ready body keeps the microtask
+   * queue busy (PR #722 r1 F1/F2).
+   */
+  private async readJson(response: Response, operation: string, deadlineAt: number) {
+    return unreachableAsUpstream(operation, () =>
+      readBoundedJson(response, MAX_KEYCLOAK_BODY_BYTES, { deadlineAt }),
+    );
+  }
+
   private async accessToken(cancel?: AbortSignal): Promise<string> {
     // Refresh 30s early so a token does not expire mid-request.
     if (this.token && this.token.expiresAt > Date.now() + 30_000) {
@@ -296,6 +320,7 @@ export class KeycloakAdminClient {
     // the database lock an approval or a projection holds around it —
     // without bound (#219 r4). The signal also bounds reading the body below.
     const deadline = this.deadline(cancel);
+    const deadlineAt = performance.now() + this.requestTimeoutMs;
     const response = await unreachableAsUpstream('client_credentials', () =>
       send(`${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`, {
         method: 'POST',
@@ -318,10 +343,10 @@ export class KeycloakAdminClient {
       });
     }
 
-    const body = await unreachableAsUpstream(
-      'client_credentials',
-      () => response.json() as Promise<{ access_token: string; expires_in: number }>,
-    );
+    const body = (await this.readJson(response, 'client_credentials', deadlineAt)) as {
+      access_token: string;
+      expires_in: number;
+    };
     this.token = {
       value: body.access_token,
       expiresAt: Date.now() + body.expires_in * 1000,
@@ -335,7 +360,8 @@ export class KeycloakAdminClient {
     cancel?: AbortSignal,
   ): Promise<Response> {
     const token = await this.accessToken(cancel);
-    return unreachableAsUpstream('admin', () =>
+    const deadlineAt = performance.now() + this.requestTimeoutMs;
+    const response = await unreachableAsUpstream('admin', () =>
       send(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
         ...init,
         headers: {
@@ -346,6 +372,15 @@ export class KeycloakAdminClient {
         signal: this.deadline(cancel),
       }),
     );
+    // An answer heard only after the deadline is the deadline's, as if the
+    // timer had fired: a header-only answer (a create's Location, a status)
+    // is never read, so no body check would catch it (PR #722 r2 F2).
+    if (performance.now() >= deadlineAt) {
+      await response.body?.cancel().catch(() => undefined);
+      throw RastaError.upstreamUnavailable('keycloak', { operation: 'admin', reason: 'deadline' });
+    }
+    adminDeadlines.set(response, deadlineAt);
+    return response;
   }
 
   /**
@@ -556,7 +591,12 @@ export class KeycloakAdminClient {
         operation: 'findAccountByUsername',
       });
     }
-    const found = ((await response.json()) as KeycloakUserRepresentation[]).find(
+    const users = (await this.readJson(
+      response,
+      'findAccountByUsername',
+      adminDeadlines.get(response) ?? 0,
+    )) as KeycloakUserRepresentation[];
+    const found = users.find(
       (account) =>
         account.username !== undefined &&
         foldAsciiCase(account.username) === foldAsciiCase(username),
@@ -621,7 +661,11 @@ export class KeycloakAdminClient {
     if (!response.ok) {
       throw RastaError.upstreamUnavailable('keycloak', { status: response.status, operation });
     }
-    return (await response.json()) as KeycloakUserRepresentation;
+    return (await this.readJson(
+      response,
+      operation,
+      adminDeadlines.get(response) ?? 0,
+    )) as KeycloakUserRepresentation;
   }
 
   /**

@@ -1,11 +1,10 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, readCappedText } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
-import { readCapped } from '../organization/organization-directory';
 
 /** The service that knows who belongs to which organization. */
 export const IDENTITY_SERVICE = 'identity-service';
@@ -132,7 +131,7 @@ export class MembershipClient implements MembershipSource {
           this.logger.warn(`identity-service answered ${response.status} to the membership read`);
           throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
         }
-        const text = await readCapped(response, MAX_MEMBERSHIP_BYTES);
+        const text = await readCappedText(response, MAX_MEMBERSHIP_BYTES);
         if (text === null) throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
         let body: unknown;
         try {

@@ -3,11 +3,15 @@ import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import {
   RastaError,
+  readBoundedJson,
   tryGetContext,
   upstreamExchange,
   type InternalTokenService,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
+
+/** Byte ceiling of the peer's answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 1024 * 1024;
 
 /**
  * The one question identity-service asks audit-service: does this correction
@@ -114,7 +118,9 @@ export class AuditLookupClient {
         if (response.status === 404) return null;
         if (response.status !== 200) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
-        const parsed = auditTargetSchema.safeParse(await response.json());
+        const parsed = auditTargetSchema.safeParse(
+          await readBoundedJson(response, MAX_ANSWER_BYTES),
+        );
         if (!parsed.success) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
         // Exactly the record named, or no record at all.

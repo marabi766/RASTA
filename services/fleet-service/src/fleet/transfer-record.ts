@@ -2,12 +2,16 @@ import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import {
   RastaError,
+  readBoundedText,
   tryGetContext,
   upstreamExchange,
   type InternalTokenService,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 import { transferFenceResolutionsTotal } from '../observability/metrics';
+
+/** Byte ceiling of the peer's answer, decoded (PR #722 r1 F1). */
+const MAX_ANSWER_BYTES = 1024 * 1024;
 
 /**
  * Resolving an expired transfer fence at its source (ADR-062 § 3b, review
@@ -93,7 +97,9 @@ export class TransferRecordClient implements TransferRecordSource {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const { status, text } = await upstreamExchange(
+    // Parsed inside the exchange, so its deadline check before it returns
+    // covers parsing too (PR #722 r2 F2).
+    const { status, body } = await upstreamExchange(
       ASSET_SERVICE,
       this.options.timeoutMs,
       (signal) =>
@@ -102,10 +108,12 @@ export class TransferRecordClient implements TransferRecordSource {
             `${encodeURIComponent(assetId)}/transfers/${encodeURIComponent(fenceId)}`,
           { method: 'GET', headers, signal },
         ),
-      async (response) => ({ status: response.status, text: await response.text() }),
+      async (response) => ({
+        status: response.status,
+        body: parseJson(await readBoundedText(response, MAX_ANSWER_BYTES)),
+      }),
     );
 
-    const body = parseJson(text);
     if (status === 200) {
       const parsed = recordedSchema.safeParse(body);
       if (parsed.success && parsed.data.assetId === assetId && parsed.data.transferId === fenceId) {

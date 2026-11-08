@@ -11,7 +11,6 @@ import {
   CONSTRUCTION_SERVICE,
   MAX_AWARD_BYTES,
   isAwardNotFound,
-  readCapped,
 } from './award-source.client';
 
 const fact = {
@@ -209,20 +208,6 @@ describe('AwardSourceClient', () => {
         client(fetchImpl as unknown as typeof fetch, 20).award('ORG_OWNER', 'TND_1'),
       ).rejects.toMatchObject({ code: ERROR_CODES.UPSTREAM_TIMEOUT });
     });
-  });
-});
-
-describe('readCapped', () => {
-  it('reads a body within the limit', async () => {
-    expect(await readCapped(new Response('hello'), 10)).toBe('hello');
-  });
-
-  it('reads an empty body as empty text', async () => {
-    expect(await readCapped(new Response(null), 10)).toBe('');
-  });
-
-  it('stops, and answers null, once the body passes the limit', async () => {
-    expect(await readCapped(new Response('0123456789ABC'), 10)).toBeNull();
   });
 });
 
