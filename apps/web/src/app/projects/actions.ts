@@ -7,31 +7,23 @@ import { parseCreateForm, projectFormValues } from '@/lib/project-commands';
 import { verifyCsrf } from '@/server/csrf';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
+import { settleRelease } from '@/server/release-feedback';
 import { createProject } from '@/server/project-commands';
 import { isProvenRefusal } from '@/server/write';
 import {
   checkCreateStamp,
   createBodyDigest,
   createStampTerms,
+  PROJECT_CREATE_RELEASE,
   PROJECT_CREATE_UNRESOLVED,
 } from '@/server/project-create-replay';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
-import {
-  releaseUnresolved,
-  reserveUnresolved,
-  settleUnresolved,
-} from '@/server/unresolved-request';
+import { reserveUnresolved, settleUnresolved } from '@/server/unresolved-request';
 import { MAX_CLOCK_SKEW_MS } from '@/server/unresolved-request-policy';
 
-import {
-  CONFIRM_DUPLICATE_FIELD,
-  CONFIRM_DUPLICATE_VALUE,
-  RELEASE_FIELD,
-  type CreateProjectFormState,
-} from './form-state';
+import { type CreateProjectFormState } from './form-state';
 import { pageContext } from '@/server/page-context';
 import { withContext } from '@/lib/page-context';
-import { pageHref } from '@/server/page-context';
 
 /**
  * The `/projects` create form's server action.
@@ -245,16 +237,12 @@ export async function submitCreateProject(
 export async function releaseUnresolvedCreate(form: FormData): Promise<void> {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/projects');
-  if (!verifyCsrf(session, form).ok) redirect('/projects');
-  if (form.get(CONFIRM_DUPLICATE_FIELD) !== CONFIRM_DUPLICATE_VALUE) redirect('/projects');
-  const outcome = await releaseUnresolved(
+  return settleRelease({
     session,
-    PROJECT_CREATE_UNRESOLVED,
-    form.get(RELEASE_FIELD),
-  );
-  redirect(
-    outcome === 'RELEASED' || outcome === 'GONE'
-      ? '/projects'
-      : pageHref(session, '/projects', { release: outcome }),
-  );
+    form,
+    back: '/projects',
+    subject: { surface: 'project-creation' },
+    scope: PROJECT_CREATE_RELEASE,
+    quietSuccess: true,
+  });
 }

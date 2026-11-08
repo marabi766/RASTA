@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 import { REPLAY_FIELD } from '@/lib/form-fields';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { CSRF_FIELD } from '@/server/csrf';
 import {
   DEMAND_SUBMIT_UNRESOLVED,
@@ -9,6 +11,7 @@ import {
   mintDemandStamp,
 } from '@/server/demand-replay';
 import { readFlash } from '@/server/flash';
+
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 import {
@@ -28,7 +31,6 @@ import {
   CONFIRM_DUPLICATE_FIELD,
   CONFIRM_DUPLICATE_VALUE,
   IDLE_DEMAND_FORM,
-  RELEASE_FIELD,
 } from './demand-form-state';
 
 /**
@@ -453,6 +455,18 @@ describe('an unresolved submission outlives the form that sent it (checklist A 2
   });
 });
 
+/** What the redirect `landing` says happened (the signed `release` parameter, read for this login). */
+function outcomeOf(landing: string): string | undefined {
+  const url = new URL(landing, 'http://localhost');
+  expect(url.pathname).toBe('/procurement/demands');
+  return feedbackFor(
+    SESSION,
+    { surface: 'demand-submission' },
+    url.searchParams.get('release'),
+    true,
+  );
+}
+
 describe('send as new', () => {
   async function release(fields: { confirm?: boolean; token?: string | null }) {
     const form = new FormData();
@@ -470,9 +484,9 @@ describe('send as new', () => {
 
   it('lets go of the held request only with the confirmation and the token drawn for it', async () => {
     await sendAndLose();
-    await release({ confirm: false });
+    expect(outcomeOf(await release({ confirm: false }))).toBe('CONSENT_MISSING');
     expect(await held()).toMatchObject({ kind: 'PENDING' });
-    expect(await release({ token: 'forged' })).toContain('release=STALE');
+    expect(outcomeOf(await release({ token: 'forged' }))).toBe('STALE');
     expect(await held()).toMatchObject({ kind: 'PENDING' });
     await release({});
     expect(await held()).toEqual({ kind: 'NONE' });
@@ -486,7 +500,7 @@ describe('send as new', () => {
     const oldToken = releaseToken(SESSION, DEMAND_SUBMIT_UNRESOLVED, await heldRequest());
     await release({});
     await sendAndLose();
-    expect(await release({ token: oldToken })).toContain('release=STALE');
+    expect(outcomeOf(await release({ token: oldToken }))).toBe('STALE');
     expect(await held()).toMatchObject({ kind: 'PENDING' });
   });
 });

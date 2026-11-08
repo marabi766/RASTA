@@ -339,7 +339,7 @@ export function WalletScreen({
           </Section>
 
           <Section headingId="top-up" title="افزایش موجودی">
-            <ReleaseFeedback outcome={releaseOutcome} />
+            <ReleaseFeedback surface="wallet" outcome={releaseOutcome} />
             {provider.kind !== 'OK' && releaseKey ? (
               <UnresolvedTopUpNotice
                 walletId={wallet.data.id}

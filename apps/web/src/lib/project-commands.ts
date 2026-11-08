@@ -618,10 +618,6 @@ export const PENDING_CAPACITY_MESSAGE =
   'شمار درخواست‌های روشن‌نشده این نشست به سقف رسیده است و چیزی فرستاده نشد. ' +
   'نخست درخواست‌های روشن‌نشده را بررسی و رها کنید.';
 
-/** The release form was drawn for a request that has since changed. */
-export const RELEASE_STALE_MESSAGE =
-  'درخواست روشن‌نشده از زمان باز شدن این صفحه تغییر کرده است و چیزی تغییر نکرد. صفحه را تازه کنید و دوباره بررسی کنید.';
-
 /** An unresolved create exists and this post is a different request. */
 export const HELD_OTHER_MESSAGE =
   'درخواست پیشینی هنوز روشن نشده است و درخواست دیگری فرستاده نشد. صفحه را تازه کنید؛ ' +

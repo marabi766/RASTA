@@ -1,11 +1,12 @@
 import { Alert, Button } from '@/ui';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { CSRF_FIELD } from '@/lib/form-fields';
 import { mayResend, type UnresolvedRequest } from '@/server/unresolved-request';
 
 import { HELD_IN_PROGRESS_MESSAGE } from '@/lib/project-commands';
 
 import { releaseUnresolvedCreate } from './actions';
-import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE, RELEASE_FIELD } from './form-state';
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE } from './form-state';
 
 /**
  * Shown on `/projects` for as long as an earlier create is unresolved

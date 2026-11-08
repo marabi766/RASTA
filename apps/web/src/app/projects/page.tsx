@@ -3,12 +3,10 @@ import { redirect } from 'next/navigation';
 import { Alert, AppShell, Button, EmptyState, PageHeader, Section, TopBar } from '@/ui';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import {
-  HELD_IN_PROGRESS_MESSAGE,
   INBOX_FLASH_SUBJECT,
   PENDING_UNCHECKED_MESSAGE,
   PROJECT_NOTICE_TEXT,
   PROJECT_NOTICES,
-  RELEASE_STALE_MESSAGE,
 } from '@/lib/project-commands';
 import { isProjectStatus } from '@/lib/project-fields';
 import { currentSession } from '@/server/current-session';
@@ -23,10 +21,12 @@ import {
 } from '@/server/projects';
 import type { WebSession } from '@/server/session';
 import { mintCreateSubmission, PROJECT_CREATE_UNRESOLVED } from '@/server/project-create-replay';
+import { readReleaseFeedback } from '@/server/release-feedback';
 import { readUnresolved, releaseToken } from '@/server/unresolved-request';
 import { mintSubmissionId } from '@/server/submission';
 import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
+import { ReleaseFeedback } from '@/app/ReleaseFeedback';
 
 import { ApprovalInbox } from './ApprovalInbox';
 import { CreateProjectForm } from './CreateProjectForm';
@@ -99,8 +99,13 @@ export default async function ProjectsPage({
     readUnresolved(session, PROJECT_CREATE_UNRESOLVED),
     fetchDemoMode(session),
   ]);
-  const release = one(params.release);
-  const releaseRefused = release === 'STALE' || release === 'IN_PROGRESS' ? release : null;
+  // Signed, for this login and surface; a newer hold (or an unreadable store) hides a replayed success.
+  const releaseOutcome = readReleaseFeedback(
+    session,
+    { surface: 'project-creation' },
+    params,
+    pending.kind === 'NONE',
+  );
   const notice = readFlash(session, one(params[FLASH_PARAM]), INBOX_FLASH_SUBJECT, PROJECT_NOTICES);
 
   return (
@@ -138,13 +143,7 @@ export default async function ProjectsPage({
         >
           {canWriteProjects(sessionWriteRoles(session), webServerEnv()) ? (
             <>
-              {releaseRefused ? (
-                <Alert tone="warning">
-                  {releaseRefused === 'IN_PROGRESS'
-                    ? HELD_IN_PROGRESS_MESSAGE
-                    : RELEASE_STALE_MESSAGE}
-                </Alert>
-              ) : null}
+              <ReleaseFeedback surface="project-creation" outcome={releaseOutcome} />
               {pending.kind === 'UNAVAILABLE' ? (
                 // Not "no hold": the store could not say, so no create form is
                 // drawn (and none mints a fresh key); the action refuses too.

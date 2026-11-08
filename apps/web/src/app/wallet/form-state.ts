@@ -43,4 +43,3 @@ export const IDLE_TOP_UP_FORM: TopUpFormState = { kind: 'IDLE' };
 
 export const CONFIRM_DUPLICATE_FIELD = 'confirmDuplicate';
 export const CONFIRM_DUPLICATE_VALUE = 'yes';
-export const RELEASE_FIELD = 'release';

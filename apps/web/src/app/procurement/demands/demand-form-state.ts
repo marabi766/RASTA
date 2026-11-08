@@ -59,7 +59,3 @@ export const IDLE_DEMAND_FORM: DemandFormState = { kind: 'IDLE' };
 /** The checkbox that lets go of an unresolved submission: the full list was checked, a duplicate is accepted. */
 export const CONFIRM_DUPLICATE_FIELD = 'confirmDuplicate';
 export const CONFIRM_DUPLICATE_VALUE = 'yes';
-/** The hidden field of the release form: the signed name of the record it was drawn for. */
-export const RELEASE_FIELD = 'release';
-/** The query parameter a refused release comes back with. */
-export const RELEASE_PARAM = 'release';

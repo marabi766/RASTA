@@ -13,7 +13,7 @@ import type {
 } from '@/server/wallet';
 import { TEST_CONTEXT } from '@/test/page-context';
 import { withContext } from '@/lib/page-context';
-import { RELEASE_MESSAGES } from '@/lib/release-messages';
+import { RELEASE_TEMPLATES, releaseMessage, type ReleaseFeedbackKey } from '@/lib/release-messages';
 
 /**
  * `WalletScreen`, composing four independent reads. Mirrors
@@ -171,11 +171,11 @@ describe('the top-up section', () => {
 });
 
 describe('FU-217 the release result', () => {
-  it.each(Object.keys(RELEASE_MESSAGES) as (keyof typeof RELEASE_MESSAGES)[])(
+  it.each(Object.keys(RELEASE_TEMPLATES) as ReleaseFeedbackKey[])(
     'shows %s in the top-up section',
     (releaseOutcome) => {
       const { getByRole } = render_({ releaseOutcome });
-      expect(getByRole('alert')).toHaveTextContent(RELEASE_MESSAGES[releaseOutcome]);
+      expect(getByRole('alert')).toHaveTextContent(releaseMessage(releaseOutcome, 'wallet'));
     },
   );
 });
