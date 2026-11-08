@@ -741,6 +741,13 @@ export default {
         const callbacks = [];
         const callbackInputs = new Map();
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
+        // JavaScript keeps the last of duplicate keys; a definition field named
+        // twice has no single readable value, so it is refused, never proven.
+        const prop = (definition, name) => {
+          const named = definition.properties.filter((p) => key(p) === name);
+          if (named.length > 1) report(named[1], 'preprocess');
+          return named.length === 1 ? named[0].value : undefined;
+        };
         const fields = (raw, seen = new Set(), input) => {
           const definition = unwrap(raw);
           if (absent(definition) || seen.has(definition)) return;
@@ -781,46 +788,38 @@ export default {
             if (api.fields !== index) report(definition, 'preprocess');
             return;
           }
-          for (const prop of definition.properties) {
-            if (prop.type === 'SpreadElement' && absent(prop.argument)) continue;
+          for (const field of definition.properties) {
+            if (field.type === 'SpreadElement' && absent(field.argument)) continue;
             if (
-              prop.type === 'SpreadElement' ||
-              key(prop) === undefined ||
-              key(prop) === '__proto__' ||
-              ['get', 'set'].includes(prop.kind)
+              field.type === 'SpreadElement' ||
+              key(field) === undefined ||
+              key(field) === '__proto__' ||
+              ['get', 'set'].includes(field.kind)
             ) {
-              report(prop, 'preprocess');
+              report(field, 'preprocess');
               continue;
             }
             if (
               ['transform', 'preprocess', 'tx', 'decode', 'encode', 'reverseTransform'].includes(
-                key(prop),
+                key(field),
               )
             ) {
-              callbacks.push(prop.value);
+              callbacks.push(field.value);
               if (
-                key(prop) === 'transform' &&
+                key(field) === 'transform' &&
                 input &&
-                constant(definition.properties.find((p) => key(p) === 'type')?.value) ===
-                  'transform'
+                constant(prop(definition, 'type')) === 'transform'
               )
-                callbackInputs.set(prop.value, input);
+                callbackInputs.set(field.value, input);
               if (factory.name === 'codec')
-                callbackInputs.set(prop.value, node.arguments[key(prop) === 'encode' ? 1 : 0]);
+                callbackInputs.set(field.value, node.arguments[key(field) === 'encode' ? 1 : 0]);
               if (/Zod(?:Mini)?Codec$/.test(factory.name ?? factory.owner ?? ''))
                 callbackInputs.set(
-                  prop.value,
-                  definition.properties.find(
-                    (p) => key(p) === (key(prop) === 'reverseTransform' ? 'out' : 'in'),
-                  )?.value,
+                  field.value,
+                  prop(definition, key(field) === 'reverseTransform' ? 'out' : 'in'),
                 );
             }
-            if (key(prop) === 'effect')
-              fields(
-                prop.value,
-                seen,
-                definition.properties.find((p) => key(p) === 'schema')?.value,
-              );
+            if (key(field) === 'effect') fields(field.value, seen, prop(definition, 'schema'));
           }
         };
         if (api.fields !== undefined)
@@ -886,6 +885,8 @@ export default {
         };
         // An inline downstream transform receives the upstream pipe output. A
         // reusable schema has no single input proof and remains unproven here.
+        // Only a receiverless callback factory takes it: a method-form callback
+        // receives its own receiver chain's output, never the pipe's upstream.
         const pipeInput = () => {
           let child = node;
           while (child.parent && unwrap(child.parent) === child) child = child.parent;
@@ -902,7 +903,9 @@ export default {
         const stringInput = (
           raw = callbackInput ??
             (api.fields === undefined
-              ? (pipeInput() ?? factory.receiver ?? unwrap(node.callee)?.object)
+              ? factory.receiverSchema
+                ? factory.receiver
+                : (pipeInput() ?? unwrap(node.callee)?.object)
               : undefined),
           seen = new Set(),
           kind = 'string',
