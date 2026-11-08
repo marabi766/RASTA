@@ -646,8 +646,7 @@ jobs:
           SCAN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          [[ "$SCAN_BASE" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SCAN_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          node -e 'for (const key of ["SCAN_BASE", "SCAN_HEAD"]) if (!/^[0-9a-f]{40}$/.test(process.env[key] ?? "")) process.exit(1)'
           gitleaks detect --redact --exit-code=2 --log-opts="--no-merges --first-parent $SCAN_BASE^..$SCAN_HEAD" --report-format=sarif --report-path=results.sarif
 
       - name: Dependency audit
