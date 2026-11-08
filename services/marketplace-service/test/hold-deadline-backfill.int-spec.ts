@@ -5,6 +5,7 @@ import {
   backfillLegacyHoldDeadlines,
   parseBackfillArgs,
 } from '../src/ops/hold-deadline-backfill';
+import { eligibilityClockWrite } from '@rasta/testing';
 import { HOLD_FENCE } from '../src/temporal/economic-refusal';
 import { asActor, cleanup, id, key, newPrisma, publishOffer, tenants, wire } from './helpers';
 
@@ -136,9 +137,16 @@ describe('the legacy hold-deadline backfill (PostgreSQL)', () => {
     // A count below zero: no writer of this service makes one. Copied from a placed order.
     const source = await place();
     const odd = { id: id('ORD'), organizationId: org.buyer };
-    await owner.$executeRaw`INSERT INTO "order" SELECT (jsonb_populate_record(o, jsonb_build_object(
-        'id', ${odd.id}::text, 'idempotency_key', ${key('odd')}::text, 'hold_send_claims', -1))).*
-      FROM "order" o WHERE o.id = ${source.id}`;
+    await eligibilityClockWrite(owner)`
+      INSERT INTO "order" (
+        id, organization_id, supplier_organization_id, placed_by, total_amount_minor, currency,
+        idempotency_key, correlation_id, created_by, created_at, updated_at,
+        saga_start_next_attempt_at, hold_send_claims
+      )
+      SELECT ${odd.id}, organization_id, supplier_organization_id, placed_by, total_amount_minor,
+        currency, ${key('odd')}, correlation_id, created_by, now(), now(),
+        now() + interval '24 hours', -1
+      FROM "order" WHERE id = ${source.id}`;
     const report = await run();
     expect(report.refused).toContainEqual({
       orderId: odd.id,
