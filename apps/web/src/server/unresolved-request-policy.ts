@@ -14,6 +14,7 @@ import {
  * | purpose          | retry | deadline   | stored as                         |
  * | ---------------- | ----- | ---------- | --------------------------------- |
  * | `project-create` | true  | `REQUIRED` | a finite integer (ms since epoch) |
+ * | `project-need-create` | false | `REQUIRED` | a finite integer (ms since epoch) |
  * | `procurement-demand` | true | `REQUIRED` | a finite integer (ms since epoch) |
  *
  *   - `retry` — may an unresolved record with the very same key and body be
@@ -28,6 +29,14 @@ import {
  *
  * A purpose that is not in the table is refused (fail closed). Supplier
  * purposes (#366) add their own rows: `retry: false, deadline: 'NONE'`.
+ *
+ * `project-need-create` carries a deadline (`REQUIRED`): `POST /v1/projects/{id}/needs` takes
+ * `Idempotency-Replay-Deadline` since #615, and every add sends the signed stamp's — so the service
+ * refuses any execution past its own retention (D-065), whether or not this store still holds a
+ * record for the form (a CONFIRMED add's record is deleted; posting that form again is the
+ * service's to refuse). It stays `retry: false`: the portal does not offer to resend an unresolved
+ * add; it is reconciled by looking at the project's needs, or released with the duplicate-risk
+ * confirmation. (Offering the resend, as `project-create` does, is a separate UX change.)
  *
  * ## Who guarantees what (PM decision D-065)
  *
@@ -117,6 +126,8 @@ const PURPOSES: Readonly<Record<string, PurposePolicy>> = {
   'wallet-top-up': { retry: false, deadline: 'NONE', identity: 'PERSON' },
   // supplier-service has no Idempotency-Key and no expiry: never resent, no deadline.
   'supplier-write': { retry: false, deadline: 'NONE' },
+  // Fenced by the service (Idempotency-Replay-Deadline, #615); not resent by the portal.
+  'project-need-create': { retry: false, deadline: 'REQUIRED' },
   // procurement-service answers a repeated Idempotency-Key with the first result while it keeps the
   // key (`PROCUREMENT_IDEMPOTENCY_TTL_HOURS`, counted from the stored answer): resent within the
   // deadline `server/demand-replay.ts` signs, never after. EXCEPTION to D-065 above: procurement-service

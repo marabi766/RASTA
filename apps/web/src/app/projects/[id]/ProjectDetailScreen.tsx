@@ -11,6 +11,7 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
 import { PROJECT_NOTICE_TEXT, type ProjectNotice } from '@/lib/project-commands';
+import { NEED_NOTICE_TEXT, type NeedNotice } from '@/lib/project-need-commands';
 import { projectStatusLabel } from '@/lib/project-fields';
 import type { ProjectDetail, ReadResult } from '@/server/projects';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
@@ -28,8 +29,9 @@ import { formatEstimate } from '../ProjectsScreen';
  * as an id that does not exist: a distinct "exists but not yours" would
  * confirm the id to somebody who should not learn it.
  *
- * Needs, tenders and progress reports are separate slices; this screen shows
- * the record, its approvals and the commands on the project itself.
+ * Tenders and progress reports are separate slices; this screen shows the record,
+ * its needs with their commands, its approvals and the commands on the project
+ * itself.
  */
 
 export interface ProjectDetailScreenProps {
@@ -39,14 +41,18 @@ export interface ProjectDetailScreenProps {
    * accepts it only from a flash the server signed for this session and this
    * project (`readFlash`).
    */
-  readonly notice?: ProjectNotice;
+  readonly notice?: ProjectNotice | NeedNotice;
   /** What the provider says (`fetchDemoMode`, Q-14), over the estimate. Nothing here moves money. */
   readonly demoMode: DemoMode;
   /** The approval policy's state and the rounds, built by the page. */
   readonly approvals?: ReactNode;
   /** The commands the status offers, built by the page from the same read. */
   readonly commands?: ReactNode;
+  /** The needs and their commands, built by the page from its own read of them. */
+  readonly needList?: ReactNode;
 }
+
+const NOTICE_TEXT = { ...PROJECT_NOTICE_TEXT, ...NEED_NOTICE_TEXT };
 
 export function ProjectDetailScreen({
   result,
@@ -54,6 +60,7 @@ export function ProjectDetailScreen({
   notice,
   approvals,
   commands,
+  needList,
 }: ProjectDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="این پروژه در اختیار شما نیست." />;
@@ -83,9 +90,7 @@ export function ProjectDetailScreen({
   return (
     <div className="flex flex-col gap-6">
       <DemoModeNotice mode={demoMode} />
-      {notice ? (
-        <Alert tone={PROJECT_NOTICE_TEXT[notice].tone}>{PROJECT_NOTICE_TEXT[notice].text}</Alert>
-      ) : null}
+      {notice ? <Alert tone={NOTICE_TEXT[notice].tone}>{NOTICE_TEXT[notice].text}</Alert> : null}
       <Section headingId="project-summary" title={project.title}>
         <div className="flex flex-wrap items-center gap-3">
           <StatusBadge status={project.status} label={projectStatusLabel(project.status)} />
@@ -145,6 +150,7 @@ export function ProjectDetailScreen({
         </Section>
       ) : null}
 
+      {needList}
       {approvals}
       {commands}
     </div>
