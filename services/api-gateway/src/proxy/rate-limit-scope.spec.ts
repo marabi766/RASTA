@@ -4,6 +4,7 @@ import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
 import type { ProxyService } from './proxy.service';
 import type { GatewayEnv } from '../config/env';
+import { RevocationGate } from '../revocation/revocation-gate';
 
 /**
  * Which rate-limit rule a request is measured against.
@@ -83,7 +84,7 @@ async function budgetUsedFor(
   path: string,
 ): Promise<{ scope: string; rule: RateLimitRule }> {
   const { limiter, calls } = recordingLimiter();
-  const controller = new GatewayController(proxy, limiter, env);
+  const controller = new GatewayController(proxy, limiter, env, RevocationGate.off());
 
   await runWithContext(context, () => controller.handle(requestFor(method, path), response()));
 
