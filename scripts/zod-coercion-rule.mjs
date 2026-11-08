@@ -120,6 +120,7 @@ const CALLBACK_APIS = new Set(['preprocess', 'transform', 'overwrite']);
 const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
   if (!raw && !receiverSchema) return {};
   const init = name === 'init';
+  const legacyCreate = name === 'create' && owner === 'ZodEffects';
   if (name === 'create' || init) name = owner;
   if (name === 'createWithPreprocess') return { slot: 0 };
   const api = name?.replace(/^_/, '');
@@ -137,7 +138,7 @@ const callbackSignature = ({ name, owner, raw, receiverSchema } = {}) => {
             ? 1
             : 0
           : /^\$?Zod(?:Mini)?(?:Transform|Preprocess|Effects|Codec|CheckOverwrite)/.test(api)
-            ? init
+            ? init || legacyCreate
               ? 1
               : 0
             : undefined,
@@ -743,7 +744,14 @@ export default {
         const callbacks = [];
         const callbackInputs = new Map();
         if (api.slot !== undefined) callbacks.push(node.arguments[api.slot]);
-        const fields = (raw, seen = new Set()) => {
+        // JavaScript keeps the last of duplicate keys; a definition field named
+        // twice has no single readable value, so it is refused, never proven.
+        const prop = (definition, name) => {
+          const named = definition.properties.filter((p) => key(p) === name);
+          if (named.length > 1) report(named[1], 'preprocess');
+          return named.length === 1 ? named[0].value : undefined;
+        };
+        const fields = (raw, seen = new Set(), input) => {
           const definition = unwrap(raw);
           if (absent(definition) || seen.has(definition)) return;
           seen.add(definition);
@@ -776,44 +784,55 @@ export default {
                 // The same audited definition slot may read an immutable object again.
               } else report(read, 'preprocess');
             }
-            fields(def.node.init, seen);
+            fields(def.node.init, seen, input);
             return;
           }
           if (definition.type !== 'ObjectExpression') {
             if (api.fields !== index) report(definition, 'preprocess');
             return;
           }
-          for (const prop of definition.properties) {
-            if (prop.type === 'SpreadElement' && absent(prop.argument)) continue;
+          for (const field of definition.properties) {
+            if (field.type === 'SpreadElement' && absent(field.argument)) continue;
             if (
-              prop.type === 'SpreadElement' ||
-              key(prop) === undefined ||
-              key(prop) === '__proto__' ||
-              ['get', 'set'].includes(prop.kind)
+              field.type === 'SpreadElement' ||
+              key(field) === undefined ||
+              key(field) === '__proto__' ||
+              ['get', 'set'].includes(field.kind)
             ) {
-              report(prop, 'preprocess');
+              report(field, 'preprocess');
               continue;
             }
             if (
               ['transform', 'preprocess', 'tx', 'decode', 'encode', 'reverseTransform'].includes(
-                key(prop),
+                key(field),
               )
             ) {
-              callbacks.push(prop.value);
+              callbacks.push(field.value);
+              if (
+                key(field) === 'transform' &&
+                input &&
+                constant(prop(definition, 'type')) === 'transform'
+              )
+                callbackInputs.set(field.value, input);
               if (factory.name === 'codec')
-                callbackInputs.set(prop.value, node.arguments[key(prop) === 'encode' ? 1 : 0]);
+                callbackInputs.set(field.value, node.arguments[key(field) === 'encode' ? 1 : 0]);
               if (/Zod(?:Mini)?Codec$/.test(factory.name ?? factory.owner ?? ''))
                 callbackInputs.set(
-                  prop.value,
-                  definition.properties.find(
-                    (p) => key(p) === (key(prop) === 'reverseTransform' ? 'out' : 'in'),
-                  )?.value,
+                  field.value,
+                  prop(definition, key(field) === 'reverseTransform' ? 'out' : 'in'),
                 );
             }
-            if (key(prop) === 'effect') fields(prop.value, seen);
+            if (key(field) === 'effect') fields(field.value, seen, prop(definition, 'schema'));
           }
         };
-        if (api.fields !== undefined) fields(node.arguments[api.fields]);
+        if (api.fields !== undefined)
+          fields(
+            node.arguments[api.fields],
+            new Set(),
+            factory.name === 'create' && factory.owner === 'ZodEffects'
+              ? node.arguments[0]
+              : undefined,
+          );
         if (!callbacks.length) return;
         let callback;
         let callbackFn;
@@ -863,10 +882,29 @@ export default {
             )
           );
         };
+        // An inline downstream transform receives the upstream pipe output. A
+        // reusable schema has no single input proof and remains unproven here.
+        // Only a receiverless callback factory takes it: a method-form callback
+        // receives its own receiver chain's output, never the pipe's upstream.
+        const pipeInput = () => {
+          let child = node;
+          while (child.parent && unwrap(child.parent) === child) child = child.parent;
+          const parent = child.parent;
+          if (parent?.type !== 'CallExpression') return undefined;
+          const pipe = origin(parent.callee);
+          if (pipe?.name !== 'pipe' || !(pipe.raw || pipe.receiverSchema)) return undefined;
+          return parent.arguments[pipe.receiverSchema ? 0 : 1] === child
+            ? pipe.receiverSchema
+              ? unwrap(parent.callee)?.object
+              : parent.arguments[0]
+            : undefined;
+        };
         const stringInput = (
           raw = callbackInput ??
             (api.fields === undefined
-              ? (factory.receiver ?? unwrap(node.callee)?.object)
+              ? factory.receiverSchema
+                ? factory.receiver
+                : (pipeInput() ?? unwrap(node.callee)?.object)
               : undefined),
           seen = new Set(),
           kind = 'string',
@@ -1154,6 +1192,17 @@ export default {
               (['array', 'strings'].includes(kind) &&
                 ['map', 'filter', 'reverse', 'slice', 'join'].includes(name))
             ) {
+              // A custom Symbol.replace can call its callback with arbitrary
+              // values. Only string patterns and literal regexes prove a match.
+              if (
+                kind === 'string' &&
+                name === 'replace' &&
+                args[1] &&
+                unwrap(args[1]).type !== 'Literal' &&
+                !stringValue(args[0], callee, new Set(), parameters) &&
+                !unwrap(args[0])?.regex
+              )
+                return true;
               const position =
                 ['array', 'strings'].includes(kind) && ['map', 'filter'].includes(name)
                   ? 0
@@ -1166,7 +1215,14 @@ export default {
                 ? unsafe(
                     args[position],
                     seen,
-                    [{ kind: kind === 'strings' ? 'string' : 'unknown' }],
+                    [
+                      {
+                        kind:
+                          kind === 'strings' || (kind === 'string' && name === 'replace')
+                            ? 'string'
+                            : 'unknown',
+                      },
+                    ],
                     parameters,
                   )
                 : false;
