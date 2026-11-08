@@ -2515,7 +2515,7 @@ RETURN_DISPATCH_WITHDRAWN`)، هر قدر دیر برسد. فقط بر این «
   `identity-service` همان بدیل «الف» است.
 - **هنوز روشن نیست:** `GATEWAY_REVOCATION_LIST=off` تنها حالت این نسخه است و بیرون از development و test باید صریح نوشته شود؛
   `enforce` با PR 2 (آداپتور Kafka، Principal و ACL `api-gateway`) می‌آید. تا آن زمان **T-06** همان است که بود. F1 (PR #381
-  r1، نگهداری پس از تاخیر Projection) با D-064 بسته است: grace حد انتشار Keycloak را هم دارد
+  r1، نگهداری پس از تأخیر Projection) با D-064 بسته است: grace حد انتشار Keycloak را هم دارد
   (`KEYCLOAK_ATTRIBUTE_PROPAGATION_SECONDS`)، و `identity-service` تنگ‌کردن را پیش از Commit می‌نویسد (PR #402)؛ PR 1 پیش از
   PR #402 ادغام نمی‌شود.
 - **اولویت:** متوسط
