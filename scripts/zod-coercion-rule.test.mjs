@@ -246,13 +246,17 @@ import { Linter } from 'eslint';
 import assert from 'node:assert/strict';
 const linter = new Linter();
 const messages = (code) =>
-  linter.verify(z + code, [
-    {
-      languageOptions: { parser: tseslint.parser },
-      plugins: { boundary: { rules: { coercion: rule } } },
-      rules: { 'boundary/coercion': 'error' },
-    },
-  ]);
+  linter.verify(
+    z + code,
+    [
+      {
+        languageOptions: { parser: tseslint.parser },
+        plugins: { boundary: { rules: { coercion: rule } } },
+        rules: { 'boundary/coercion': 'error' },
+      },
+    ],
+    { filename: `${ROOT}apps/web/src/probe.js` },
+  );
 for (const [finding, cases] of Object.entries(regressions))
   for (const [index, code] of cases.entries())
     it(`${finding} review trigger ${index + 1}: ${code}`, () => {
@@ -304,16 +308,40 @@ import {
   rmSync,
   readFileSync,
   writeFileSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { verifiedCallbackHelper } from './zod-callback-helpers.mjs';
+// PR #733 r1 F1: every grant names its importer. An import resolves from it; a binding
+// declared in the importer itself is named by the importer's own path.
+const PROBE_WEB = 'apps/web/src/probe.ts';
+const imported = (root, specifier, name, from = PROBE_WEB) =>
+  verifiedCallbackHelper(root, specifier, name, {
+    importer: join(root, from),
+    spelling: specifier.split('/').pop(),
+    definition: 'ImportBinding',
+  });
+const declared = (root, file, name, definition = 'FunctionName') =>
+  verifiedCallbackHelper(root, file, name, {
+    importer: join(root, file),
+    spelling: file.split('/').pop(),
+    definition,
+  });
+const contractsEntry = (root) => {
+  mkdirSync(join(root, 'node_modules/@rasta'), { recursive: true });
+  mkdirSync(join(root, 'packages/contracts/dist'), { recursive: true });
+  symlinkSync(join(root, 'packages/contracts'), join(root, 'node_modules/@rasta/contracts'));
+  writeFileSync(join(root, 'packages/contracts/dist/index.d.ts'), '');
+};
 it('reviewed helper provenance refuses unknown, missing and changed source', () => {
   const root = mkdtempSync(join(tmpdir(), 'rasta-zod-helper-'));
   try {
-    assert.equal(
-      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
-      undefined,
+    assert.equal(imported(root, './lib/format', 'toLatinDigits'), undefined);
+    mkdirSync(join(root, 'apps/web'), { recursive: true });
+    writeFileSync(
+      join(root, 'apps/web/tsconfig.json'),
+      JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['./src/*'] } } }),
     );
     cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
       recursive: true,
@@ -323,11 +351,8 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
       join(ROOT, 'apps/web/src/lib/form-issues.ts'),
       join(root, 'apps/web/src/lib/form-issues.ts'),
     );
-    assert.equal(
-      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
-      'string',
-    );
-    assert.equal(verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'unknown'), undefined);
+    assert.equal(imported(root, './lib/format', 'toLatinDigits'), 'string');
+    assert.equal(imported(root, './lib/format', 'unknown'), undefined);
     for (const [module, name] of [
       ['drivers', 'localDateToIso'],
       ['usage', 'localDateTimeToIso'],
@@ -336,51 +361,80 @@ it('reviewed helper provenance refuses unknown, missing and changed source', () 
         join(ROOT, `apps/web/src/server/${module}.ts`),
         join(root, `apps/web/src/server/${module}.ts`),
       );
-      assert.equal(verifiedCallbackHelper(root, `apps/web/src/server/${module}`, name), 'verified');
+      assert.equal(declared(root, `apps/web/src/server/${module}.ts`, name), 'verified');
+      // Only a declared binding is the helper: an undeclared global or a parameter is not.
+      const importer = join(root, `apps/web/src/server/${module}.ts`);
+      for (const definition of [undefined, 'Parameter', 'ImplicitGlobalVariable'])
+        assert.equal(
+          verifiedCallbackHelper(root, importer, name, { importer, definition }),
+          undefined,
+        );
     }
     cpSync(
       join(ROOT, 'apps/web/src/lib/repair-order-fields.ts'),
       join(root, 'apps/web/src/lib/repair-order-fields.ts'),
     );
-    assert.equal(
-      verifiedCallbackHelper(root, 'apps/web/src/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'),
-      'money-limit',
-    );
+    assert.equal(imported(root, '@/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'), 'money-limit');
     appendFileSync(join(root, 'apps/web/src/lib/repair-order-fields.ts'), '\n// changed source\n');
-    assert.equal(
-      verifiedCallbackHelper(root, 'apps/web/src/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'),
-      undefined,
-    );
+    assert.equal(imported(root, '@/lib/repair-order-fields', 'MAX_AMOUNT_MINOR'), undefined);
     appendFileSync(join(root, 'apps/web/src/lib/format/digits.ts'), '\n// changed helper\n');
-    assert.equal(
-      verifiedCallbackHelper(root, 'apps/web/src/lib/format', 'toLatinDigits'),
-      undefined,
-    );
-    assert.equal(
-      verifiedCallbackHelper(root, 'apps/web/src/server/drivers', 'localDateToIso'),
-      undefined,
-    );
-    assert.equal(
-      verifiedCallbackHelper(root, 'apps/web/src/server/usage', 'localDateTimeToIso'),
-      undefined,
-    );
+    assert.equal(imported(root, './lib/format', 'toLatinDigits'), undefined);
+    assert.equal(declared(root, 'apps/web/src/server/drivers.ts', 'localDateToIso'), undefined);
+    assert.equal(declared(root, 'apps/web/src/server/usage.ts', 'localDateTimeToIso'), undefined);
+    // No importer, or a relative one, refuses every grant.
+    for (const binding of [undefined, {}, { importer: 'apps/web/src/probe.ts' }])
+      assert.equal(
+        verifiedCallbackHelper(root, './lib/form-issues', 'formMessage', binding),
+        undefined,
+      );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-it('reviewed ISO check refuses contracts barrel drift', () => {
+it('FU-069b reviewed ISO check refuses contracts barrel or package entry drift', () => {
   const root = mkdtempSync(join(tmpdir(), 'rasta-zod-contract-check-'));
   try {
     for (const file of [
       'packages/contracts/src/index.ts',
       'packages/contracts/src/common/iso-datetime.ts',
+      'packages/contracts/package.json',
       'packages/contracts/src/common/pattern-refinement.ts',
     ])
       cpSync(join(ROOT, file), join(root, file));
-    assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), 'check');
-    appendFileSync(join(root, 'packages/contracts/src/index.ts'), '\n// changed barrel\n');
+    const proof = () => imported(root, '@rasta/contracts', 'isoDateTime');
+    // r1 F1: the dist entry is checked on every grant, an importer is never optional.
+    assert.equal(proof(), undefined);
+    contractsEntry(root);
+    assert.equal(proof(), 'check');
     assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), undefined);
+    // A linted file whose own path spells the package never stands in for the import.
+    mkdirSync(join(root, '@rasta'));
+    writeFileSync(join(root, '@rasta/contracts'), '');
+    assert.equal(declared(root, '@rasta/contracts', 'isoDateTime'), undefined);
+    // r1 F2: the manifest pin is a projection. Inert edits keep the proof; any entry
+    // or dependency field, or a field no reviewer has classified, drops it.
+    const manifest = join(root, 'packages/contracts/package.json');
+    const original = JSON.parse(readFileSync(manifest, 'utf8'));
+    for (const [edit, kept] of [
+      [(m) => ({ ...m, devDependencies: { ...m.devDependencies, jest: '^30.0.0' } }), true],
+      [(m) => ({ ...m, scripts: { ...m.scripts, 'test:unit': 'jest --ci' } }), true],
+      [(m) => ({ ...m, version: '0.2.0' }), true],
+      [(m) => ({ ...m, scripts: { ...m.scripts, build: 'tsc -p tsconfig.other.json' } }), false],
+      [(m) => ({ ...m, scripts: { ...m.scripts, postinstall: 'node patch-dist.js' } }), false],
+      [(m) => ({ ...m, exports: { '.': './dist/other.js' } }), false],
+      [(m) => ({ ...m, main: './dist/other.js' }), false],
+      [(m) => ({ ...m, dependencies: { zod: '^3.0.0' } }), false],
+      [(m) => ({ ...m, unclassified: true }), false],
+    ]) {
+      writeFileSync(manifest, JSON.stringify(edit(original), null, 2) + '\n');
+      assert.equal(proof(), kept ? 'check' : undefined, String(edit));
+    }
+    writeFileSync(manifest, '{');
+    assert.equal(proof(), undefined);
+    cpSync(join(ROOT, 'packages/contracts/package.json'), manifest);
+    appendFileSync(join(root, 'packages/contracts/src/index.ts'), '\n// changed barrel\n');
+    assert.equal(proof(), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -393,8 +447,11 @@ it('FU-181 refuses the stale partial contracts barrel', () => {
       'packages/contracts/src/index.ts',
       'packages/contracts/src/common/iso-datetime.ts',
       'packages/contracts/src/common/pattern-refinement.ts',
+      'packages/contracts/package.json',
     ])
       cpSync(join(ROOT, file), join(root, file));
+    contractsEntry(root);
+    assert.equal(imported(root, '@rasta/contracts', 'isoDateTime'), 'check');
     const barrel = join(root, 'packages/contracts/src/index.ts');
     const stale = readFileSync(barrel, 'utf8')
       .replace(
@@ -415,7 +472,7 @@ it('FU-181 refuses the stale partial contracts barrel', () => {
       createHash('sha256').update(stale).digest('hex'),
       '292d4fef2cb013e364ea7dd29ef04b112bf64734394155147d7dee955d91f770',
     );
-    assert.equal(verifiedCallbackHelper(root, '@rasta/contracts', 'isoDateTime'), undefined);
+    assert.equal(imported(root, '@rasta/contracts', 'isoDateTime'), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -742,37 +799,25 @@ it('canonicalUniqueText: coercion beside the call inside the defining module is 
   );
 });
 it('canonicalUniqueText: the pin matches the real source, and changed source refuses', () => {
-  assert.equal(
-    verifiedCallbackHelper(ROOT, UNIQUE_TEXT, 'canonicalUniqueText', {
-      spelling: 'canonical-unique-text.ts',
-      definition: 'FunctionName',
-    }),
-    'canonicalizer',
-  );
+  assert.equal(declared(ROOT, `${UNIQUE_TEXT}.ts`, 'canonicalUniqueText'), 'canonicalizer');
   // No binding information, or a variable binding, never carries an `exact` allowance.
   assert.equal(verifiedCallbackHelper(ROOT, UNIQUE_TEXT, 'canonicalUniqueText'), undefined);
-  assert.equal(
-    verifiedCallbackHelper(ROOT, UNIQUE_TEXT, 'canonicalUniqueText', {
-      spelling: 'canonical-unique-text',
-      definition: 'Variable',
-    }),
-    undefined,
-  );
+  assert.equal(declared(ROOT, `${UNIQUE_TEXT}.ts`, 'canonicalUniqueText', 'Variable'), undefined);
   const root = mkdtempSync(join(tmpdir(), 'rasta-zod-unique-text-'));
   try {
     const target = join(root, `${UNIQUE_TEXT}.ts`);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(join(ROOT, `${UNIQUE_TEXT}.ts`), target);
-    const binding = { spelling: UNIQUE_TEXT.split('/').pop(), definition: 'ImportBinding' };
-    assert.equal(
-      verifiedCallbackHelper(root, UNIQUE_TEXT, 'canonicalUniqueText', binding),
-      'canonicalizer',
-    );
+    const proof = () =>
+      imported(
+        root,
+        './canonical-unique-text',
+        'canonicalUniqueText',
+        `${dirname(UNIQUE_TEXT)}/p.ts`,
+      );
+    assert.equal(proof(), 'canonicalizer');
     appendFileSync(target, '\n// changed source\n');
-    assert.equal(
-      verifiedCallbackHelper(root, UNIQUE_TEXT, 'canonicalUniqueText', binding),
-      undefined,
-    );
+    assert.equal(proof(), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -817,14 +862,13 @@ for (const code of [
 ])
   it(`canonicalIdentifier/plainText refused: ${code}`, () => assert.ok(refused(code, ASSET), code));
 it('reviewed sources: every pin matches the real tree (drift fails here, with a name)', () => {
-  const binding = { spelling: IDENTIFIER.split('/').pop(), definition: 'ImportBinding' };
-  for (const [module, name, kind] of [
-    [IDENTIFIER, 'canonicalIdentifier', 'string'],
-    ['@rasta/contracts', 'plainText', 'string-schema'],
-    ['apps/web/src/lib/order-fields', 'isOrderCommand', 'predicate'],
+  for (const [module, name, kind, from] of [
+    ['./identifier', 'canonicalIdentifier', 'string', ASSET],
+    ['@rasta/contracts', 'plainText', 'string-schema', ASSET],
+    ['@/lib/order-fields', 'isOrderCommand', 'predicate', PROBE_WEB],
   ])
     assert.equal(
-      verifiedCallbackHelper(ROOT, module, name, binding),
+      imported(ROOT, module, name, from),
       kind,
       `${module} ${name}: its pinned source changed; review the helper again and re-pin it in scripts/zod-callback-helpers.mjs`,
     );
@@ -833,23 +877,12 @@ it('reviewed sources: every pin matches the real tree (drift fails here, with a 
     const target = join(root, `${IDENTIFIER}.ts`);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(join(ROOT, `${IDENTIFIER}.ts`), target);
-    assert.equal(
-      verifiedCallbackHelper(root, IDENTIFIER, 'canonicalIdentifier', binding),
-      'string',
-    );
+    assert.equal(imported(root, './identifier', 'canonicalIdentifier', ASSET), 'string');
     appendFileSync(target, '\n// changed source\n');
-    assert.equal(
-      verifiedCallbackHelper(root, IDENTIFIER, 'canonicalIdentifier', binding),
-      undefined,
-    );
+    assert.equal(imported(root, './identifier', 'canonicalIdentifier', ASSET), undefined);
     // A variable binding or a sibling spelling never carries the allowance.
-    assert.equal(
-      verifiedCallbackHelper(ROOT, IDENTIFIER, 'canonicalIdentifier', {
-        spelling: 'identifier.mjs',
-        definition: 'ImportBinding',
-      }),
-      undefined,
-    );
+    assert.equal(imported(ROOT, './identifier.mjs', 'canonicalIdentifier', ASSET), undefined);
+    assert.equal(declared(ROOT, `${IDENTIFIER}.ts`, 'canonicalIdentifier', 'Variable'), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1156,6 +1189,148 @@ for (const code of [
 ])
   it(`FU-070 refuses unproven input: ${code}`, () => assert.ok(messages(code).length, code));
 
+// FU-069a: infer each binding, then discard element proofs across mutation.
+const unsoundBindings = [
+  `const [x=true]=v; return Number(x)`,
+  `const [ok, x=true]=v; return Number(x)`,
+  `const [...xs]=v; return Number(xs)`,
+  `v[0]=true; const [x]=v; return Number(x)`,
+  `const alias=v; alias[0]=true; const [x]=v; return Number(x)`,
+  `const alias=v.reverse(); alias[0]=true; return v.map(Number)`,
+  `return v.map((s,i,a)=>{a[1]=true; return Number(s)})`,
+  `return v.map((s,...args)=>{args[1][1]=true; return Number(s)})`,
+  `return v.map(function(s){arguments[2][1]=true; return Number(s)})`,
+  `const {length:n}=v;return Number(n)`,
+  `return v.map((s,i,a)=>{const alias=a;alias[1]=true; return Number(s)})`,
+  `return v.filter((s,i,a)=>{a[1]=true; return true}).map(Number)`,
+  `const f=(s,i,a)=>{a[1]=true;return Number(s)};const alias=f;return v.map(alias)`,
+];
+for (const body of unsoundBindings)
+  for (const code of [
+    `z.array(z.string()).transform(v=>{${body}});`,
+    `z.array(z.string()).overwrite(v=>{${body}});`,
+    `z.codec(z.array(z.string()),z.unknown(),{decode:v=>{${body}},encode:v=>v});`,
+    `z.codec(z.unknown(),z.array(z.string()),{decode:v=>v,encode:v=>{${body}}});`,
+  ])
+    it(`FU-069a refuses unsound proof: ${code}`, () => assert.ok(messages(code).length, code));
+for (const code of [
+  `z.string().transform(v=>{const [...xs]=v.split(',');return Number(xs)});`,
+  `z.string().transform(v=>{const [x=true]=v.split(',');return Number(x)});`,
+])
+  it(`FU-069a split binding refuses: ${code}`, () => assert.ok(messages(code).length, code));
+for (const body of [
+  `const [x='4']=v; return Number(x)`,
+  `const [x,y='5']=v; return Number(y)`,
+  `const [...xs]=v; return xs.map(Number)`,
+  `return v.map((s,i,a)=>Number(s))`,
+  `return v.filter(s=>s.length>0).map(Number)`,
+])
+  it(`FU-069a preserves stable strings: ${body}`, () =>
+    assert.deepEqual(messages(`z.array(z.string()).transform(v=>{${body}});`), []));
+
+// FU-069b: alternate resolved files never inherit a reviewed source's hash.
+for (const ext of ['mjs', 'cjs', 'tsx', 'jsx', 'mts', 'cts'])
+  it(`FU-069b refuses unregistered ${ext} import`, () =>
+    assert.ok(
+      messages(
+        `import {isOrderCommand} from '@/lib/order-fields.${ext}'; z.transform(isOrderCommand);`,
+      ).length,
+    ));
+it('FU-069b resolves exact sources and dependency siblings', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-resolution-'));
+  const path = 'apps/web/src/lib/order-fields';
+  try {
+    cpSync(join(ROOT, path + '.ts'), join(root, path + '.ts'));
+    const spec = './lib/order-fields';
+    for (const spelling of [spec, spec + '.ts', spec + '.js'])
+      assert.equal(imported(root, spelling, 'isOrderCommand'), 'predicate');
+    for (const ext of ['mjs', 'cjs', 'tsx', 'jsx', 'mts', 'cts', 'js']) {
+      appendFileSync(join(root, path + '.' + ext), 'export const isOrderCommand=Number;');
+      assert.equal(imported(root, spec + '.' + ext, 'isOrderCommand'), undefined);
+      assert.equal(imported(root, spec, 'isOrderCommand'), undefined);
+      rmSync(join(root, path + '.' + ext));
+    }
+    cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
+      recursive: true,
+    });
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/form-issues.ts'),
+      join(root, 'apps/web/src/lib/form-issues.ts'),
+    );
+    assert.equal(imported(root, './lib/format', 'toLatinDigits'), 'string');
+    for (const shadow of ['apps/web/src/lib/format.ts', 'apps/web/src/lib/format/digits.tsx']) {
+      appendFileSync(join(root, shadow), 'export const toLatinDigits=Number;');
+      assert.equal(imported(root, './lib/format', 'toLatinDigits'), undefined);
+      rmSync(join(root, shadow));
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it('FU-069b respects compiler aliases and module suffixes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rasta-zod-config-'));
+  const source = 'apps/web/src/lib/order-fields.ts';
+  const config = join(root, 'apps/web/tsconfig.json');
+  const paths = { '@/*': ['./src/*'] };
+  const options = { module: 'esnext', moduleResolution: 'bundler', baseUrl: '.', paths };
+  const configure = (extra) =>
+    writeFileSync(
+      config,
+      JSON.stringify({ compilerOptions: { ...options, ...extra }, include: ['src/**/*'] }),
+    );
+  const proof = () => imported(root, '@/lib/order-fields', 'isOrderCommand');
+  // r1 F1: the declaring file's own (in-file) uses resolve their dependencies the same way.
+  const inFile = () => [
+    declared(root, 'apps/web/src/server/drivers.ts', 'localDateToIso'),
+    declared(root, 'apps/web/src/server/usage.ts', 'localDateTimeToIso'),
+  ];
+  try {
+    cpSync(join(ROOT, source), join(root, source));
+    configure({});
+    assert.equal(proof(), 'predicate');
+    cpSync(join(ROOT, source), join(root, 'apps/web/src/alternate/order-fields.ts'));
+    configure({ paths: { '@/lib/*': ['./src/alternate/*'] } });
+    assert.equal(proof(), undefined);
+    appendFileSync(
+      join(root, 'apps/web/src/lib/order-fields.evil.ts'),
+      'export const isOrderCommand=Number;',
+    );
+    configure({ moduleSuffixes: ['.evil', ''] });
+    assert.equal(proof(), undefined);
+    cpSync(join(ROOT, 'apps/web/src/lib/format'), join(root, 'apps/web/src/lib/format'), {
+      recursive: true,
+    });
+    cpSync(
+      join(ROOT, 'apps/web/src/lib/form-issues.ts'),
+      join(root, 'apps/web/src/lib/form-issues.ts'),
+    );
+    for (const file of ['drivers', 'usage'])
+      cpSync(
+        join(ROOT, `apps/web/src/server/${file}.ts`),
+        join(root, `apps/web/src/server/${file}.ts`),
+      );
+    configure({});
+    assert.deepEqual(inFile(), ['verified', 'verified']);
+    configure({ moduleSuffixes: ['.evil', ''] });
+    appendFileSync(
+      join(root, 'apps/web/src/lib/format/digits.evil.ts'),
+      'export const toLatinDigits=Number;',
+    );
+    assert.equal(imported(root, '@/lib/format', 'toLatinDigits'), undefined);
+    assert.deepEqual(inFile(), [undefined, undefined]);
+    configure({ paths: { '@/lib/format': ['./src/alternate/format'], '@/*': ['./src/*'] } });
+    cpSync(join(root, 'apps/web/src/lib/format'), join(root, 'apps/web/src/alternate/format'), {
+      recursive: true,
+    });
+    assert.deepEqual(inFile(), [undefined, undefined]);
+    writeFileSync(config, '{');
+    assert.equal(proof(), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // PR #730 r1 F1: only a receiverless callback takes the pipe's upstream as its
 // input; a method-form callback's input is its own receiver chain.
 for (const code of [
@@ -1191,3 +1366,22 @@ for (const code of [
       messages(code).some((m) => m.messageId === 'preprocess'),
       JSON.stringify(messages(code)),
     ));
+
+// PR #733 r1 F1: an in-file use is granted only to a binding declared in that file. An
+// undeclared global or a parameter of the same name is not the pinned helper.
+const DRIVERS = 'apps/web/src/server/drivers.ts';
+it('r1 F1 in-file declaration keeps the pinned proof', () =>
+  assert.deepEqual(
+    uniqueTextMessages(
+      `function localDateToIso(r) { return BigInt(r); } z.string().transform((raw) => localDateToIso(raw));`,
+      DRIVERS,
+    ),
+    [],
+  ));
+for (const code of [
+  `z.string().transform((raw) => localDateToIso(raw));`,
+  `const f = (localDateToIso) => z.string().transform((raw) => localDateToIso(raw));`,
+  `try {} catch (localDateToIso) { z.string().transform((raw) => localDateToIso(raw)); }`,
+])
+  it(`r1 F1 in-file name without a declaration refuses: ${code}`, () =>
+    assert.ok(refused(code, DRIVERS), code));
