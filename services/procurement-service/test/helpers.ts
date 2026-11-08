@@ -1,4 +1,5 @@
-import { withUtcSession } from '@rasta/config';
+import { eligibilityClockWrite } from '@rasta/testing';
+import { readUrl, withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 
@@ -35,7 +36,7 @@ export function databaseUrl(): string {
 export const TEST_POOL_CONNECTIONS = 16;
 
 function withTestPool(url: string): string {
-  const parsed = new URL(url);
+  const parsed = readUrl(url);
   parsed.searchParams.set('connection_limit', String(TEST_POOL_CONNECTIONS));
   return parsed.toString();
 }
@@ -96,7 +97,7 @@ export async function seedOpenWindow(input: {
         for (const trigger of lifted) {
           await tx.$executeRawUnsafe(`ALTER TABLE "demand_request" DISABLE TRIGGER "${trigger}"`);
         }
-        await tx.$executeRaw`
+        await eligibilityClockWrite(tx)`
           INSERT INTO demand_aggregation
             (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
              min_quantity, shortfall_policy, setting_version, total_quantity, demand_count,
@@ -133,6 +134,9 @@ const GUARDED = [
   // An RFQ's frozen children, then the RFQ (plan PR 6). The RFQ and its aggregation name each other:
   // the aggregation's reference (`fk_demand_aggregation_rfq`) is deferred for the cleanup's
   // transaction, so the RFQ goes first and its aggregation after.
+  // A quotation's chain, then the quotation (plan PR 8): both before the invitation they name.
+  ['quotation_receipt', ['tg_quotation_receipt_guard']],
+  ['quotation', ['tg_quotation_guard']],
   ['rfq_criterion', ['tg_rfq_criterion_guard']],
   ['rfq_invitation', ['tg_rfq_invitation_guard']],
   ['rfq', ['tg_rfq_guard']],

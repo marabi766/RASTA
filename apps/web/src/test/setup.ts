@@ -2,6 +2,8 @@ import { TextDecoder, TextEncoder } from 'node:util';
 import '@testing-library/jest-dom';
 import { toHaveNoViolations } from 'jest-axe';
 
+import { resetUnrecordedOutcomes } from '@/lib/unresolved-tenancy';
+
 import { installTurboInputsGuard } from './turbo-inputs-guard';
 
 /**
@@ -30,12 +32,17 @@ expect.extend(toHaveNoViolations);
 // stale cached green later.
 installTurboInputsGuard();
 
+// A late answer that storage refused is held in this document's memory
+// (`lib/unresolved-tenancy.ts`); each test is a new document.
+beforeEach(() => resetUnrecordedOutcomes());
+
 // An unmapped service sentence is reported with a one-line structured
 // diagnostic on stderr (`server/write.ts`, `reportUnmappedMessage`). Specs
 // exercise that path on purpose, so the line is swallowed here; a spec that
 // cares asserts on `console.error` (it stays a jest spy). Any other
 // `console.error` still reaches the terminal.
-const realConsoleError = console.error.bind(console);
+const savedConsoleError = console.error;
+const realConsoleError: typeof console.error = (...args) => savedConsoleError.apply(console, args);
 beforeEach(() => {
   jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
     if (typeof args[0] === 'string' && args[0].includes('web.unmapped_service_message')) return;

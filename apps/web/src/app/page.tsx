@@ -13,8 +13,14 @@ import {
 } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { roleLabel, userStatusLabel } from '@/lib/organization-fields';
-import { activeMembership, displayName, fetchCurrentUser } from '@/server/identity';
+import { displayName, fetchCurrentUser, membershipIn } from '@/server/identity';
 import { PortalSidebar } from '@/app/PortalSidebar';
+import {
+  actingOrganizationId,
+  actingOrganizationLabel,
+  actingScope,
+  sessionRoles,
+} from '@/server/session-organization';
 
 /**
  * The dashboard (docs/16 § 16.6, `/`).
@@ -49,14 +55,25 @@ export default async function HomePage() {
 
   // The organisation's name when the page already has it (the membership the
   // user is acting under); the code stays as secondary text, and is all the
-  // header has before — or without — that read.
-  const membership = result.kind === 'USER' ? activeMembership(result.user) : undefined;
+  // header has before — or without — that read. Acting under: the
+  // organization the session is pinned to, the one every request names — not
+  // identity's `activeOrganizationId`, nor the token's `org_id`, which a switch
+  // made elsewhere moves (task 118).
+  const actingOrganization = actingOrganizationId(session);
+  const membership =
+    result.kind === 'USER' ? membershipIn(result.user, actingOrganization) : undefined;
   const organizationName = membership?.organizationName ?? null;
+  // The roles drawn are the ones every request is decided on: the token's for
+  // the organization this session is pinned to and every call names
+  // (`sessionRoles`, task 118) — not the membership rows, and never the
+  // token's active organization's, which a switch made elsewhere moves.
+  const roles = sessionRoles(session) ?? [];
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={organizationName ?? session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={organizationName ?? actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             {/* ADR-059 § 5: SameSite=Strict plus a token, because "almost
                 always" is not a guarantee for a state change. */}
@@ -108,16 +125,16 @@ export default async function HomePage() {
                 <div className="flex flex-col gap-1">
                   <dt className="text-sm text-content-subtle">سازمان فعال</dt>
                   <dd className="text-content">
-                    {result.user.activeOrganizationId ? (
+                    {actingOrganization ? (
                       organizationName ? (
                         <>
                           <span className="text-xl">{organizationName}</span>
                           <span className="ms-2 text-sm text-content-muted">
-                            کد <Identifier>{result.user.activeOrganizationId}</Identifier>
+                            کد <Identifier>{actingOrganization}</Identifier>
                           </span>
                         </>
                       ) : (
-                        <Identifier>{result.user.activeOrganizationId}</Identifier>
+                        <Identifier>{actingOrganization}</Identifier>
                       )
                     ) : (
                       'انتخاب نشده'
@@ -129,9 +146,12 @@ export default async function HomePage() {
           </Section>
 
           <Section headingId="roles" title="دسترسی شما در این سازمان">
-            {result.user.effectiveRoles.length > 0 ? (
+            {/* The acting organization's roles as the token grants them:
+                identity's `effectiveRoles` are its active organization's,
+                which may be another one. */}
+            {roles.length > 0 ? (
               <ul className="flex flex-wrap gap-2">
-                {result.user.effectiveRoles.map((role) => (
+                {roles.map((role) => (
                   <li key={role}>
                     {/* The Persian name; the code (a closed Latin vocabulary) is
                         what the service authorises on and is not for the reader.
@@ -148,8 +168,8 @@ export default async function HomePage() {
               </Alert>
             )}
             <p className="mt-4 text-sm text-content-muted">
-              {activeMembership(result.user)
-                ? 'این فهرست از سرویس هویت می‌آید و مرجع مجوزدهی نیست؛ هر درخواست جداگانه در سرور بررسی می‌شود.'
+              {membership
+                ? 'این فهرست از ورود فعلی شما برای همین سازمان خوانده می‌شود و مرجع مجوزدهی نیست؛ هر درخواست جداگانه در سرور بررسی می‌شود.'
                 : 'عضویتی برای سازمان فعال یافت نشد.'}
             </p>
           </Section>

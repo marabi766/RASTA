@@ -3,13 +3,14 @@
  * Runs a workspace test task in phases.
  *
  *   node scripts/run-test-phases.mjs test [-- <test-runner args>]
- *   node scripts/run-test-phases.mjs test:integration [-- <test-runner args>]
+ *   node scripts/run-test-phases.mjs test:integration [--shard=<name>] [-- <test-runner args>]
  *
  * 1. workspace  `turbo run <task>` — every package in parallel, as before; the
  *               aggregation stress spec is excluded from identity's task.
+ *               Named shards use exact positive package filters.
  * 2. exclusive  `turbo run test:aggregation-stress --filter=@rasta/identity-service`
  *               — that spec alone, started only after phase 1 has exited.
- *               **`test:integration` only:** the spec needs a real PostgreSQL,
+ *               **`test:integration` only, unsharded or identity shard:** the spec needs a real PostgreSQL,
  *               and `pnpm test` (so `pnpm verify`) must run without one.
  *
  * Phase 2 runs even when phase 1 failed: it still starts only once every

@@ -21,7 +21,7 @@
             "name": "Idempotency-Replay-Deadline",
             "in": "header",
             "required": false,
-            "description": "Optional; only with an Idempotency-Key (otherwise 400 VALIDATION_FAILED, as for any value that is not one canonical integer: no sign, no leading zero, no space, once). The last instant, in milliseconds since the epoch, this request may be executed under its key. A value later than claim time + retention − B on the receiving replica (B = 2 · CONSTRUCTION_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message): nothing is written, and the answer depends on nothing stored. It is never clamped. Otherwise the first claim stores the value as sent. The portal and this service are bound to one constant, PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts), and refuse to start when their own settings break it, so a conforming client does not meet the refusal. A stored record is forgotten (reclaimed or purged) only when its expiry is more than B in the past; another requester or body meets IDEMPOTENCY_KEY_REUSED until then. Past the stored deadline on this service's clock, the same request is refused with 409 REPLAY_WINDOW_CLOSED before anything is written: that attempt did nothing, an earlier one under the key may have. A first claim whose value is already behind this service's clock is refused the same way. A request without the header, and a record written before the deadline existed, behave as before (an expired key is reusable).",
+            "description": "Optional; only with an Idempotency-Key (otherwise 400 VALIDATION_FAILED, as for any value that is not one canonical integer: no sign, no leading zero, no space, once). The last instant, in milliseconds since the epoch, this request may be executed under its key. A value later than claim time + retention − B on the receiving replica (B = 2 · CONSTRUCTION_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message): nothing is written, and the answer depends on nothing stored. It is never clamped. Otherwise the first claim stores the value as sent. The portal and this service are bound to one constant, PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts), and refuse to start when their own settings break it, so a conforming client does not meet the refusal. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A stored record is forgotten (reclaimed or purged) only when its expiry is more than B in the past; another requester or body meets IDEMPOTENCY_KEY_REUSED until then. Past the stored deadline on this service's clock, the same request is refused with 409 REPLAY_WINDOW_CLOSED before anything is written: that attempt did nothing, an earlier one under the key may have. A first claim whose value is already behind this service's clock is refused the same way. A request without the header, and a record written before the deadline existed, behave as before (an expired key is reusable).",
             "schema": {
               "type": "string",
               "pattern": "^[1-9][0-9]{0,15}$"
@@ -195,7 +195,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -242,27 +242,19 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "operationType": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 100,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 5000,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار»."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار». Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "locationDescription": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 500,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "area": {
                     "type": "object",
@@ -294,7 +286,7 @@
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["title", "operationType", "scopeOfWork", "locationDescription"],
@@ -903,7 +895,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -954,27 +946,19 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «عنوان», not from the product document. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "operationType": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 100,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «نوع عملیات». Free text unless CONSTRUCTION_OPERATION_TYPES configures a list. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 5000,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار»."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «شرح کار». Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "locationDescription": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 500,
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «محل», as text. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "area": {
                     "type": "object",
@@ -1007,7 +991,7 @@
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string.",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   }
                 },
@@ -1210,7 +1194,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1261,8 +1245,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reason"],
@@ -1275,7 +1258,7 @@
     },
     "/v1/projects/{id}/needs": {
       "post": {
-        "description": "Only while the project is DRAFT or CHANGES_REQUESTED (422 otherwise). Fields are the provisional set of docs/24 Q-68. An optional Idempotency-Key makes a retry return the first response. Publishes PROJECT_NEED_ADDED. Only the organization the request acts for: a project of any other organization answers 404, never 403, so its existence is not disclosed.",
+        "description": "Only while the project is DRAFT or CHANGES_REQUESTED (422 otherwise). Fields are the provisional set of docs/24 Q-68. An optional Idempotency-Key makes a retry return the first response. The optional Idempotency-Replay-Deadline uses the same admission and retention fence as project creation. `expectedProjectVersion` is required and must match the parent under its row lock, before editability or no-op checks; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Need writes do not increment the project version. Completed add replays return their stored response without domain work, including an old body without this field; new claims require it.  Publishes PROJECT_NEED_ADDED. Only the organization the request acts for: a project of any other organization answers 404, never 403, so its existence is not disclosed.",
         "operationId": "ProjectController_addNeed_v1",
         "parameters": [
           {
@@ -1295,6 +1278,16 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "Idempotency-Replay-Deadline",
+            "in": "header",
+            "required": false,
+            "description": "Optional; only with an Idempotency-Key (otherwise 400 VALIDATION_FAILED, as for any value that is not one canonical integer: no sign, no leading zero, no space, once). The last instant, in milliseconds since the epoch, this request may be executed under its key. A value later than claim time + retention − B on the receiving replica (B = 2 · CONSTRUCTION_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message): nothing is written, and the answer depends on nothing stored. It is never clamped. Otherwise the first claim stores the value as sent. Claim admission also checks the database clock after the insert and any lock wait; a past deadline rolls the claim back. Equality is accepted. A stored record is forgotten (reclaimed or purged) only when its expiry is more than B in the past; another requester or body meets IDEMPOTENCY_KEY_REUSED until then. Past the stored deadline on this service's clock, the same request is refused with 409 REPLAY_WINDOW_CLOSED before anything is written: that attempt did nothing, an earlier one under the key may have. A first claim whose value is already behind this service's clock is refused the same way. A request without the header, and a record written before the deadline existed, behave as before (an expired key is reusable).",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,15}$"
             }
           }
         ],
@@ -1436,7 +1429,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -1491,35 +1484,35 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "expectedProjectVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "description": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "quantity": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,13})(\\.\\d{1,4})?$",
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "unit": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 50,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string."
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
-                "required": ["title", "description"],
+                "required": ["expectedProjectVersion", "title", "description"],
                 "additionalProperties": false
               }
             }
@@ -1744,7 +1737,7 @@
     },
     "/v1/projects/{id}/needs/{needId}": {
       "patch": {
-        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. A submitted need cannot be edited: withdraw it and add a new one. Publishes PROJECT_NEED_UPDATED.",
+        "description": "`expectedProjectVersion` is required and must match the parent under its row lock, before editability or no-op checks; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Need writes do not increment the project version. Completed add replays return their stored response without domain work, including an old body without this field; new claims require it. `expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. A submitted need cannot be edited: withdraw it and add a new one. Publishes PROJECT_NEED_UPDATED.",
         "operationId": "ProjectController_updateNeed_v1",
         "parameters": [
           {
@@ -1902,7 +1895,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1946,6 +1939,11 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "expectedProjectVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
                   "expectedVersion": {
                     "type": "integer",
                     "minimum": 1,
@@ -1953,36 +1951,31 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires."
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note: what this line of the project requires. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "description": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "quantity": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,13})(\\.\\d{1,4})?$",
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float.",
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. A decimal string, never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   },
                   "unit": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 50,
-                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined.",
+                    "description": "Provisional field (docs/24 Q-68): taken from the CON-001 design note. Free text; no unit list is defined. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   },
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
-                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string.",
+                    "description": "Provisional field (docs/24 Q-68): taken from docs/03 «برآورد». Rial minor units as a string. Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   }
                 },
-                "required": ["expectedVersion"],
+                "required": ["expectedProjectVersion", "expectedVersion"],
                 "additionalProperties": false
               }
             }
@@ -1992,7 +1985,7 @@
     },
     "/v1/projects/{id}/needs/{needId}/submit": {
       "post": {
-        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Publishes PROJECT_NEED_SUBMITTED.",
+        "description": "`expectedProjectVersion` is required and must match the parent under its row lock, before editability or no-op checks; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Need writes do not increment the project version. Completed add replays return their stored response without domain work, including an old body without this field; new claims require it. `expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Publishes PROJECT_NEED_SUBMITTED.",
         "operationId": "ProjectController_submitNeed_v1",
         "parameters": [
           {
@@ -2150,7 +2143,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2194,13 +2187,18 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "expectedProjectVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
                   "expectedVersion": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 2147483647
                   }
                 },
-                "required": ["expectedVersion"],
+                "required": ["expectedProjectVersion", "expectedVersion"],
                 "additionalProperties": false
               }
             }
@@ -2210,7 +2208,7 @@
     },
     "/v1/projects/{id}/needs/{needId}/withdraw": {
       "post": {
-        "description": "`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. The reason is required and kept as withdrawalReason; PROJECT_NEED_WITHDRAWN does not carry it (no free text on events).",
+        "description": "`expectedProjectVersion` is required and must match the parent under its row lock, before editability or no-op checks; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. Need writes do not increment the project version. Completed add replays return their stored response without domain work, including an old body without this field; new claims require it. `expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. The reason is required and kept as withdrawalReason; PROJECT_NEED_WITHDRAWN does not carry it (no free text on events).",
         "operationId": "ProjectController_withdrawNeed_v1",
         "parameters": [
           {
@@ -2368,7 +2366,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2412,6 +2410,11 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "expectedProjectVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
                   "expectedVersion": {
                     "type": "integer",
                     "minimum": 1,
@@ -2419,16 +2422,140 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
-                "required": ["expectedVersion", "reason"],
+                "required": ["expectedProjectVersion", "expectedVersion", "reason"],
                 "additionalProperties": false
               }
             }
           }
         }
+      }
+    },
+    "/v1/internal/projects/{id}/completion": {
+      "get": {
+        "description": "Only contract-service with a SERVICE token in X-Internal-Token, signed for the project owner. Every user and every other service is refused (403); a missing signed tenant or a conflicting X-Organization-Id is 403. Missing and other-tenant projects answer the same 404. Returns ids, status, version and, only for COMPLETED, completedAt and completedBy from the stored status transition. Every other status has null completion fields and proves no completion. Covers configured project.completion approvals and the interim 100% progress path. Consumers must compare the project, tenant, status and completion metadata with the event before acting; projectId and version identify the source fact. No money or project content is returned. This read writes nothing. The gateway does not route /v1/internal/.",
+        "operationId": "InternalProjectController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "projectId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_APPROVAL",
+                        "CHANGES_REQUESTED",
+                        "APPROVED",
+                        "IN_PROGRESS",
+                        "COMPLETED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "completedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
+                      "nullable": true
+                    },
+                    "completedBy": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "projectId",
+                    "organizationId",
+                    "status",
+                    "version",
+                    "completedAt",
+                    "completedBy"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Every user token is refused. A service token is accepted only from contract-service; any other service is refused. An X-Organization-Id that differs from the signed tenant is SERVICE_TENANT_CONTEXT_INVALID. A service token signed for no tenant is SERVICE_TENANT_CONTEXT_INVALID as well.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project not found in the signed tenant; the same response for missing and other-tenant projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read the project completion source fact (internal, D-081)",
+        "tags": ["construction-internal"],
+        "security": [
+          {
+            "internalToken": []
+          }
+        ]
       }
     },
     "/v1/projects/{id}/approvals": {
@@ -2622,7 +2749,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3226,7 +3353,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3475,7 +3602,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3716,7 +3843,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -3779,23 +3906,19 @@
                   },
                   "materials": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "machinery": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "labor": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "obstacles": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "assetsUsed": {
                     "type": "array",
@@ -3803,6 +3926,7 @@
                       "anyOf": [
                         {
                           "type": "string",
+                          "pattern": "^AST_[0-9A-HJKMNP-TV-Z]{26}$",
                           "description": "AST identifier"
                         },
                         {
@@ -4197,7 +4321,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4414,7 +4538,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4706,7 +4830,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -4773,8 +4897,7 @@
                 "properties": {
                   "organizationId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "workflowKey": {
                     "type": "string",
@@ -4788,13 +4911,11 @@
                   },
                   "label": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "rationale": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "isSample": {
                     "type": "boolean",
@@ -4807,13 +4928,11 @@
                       "properties": {
                         "approvalType": {
                           "type": "string",
-                          "minLength": 2,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "authorityOrganizationId": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 64
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "authorityRole": {
                           "type": "string",
@@ -4833,16 +4952,17 @@
                         },
                         "authorityLabel": {
                           "type": "string",
-                          "minLength": 2,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "minAmountMinor": {
                           "type": "string",
-                          "pattern": "^(0|[1-9]\\d{0,18})$"
+                          "pattern": "^(0|[1-9]\\d{0,18})$",
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "maxAmountMinor": {
                           "type": "string",
-                          "pattern": "^(0|[1-9]\\d{0,18})$"
+                          "pattern": "^(0|[1-9]\\d{0,18})$",
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": [
@@ -5983,7 +6103,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6302,7 +6422,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6621,7 +6741,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6672,8 +6792,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "reason"],
@@ -6925,7 +7044,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7639,7 +7758,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -7993,7 +8114,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8016,7 +8139,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8056,7 +8179,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -8114,18 +8239,15 @@
                   },
                   "decisionNumber": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "conditions": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion", "decision"],
@@ -8328,7 +8450,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -8385,15 +8507,11 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 20000,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "procurementNature": {
                     "type": "string",
@@ -8402,7 +8520,8 @@
                   },
                   "estimatedCostMinor": {
                     "type": "string",
-                    "pattern": "^(0|[1-9]\\d{0,18})$"
+                    "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "visibility": {
                     "type": "string",
@@ -8412,12 +8531,14 @@
                   "bidOpeningAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "Start of the bidding window, inclusive. UTC."
+                    "pattern": "Z$",
+                    "description": "Start of the bidding window, inclusive. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   },
                   "bidClosingAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC."
+                    "pattern": "Z$",
+                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   }
                 },
                 "required": ["title", "scopeOfWork"],
@@ -8476,8 +8597,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 64
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           }
         ],
@@ -9049,7 +9169,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9100,15 +9220,11 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 2,
-                    "maxLength": 200,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «مناقصه»: what is being tendered, in a line. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "scopeOfWork": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 20000,
-                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86."
+                    "description": "Provisional field (docs/24 Q-84): taken from docs/03 «سند مناقصه» (scope of work), as text; attachments are Q-86. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "procurementNature": {
                     "type": "string",
@@ -9119,6 +9235,7 @@
                   "estimatedCostMinor": {
                     "type": "string",
                     "pattern": "^(0|[1-9]\\d{0,18})$",
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value.",
                     "nullable": true
                   },
                   "visibility": {
@@ -9130,13 +9247,15 @@
                   "bidOpeningAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "Start of the bidding window, inclusive. UTC.",
+                    "pattern": "Z$",
+                    "description": "Start of the bidding window, inclusive. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                     "nullable": true
                   },
                   "bidClosingAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC.",
+                    "pattern": "Z$",
+                    "description": "End of the bidding window, exclusive: a bid received at this instant is refused. UTC. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.",
                     "nullable": true
                   }
                 },
@@ -9463,7 +9582,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -9514,7 +9633,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -9588,7 +9709,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -9632,8 +9755,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 8,
-                    "maxLength": 500
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "reasonCode": {
                     "type": "string",
@@ -9768,7 +9890,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -9815,8 +9937,7 @@
                 "properties": {
                   "label": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 200
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "criteria": {
                     "type": "array",
@@ -9825,13 +9946,11 @@
                       "properties": {
                         "code": {
                           "type": "string",
-                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
-                          "description": "Identifies the criterion within a tender; what scores refer to."
+                          "description": "Identifies the criterion within a tender; what scores refer to. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "label": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "weightBp": {
                           "type": "integer",
@@ -9855,7 +9974,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["label", "criteria"],
@@ -9895,8 +10015,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 200
+              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
             }
           }
         ],
@@ -10316,7 +10435,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10367,8 +10486,7 @@
                   },
                   "templateId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   },
                   "criteria": {
                     "type": "array",
@@ -10377,13 +10495,11 @@
                       "properties": {
                         "code": {
                           "type": "string",
-                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
-                          "description": "Identifies the criterion within a tender; what scores refer to."
+                          "description": "Identifies the criterion within a tender; what scores refer to. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "label": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 200
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "weightBp": {
                           "type": "integer",
@@ -10407,7 +10523,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["expectedVersion"],
@@ -10977,7 +11094,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (approval: APPROVAL_STALE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -11028,7 +11145,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11114,7 +11233,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11271,7 +11392,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -11332,7 +11453,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -11371,9 +11494,7 @@
                 "properties": {
                   "organizationId": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64,
-                    "description": "The organization invited to bid. It must exist: it is confirmed with organization-service before anything is written (422 INVITED_ORGANIZATION_NOT_FOUND if it does not; 503/504 if it cannot be confirmed, and nothing is invited unconfirmed)."
+                    "description": "The organization invited to bid. It must exist: it is confirmed with organization-service before anything is written (422 INVITED_ORGANIZATION_NOT_FOUND if it does not; 503/504 if it cannot be confirmed, and nothing is invited unconfirmed). Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["organizationId"],
@@ -11960,7 +12081,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -12030,7 +12151,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12073,7 +12196,7 @@
                       "priceMinor": {
                         "type": "string",
                         "pattern": "^(0|[1-9]\\d{0,18})$",
-                        "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                        "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "answers": {
                         "type": "array",
@@ -12082,25 +12205,22 @@
                           "properties": {
                             "criterionCode": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 64
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             },
                             "response": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 2000
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             }
                           },
                           "required": ["criterionCode", "response"],
                           "additionalProperties": false
                         },
                         "maxItems": 50,
-                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "note": {
                         "type": "string",
-                        "minLength": 1,
-                        "maxLength": 4000
+                        "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       }
                     },
                     "required": ["priceMinor", "answers"],
@@ -12183,7 +12303,7 @@
                               "priceMinor": {
                                 "type": "string",
                                 "pattern": "^(0|[1-9]\\d{0,18})$",
-                                "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                                "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "answers": {
                                 "type": "array",
@@ -12192,25 +12312,22 @@
                                   "properties": {
                                     "criterionCode": {
                                       "type": "string",
-                                      "minLength": 1,
-                                      "maxLength": 64
+                                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                                     },
                                     "response": {
                                       "type": "string",
-                                      "minLength": 1,
-                                      "maxLength": 2000
+                                      "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                                     }
                                   },
                                   "required": ["criterionCode", "response"],
                                   "additionalProperties": false
                                 },
                                 "maxItems": 50,
-                                "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                                "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "note": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 4000
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               }
                             },
                             "required": ["priceMinor", "answers"],
@@ -12314,7 +12431,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12337,7 +12456,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -12387,7 +12506,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12609,7 +12730,7 @@
                         "priceMinor": {
                           "type": "string",
                           "pattern": "^(0|[1-9]\\d{0,18})$",
-                          "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                          "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "answers": {
                           "type": "array",
@@ -12618,25 +12739,22 @@
                             "properties": {
                               "criterionCode": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 64
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "response": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 2000
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               }
                             },
                             "required": ["criterionCode", "response"],
                             "additionalProperties": false
                           },
                           "maxItems": 50,
-                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "note": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 4000
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": ["priceMinor", "answers"],
@@ -12784,7 +12902,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -12949,7 +13069,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13009,7 +13129,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13057,7 +13179,7 @@
                       "priceMinor": {
                         "type": "string",
                         "pattern": "^(0|[1-9]\\d{0,18})$",
-                        "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                        "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "answers": {
                         "type": "array",
@@ -13066,25 +13188,22 @@
                           "properties": {
                             "criterionCode": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 64
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             },
                             "response": {
                               "type": "string",
-                              "minLength": 1,
-                              "maxLength": 2000
+                              "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                             }
                           },
                           "required": ["criterionCode", "response"],
                           "additionalProperties": false
                         },
                         "maxItems": 50,
-                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                        "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       },
                       "note": {
                         "type": "string",
-                        "minLength": 1,
-                        "maxLength": 4000
+                        "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                       }
                     },
                     "required": ["priceMinor", "answers"],
@@ -13154,7 +13273,7 @@
                         "priceMinor": {
                           "type": "string",
                           "pattern": "^(0|[1-9]\\d{0,18})$",
-                          "description": "The bid price in minor units (rials) as a decimal string; never a float."
+                          "description": "The bid price in minor units (rials) as a decimal string; never a float. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "answers": {
                           "type": "array",
@@ -13163,25 +13282,22 @@
                             "properties": {
                               "criterionCode": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 64
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               },
                               "response": {
                                 "type": "string",
-                                "minLength": 1,
-                                "maxLength": 2000
+                                "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                               }
                             },
                             "required": ["criterionCode", "response"],
                             "additionalProperties": false
                           },
                           "maxItems": 50,
-                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422."
+                          "description": "Answers to the tender’s criteria, by code. A code the tender does not have is 422. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         },
                         "note": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 4000
+                          "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                         }
                       },
                       "required": ["priceMinor", "answers"],
@@ -13264,7 +13380,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13287,7 +13405,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13337,7 +13455,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13502,7 +13622,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -13557,7 +13677,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13736,7 +13858,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13759,7 +13883,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -13826,7 +13950,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -13993,7 +14119,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14016,7 +14144,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -14077,7 +14205,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14221,7 +14351,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14244,7 +14376,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (opening: PROPOSAL_SUPERSEDED)",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (opening: PROPOSAL_SUPERSEDED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -14295,7 +14427,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14348,7 +14482,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14388,7 +14524,8 @@
                   "proposedAt": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET /tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn."
+                    "pattern": "Z$",
+                    "description": "The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET /tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn. ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                   }
                 },
                 "required": ["proposedAt"],
@@ -14578,7 +14715,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14756,7 +14895,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14779,7 +14920,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14834,7 +14975,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -14902,9 +15045,7 @@
                   },
                   "reasonText": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000,
-                    "description": "Required for DISQUALIFIED, forbidden for QUALIFIED. Kept in the database; never on an event and never shown to the bidder."
+                    "description": "Required for DISQUALIFIED, forbidden for QUALIFIED. Kept in the database; never on an event and never shown to the bidder. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["decision"],
@@ -15046,7 +15187,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15069,7 +15212,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15119,7 +15262,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15355,7 +15500,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15378,7 +15525,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -15445,7 +15592,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15529,7 +15678,8 @@
                       "additionalProperties": false
                     },
                     "minItems": 1,
-                    "maxItems": 50
+                    "maxItems": 50,
+                    "description": "Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["scores"],
@@ -15665,7 +15815,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -15688,7 +15840,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15738,7 +15890,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16125,7 +16279,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16188,7 +16344,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16532,7 +16690,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16555,7 +16715,7 @@
             }
           },
           "409": {
-            "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: ALREADY_AWARDED; approval: APPROVAL_STALE)",
+            "description": "Conflict: `expectedVersion` or a need command’s `expectedProjectVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), a project or need creation whose Idempotency-Replay-Deadline has passed on the service clock (REPLAY_WINDOW_CLOSED — nothing was done by this attempt; check the project list before creating again), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way. Withdrawing a proposal to open bids that is no longer the one that stands (CONFLICT, PROPOSAL_SUPERSEDED): it was withdrawn or cleared and another made since — nothing is withdrawn. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: ALREADY_AWARDED; approval: APPROVAL_STALE)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -16627,7 +16787,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16725,7 +16887,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -16790,9 +16954,7 @@
                   },
                   "justification": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 2000,
-                    "description": "Required unless the bid is the single first rank of the frozen matrix: a choice of any other rank, or among a tie, is justified in words (ADR-067 § 3, Q-89). Kept in the database; never on an event and never shown to a bidder."
+                    "description": "Required unless the bid is the single first rank of the frozen matrix: a choice of any other rank, or among a tie, is justified in words (ADR-067 § 3, Q-89). Kept in the database; never on an event and never shown to a bidder. Constraints after a value-changing step are omitted; validation applies them to the transformed value."
                   }
                 },
                 "required": ["bidId"],
@@ -16919,7 +17081,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator. Approval gates of a tender (CON-002 PR 11): deciding a tender approval as the person who made the request (separation of duties through the shared helper; the same person under two user ids or another issuer is one person); on an award approval, a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST — also on reading it), and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (APPROVER_IS_EVALUATOR). Refusals on the caller’s own tender are audited in the tender approval log. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: CONFLICT_OF_INTEREST)",
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator. Approval gates of a tender (CON-002 PR 11): deciding a tender approval as the person who made the request (separation of duties through the shared helper; the same person under two user ids or another issuer is one person); on an award approval, a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST — also on reading it), and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (APPROVER_IS_EVALUATOR). Refusals on the caller’s own tender are audited in the tender approval log. On this route, unlike the rest, service tokens are not all refused: A service token is accepted only from contract-service; any other service is refused. An X-Organization-Id that differs from the signed tenant is SERVICE_TENANT_CONTEXT_INVALID. When refused for a closed reason, `details` names it: one entry per reason, `path` the area (publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message` (unchanged, for people). A refusal without a closed reason carries no `details`. (award: CONFLICT_OF_INTEREST)",
             "content": {
               "application/json": {
                 "schema": {
@@ -16959,7 +17121,9 @@
                     },
                     "timestamp": {
                       "type": "string",
-                      "format": "date-time"
+                      "format": "date-time",
+                      "pattern": "Z$",
+                      "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
                     },
                     "path": {
                       "type": "string"
@@ -17017,6 +17181,9 @@
         "security": [
           {
             "bearer": []
+          },
+          {
+            "internalToken": []
           }
         ]
       }
@@ -17280,6 +17447,11 @@
         "scheme": "bearer",
         "bearerFormat": "JWT",
         "type": "http"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token"
       }
     },
     "schemas": {
@@ -17319,7 +17491,9 @@
           },
           "timestamp": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "pattern": "Z$",
+            "description": "ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here."
           },
           "path": {
             "type": "string"

@@ -1812,6 +1812,16 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 
 ## ۳. Current Verified State
 
+Consumer crash recovery — task 865, 2026-11-01 (local verification; see PR STATUS for CI):
+
+| Scope                  | Verified evidence                                                                                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Terminal KafkaJS crash | nest-common: 1,237 tests; twelve consumer services: 10,268 unit and 5,413 integration tests; HTTP 503 probes; three economic child-process restart/replay proofs; 173 E2E scenarios.                                                      |
+| Crash visibility       | Prometheus config and 99 rule scenarios across seven files; 20 lifecycle/health/alert mutants killed and restored. Supervisor restart/backoff is a deployment requirement; between-scrape process incarnations remain a visibility limit. |
+
+These are scoped task results, not a replacement for the historical CI counts below.
+The broker limits gate and PR CI results are recorded in task 865's PR STATUS.
+
 ### به‌روزرسانی 2026-09-18 — شمارش واقعی از اجرای سبز `35364991343` (`f7252d3`)
 
 اعداد زیر از Log همان اجرا برداشته شده‌اند، نه از حافظه و نه از اجرای محلی.
@@ -2323,6 +2333,16 @@ HTTP → maintenance-service
   دلیلش در ADR-031
 - **صفر نرخ کارمزد یا نرخ تبدیل پاداش در کد یا Seed** — `grep` اجرا شد
 
+Task 1201 (D-080) adds append-only `RewardRuleStatusHistory`, written with rule
+creation/PATCH, and nullable `Reward.occurredAt` for occurrence-based UTC weekly
+caps. Delayed facts use historical status; saved evaluations retain their rule
+IDs. Usage keeps fleet's arrival `recordedAt` pending Q-153. Legacy status backfill
+is best available evidence (ACTIVE from validFrom/createdAt; current INACTIVE
+from updatedAt); unknown legacy occurrence is counted conservatively, never
+inferred from delivery time. Exact predicates and wallet-race retry classification
+are documented in ADR-033's correctness amendment. Validation evidence belongs
+to task 1201's PR STATUS; this paragraph makes no new live-verification claim.
+
 ### پنج ماژول ADR-013، به‌علاوه دو
 
 `wallet` · `ledger` · `payment` · `commission` · `reward` — دقیقاً همان‌طور که
@@ -2542,9 +2562,9 @@ ScanWorker → Claim (FOR UPDATE SKIP LOCKED + Lease) → Stream از MinIO → 
 
 | موضوع         | واقعیت                                                                                  |
 | ------------- | --------------------------------------------------------------------------------------- |
-| Image         | `clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6` |
-| نسخه          | ClamAV 1.5.4، Alpine 3.24.2، amd64، ~۴۰۰MB                                              |
-| امضا در Image | `main.cvd` v63 · `daily.cvd` v28150 · `bytecode.cvd` v339                               |
+| Image         | `clamav/clamav@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d` |
+| نسخه          | ClamAV 1.5.4، Alpine 3.24.3، amd64، ~۴۰۰MB                                              |
+| امضا در Image | `main.cvd` v63 · `daily.cvd` v28164 · `bytecode.cvd` v339                               |
 | Production    | Unix Socket؛ `DOCUMENT_CLAMAV_HOST` در Production **رد می‌شود و فرآیند خارج** (S-08)    |
 | Local/CI      | TCP فقط روی `127.0.0.1`؛ CI روی لینوکس از Socket استفاده می‌کند                         |
 | freshclam     | Container جداگانه، غیر-root، Volume ماندگار — **محلی تأیید شد: 28108 → 28109**          |
@@ -2959,6 +2979,17 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
 ---
 
 ## ۱۳. Outbox / DLQ
+
+Terminal consumer recovery (task 865, 2026-11-01): KafkaJS `CRASH` with
+`restart=false` makes `EventConsumer.isRunning()` false and both probes return 503,
+counts a closed reason, and starts existing graceful shutdown with exit 1 within
+`SHUTDOWN_TIMEOUT_MS`. STOP/DISCONNECT before a retriable crash do not request exit.
+All 22 consumers in twelve services use the shared wrapper; replay protection is
+inventoried in the PR, including six consumers using natural keys/convergent writes
+without event markers. Fleet's parked-DLQ outbox is unchanged. Recovery never skips
+or commits the failed record and remains limited by source retention. See the
+[consumer crash-loop runbook](docs/runbooks/consumer-crash-loop.md) and deployment
+requirements in [docs/12](docs/12-deployment-architecture.md).
 
 - **Producer:** `buildOutboxRow` + جدول `outbox_message` در همان Transaction
   نوشتن دامنه؛ `OutboxRelay` با Polling، `FOR UPDATE SKIP LOCKED`، منتشر به
@@ -3427,10 +3458,11 @@ not available» می‌گیرد و در پس‌زمینه Retry می‌کند �
    **تهی** است، پس سهم آن‌ها از مرحله Integration همچنان یعنی «چیزی نشکست».
    تنها `fleet-service` این Flag را ندارد. بستن این شکاف برای هر سرویس، کار
    همان سرویس است، نه فاز ناوگان.
-2. مرحله «Tenant isolation and authorization» دو فرمان اجرا می‌کند؛ فرمان اول
-   روی Project های Unit با Name Pattern فیلتر می‌شود و در بعضی سرویس‌ها صفر تست
-   می‌ماند (`11 skipped`). شاهد واقعی، فرمان دوم روی Project Integration ناوگان
-   است.
+2. مرحله «Tenant isolation and financial invariant tests» اکنون یک فرمان
+   Integration اجرا می‌کند. تست‌های Unit مستأجر و مجوزدهی بدون فیلتر در
+   `quality-unit` / `Unit tests` اجرا می‌شوند؛ شکست هرکدام دروازهٔ الزامی خودش
+   را می‌بندد. `test:unit` در همهٔ Workspaceها بررسی می‌شود و
+   `--passWithNoTests` در آن مجاز نیست (FU-185، بازبینی دور دوم).
 
 ---
 
@@ -3694,7 +3726,7 @@ live-verify-17  WALLET_OPENED         actor=USR-SEED-DEHYARI-ADMIN
 | D-027 | ترتیب معنایی هر جریان (`topic + partitionKey`) تضمین نشده                                                                                                     | متوسط                           | **شش** مسیر مستقل وارونگی، اندازه‌گیری‌شده (پایین). برخورد میلی‌ثانیه‌ای کوچک‌ترین‌شان است؛ مهم‌ترین، واگرایی ترتیب Commit از `created_at` است                                                     | [ADR-051](docs/adr/ADR-051-outbox-semantic-ordering.md) **`Accepted`** (2026-09-04) و **Q-36 بسته شد**؛ **B1 (Schema)، B2 (ابزار Backfill) و B3 (تخصیص سمت تولیدکننده) پیاده شدند (2026-09-05)**، ولی **B4–B6 نه** — هیچ مصرف‌کننده یا Claim ای `stream_seq` را اجبار نمی‌کند، پس هیچ تضمین ترتیبی در زمان اجرا برقرار نیست و این مورد باز می‌ماند |
 | D-033 | انتقال دارایی از کار باز fleet/maintenance جلو می‌زد — رفع روی `fix/asset-transfer-clearance` (ADR-062، 2026-09-27؛ بازبینی دور ۱ #127)، هنوز روی `main` نیست | پایین (باقی‌مانده)              | فقط کار مانده از پیش از رفع و تأیید هزینهٔ کار `COMPLETED` پیش از انتقال (Q-74)؛ دیگر پنجرهٔ زمانی نیست                                                                                            | پرسش احرازشده از fleet و maintenance با حصار و شکست بسته؛ حصار منقضی از رکورد asset-service حل می‌شود، نه با زمان؛ دیده‌شدن با `rasta_maintenance_transfer_open_work_total`                                                                                                                                                                        |
 | D-021 | ~~هیچ Endpoint در `document-service` `@AllowService` ندارد~~                                                                                                  | —                               | ✅ بسته شد 2026-09-22 — `@AllowService('asset-service')` روی `GET /v1/documents/{id}` (تنها Endpoint خواندن-با-شناسه)؛ شرح کامل زیر همین بخش                                                       | —                                                                                                                                                                                                                                                                                                                                                  |
-| —     | `openapi/zod-schema.ts` در سه سرویس بایت‌به‌بایت تکرار شده                                                                                                    | پایین                           | یک اصلاح باید سه‌جا اعمال شود                                                                                                                                                                      | Utility خالص و بدون دانش دامنه است، پس جایش `packages/` است (A-03)؛ استخراجش سه سرویس را هم‌زمان لمس می‌کند                                                                                                                                                                                                                                        |
+| —     | ~~`openapi/zod-schema.ts` در سه سرویس بایت‌به‌بایت تکرار شده~~                                                                                                | —                               | ✅ بسته شد 2026-10-24 — ۱۳ نسخه (هشت گونه) یک Converter در `@rasta/nest-common` شدند؛ سند هر ۱۳ سرویس بایت‌به‌بایت همان ماند                                                                       | —                                                                                                                                                                                                                                                                                                                                                  |
 | —     | ~~`InsuranceClaim` جدول بدون API~~                                                                                                                            | —                               | ✅ بسته شد 2026-09-21 — API ادعای خسارت پایه روی `feat/asset-insurance-claim-api` (Q-59)                                                                                                           | —                                                                                                                                                                                                                                                                                                                                                  |
 | —     | `mission` و رویدادهای `MISSION_*` پیاده نشدند                                                                                                                 | پایین                           | تحلیل «ناوگان داخلی در برابر برون‌سپاری» هنوز داده مأموریت ندارد                                                                                                                                   | عمدی — به `construction-service` گره خورده که وجود ندارد؛ ADR-026 § Consequences                                                                                                                                                                                                                                                                   |
 
@@ -6074,6 +6106,21 @@ un\` است — تغییر نام آن پوشه رفعش می‌کند.
 
 ---
 
+### FU-188: مهلت پایگاه داده به منطقهٔ زمانی نشست وابسته نیست (2026-11-06)
+
+- **یک نمایش:** ستون `timestamp(3)` ساعت دیواری UTC است و هر ساعتی که به آن می‌رسد `AT TIME ZONE 'UTC'` دارد؛ مهلت نوشته‌شده به
+  میلی‌ثانیه گرد به پایین می‌شود. Outbox هر دو نوع ستون را دارد و همه‌جا فقط `OUTBOX_NOW` (`outbox-sql.ts`) را به کار می‌برد.
+- **بررسی زمان اجرا:** `createSafePrismaClient` در نشست غیر UTC کار را رد می‌کند، داخل همان تراکنش تا پشت PgBouncer هم همان Backend
+  سنجیده شود (`database/utc-session.ts`، docs/11 § ۱۱٫۲). این Extension باید آخرین Extension بماند: `query(args)` در Batch، با Extension
+  دیگری زیر آن، دستور را دو بار اجرا می‌کند.
+- **هیچ کلاینتی بدون بررسی بیرون داده نمی‌شود (#906 r1 F1):** `$parent` روی کلاینت و Model، و شکل تابعی `$extends` رد می‌شوند؛
+  دستوری در تراکنش فقط وقتی اجرا می‌شود که ثابت شده باشد آن تراکنش با بررسی آغاز شده است. عضو تراکنش بودن اثبات نیست.
+- **نگهبان ایستا:** `pnpm check:utc-clock-sites`؛ انواع ستون را از بازپخش Migrationها می‌خواند و با `schema.prisma` می‌سنجد. هرچه را
+  نتواند اثبات کند رد می‌کند (#906 r1 F2): جدول ناشناخته، دستور یا تعریف مدل‌نشده، `DEFAULT` صریح روی ستون وابسته به نشست. هر
+  استثنای بازبینی‌شده به Hash محتوای بازبینی‌شده بسته است.
+
+---
+
 ## Memory Update Protocol
 
 این فایل باید با هرکدام از این تغییرات به‌روز شود:
@@ -6092,7 +6139,7 @@ un\` است — تغییر نام آن پوشه رفعش می‌کند.
 
 ---
 
-_آخرین Audit کامل: 2026-08-27. آخرین به‌روزرسانی: **2026-09-28** — `UNION_ADMIN` دیگر اپراتور ثبت سازمان‌ها نیست (#132،
+_آخرین Audit کامل: 2026-08-27. آخرین به‌روزرسانی: **2026-11-06** — مهلت‌ها مستقل از منطقهٔ زمانی نشست (FU-188). پیش‌تر: **2026-09-28** — `UNION_ADMIN` دیگر اپراتور ثبت سازمان‌ها نیست (#132،
 § ۱۱، Q-80). پیش‌تر: **2026-09-27** — Projector کیکلوک فقط صفات خودش را می‌نویسد (#129،
 § ۱۱، D-037)؛ و Consumer عملکرد `supplier-service` (ADR-052 گام ۵، #126؛ پیش‌فرض خاموش، D-036). پیش‌تر: **2026-09-26** — `construction-service` در بازبینی (#119، #122؛
 § ۷-ه). پیش‌تر: **2026-09-21** — هم‌خوانی اسناد

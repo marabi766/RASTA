@@ -268,3 +268,117 @@ describe('a zero-value order is refused', () => {
     ).toThrow(/positive total/);
   });
 });
+
+describe('derived totals stay within what can be stored (marketplace audit F4)', () => {
+  const MAX = 9_223_372_036_854_775_807n;
+
+  function refusal(run: () => unknown) {
+    try {
+      run();
+    } catch (error) {
+      if (!isRastaError(error)) throw error;
+      return {
+        code: error.code,
+        status: error.status,
+        message: error.message,
+        details: error.details,
+        internalContext: error.internalContext,
+      };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it('prices a line whose total is exactly the largest storable amount', () => {
+    const priced = priceOrder(
+      [{ offerId: 'OFR_1', quantity: 1 }],
+      catalogue(offer({ unitPriceMinor: MAX })),
+    );
+    expect(priced.lines[0]?.lineTotalMinor).toBe(MAX);
+    expect(priced.totalAmountMinor).toBe(MAX);
+  });
+
+  it('prices two lines that add up to exactly the largest storable amount', () => {
+    const priced = priceOrder(
+      [
+        { offerId: 'OFR_1', quantity: 1 },
+        { offerId: 'OFR_2', quantity: 1 },
+      ],
+      catalogue(
+        offer({ id: 'OFR_1', unitPriceMinor: MAX - 1n }),
+        offer({ id: 'OFR_2', productId: 'PRD_2', unitPriceMinor: 1n }),
+      ),
+    );
+    expect(priced.totalAmountMinor).toBe(MAX);
+  });
+
+  it('refuses a line total one past the bound, naming the quantity and no figure', () => {
+    // MAX + 1 = 2^63 is even: two units of half of it are exactly one past.
+    const unit = (MAX + 1n) / 2n;
+    const found = refusal(() =>
+      priceOrder([{ offerId: 'OFR_1', quantity: 2 }], catalogue(offer({ unitPriceMinor: unit }))),
+    );
+    expect(unit * 2n).toBe(MAX + 1n);
+    expect(found).toEqual({
+      code: 'BUSINESS_RULE_VIOLATION',
+      status: 422,
+      message: 'The order total exceeds the largest amount the platform can record',
+      details: [
+        {
+          path: 'lines[0].quantity',
+          code: 'ORDER_AMOUNT_EXCEEDS_LIMIT',
+          message: 'The order total exceeds the largest amount the platform can record',
+        },
+      ],
+      internalContext: undefined,
+    });
+  });
+
+  it('refuses the audit trigger: the largest price times two', () => {
+    const found = refusal(() =>
+      priceOrder([{ offerId: 'OFR_1', quantity: 2 }], catalogue(offer({ unitPriceMinor: MAX }))),
+    );
+    expect(found.details?.[0]).toMatchObject({
+      path: 'lines[0].quantity',
+      code: 'ORDER_AMOUNT_EXCEEDS_LIMIT',
+    });
+  });
+
+  it('refuses lines that are each storable but sum one past the bound', () => {
+    const found = refusal(() =>
+      priceOrder(
+        [
+          { offerId: 'OFR_1', quantity: 1 },
+          { offerId: 'OFR_2', quantity: 1 },
+        ],
+        catalogue(
+          offer({ id: 'OFR_1', unitPriceMinor: MAX }),
+          offer({ id: 'OFR_2', productId: 'PRD_2', unitPriceMinor: 1n }),
+        ),
+      ),
+    );
+    expect(found.details).toEqual([
+      expect.objectContaining({ path: 'lines', code: 'ORDER_AMOUNT_EXCEEDS_LIMIT' }),
+    ]);
+    // No figure in any part of the refusal.
+    expect(JSON.stringify(found)).not.toMatch(/\d{6,}/);
+  });
+
+  it('refuses a sum that passes the bound only on the third line', () => {
+    const third = MAX / 3n + 1n;
+    const found = refusal(() =>
+      priceOrder(
+        [
+          { offerId: 'OFR_1', quantity: 1 },
+          { offerId: 'OFR_2', quantity: 1 },
+          { offerId: 'OFR_3', quantity: 1 },
+        ],
+        catalogue(
+          offer({ id: 'OFR_1', unitPriceMinor: third }),
+          offer({ id: 'OFR_2', productId: 'PRD_2', unitPriceMinor: third }),
+          offer({ id: 'OFR_3', productId: 'PRD_3', unitPriceMinor: third }),
+        ),
+      ),
+    );
+    expect(found.details?.[0]?.path).toBe('lines');
+  });
+});

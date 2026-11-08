@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 // -----------------------------------------------------------------------------
 // Proves the outbox migrations are reversible on all eight service-owned
 // databases, by actually reversing them.
@@ -53,6 +54,7 @@ import { createRequire } from 'node:module';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { assertB1Definitions, assertB1Inert, assertB1Objects } from './verify-outbox-b1-lib.mjs';
+import { readUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -219,16 +221,20 @@ const CLAIMABLE_INDEXDEF =
   'CREATE INDEX ix_outbox_claimable ON public.outbox_message ' +
   'USING btree (created_at, id) WHERE (published_at IS NULL)';
 
-/** A minimal, valid unpublished row. Every NOT NULL column the table has. */
-const insertRow = (id, extra = '') => `
+/**
+ * A minimal, valid unpublished row. Every NOT NULL column the table has, and
+ * none of the claim or retry columns: those are compared with the database
+ * clock, so a probe that needs one names it in its own static statement.
+ */
+const insertRow = (id) => eligibilityClockSql`
 INSERT INTO "outbox_message" (
   "id", "aggregate_type", "aggregate_id", "event_name", "event_version",
   "topic", "partition_key", "payload", "headers", "correlation_id",
-  "created_at", "attempts"${extra ? ', ' + extra.split('=')[0].trim() : ''}
+  "created_at", "attempts"
 ) VALUES (
   '${id}', 'Probe', '${id}', 'PROBE', 1,
   't.probe', '${id}', '{}'::jsonb, '{}'::jsonb, 'COR-${id}',
-  now(), 0${extra ? ', ' + extra.split('=').slice(1).join('=').trim() : ''}
+  now(), 0
 );`;
 
 /** Probe rows this script writes, removed before and after the constraint checks. */
@@ -240,7 +246,8 @@ const args = process.argv.slice(2);
 const only = args.find((a) => !a.startsWith('--'));
 const targets = only ? [only] : SERVICES;
 if (only && !SERVICES.includes(only)) {
-  console.error(`Unknown service "${only}". Known: ${SERVICES.join(', ')}`);
+  // Echoed only once it is one of SERVICES (#385 r6).
+  console.error(`Unknown service; it is not repeated. Known: ${SERVICES.join(', ')}`);
   process.exit(1);
 }
 
@@ -266,7 +273,7 @@ const inPlace = args.includes('--in-place');
 const schemaFlag = args.indexOf('--schema');
 const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'outbox_claim_check';
 if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
-  console.error(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  console.error('--schema must be a plain lowercase identifier; its value is not repeated.');
   process.exit(1);
 }
 
@@ -316,7 +323,10 @@ function verify(service) {
 
   // In UTC whatever the server's or the role's default (L7-37): the probe rows
   // below write `now()` into `timestamp(3)` columns.
-  const url = new URL(withUtcSession(baseUrl));
+  // Refused with a fixed text naming the settings, never the value (#385 r5).
+  const url = readUrl(withUtcSession(baseUrl), {
+    refusal: `${envKey}_MIGRATOR (else ${envKey}, else DATABASE_URL) cannot be read as a URL`,
+  });
   if (!inPlace) url.searchParams.set('schema', scratchSchema);
   const scratchUrl = url.toString();
 
@@ -607,7 +617,7 @@ function assertConstraintsBite(mustRun, mustFail) {
   );
   mustRun(
     'ck_outbox_claim_triple accepts all three together',
-    `UPDATE "outbox_message"
+    eligibilityClockSql`UPDATE "outbox_message"
         SET "claim_token" = 't', "claim_owner" = 'o',
             "claim_expires_at" = now() + interval '60 seconds'
       WHERE id = 'OBXCHK_VALID';`,
@@ -637,19 +647,19 @@ function assertConstraintsBite(mustRun, mustFail) {
   // ck_outbox_next_attempt_requires_failure — a retry with no prior attempt.
   mustFail(
     'ck_outbox_next_attempt_requires_failure refuses a retry scheduled with zero attempts',
-    `UPDATE "outbox_message" SET "next_attempt_at" = now() + interval '5 seconds'
+    eligibilityClockSql`UPDATE "outbox_message" SET "next_attempt_at" = now() + interval '5 seconds'
       WHERE id = 'OBXCHK_VALID';`,
     'ck_outbox_next_attempt_requires_failure',
   );
   mustRun(
     'ck_outbox_next_attempt_requires_failure accepts one after a real failure',
-    `UPDATE "outbox_message"
+    eligibilityClockSql`UPDATE "outbox_message"
         SET "attempts" = 1, "next_attempt_at" = now() + interval '5 seconds'
       WHERE id = 'OBXCHK_VALID';`,
   );
   mustFail(
     'ck_outbox_next_attempt_requires_failure refuses a retry on a published row',
-    `UPDATE "outbox_message"
+    eligibilityClockSql`UPDATE "outbox_message"
         SET "claim_token" = NULL, "claim_owner" = NULL, "claim_expires_at" = NULL,
             "published_at" = now()
       WHERE id = 'OBXCHK_VALID';`,

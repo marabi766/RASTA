@@ -1,4 +1,5 @@
 import { Injectable, type OnModuleDestroy } from '@nestjs/common';
+import { clientFailureCode } from '@rasta/nest-common';
 import { createTransport, type Transporter } from 'nodemailer';
 import type {
   MailChannel,
@@ -128,7 +129,11 @@ export class SmtpMailChannel implements MailChannel, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    this.transporter?.close();
+    try {
+      this.transporter?.close();
+    } catch (error) {
+      throw new Error(`SMTP_HOST: mail transport close failed (code ${clientFailureCode(error)})`);
+    }
     this.transporter = undefined;
   }
 

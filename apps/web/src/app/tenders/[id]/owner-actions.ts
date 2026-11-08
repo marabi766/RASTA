@@ -19,6 +19,8 @@ import { issueOwnerCommand, outcomeOf, ownerRequest } from '@/server/tender-owne
 import { verifyOwnerStamp } from '@/server/tender-owner-replay';
 
 import { afterRetry, type OwnerFormState } from './owner-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The server action behind the owner's forms on `/tenders/[id]`.
@@ -93,7 +95,10 @@ async function attempt(tenderId: string, form: FormData, resent: boolean): Promi
       const outcome = outcomeOf(command, result.data);
       const done = resent ? resentOutcome(outcome) : outcome;
       return redirect(
-        `/tenders/${encodeURIComponent(tenderId)}?view=own&${FLASH_PARAM}=${mintFlash(session, tenderId, done)}`,
+        withContext(
+          pageContext(session),
+          `/tenders/${encodeURIComponent(tenderId)}?view=own&${FLASH_PARAM}=${mintFlash(session, tenderId, done)}`,
+        ),
       );
     }
     case 'INVALID':

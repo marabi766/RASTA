@@ -1,6 +1,6 @@
-import { DISPLAY_TEXT_PATTERN } from '@rasta/contracts';
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { toJsonSchema } from '@rasta/nest-common';
 import {
   createAssignmentSchema,
   createDriverSchema,
@@ -45,7 +45,11 @@ describe('zod to JSON Schema', () => {
         string,
         Record<string, unknown>
       >;
-      expect(props.employeeNo).toMatchObject({ type: 'string', minLength: 1, maxLength: 64 });
+      expect(props.employeeNo).toEqual({
+        type: 'string',
+        pattern: WITHOUT_BIDI_CONTROL.source,
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
       expect(props.licenceValidTo).toMatchObject({ type: 'string', format: 'date-time' });
     });
 
@@ -64,7 +68,12 @@ describe('zod to JSON Schema', () => {
         string,
         Record<string, unknown>
       >;
-      expect(props.limit).toMatchObject({ type: 'integer', minimum: 1, maximum: 200 });
+      expect(props.limit).toEqual({
+        type: 'integer',
+        minimum: 1,
+        maximum: 200,
+        default: 25,
+      });
     });
 
     it('records a default rather than hiding it', () => {
@@ -147,15 +156,13 @@ describe('zod to JSON Schema', () => {
   });
 });
 
-describe('the published display-text pattern', () => {
-  it('is the shared rule in full: the Bidi_Control lookahead and the Persian punctuation', () => {
-    const properties = toJsonSchema(createDriverSchema).properties as Record<
-      string,
-      { pattern?: string }
-    >;
-    expect(properties.notes?.pattern).toBe(DISPLAY_TEXT_PATTERN.source);
-    expect(properties.notes?.pattern).toContain('\\p{Bidi_Control}');
-    expect(properties.notes?.pattern).toContain('\\u060c');
-    expect(new RegExp(properties.notes!.pattern!, 'u').test('شیفت شب، پایه دو؛')).toBe(true);
+describe('post-trim display-text constraints (FU-120)', () => {
+  it('marks the pattern as omitted rather than asserting it on raw input', () => {
+    const properties = toJsonSchema(createDriverSchema).properties as Record<string, unknown>;
+    expect(properties.notes).toMatchObject({
+      type: 'string',
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    expect(properties.notes).not.toHaveProperty('pattern');
   });
 });

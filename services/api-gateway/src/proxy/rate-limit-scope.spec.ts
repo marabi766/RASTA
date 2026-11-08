@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { GatewayController } from './gateway.controller';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
@@ -66,15 +67,21 @@ function requestFor(method: string, path: string) {
   } as never;
 }
 
+// An open connection: the controller listens for the caller going away.
 const response = () =>
-  ({
+  Object.assign(new EventEmitter(), {
+    closed: false,
+    writableFinished: false,
     setHeader: () => undefined,
     status: () => response(),
     json: () => undefined,
     end: () => undefined,
   }) as never;
 
-async function ruleUsedFor(method: string, path: string): Promise<RateLimitRule> {
+async function budgetUsedFor(
+  method: string,
+  path: string,
+): Promise<{ scope: string; rule: RateLimitRule }> {
   const { limiter, calls } = recordingLimiter();
   const controller = new GatewayController(proxy, limiter, env);
 
@@ -82,16 +89,19 @@ async function ruleUsedFor(method: string, path: string): Promise<RateLimitRule>
 
   const routeCall = calls.find((call) => call.scope.startsWith('user:'));
   if (!routeCall) throw new Error('the controller consumed no per-route budget');
-  return routeCall.rule;
+  return routeCall;
 }
 
-describe('a route override marked unsafeMethodsOnly', () => {
+async function ruleUsedFor(method: string, path: string): Promise<RateLimitRule> {
+  return (await budgetUsedFor(method, path)).rule;
+}
+
+describe("a route override for 'unsafe-methods'", () => {
   it('applies to a write', async () => {
     // `docs/06` § 6.9: twenty document uploads an hour.
     expect(await ruleUsedFor('POST', '/v1/documents/upload-url')).toEqual({
       limit: 20,
       windowSeconds: 3600,
-      unsafeMethodsOnly: true,
     });
   });
 
@@ -111,7 +121,31 @@ describe('a route override marked unsafeMethodsOnly', () => {
   });
 });
 
-describe('a route override without the flag', () => {
+describe("a route override for 'collection-post' (task 130, PR #483 r1 R6)", () => {
+  it('caps the public registration submission at five an hour', async () => {
+    expect(await budgetUsedFor('POST', '/v1/registration-requests')).toEqual({
+      scope: 'user:registration-requests:collection-post',
+      rule: { limit: 5, windowSeconds: 3600 },
+    });
+  });
+
+  it.each([
+    ['GET', '/v1/registration-requests'],
+    ['GET', '/v1/registration-requests/REG_1'],
+    ['POST', '/v1/registration-requests/REG_1/approve'],
+    ['POST', '/v1/registration-requests/REG_1/reject'],
+  ])(
+    'leaves the review operation %s %s on the platform default, in its own bucket',
+    async (method, path) => {
+      expect(await budgetUsedFor(method, path)).toEqual({
+        scope: 'user:registration-requests',
+        rule: PLATFORM_DEFAULT,
+      });
+    },
+  );
+});
+
+describe('a route override without appliesTo', () => {
   it('still applies to every method', async () => {
     // `products` carries the search limit, which is about read volume — so
     // narrowing it to writes would be the wrong change and this guards it.

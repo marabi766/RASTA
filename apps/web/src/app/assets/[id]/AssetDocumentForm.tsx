@@ -2,7 +2,7 @@
 
 import { useActionState, type ReactNode } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import {
@@ -10,6 +10,7 @@ import {
   EMPTY_ATTACH_DOCUMENT_FORM,
   FILE_FIELD,
   UPLOAD_TOKEN_FIELD,
+  type AttachDocumentFormValues,
 } from '@/lib/asset-document-fields';
 import { documentKindLabel } from '@/lib/labels';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
@@ -42,9 +43,25 @@ export interface DocumentIdentity {
   readonly baseline: string;
 }
 
-/** A retry of the same form carries the same reference. */
+/**
+ * A retry of the same form carries the same reference — the one its `resume`
+ * token is bound to, which after a fresh start is not the page's (PR-880 r1 F1).
+ */
 function submissionOf(state: DocumentFormState, minted: string): string {
-  return state.kind === 'INVALID' ? state.submissionId : minted;
+  if (state.kind === 'INVALID') return state.submissionId;
+  if ((state.kind === 'UNCONFIRMED' || state.kind === 'FAILED') && state.submissionId) {
+    return state.submissionId;
+  }
+  return minted;
+}
+
+/** What the last attempt sent, so a resend names the same kind its token vouches for. */
+function valuesOf(state: DocumentFormState): AttachDocumentFormValues {
+  if (state.kind === 'INVALID') return state.values;
+  if ((state.kind === 'UNCONFIRMED' || state.kind === 'FAILED') && state.values) {
+    return state.values;
+  }
+  return EMPTY_ATTACH_DOCUMENT_FORM;
 }
 
 /** The token of a document this submission already registered, if the last attempt got that far. */
@@ -126,7 +143,7 @@ export function AttachDocumentForm(identity: DocumentIdentity) {
     IDLE_DOCUMENT_FORM,
   );
 
-  const values = state.kind === 'INVALID' ? state.values : EMPTY_ATTACH_DOCUMENT_FORM;
+  const values = valuesOf(state);
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
   const resume = resumeOf(state);
 
@@ -190,7 +207,7 @@ export function AttachDocumentForm(identity: DocumentIdentity) {
           </Field>
           <Field label="تاریخ صدور" error={errors.issuedAt} hint="اختیاری.">
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="issuedAt"
                 type="date"
@@ -205,7 +222,7 @@ export function AttachDocumentForm(identity: DocumentIdentity) {
             hint="اختیاری؛ مدرک از آغاز این روز منقضی شمرده می‌شود."
           >
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="expiresAt"
                 type="date"

@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { MIGRATION_REFUSALS } from './prisma-lib.mjs';
 import { ROOT, allows, taskPatterns, turbo, workspacePackages } from './turbo-env-lib.mjs';
 
 const PRISMA_SCRIPT = 'scripts/prisma.mjs';
@@ -112,11 +113,12 @@ test(
     });
     const output = `${run.stdout}\n${run.stderr}`;
     assert.equal(run.error, undefined, `pnpm did not start: ${run.error}`);
-    assert.match(
-      output,
-      /the migration statement timeout "not-a-duration" is not a positive duration/,
+    assert.ok(
+      output.includes(MIGRATION_REFUSALS.statementTimeout),
       `prisma.mjs never saw ${TIMEOUT_VARIABLE}:\n${output}`,
     );
+    // Refused as a fixed text: the value is not repeated (#385 r4).
+    assert.doesNotMatch(output, /not-a-duration/);
     assert.doesNotMatch(output, /P1001/, 'prisma.mjs went on to run Prisma');
     assert.notEqual(run.status, 0);
   },

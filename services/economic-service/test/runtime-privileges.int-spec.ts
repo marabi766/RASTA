@@ -56,6 +56,20 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   // So is a levels-and-badges version (COM-012 criterion 2).
   ['recognition_rule', 'trg_recognition_rule_append_only'],
   ['recognition_rule', 'trg_recognition_rule_no_truncate'],
+  // What a settlement reversal is capped by and bound to (RLG-002-1).
+  ['settlement', 'trg_settlement_append_only'],
+  ['settlement', 'trg_settlement_no_truncate'],
+  ['ledger_account', 'trg_ledger_account_identity_fixed'],
+  // A settlement proves it happened when it is written (FU-097).
+  ['settlement', 'trg_settlement_creation_proven'],
+  ['commission', 'trg_commission_creation_proven'],
+  ['commission', 'trg_commission_no_truncate'],
+  ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_frozen'],
+  ['settlement_creation_quarantine', 'trg_settlement_creation_quarantine_no_truncate'],
+  ['settlement_reversal', 'trg_settlement_reversal_not_quarantined'],
+  // Who decided a row standing on another's hold, and why (FU-138).
+  ['transaction_hold_decision', 'trg_transaction_hold_decision_guard'],
+  ['transaction_hold_decision', 'trg_transaction_hold_decision_no_truncate'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
@@ -80,6 +94,7 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
       createDb: false,
       createRole: false,
       bypassRls: false,
+      replication: false,
     });
   });
 

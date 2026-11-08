@@ -6,6 +6,7 @@ import {
   orderCreatedPayload,
   orderDisputeResolvedPayload,
   orderReceiptConfirmedPayload,
+  reviewSubmittedPayload,
   validateMarketplacePayload,
 } from './events';
 
@@ -325,6 +326,23 @@ describe('ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b)', () => {
     expect(orderDisputeResolvedPayload.safeParse(withoutResponsibility).success).toBe(false);
   });
 
+  it.each([
+    'FUNDS_HELD',
+    'CONFIRMED',
+    'AWAITING_RECEIPT_CONFIRMATION',
+    'RECEIPT_CONFIRMED',
+    'CANCELLING',
+  ])('carries where the decision left the order: %s (D-083)', (orderStatus) => {
+    expect(orderDisputeResolvedPayload.safeParse({ ...base, orderStatus }).success).toBe(true);
+  });
+
+  it.each(['DISPUTED', 'SETTLING', 'COMPLETED', 'PENDING'])(
+    'refuses %s as where a decision left the order',
+    (orderStatus) => {
+      expect(orderDisputeResolvedPayload.safeParse({ ...base, orderStatus }).success).toBe(false);
+    },
+  );
+
   it('refuses an outcome outside SETTLE or REFUND', () => {
     expect(
       orderDisputeResolvedPayload.safeParse({ ...base, outcome: 'SPLIT_THE_DIFFERENCE' }).success,
@@ -452,5 +470,28 @@ describe('the L7-14 audit records', () => {
         startedAt: '2026-08-29T00:00:00.000Z',
       }),
     ).toThrow();
+  });
+});
+
+describe('REVIEW_SUBMITTED v1 quality compatibility', () => {
+  const legacy = {
+    reviewId: 'REV_1',
+    orderId: 'ORD_1',
+    buyerOrganizationId: 'ORG-A',
+    supplierOrganizationId: 'ORG-B',
+    rating: 4,
+    submittedAt: '2026-11-02T00:00:00.000Z',
+  };
+  it('still parses the old v1 payload without a quality answer', () => {
+    expect(reviewSubmittedPayload.parse(legacy)).toEqual(legacy);
+  });
+  it.each([1, 2, 3, 4, 5])('preserves the separate quality answer %s', (qualityRating) => {
+    expect(reviewSubmittedPayload.parse({ ...legacy, qualityRating })).toEqual({
+      ...legacy,
+      qualityRating,
+    });
+  });
+  it.each([0, 6, 2.5, '3', null])('refuses invalid quality %s', (qualityRating) => {
+    expect(reviewSubmittedPayload.safeParse({ ...legacy, qualityRating }).success).toBe(false);
   });
 });

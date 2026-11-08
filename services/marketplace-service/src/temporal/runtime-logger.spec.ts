@@ -96,11 +96,7 @@ describe('TemporalRuntimeLogger through the SDK activity executor', () => {
     const failed = calls.filter((call) => call.msg === 'Activity failed');
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ level: 'warn', fields: { component: 'temporal' } });
-    // pino serializes an Error under `err` (message, stack, cause chain).
-    const err = failed[0].fields.err as Error;
-    expect(err).toBeInstanceOf(Error);
-    expect(err.message).toContain('economic-service refused');
-    expect(String(err.cause)).toContain('inner');
+    expect(failed[0].fields.failure).toEqual({ type: 'ApplicationFailure' });
     const text = textOf(calls);
     expect(text).not.toContain(PASSWORD);
     expect(text).not.toContain(TOKEN);
@@ -147,7 +143,10 @@ describe('TemporalRuntimeLogger', () => {
       }),
     ).not.toThrow();
 
-    expect(calls.map((call) => call.msg)).toEqual(['failed', 'failed']);
+    expect(calls.map((call) => call.msg)).toEqual([
+      'Temporal SDK diagnostic (TEMPORAL_ADDRESS)',
+      'Temporal SDK diagnostic (TEMPORAL_ADDRESS)',
+    ]);
   });
 
   it('maps the five levels', () => {
@@ -176,6 +175,19 @@ describe('Core (native) logs', () => {
   const exporterOf = (compiled: Compiled) =>
     compiled.runtimeOptions.logExporter as { type: string; receiver?: (entries: string[]) => void };
   const close = (compiled: Compiled) => (compiled.logger as { close?: () => void }).close?.();
+
+  it('leave every signal to the service: the SDK does not stop the worker on SIGTERM', () => {
+    const compiled = compileOptions(temporalRuntimeOptions(stubLogger().logger));
+    // The SDK's default, as a control: SIGTERM among them.
+    const sdkDefault = compileOptions({ logger: new TemporalRuntimeLogger(stubLogger().logger) });
+    try {
+      expect(compiled.shutdownSignals).toEqual([]);
+      expect(sdkDefault.shutdownSignals).toContain('SIGTERM');
+    } finally {
+      close(compiled);
+      close(sdkDefault);
+    }
+  });
 
   it('are forwarded: the compiler selects the forwarding exporter, not the console one', () => {
     const forwarded = compileOptions(temporalRuntimeOptions(stubLogger().logger));
@@ -219,7 +231,7 @@ describe('Core (native) logs', () => {
       level: 'warn',
       component: 'temporal',
       sdkComponent: 'core',
-      msg: expect.stringContaining('Error when polling') as unknown,
+      msg: 'Temporal SDK diagnostic (TEMPORAL_ADDRESS)',
     });
     expect(lines[0]).not.toContain(TOKEN);
     expect(lines[0]).not.toContain(PASSWORD);
@@ -245,4 +257,22 @@ describe('installTemporalRuntimeLogger', () => {
     }
     install.mockRestore();
   });
+});
+
+test('SDK free text, JSON, stack and arbitrary metadata never leave the runtime logger', () => {
+  const { logger, calls } = stubLogger();
+  const adapter = new TemporalRuntimeLogger(logger);
+  const diagnostic = ['private-sentinel-79', 'JZ97-another-secret'].join(' ');
+  adapter.error(diagnostic, {
+    error: Object.assign(new Error(diagnostic), {
+      name: 'PrivateSentinel79',
+      code: 'JZ97_ANOTHER_SECRET',
+      cause: new Error(diagnostic),
+    }),
+    address: diagnostic,
+    json: JSON.stringify({ message: diagnostic }),
+  });
+  expect(textOf(calls)).not.toMatch(/sentinel|JZ97|another.secret/i);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({ msg: 'Temporal SDK diagnostic (TEMPORAL_ADDRESS)' });
 });

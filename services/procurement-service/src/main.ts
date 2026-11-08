@@ -45,6 +45,7 @@ import {
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
 import { buildProcurementOpenApiDocument } from './openapi/document';
+import { useProcurementBodyParser } from './shared/body-parser';
 
 async function bootstrap(): Promise<void> {
   // D-045: refuse to start as anything but the runtime role before Nest builds a single
@@ -90,16 +91,15 @@ async function bootstrap(): Promise<void> {
         'x-correlation-id',
         'x-organization-id',
         'idempotency-key',
+        'idempotency-replay-deadline',
         'if-match',
       ],
-      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag'],
+      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag', 'retry-after'],
       maxAge: 600,
     });
   }
 
-  // This change reads only; a body this service accepts is small. Anything much larger
-  // is malformed or hostile.
-  app.useBodyParser('json', { limit: '64kb' });
+  useProcurementBodyParser(app);
 
   if (allowsDeveloperTooling(env)) {
     // The same document that is committed at docs/api/procurement-service.openapi.json

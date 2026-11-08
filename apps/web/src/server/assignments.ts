@@ -1,4 +1,4 @@
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -13,12 +13,14 @@ import {
 } from '@/lib/driver-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import { localDateTimeToIso } from './usage';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Putting a driver in charge of a machine, and taking them off it, through
@@ -49,18 +51,18 @@ const assignmentSummarySchema = z.object({
   assetId: z.string(),
   active: z.boolean(),
   startedAt: renderableDate,
-  endedAt: renderableDate.nullable().default(null),
-  purpose: z.string().nullable().default(null),
-  endReason: z.string().nullable().default(null),
-  endNotes: z.string().nullable().default(null),
+  endedAt: renderableDate.nullable().prefault(null),
+  purpose: z.string().nullable().prefault(null),
+  endReason: z.string().nullable().prefault(null),
+  endNotes: z.string().nullable().prefault(null),
 });
 
 export type AssignmentSummary = z.infer<typeof assignmentSummarySchema>;
 
 const assignmentPageSchema = z.object({
   items: z.array(assignmentSummarySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type AssignmentPage = z.infer<typeof assignmentPageSchema>;
@@ -74,7 +76,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);
@@ -143,7 +145,10 @@ const optionalLocalDateTime = z
     if (raw.trim() === '') return undefined;
     const iso = localDateTimeToIso(raw);
     if (iso === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'تاریخ یا ساعت معتبر نیست' });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: formMessage('تاریخ یا ساعت معتبر نیست'),
+      });
       return z.NEVER;
     }
     return iso;
@@ -154,15 +159,15 @@ export const assignFormSchema = z
   .object({
     assetId: z
       .string()
-      .min(1, 'ماشین را انتخاب کنید')
-      .refine((value) => assetId.safeParse(value).success, 'شناسهٔ ماشین معتبر نیست'),
+      .min(1, formMessage('ماشین را انتخاب کنید'))
+      .refine((value) => assetId.safeParse(value).success, formMessage('شناسهٔ ماشین معتبر نیست')),
     // Blank means "now" — the common case — not a value the service must
     // parse; the transform below turns that into an absent field.
     startedAt: optionalLocalDateTime,
     purpose: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(500, 'هدف حداکثر ۵۰۰ نویسه است'))
+      .pipe(z.string().max(500, formMessage('هدف حداکثر ۵۰۰ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
   })
   .strict();
@@ -184,10 +189,13 @@ export function parseAssignForm(
   values: AssignDriverFormValues,
   driverIdValue: string,
 ): ParsedAssignForm {
-  const parsed = assignFormSchema.safeParse(values);
+  const parsed = legacyParse(assignFormSchema, values);
   if (parsed.success) return { ok: true, request: { ...parsed.data, driverId: driverIdValue } };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isAssignField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isAssignField),
+  };
 }
 
 function isAssignField(value: string): value is AssignDriverField {
@@ -260,7 +268,7 @@ export const endAssignmentFormSchema = z
     notes: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(500, 'یادداشت حداکثر ۵۰۰ نویسه است'))
+      .pipe(z.string().max(500, formMessage('یادداشت حداکثر ۵۰۰ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
   })
   .strict();
@@ -272,10 +280,13 @@ export type ParsedEndAssignmentForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<EndAssignmentField, string>> };
 
 export function parseEndAssignmentForm(values: EndAssignmentFormValues): ParsedEndAssignmentForm {
-  const parsed = endAssignmentFormSchema.safeParse(values);
+  const parsed = legacyParse(endAssignmentFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isEndAssignmentField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isEndAssignmentField),
+  };
 }
 
 function isEndAssignmentField(value: string): value is EndAssignmentField {

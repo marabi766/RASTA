@@ -1,4 +1,8 @@
+import { markRefusal } from '@rasta/config';
 import { MAX_PAGE_SIZE } from './reproject.command';
+
+/** A refused command line: reported as `command refused (code usage)` (FU-023). */
+const usage = (message: string): Error => markRefusal(new Error(message), 'usage');
 
 /**
  * The arguments of `insurance:reproject` (#240 r10). Apart from the CLI so they
@@ -26,10 +30,11 @@ export function parseReprojectArgs(argv: readonly string[]): ReprojectArgs {
     else if (flag === '--organization') args.organizationId = optionValue(argv, ++i, flag);
     else if (flag === '--page-size') args.pageSize = Number(optionValue(argv, ++i, flag));
     else if (flag === '--reissue') args.reissue = true;
-    else throw new Error(`unknown argument ${String(flag)}`);
+    // Not repeated: only an argument that matched is ever echoed (#385 r6).
+    else throw usage(`unknown argument at position ${i + 1}; it is not repeated`);
   }
   if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > MAX_PAGE_SIZE) {
-    throw new Error(`--page-size must be an integer from 1 to ${MAX_PAGE_SIZE}`);
+    throw usage(`--page-size must be an integer from 1 to ${MAX_PAGE_SIZE}`);
   }
   return args;
 }
@@ -38,7 +43,7 @@ export function parseReprojectArgs(argv: readonly string[]): ReprojectArgs {
 function optionValue(argv: readonly string[], index: number, flag: string): string {
   const value = argv[index];
   if (value === undefined || value.trim().length === 0 || value.startsWith('--')) {
-    throw new Error(`${flag} needs a value`);
+    throw usage(`${flag} needs a value`);
   }
   return value;
 }

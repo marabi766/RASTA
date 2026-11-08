@@ -32,7 +32,8 @@ initTelemetry({
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
+import { buildOrganizationOpenApiDocument } from './openapi/document';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import {
@@ -89,9 +90,10 @@ async function bootstrap(): Promise<void> {
         'x-correlation-id',
         'x-organization-id',
         'idempotency-key',
+        'idempotency-replay-deadline',
         'if-match',
       ],
-      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag'],
+      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag', 'retry-after'],
       maxAge: 600,
     });
   }
@@ -100,18 +102,7 @@ async function bootstrap(): Promise<void> {
   app.useBodyParser('json', { limit: '256kb' });
 
   if (allowsDeveloperTooling(env)) {
-    const document = SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — Organization Service')
-        .setDescription(
-          'Generic, extensible organization model and hierarchy. Deliberately knows ' +
-            'nothing about dehyaris: an organization has a type, and the type is data.',
-        )
-        .setVersion(env.SERVICE_VERSION)
-        .addBearerAuth()
-        .build(),
-    );
+    const document = buildOrganizationOpenApiDocument(app, env.SERVICE_VERSION);
     SwaggerModule.setup('docs', app, document);
   }
 

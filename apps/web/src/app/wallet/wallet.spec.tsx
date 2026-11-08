@@ -11,6 +11,9 @@ import type {
   TransactionPage,
   Wallet,
 } from '@/server/wallet';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
+import { RELEASE_TEMPLATES, releaseMessage, type ReleaseFeedbackKey } from '@/lib/release-messages';
 
 /**
  * `WalletScreen`, composing four independent reads. Mirrors
@@ -65,6 +68,7 @@ const TRANSACTIONS: TransactionPage = {
       id: 'TXN_1',
       transactionType: 'MARKETPLACE_ORDER',
       status: 'SETTLED',
+      grossAmountMinor: '1000000',
       netAmountMinor: '900000',
       currency: 'IRR',
       occurredAt: '2026-02-01T00:00:00.000Z',
@@ -90,7 +94,8 @@ function render_(
     holds?: ReadResult<HoldsPage>;
     transactions?: ReadResult<TransactionPage>;
     provider?: ReadResult<PaymentProviderDisclosure>;
-    query?: { status?: string; transactionType?: string; cursor?: string };
+    query?: { context?: string; status?: string; transactionType?: string; cursor?: string };
+    releaseOutcome?: string;
   } = {},
 ) {
   return render(
@@ -99,9 +104,10 @@ function render_(
       holds={overrides.holds ?? { kind: 'OK', data: HOLDS }}
       transactions={overrides.transactions ?? { kind: 'OK', data: TRANSACTIONS }}
       provider={overrides.provider ?? { kind: 'OK', data: PROVIDER }}
-      query={overrides.query ?? {}}
+      query={{ context: TEST_CONTEXT, ...overrides.query }}
       csrfToken="csrf-token-for-this-session"
       submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
+      releaseOutcome={overrides.releaseOutcome}
     />,
   );
 }
@@ -162,6 +168,16 @@ describe('the top-up section', () => {
     expect(container.querySelector('[name="amountMinor"]')).toBeNull();
     expect(getByText('افزایش موجودی اکنون در دسترس نیست')).toBeInTheDocument();
   });
+});
+
+describe('FU-217 the release result', () => {
+  it.each(Object.keys(RELEASE_TEMPLATES) as ReleaseFeedbackKey[])(
+    'shows %s in the top-up section',
+    (releaseOutcome) => {
+      const { getByRole } = render_({ releaseOutcome });
+      expect(getByRole('alert')).toHaveTextContent(releaseMessage(releaseOutcome, 'wallet'));
+    },
+  );
 });
 
 describe('the whole screen: «حالت نمایشی» (Q-14)', () => {
@@ -233,13 +249,85 @@ describe('transaction history', () => {
     expect(row).toHaveTextContent('تسویه‌شده');
   });
 
+  // Demo run 2026-10-24, defect 13: a transaction tied to a held order showed
+  // «۰ ریال». Zero net is right before settlement (ADR-028), so the zero stays;
+  // the gross is shown beside it, labelled, and says nothing about holds.
+  describe('a transaction that is not settled yet', () => {
+    const HELD: TransactionPage = {
+      items: [
+        {
+          ...TRANSACTIONS.items[0]!,
+          id: 'TXN_HELD',
+          status: 'HELD',
+          grossAmountMinor: '5000000',
+          netAmountMinor: '0',
+          settledAt: null,
+        },
+      ],
+      nextCursor: null,
+      hasMore: false,
+    };
+    const heldRow = (page: TransactionPage = HELD) =>
+      render_({ transactions: { kind: 'OK', data: page } }).getByRole('row', {
+        name: /سفارش بازار/,
+      });
+
+    // #824 r1, F2: the row carries economic-service's proof to the one wording of a status.
+    it.each([
+      ['false', { heldProven: false }, /وثیقه اثبات‌نشده/],
+      ['missing', {}, /وثیقه اثبات‌نشده/],
+      ['true', { heldProven: true }, /در وثیقه/],
+    ])('HELD with its proof %s reads as such', (proof, fields, wording) => {
+      const row = heldRow({ ...HELD, items: [{ ...HELD.items[0]!, ...fields }] });
+      expect(row).toHaveTextContent(wording);
+      if (proof !== 'true') expect(row.textContent).not.toContain('در وثیقه');
+    });
+
+    it('keeps the net at zero and shows the gross, labelled as the gross', () => {
+      const row = heldRow();
+      expect(row).toHaveTextContent(`${formatMoney('0')}`);
+      expect(row).toHaveTextContent(`مبلغ کل: ${formatMoney('5000000')}`);
+    });
+
+    it('never presents the gross as the net or as a verified hold', () => {
+      const row = heldRow();
+      expect(row.textContent).not.toMatch(/وثیقهٔ فعال|مبلغ خالص: /);
+      // The only «وثیقه» in the row is the status badge's own word.
+      expect(row.textContent?.match(/وثیقه/g)).toHaveLength(1);
+    });
+
+    it('explains the zero and refuses to read it as "nothing committed"', () => {
+      const { getByText } = render_({ transactions: { kind: 'OK', data: HELD } });
+      expect(getByText(/صفر به معنی «مبلغی در تعهد نیست» نیست/)).toBeInTheDocument();
+    });
+
+    it('shows a dash, never a made-up amount, when the API sent no gross', () => {
+      const row = heldRow({
+        ...HELD,
+        items: [{ ...HELD.items[0]!, grossAmountMinor: null }],
+      });
+      expect(row).toHaveTextContent('مبلغ کل: —');
+    });
+
+    it('writes a gross beyond 2^53 exactly (a string, never a number)', () => {
+      const row = heldRow({
+        ...HELD,
+        items: [{ ...HELD.items[0]!, grossAmountMinor: '9007199254740993123' }],
+      });
+      expect(row).toHaveTextContent(`مبلغ کل: ${formatMoney('9007199254740993123')}`);
+    });
+  });
+
   it('says something different when a filter matched nothing', () => {
     const empty = { kind: 'OK' as const, data: { items: [], nextCursor: null, hasMore: false } };
 
     const unfiltered = render_({ transactions: empty });
     expect(unfiltered.getByText('هیچ تراکنشی ثبت نشده')).toBeInTheDocument();
 
-    const filtered = render_({ transactions: empty, query: { status: 'DISPUTED' } });
+    const filtered = render_({
+      transactions: empty,
+      query: { context: TEST_CONTEXT, status: 'DISPUTED' },
+    });
     expect(filtered.getByText('چیزی با این پالایش پیدا نشد')).toBeInTheDocument();
   });
 
@@ -249,11 +337,11 @@ describe('transaction history', () => {
 
     const { getByRole } = render_({
       transactions: { kind: 'OK', data: { ...TRANSACTIONS, hasMore: true, nextCursor: 'CUR_2' } },
-      query: { status: 'SETTLED' },
+      query: { context: TEST_CONTEXT, status: 'SETTLED' },
     });
     expect(getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/wallet?status=SETTLED&cursor=CUR_2',
+      withContext(TEST_CONTEXT, '/wallet?status=SETTLED&cursor=CUR_2'),
     );
   });
 
@@ -270,4 +358,25 @@ describe('accessibility', () => {
     const { container } = render_();
     expect(await axe(container)).toHaveNoViolations();
   });
+});
+
+// prettier-ignore
+it('F1: remounts for a server-held record and after its release', () => {
+  const screen = (submissionId: string, held: boolean, providerOk = true) => <WalletScreen
+    wallet={{ kind: 'OK', data: WALLET }} holds={{ kind: 'OK', data: HOLDS }}
+    transactions={{ kind: 'OK', data: TRANSACTIONS }}
+    provider={providerOk ? { kind: 'OK', data: PROVIDER } : { kind: 'UNAVAILABLE', status: 503, correlationId: 'down' }}
+    query={{ context: TEST_CONTEXT }} csrfToken="csrf" submissionId={submissionId}
+    topUpState={held ? { kind: 'HELD', submissionId, values: { amountMinor: '1000' }, releaseToken: 'signed-record' } : { kind: 'IDLE' }}
+  />;
+  const view = render(screen('held-key', false));
+  view.rerender(screen('held-key', true));
+  expect(view.getByRole('button', { name: /افزایش موجودی نمایشی/ })).toBeDisabled();
+  expect(view.getByRole('checkbox', { name: /دوباره افزایش دهد/ })).toBeRequired();
+  expect(view.container.querySelector('form form')).toBeNull();
+  view.rerender(screen('held-key', true, false));
+  expect(view.getByRole('checkbox', { name: /دوباره افزایش دهد/ })).toBeRequired();
+  expect(view.container.querySelector('[name="amountMinor"]')).toBeNull();
+  view.rerender(screen('fresh-key', false));
+  expect(view.getByRole('button', { name: /افزایش موجودی نمایشی/ })).toBeEnabled();
 });

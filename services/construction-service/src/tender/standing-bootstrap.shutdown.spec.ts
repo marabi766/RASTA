@@ -130,3 +130,31 @@ describe('StandingBootstrap shutdown (Codex on #277, finding 3)', () => {
     await first;
   });
 });
+
+it('a redirect on snapshot page 2 preserves the page-1 cursor and never completes bootstrap', async () => {
+  const { SupplierSnapshotClient } = await import('./supplier-snapshot.client');
+  const { withRedirectProbe } = await import('@rasta/testing');
+  const { InternalTokenService } = await import('@rasta/nest-common');
+  const { randomBytes } = await import('node:crypto');
+  await withRedirectProbe({ firstPage: page(1, true), body: page(2, false) }, async (probe) => {
+    const source = new SupplierSnapshotClient(
+      {
+        SUPPLIER_SERVICE_URL: probe.baseUrl,
+        CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: 2000,
+      } as never,
+      new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
+    );
+    const { bootstrap, committed, prisma } = setup(source.fetchPage.bind(source));
+    await expect(bootstrap.runOnce()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    expect(committed).toEqual(['c1']);
+    expect(prisma.transaction).toHaveBeenCalledTimes(1);
+    expect(probe.sent).toHaveLength(2);
+    expect(probe.sent[1].url).toContain('cursor=c1');
+    expect(probe.target).toEqual([]);
+    // The same incomplete marker causes the next attempt to resume that page.
+    probe.recover();
+    await expect(bootstrap.runOnce()).resolves.toBe('LOADED');
+    expect(probe.sent[2].url).toContain('cursor=c1');
+    expect(committed).toEqual(['c1', 'c1']);
+  });
+});

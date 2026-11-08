@@ -2,6 +2,8 @@ import { ApplicationFailure } from '@temporalio/activity';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { createActivities, type OrderActivities } from '../src/temporal/activities';
+import { SagaStartStore } from '../src/temporal/saga-start.store';
+import { OrderRepository } from '../src/order/order.repository';
 import { EconomicClient, OBLIGATION_LOOKUP_PAGES } from '../src/economic/economic.client';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import {
@@ -10,6 +12,7 @@ import {
   key,
   newPrisma,
   publishOffer,
+  resolveOpenDispute,
   sagaStep,
   settledResult,
   tenants,
@@ -89,6 +92,8 @@ describe('order saga activities (real database)', () => {
 
     const economic = {
       createObligation: method('createObligation', { id: `TXN_${ulid().slice(-8)}` }),
+      // economic-service with the D-150 rule, which the row's proof needs (FU-233).
+      requiresOrderHoldDeadline: async () => true,
       authoriseSettlement: method('authoriseSettlement', undefined),
       settle: method('settle', {
         settlementId: `STL_${ulid().slice(-8)}`,
@@ -121,7 +126,11 @@ describe('order saga activities (real database)', () => {
   }
 
   /** A real PENDING order, placed through the real service by a real buyer. */
-  async function placeOrder(): Promise<{ orderId: string; correlationId: string }> {
+  async function placeOrder(): Promise<{
+    orderId: string;
+    correlationId: string;
+    offerId: string;
+  }> {
     const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '500000' });
 
     const order = await asActor(
@@ -133,8 +142,15 @@ describe('order saga activities (real database)', () => {
       prisma.client.order.findUniqueOrThrow({ where: { id: order.id } }),
     );
 
-    return { orderId: order.id, correlationId: row.correlationId };
+    return { orderId: order.id, correlationId: row.correlationId, offerId };
   }
+
+  const availableOf = async (offerId: string): Promise<number> =>
+    (
+      await runUnscoped('the suite reads what the offer has left', () =>
+        prisma.client.offer.findUniqueOrThrow({ where: { id: offerId } }),
+      )
+    ).availableQuantity;
 
   // -------------------------------------------------------------------------
 
@@ -301,7 +317,7 @@ describe('order saga activities (real database)', () => {
 
     it('marks an insufficient balance non-retryable', async () => {
       const caught = (await failWith(
-        RastaError.insufficientBalance('WAL_1', '500000', '10'),
+        RastaError.insufficientBalance('WAL_1'),
       )) as ApplicationFailure;
 
       expect(caught.nonRetryable).toBe(true);
@@ -394,6 +410,9 @@ describe('order saga activities (real database)', () => {
       expect(calls.map((c) => c.method)).toEqual([
         'createObligation',
         'readObligation',
+        // Outside a worker no attempt can be named, so it counts as a retry: in
+        // doubt, the obligation is asked before anything is sent (FU-178).
+        'readObligation',
         'authoriseSettlement',
         'settle',
       ]);
@@ -412,6 +431,42 @@ describe('order saga activities (real database)', () => {
         prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
       );
       expect(row.status).toBe('FAILED');
+    });
+
+    it('a hold given up on, nobody having cancelled: the stock comes back, an attempt running on sends nothing, and a late hold is still refunded', async () => {
+      const { orderId, offerId } = await placeOrder();
+      const reserved = await availableOf(offerId);
+      const { calls, economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+
+      await expect(acts.markFailed(orderId, 'INSUFFICIENT_BALANCE')).resolves.toBe('FAILED');
+      expect(await availableOf(offerId)).toBe(reserved + 1);
+
+      await expect(acts.createObligation(orderId)).rejects.toMatchObject({
+        type: 'ORDER_ALREADY_CLOSED',
+      });
+      expect(calls.some((c) => c.method === 'createObligation')).toBe(false);
+
+      await acts.compensate(orderId, 'TXN_LATE', 'A hold arrived after the saga gave up', true);
+      const refund = calls.find((c) => c.method === 'refund');
+      expect(refund?.input.transactionId).toBe('TXN_LATE');
+    });
+
+    it('a hold given up on, the buyer having cancelled: the failure yields, and closing returns the stock once', async () => {
+      const { orderId, offerId } = await placeOrder();
+      const reserved = await availableOf(offerId);
+      const { economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+      await asActor(
+        { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
+        () => wiring.orders.cancel(orderId, { reason: 'no longer needed' }),
+      );
+
+      await expect(acts.markFailed(orderId, 'INSUFFICIENT_BALANCE')).resolves.toBe('CANCELLING');
+      expect(await availableOf(offerId)).toBe(reserved);
+
+      await acts.markCancelled(orderId, 'no longer needed');
+      expect(await availableOf(offerId)).toBe(reserved + 1);
     });
 
     it('returns the held funds and cancels, in the order the saga does it', async () => {
@@ -487,6 +542,165 @@ describe('order saga activities (real database)', () => {
       // Keyed by the dispute, so a second dispute on this order is its own call.
       expect(calls[2].input.disputeId).toBe(dispute!.id);
       expect(calls[3].input.disputeId).toBe(dispute!.id);
+    });
+
+    const openReleases = async (orderId: string) =>
+      (await new SagaStartStore(prisma).openUnconfirmedCalls(1_000_000)).calls.filter(
+        (call) => call.orderId === orderId && call.operation === 'resolveObligationDispute',
+      ).length;
+
+    it('holds a told dispute on record, decided or not, until the release is confirmed (FU-104)', async () => {
+      const { orderId } = await placeOrder();
+      const { economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+
+      const held = await acts.createObligation(orderId);
+      await acts.markFundsHeld(orderId, held.transactionId);
+      await asActor(
+        { organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-ACT-SUP' },
+        () => wiring.orders.confirm(orderId),
+      );
+      await asActor(
+        { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
+        () => wiring.orders.raiseDispute(orderId, { reason: 'the part does not fit' }),
+      );
+      const { dispute } = await acts.readOrder(orderId);
+      expect(await openReleases(orderId)).toBe(0);
+      await acts.disputeObligation(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'the part does not fit',
+      );
+      expect(await openReleases(orderId)).toBe(1);
+
+      await asActor(
+        { organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-ACT-OPS' },
+        () =>
+          resolveOpenDispute(wiring, orderId, {
+            outcome: 'REFUND',
+            resolution: 'the part does not fit',
+            responsibility: 'SUPPLIER',
+          }),
+      );
+      // No saga has called: the decision closes nothing.
+      expect(await openReleases(orderId)).toBe(1);
+
+      await acts.resolveObligationDispute(orderId, held.transactionId, dispute!.id, 'REFUND');
+      expect(await openReleases(orderId)).toBe(0);
+    });
+
+    /** A decided dispute economic-service was told of, as the saga has it at the release. */
+    async function decidedRelease() {
+      const { orderId } = await placeOrder();
+      const { economic } = stubEconomic();
+      const acts = activitiesWith(economic);
+      const held = await acts.createObligation(orderId);
+      await acts.markFundsHeld(orderId, held.transactionId);
+      await asActor(
+        { organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-ACT-SUP' },
+        () => wiring.orders.confirm(orderId),
+      );
+      await asActor(
+        { organizationId: org.buyer, roles: ['PROCUREMENT_USER'], userId: 'USR-ACT-BUYER' },
+        () => wiring.orders.raiseDispute(orderId, { reason: 'the part does not fit' }),
+      );
+      const { dispute } = await acts.readOrder(orderId);
+      await acts.disputeObligation(
+        orderId,
+        held.transactionId,
+        dispute!.id,
+        'the part does not fit',
+      );
+      await asActor(
+        { organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-ACT-OPS' },
+        () =>
+          resolveOpenDispute(wiring, orderId, {
+            outcome: 'REFUND',
+            resolution: 'the part does not fit',
+            responsibility: 'SUPPLIER',
+          }),
+      );
+      const count = () => openReleases(orderId);
+      return { orderId, transactionId: held.transactionId, disputeId: dispute!.id, count };
+    }
+
+    // A newer dispute there, and the first command's stored answer long expired.
+    const refusingEconomic = (orderId: string, transactionId: string) =>
+      stubEconomic({
+        resolveDispute: async () => {
+          throw new RastaError('INVALID_STATE_TRANSITION', 'held by another dispute');
+        },
+        readObligation: async () =>
+          obligation(orderId, {
+            id: transactionId,
+            status: 'DISPUTED',
+            disputeId: 'TXD_NEWER',
+            disputedAt: new Date().toISOString(),
+          }),
+      }).economic;
+
+    it('a retry past a confirmed release is back on record when it is refused (#769 r1 F3)', async () => {
+      const { orderId, transactionId, disputeId, count } = await decidedRelease();
+      const before = await count();
+      const step = sagaStep();
+      const attempt = (economic: EconomicClient) =>
+        createActivities({
+          orders: wiring.orders,
+          economic,
+          currentStep: () => step,
+        }).resolveObligationDispute(orderId, transactionId, disputeId, 'REFUND', 'TXD_STUB');
+
+      // It succeeds, its receipt is lost, the confirmation persists, and Temporal
+      // never hears: the same step runs again, with nothing recorded to answer it.
+      const lost = jest
+        .spyOn(OrderRepository.prototype, 'recordSagaStep')
+        .mockRejectedValueOnce(new Error('connection lost'));
+      try {
+        await attempt(stubEconomic().economic);
+      } finally {
+        lost.mockRestore();
+      }
+      expect(await count()).toBe(before - 1);
+
+      await expect(attempt(refusingEconomic(orderId, transactionId))).rejects.toThrow();
+      expect(await count()).toBe(before);
+
+      // Answered at last, it closes again.
+      await attempt(stubEconomic().economic);
+      expect(await count()).toBe(before - 1);
+    });
+
+    it('an overtaken attempt confirming late does not close a newer refused one (#769 r1 F3)', async () => {
+      const { orderId, transactionId, disputeId, count } = await decidedRelease();
+      const before = await count();
+      let answer!: () => void;
+      let reached!: () => void;
+      const calling = new Promise<void>((resolve) => (reached = resolve));
+      const slow = stubEconomic({
+        resolveDispute: () =>
+          new Promise((resolve) => {
+            answer = () => resolve(undefined);
+            reached();
+          }),
+      }).economic;
+      const attempt = (economic: EconomicClient) =>
+        activitiesWith(economic).resolveObligationDispute(
+          orderId,
+          transactionId,
+          disputeId,
+          'REFUND',
+          'TXD_STUB',
+        );
+
+      const overtaken = attempt(slow);
+      await calling;
+      await expect(attempt(refusingEconomic(orderId, transactionId))).rejects.toThrow();
+
+      answer();
+      await overtaken;
+
+      expect(await count()).toBe(before);
     });
 
     it('records a settlement that will not complete, without moving money', async () => {
@@ -710,6 +924,7 @@ describe('order saga activities (real database)', () => {
       counterpartyOrganizationId: org.supplier,
       transactionType: 'MARKETPLACE_ORDER',
       status: 'HELD',
+      heldProven: true,
       grossAmountMinor: '500000',
       commissionAmountMinor: '0',
       netAmountMinor: '500000',
@@ -726,6 +941,12 @@ describe('order saga activities (real database)', () => {
       globalThis.fetch = original;
     });
 
+    /** The capability question, answered as the D-150 release does (FU-233). */
+    const capabilities = (url: string): Response | undefined =>
+      new URL(url).pathname === '/v1/transactions/capabilities'
+        ? new Response(JSON.stringify({ heldProven: true, orderHoldDeadlineRequired: true }))
+        : undefined;
+
     /**
      * economic-service without the reservation (main before #334), over HTTP
      * to the real `EconomicClient`: the buyer's administrator's row already
@@ -741,6 +962,8 @@ describe('order saga activities (real database)', () => {
       const requests: string[] = [];
       const queries: Record<string, string>[] = [];
       globalThis.fetch = (async (url: string, init: RequestInit) => {
+        const capable = capabilities(url);
+        if (capable) return capable;
         const asked = new URL(url);
         requests.push(`${init.method} ${asked.pathname}`);
         const [status, body] =
@@ -754,11 +977,7 @@ describe('order saga activities (real database)', () => {
                 },
               ]
             : [200, listed(rows, Object.fromEntries(asked.searchParams), queries)];
-        return {
-          ok: status < 300,
-          status,
-          text: async () => JSON.stringify(body),
-        } as Response;
+        return new Response(JSON.stringify(body), { status });
       }) as typeof fetch;
       const economic = new EconomicClient(
         {
@@ -792,9 +1011,11 @@ describe('order saga activities (real database)', () => {
     function economicLostAnswer(rows: Record<string, unknown>[]) {
       const queries: Record<string, string>[] = [];
       globalThis.fetch = (async (url: string, init: RequestInit) => {
+        const capable = capabilities(url);
+        if (capable) return capable;
         if (init.method === 'POST') throw new TypeError('fetch failed');
         const body = listed(rows, Object.fromEntries(new URL(url).searchParams), queries);
-        return { ok: true, status: 200, text: async () => JSON.stringify(body) } as Response;
+        return new Response(JSON.stringify(body), { status: 200 });
       }) as typeof fetch;
       const economic = new EconomicClient(
         {
@@ -894,7 +1115,7 @@ describe('order saga activities (real database)', () => {
       globalThis.fetch = (async () => {
         pages += 1;
         const body = { items: [], nextCursor: `C${pages}`, hasMore: true };
-        return { ok: true, status: 200, text: async () => JSON.stringify(body) } as Response;
+        return new Response(JSON.stringify(body), { status: 200 });
       }) as typeof fetch;
       const economic = new EconomicClient(
         {
@@ -983,6 +1204,106 @@ describe('order saga activities (real database)', () => {
       const { economic } = economicHolding([decoy, own]);
       await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
         transactionId: own.id,
+      });
+    });
+
+    // #762 r3, F2: the reviewer's probe. Every term equal, the status HELD, and nothing in
+    // escrow: unresolved history. Only an answer stops the saga (a missing one: below).
+    describe.each([
+      ['economic-service says it is not proven', false],
+      ['economic-service answers a word for yes', 'true'],
+    ])('HELD, and %s', (_case, heldProven) => {
+      async function nothingAdopted(orderId: string) {
+        const order = await runUnscoped('the suite reads the order', () =>
+          prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+        );
+        expect(order.status).toBe('PENDING');
+        expect(order.economicTransactionId).toBeNull();
+        const announced = await runUnscoped('the suite reads the outbox', () =>
+          prisma.client.outboxMessage.count({
+            where: { aggregateId: orderId, eventName: 'ORDER_FUNDS_HELD' },
+          }),
+        );
+        expect(announced).toBe(0);
+      }
+
+      it('findObligation answers not held, as a restored row does', async () => {
+        const { orderId } = await placeOrder();
+        const own = obligation(orderId, { heldProven });
+        const { economic } = economicHolding([own]);
+        await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
+          notHeld: true,
+          transactionId: own.id,
+          status: 'HELD',
+          funds: 'UNPROVEN',
+        });
+        await nothingAdopted(orderId);
+      });
+
+      it('createObligation adopts nothing from the stored answer', async () => {
+        const { orderId } = await placeOrder();
+        const { economic } = economicHolding([]);
+        Object.assign(economic, {
+          createObligation: async () => ({ id: 'TXN_STORED', status: 'HELD', heldProven: true }),
+          readObligation: async () => obligation(orderId, { id: 'TXN_STORED', heldProven }),
+        });
+        await expect(activitiesWith(economic).createObligation(orderId)).rejects.toMatchObject({
+          type: 'OBLIGATION_NOT_HELD',
+          nonRetryable: true,
+        });
+        await nothingAdopted(orderId);
+      });
+    });
+
+    // #824 r1, F3: the hold exists, and an older economic-service does not speak of proof.
+    // Retried (never `nonRetryable`), nothing adopted, and carried on once it does.
+    describe('HELD, from an economic-service too old to say whether it is proven', () => {
+      const WAITS = { type: 'ECONOMIC_HELD_PROOF_UNAVAILABLE', nonRetryable: false };
+      const pending = async (orderId: string) =>
+        expect(
+          await runUnscoped('the suite reads the order', () =>
+            prisma.client.order.findUniqueOrThrow({ where: { id: orderId } }),
+          ),
+        ).toMatchObject({ status: 'PENDING', economicTransactionId: null });
+
+      it('findObligation waits, and answers once economic-service is upgraded', async () => {
+        const { orderId } = await placeOrder();
+        const own = obligation(orderId);
+        const { heldProven: _proof, ...older } = own;
+        const acts = activitiesWith(economicHolding([older]).economic);
+        await expect(acts.findObligation(orderId)).rejects.toMatchObject(WAITS);
+        await pending(orderId);
+
+        const upgraded = activitiesWith(economicHolding([own]).economic);
+        await expect(upgraded.findObligation(orderId)).resolves.toEqual({
+          transactionId: own.id,
+        });
+      });
+
+      it('createObligation waits after the hold exists: retried, and nothing adopted', async () => {
+        const { orderId } = await placeOrder();
+        const { economic } = economicHolding([]);
+        const { heldProven: _proof, ...older } = obligation(orderId, { id: 'TXN_OLD' });
+        Object.assign(economic, {
+          createObligation: async () => ({ id: 'TXN_OLD', status: 'HELD' }),
+          readObligation: async () => older,
+        });
+        await expect(activitiesWith(economic).createObligation(orderId)).rejects.toMatchObject(
+          WAITS,
+        );
+        await pending(orderId);
+      });
+    });
+
+    it('the restored control still answers not held, whatever proof it carries', async () => {
+      const { orderId } = await placeOrder();
+      const own = obligation(orderId, { status: 'PENDING_SETTLEMENT', heldProven: true });
+      const { economic } = economicHolding([own]);
+      await expect(activitiesWith(economic).findObligation(orderId)).resolves.toEqual({
+        notHeld: true,
+        transactionId: own.id,
+        status: 'PENDING_SETTLEMENT',
+        funds: 'UNPROVEN',
       });
     });
 

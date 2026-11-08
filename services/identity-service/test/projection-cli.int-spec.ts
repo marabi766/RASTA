@@ -1,9 +1,12 @@
 import { withUtcSession } from '@rasta/config';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
+import { PrismaClient } from '../src/generated/prisma';
 import { databaseUrl } from './helpers';
 
 /**
@@ -14,13 +17,19 @@ import { databaseUrl } from './helpers';
  * neither of the service's gates — main.ts's preflight, AppModule's check —
  * stands in front of it. Pointed at the migrator, it would read identity data
  * and write Keycloak attributes as the database owner. It now runs
- * `preflightRuntimeRole` itself. This runs the real CLI, as the package script
- * does, against a stub Keycloak that counts the requests it receives: with the
- * migrator's URL the process exits 2 naming the role — never the URL — and
- * Keycloak is never called; with the runtime URL it gets past the gate.
+ * `preflightRuntimeRole` itself, after the environment guard. This runs the
+ * real CLI, as the package script does, against a stub Keycloak that counts
+ * the requests it receives: with the migrator's URL the process exits 2 at the
+ * environment guard, which reads the URL's user (#421 r1 F2); as the runtime
+ * role holding CREATE — which no URL shows — it exits 2 at the preflight,
+ * with closed diagnostics and Keycloak is never called. With the
+ * runtime URL alone it gets past both gates.
  */
 const SERVICE_DIR = join(__dirname, '..');
 const RUN_TIMEOUT_MS = 90_000;
+const PREFLIGHT_MARKER = 'probe: runtime-role preflight invoked';
+let hookDirectory: string;
+let preflightHook: string;
 
 function migratorUrl(): string {
   const url = process.env.DATABASE_URL_IDENTITY_MIGRATOR;
@@ -64,7 +73,14 @@ function runCli(mode: 'backfill' | 'reconcile', url: string, keycloakUrl: string
   return new Promise((done, fail) => {
     const child = spawn(
       process.execPath,
-      ['-r', '@swc-node/register', 'src/keycloak/projection.cli.ts', mode],
+      [
+        '--require',
+        preflightHook,
+        '-r',
+        '@swc-node/register',
+        'src/keycloak/projection.cli.ts',
+        mode,
+      ],
       { cwd: SERVICE_DIR, env },
     );
     let output = '';
@@ -87,6 +103,25 @@ describe('the Keycloak projection CLI runs only as the runtime role (D-045)', ()
   let requests = 0;
 
   beforeAll(async () => {
+    // Delegate to the real preflight/driver. The marker proves the environment
+    // guard refuses before database I/O, even though both refusals now share text.
+    hookDirectory = mkdtempSync(join(tmpdir(), 'projection-cli-preflight-'));
+    preflightHook = join(hookDirectory, 'preflight.cjs');
+    writeFileSync(
+      preflightHook,
+      `
+      const Module = require('node:module');
+      const load = Module._load;
+      Module._load = function(id, ...args) {
+        const loaded = load.call(this, id, ...args);
+        if (id !== '@rasta/nest-common') return loaded;
+        return { ...loaded, preflightRuntimeRole(...args) {
+          process.stderr.write(${JSON.stringify(PREFLIGHT_MARKER + '\n')});
+          return loaded.preflightRuntimeRole(...args);
+        } };
+      };
+    `,
+    );
     // Answers nothing useful: a run that reached it would fail later, but the
     // count is what matters — the refused run must not reach it at all.
     keycloak = createServer((_request, response) => {
@@ -98,6 +133,7 @@ describe('the Keycloak projection CLI runs only as the runtime role (D-045)', ()
   });
 
   afterAll(async () => {
+    rmSync(hookDirectory, { recursive: true, force: true });
     await new Promise((closed) => keycloak.close(closed));
   });
 
@@ -106,18 +142,40 @@ describe('the Keycloak projection CLI runs only as the runtime role (D-045)', ()
   });
 
   it.each(['backfill', 'reconcile'] as const)(
-    '%s with the migrator URL exits 2 naming the role, before it reads a row or calls Keycloak',
+    '%s with the migrator URL exits 2 at the environment guard, before it reads a row or calls Keycloak',
     async (mode) => {
       const owner = migratorUrl();
       const run = await runCli(mode, owner, keycloakUrl);
 
       expect(run.code).toBe(2);
-      expect(run.output).toMatch(
-        /identity-service refuses to start: it is connected as rasta_identity_migrator/,
-      );
-      // The refusal names the role and what it owns — never the URL or its password.
+      expect(run.output).toMatch(/command refused \(code owner-credential\); diagnostics withheld/);
+      expect(run.output).not.toContain(PREFLIGHT_MARKER);
+      // Closed diagnostics: no URL or password survives.
       expect(run.output).not.toContain(owner);
       expect(run.output).not.toContain(decodeURIComponent(new URL(owner).password));
+      expect(requests).toBe(0);
+    },
+    RUN_TIMEOUT_MS + 10_000,
+  );
+
+  it.each(['backfill', 'reconcile'] as const)(
+    '%s as the runtime role holding CREATE exits 2 at the preflight with closed diagnostics, before it reads a row or calls Keycloak',
+    async (mode) => {
+      // Only the catalogue shows it: the URL is the runtime role's own.
+      const owner = new PrismaClient({ datasources: { db: { url: migratorUrl() } } });
+      let run: CliRun;
+      try {
+        await owner.$executeRawUnsafe('GRANT CREATE ON SCHEMA public TO rasta_identity');
+        run = await runCli(mode, databaseUrl(), keycloakUrl);
+      } finally {
+        await owner.$executeRawUnsafe('REVOKE CREATE ON SCHEMA public FROM rasta_identity');
+        await owner.$disconnect();
+      }
+
+      expect(run.code).toBe(2);
+      expect(run.output).toMatch(/command refused \(code runtime-role\); diagnostics withheld/);
+      expect(run.output).toContain(PREFLIGHT_MARKER);
+      expect(run.output).not.toContain(databaseUrl());
       expect(requests).toBe(0);
     },
     RUN_TIMEOUT_MS + 10_000,
@@ -128,6 +186,7 @@ describe('the Keycloak projection CLI runs only as the runtime role (D-045)', ()
     async () => {
       const run = await runCli('backfill', databaseUrl(), keycloakUrl);
 
+      expect(run.output).toContain(PREFLIGHT_MARKER);
       expect(run.output).not.toMatch(/refuses to start/);
       // Past the gate it either finds nothing to project (exit 0) or reaches
       // Keycloak, which this stub refuses: either way it ran as the runtime role.

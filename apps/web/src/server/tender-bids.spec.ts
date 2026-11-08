@@ -28,6 +28,11 @@ import {
 } from './tender-bids';
 import type { ReadResult } from './assets';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * The bid module: what it reads, who it offers each form to — the copy of
@@ -43,7 +48,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const CONTENT = {
   priceMinor: '4200000000',
@@ -66,7 +71,7 @@ function problem(status: number, code: string, details?: { path: string; code: s
   });
 }
 
-const contractor = bidderCallerOf(tokenFor(BIDDER, ['CONTRACTOR']));
+const contractor = bidderCallerOf(pinnedTokens(tokenFor(BIDDER, ['CONTRACTOR'])));
 const tender: ReadResult<typeof OPEN_TENDER> = { kind: 'OK', data: OPEN_TENDER };
 const own = (data: typeof RECEIPT): ReadResult<typeof RECEIPT> => ({ kind: 'OK', data });
 const NO_BID: ReadResult<typeof RECEIPT> = { kind: 'NOT_FOUND' };
@@ -109,19 +114,27 @@ describe('who is a bidder — assertCanBid', () => {
   });
 
   it('never with the platform administrator or the oversight role, even alongside CONTRACTOR', () => {
-    expect(canBid(bidderCallerOf(tokenFor(BIDDER, ['CONTRACTOR', 'AUDITOR'])))).toBe(false);
+    expect(canBid(bidderCallerOf(pinnedTokens(tokenFor(BIDDER, ['CONTRACTOR', 'AUDITOR']))))).toBe(
+      false,
+    );
     expect(
-      canBid(bidderCallerOf(tokenFor(BIDDER, ['CONTRACTOR'], { realm: ['SYSTEM_ADMIN'] }))),
+      canBid(
+        bidderCallerOf(pinnedTokens(tokenFor(BIDDER, ['CONTRACTOR'], { realm: ['SYSTEM_ADMIN'] }))),
+      ),
     ).toBe(false);
   });
 
   it('not without CONTRACTOR, and not from a token that cannot be read', () => {
-    expect(canBid(bidderCallerOf(tokenFor(BIDDER, ['ORGANIZATION_ADMIN'])))).toBe(false);
-    expect(canBid(bidderCallerOf('not-a-token'))).toBe(false);
+    expect(canBid(bidderCallerOf(pinnedTokens(tokenFor(BIDDER, ['ORGANIZATION_ADMIN']))))).toBe(
+      false,
+    );
+    expect(canBid(bidderCallerOf(pinnedTokens('not-a-token')))).toBe(false);
   });
 
   it('a person without a platform user id still bids: the actor falls back to the subject', () => {
-    expect(canBid(bidderCallerOf(tokenFor(BIDDER, ['CONTRACTOR'], { uid: false })))).toBe(true);
+    expect(
+      canBid(bidderCallerOf(pinnedTokens(tokenFor(BIDDER, ['CONTRACTOR'], { uid: false })))),
+    ).toBe(true);
   });
 });
 
@@ -186,7 +199,7 @@ describe('which forms are offered', () => {
   });
 
   it('nothing to a caller that is no bidder, or on a tender the bidder’s door does not show', () => {
-    const owner = bidderCallerOf(tokenFor('ORG-DEH-0001', ['ORGANIZATION_ADMIN']));
+    const owner = bidderCallerOf(pinnedTokens(tokenFor('ORG-DEH-0001', ['ORGANIZATION_ADMIN'])));
     expect(bidOffers(owner, tender, null, DURING).offers).toEqual([]);
     expect(bidOffers(contractor, { kind: 'NOT_FOUND' }, own(RECEIPT), DURING).offers).toEqual([]);
   });
@@ -317,7 +330,7 @@ describe('what every answer becomes', () => {
     }
   });
 
-  it('a second bid, a stale form and an unknown refusal each have their fixed sentence', async () => {
+  it('a second bid and a stale form have their fixed sentence; an undocumented code is unconfirmed', async () => {
     const second = await send(
       submit,
       jest.fn(async () => problem(409, 'ALREADY_EXISTS')),
@@ -332,7 +345,14 @@ describe('what every answer becomes', () => {
       submit,
       jest.fn(async () => problem(422, 'SOMETHING_NEW')),
     );
-    expect(odd).toMatchObject({ kind: 'INVALID', message: BID_REFUSAL_FALLBACK });
+    // Not a documented refusal: nothing proves the bid was not written (PR-830 r1 F1).
+    expect(odd.kind).toBe('UNKNOWN_OUTCOME');
+    // A documented refusal whose reason this portal has no sentence for: the fixed fallback.
+    const unnamed = await send(
+      submit,
+      jest.fn(async () => problem(409, 'INVALID_STATE_TRANSITION')),
+    );
+    expect(unnamed).toMatchObject({ kind: 'INVALID', message: BID_REFUSAL_FALLBACK });
   });
 
   it('places a field error on the form row it came from', async () => {

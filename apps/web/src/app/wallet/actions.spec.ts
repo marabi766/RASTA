@@ -2,10 +2,27 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
-import { IDLE_TOP_UP_FORM } from './form-state';
+import WalletPage from './page';
+import { CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE, IDLE_TOP_UP_FORM } from './form-state';
+import { restoreTopUp, topUpScope } from '@/server/top-up-request';
+import {
+  purgeUnresolved,
+  releaseUnresolved,
+  useUnresolvedStore,
+} from '@/server/unresolved-request';
+import {
+  memoryUnresolvedStore,
+  UnresolvedStoreUnavailable,
+} from '@/server/unresolved-request-store';
+import { pageContext } from '@/server/page-context';
+import { releaseFeedback } from '@/server/release-feedback';
+import { claimsOf, withoutExpiry } from '@/test/minted-tokens';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * `/wallet`'s one write path — the same order-of-checks suite as
@@ -23,6 +40,15 @@ Object.assign(process.env, {
 
 const currentSession = jest.fn();
 const topUpWallet = jest.fn();
+const mayDispatch = jest.fn();
+let snapshotOverride: string | undefined;
+jest.mock('@/server/top-up-request', () => {
+  const actual = jest.requireActual('@/server/top-up-request');
+  return {
+    ...actual,
+    topUpSnapshot: (...args: unknown[]) => snapshotOverride ?? actual.topUpSnapshot(...args),
+  };
+});
 const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
 });
@@ -34,21 +60,30 @@ jest.mock('@/server/current-session', () => ({
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
 // The provider gate is open here: what it refuses, against a fake gateway, is
 // `app/money-actions-gate.spec.ts`.
-jest.mock('@/server/money-gate', () => ({ mayDispatch: async () => true }));
+jest.mock('@/server/money-gate', () => ({
+  mayDispatch: (...args: unknown[]) => mayDispatch(...args),
+}));
 jest.mock('@/server/wallet', () => {
   const actual = jest.requireActual('@/server/wallet');
-  return { ...actual, topUpWallet: (...args: unknown[]) => topUpWallet(...args) };
+  return {
+    ...actual,
+    topUpWallet: (...args: unknown[]) => topUpWallet(...args),
+    fetchWallet: async () => ({ kind: 'OK', data: { id: 'WLT_1' } }),
+    fetchHolds: async () => ({ kind: 'OK', data: {} }),
+    fetchTransactions: async () => ({ kind: 'OK', data: {} }),
+    fetchPaymentProvider: async () => ({ kind: 'OK', data: {} }),
+  };
 });
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const actions = require('./actions') as typeof import('./actions');
-const { submitTopUp } = actions;
+const { submitTopUp, releaseUnresolvedTopUp } = actions;
 
 const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -56,6 +91,7 @@ const SESSION = {
 } satisfies WebSession;
 
 const WALLET_ID = 'WLT_1';
+const WALLET_SUBJECT = { surface: 'wallet', target: WALLET_ID } as const;
 
 function formData(
   fields: Record<string, string>,
@@ -72,8 +108,11 @@ function formData(
 }
 
 beforeEach(() => {
+  snapshotOverride = undefined;
+  useUnresolvedStore(memoryUnresolvedStore());
+  mayDispatch.mockReset().mockResolvedValue(true);
   currentSession.mockResolvedValue(SESSION);
-  topUpWallet.mockResolvedValue({
+  topUpWallet.mockReset().mockResolvedValue({
     kind: 'CREATED',
     data: { paymentIntentId: 'PI_1', transactionId: 'TXN_1' },
     correlationId: 'corr-sample',
@@ -160,11 +199,11 @@ describe('topping up — the full order of checks', () => {
     );
   });
 
-  it('redirects to /wallet with ?toppedUp=1 after a successful top-up', async () => {
+  it('redirects to /wallet — with no flag the page never read — after a successful top-up', async () => {
     await expect(
       submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000000' })),
     ).rejects.toThrow(/NEXT_REDIRECT/);
-    expect(redirect).toHaveBeenCalledWith('/wallet?toppedUp=1');
+    expect(redirect).toHaveBeenCalledWith('/wallet');
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {
@@ -176,6 +215,30 @@ describe('topping up — the full order of checks', () => {
 
     const ids = topUpWallet.mock.calls.map((args) => args[3]);
     expect(ids).toEqual([submission, submission]);
+  });
+
+  it('keeps the first correlation, key and amount on an unconfirmed retry without resending (FU-173/FU-190)', async () => {
+    // The first answer was lost. Reconciliation-only policy withholds the retry;
+    // #880's boundary keeps its first correlation, held key and held values.
+    topUpWallet.mockReset();
+    topUpWallet
+      .mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-first' })
+      .mockResolvedValueOnce({
+        kind: 'UNAVAILABLE',
+        status: 429,
+        code: 'RATE_LIMIT_EXCEEDED',
+        correlationId: 'corr-retry',
+      });
+    const form = formData({ amountMinor: '1000000' });
+    const first = await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, form);
+    expect(first).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-first',
+      submissionId: form.get(SUBMISSION_FIELD),
+      values: { amountMinor: '1000000' },
+    });
+    expect(await submitTopUp(WALLET_ID, first, form)).toEqual(first);
+    expect(topUpWallet).toHaveBeenCalledTimes(1);
   });
 
   it('returns the service refusal as a banner', async () => {
@@ -192,5 +255,469 @@ describe('topping up — the full order of checks', () => {
     );
     expect(state).toMatchObject({ kind: 'INVALID', message: 'مبلغ باید بیشتر از صفر باشد' });
     expect(redirect).not.toHaveBeenCalled();
+  });
+});
+
+describe('FU-190: the server holds an ambiguous top-up across reloads', () => {
+  it.each(['UNKNOWN_OUTCOME', 'IN_PROGRESS', 'UNAVAILABLE'])(
+    'restores key, amount and held state after %s, even with forged IDLE and edited values',
+    async (kind) => {
+      topUpWallet.mockResolvedValue({ kind, status: 503, correlationId: 'LOST' });
+      const submission = mintSubmissionId(SESSION);
+      await submitTopUp(
+        WALLET_ID,
+        IDLE_TOP_UP_FORM,
+        formData({ amountMinor: '1,000' }, { submission }),
+      );
+      const reloaded = await restoreTopUp(SESSION, WALLET_ID);
+      expect(reloaded).toEqual({
+        kind: 'HELD',
+        releaseToken: expect.any(String),
+        submissionId: submission,
+        values: { amountMinor: '1000' },
+      });
+      // Each answer carries a token minted on its own call (`exp` moves with the clock).
+      expect(
+        withoutExpiry(
+          await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '2000' })),
+        ),
+      ).toEqual(withoutExpiry(reloaded));
+      expect(
+        withoutExpiry(
+          await submitTopUp(
+            WALLET_ID,
+            IDLE_TOP_UP_FORM,
+            formData({ amountMinor: '2000' }, { submission }),
+          ),
+        ),
+      ).toEqual(withoutExpiry(reloaded));
+      expect(topUpWallet).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('the actual page reload passes the held key, amount and state to the form', async () => {
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    const page = await WalletPage({ searchParams: Promise.resolve({}) });
+    expect(withoutExpiry(page.props.children.props.topUpState)).toEqual(
+      withoutExpiry(await restoreTopUp(SESSION, WALLET_ID)),
+    );
+    expect(page.props.children.props.submissionId).toBe(
+      page.props.children.props.topUpState.submissionId,
+    );
+  });
+
+  it.each([
+    ['1000', '2000'],
+    ['2000', '1000'],
+    ['1000', '1000'],
+  ])(
+    'reserves atomically for both orders and identical keys/bodies: %s / %s',
+    async (firstAmount, secondAmount) => {
+      let gates = 0;
+      let open!: () => void;
+      const ready = new Promise<boolean>((resolve) => {
+        open = () => resolve(true);
+      });
+      mayDispatch.mockImplementation(() => {
+        if (++gates === 2) open();
+        return ready;
+      });
+      topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
+      const submission = mintSubmissionId(SESSION);
+      const answers = await Promise.all([
+        submitTopUp(
+          WALLET_ID,
+          IDLE_TOP_UP_FORM,
+          formData({ amountMinor: firstAmount }, { submission }),
+        ),
+        submitTopUp(
+          WALLET_ID,
+          IDLE_TOP_UP_FORM,
+          formData({ amountMinor: secondAmount }, { submission }),
+        ),
+      ]);
+      expect(gates).toBe(2);
+      expect(topUpWallet).toHaveBeenCalledTimes(1);
+      expect(answers.map(({ kind }) => kind).sort()).toEqual(['HELD', 'UNCONFIRMED']);
+    },
+  );
+
+  it('holds a second tab while the first dispatch is still running', async () => {
+    let finish!: (result: unknown) => void;
+    let began!: () => void;
+    const started = new Promise<void>((resolve) => {
+      began = resolve;
+    });
+    topUpWallet.mockImplementationOnce(() => {
+      began();
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    const first = submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    // Wait until the real atomic reservation has completed and the send has begun.
+    await started;
+    const held = await restoreTopUp(SESSION, WALLET_ID);
+    expect(held.kind).toBe('HELD');
+    expect(
+      withoutExpiry(
+        await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '3000' })),
+      ),
+    ).toEqual(withoutExpiry(held));
+    expect(topUpWallet).toHaveBeenCalledTimes(1);
+    finish({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
+    await first;
+    expect(withoutExpiry(await restoreTopUp(SESSION, WALLET_ID))).toEqual(withoutExpiry(held));
+  });
+
+  it('FU-256: a restore re-mints the release token, and two restores a second apart name the same hold', async () => {
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    const edge = Math.floor(Date.now() / 1000) * 1000 + 999;
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(edge);
+    const first = await restoreTopUp(SESSION, WALLET_ID);
+    clock.mockReturnValue(edge + 2);
+    const second = await restoreTopUp(SESSION, WALLET_ID);
+    if (first.kind !== 'HELD' || second.kind !== 'HELD') throw new Error('missing hold');
+    // The two answers straddle a second boundary: the tokens differ, only in their lifetime.
+    expect(second.releaseToken).not.toBe(first.releaseToken);
+    const { exp: firstExp, ...firstNames } = claimsOf(first.releaseToken) ?? {};
+    const { exp: secondExp, ...secondNames } = claimsOf(second.releaseToken) ?? {};
+    expect(secondExp).toBe((firstExp as number) + 1);
+    expect(secondNames).toEqual(firstNames);
+    expect(Object.keys(firstNames).sort()).toEqual(['id', 'scope']);
+    expect(withoutExpiry(second)).toEqual(withoutExpiry(first));
+    // Either token releases the same record.
+    clock.mockRestore();
+    expect(await releaseUnresolved(SESSION, topUpScope(WALLET_ID), first.releaseToken)).toBe(
+      'RELEASED',
+    );
+  });
+
+  it('keeps the hold after an unexpected exception and isolates organization and person', async () => {
+    topUpWallet.mockRejectedValueOnce(new Error('lost response'));
+    await expect(
+      submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })),
+    ).rejects.toThrow('lost response');
+    expect((await restoreTopUp(SESSION, WALLET_ID)).kind).toBe('HELD');
+    for (const other of [
+      { ...SESSION, subject: 'other' },
+      { ...SESSION, organizationId: 'ORG_OTHER', accessToken: actingAccessToken('ORG_OTHER') },
+    ])
+      expect((await restoreTopUp(other, WALLET_ID)).kind).toBe('IDLE');
+    expect((await restoreTopUp(SESSION, 'WLT_OTHER')).kind).toBe('IDLE');
+  });
+
+  it('keeps the original amount past an aged lease and two days, without replaying the key', async () => {
+    let now = Date.now();
+    useUnresolvedStore(memoryUnresolvedStore(() => now));
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
+    const form = formData({ amountMinor: '1000' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, form);
+    now += 2 * 24 * 60 * 60 * 1000;
+    expect(await restoreTopUp(SESSION, WALLET_ID)).toMatchObject({
+      kind: 'HELD',
+      values: { amountMinor: '1000' },
+    });
+    expect(await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, form)).toMatchObject({ kind: 'HELD' });
+    expect(topUpWallet).toHaveBeenCalledTimes(1);
+  });
+
+  // prettier-ignore
+  it.each(['SNAPSHOT_UNREADABLE', 'CORRUPT_RECORD'] as const)('refuses %s and an unavailable reservation without sending', async (reason) => {
+    const store = memoryUnresolvedStore();
+    useUnresolvedStore(store);
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'LOST' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    for (const [key, raw] of store.records)
+      store.records.set(
+        key,
+        JSON.stringify({
+          ...JSON.parse(raw),
+          ...(reason === 'CORRUPT_RECORD' ? { state: 'BROKEN' } : { ref: 'corrupt' }),
+        }),
+      );
+    expect(await restoreTopUp(SESSION, WALLET_ID)).toEqual({
+      kind: 'NOT_CHECKED',
+      reason,
+      submissionId: '',
+      ...(reason === 'SNAPSHOT_UNREADABLE' ? { releaseToken: expect.any(String) } : {}),
+    });
+    expect(
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '2000' })),
+    ).toMatchObject({ kind: 'NOT_CHECKED' });
+    expect(topUpWallet).toHaveBeenCalledTimes(1);
+    useUnresolvedStore(memoryUnresolvedStore());
+    const unavailable = memoryUnresolvedStore();
+    jest.spyOn(unavailable, 'reserve').mockRejectedValue(new UnresolvedStoreUnavailable());
+    useUnresolvedStore(unavailable);
+    topUpWallet.mockClear();
+    expect(
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })),
+    ).toMatchObject({ kind: 'NOT_CHECKED' });
+    expect(topUpWallet).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the shared store cannot be read, without dispatching', async () => {
+    const store = memoryUnresolvedStore();
+    jest.spyOn(store, 'read').mockRejectedValue(new UnresolvedStoreUnavailable());
+    useUnresolvedStore(store);
+    expect(await restoreTopUp(SESSION, WALLET_ID)).toEqual({
+      kind: 'NOT_CHECKED',
+      reason: 'STORE_UNAVAILABLE',
+      submissionId: '',
+    });
+    expect(
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })),
+    ).toMatchObject({ kind: 'NOT_CHECKED' });
+    expect(topUpWallet).not.toHaveBeenCalled();
+  });
+});
+
+// prettier-ignore
+describe('F1: explicit reconciliation for every held top-up', () => {
+  it.each(['UNRESOLVED', 'AGED', 'LOST_CONFIRMATION', 'CORRUPT'])(
+    'offers and releases %s only after duplicate-risk confirmation', async (cause) => {
+      let now = Date.now();
+      const store = memoryUnresolvedStore(() => now);
+      useUnresolvedStore(store);
+      if (cause === 'LOST_CONFIRMATION' || cause === 'AGED')
+        jest.spyOn(store, 'settle').mockRejectedValueOnce(new UnresolvedStoreUnavailable());
+      topUpWallet.mockResolvedValue({
+        kind: cause === 'LOST_CONFIRMATION' ? 'CREATED' : 'UNKNOWN_OUTCOME', correlationId: 'LOST',
+      });
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })).catch((error) => {
+        if (!String(error).includes('NEXT_REDIRECT')) throw error;
+      });
+      if (cause === 'AGED' || cause === 'LOST_CONFIRMATION') now += 3600000;
+      if (cause === 'CORRUPT') for (const [key, raw] of store.records)
+        store.records.set(key, JSON.stringify({ ...JSON.parse(raw), ref: 'unopenable' }));
+      const session = cause === 'FORMER' ? {
+        ...SESSION, organizationId: 'ORG_OTHER', accessToken: actingAccessToken('ORG_OTHER'),
+        formerOrganizationId: SESSION.organizationId,
+      } : SESSION;
+      currentSession.mockResolvedValue(session);
+      const held = await restoreTopUp(session, WALLET_ID);
+      expect(held.kind).toBe(cause === 'FORMER' || cause === 'CORRUPT' ? 'NOT_CHECKED' : 'HELD');
+      if (held.kind !== 'HELD' && held.kind !== 'NOT_CHECKED') throw new Error('missing hold');
+      expect(held.releaseToken).toEqual(expect.any(String));
+      const form = formData({ [RELEASE_FIELD]: held.releaseToken! });
+      const release = () => expect(releaseUnresolvedTopUp(WALLET_ID, form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
+      await release();
+      expect((await restoreTopUp(session, WALLET_ID)).kind).toBe(held.kind);
+      form.set(CONFIRM_DUPLICATE_FIELD, CONFIRM_DUPLICATE_VALUE);
+      await expect(releaseUnresolvedTopUp('WLT_OTHER', form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
+      await release();
+      if (cause === 'AGED' || cause === 'LOST_CONFIRMATION') {
+        expect((await restoreTopUp(session, WALLET_ID)).kind).toBe('HELD');
+        await release();
+      }
+      expect((await restoreTopUp(session, WALLET_ID)).kind).toBe('IDLE');
+    },
+  );
+});
+
+describe('FU-209 person/org/wallet holds', () => {
+  it.each(['re-login', 'second-device', 'logout'])(
+    'survives %s; isolates person, org and wallet',
+    async (event) => {
+      topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+      if (event === 'logout') expect(await purgeUnresolved(SESSION)).toBe(true);
+      const original = await restoreTopUp(SESSION, WALLET_ID);
+      expect(original.kind).toBe('HELD');
+      for (const csrfToken of [event === 'logout' ? SESSION.csrfToken : event]) {
+        const next = { ...SESSION, csrfToken };
+        currentSession.mockResolvedValue(next);
+        const held = await restoreTopUp(next, WALLET_ID);
+        expect(held).toMatchObject({ ...original, releaseToken: expect.any(String) });
+        const data = formData(
+          { amountMinor: '2000' },
+          { csrf: csrfToken, submission: mintSubmissionId(next) },
+        );
+        expect(await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, data)).toMatchObject({
+          kind: 'HELD',
+        });
+        expect(await purgeUnresolved(next)).toBe(true);
+        expect((await restoreTopUp(next, WALLET_ID)).kind).toBe('HELD');
+      }
+      if (!('releaseToken' in original)) throw new Error('missing hold');
+      for (const other of [
+        { ...SESSION, subject: 'other-person' },
+        {
+          ...SESSION,
+          organizationId: 'OTHER',
+          accessToken: actingAccessToken('OTHER'),
+          formerOrganizationId: SESSION.organizationId,
+        },
+      ]) {
+        expect((await restoreTopUp(other, WALLET_ID)).kind).toBe('IDLE');
+        expect(await releaseUnresolved(other, topUpScope(WALLET_ID), original.releaseToken)).toBe(
+          'STALE',
+        );
+      }
+      expect((await restoreTopUp(SESSION, 'OTHER_WALLET')).kind).toBe('IDLE');
+      expect((await restoreTopUp(SESSION, WALLET_ID)).kind).toBe('HELD');
+      expect(topUpWallet).toHaveBeenCalledTimes(1);
+      const next = { ...SESSION, csrfToken: 'fresh-login' };
+      const held = await restoreTopUp(next, WALLET_ID);
+      if (!('releaseToken' in held)) throw new Error('missing hold');
+      expect(await releaseUnresolved(next, topUpScope(WALLET_ID), original.releaseToken)).toBe(
+        'STALE',
+      );
+      expect(await releaseUnresolved(next, topUpScope(WALLET_ID), held.releaseToken)).toBe(
+        'RELEASED',
+      );
+    },
+  );
+});
+
+describe('FU-217 release feedback', () => {
+  it.each(['IN_PROGRESS', 'STALE', 'UNAVAILABLE', 'RELEASED', 'GONE'] as const)(
+    'redirects with %s',
+    async (outcome) => {
+      const store = memoryUnresolvedStore();
+      useUnresolvedStore(store);
+      topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+      const held = await restoreTopUp(SESSION, WALLET_ID);
+      if (!('releaseToken' in held)) throw new Error('missing hold');
+      if (outcome === 'UNAVAILABLE')
+        jest.spyOn(store, 'release').mockRejectedValue(new UnresolvedStoreUnavailable());
+      else jest.spyOn(store, 'release').mockResolvedValue(outcome);
+      await expect(
+        releaseUnresolvedTopUp(
+          WALLET_ID,
+          formData({
+            release: held.releaseToken!,
+            confirmDuplicate: 'yes',
+          }),
+        ),
+      ).rejects.toThrow('NEXT_REDIRECT:/wallet');
+      const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
+      expect(feedbackFor(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true)).toBe(
+        outcome,
+      );
+    },
+  );
+});
+
+describe('FU-222 wallet release refusals before the store', () => {
+  it.each([
+    ['CSRF_REFUSED', { [CSRF_FIELD]: 'wrong', confirmDuplicate: 'yes' }],
+    ['CONSENT_MISSING', {}],
+  ] as const)('says %s and asks the store nothing', async (outcome, extra) => {
+    const store = memoryUnresolvedStore();
+    useUnresolvedStore(store);
+    const spy = jest.spyOn(store, 'release');
+    const form = formData({ release: 'token' });
+    for (const [key, value] of Object.entries(extra)) form.set(key, value);
+    await expect(releaseUnresolvedTopUp(WALLET_ID, form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
+    const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
+    expect(feedbackFor(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true)).toBe(
+      outcome,
+    );
+    expect(spy).not.toHaveBeenCalled();
+  });
+  // FU-254 L1: the wallet id is a bound action argument (client-controlled). A crafted one must not
+  // mint a token another surface accepts — the old subject strings were '/assets' and '/drivers'.
+  it.each(['/assets', '/drivers', 'asset-registration', 'driver-creation', 'wallet', ''])(
+    'a crafted wallet id %j yields feedback only for that wallet, on no other surface',
+    async (crafted) => {
+      const form = formData({ release: 'token', confirmDuplicate: 'yes' });
+      form.set(CSRF_FIELD, 'wrong');
+      await expect(releaseUnresolvedTopUp(crafted, form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
+      const token = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost').searchParams.get(
+        'release',
+      );
+      expect(feedbackFor(SESSION, { surface: 'wallet', target: crafted }, token, true)).toBe(
+        'CSRF_REFUSED',
+      );
+      for (const surface of [
+        'asset-registration',
+        'driver-creation',
+        'project-creation',
+        'demand-submission',
+        'supplier-write',
+        'supplier-record',
+      ] as const) {
+        expect(feedbackFor(SESSION, { surface }, token, true)).toBeUndefined();
+        expect(feedbackFor(SESSION, { surface, target: crafted }, token, true)).toBeUndefined();
+      }
+      expect(feedbackFor(SESSION, { surface: 'wallet' }, token, true)).toBeUndefined();
+      expect(feedbackFor(SESSION, WALLET_SUBJECT, token, true)).toBeUndefined();
+    },
+  );
+  it('shows an answer it does not know as not done', async () => {
+    const store = memoryUnresolvedStore();
+    useUnresolvedStore(store);
+    jest.spyOn(store, 'release').mockResolvedValue('SOMETHING_NEW' as never);
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    const held = await restoreTopUp(SESSION, WALLET_ID);
+    if (!('releaseToken' in held)) throw new Error('missing hold');
+    await expect(
+      releaseUnresolvedTopUp(
+        WALLET_ID,
+        formData({ release: held.releaseToken!, confirmDuplicate: 'yes' }),
+      ),
+    ).rejects.toThrow('NEXT_REDIRECT:/wallet');
+    const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
+    expect(feedbackFor(SESSION, WALLET_SUBJECT, url.searchParams.get('release'), true)).toBe(
+      'NOT_DONE',
+    );
+  });
+});
+
+describe('FU-210 top-up pre-dispatch refusals', () => {
+  it.each(['CAPACITY', 'SNAPSHOT_TOO_LARGE'] as const)('%s sends nothing', async (reason) => {
+    const store = memoryUnresolvedStore();
+    useUnresolvedStore(store);
+    if (reason === 'CAPACITY') jest.spyOn(store, 'reserve').mockResolvedValue({ kind: 'CAPACITY' });
+    else snapshotOverride = 'x'.repeat(801);
+    expect(
+      await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' })),
+    ).toMatchObject({ kind: 'NOT_CHECKED', reason });
+    expect(topUpWallet).not.toHaveBeenCalled();
+  });
+});
+
+describe('F4 server-derived wallet release feedback', () => {
+  const page = async (release: string) =>
+    WalletPage({ searchParams: Promise.resolve({ ctx: pageContext(SESSION), release }) });
+  it('ignores an unsigned RELEASED query even with the organization context', async () => {
+    expect((await page('RELEASED')).props.children.props.releaseOutcome).toBeUndefined();
+  });
+  it('accepts a signed outcome only for this login, organization, wallet and TTL', async () => {
+    const token = releaseFeedback(SESSION, WALLET_SUBJECT, 'RELEASED');
+    expect((await page(token)).props.children.props.releaseOutcome).toBe('RELEASED');
+    for (const other of [
+      { ...SESSION, csrfToken: 'other' },
+      { ...SESSION, subject: 'other' },
+      { ...SESSION, organizationId: 'other', accessToken: actingAccessToken('other') },
+    ]) {
+      expect(feedbackFor(other, WALLET_SUBJECT, token, true)).toBeUndefined();
+    }
+    expect(
+      feedbackFor(SESSION, { surface: 'wallet', target: 'WLT_OTHER' }, token, true),
+    ).toBeUndefined();
+    expect(feedbackFor(SESSION, WALLET_SUBJECT, token + 'x', true)).toBeUndefined();
+    const time = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
+    try {
+      expect(feedbackFor(SESSION, WALLET_SUBJECT, token, true)).toBeUndefined();
+    } finally {
+      time.mockRestore();
+    }
+  });
+  it('suppresses a signed success when a newer hold exists or the store is unavailable', async () => {
+    const token = releaseFeedback(SESSION, WALLET_SUBJECT, 'RELEASED');
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    expect((await page(token)).props.children.props.releaseOutcome).toBeUndefined();
+    const store = memoryUnresolvedStore();
+    jest.spyOn(store, 'read').mockRejectedValue(new UnresolvedStoreUnavailable());
+    useUnresolvedStore(store);
+    expect((await page(token)).props.children.props.releaseOutcome).toBeUndefined();
   });
 });

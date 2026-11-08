@@ -6,6 +6,7 @@ import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
 import { IdempotencyStore, type IdempotentAnswer } from '../src/shared/idempotency';
 import { LedgerBalanceAudit } from '../src/wallet/balance-audit';
 import {
+  bareObligation,
   asActor,
   cleanup,
   fundWallet,
@@ -87,10 +88,12 @@ describe('economic internals', () => {
         owner: 'econ-internals',
         leaseSeconds: 60,
       });
-      await expireClaim(
-        prisma,
-        claimed.rows.map((row) => row.id),
-      );
+      // A claim may take nothing; the helper refuses an empty list.
+      if (claimed.rows.length > 0)
+        await expireClaim(
+          prisma,
+          claimed.rows.map((row) => row.id),
+        );
       return claimed;
     };
     const backoff = { baseSeconds: 5, maxSeconds: 60 };
@@ -346,7 +349,7 @@ describe('economic internals', () => {
 
     it('is returned unchanged when the same obligation is held twice for the same amount', async () => {
       const { walletId } = await fundWallet(wiring, org.c, 100_000n);
-      const transactionId = `TXN_${ulid()}`;
+      const transactionId = await bareObligation(prisma, org.c);
 
       const place = () =>
         asActor({ organizationId: org.c }, () =>
@@ -374,7 +377,7 @@ describe('economic internals', () => {
 
     it('refuses a second hold on the same obligation for a different amount', async () => {
       const { walletId } = await fundWallet(wiring, org.c, 100_000n);
-      const transactionId = `TXN_${ulid()}`;
+      const transactionId = await bareObligation(prisma, org.c);
 
       const place = (amountMinor: bigint) =>
         asActor({ organizationId: org.c }, () =>
@@ -402,7 +405,7 @@ describe('economic internals', () => {
 
     it('cannot be released twice, and a hold that does not exist is not found', async () => {
       const { walletId } = await fundWallet(wiring, org.c, 100_000n);
-      const transactionId = `TXN_${ulid()}`;
+      const transactionId = await bareObligation(prisma, org.c);
 
       const { holdId } = await asActor({ organizationId: org.c }, () =>
         wiring.prisma.transaction(async (tx) => {
@@ -425,6 +428,7 @@ describe('economic internals', () => {
             return wiring.wallets.refundHold(tx, {
               wallet: locked!,
               holdId: id,
+              referenceType: 'TRANSACTION',
               transactionId,
               note: 'released by the internals suite',
               resolvedBy: 'internals-itest',
@@ -513,7 +517,7 @@ describe('economic internals', () => {
 
     it('finds a wallet whose escrow disagrees with its holds', async () => {
       const { walletId } = await fundWallet(wiring, org.b, 80_000n);
-      const transactionId = `TXN_${ulid()}`;
+      const transactionId = await bareObligation(prisma, org.b);
 
       await asActor({ organizationId: org.b }, () =>
         wiring.prisma.transaction(async (tx) => {
@@ -538,11 +542,13 @@ describe('economic internals', () => {
       // `ck_wallet_hold_resolution` requires a resolved hold to name both the
       // moment and the journal that resolved it, so the drift has to be
       // introduced as a row the constraint accepts — otherwise this would test
-      // the constraint rather than the reconciliation.
+      // the constraint rather than the reconciliation. REFUNDED, not RELEASED:
+      // a release names an authorised transaction
+      // (`trg_wallet_hold_release_settlement_authority`), and this hold's is not.
       await runUnscoped('the suite resolves a hold behind the ledger’s back', () =>
         prisma.client.$executeRawUnsafe(
           `UPDATE wallet_hold
-              SET status = 'RELEASED',
+              SET status = 'REFUNDED',
                   resolved_at = now(),
                   resolved_journal_id = placed_journal_id
             WHERE wallet_id = $1 AND reference = $2`,
@@ -554,16 +560,6 @@ describe('economic internals', () => {
       const deviations = await audit().run();
       const found = deviations.find((row) => row.walletId === walletId);
       expect(found?.kind).toBe('PENDING_VS_HOLDS');
-
-      await runUnscoped('the suite restores the hold it resolved', () =>
-        prisma.client.$executeRawUnsafe(
-          `UPDATE wallet_hold
-              SET status = 'ACTIVE', resolved_at = NULL, resolved_journal_id = NULL
-            WHERE wallet_id = $1 AND reference = $2`,
-          walletId,
-          transactionId,
-        ),
-      );
     });
 
     it('pages through the wallets, one snapshot per page', async () => {
@@ -586,7 +582,7 @@ describe('economic internals', () => {
       // balance and reported a PENDING_VS_ESCROW that was never true.
       const organizationId = `${org.c}-SNAPSHOT`;
       const { walletId } = await fundWallet(wiring, organizationId, 50_000n);
-      const transactionId = `TXN_${ulid()}`;
+      const transactionId = await bareObligation(prisma, organizationId);
 
       const findEscrow = wiring.walletRepository.findEscrowAccount.bind(wiring.walletRepository);
       let interleaved = false;
@@ -637,7 +633,7 @@ describe('economic internals', () => {
       // agree with one another.
       const organizationId = `${org.c}-ESCROW-DRIFT`;
       const { walletId } = await fundWallet(wiring, organizationId, 80_000n);
-      const transactionId = `TXN_${ulid()}`;
+      const transactionId = await bareObligation(prisma, organizationId);
 
       await asActor({ organizationId }, () =>
         wiring.prisma.transaction(async (tx) => {

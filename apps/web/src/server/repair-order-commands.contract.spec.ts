@@ -170,13 +170,14 @@ describe('the Idempotency-Key the portal sends', () => {
       );
       expect(declaration).toBeDefined();
       const parameters = declaration!.parameters.map((parameter) => parameter.getText());
-      expect(parameters.some((text) => text.includes("@Headers('idempotency-key')"))).toBe(true);
+      expect(parameters.some((text) => text.includes('@Headers() headers'))).toBe(true);
     },
   );
 
   it('is demanded of every one of them, not only honoured when sent', () => {
-    expect(source).toContain('requiredIdempotencyKey(rawKey)');
-    expect(source).not.toContain('optionalIdempotencyKey');
+    // FU-171: the one entry point reads the key, and its replay deadline, from the headers.
+    expect(source).toContain('idempotentRequest(headers)');
+    expect(source).not.toContain('optionalIdempotentRequest');
   });
 });
 
@@ -220,7 +221,7 @@ describe('the request bodies', () => {
     ['recordPartSchema', 'quantity', 'partQuantity'],
     ['recordPartSchema', 'unit', 'displayText(1, 32)'],
     ['recordPartSchema', 'unitCostMinor', 'boundedAmountMinorSchema'],
-    ['recordPartSchema', 'source', "partSourceSchema.default('WORKSHOP_SUPPLIED')"],
+    ['recordPartSchema', 'source', "partSourceSchema.prefault('WORKSHOP_SUPPLIED')"],
     ['recordPartSchema', 'sourceReference', 'referenceId().min(1).max(128).optional()'],
     ['recordLabourSchema', 'description', 'displayText(2, 500)'],
     ['recordLabourSchema', 'technician', 'displayText(2, 120).optional()'],
@@ -228,7 +229,7 @@ describe('the request bodies', () => {
     ['recordLabourSchema', 'hourlyRateMinor', 'boundedAmountMinorSchema'],
     ['recordCostSchema', 'category', 'directCostCategorySchema'],
     ['recordCostSchema', 'amountMinor', 'boundedAmountMinorSchema'],
-    ['recordCostSchema', 'currency', "currencySchema.default('IRR')"],
+    ['recordCostSchema', 'currency', "currencySchema.prefault('IRR')"],
     ['recordCostSchema', 'description', 'displayText(2, 500)'],
   ])('still bounds %s.%s as the forms do', (schema, key, expected) => {
     expect(squash(schemaProperties(schema).get(key))).toBe(expected);

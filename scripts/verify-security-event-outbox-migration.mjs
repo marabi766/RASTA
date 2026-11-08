@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 // -----------------------------------------------------------------------------
 // Proves identity-service's `security_event_outbox` migrations (ADR-053 § 4,
 // AUD-004 Phases C1 and C2) are reversible, by reversing them.
@@ -40,6 +41,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { tryReadUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -128,7 +130,7 @@ const args = process.argv.slice(2);
 const schemaFlag = args.indexOf('--schema');
 const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'security_event_outbox_check';
 if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
-  fail(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  fail('--schema must be a plain lowercase identifier; its value is not repeated.');
 }
 
 // The scratch schema is DDL: identity's migrator (D-045 — the runtime role owns
@@ -138,8 +140,16 @@ const baseUrl =
   process.env.DATABASE_URL_IDENTITY ??
   process.env.DATABASE_URL;
 if (!baseUrl) fail('DATABASE_URL_IDENTITY is not set.');
-// In UTC whatever the server's or the role's default (L7-37).
-const url = new URL(withUtcSession(baseUrl));
+// In UTC whatever the server's or the role's default (L7-37). A URL that does
+// not parse is refused with a fixed text: `new URL`'s own error carries the
+// value whole, password included (#385 r5).
+const url = tryReadUrl(withUtcSession(baseUrl));
+if (url === null) {
+  fail(
+    'DATABASE_URL_IDENTITY_MIGRATOR (else DATABASE_URL_IDENTITY, else DATABASE_URL) cannot be ' +
+      'read as a URL; its value is not repeated.',
+  );
+}
 url.searchParams.set('schema', scratchSchema);
 const scratchUrl = url.toString();
 
@@ -336,7 +346,13 @@ const insertLegacy = insertInto(C1_VALUES);
 /** A row as Phase C2 writes it. */
 const insertProbe = insertInto(C2_VALUES);
 const clearProbes = `DELETE FROM "${TABLE}" WHERE id LIKE 'SEOCHK%';`;
-const update = (set, id = PROBE) => `UPDATE "${TABLE}" SET ${set} WHERE id = '${id}';`;
+/**
+ * One probe UPDATE. A reviewed template: its SET list may name a clock-gated
+ * column only through a reviewed `eligibilityClockSql` fragment, which the
+ * guard checks at every call.
+ */
+const update = (set, id = PROBE) =>
+  eligibilityClockSql`UPDATE "${TABLE}" SET ${set} WHERE id = '${id}';`;
 const fresh = (statement) => `${clearProbes} ${statement}`;
 
 const startedAt = Date.now();
@@ -371,7 +387,9 @@ mustFail(
 );
 mustRun(
   'claim triple accepts all three together',
-  update(`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`),
+  update(
+    eligibilityClockSql`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`,
+  ),
 );
 mustFail(
   'a published row must hold no claim',
@@ -385,7 +403,7 @@ mustFail(
 );
 mustFail(
   'a retry needs a prior failure',
-  update(`next_attempt_at = now()`),
+  update(eligibilityClockSql`next_attempt_at = now()`),
   'ck_security_event_outbox_next_attempt_requires_failure',
 );
 
@@ -505,7 +523,7 @@ mustRun(
   'a claimed row leaves the index: a successor is accepted',
   fresh(
     `${insertProbe()}
-     ${update(`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`)}
+     ${update(eligibilityClockSql`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`)}
      ${insertProbe({ id: `'${SECOND}'` })}`,
   ),
 );
@@ -545,17 +563,23 @@ mustRun('the count grows before the first claim', update('occurrence_count = 5')
 mustFail('the count never shrinks', update('occurrence_count = 4'), C2_TRIGGER);
 mustRun(
   'a claim is accepted',
-  update(`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`),
+  update(
+    eligibilityClockSql`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`,
+  ),
 );
 mustFail('a claimed row cannot change its count', update('occurrence_count = 6'), C2_TRIGGER);
 mustFail(
   'claim_count never decreases',
-  update(`claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL, claim_count = 0`),
+  update(
+    eligibilityClockSql`claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL, claim_count = 0`,
+  ),
   C2_TRIGGER,
 );
 mustRun(
   'delivery state still moves on a claimed row',
-  update(`published_at = now(), claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL`),
+  update(
+    eligibilityClockSql`published_at = now(), claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL`,
+  ),
 );
 mustRun('clear the probe rows', clearProbes);
 

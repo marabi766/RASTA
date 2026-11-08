@@ -95,6 +95,36 @@ OTLP/Collector اضافه می‌کند؛ پس مقصد پیکربندی‌شد�
 Listener ندارد، و مسیردهیِ چندهدفهٔ Transport سطح عددی می‌خواهد و سطر بی‌صدا حذف می‌شد. Fan-out را خودِ Logger
 می‌سازد؛ در مخزن هیچ فراخواننده‌ای `destination` نمی‌دهد. باقی‌مانده: T-07 در docs/23.
 
+**تشخیص‌های SDK اوپن‌تلمتری (#385 r5).** SDK هر متغیر `OTEL_*` را می‌خواند — حتی با
+`OTEL_SDK_DISABLED` — و هر مقداری را که نتوانست به کار ببرد روی `diag` گزارش می‌کند، همراه خود مقدار
+(Endpoint با رمز عبور، Compression، بازه، فهرست Detector). `initTelemetry` پیش از هر بخش SDK یک Logger امن
+نصب می‌کند (`packages/observability/src/diagnostics.ts`)، در سطحی که `OTEL_LOG_LEVEL` می‌خواهد (بی آن، هیچ
+سطری)، و هنگام ساخت `NodeSDK` این متغیر را پنهان می‌کند تا SDK Logger کنسولی خودش را جایگزین نکند؛ پس از ساخت
+و پس از `start()` همان Logger دوباره نصب می‌شود. هر تشخیص فقط یک سطر روی stderr است: سطح، یک دسته از فهرست
+ثابت، و نام تنظیم‌های ثبت‌شده در `OTEL_SETTINGS` — نه متن SDK، نه آرگومان‌ها، نه خطا. Endpoint صریحی که URL
+نیست با متن ثابت رد می‌شود. URLهای پیکربندی (Env یا argv) فقط با `readUrl`/`tryReadUrl` از `@rasta/config`
+خوانده می‌شوند که با متن ثابت رد می‌کنند؛ `scripts/url-parsing-guard.test.mjs` هر `new URL` دیگری را روی مقدار
+غیرثابت رد می‌کند.
+
+**مالکیت آنچه یک شروع می‌سازد (#426 r1 F3).** `initTelemetry` همگام می‌ماند تا `main.ts` و Preloadِ
+`pnpm dev` همچنان Instrumentation را پیش از بارشدن برنامه نصب کنند. Metric Readerها را خودِ آن می‌سازد، با
+همان انتخاب و ترتیبی که سازندهٔ `NodeSDK` از `OTEL_METRICS_EXPORTER` می‌سازد، اما بی‌اثر: Exporterِ Prometheus
+گوش نمی‌دهد و Reader دوره‌ای Timer خود را آغاز نمی‌کند. این دو فقط پس از بازگشتِ `start()` فعال می‌شوند، یعنی
+وقتی هیچ گامی دیگر نمی‌تواند خطا بدهد، و فقط برای Readerی که SDK واقعاً ثبت کرده است؛ پس زیر
+`OTEL_SDK_DISABLED` هیچ پورتی باز نمی‌شود. اگر شروع رد شود، هنگام ردشدن هیچ چیزی از آن گوش نمی‌دهد یا زمان‌بندی
+نشده است و همان پورت بی‌درنگ آزاد است. هر Exporterِ داده‌شده یا ساخته‌شده، پیش از هر گامی که ممکن است رد شود، در
+دفتر مالکیتِ همان شروع ثبت و هنگام رد بدون Flush خاموش می‌شود. فراخوانی تودرتو در حین ساخت رد می‌شود. پایان
+خاموش‌شدن یک «حصار» است (#749 r2): `shutdownTelemetry`، و نیز آزادسازیِ یک شروعِ ردشده، منتظر تک‌تک اجزا
+می‌ماند (Readerها، Processorها، سپس Exporterها؛ نه `Promise.all`ِ زودشکستِ SDK) و تا همه تمام نشده‌اند
+`initTelemetry` با متن ثابت رد می‌کند؛ پس پس از یک رد، پیش از تلاش دوباره `await shutdownTelemetry()` لازم است.
+حصار پیش از فراخوانیِ هر جزء برپا می‌شود (#749 r3): Exporterی که از درونِ خاموش‌شدنِ خود دوباره `initTelemetry`
+یا `shutdownTelemetry` را فراخوانی کند، شروعِ دوباره را ردشده و خاموش‌شدنِ تودرتو را همان `Promise`ِ در جریان می‌یابد.
+Exporterِ هر Processor جدا از خودِ Processor در مالکیت است و حتی اگر Flushِ پایانیِ Processor شکست بخورد خاموش
+می‌شود و حصار منتظر Exportهای در جریانِ آن می‌ماند؛ Processorی که Exporterش در دسترس نباشد، شروع را رد می‌کند.
+خطای اجزا خوانده نمی‌شود و فقط با متن ثابت گزارش می‌شود. `shutdownTelemetry` Instrumentationها را هم غیرفعال
+می‌کند، اجزای ثبت‌نشده زیر `OTEL_SDK_DISABLED` را هم آزاد می‌کند، و در پایان ثبت سراسری API را برمی‌دارد تا شروع
+بعدی واقعاً به کار رود (`telemetry-ownership.spec.ts`).
+
 **MVP → PRODUCTION.** MVP: خروجی به stdout، تجمیع با `docker compose logs`.
 Production: OTel Collector → Loki یا سامانه معادل، با نگهداشت ۳۰ روز (۱۳ ماه برای
 Logهای مالی).
@@ -307,6 +337,7 @@ POST /v1/orders                                    [gateway]        45ms
 | `RastaDeadLetterMessagePublished`         | `warning`  | `sum by (service, topic, reason) (increase(rasta_dlq_messages_total[5m])) > 0`                                                                                                                                                                                                                          | [replay-dlq](runbooks/replay-dlq.md)                         |
 | `RastaAuditIngestionFailure`              | `warning`  | `sum by (reason) (increase(rasta_audit_ingestion_failures_total[5m])) > 0`                                                                                                                                                                                                                              | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
 | `RastaAuditTenderChainGapOpen`            | `warning`  | `max(rasta_audit_tender_overdue_links) > 0`                                                                                                                                                                                                                                                             | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
+| `RastaAuditRfqChainGapOpen`               | `warning`  | `max(rasta_audit_rfq_overdue_links) > 0`                                                                                                                                                                                                                                                                | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
 | `RastaAuditReconciliationEvidenceMissing` | `warning`  | `max(rasta_audit_reconciliation_evidence_missing) > 0`                                                                                                                                                                                                                                                  | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
 | `RastaAuditIngestionLagHigh`              | `warning`  | `histogram_quantile(0.95, sum by (le, source_topic) (rate(rasta_audit_ingestion_lag_seconds_bucket[5m]))) > 60` با `for: 5m`                                                                                                                                                                            | [audit-ingestion-lag](runbooks/audit-ingestion-lag.md)       |
 | `RastaAuditProducerSilent`                | `warning`  | `(max by (source_service) (rasta_audit_expected_active_producer == 1) and on (source_service) max by (source_service) (rasta_audit_expected_active_producer offset 6h == 1)) unless on (source_service) (sum by (source_service) (increase(rasta_audit_records_ingested_total[6h])) > 0)` با `for: 30m` | [audit-gap-detected](runbooks/audit-gap-detected.md)         |
@@ -518,7 +549,7 @@ Stack **محلی** Compose (Profile `observability`/`all`):
   و شکست انتشار؛ (۱۱) سن پشتهٔ **بسته** با خط ۶۰ ثانیه — `pending_age` پنجرهٔ باز عمداً نیست. هر Panel توضیح دارد، هر Query همان
   عبارت (یا عبارت پیش از مقایسهٔ `> 0`) هشدار متناظرش است، و هیچ Label یا متنی شناسهٔ مستأجر، Actor، منبع، رویداد، Correlation،
   Partition، Offset یا متن خطا را نمایش نمی‌دهد.
-- **دسترسی محلی:** `docker compose --profile observability up -d`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
+- **دسترسی محلی:** `COMPOSE_PROFILES=observability pnpm infra:up`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
   `Rasta`). ورود با Credential محلی Compose است.
 - **اعتبارسنجی:** `pnpm run check:grafana-dashboard` (در `pnpm verify` و Job ‏`quality` در CI) و
   `pnpm run verify:grafana-dashboard-live` (دستی، Docker) — جزئیات در [`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱.

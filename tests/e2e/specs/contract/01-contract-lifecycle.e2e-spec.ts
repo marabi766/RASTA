@@ -9,6 +9,7 @@ import {
   until,
   type ApiResponse,
 } from '../../src/api';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ORG, e2eConfig } from '../../src/env';
 import { EconomicEventTap, type ObservedEvent } from '../../src/events';
 import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-accounts';
@@ -408,7 +409,7 @@ function expectRefusalExactly(
     ...(expected.details ? { details: expected.details } : {}),
   });
   for (const value of SCENARIO_VALUES) {
-    expect(text, `${what}: the body repeats ${value}`).not.toContain(value);
+    expectNotDisclosed(response.body, [value]);
   }
 }
 
@@ -823,14 +824,23 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     projectId = (created.body as { id: string }).id;
 
     const need = await author.post(`/v1/projects/${projectId}/needs`, {
-      body: { title: 'Contractor', description: 'Resurfacing works, two kilometres' },
+      body: {
+        expectedProjectVersion: (created.body as { version: number }).version,
+        title: 'Contractor',
+        description: 'Resurfacing works, two kilometres',
+      },
     });
     expect(need.status, JSON.stringify(need.body)).toBe(201);
     expect(
       (
         await author.post(
           `/v1/projects/${projectId}/needs/${(need.body as { id: string }).id}/submit`,
-          { body: { expectedVersion: 1 } },
+          {
+            body: {
+              expectedProjectVersion: (created.body as { version: number }).version,
+              expectedVersion: 1,
+            },
+          },
         )
       ).status,
     ).toBe(200);
@@ -3001,9 +3011,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       ).toBe(true);
     }
     for (const event of ofContracts) {
-      const label = `${event.eventName} of contract ${contractKey.get(event.key!)}`;
       for (const leak of amounts) {
-        expect(JSON.stringify(event.payload), label).not.toContain(leak);
+        expectNotDisclosed(event.payload, [leak]);
       }
     }
 

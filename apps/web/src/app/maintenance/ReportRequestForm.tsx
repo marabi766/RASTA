@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useState } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { IN_PROGRESS_WRITE_MESSAGE } from '@/lib/in-progress-write';
@@ -13,6 +13,7 @@ import {
   type ReportRequestFormValues,
 } from '@/lib/maintenance-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { ASSET_ID_HINT } from '@/lib/id-hints';
 
 import { submitReportRequest } from './actions';
 import {
@@ -52,6 +53,8 @@ function valuesOf(state: ReportRequestFormState, initialAssetId: string): Report
   ) {
     return state.values;
   }
+  // An unconfirmed send is resent as it was sent (PR-880 r1 F1).
+  if (state.kind === 'UNCONFIRMED' && state.values) return state.values;
   return { ...EMPTY_REPORT_REQUEST_FORM, assetId: initialAssetId };
 }
 
@@ -84,13 +87,17 @@ export function ReportRequestForm({
 
   const values = valuesOf(state, initialAssetId);
   const errors = errorsOf(state);
+  // The key of the request this form is about — after "edit and send as new" not
+  // the page's: an unconfirmed send is resent under its own key (PR-880 r1 F1).
   const currentSubmissionId =
     state.kind === 'INVALID' ||
     state.kind === 'NOT_FOUND' ||
     state.kind === 'IN_PROGRESS' ||
     state.kind === 'EDITING'
       ? state.submissionId
-      : submissionId;
+      : state.kind === 'UNCONFIRMED' && state.submissionId
+        ? state.submissionId
+        : submissionId;
   const waiting = useRetryAfter(state);
   // While a submission is in flight its retry must send exactly what was sent
   // (round 2 on PR 171): a changed body under the same id is refused as
@@ -107,7 +114,7 @@ export function ReportRequestForm({
       <FormBanner state={state} />
       {locked && <SentValues values={values} />}
 
-      <Field label={LABELS.assetId} required error={errors.assetId} hint="مانند AST_01J…">
+      <Field label={LABELS.assetId} required error={errors.assetId} hint={ASSET_ID_HINT}>
         {(control) => (
           <input
             {...control}
@@ -201,7 +208,7 @@ export function ReportRequestForm({
           hint="اگر پیش از گزارش از کار افتاده بود؛ زمان از کار افتادگی از همین روز حساب می‌شود"
         >
           {(control) => (
-            <input
+            <JalaliDateInput
               {...control}
               type="date"
               name="outOfServiceAt"
@@ -214,7 +221,7 @@ export function ReportRequestForm({
 
         <Field label={LABELS.dueDate} error={errors.dueDate}>
           {(control) => (
-            <input
+            <JalaliDateInput
               {...control}
               type="date"
               name="dueDate"

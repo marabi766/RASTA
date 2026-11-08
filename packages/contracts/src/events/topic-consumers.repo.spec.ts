@@ -1,7 +1,12 @@
-import { readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import * as ts from 'typescript';
 import { TOPIC_CONSUMERS, consumerDeclarationProblem } from './topic-consumers';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS, shared with the other specs
+const { authoredFiles } = require('../../../../scripts/authored-source-inventory.cjs') as {
+  authoredFiles: (dir: string) => string[];
+};
 
 /**
  * Every Kafka consumer in the repository's services is an `EventConsumer`
@@ -56,30 +61,16 @@ const COMPILER_OPTIONS: ts.CompilerOptions = {
   paths: { '@rasta/*': ['packages/*/src'] },
 };
 
-function sourceFiles(dir: string): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (entry === 'generated' || entry === 'node_modules') continue;
-    const path = join(dir, entry);
-    if (statSync(path).isDirectory()) files.push(...sourceFiles(path));
-    else if (path.endsWith('.ts') && !path.endsWith('.spec.ts') && !path.endsWith('.d.ts')) {
-      files.push(path);
-    }
-  }
-  return files;
-}
-
-/** `services/<name>/src/**` production files, per service. */
+/** `services/<name>/src/**` production files, per service (git-ignored output is never listed). */
 function serviceSources(): Map<string, string[]> {
   const byService = new Map<string, string[]>();
-  for (const service of readdirSync(SERVICES)) {
-    const src = join(SERVICES, service, 'src');
-    try {
-      if (!statSync(src).isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    byService.set(service, sourceFiles(src));
+  for (const path of authoredFiles(SERVICES)) {
+    const [service, src] = relative(SERVICES, path).split(/[\\/]/);
+    if (src !== 'src') continue;
+    const files = byService.get(service!) ?? [];
+    byService.set(service!, files);
+    if (path.endsWith('.ts') && !path.endsWith('.spec.ts') && !path.endsWith('.d.ts'))
+      files.push(path);
   }
   return byService;
 }
@@ -439,6 +430,27 @@ describe('every Kafka consumer in the repository is a declared EventConsumer', (
   it('declares exactly the services that run a consumer', () => {
     const running = [...new Set(scan.consumers.map((consumer) => consumer.service))].sort();
     expect(running).toEqual(Object.keys(TOPIC_CONSUMERS).sort());
+  });
+
+  it('declares exactly the running groups for operational alerts', () => {
+    for (const [service, declaration] of Object.entries(TOPIC_CONSUMERS)) {
+      expect(
+        scan.consumers
+          .filter((consumer) => consumer.service === service)
+          .map((consumer) => consumer.groupId)
+          .sort(),
+      ).toEqual([...declaration.groups].sort());
+    }
+  });
+
+  it('scrapes every declared consumer service directly for crash and restart telemetry', () => {
+    const config = readFileSync(
+      join(REPO, 'infrastructure/docker/prometheus/prometheus.yml'),
+      'utf8',
+    );
+    for (const service of Object.keys(TOPIC_CONSUMERS))
+      expect(config).toContain(`job_name: ${service}`);
+    expect(config).toContain('rules/rasta-consumer-alerts.yml');
   });
 
   it('evaluates and holds each one to its service’s declaration', () => {

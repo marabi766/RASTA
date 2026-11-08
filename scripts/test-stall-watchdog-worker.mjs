@@ -1,0 +1,31 @@
+/** Watchdog thread of scripts/test-stall-watchdog.mjs; see the header there. */
+import { writeSync } from 'node:fs';
+import { workerData } from 'node:worker_threads';
+import { monotonicMs } from './test-stall-watchdog-clock.mjs';
+
+const { buffer, budget, runner } = workerData;
+const state = new Float64Array(buffer, 0, 2); // [monotonic time of the last change (ms), 1 while a test runs]
+const nameBytes = new Uint8Array(buffer, 16);
+const poll = Math.max(10, Math.min(1000, Math.floor(budget / 4)));
+
+setInterval(() => {
+  const elapsed = monotonicMs() - state[0];
+  if (elapsed <= budget) return;
+  const end = nameBytes.indexOf(0);
+  const name = new TextDecoder().decode(nameBytes.subarray(0, end < 0 ? nameBytes.length : end));
+  const what = runner
+    ? 'the node --test runner (parent process) stopped running its event loop, the Node 22 hang of nodejs/node#62693 (a misread child report frame)'
+    : state[1] === 1
+      ? `test "${name}" is still running`
+      : `no test started after "${name}"`;
+  try {
+    // Synchronous write to descriptor 2: needs neither the event loop of the
+    // stuck thread nor the test reporter.
+    writeSync(
+      2,
+      `\nTEST STALL: ${what} after ${Math.round(elapsed)} ms (budget ${budget} ms, RASTA_TEST_STALL_MS); killing the ${runner ? 'runner' : 'test process'}.\n`,
+    );
+  } finally {
+    process.kill(process.pid, 'SIGKILL');
+  }
+}, poll);

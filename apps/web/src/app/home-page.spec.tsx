@@ -15,6 +15,15 @@ import type { CurrentUser } from '@/server/identity';
 
 let user: CurrentUser;
 
+const tokens = jest.requireActual<typeof import('@/test/session-token')>('@/test/session-token');
+/** The roles drawn are the token's for the pinned organization (task 118): set per test. */
+const mockToken = { current: '' };
+const tokenFor = (roles: readonly string[], extra: Record<string, unknown> = {}) =>
+  tokens.actingAccessToken('ORG-DEH-0001', roles, extra);
+beforeEach(() => {
+  mockToken.current = tokenFor(Object.keys(ROLE_LABELS));
+});
+
 jest.mock('next/navigation', () => ({
   redirect: (url: string) => {
     throw new Error(`NEXT_REDIRECT:${url}`);
@@ -25,7 +34,7 @@ jest.mock('@/server/current-session', () => ({
     subject: 'USR_1',
     username: 'u',
     organizationId: 'ORG-DEH-0001',
-    accessToken: 'a',
+    accessToken: mockToken.current,
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'r',
     csrfToken: 'csrf',
@@ -80,13 +89,25 @@ describe('the roles list', () => {
     expect(roles.textContent).not.toMatch(RAW_CODE);
   });
 
-  it('shows a role this portal has no name for as sent, and only that one', async () => {
-    user = makeUser({ effectiveRoles: ['FLEET_MANAGER', 'BRAND_NEW_ROLE'] });
+  it('draws only roles the guard acts on: one this portal does not know is not a grant (task 118)', async () => {
+    mockToken.current = tokenFor(['FLEET_MANAGER'], {
+      org_roles: ['ORG-DEH-0001:FLEET_MANAGER', 'ORG-DEH-0001:BRAND_NEW_ROLE'],
+    });
+    user = makeUser({
+      memberships: [
+        {
+          organizationId: 'ORG-DEH-0001',
+          organizationName: 'دهیاری نمونه یک',
+          roles: ['FLEET_MANAGER', 'BRAND_NEW_ROLE'],
+          status: 'ACTIVE',
+        },
+      ],
+    });
     const { container } = await renderHome();
     const roles = container.querySelector('#roles, [aria-labelledby="roles"]') as HTMLElement;
     expect(roles.textContent).toContain(ROLE_LABELS.FLEET_MANAGER);
     expect(roles.textContent).not.toContain('FLEET_MANAGER');
-    expect(roles.textContent).toContain('BRAND_NEW_ROLE');
+    expect(roles.textContent).not.toContain('BRAND_NEW_ROLE');
   });
 });
 
@@ -121,6 +142,44 @@ describe('the organisation', () => {
     });
     const { container } = await renderHome();
     expect(container.querySelector('header')!.textContent).toContain('ORG-DEH-0001');
+  });
+});
+
+describe('the organization the session is pinned to, not identity’s or the token’s active one (task 100, task 118)', () => {
+  it('names, codes and lists the roles of the pinned membership after a switch elsewhere', async () => {
+    // identity — and the refreshed token's org_id — already moved to B; the
+    // session, and every request it sends, still acts for A.
+    mockToken.current = tokens.actingAccessToken('ORG-DEH-0002', ['OPERATOR'], {
+      org_ids: ['ORG-DEH-0001', 'ORG-DEH-0002'],
+      org_roles: ['ORG-DEH-0001:FLEET_MANAGER', 'ORG-DEH-0002:ORGANIZATION_ADMIN'],
+    });
+    user = makeUser({
+      activeOrganizationId: 'ORG-DEH-0002',
+      memberships: [
+        {
+          organizationId: 'ORG-DEH-0001',
+          organizationName: 'دهیاری نمونه یک',
+          roles: ['FLEET_MANAGER'],
+          status: 'ACTIVE',
+        },
+        {
+          organizationId: 'ORG-DEH-0002',
+          organizationName: 'دهیاری نمونه دو',
+          roles: ['ORGANIZATION_ADMIN'],
+          status: 'ACTIVE',
+        },
+      ],
+      effectiveRoles: ['ORGANIZATION_ADMIN'],
+    });
+    const { container } = await renderHome();
+    const text = container.textContent ?? '';
+    expect(container.querySelector('header')!.textContent).toContain('دهیاری نمونه یک');
+    expect(text).toContain('ORG-DEH-0001');
+    expect(text).not.toContain('دهیاری نمونه دو');
+    expect(text).not.toContain('ORG-DEH-0002');
+    const roles = container.querySelector('#roles, [aria-labelledby="roles"]') as HTMLElement;
+    expect(roles.textContent).toContain(ROLE_LABELS.FLEET_MANAGER);
+    expect(roles.textContent).not.toContain(ROLE_LABELS.ORGANIZATION_ADMIN);
   });
 });
 

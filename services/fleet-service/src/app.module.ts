@@ -24,6 +24,7 @@ import {
   toLogContext,
   type AuthGuardOptions,
   kafkaConnection,
+  StrictQueryParserInstaller,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
@@ -41,6 +42,7 @@ import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { DISPATCH_POLICY, type DispatchPolicy } from './fleet/dispatch-blocks';
 import { FleetRepository } from './fleet/fleet.repository';
 import { DriverService } from './fleet/driver.service';
+import { LiveMembershipClient, MEMBERSHIP_SOURCE, type MembershipSource } from './fleet/membership';
 import { AssignmentService } from './fleet/assignment.service';
 import { UsageService } from './fleet/usage.service';
 import { AvailabilityService } from './fleet/availability.service';
@@ -117,6 +119,9 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
     MetricsController,
   ],
   providers: [
+    // Over 1000 query segments is a 400, never a silent truncation (FU-072).
+    StrictQueryParserInstaller,
+
     { provide: ENV, useFactory: () => loadFleetEnv() },
 
     {
@@ -181,6 +186,18 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
             env.INTERNAL_TOKEN_ISSUER,
             env.INTERNAL_TOKEN_TTL_SECONDS,
           ),
+        }),
+    },
+    // Task 095: identity-service, asked whether a user is a live member of the
+    // organization before that user is registered as a driver.
+    {
+      provide: MEMBERSHIP_SOURCE,
+      inject: [ENV],
+      useFactory: (env: FleetEnv): MembershipSource =>
+        new LiveMembershipClient({
+          baseUrl: env.IDENTITY_SERVICE_URL,
+          timeoutMs: env.FLEET_IDENTITY_REQUEST_TIMEOUT_MS,
+          tokens: internalTokens(env),
         }),
     },
     AvailabilityService,

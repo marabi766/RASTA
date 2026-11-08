@@ -23,7 +23,7 @@ describe('Idempotency-Key on the repair-order writes', () => {
     recordLabour: jest.fn(),
     recordCost: jest.fn(),
   };
-  const store = { execute: jest.fn() };
+  const store = { assertAdmissible: jest.fn(), execute: jest.fn() };
   let app: INestApplication;
 
   beforeAll(async () => {
@@ -63,7 +63,7 @@ describe('Idempotency-Key on the repair-order writes', () => {
     store.execute.mockImplementation(
       async (
         _endpoint: string,
-        _key: string,
+        _request: unknown,
         _body: unknown,
         _status: number,
         work: (fence: typeof FENCE) => Promise<unknown>,
@@ -181,9 +181,9 @@ describe('Idempotency-Key on the repair-order writes', () => {
         store.execute.mock.invocationCallOrder[0],
       );
       expect(store.execute).toHaveBeenCalledTimes(1);
-      const [storedEndpoint, key, hashed, successStatus] = store.execute.mock.calls[0];
+      const [storedEndpoint, request, hashed, successStatus] = store.execute.mock.calls[0];
       expect(storedEndpoint).toBe(endpoint);
-      expect(key).toBe(KEY);
+      expect(request).toEqual({ key: KEY, replayDeadlineMs: undefined });
       // The order is part of the request the key stands for: one key cannot be replayed onto another.
       // (Defaults the schema fills in, such as a part's source, are part of it too.)
       expect(hashed).toEqual(expect.objectContaining({ repairOrderId: 'RPO-1', ...body }));

@@ -1,5 +1,7 @@
 # Runbook: ثبت Cutover ارزیابی پاداش (ADR-061 § ۴.۲)
 
+> **منطقهٔ زمانی:** پیش از هر SQL این Runbook، در همان نشست `SET TimeZone = 'UTC';` را اجرا کن: ستون‌های `timestamp(3)` ساعت دیواری UTC‌اند و `now()` را در منطقهٔ زمانی نشست می‌سنجند (FU-188).
+
 **شدت:** ⚪ عملیاتی
 **هشدار محرک:** ندارد — یک بار، هنگام نخستین استقرار economic-service با جدول `reward_source_evaluation`
 (Migration `20260925200000_reward_source_evaluation`).
@@ -35,7 +37,7 @@ Cutover همین مرز است: واقعیتِ بی ردیف ارزیابی که
 ```sql
 -- گام ۳ — فقط یک بار، پس از توقف همهٔ نمونه‌های قدیمی
 INSERT INTO "reward_evaluation_cutover" ("singleton", "cutover_at")
-VALUES (TRUE, CURRENT_TIMESTAMP);
+VALUES (TRUE, now() AT TIME ZONE 'UTC');
 ```
 
 زمان و نام اجراکننده را در Change Record استقرار ثبت کن؛ این ردیف پیکربندی مالی است.
@@ -47,7 +49,7 @@ VALUES (TRUE, CURRENT_TIMESTAMP);
 ## محدودیت‌ها
 
 - **فقط رو به جلو.** یک Trigger، `UPDATE` به زمان زودتر، `DELETE` و `TRUNCATE` را رد می‌کند. اگر Cutover زودتر از
-  پایان گام ۲ ثبت شد، آن را **جلو** ببر (`UPDATE ... SET "cutover_at" = CURRENT_TIMESTAMP`)؛ هرگز عقب نمی‌رود.
+  پایان گام ۲ ثبت شد، آن را **جلو** ببر (`UPDATE ... SET "cutover_at" = now() AT TIME ZONE 'UTC'`)؛ هرگز عقب نمی‌رود.
 - **پایین آوردن برای پذیرش تاریخچهٔ یک مستأجر ممنوع است.** Cutover سراسری است و پایین آوردنش تاریخچهٔ همهٔ مستأجرها را
   باز می‌کند. راه درست یک Backfill مجاز و مستأجرمحور است که هنوز ساخته نشده (ADR-061 § ۴.۲، پیگیری).
 - **رویدادهای ماندهٔ Topic.** واقعیتی که پیش از Cutover رخ داده و هنوز مصرف نشده بود، به DLQ

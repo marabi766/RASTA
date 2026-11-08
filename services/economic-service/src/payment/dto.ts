@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema, digitsToBigInt, numberInput } from '@rasta/contracts';
 import { EVIDENCE_REFERENCE_PATTERN } from '../events/events';
+import { identifier } from '../shared/canonical';
 import { cursorQueryParameter } from '../shared/cursor';
 
 /**
@@ -28,7 +29,7 @@ export const topUpSchema = z
      * Passed to the provider as well as stored, so a retry is deduplicated on
      * both sides of the boundary (docs/06 § 6.8).
      */
-    idempotencyKey: z.string().trim().min(8).max(128),
+    idempotencyKey: identifier(z.string().trim().min(8).max(128)),
     /**
      * Opaque provider instruction.
      *
@@ -38,7 +39,7 @@ export const topUpSchema = z
      * `fail-capture:<code>`), which is what makes the compensation paths
      * reachable deterministically instead of by chance.
      */
-    instrument: z.string().trim().max(128).optional(),
+    instrument: identifier(z.string().trim().max(128)).optional(),
   })
   .strict();
 
@@ -81,7 +82,7 @@ export type OperatorDecisionDto = z.infer<typeof operatorDecisionSchema>;
 export const listPaymentsQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 

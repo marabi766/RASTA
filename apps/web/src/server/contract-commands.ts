@@ -17,6 +17,7 @@ import type {
 } from '@/lib/contract-command-input';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import {
   AMENDMENT_SCHEMA,
   CONTRACT_DETAIL_SCHEMA,
@@ -160,7 +161,7 @@ export async function fetchSigningPolicy(
       const response = await callGateway<unknown>({
         baseUrl: webServerEnv().API_GATEWAY_URL,
         path: `/v1/contract-approval-policies?${search.toString()}`,
-        accessToken: session.accessToken,
+        credential: tenantCredential(session),
       });
       correlationId = response.correlationId;
       const parsed = policyPageSchema.safeParse(response.data);

@@ -10,6 +10,14 @@ export const RETRY_AFTER_MIN_SECONDS = 1;
  */
 export const RETRY_AFTER_MAX_SECONDS = 3600;
 
+/**
+ * Why a journal was refused as unbalanced: too few entries for double entry,
+ * an entry that is zero or negative, or debits and credits that differ in a
+ * currency. Fixed codes, logged in place of the figures.
+ */
+export type LedgerUnbalancedReason =
+  'TOO_FEW_ENTRIES' | 'NON_POSITIVE_ENTRY' | 'DEBITS_NOT_CREDITS';
+
 const TENANT_MISMATCH_MESSAGE = 'You are not a member of the requested organization';
 
 /**
@@ -27,13 +35,17 @@ export class RastaError extends Error {
   /**
    * Never serialised to the client — for server-side logs only, where
    * operators diagnose from it. What it may carry (S-09, docs/06 § 6.7):
-   * **identifiers and amounts** — record and tenant ids, an endpoint, a
-   * wallet's requested and available balance, a state transition. What it
-   * must never carry: **credentials or keys** (tokens, passwords, an
-   * Idempotency-Key or anything derived from one), **personal data** (names,
-   * emails, phone numbers, national ids, addresses) or **client free text**
-   * (a reason, a note, a raw body). Nothing sanitises it: it is logged as
-   * written, so what goes in is the author's call.
+   * **identifiers and fixed codes** — record and tenant ids, an endpoint, a
+   * state transition, a closed reason code. What it must never carry:
+   * **amounts or balances** (a wallet's requested or available figure, a
+   * journal's imbalance: they are an organization's financial data, read
+   * under authorization in the database, and the exception filter logs this
+   * object — economic audit F9), **credentials or keys** (tokens, passwords,
+   * an Idempotency-Key or anything derived from one), **personal data**
+   * (names, emails, phone numbers, national ids, addresses, an IBAN or a card
+   * number) or **client free text** (a reason, a note, a raw body). Nothing
+   * sanitises it: it is logged as written, so what goes in is the author's
+   * call.
    */
   readonly internalContext?: Record<string, unknown>;
   /**
@@ -152,17 +164,29 @@ export class RastaError extends Error {
     });
   }
 
-  static insufficientBalance(walletId: string, requested: string, available: string): RastaError {
+  /**
+   * The wallet and a fixed reason — never the figures (economic audit F9).
+   * The requested and available amounts used to be carried here, and the
+   * exception filter logs `internalContext` at debug, so every refused spend
+   * wrote an organization's balance into the log. The figures are in the
+   * database, under authorization; the wallet id is the handle to them.
+   */
+  static insufficientBalance(walletId: string): RastaError {
     return new RastaError(ERROR_CODES.INSUFFICIENT_BALANCE, 'Insufficient available balance', {
-      internalContext: { walletId, requested, available },
+      internalContext: { walletId, reason: 'AVAILABLE_BELOW_REQUESTED' },
     });
   }
 
-  static ledgerUnbalanced(journalId: string, delta: string): RastaError {
+  /**
+   * The journal and which check refused it, from a closed set — never the
+   * imbalance itself, which is an amount (economic audit F9). Typed as a
+   * union, so a caller cannot pass a figure.
+   */
+  static ledgerUnbalanced(journalId: string, reason: LedgerUnbalancedReason): RastaError {
     return new RastaError(
       ERROR_CODES.LEDGER_UNBALANCED,
       'Journal entries do not balance; refusing to post',
-      { internalContext: { journalId, delta } },
+      { internalContext: { journalId, reason } },
     );
   }
 

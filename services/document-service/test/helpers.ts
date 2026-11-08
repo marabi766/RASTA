@@ -1,4 +1,5 @@
 import { withUtcSession } from '@rasta/config';
+import { guardedFetch } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -413,7 +414,9 @@ export async function putToSignedUrl(
   body: Buffer,
   contentType: string,
 ): Promise<number> {
-  const response = await fetch(uploadUrl, {
+  // The signed URL is the capability: a redirect is refused, never followed
+  // with the bytes to another host (Q-155, PR #492 r1 F2).
+  const response = await guardedFetch(uploadUrl, {
     method: 'PUT',
     headers: { 'content-type': contentType },
     body: new Uint8Array(body),
@@ -428,7 +431,7 @@ export async function getFromSignedUrl(downloadUrl: string): Promise<{
   contentType: string | null;
   contentDisposition: string | null;
 }> {
-  const response = await fetch(downloadUrl);
+  const response = await guardedFetch(downloadUrl);
   const buffer = Buffer.from(await response.arrayBuffer());
   return {
     status: response.status,

@@ -3,8 +3,17 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema } from './zod-schema';
+import {
+  applyOperationSecurity,
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  routeAccessByOperation,
+  toJsonSchema,
+  type ServiceRouteUsers,
+} from '@rasta/nest-common';
 import { WarehouseController } from '../warehouse/warehouse.controller';
 import { WarehouseService } from '../warehouse/warehouse.service';
 import {
@@ -75,22 +84,13 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
  *   - the same suite provokes the documented refusals against the real API.
  *
  * Payload shapes come from the Zod schemas the pipes validate with, converted by
- * `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/inventory-service openapi:generate`.
  */
 
 /** Pinned so the committed document is deterministic. */
 export const INVENTORY_VERSION = '0.1.0';
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z
@@ -141,21 +141,23 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
 };
 
 /**
- * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
- * else — `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as a
- * user (marketplace-service's and contract-service's documents say the same).
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`dispatch-fence.ts`) — and must match the decorators exactly.
  */
-export const INTERNAL_TOKEN_SCHEME = 'internalToken';
-
-export const INTERNAL_TOKEN_API_KEY = {
-  type: 'apiKey' as const,
-  in: 'header',
-  name: 'X-Internal-Token',
-  description:
-    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/return-requests/{id}/return-shipment': 'users-refused',
+  'POST /v1/internal/return-requests/{id}/dispatch-withdrawal': 'users-refused',
 };
 
-const isInternal = (path: string): boolean => path.startsWith('/v1/internal/');
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 /** The internal routes' bodies: no Idempotency-Key — each is idempotent by itself. */
 const INTERNAL_REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
@@ -262,7 +264,7 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
     .filter(([, answered]) => answered === status)
     .map(([code]) => code);
   if (codes.length === 0) return undefined;
-  return apiErrorSchema.extend({
+  return publishedApiErrorSchema.extend({
     details: z
       .array(
         z
@@ -282,12 +284,20 @@ const REFUSAL_DETAILS_NOTE =
   'reservation, shipment, returnShipment) and `code` the reason, one of those listed here. Branch on `code` and ' +
   '`details[].code`, never on `message`.';
 
+/** The replay fence's header, as every keyed command reads it (FU-171, PM decision D-133). */
+const REPLAY_DEADLINE_DESCRIPTION =
+  'Optional. The last instant, in milliseconds since the epoch (one canonical integer: no sign, no leading zero, no space, sent once — otherwise 400 VALIDATION_FAILED), this request may be admitted under its Idempotency-Key or answered from its stored response. ' +
+  'Past it the request is refused with 409 REPLAY_WINDOW_CLOSED and nothing is written — a replay of the stored response included: this attempt did nothing, an earlier one under the key may have, so check before creating again. ' +
+  'The database clock has the last word, read after the insert of a claim and after every wait; a past deadline rolls the claim back. Equality is accepted. ' +
+  'A value later than claim time + INVENTORY_IDEMPOTENCY_TTL_HOURS − B (B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + a fixed margin) is refused before any claim with 400 VALIDATION_FAILED (path Idempotency-Replay-Deadline, code beyond_retention, a fixed message), never clamped; this service is bound to INVENTORY_MAX_REPLAY_WINDOW_SECONDS (@rasta/contracts) and refuses to start when its settings break it. ' +
+  'A completed response is kept at least B past the deadline, so a request carrying it is never executed again once it has been. Without the header nothing changes: an expired key is reusable.';
+
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
-  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
+  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too, and so is an Idempotency-Replay-Deadline that is not one canonical integer or is later than the retention allows (the attempt did nothing).',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).',
   404: 'Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), and, when a return shipment is recorded, for a return request marketplace-service does not hold with the acting organization as its supplier — so its existence is never disclosed.',
-  409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).',
+  409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); an Idempotency-Replay-Deadline that has passed (REPLAY_WINDOW_CLOSED — this attempt did nothing; an earlier one under the key may have); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).',
   422: 'Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once.',
   500: 'Unexpected server error.',
   503: 'marketplace-service, which owns the return request, could not be asked or gave no usable answer (UPSTREAM_UNAVAILABLE): the return shipment is not recorded and its dispatch not reserved; retry with the same Idempotency-Key.',
@@ -319,10 +329,9 @@ export function buildInventoryOpenApiDocument(app: INestApplication): OpenAPIObj
       .setDescription(DESCRIPTION)
       .setVersion(INVENTORY_VERSION)
       .addBearerAuth()
-      .addApiKey(INTERNAL_TOKEN_API_KEY, INTERNAL_TOKEN_SCHEME)
       .build(),
   );
-  return enrichOpenApiDocument(document);
+  return publishOperationSecurity(enrichOpenApiDocument(document), app);
 }
 
 /**
@@ -360,7 +369,7 @@ export async function buildDocumentationApp(): Promise<INestApplication> {
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -368,14 +377,13 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
-      if (isInternal(path)) {
+      // A route only a service may call has its own body, success and errors; every
+      // operation's `security` is `publishOperationSecurity`'s, from the guard's metadata
+      // (FU-075), never from the path.
+      if (SERVICE_ROUTES[key] === 'users-refused') {
         enrichInternalOperation(key, operation);
         continue;
       }
-
-      // `addBearerAuth()` declares the scheme; it does not apply it. Without this the contract
-      // would describe endpoints anybody can call.
-      operation.security ??= [{ bearer: [] }];
 
       const query = QUERY_SCHEMAS[key];
       const body = REQUEST_BODIES[key];
@@ -390,7 +398,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         };
         // Nest's `@ApiHeader` has no schema; replaced with the truth: required, bounded.
         operation.parameters = operation.parameters.filter(
-          (parameter) => !isHeader(parameter, 'idempotency-key'),
+          (parameter) =>
+            !isHeader(parameter, 'idempotency-key') &&
+            !isHeader(parameter, 'idempotency-replay-deadline'),
         );
         operation.parameters.push({
           name: 'Idempotency-Key',
@@ -399,6 +409,14 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           description:
             'Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.',
           schema: { type: 'string', minLength: 8, maxLength: 255 },
+        });
+        // FU-171: every keyed command reads it, through the one store (`shared/idempotency.ts`).
+        operation.parameters.push({
+          name: 'Idempotency-Replay-Deadline',
+          in: 'header',
+          required: false,
+          description: REPLAY_DEADLINE_DESCRIPTION,
+          schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
         });
       }
 
@@ -461,11 +479,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 }
 
 /**
- * An internal route (ADR-061 § 4): the internal token's scheme, never the bearer one; its body,
- * with no Idempotency-Key; its one success; and only the errors it can give.
+ * An internal route (ADR-061 § 4): its body, with no Idempotency-Key; its one success; and only
+ * the errors it can give.
  */
 function enrichInternalOperation(key: string, operation: MutableOperation): void {
-  operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
   const body = INTERNAL_REQUEST_BODIES[key];
   if (body) {
     operation.requestBody = {
@@ -515,7 +532,6 @@ interface MutableOperation {
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;
-  security?: Record<string, string[]>[];
 }
 
 function isHeader(parameter: unknown, name: string): boolean {
@@ -527,42 +543,14 @@ function isOperation(value: unknown): value is MutableOperation {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
   return Object.entries(shape).map(([name, member]) => ({
     name,
     in: 'query',
-    required: !member.isOptional(),
+    required: !isOptionalField(member),
     schema: toJsonSchema(member),
   }));
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodEffects ||
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current =
-        typeName === z.ZodFirstPartyTypeKind.ZodEffects
-          ? current._def.schema
-          : current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

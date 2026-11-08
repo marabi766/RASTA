@@ -1,6 +1,8 @@
+import { releaseWithin, type OutboxReleaseBound } from '@rasta/nest-common';
 import { expireClaim } from '@rasta/testing';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, ownerDatabaseUrl } from './helpers';
+import { readUrl } from '@rasta/config';
 
 /**
  * An isolated `outbox_message` for the ADR-050 protocol suite.
@@ -21,7 +23,7 @@ import { databaseUrl, ownerDatabaseUrl } from './helpers';
 export const PROTOCOL_SCHEMA = 'outbox_claim_protocol_test';
 
 function schemaUrl(schema: string): string {
-  const url = new URL(databaseUrl());
+  const url = readUrl(databaseUrl());
   url.searchParams.set('schema', schema);
   return url.toString();
 }
@@ -32,7 +34,7 @@ export function newProtocolPrisma(): PrismaService {
 }
 
 /** The role the service — and so every protocol "replica" — connects as. */
-const runtimeRole = () => decodeURIComponent(new URL(databaseUrl()).username);
+const runtimeRole = () => decodeURIComponent(readUrl(databaseUrl()).username);
 
 /**
  * Creates the isolated schema and table, as the owner (D-045: the runtime role
@@ -248,4 +250,192 @@ export async function holdLockOnOldest(
       return holding;
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// What a release's budget actually was (FU-048, Codex r1 on #644)
+// ---------------------------------------------------------------------------
+
+/** What one release showed at the three places its budget is decided. */
+export interface ReleaseObservation {
+  /** `released N`, the rejection's text, or `still waiting …` if neither came by the backstop. */
+  readonly outcome: string;
+  /** The time left that the bound reported to the release, in the order it was asked. */
+  readonly reads: readonly number[];
+  /** `timeout` and `maxWait` of every transaction start Prisma's engine was handed. */
+  readonly starts: readonly { readonly timeout: unknown; readonly maxWait: unknown }[];
+  /** UPDATE statements that reached PostgreSQL (the probe's count). */
+  readonly updates: number;
+  /** `statement_timeout`, in ms, PostgreSQL had in force when the last UPDATE began. */
+  readonly statementTimeoutMs: number | null;
+}
+
+/** What the refusal of a release blocked on a lock may look like (see the spec). */
+export const RELEASE_REFUSAL =
+  /57014|statement timeout|expired transaction|Transaction not found\. Transaction ID is invalid/;
+
+/**
+ * Whether `seen` is a release refused under a budget of exactly `budgetMs`:
+ *
+ * - the release was refused, in one of the forms a blocked release has;
+ * - the bound reported the whole budget when the release first read it, and
+ *   never more;
+ * - exactly one transaction started, and Prisma's engine was handed
+ *   `timeout` and `maxWait` equal to what the release read first;
+ * - exactly one UPDATE reached PostgreSQL, with a `statement_timeout` in force
+ *   equal to what the release read second (the `SET LOCAL` is recomputed from
+ *   the deadline, never carried over).
+ *
+ * The refusal alone proves nothing about the budget: a 5 000 ms transaction
+ * and statement timeout also end before the backstop, with a message this
+ * test accepts. So the budget is read where it is decided — the engine call
+ * and the setting PostgreSQL holds — and compared with the deadline.
+ */
+export function refusedUnderBudget(seen: ReleaseObservation, budgetMs: number): boolean {
+  const [first, second] = seen.reads;
+  if (first === undefined || second === undefined) return false;
+  if (!RELEASE_REFUSAL.test(seen.outcome)) return false;
+  if (first !== budgetMs || seen.reads.some((left) => !(left > 0 && left <= budgetMs)))
+    return false;
+  if (seen.starts.length !== 1) return false;
+  const [start] = seen.starts;
+  if (start?.timeout !== Math.floor(first) || start?.maxWait !== Math.floor(first)) return false;
+  return seen.updates === 1 && seen.statementTimeoutMs === Math.floor(second);
+}
+
+/** The side channel that reports the `statement_timeout` an UPDATE ran under. */
+export interface ReleaseProbe {
+  /** Forgets earlier UPDATEs. */
+  reset(): Promise<void>;
+  read(): Promise<{ updates: number; statementTimeoutMs: number | null }>;
+  /** Drops it. Only once nothing holds a lock on the table (DROP TRIGGER waits for it). */
+  remove(): Promise<void>;
+}
+
+/**
+ * Installs, on the protocol table, a statement-level trigger that records
+ * `statement_timeout` as PostgreSQL holds it when an UPDATE begins.
+ *
+ * Sequences are the record because they are not transactional: a release that
+ * is cancelled behind a lock, or rolled back, still leaves what it saw. A
+ * statement trigger runs before the UPDATE looks for a row, so it fires even
+ * when that UPDATE then waits on a lock. The setting is read from
+ * `pg_settings`, in ms, after `SET LOCAL` — the value actually in force.
+ */
+export async function installReleaseProbe(reader: PrismaService): Promise<ReleaseProbe> {
+  const admin = new PrismaService(ownerDatabaseUrl());
+  const runtime = runtimeRole();
+  const schema = PROTOCOL_SCHEMA;
+  const fires = `${schema}.release_probe_fires`;
+  const ms = `${schema}.release_probe_ms`;
+  try {
+    for (const statement of [
+      `CREATE SEQUENCE ${fires}`,
+      `CREATE SEQUENCE ${ms} MINVALUE 0 START 0`,
+      `CREATE FUNCTION ${schema}.release_probe() RETURNS trigger LANGUAGE plpgsql AS $f$
+         BEGIN
+           PERFORM nextval('${fires}');
+           PERFORM setval('${ms}', (SELECT setting::bigint FROM pg_catalog.pg_settings
+                                     WHERE name = 'statement_timeout'));
+           RETURN NULL;
+         END $f$`,
+      `CREATE TRIGGER release_probe BEFORE UPDATE ON ${schema}.outbox_message
+         FOR EACH STATEMENT EXECUTE FUNCTION ${schema}.release_probe()`,
+      `GRANT USAGE, SELECT, UPDATE ON SEQUENCE ${fires}, ${ms} TO "${runtime}"`,
+    ]) {
+      await admin.client.$executeRawUnsafe(statement);
+    }
+  } finally {
+    await admin.onModuleDestroy();
+  }
+  return {
+    reset: async () => {
+      await reader.client.$queryRawUnsafe(
+        `SELECT setval('${fires}', 1, false)::text, setval('${ms}', 0)::text`,
+      );
+    },
+    read: async () => {
+      const [row] = await reader.client.$queryRawUnsafe<{ updates: number; ms: number }[]>(
+        `SELECT (SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM ${fires})::int AS updates,
+                (SELECT last_value FROM ${ms})::int AS ms`,
+      );
+      const updates = row?.updates ?? 0;
+      return { updates, statementTimeoutMs: updates > 0 ? (row?.ms ?? null) : null };
+    },
+    remove: async () => {
+      const owner = new PrismaService(ownerDatabaseUrl());
+      try {
+        await owner.client.$executeRawUnsafe(
+          `DROP TRIGGER IF EXISTS release_probe ON ${schema}.outbox_message`,
+        );
+        await owner.client.$executeRawUnsafe(`DROP FUNCTION IF EXISTS ${schema}.release_probe()`);
+        await owner.client.$executeRawUnsafe(`DROP SEQUENCE IF EXISTS ${fires}, ${ms}`);
+      } finally {
+        await owner.onModuleDestroy();
+      }
+    },
+  };
+}
+
+/** The one engine call this wraps: Prisma 6's `transaction(action, headers, options)`. */
+interface TransactionEngine {
+  transaction: (action: string, headers: unknown, options: unknown) => Promise<unknown>;
+}
+
+/**
+ * Runs a release on `service` under a bound that reports `budgetMs` at every
+ * read (its clock is frozen, so the time left is the budget, with no wait for
+ * the machine) and returns what it showed at the Prisma engine and at
+ * PostgreSQL. The engine is restored afterwards.
+ *
+ * Fails, rather than records nothing, when Prisma no longer has the engine
+ * where this reads it: an unreadable timeout must not look like a pass.
+ */
+export async function observeRelease(
+  service: PrismaService,
+  probe: ReleaseProbe,
+  release: (bound: OutboxReleaseBound) => Promise<number>,
+  budgetMs: number,
+  backstopMs = 10_000,
+): Promise<ReleaseObservation> {
+  const base = (service as unknown as { base?: { _engine?: Partial<TransactionEngine> } }).base;
+  const engine = base?._engine;
+  if (engine === undefined || typeof engine.transaction !== 'function') {
+    throw new Error('Prisma no longer exposes _engine.transaction; the timeout cannot be read');
+  }
+  const original = engine.transaction;
+  const starts: { timeout: unknown; maxWait: unknown }[] = [];
+  engine.transaction = function (this: unknown, action, headers, options) {
+    if (action === 'start') {
+      const { timeout, maxWait } = (options ?? {}) as { timeout?: unknown; maxWait?: unknown };
+      starts.push({ timeout, maxWait });
+    }
+    return original.call(this, action, headers, options);
+  };
+  const frozen = releaseWithin(budgetMs, () => 0);
+  const reads: number[] = [];
+  const bound: OutboxReleaseBound = {
+    remainingMs: () => {
+      const left = frozen.remainingMs();
+      reads.push(left);
+      return left;
+    },
+  };
+  let backstop: NodeJS.Timeout | undefined;
+  try {
+    await probe.reset();
+    const outcome = await Promise.race([
+      release(bound).then(
+        (released) => `released ${released}`,
+        (error: unknown) => String(error),
+      ),
+      new Promise<string>((resolve) => {
+        backstop = setTimeout(() => resolve(`still waiting after ${backstopMs} ms`), backstopMs);
+      }),
+    ]);
+    return { outcome, reads, starts, ...(await probe.read()) };
+  } finally {
+    clearTimeout(backstop);
+    engine.transaction = original;
+  }
 }

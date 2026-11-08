@@ -3,8 +3,18 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
+import {
+  applyOperationSecurity,
+  INTERNAL_TOKEN_SCHEME,
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  routeAccessByOperation,
+  toJsonSchema,
+  type ServiceRouteUsers,
+} from '@rasta/nest-common';
 import { ContractController } from '../contract/contract.controller';
 import { ContractService } from '../contract/contract.service';
 import {
@@ -67,22 +77,13 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
  *   - the same suite provokes every documented status against the real API.
  *
  * Payload shapes come from the Zod schemas the pipes validate with (`src/contract/dto.ts`),
- * converted by `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * converted by `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/contract-service openapi:generate`.
  */
 
 /** Pinned so the committed document is deterministic. */
 export const CONTRACT_VERSION = '0.1.0';
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z
@@ -226,7 +227,7 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
     .filter(([, answered]) => answered === status)
     .map(([code]) => code);
   if (codes.length === 0) return undefined;
-  return apiErrorSchema.extend({
+  return publishedApiErrorSchema.extend({
     details: z
       .array(
         z
@@ -281,8 +282,8 @@ export const POLICY_ERROR_DESCRIPTIONS: Record<number, string> = {
 };
 
 /**
- * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4), which answer one named
- * service and no user at all.
+ * The same statuses on the routes that refuse every user (`users-refused` in `SERVICE_ROUTES`,
+ * ADR-061 § 4), which answer one named service and no user at all.
  */
 export const INTERNAL_ERROR_DESCRIPTIONS: Record<number, string> = {
   401: ERROR_DESCRIPTIONS[401] as string,
@@ -291,12 +292,25 @@ export const INTERNAL_ERROR_DESCRIPTIONS: Record<number, string> = {
   500: 'Unexpected server error.',
 };
 
+export { INTERNAL_TOKEN_SCHEME };
+
 /**
- * The internal routes' credential: a service's internal token in `X-Internal-Token` and nothing
- * else. `AuthGuard` judges a request that also carries `Authorization` on that bearer token, as
- * a user — so the internal routes cannot be described by the bearer scheme.
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`settlement-fact.ts`) — and must match the decorators exactly.
  */
-export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/statements/{id}': 'users-refused',
+};
+
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 const DESCRIPTION =
   'The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: ' +
@@ -334,19 +348,9 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
       .setDescription(DESCRIPTION)
       .setVersion(CONTRACT_VERSION)
       .addBearerAuth()
-      .addApiKey(
-        {
-          type: 'apiKey',
-          in: 'header',
-          name: 'X-Internal-Token',
-          description:
-            'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
-        },
-        INTERNAL_TOKEN_SCHEME,
-      )
       .build(),
   );
-  return enrichOpenApiDocument(document);
+  return publishOperationSecurity(enrichOpenApiDocument(document), app);
 }
 
 /**
@@ -385,7 +389,7 @@ export async function buildDocumentationApp(): Promise<INestApplication> {
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -393,12 +397,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
-      // `addBearerAuth()` declares the scheme; it does not apply it. Without this the
-      // contract would describe endpoints anybody can call. The internal routes answer a
-      // service's internal token only, which is not a bearer token.
-      operation.security ??= path.startsWith('/v1/internal/')
-        ? [{ [INTERNAL_TOKEN_SCHEME]: [] }]
-        : [{ bearer: [] }];
+      // Every operation's `security` is `publishOperationSecurity`'s, from the guard's metadata
+      // (FU-075), never from the path.
 
       const query = QUERY_SCHEMAS[key];
       const body = REQUEST_BODIES[key];
@@ -441,11 +441,12 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         };
       }
 
-      const descriptions = path.startsWith('/v1/internal/')
-        ? INTERNAL_ERROR_DESCRIPTIONS
-        : path.startsWith('/v1/contract-approval-policies')
-          ? POLICY_ERROR_DESCRIPTIONS
-          : ERROR_DESCRIPTIONS;
+      const descriptions =
+        SERVICE_ROUTES[key] === 'users-refused'
+          ? INTERNAL_ERROR_DESCRIPTIONS
+          : path.startsWith('/v1/contract-approval-policies')
+            ? POLICY_ERROR_DESCRIPTIONS
+            : ERROR_DESCRIPTIONS;
       for (const [status, description] of Object.entries(descriptions)) {
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
@@ -512,7 +513,6 @@ interface MutableOperation {
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;
-  security?: Record<string, string[]>[];
 }
 
 function isHeader(parameter: unknown, name: string): boolean {
@@ -524,42 +524,14 @@ function isOperation(value: unknown): value is MutableOperation {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
   return Object.entries(shape).map(([name, member]) => ({
     name,
     in: 'query',
-    required: !member.isOptional(),
+    required: !isOptionalField(member),
     schema: toJsonSchema(member),
   }));
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodEffects ||
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current =
-        typeName === z.ZodFirstPartyTypeKind.ZodEffects
-          ? current._def.schema
-          : current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

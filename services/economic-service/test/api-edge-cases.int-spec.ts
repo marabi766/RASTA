@@ -320,6 +320,7 @@ describe('economic edge cases', () => {
       const created = await request(http)
         .post('/v1/rewards/rules')
         .set('authorization', asSystem())
+        .set('idempotency-key', id('api-reward-rule'))
         .send({
           organizationId: org,
           triggerEvent: 'USAGE_RECORDED',
@@ -338,6 +339,7 @@ describe('economic edge cases', () => {
       const created = await request(http)
         .post('/v1/rewards/rules')
         .set('authorization', asSystem())
+        .set('idempotency-key', id('api-reward-rule'))
         .send({
           organizationId: org,
           triggerEvent: 'USAGE_RECORDED',
@@ -408,6 +410,7 @@ describe('economic edge cases', () => {
       const refused = await request(http)
         .post('/v1/rewards/rules')
         .set('authorization', asSystem())
+        .set('idempotency-key', id('api-reward-rule'))
         .send({
           organizationId: org,
           triggerEvent: 'USAGE_RECORDED',

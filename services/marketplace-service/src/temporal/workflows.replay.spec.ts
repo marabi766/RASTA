@@ -1,0 +1,158 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Worker } from '@temporalio/worker';
+
+/**
+ * `orderSaga` replays histories its previous release recorded (D-083).
+ *
+ * A saga runs for weeks, so every change to its commands meets histories the
+ * old code wrote: on the next workflow task after a deploy, the new code
+ * re-executes each one from the start and must issue exactly the commands it
+ * records, or the run fails with a nondeterminism error and the order stops
+ * with its money held. D-083 changed the waits — a window is now a deadline
+ * kept across a dispute (`DISPUTE_RESUME_PATCH`), the dispute wait also ends
+ * on a new dispute, and a pre-receipt status mirrors a decided dispute before
+ * it waits — and each change is guarded so an old history replays as it ran.
+ *
+ * The histories are main's `orderSaga` as it was before D-083, run against
+ * Temporal's time-skipping server and saved with the SDK's own
+ * `historyToJSON` (host identity replaced):
+ *
+ * - `settled` — fulfilment and receipt reminders, a dispute raised before
+ *   receipt and settled the old way (to RECEIPT_CONFIRMED), then settlement.
+ * - `disputed` — still waiting in a dispute raised at CONFIRMED when the
+ *   release changes: the in-flight case the deploy actually meets.
+ * - `resumed` — the rollout's overlap: a new API pod resumed a dispute to
+ *   CONFIRMED and a worker of the previous release carried the saga on, so
+ *   the history waits at CONFIRMED with the dispute still mirrored and
+ *   releases it only at RECEIPT_CONFIRMED. The new code must not add its
+ *   resume-time release there (`mirrorResumed` is behind the patch).
+ *
+ * No server is needed: `runReplayHistory` replays locally and throws on any
+ * divergence.
+ */
+
+jest.setTimeout(120_000);
+
+function fixture(name: string): unknown {
+  const file = join(__dirname, '__fixtures__', `order-saga-${name}.history.json`);
+  return JSON.parse(readFileSync(file, 'utf8'));
+}
+const history = (name: string): unknown => fixture(`pre-d083-${name}`);
+
+describe('orderSaga replays histories recorded before D-083', () => {
+  it.each(['settled', 'disputed', 'resumed'])(
+    'the %s history replays without divergence',
+    async (name) => {
+      await expect(
+        Worker.runReplayHistory(
+          { workflowsPath: require.resolve('./workflows') },
+          history(name),
+          `legacy-${name}`,
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+});
+
+/**
+ * The release wait (FU-080). `pre-fu080-release-refused` is the code before it
+ * (#625's head `dfa48a55`): a release refused, and the saga failed there. The
+ * new code must end the same way, not wait. `fu080-release-wait` is the code
+ * with it: the same refusal, its marker and report, a backoff, the release
+ * confirmed, and the saga on to its end. Its markers also feed the drain gate's
+ * test, as the real SDK's shape of them.
+ */
+describe('orderSaga replays histories on both sides of the release wait', () => {
+  it.each([
+    'pre-fu080-release-refused',
+    'fu080-release-wait',
+    // FU-103, the same pair: before it, authorisation exhausted ended the run
+    // (`7ac5e936`), and the new code must end the same way; with it, the wait.
+    'pre-fu103-authorise-exhausted',
+    'fu103-authorise-wait',
+    // FU-117: each site before it (`0a3b973a`) ended the run, and must replay that
+    // end. So must protocol 4's own history, carrying the
+    // FU-103 marker from an authorisation and then ending at the refund or the
+    // filing: the reason these sites have a marker of their own. With it, the wait.
+    'pre-fu117-compensate-exhausted',
+    'pre-fu117-dispute-exhausted',
+    // Protocol 5 (`38d0ca5d`) failed the order on an empty lookup, with no marker.
+    'pre-fu117-hold-empty',
+    'fu103-wait-then-refund-exhausted',
+    'fu103-wait-then-dispute-exhausted',
+    'fu117-compensate-wait',
+    'fu117-dispute-wait',
+    'fu117-hold-wait',
+    // #796 r1: each exit below ended the run before the owed-work marker (`38d0ca5d`,
+    // protocol 5), and must replay that end, or a filing sent without doubt. With it,
+    // the waits and the owner's answer, to their ends.
+    'pre-fu117r2-lookup-refused',
+    'pre-fu117r2-lookup-not-held',
+    'pre-fu117r2-lookup-mismatch',
+    'pre-fu117r2-cancel-refused',
+    'pre-fu117r2-filing-final',
+    'pre-fu117r2-compensate-final',
+    'pre-fu117r2-settle-then-filing-refused',
+    'pre-fu117r2-read-refused-mirrored',
+    'pre-fu117r2-settled-not-recorded',
+    'pre-fu117r2-settling-refused',
+    'pre-fu117r2-reminder-refused',
+    'fu117r2-lookup-then-cancel-wait',
+    'fu117r2-filing-final-then-cancel',
+    'fu117r2-settled-reconciliation',
+    'fu117r2-settle-doubt-filing',
+    // #812 r1: the build before the exit went on waiting past the limit, its input
+    // already carrying the retention (the rollout's overlap), and must replay that wait.
+    // With it, the order closed, and the watch to its end or to a late hold's refund.
+    'pre-fu117r3-hold-refused-past-window',
+    'fu117r3-hold-exit-failed',
+    'fu117r3-hold-exit-cancelled',
+    'fu117r3-late-hold-refunded',
+    // #796 r2 F5: what this build records. The marker commits with the call that may
+    // answer final (above, it followed the answer, as no history in service does).
+    'fu117r3-declared-filing-release-refund',
+    'fu117r3-declared-authorise-final',
+    // #812 r1 (D-132): the fence, its marker with the first send; the exit from a run
+    // continued short of its limit. The `fu117r3` hold exits above took the retired exit,
+    // and must keep replaying it.
+    'fu117r4-fence-exit-failed',
+    'fu117r4-fence-exit-cancelled',
+    'fu117r4-fence-late-hold-refunded',
+    'fu117r4-fence-first-send-refused',
+    'fu117r4-fence-wait-then-held-cancelled',
+    // #812 r2 (D-144): the fence on the order row, from a run that found it, a legacy watch
+    // that no longer expires, and a terminal obligation ending the hold's recovery.
+    'fu117r5-row-first-refusal-then-fence',
+    'fu117r5-row-cancelling-waits',
+    'fu117r5-row-closed-watches',
+    'fu117r5-legacy-watch-stays-then-terminal',
+    'fu117r5-hold-refunded-cancelled',
+    'fu117r5-hold-refunded-failed',
+    // FU-158 (D-127): a refund, filing or authorisation refused on its first attempt ended the
+    // run on every build before protocol 12, each captured with that build's own workflow, and
+    // must replay that end. With the marker, the wait to its end, and the refusal kept where
+    // the obligation holds nothing.
+    'pre-fu158-p4-refund-refused',
+    'pre-fu158-p5-refund-refused',
+    'pre-fu158-p6-refund-refused',
+    'pre-fu158-p7-refund-refused',
+    'pre-fu158-p10-refund-refused',
+    'pre-fu158-p5-filing-refused',
+    'pre-fu158-p10-filing-refused',
+    'pre-fu158-p4-authorise-refused',
+    'pre-fu158-p10-authorise-refused',
+    'fu158-refund-waits-then-refunded',
+    'fu158-refund-refused-owner-refunded',
+    'fu158-filing-waits-then-filed',
+    'fu158-authorise-waits-then-settled',
+  ])('the %s history replays without divergence', async (name) => {
+    await expect(
+      Worker.runReplayHistory(
+        { workflowsPath: require.resolve('./workflows') },
+        fixture(name),
+        name,
+      ),
+    ).resolves.toBeUndefined();
+  });
+});

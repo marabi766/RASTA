@@ -203,7 +203,8 @@ async function run(testCase: Case, mode: Mode): Promise<Outcome> {
     for (const [key, value] of Object.entries(testCase.env)) {
       env[key] = value === 'HTTP' ? origins.http : value === 'GRPC' ? origins.grpc : value;
     }
-    const args = ['-e', RUN_FIXTURE, mode, ...(testCase.explicitEndpoint ? [origins.http] : [])];
+    if (testCase.explicitEndpoint) env.FIXTURE_OTLP_ENDPOINT = origins.http;
+    const args = ['-e', RUN_FIXTURE, mode];
     const { stdout } = await promisify(execFile)(process.execPath, args, {
       cwd: PACKAGE_DIR,
       env,

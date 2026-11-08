@@ -1,7 +1,9 @@
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { OpenAPIObject } from '@nestjs/swagger';
-import { enrichOpenApiDocument } from '../src/openapi/document';
-import { startApi, type ApiHarness } from './api-helpers';
+import { enrichOpenApiDocument, publishOperationSecurity } from '../src/openapi/document';
+import { apiTenant, startApi, supplierActor, type ApiHarness } from './api-helpers';
+import request from 'supertest';
+import { PROBE_TRACEPARENT, httpErrorBodyProblems } from '@rasta/nest-common';
 
 /**
  * The published contract, built from the **running application**.
@@ -55,15 +57,18 @@ describe('the OpenAPI document describes the application that is running', () =>
 
   beforeAll(async () => {
     api = await startApi();
-    document = enrichOpenApiDocument(
-      SwaggerModule.createDocument(
-        api.app,
-        new DocumentBuilder()
-          .setTitle('RASTA Supplier Service')
-          .setVersion('1')
-          .addBearerAuth()
-          .build(),
+    document = publishOperationSecurity(
+      enrichOpenApiDocument(
+        SwaggerModule.createDocument(
+          api.app,
+          new DocumentBuilder()
+            .setTitle('RASTA Supplier Service')
+            .setVersion('1')
+            .addBearerAuth()
+            .build(),
+        ),
       ),
+      api.app,
     );
   }, 180_000);
 
@@ -155,19 +160,22 @@ describe('the OpenAPI document describes the application that is running', () =>
     expect(offenders).toEqual([]);
   });
 
-  it('publishes the standing routes under the internal service token, and every other route under the bearer', () => {
+  it('publishes the standing routes under the internal service token, the @Public probes under none, and every other route under the bearer', () => {
     const schemes = (document.components as { securitySchemes?: Record<string, unknown> })
       .securitySchemes;
     expect(schemes?.internalToken).toMatchObject({ type: 'apiKey', in: 'header' });
-    expect((schemes?.internalToken as { name: string }).name).toBe('x-internal-token');
+    expect((schemes?.internalToken as { name: string }).name).toBe('X-Internal-Token');
 
     for (const [path, item] of Object.entries(document.paths ?? {})) {
       const internal = path.startsWith('/v1/suppliers/standing-snapshot');
+      // `/health/*` and `/metrics` are `@Public`: the guard admits anyone, so no scheme (FU-075;
+      // the path rule used to stamp bearer on them).
+      const open = !path.startsWith('/v1/');
       for (const [method, operation] of Object.entries(item ?? {})) {
         const security = (operation as { security?: Record<string, unknown>[] }).security ?? [];
         expect({ route: `${method} ${path}`, schemes: security.flatMap(Object.keys) }).toEqual({
           route: `${method} ${path}`,
-          schemes: [internal ? 'internalToken' : 'bearer'],
+          schemes: open ? [] : [internal ? 'internalToken' : 'bearer'],
         });
       }
     }
@@ -211,5 +219,44 @@ describe('the OpenAPI document describes the application that is running', () =>
         });
       }
     }
+  });
+
+  it('accepts the error bodies the application really sends over HTTP, with and without a trace (audit 10-26 F3)', async () => {
+    const problems: string[] = [];
+    for (const traced of [true, false]) {
+      const headers: Record<string, string> = traced ? { traceparent: PROBE_TRACEPARENT } : {};
+      const http = () => request(api.app.getHttpServer());
+      const answers = [
+        {
+          method: 'GET',
+          url: '/v1/suppliers',
+          response: await http().get('/v1/suppliers').set(headers),
+        },
+        {
+          method: 'POST',
+          url: '/v1/suppliers',
+          response: await http()
+            .post('/v1/suppliers')
+            .set(headers)
+            .set('authorization', `Bearer ${supplierActor(apiTenant('API-ENVELOPE'))}`)
+            .send({ displayName: 'ok', capabilities: [] }),
+        },
+      ];
+      expect(answers.map(({ response }) => response.status)).toEqual([401, 400]);
+      expect(answers[1]!.response.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      expect(answers[1]!.response.body.details.length).toBeGreaterThan(0);
+      for (const { method, url, response } of answers) {
+        problems.push(
+          ...httpErrorBodyProblems(document, {
+            method,
+            url,
+            status: response.status,
+            body: response.body,
+            traced,
+          }),
+        );
+      }
+    }
+    expect(problems).toEqual([]);
   });
 });

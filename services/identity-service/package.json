@@ -12,7 +12,7 @@
     "lint": "eslint src test dev prisma/seed.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "jest --selectProjects unit",
-    "test:unit": "jest --selectProjects unit --passWithNoTests",
+    "test:unit": "jest --selectProjects unit",
     "test:integration": "jest --selectProjects integration --runInBand",
     "test:aggregation-stress": "jest --selectProjects aggregation-stress --runInBand",
     "test:keycloak-live": "jest --selectProjects keycloak-live --runInBand",
@@ -22,7 +22,7 @@
     "db:seed": "node --import @swc-node/register/esm-register --env-file-if-exists=../../.env prisma/seed.ts",
     "keycloak:reconcile": "node -r @swc-node/register --env-file-if-exists=../../.env src/keycloak/projection.cli.ts reconcile",
     "keycloak:backfill": "node -r @swc-node/register --env-file-if-exists=../../.env src/keycloak/projection.cli.ts backfill",
-    "openapi:generate": "tsx src/openapi.ts"
+    "openapi:generate": "node -r @swc-node/register src/openapi/generate.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -44,7 +44,7 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "ulid": "^2.3.0",
-    "zod": "^3.25.76"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@nestjs/testing": "^11.2.3",

@@ -328,8 +328,10 @@ describe('approval policies (contract.signature)', () => {
       it.each([
         [
           'a decimal minimum',
-          { minAmountMinor: '12.5', maxAmountMinor: '100' },
-          '12.5',
+          { minAmountMinor: '482139.5', maxAmountMinor: '100' },
+          // Not "12.5": the body's `timestamp` ("…T01:39:12.584Z") contains it. A dot after
+          // six digits is in no instant (seconds are two digits), no ULID and no correlation id.
+          '482139.5',
           'minAmountMinor',
         ],
         [

@@ -1,10 +1,17 @@
-import { corsOrigins, brokersOf, DEFAULT_PORT, loadAuditEnv, SERVICE_NAME } from './env';
+import {
+  auditEnvSchema,
+  corsOrigins,
+  brokersOf,
+  DEFAULT_PORT,
+  loadAuditEnv,
+  SERVICE_NAME,
+} from './env';
 import { AUDIT_SOURCE_SERVICES } from '../audit/audit-producer-topology';
 import {
   DEFAULT_MAX_QUERY_WINDOW_DAYS,
   DEFAULT_MAX_VERIFICATION_RECORDS,
 } from '../audit/audit.query.dto';
-import { withUtcSession } from '@rasta/config';
+import { withUtcSession, envEnumProbes } from '@rasta/config';
 import { auditOperationBudgets } from './operation-budgets';
 
 const RUNTIME_URL = 'postgresql://rasta_audit:pw@localhost:5433/rasta_audit?schema=audit';
@@ -301,7 +308,7 @@ describe('audit-service configuration', () => {
       expect(thrown).toBeInstanceOf(Error);
       const text = JSON.stringify(thrown) + String((thrown as Error).message);
       expect(text).toMatch(/not a known audit producer/);
-      // Names the position and the allowed set, never the rejected text.
+      // Names the allowed set, never the rejected text (nor, since #385 r2, its position).
       expect(text).not.toContain('SENTINEL');
       expect(text).not.toContain('zzzz');
     });
@@ -328,6 +335,32 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
     );
     expect(loadAuditEnv(base({ DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).DATABASE_URL).toContain(
       'statement_timeout%3D30001',
+    );
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(auditEnvSchema, (source) => loadAuditEnv(source), base(), SENTINELS);
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining(['NODE_ENV', 'LOG_LEVEL', 'KAFKA_SASL_MECHANISM']),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
     );
   });
 });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { isoDateTime } from '@rasta/contracts';
+import { toJsonSchema } from '@rasta/nest-common';
 import { createOrderSchema, listOrdersQuerySchema, submitReviewSchema } from '../order/dto';
 import { createOfferSchema, searchProductsQuerySchema, updateOfferSchema } from '../offer/dto';
 
@@ -47,7 +48,10 @@ describe('zod to JSON Schema', () => {
         string,
         Record<string, unknown>
       >;
-      expect(props.productId).toMatchObject({ type: 'string', minLength: 1, maxLength: 64 });
+      expect(props.productId).toEqual({
+        type: 'string',
+        description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+      });
     });
 
     it('carries the pattern actually enforced, not a re-spelling of it', () => {
@@ -59,7 +63,7 @@ describe('zod to JSON Schema', () => {
     });
 
     it('carries a date-time format', () => {
-      const s = toJsonSchema(z.object({ at: z.string().datetime() }));
+      const s = toJsonSchema(z.object({ at: z.string().check(isoDateTime()) }));
       const props = s.properties as Record<string, Record<string, unknown>>;
       expect(props.at).toMatchObject({ type: 'string', format: 'date-time' });
     });
@@ -71,7 +75,12 @@ describe('zod to JSON Schema', () => {
         string,
         Record<string, unknown>
       >;
-      expect(props.limit).toMatchObject({ type: 'integer', minimum: 1, maximum: 100 });
+      expect(props.limit).toEqual({
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        default: 25,
+      });
     });
 
     it('records a default rather than hiding it', () => {
@@ -89,6 +98,8 @@ describe('zod to JSON Schema', () => {
         Record<string, unknown>
       >;
       expect(props.rating).toMatchObject({ type: 'integer', minimum: 1, maximum: 5 });
+      expect(props.qualityRating).toMatchObject({ type: 'integer', minimum: 1, maximum: 5 });
+      expect(toJsonSchema(submitReviewSchema).required).not.toContain('qualityRating');
     });
   });
 

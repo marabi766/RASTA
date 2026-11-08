@@ -3,11 +3,11 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { admin, apiTenant, auditor, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
-import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped, type JsonSchema } from '@rasta/nest-common';
+import { recordCalls } from '@rasta/testing';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from '../src/openapi/document';
 import { schemaMismatches } from '../src/openapi/schema-mismatches';
-import type { JsonSchema } from '../src/openapi/zod-schema';
 
 /**
  * The wallet and payment HTTP surface, every path including the refusals.
@@ -400,20 +400,16 @@ describe('wallet API', () => {
     /** Every line the service could write: the filter's logger at each level, and the streams. */
     function captureLogs(): { text: () => string; restore: () => void } {
       const logger = harness.app.get<Record<string, unknown>>(EXCEPTION_FILTER_LOGGER);
-      const spies = [
+      const record = recordCalls([
         ...['fatal', 'error', 'warn', 'info', 'debug', 'trace']
           .filter((level) => typeof logger[level] === 'function')
           .map((level) => jest.spyOn(logger as Record<string, () => void>, level)),
         jest.spyOn(process.stdout, 'write'),
         jest.spyOn(process.stderr, 'write'),
-      ];
+      ]);
       return {
-        text: () =>
-          inspect(
-            spies.flatMap((spy): unknown[][] => spy.mock.calls),
-            { depth: null, maxStringLength: null },
-          ),
-        restore: () => spies.forEach((spy) => spy.mockRestore()),
+        text: () => inspect(record.calls(), { depth: null, maxStringLength: null }),
+        restore: () => record.restore(),
       };
     }
 
@@ -425,6 +421,30 @@ describe('wallet API', () => {
       runUnscoped('the suite looks for the key a refusal must not reserve', () =>
         harness.prisma.client.idempotencyKey.count({ where: { key } }),
       );
+
+    /**
+     * Positive control for `captureLogs`: a line the application's logger writes while it is
+     * active is in `text()` — before the restore and after it. A capture that records nothing
+     * fails here instead of letting "the text in no log line" pass on an empty record.
+     */
+    it('captures a line the application logs, and still holds it after the restore', () => {
+      const logger =
+        harness.app.get<Record<string, (message: string) => void>>(EXCEPTION_FILTER_LOGGER);
+      const level = (['error', 'warn', 'info'] as const).find(
+        (name) => typeof logger[name] === 'function',
+      )!;
+      const logs = captureLogs();
+      try {
+        logger[level](`line naming ${SENTINEL}`);
+        expect(logs.text()).toContain(SENTINEL);
+      } finally {
+        logs.restore();
+      }
+      expect(logs.text()).toContain(SENTINEL);
+      const empty = captureLogs();
+      empty.restore();
+      expect(empty.text()).not.toContain(SENTINEL);
+    });
 
     it.each([
       ['a fraction', '1.5'],

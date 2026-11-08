@@ -1,14 +1,20 @@
+import { envEnumProbes } from '@rasta/config';
 import { randomBytes } from 'node:crypto';
 import { MAX_QUANTITY } from '../demand/dto';
+import { PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
 import {
   corsOrigins,
   loadProcurementEnv,
+  replayWindowRoomSeconds,
+  procurementEnvSchema,
   MAX_FOLLOW_BATCH_SIZE,
   DEFAULT_MAX_LIVE_DEMANDS,
   MAX_INVITEES_LIMIT,
+  MAX_QUOTATION_REVISIONS_LIMIT,
+  QUOTATION_RECEIPT_CHAIN_LIMIT,
   MAX_LIVE_DEMANDS_LIMIT,
 } from './env';
-import { procurementOperationBudgets } from './operation-budgets';
+import { procurementOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
   KAFKA_BROKERS: 'localhost:9092',
@@ -193,6 +199,39 @@ describe('overrides', () => {
   });
 });
 
+describe('the replay fence budget (FU-156, PM decision D-125)', () => {
+  it('defaults to a 30 s skew: B = 2 · 30 s + 7 s', () => {
+    expect(load().PROCUREMENT_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(replayFenceBudgetMs(30)).toBe(67_000);
+  });
+
+  it.each([['-1'], ['301'], ['1.5']])('refuses a skew of %s at startup', (skew) => {
+    expect(() => load({ PROCUREMENT_CLOCK_SKEW_SECONDS: skew })).toThrow();
+  });
+
+  it('holds TTL − B − skew at or above PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS, at the edge', () => {
+    // 1 h: 3 600 − (2s + 7) − s ≥ 3 300  ⇔  s ≤ 97.
+    expect(
+      replayWindowRoomSeconds({
+        PROCUREMENT_IDEMPOTENCY_TTL_HOURS: 1,
+        PROCUREMENT_CLOCK_SKEW_SECONDS: 97,
+      }),
+    ).toBe(PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS + 2);
+    expect(
+      load({ PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '1', PROCUREMENT_CLOCK_SKEW_SECONDS: '97' })
+        .PROCUREMENT_CLOCK_SKEW_SECONDS,
+    ).toBe(97);
+    expect(() =>
+      load({ PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '1', PROCUREMENT_CLOCK_SKEW_SECONDS: '98' }),
+    ).toThrow(/PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS/);
+    // A longer retention leaves room for the largest skew.
+    expect(
+      load({ PROCUREMENT_IDEMPOTENCY_TTL_HOURS: '2', PROCUREMENT_CLOCK_SKEW_SECONDS: '300' })
+        .PROCUREMENT_CLOCK_SKEW_SECONDS,
+    ).toBe(300);
+  });
+});
+
 describe('corsOrigins', () => {
   it('splits, trims and drops empties', () => {
     expect(corsOrigins(load({ CORS_ORIGINS: ' https://a.test , ,https://b.test ' }))).toEqual([
@@ -257,6 +296,19 @@ describe('the RFQ settings (ADR-070 § 3, § 4; plan PR 6)', () => {
     }
   });
 
+  it('lets a quotation have 10 sealed revisions by default, 1 to 20: the most invitees at the most revisions fill exactly the chain audit-service returns', () => {
+    expect(load().PROCUREMENT_QUOTATION_MAX_REVISIONS).toBe(10);
+    expect(MAX_QUOTATION_REVISIONS_LIMIT * MAX_INVITEES_LIMIT).toBe(QUOTATION_RECEIPT_CHAIN_LIMIT);
+    expect(
+      load({ PROCUREMENT_QUOTATION_MAX_REVISIONS: '20' }).PROCUREMENT_QUOTATION_MAX_REVISIONS,
+    ).toBe(20);
+    for (const bad of ['0', '21', '1.5']) {
+      expect(() => load({ PROCUREMENT_QUOTATION_MAX_REVISIONS: bad })).toThrow(
+        /PROCUREMENT_QUOTATION_MAX_REVISIONS/,
+      );
+    }
+  });
+
   it('cancels for BUYER_REQUEST by default; the closed list is the client’s (the planned CancelRfq)', () => {
     expect(load().PROCUREMENT_RFQ_CANCELLATION_CODES).toEqual(['BUYER_REQUEST']);
     expect(
@@ -314,5 +366,41 @@ describe('the RFQ settings (ADR-070 § 3, § 4; plan PR 6)', () => {
       expect(message).toMatch(/PROCUREMENT_RFQ_KEK/);
       expect(message).not.toContain(first);
     }
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    procurementEnvSchema,
+    (source) => loadProcurementEnv(source),
+    base,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining([
+        'NODE_ENV',
+        'LOG_LEVEL',
+        'KAFKA_SASL_MECHANISM',
+        'PROCUREMENT_AGGREGATION_SHORTFALL_POLICY',
+      ]),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

@@ -47,12 +47,12 @@ describe('a registration request person name (HTTP)', () => {
       .send({ ...BODY, firstName });
 
   it('accepts an ordinary name, ZWNJ and apostrophe included', async () => {
-    expect((await post('علی‌اکبر')).status).toBe(201);
-    expect((await post("Mary-Ann O'Neil")).status).toBe(201);
+    expect((await post('علی‌اکبر')).status).toBe(202);
+    expect((await post("Mary-Ann O'Neil")).status).toBe(202);
   });
 
   it('keeps the whitespace rule it always had: a stored line break still validates', async () => {
-    expect((await post('علی\nاکبر')).status).toBe(201);
+    expect((await post('علی\nاکبر')).status).toBe(202);
   });
 
   it.each([

@@ -1,7 +1,9 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { InternalTokenService, RastaError, runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import {
   TenderEvidenceClient,
   trustedReceiptsOf,
@@ -133,19 +135,24 @@ describe('bids', () => {
         receipt: expect.stringMatching(/^[0-9a-f]{64}$/),
         contentCommitment: expect.stringMatching(/^[0-9a-f]{64}$/),
       });
-      expect(JSON.stringify(view)).not.toMatch(/1250000000|Mobilisation|Licence 1234/);
+      // No independently verified path exemption: generated values stay searched (#452).
+
+      expectNotDisclosed(view, [/1250000000|Mobilisation|Licence 1234/]);
 
       // Nothing readable is stored: the price, the note and the answers exist only sealed.
       const row = await runUnscoped('the suite reads the row it wrote', () =>
         w.prisma.client.bid.findFirstOrThrow({ where: { id: view.bidId } }),
       );
       expect(row).toMatchObject({ organizationId: owner, bidderOrganizationId: bidder });
-      const stored = JSON.stringify({
-        ...row,
-        nonce: Buffer.from(row.nonce).toString('latin1'),
-        ciphertext: Buffer.from(row.ciphertext).toString('latin1'),
-      });
-      expect(stored).not.toMatch(/1250000000|Mobilisation|Licence 1234/);
+      // The sealed bytes stay in what is searched, as text (C): they are what must not hold it.
+      expectNotDisclosed(
+        {
+          ...row,
+          nonce: Buffer.from(row.nonce).toString('latin1'),
+          ciphertext: Buffer.from(row.ciphertext).toString('latin1'),
+        },
+        [/1250000000|Mobilisation|Licence 1234/],
+      );
 
       // The event carries digests and the new head, no content.
       const [event] = await eventsOf(w, owner, 'BID_SUBMITTED');
@@ -163,7 +170,7 @@ describe('bids', () => {
         receipt: view.receipt,
         submittedBy: expect.any(String),
       });
-      expect(JSON.stringify(event!.payload)).not.toMatch(/1250000000|Mobilisation|Licence 1234/);
+      expectNotDisclosed(event!.payload, [/1250000000|Mobilisation|Licence 1234/]);
     });
 
     it('stamps the row, the receipt and the event with one instant', async () => {
@@ -250,10 +257,9 @@ describe('bids', () => {
     it('refuses on the real clock once the window has passed, though the tender is still PUBLISHED', async () => {
       const { bidder, tenderId } = await setup();
       await runUnscoped('the suite moves the deadline into the past', () =>
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
-        ),
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`),
       );
 
       expect(await refusalsOf(submit(bidder, tenderId))).toContain('BID_WINDOW_CLOSED');
@@ -270,10 +276,8 @@ describe('bids', () => {
       const held = new Promise<void>((resolve) => (holding = resolve));
       const holder = runUnscoped('the suite holds the tender row and moves its deadline', () =>
         w.prisma.client.$transaction(async (tx) => {
-          await tx.$executeRawUnsafe(
-            `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-               "bid_closing_at" = now() + interval '1 second' WHERE "id" = '${tenderId}'`,
-          );
+          await tx.$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+               "bid_closing_at" = now() + interval '1 second' WHERE "id" = '${tenderId}'`);
           holding();
           await mayRelease;
         }),
@@ -295,10 +299,9 @@ describe('bids', () => {
       const { owner, bidder, tenderId } = await setup();
       const view = await submit(bidder, tenderId);
       await runUnscoped('the suite closes the window', () =>
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
-        ),
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`),
       );
 
       // A replacement of the seal, or a withdrawal, straight in SQL: refused by the trigger.
@@ -328,10 +331,9 @@ describe('bids', () => {
   describe('a deadline that crosses between the decision and the write', () => {
     const closeWindowForReal = (tenderId: string) =>
       runUnscoped('the suite lets the real deadline pass', () =>
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
-        ),
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`),
       );
 
     it('is a 422 BID_WINDOW_CLOSED, not a 500, for a submission, a replacement and a withdrawal', async () => {
@@ -777,10 +779,9 @@ describe('bids', () => {
         // And a tender filled to its caps is opened — through the opening itself, not by checking
         // the chain on the side (Codex r1 on #250, R2): every standing bid against one verification.
         await runUnscoped('the suite lets the deadline pass', () =>
-          w.prisma.client.$executeRawUnsafe(
-            `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-               "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
-          ),
+          w.prisma.client
+            .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+               "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`),
         );
         await limited.tenderClose.close({ organizationId: owner, tenderId });
         // Four eyes: one proposes, another approves and opens.
@@ -1125,9 +1126,8 @@ describe('bids', () => {
         refusalCode: null,
         accessedAt: rows[0]!.accessedAt.toISOString(),
       });
-      expect(JSON.stringify(rows) + JSON.stringify(event!.payload)).not.toMatch(
-        /1250000000|Mobilisation|Licence 1234/,
-      );
+      // No independently verified path exemption: generated values stay searched (#452).
+      expectNotDisclosed([rows, event!.payload], [/1250000000|Mobilisation|Licence 1234/]);
     });
 
     it('logs a refused read, commits the row, and then answers 404', async () => {

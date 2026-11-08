@@ -16,6 +16,11 @@ import {
 } from './transactions';
 import { tokenAuthority } from './realm-roles';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * One transaction and its dispute commands: the reader refuses an answer that
@@ -32,7 +37,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const TXN = 'TXN_01JABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -98,7 +103,7 @@ describe('reading one transaction', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`http://gateway.test:3000/v1/transactions/${TXN}`);
     expect((init.headers as Record<string, string>).authorization).toBe(
-      'Bearer access-token-value',
+      `Bearer ${ACCESS_TOKEN_VALUE}`,
     );
   });
 
@@ -108,6 +113,12 @@ describe('reading one transaction', () => {
     expect(fetchMock.mock.calls[0]![0]).toBe(
       'http://gateway.test:3000/v1/transactions/..%2Fwallets%2Fme',
     );
+  });
+
+  // #824 r1, F2: dropped here, every HELD read as proven escrow.
+  it.each([[true], [false]])('keeps heldProven %s as the API sent it', async (heldProven) => {
+    const result = await read({ ...WIRE, heldProven });
+    expect(result).toMatchObject({ kind: 'OK', data: { heldProven } });
   });
 
   it('keeps money a decimal string, digit for digit, past 2^53', async () => {
@@ -126,7 +137,8 @@ describe('reading one transaction', () => {
     expect(data).not.toHaveProperty('commission');
   });
 
-  const REQUIRED = Object.keys(TRANSACTION_SCHEMA.shape);
+  // heldProven alone may be absent, from an older service: it then proves nothing (`labels.ts`).
+  const REQUIRED = Object.keys(TRANSACTION_SCHEMA.shape).filter((field) => field !== 'heldProven');
 
   it.each(REQUIRED)(
     'answers MALFORMED when the required field `%s` is omitted, never a default',
@@ -280,7 +292,7 @@ describe('which commands are offered, from the token the service will see (revie
   const jwt = (claims: unknown): string =>
     `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
   const viewerOf = (token: string) => {
-    const authority = tokenAuthority(token);
+    const authority = tokenAuthority(token, pinnedTokens(token).organizationId);
     return { roles: authority?.roles ?? null, organizationId: authority?.organizationId ?? null };
   };
   const held = {
@@ -395,6 +407,8 @@ describe('issuing a command', () => {
   it.each([
     [DISPUTE, 'dispute', 'DISPUTED'],
     [RESOLVE, 'resolve-dispute', 'PENDING_SETTLEMENT'],
+    // Escrowed and never authorised: back to HELD, still a done resolution (D-083).
+    [RESOLVE, 'resolve-dispute', 'HELD'],
   ])(
     'posts %j to its path with the submission id as the Idempotency-Key',
     async (request, path, target) => {
@@ -406,6 +420,14 @@ describe('issuing a command', () => {
       expect(init.method).toBe('POST');
       expect((init.headers as Record<string, string>)['idempotency-key']).toBe(SUBMISSION);
       expect(JSON.parse(init.body as string)).toEqual(request.body);
+    },
+  );
+
+  it.each(['DISPUTED', 'SETTLED', 'REFUNDED'])(
+    'reads a resolution answered %s as unconfirmed: no resolution leaves it there',
+    async (status) => {
+      const fetchImpl = jest.fn(async () => jsonResponse(200, { ...WIRE, status }));
+      expect(await send(fetchImpl, RESOLVE)).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
     },
   );
 
@@ -463,7 +485,9 @@ describe('issuing a command', () => {
   it('never echoes service text for a code it has no sentence for (a bidi control)', async () => {
     const result = await send(
       jest.fn(async () =>
-        problem(422, 'SOMETHING_NEW', 'raw ‮ text', [{ path: 'elsewhere', message: 'bad ‮ x' }]),
+        problem(422, 'BUSINESS_RULE_VIOLATION', 'raw ‮ text', [
+          { path: 'elsewhere', message: 'bad ‮ x' },
+        ]),
       ),
     );
     expect(result.kind).toBe('INVALID');

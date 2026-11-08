@@ -77,6 +77,7 @@ Envelope می‌آید تا یک Topic بتواند در طول یک Rollout ج�
   "traceparent": "00-4bf92f3577b34da6...-01", // W3C Trace Context
 
   "actor": { "type": "USER", "id": "USR_01JBQ8..." },
+  // یا، بی actor: "anonymous": true — درخواست احراز هویت‌نشده (ثبت‌نام عمومی)، نه کار پس‌زمینه (PR #483 r3 F1، docs/events)
 
   "payload": {}, // مطابق Schema این رویداد و این نسخه
 }
@@ -350,6 +351,15 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `ORGANIZATION_CREATED`           | organization | **همه** (Replica مرجع) · economic (کیف پول) |
 | `ORGANIZATION_UPDATED`           | organization | همه (Replica مرجع)                          |
 | `ORGANIZATION_DEACTIVATED`       | organization | identity (ابطال عضویت) · همه                |
+
+**`occurredAt` رویدادهای تنگ‌کننده (D-064، ADR-060 افزوده‌ی «نوشتن Keycloak پیش از Commit»).** `ROLE_REVOKED`،
+`MEMBERSHIP_REVOKED` و `MEMBERSHIP_EXPIRED` فقط پس از آن صف می‌شوند که `identity-service` صفت‌های کاربر را در Keycloak،
+درون همان تراکنش، تنگ کرده است؛ پس `occurredAt` آن‌ها دیرتر از هر توکنی است که Keycloak با اعطای قدیم ساخته، و Gateway آن را
+مرز ابطال می‌گیرد. اگر Keycloak نوشته نشود، تغییر Commit نمی‌شود و **رویدادی هم نیست** (`503 KEYCLOAK_UNAVAILABLE`)؛ همچنین
+وقتی نوشتنی پیشین از همان کاربر هنوز ممکن است بنشیند (`503 KEYCLOAK_WRITE_SETTLING`، حصار D-069). تکرار
+همان تنزل یا ابطال رویداد دومی نمی‌سازد. هر مسیر تنگ‌کننده‌ی بعدی — از جمله ابطال عضویت با `ORGANIZATION_DEACTIVATED`، که هنوز Consumerی در
+`identity-service` ندارد — از همان `KeycloakProjector.narrowing` می‌گذرد. `ROLE_ASSIGNED`، `MEMBERSHIP_CREATED` و `USER_ACTIVATED` مانند پیش‌اند: Commit، سپس
+Projection.
 
 ### Asset · Fleet · Maintenance · Insurance
 

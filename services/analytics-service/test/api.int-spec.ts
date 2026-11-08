@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { errorEnvelope, expectNotDisclosed } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { fleetDashboardViewSchema } from '../src/maintenance/dto';
 import {
@@ -49,6 +50,32 @@ function fleet(token: string, query: Record<string, string> = WINDOW, organizati
 
 let a: string;
 let b: string;
+
+/**
+ * A refusal says nothing of either organization's facts: looked for once the envelope's
+ * correlation ULID and timestamp are verified and set aside, so `777777` or `50000` inside a
+ * generated id cannot fail it (#452). The path holds no id and stays in what is searched.
+ */
+function expectRefusalWithout(response: request.Response, secrets: (string | RegExp)[]): void {
+  expectNotDisclosed(response.body, secrets, {
+    metadata: errorEnvelope({ headers: response.headers }),
+  });
+}
+
+/**
+ * A dashboard answers its own organization: that id, the window and its earliest held completion
+ * (each organization's fixture above) are verified and set aside, the facts searched.
+ */
+function expectDashboardWithout(
+  response: request.Response,
+  organizationId: string,
+  earliestCompletionAt: string,
+  secret: string,
+): void {
+  expectNotDisclosed(response.body, [secret], {
+    metadata: { organizationId, from: WINDOW.from, to: WINDOW.to, earliestCompletionAt },
+  });
+}
 
 beforeAll(async () => {
   api = await startApi();
@@ -204,7 +231,8 @@ describe('tenant isolation: organization A never sees organization B', () => {
     const forA = await fleet(actor(a, ['FLEET_MANAGER'])).expect(200);
     const forB = await fleet(actor(b, ['FLEET_MANAGER'])).expect(200);
 
-    expect(JSON.stringify(forA.body)).not.toContain('777777');
+    // B's cost (beforeAll) is nowhere in A's dashboard.
+    expectDashboardWithout(forA, a, '2026-09-15T10:00:00.000Z', '777777');
     expect(forB.body.maintenance.completed).toEqual([
       {
         type: 'CORRECTIVE',
@@ -219,7 +247,7 @@ describe('tenant isolation: organization A never sees organization B', () => {
   it('refuses a member of A who names B in X-Organization-Id, and leaks nothing of B', async () => {
     const response = await fleet(actor(a, ['FLEET_MANAGER']), WINDOW, b);
     expect(response.status).toBe(403);
-    expect(JSON.stringify(response.body)).not.toContain('777777');
+    expectRefusalWithout(response, ['777777']);
   });
 
   it('cannot be steered to another organization by a query parameter', async () => {
@@ -232,7 +260,7 @@ describe('tenant isolation: organization A never sees organization B', () => {
       const response = await fleet(actor(a, ['FLEET_MANAGER']), { ...WINDOW, [name]: b }).expect(
         400,
       );
-      expect(JSON.stringify(response.body)).not.toContain('777777');
+      expectRefusalWithout(response, ['777777']);
     },
   );
 
@@ -243,14 +271,15 @@ describe('tenant isolation: organization A never sees organization B', () => {
         .query({ period: '2026-10' })
         .set('authorization', `Bearer ${actor(a, roles)}`);
       expect(response.status).toBe(404);
-      expect(JSON.stringify(response.body)).not.toMatch(/777777|50000/);
+      expectRefusalWithout(response, [/777777|50000/]);
     }
   });
 
   it('lets a SYSTEM_ADMIN read only the organization it acts for', async () => {
     const response = await fleet(actor(b, ['SYSTEM_ADMIN'])).expect(200);
     expect(response.body.organizationId).toBe(b);
-    expect(JSON.stringify(response.body)).not.toContain('50000');
+    // A's corrective cost (beforeAll) is nowhere in B's dashboard.
+    expectDashboardWithout(response, b, '2026-10-05T10:00:00.000Z', '50000');
   });
 });
 
@@ -272,7 +301,7 @@ describe('authorization', () => {
 
   it('refuses the oversight role: one organization’s dashboard is not an aggregate (docs/09 § 9.3)', async () => {
     const response = await fleet(actor(a, ['AUDITOR'])).expect(403);
-    expect(JSON.stringify(response.body)).not.toContain('50000');
+    expectRefusalWithout(response, ['50000']);
     await fleet(actor(a, ['FLEET_MANAGER', 'AUDITOR'])).expect(403);
   });
 
@@ -286,7 +315,7 @@ describe('authorization', () => {
       .query(WINDOW)
       .set('x-internal-token', await internalToken('economic-service', { organizationId: a }))
       .expect(403);
-    expect(JSON.stringify(response.body)).not.toContain('50000');
+    expectRefusalWithout(response, ['50000']);
   });
 
   it('refuses a caller with no token', async () => {

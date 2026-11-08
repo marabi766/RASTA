@@ -1,7 +1,15 @@
 import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import {
+  applyOperationSecurity,
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  routeAccessByOperation,
+  toJsonSchema,
+  type ServiceRouteUsers,
+} from '@rasta/nest-common';
 import {
   auditEventDetailQuerySchema,
   auditEventQuerySchema,
@@ -10,6 +18,7 @@ import {
 import { auditEventPageSchema, auditEventViewSchema } from '../audit/audit.view';
 import { auditChainVerificationSchema } from '../audit/audit.verification.view';
 import { auditTargetLookupQuerySchema, auditTargetViewSchema } from '../audit/audit.lookup';
+import { rfqChainViewSchema } from '../audit/rfq-evidence.service';
 import { tenderChainViewSchema } from '../audit/tender-evidence.service';
 
 /**
@@ -37,15 +46,6 @@ import { tenderChainViewSchema } from '../audit/tender-evidence.service';
  * with no generator, no CI check and no consumer asking for it.
  */
 
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
-
 /**
  * Success responses, each with the status the handler actually answers.
  *
@@ -61,6 +61,10 @@ const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> =
   'GET /v1/internal/tender-evidence/{tenderId}/chain': {
     status: '200',
     schema: tenderChainViewSchema,
+  },
+  'GET /v1/internal/rfq-evidence/{rfqId}/chain': {
+    status: '200',
+    schema: rfqChainViewSchema,
   },
 };
 
@@ -123,6 +127,27 @@ const DESCRIPTION =
   "only by identity-service's service token, proves a correction target exists and " +
   'names its scope; it returns no evidence.';
 
+/**
+ * Every `@AllowService` route (FU-075) and whether a user token is still admitted there. Which
+ * token a route takes is read from the guard's own metadata (`applyOperationSecurity`,
+ * @rasta/nest-common); this table states only what no decorator does — `users-refused` is
+ * enforced in the service (`audit.lookup.ts`, `tender-evidence.service.ts`,
+ * `rfq-evidence.service.ts`) — and must match the decorators exactly.
+ */
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/internal/audit-events/{id}': 'users-refused',
+  'GET /v1/internal/tender-evidence/{tenderId}/chain': 'users-refused',
+  'GET /v1/internal/rfq-evidence/{rfqId}/chain': 'users-refused',
+};
+
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
+
 /** Builds the finished document for a booted application. */
 export function buildAuditOpenApiDocument(
   app: INestApplication,
@@ -138,27 +163,13 @@ export function buildAuditOpenApiDocument(
       .build(),
   );
 
-  return enrichOpenApiDocument(document);
+  return publishOperationSecurity(enrichOpenApiDocument(document), app);
 }
 
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
-  // The internal correction-target lookup is not bearer-authenticated: it is
-  // reached with a signed service token (ADR-020/035) and by exactly one
-  // service. Publishing it under the bearer scheme would describe a door that
-  // does not exist and hide the one that does.
-  document.components.securitySchemes ??= {};
-  document.components.securitySchemes.internalToken = {
-    type: 'apiKey',
-    in: 'header',
-    name: 'x-internal-token',
-    description:
-      'A signed internal service token. The correction-target lookup accepts one ' +
-      'minted for audit-service by identity-service, and the tender-evidence chain read ' +
-      'one minted by construction-service for the tender owner’s organization; nothing else.',
-  } as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -166,15 +177,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       const key = `${method.toUpperCase()} ${path}`;
 
-      // Stated on the operation, not only in `components.securitySchemes`.
-      // `DocumentBuilder.addBearerAuth()` *declares* the scheme; it does not
-      // apply it, and without this the published contract would describe a
-      // service whose endpoints are open while the guard answers 401 to every
-      // one of them. On an audit API that is not a documentation nicety: a
-      // reviewer reading the contract must be able to see the store is closed.
-      operation.security ??= path.startsWith('/v1/internal/')
-        ? [{ internalToken: [] }]
-        : [{ bearer: [] }];
+      // Every operation's `security` is `publishOperationSecurity`'s, from the
+      // guard's metadata (FU-075), never from the path: a reviewer reading the
+      // contract must be able to see the store is closed, and which door is which.
 
       const query = QUERY_SCHEMAS[key];
       if (query) {
@@ -210,7 +215,6 @@ interface MutableOperation {
   parameters?: unknown[];
   responses?: Record<string, unknown>;
   description?: string;
-  security?: Record<string, string[]>[];
 }
 
 function isOperation(value: unknown): value is MutableOperation {
@@ -226,7 +230,7 @@ function isOperation(value: unknown): value is MutableOperation {
  * because the document is still valid. Both audit query schemas carry both
  * wrappers, so this unwrapping is load-bearing rather than defensive.
  */
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
@@ -237,36 +241,8 @@ function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
       in: 'query',
       // `from` and `to` are the two that matter: published as required, from
       // the same schema that rejects a request without them.
-      required: !member.isOptional(),
+      required: !isOptionalField(member),
       schema: jsonSchema,
     };
   });
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (typeName === z.ZodFirstPartyTypeKind.ZodEffects) {
-      current = current._def.schema;
-      continue;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current = current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

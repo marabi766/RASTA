@@ -1,4 +1,10 @@
-import { corsOrigins, loadContractEnv, signingTransactionTimeoutMs } from './env';
+import { envEnumProbes } from '@rasta/config';
+import {
+  contractEnvSchema,
+  corsOrigins,
+  loadContractEnv,
+  signingTransactionTimeoutMs,
+} from './env';
 import { contractOperationBudgets } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
@@ -96,6 +102,18 @@ describe('overrides', () => {
     ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
   });
 
+  it('has no deduction writer by default, nor any approver or four-eyes setting (CON-003-1, D-115)', () => {
+    const env = load();
+    expect(env.CONTRACT_DEDUCTION_WRITER_ROLES).toEqual([]);
+    expect(Object.keys(env).filter((key) => /DEDUCTION/.test(key))).toEqual([
+      'CONTRACT_DEDUCTION_WRITER_ROLES',
+    ]);
+    expect(
+      load({ CONTRACT_DEDUCTION_WRITER_ROLES: 'ORGANIZATION_ADMIN' })
+        .CONTRACT_DEDUCTION_WRITER_ROLES,
+    ).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
   it('accepts an empty cancel list (nobody) and four eyes switched off', () => {
     const env = load({ CONTRACT_CANCEL_ROLES: '', CONTRACT_POLICY_FOUR_EYES: 'false' });
     expect(env.CONTRACT_CANCEL_ROLES).toEqual([]);
@@ -109,6 +127,12 @@ describe('overrides', () => {
     ['an organization timeout under 100 ms', { CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '10' }],
     ['SYSTEM_ADMIN among the amenders', { CONTRACT_AMENDMENT_ROLES: 'SYSTEM_ADMIN' }],
     ['AUDITOR among the milestone planners', { CONTRACT_MILESTONE_ROLES: 'AUDITOR' }],
+    ['a contractor among the deduction writers', { CONTRACT_DEDUCTION_WRITER_ROLES: 'CONTRACTOR' }],
+    [
+      'SYSTEM_ADMIN among the deduction writers',
+      { CONTRACT_DEDUCTION_WRITER_ROLES: 'SYSTEM_ADMIN' },
+    ],
+    ['AUDITOR among the deduction writers', { CONTRACT_DEDUCTION_WRITER_ROLES: 'AUDITOR' }],
     ['no amendment reason', { CONTRACT_AMENDMENT_REASON_CODES: '' }],
     ['an amendment reason that is not a code', { CONTRACT_AMENDMENT_REASON_CODES: 'lower case' }],
     ['an amendment reason twice', { CONTRACT_AMENDMENT_REASON_CODES: 'OTHER,OTHER' }],
@@ -224,5 +248,36 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
       /not above CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS, 70000 ms/,
     );
     expect(() => load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '70001' })).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    contractEnvSchema,
+    (source) => loadContractEnv(source),
+    base,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining(['NODE_ENV', 'LOG_LEVEL', 'KAFKA_SASL_MECHANISM']),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

@@ -42,7 +42,13 @@ const TENDERS_ITEM: SidebarItem = { href: '/tenders', label: 'مناقصه‌ه�
 const CONTRACTS_ITEM: SidebarItem = { href: '/contracts', label: 'قراردادها' };
 
 /** Shown only to a role that may read the supplier directory (`server/portal-nav.ts`). */
-const SUPPLIERS_ITEM: SidebarItem = { href: '/suppliers', label: 'تامین‌کنندگان' };
+const SUPPLIERS_ITEM: SidebarItem = { href: '/suppliers', label: 'تأمین‌کنندگان' };
+
+/** Shown only to a role procurement-service admits to demands (`server/demand-commands.ts`). */
+export const DEMANDS_NAV_ITEM: SidebarItem = {
+  href: '/procurement/demands',
+  label: 'نیازهای تدارکات',
+};
 
 const NAV_AFTER_PROJECTS: readonly SidebarItem[] = [
   { href: '/wallet', label: 'کیف پول' },
@@ -70,6 +76,7 @@ export function portalNavFor(options: {
   readonly canReadInventory?: boolean;
   readonly canReadSuppliers?: boolean;
   readonly canReadReturns?: boolean;
+  readonly canReadDemands?: boolean;
 }): readonly SidebarItem[] {
   const before = options.canReadReturns
     ? NAV_BEFORE_PROJECTS.flatMap((item) =>
@@ -83,6 +90,7 @@ export function portalNavFor(options: {
     ...(options.canReadContracts ? [CONTRACTS_ITEM] : []),
     ...(options.canReadInventory ? [INVENTORY_NAV_ITEM] : []),
     ...(options.canReadSuppliers ? [SUPPLIERS_ITEM] : []),
+    ...(options.canReadDemands ? [DEMANDS_NAV_ITEM] : []),
     ...NAV_AFTER_PROJECTS,
   ];
   if (!options.canReadSettlements) return items;

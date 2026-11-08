@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { toJsonSchema, type JsonSchema } from '@rasta/nest-common';
 import { listTransactionsQuerySchema } from '../transaction/dto';
 import { listSettlementsQuerySchema } from '../settlement/dto';
 
@@ -56,9 +57,9 @@ describe('toJsonSchema', () => {
     const schema = z.object({
       amountMinor: z.string().regex(/^\d{1,30}$/),
       note: z.string().min(3).max(10),
-      when: z.string().datetime(),
+      when: z.string().check(isoDateTime()),
       email: z.string().email(),
-      link: z.string().url(),
+      link: z.string().check(parsableUrl()),
     });
 
     const properties = propertiesOf(schema);
@@ -66,7 +67,14 @@ describe('toJsonSchema', () => {
     // than a re-spelling of it.
     expect(properties.amountMinor).toEqual({ type: 'string', pattern: '^\\d{1,30}$' });
     expect(properties.note).toEqual({ type: 'string', minLength: 3, maxLength: 10 });
-    expect(properties.when).toEqual({ type: 'string', format: 'date-time' });
+    // `isoDateTime()` also publishes the zone it accepts (FU-035).
+    expect(properties.when).toEqual({
+      type: 'string',
+      format: 'date-time',
+      pattern: 'Z$',
+      description:
+        'ISO 8601 instant that ends in `Z` (UTC); a numeric offset (`+03:30`) is invalid here.',
+    });
     expect(properties.email).toEqual({ type: 'string', format: 'email' });
     expect(properties.link).toEqual({ type: 'string', format: 'uri' });
   });
@@ -100,7 +108,7 @@ describe('toJsonSchema', () => {
       status: z.enum(['ACTIVE', 'INACTIVE']),
       kind: z.literal('SETTLEMENT'),
       names: z.array(z.string()),
-      metadata: z.record(z.string()),
+      metadata: z.record(z.string(), z.string()),
     });
 
     const properties = propertiesOf(schema);
@@ -118,7 +126,7 @@ describe('toJsonSchema', () => {
     const schema = z.object({
       maybe: z.string().optional(),
       nullable: z.string().nullable(),
-      withDefault: z.string().default('IRR'),
+      withDefault: z.string().prefault('IRR'),
     });
 
     const properties = propertiesOf(schema);
@@ -197,7 +205,12 @@ describe('the listing contracts', () => {
       Record<string, unknown>
     >;
 
-    expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
+    expect(properties.limit).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 100,
+      default: 25,
+    });
     expect(properties.status).toMatchObject({ type: 'string' });
   });
 });

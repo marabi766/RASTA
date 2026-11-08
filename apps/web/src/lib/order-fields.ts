@@ -1,3 +1,5 @@
+import { TRANSACTION_TEXT_BOUNDS, boundsForAll } from '@rasta/contracts';
+import { ownValue } from '@/lib/own-key';
 /**
  * The shape of the `/orders` screens: labels, the stepper's spine, and the
  * fields each order command's form posts.
@@ -64,7 +66,8 @@ export const COMMAND_CONSEQUENCES: Readonly<Record<OrderCommand, string>> = {
     'تأیید می‌کنید کالا یا خدمت را دریافت کرده‌اید. این تنها اقدامی است که اجازهٔ تسویه با فروشنده را می‌دهد و بازگشت‌پذیر نیست.',
   RAISE_DISPUTE:
     'تسویه به‌طور کامل متوقف می‌شود تا اپراتور پلتفرم رسیدگی کند. دلیل را روشن بنویسید.',
-  RESOLVE_DISPUTE: 'تصمیم شما سرنوشت وجه نگه‌داشته‌شده را معین می‌کند.',
+  RESOLVE_DISPUTE:
+    'تصمیم شما سرنوشت وجه نگه‌داشته‌شده را معین می‌کند. «ادامهٔ سفارش» آن را به مرحله‌ای برمی‌گرداند که اختلاف در آن ثبت شد و تسویه همچنان منتظر تأیید دریافت از سوی خریدار می‌ماند؛ «بازگشت وجه» سفارش را لغو می‌کند.',
   CANCEL: 'سفارش لغو می‌شود. تا بازگشت کامل وجه، وضعیت «در حال لغو» می‌ماند.',
   REVIEW: 'نظر شما دربارهٔ این سفارش تکمیل‌شده. هر سفارش فقط یک نظر می‌پذیرد.',
 };
@@ -89,12 +92,19 @@ export const COMMAND_FIELD = 'command';
  * never less safe.
  */
 export const ORDER_FIELD_LIMITS = {
+  // The three texts the order saga forwards to economic-service take that
+  // service's bounds from the shared table, as marketplace-service does (FU-134).
   /** `raiseDisputeSchema.reason` — at least a sentence, for whoever resolves it. */
-  disputeReason: { min: 10, max: 1000 },
+  disputeReason: TRANSACTION_TEXT_BOUNDS.disputeReason,
   /** `resolveDisputeSchema.resolution`. */
-  resolution: { min: 10, max: 1000 },
+  resolution: TRANSACTION_TEXT_BOUNDS.disputeResolution,
+  /** `REFUND_RESOLUTION_BOUNDS`: a REFUND resolution is also the refund's reason. */
+  refundResolution: boundsForAll(
+    TRANSACTION_TEXT_BOUNDS.disputeResolution,
+    TRANSACTION_TEXT_BOUNDS.closingReason,
+  ),
   /** `cancelOrderSchema.reason`. */
-  cancelReason: { min: 3, max: 500 },
+  cancelReason: TRANSACTION_TEXT_BOUNDS.closingReason,
   /** `fulfillOrderSchema.trackingReference`. */
   trackingReference: { max: 128 },
   /** `fulfillOrderSchema.note`, `confirmReceiptSchema.note`. */
@@ -107,7 +117,10 @@ export const DISPUTE_OUTCOMES = ['SETTLE', 'REFUND'] as const;
 export type DisputeOutcome = (typeof DISPUTE_OUTCOMES)[number];
 
 export const DISPUTE_OUTCOME_LABELS: Readonly<Record<DisputeOutcome, string>> = {
-  SETTLE: 'تسویه با فروشنده',
+  // D-083: SETTLE lifts the dispute and resumes the order where the dispute
+  // found it; it is not a receipt, and it settles only an order whose buyer
+  // had already confirmed receipt.
+  SETTLE: 'ادامهٔ سفارش از همان مرحله',
   REFUND: 'بازگشت وجه به خریدار',
 };
 
@@ -134,6 +147,13 @@ export interface OrderCommandFormValues {
   readonly rating: string;
   readonly comment: string;
   /**
+   * The dispute an operator's decision is about: the order's `openDisputeId`
+   * when the page was drawn, posted from a hidden field. The service refuses
+   * a decision naming any other (`DISPUTE_DECISION_STALE`, D-083), so a form
+   * drawn for one dispute never decides a later one.
+   */
+  readonly disputeId: string;
+  /**
    * `'yes'` when the person ticked "I understand this cannot be undone", on
    * the commands in {@link IRREVERSIBLE_COMMANDS}. Checked by the portal's
    * own action and never sent to the service — no DTO has it, and every
@@ -154,6 +174,7 @@ export const EMPTY_ORDER_COMMAND_FORM: OrderCommandFormValues = {
   responsibility: '',
   rating: '',
   comment: '',
+  disputeId: '',
   acknowledge: '',
 };
 
@@ -176,7 +197,7 @@ export const ORDER_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function orderStatusLabel(status: string): string {
-  return ORDER_STATUS_LABELS[status] ?? status;
+  return ownValue(ORDER_STATUS_LABELS, status) ?? status;
 }
 
 /**
@@ -295,3 +316,6 @@ export const ORDER_LIST_ROLE_LABELS: Readonly<Record<OrderListRole, string>> = {
   BUYER: 'سفارش‌هایی که ثبت کرده‌ایم',
   SUPPLIER: 'سفارش‌هایی که به ما داده شده',
 };
+
+/** The flash a placed order leaves on its detail page (`server/flash.ts`); a command leaves its own name. */
+export const ORDER_PLACED = 'PLACED';

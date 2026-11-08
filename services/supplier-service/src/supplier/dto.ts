@@ -116,7 +116,7 @@ export const submitQualificationSchema = z
      * admissions rule (AGENTS.md § 9); the reviewer decides what is enough, and
      * a submission with nothing attached is one a reviewer can reject.
      */
-    evidence: z.array(qualificationEvidenceInputSchema).max(20).default([]),
+    evidence: z.array(qualificationEvidenceInputSchema).max(20).prefault([]),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -229,6 +229,40 @@ export type ReinstateSupplierDto = z.infer<typeof reinstateSupplierSchema>;
  * `sort=RATING` is likewise absent rather than accepted-and-ignored, which is
  * the choice ADR-042 already made on the marketplace side.
  */
+export const MAX_DIRECTORY_ORGANIZATION_IDS = 200;
+
+/**
+ * One value arrives as a string, a repeated one as an array. Each id must be a
+ * canonical organization id; more than {@link MAX_DIRECTORY_ORGANIZATION_IDS}
+ * values (counted before deduplication, so the bound is on what was sent) or an
+ * empty one is a 400, never a silently truncated or widened answer.
+ */
+/**
+ * One organization id, as a schema the OpenAPI converter can publish (PR 699
+ * review F2). The shared `organizationIdSchema` checks the ULID branch in a
+ * `.refine()`, which no JSON-schema converter can see, so the published item
+ * read `{"type":"string"}` — arbitrary strings. This is the same language as a
+ * single anchored pattern (`ORG_<26 Crockford base32>` or the readable seed
+ * form), so what runs and what is published come from one regex;
+ * `dto.spec.ts` pins the equivalence with `organizationIdSchema`. The shared
+ * schema itself is follow-up FU-073.
+ */
+export const DIRECTORY_ORGANIZATION_ID_PATTERN =
+  /^(?:ORG_[0-9A-HJKMNP-TV-Z]{26}|ORG-[A-Z0-9-]{1,48})$/;
+
+const directoryOrganizationId = z
+  .string()
+  .regex(DIRECTORY_ORGANIZATION_ID_PATTERN, 'Expected an identifier of the form ORG_<ULID>');
+
+const directoryOrganizationIds = z.preprocess(
+  (value) => (typeof value === 'string' ? [value] : value),
+  z
+    .array(directoryOrganizationId)
+    .min(1)
+    .max(MAX_DIRECTORY_ORGANIZATION_IDS)
+    .transform((ids) => [...new Set(ids)]),
+);
+
 export const searchSuppliersQuerySchema = cursorPaginationSchema
   .extend({
     /** Suppliers that *claim* this capability. Claiming is not qualification. */
@@ -236,6 +270,14 @@ export const searchSuppliersQuerySchema = cursorPaginationSchema
     /** Suppliers with a **current** approval for this capability. */
     qualifiedFor: capability.optional(),
     status: z.enum(SUPPLIER_STATUSES).optional(),
+    /**
+     * Narrows the page to these organizations' directory entries (FU-019): the
+     * offer page asks for exactly the suppliers behind its offers instead of
+     * walking the directory. Repeat the parameter (`?organizationId=A&organizationId=B`).
+     * It only narrows the same cross-tenant, catalogue-safe list — same roles,
+     * same projection; an organization with no profile is simply absent.
+     */
+    organizationId: directoryOrganizationIds.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -274,7 +316,7 @@ export type ListQualifiedForQuery = z.infer<typeof listQualifiedForQuerySchema>;
 /** The reviewer's queue. Platform operators only — see `access.ts`. */
 export const reviewQueueQuerySchema = cursorPaginationSchema
   .extend({
-    state: z.enum(QUALIFICATION_STATES).default('SUBMITTED'),
+    state: z.enum(QUALIFICATION_STATES).prefault('SUBMITTED'),
     capability: capability.optional(),
   })
   .strict();

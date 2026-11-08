@@ -1,8 +1,9 @@
-import { EnvValidationError } from '@rasta/config';
+import { EnvValidationError, envEnumProbes } from '@rasta/config';
 import {
   ORGANIZATION_REQUEST_CEILING_MS,
   brokerConnectionIsAuthenticated,
   loadMarketplaceEnv,
+  marketplaceEnvSchema,
 } from './env';
 import { marketplaceOperationBudgets } from './operation-budgets';
 
@@ -123,6 +124,7 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
     ).toEqual([
       ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
       ['CLAIM_WAIT_MS', 7000],
+      ['ORDER_HOLD_TRANSACTION_MS', 9000],
       ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
     ]);
   });
@@ -258,4 +260,55 @@ describe('INVENTORY_SERVICE_URL and MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS', (
       EnvValidationError,
     );
   });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    marketplaceEnvSchema,
+    (source) => loadMarketplaceEnv(source),
+    BASE,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining(['NODE_ENV', 'LOG_LEVEL', 'KAFKA_SASL_MECHANISM']),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
+  });
+});
+
+it('refuses a shutdown deadline shorter than the starter database stop budget', () => {
+  const result = marketplaceEnvSchema.safeParse({
+    ...BASE,
+    SERVICE_NAME: 'marketplace-service',
+    PORT: '3106',
+    KAFKA_CLIENT_ID: 'marketplace-service',
+    SHUTDOWN_TIMEOUT_MS: '4499',
+  });
+  expect(result.success).toBe(false);
+  if (!result.success)
+    expect(result.error.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: ['SHUTDOWN_TIMEOUT_MS'],
+          message: 'SHUTDOWN_TIMEOUT_MS must cover the saga starter database stop budget',
+        }),
+      ]),
+    );
 });

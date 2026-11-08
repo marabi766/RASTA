@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -129,6 +130,8 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const RULE_LOCK_ORDER = '20261104200000_deduction_rule_lock_order';
+  const RULE_CHANGES = '20261104100000_deduction_rule_changes';
   const SETTLEMENT = '20261017160000_statement_settlement';
   const DECISIONS = '20261016180000_statement_decisions';
   const SUBMISSION = '20261016120000_statement_submission';
@@ -293,7 +296,7 @@ describe('each down.sql, run whole with psql --file', () => {
     expect(shape(unused)).toBe(shape(scratch(SIGNING_POLICY)));
   });
 
-  const openTask = `INSERT INTO "policy_reconciliation_task"
+  const openTask = eligibilityClockSql`INSERT INTO "policy_reconciliation_task"
       ("id", "organization_id", "policy_id", "union_id", "source_event_id",
        "moved_organization_id", "correlation_id", "earliest_moved_at", "next_attempt_at",
        "created_at", "updated_at")
@@ -1148,6 +1151,139 @@ describe('each down.sql, run whole with psql --file', () => {
              FROM "statement" s JOIN "contract" c ON c."id" = s."contract_id" WHERE s."id" = 'STM_rb'`,
         ]),
       ).toBe('SETTLED:10:10');
+    });
+  });
+
+  it('statement_deduction_rule_lock (FU-089) down restores the previous shape and functions', () => {
+    const migration = '20261105160000_statement_deduction_rule_lock';
+    const schema = scratch(migration);
+    expect(psql(schema, ['--file', down(migration)])).toEqual({ ok: true, out: '' });
+    const previous = scratch(RULE_LOCK_ORDER);
+    expect(shape(schema)).toBe(shape(previous));
+    expect(functions(schema)).toBe(functions(previous));
+  });
+
+  it('deduction_rule_lock_order (FU-060) changes only trigger bodies: down restores them exactly', () => {
+    const schema = scratch(RULE_LOCK_ORDER);
+    const result = psql(schema, ['--file', down(RULE_LOCK_ORDER)]);
+    expect(result.out).toBe('');
+    expect(result.ok).toBe(true);
+    const previous = scratch(RULE_CHANGES);
+    expect(shape(schema)).toBe(shape(previous));
+    expect(functions(schema)).toBe(functions(previous));
+  });
+
+  describe('deduction_rule_changes (CON-003-1)', () => {
+    const pending = `INSERT INTO "deduction_rule_change"
+         ("id", "organization_id", "kind", "name", "rate_bp", "base", "proposed_at", "proposed_by",
+          "proposed_by_issuer", "proposed_by_subject")
+       VALUES ('DRC_rb', 'ORG_E', 'CREATE', 'Retention', 500, 'GROSS', now(), 'USR_1', 'iss', 'sub-1')`;
+
+    it('over a change it refuses and changes nothing — with ON_ERROR_STOP and without it; over none it succeeds, to the exact previous shape and guards', () => {
+      const schema = scratch(RULE_CHANGES);
+      mustRun(schema, ['-c', pending]);
+      const before = shape(schema);
+      const guards = functions(schema);
+      for (const stop of [true, false]) {
+        const refused = psql(schema, ['--file', down(RULE_CHANGES)], stop);
+        expect(refused.out).toMatch(
+          /down refused: 1 deduction rule change\(s\) exist; nothing was changed/,
+        );
+        expect(shape(schema)).toBe(before);
+        expect(functions(schema)).toBe(guards);
+      }
+
+      const unused = scratch(RULE_CHANGES);
+      const result = psql(unused, ['--file', down(RULE_CHANGES)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      const previous = scratch(SETTLEMENT);
+      expect(shape(unused)).toBe(shape(previous));
+      expect(functions(unused)).toBe(functions(previous));
+    });
+
+    it('a rule from before the migration whose name is not in the one form stops it, for a person to decide', () => {
+      const schema = scratch(SETTLEMENT);
+      mustRun(schema, [
+        '-c',
+        `INSERT INTO "deduction_rule"
+           ("id", "organization_id", "name", "rate_bp", "base", "created_at", "created_by")
+         VALUES ('DDR_rb', 'ORG_E', U&'Tax\\034F', 500, 'GROSS', now(), 'USR_1')`,
+      ]);
+      const stopped = psql(schema, [
+        '--single-transaction',
+        '--file',
+        join(MIGRATIONS, RULE_CHANGES, 'migration.sql'),
+      ]);
+      expect(stopped.ok).toBe(false);
+      expect(stopped.out).toMatch(/ck_deduction_rule_name_canonical/);
+    });
+
+    it('up → down → up over a rule from before the migration: it stays in force, and retires only through an approved change after the second up', () => {
+      const legacy = `INSERT INTO "deduction_rule"
+           ("id", "organization_id", "name", "rate_bp", "base", "created_at", "created_by")
+         VALUES ('DDR_rb', 'ORG_E', 'Legacy', 500, 'GROSS', now(), 'USR_1')`;
+      const held = (schema: string) =>
+        mustRun(schema, [
+          '-c',
+          `SELECT jsonb_agg(to_jsonb(r) - 'approved_change_id' ORDER BY r."id")::text FROM "deduction_rule" r`,
+        ]);
+      const up = (schema: string) => {
+        mustRun(schema, ['--file', join(MIGRATIONS, RULE_CHANGES, 'migration.sql')]);
+        mustRun(schema, ['-c', `INSERT INTO "_prisma_migrations" VALUES ('${RULE_CHANGES}')`]);
+      };
+
+      const schema = scratch(SETTLEMENT);
+      mustRun(schema, ['-c', legacy]);
+      const before = shape(schema);
+      const guards = functions(schema);
+      const rows = held(schema);
+
+      up(schema);
+      const afterUp = shape(schema);
+      const afterUpGuards = functions(schema);
+      const reference = scratch(RULE_CHANGES);
+      expect(afterUp).toBe(shape(reference));
+      expect(afterUpGuards).toBe(functions(reference));
+      expect(held(schema)).toBe(rows);
+
+      const result = psql(schema, ['--file', down(RULE_CHANGES)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      expect(shape(schema)).toBe(before);
+      expect(functions(schema)).toBe(guards);
+      expect(held(schema)).toBe(rows);
+
+      up(schema);
+      expect(shape(schema)).toBe(afterUp);
+      expect(functions(schema)).toBe(afterUpGuards);
+      expect(held(schema)).toBe(rows);
+
+      const plain = psql(schema, [
+        '-c',
+        `UPDATE "deduction_rule" SET "retired_at" = now() WHERE "id" = 'DDR_rb'`,
+      ]);
+      expect(plain.out).toMatch(/ck_deduction_rule_retire_approved/);
+      mustRun(schema, [
+        '-c',
+        `BEGIN;
+         INSERT INTO "deduction_rule_change"
+           ("id", "organization_id", "kind", "deduction_rule_id", "reason", "proposed_at", "proposed_by",
+            "proposed_by_issuer", "proposed_by_subject")
+         VALUES ('DRC_rb', 'ORG_E', 'RETIRE', 'DDR_rb', 'old', now(), 'USR_1', 'iss', 'sub-1');
+         UPDATE "deduction_rule_change"
+            SET "status" = 'APPROVED', "decided_at" = now(), "decided_by" = 'USR_2',
+                "decided_by_issuer" = 'iss', "decided_by_subject" = 'sub-2', "version" = 2
+          WHERE "id" = 'DRC_rb';
+         UPDATE "deduction_rule" SET "retired_at" = now() WHERE "id" = 'DDR_rb';
+         COMMIT;`,
+      ]);
+      expect(
+        mustRun(schema, [
+          '-c',
+          `SELECT "retired_at" IS NOT NULL FROM "deduction_rule" WHERE "id" = 'DDR_rb'`,
+        ]),
+      ).toBe('t');
     });
   });
 });

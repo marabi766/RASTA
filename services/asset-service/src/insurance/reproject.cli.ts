@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -22,7 +22,7 @@ import { parseReprojectArgs } from './reproject.args';
  * outbox rows, which that role may. The same preflight the service runs at
  * boot is run here, since this entry point skips it. Credentials come from the
  * environment only; the arguments carry no secret. Exit 2 on a refusal or an
- * error, naming the role and never the URL. The arguments are parsed first,
+ * error, with closed diagnostics that never repeat the URL. The arguments are parsed first,
  * before the environment or the database ({@link parseReprojectArgs}): a
  * malformed command line touches nothing.
  */
@@ -64,7 +64,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${commandFailure(error)}\n`);
     process.exit(2);
   },
 );

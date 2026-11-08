@@ -1,3 +1,4 @@
+import { DatabaseConnectionError } from '@rasta/nest-common';
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -471,23 +472,37 @@ describe('audit tenant isolation (real PostgreSQL)', () => {
     foreign.pathname = '/rasta_notification';
     foreign.searchParams.delete('schema');
 
+    // Prove that this is the intended live cluster and a real CONNECT denial,
+    // independently of the driver's diagnostic text (which must be withheld).
+    const [boundary] = await api.prisma.client.$queryRaw<
+      {
+        role: string;
+        targetExists: boolean;
+        canConnect: boolean;
+      }[]
+    >`
+      SELECT current_user::text AS role,
+             EXISTS (SELECT 1 FROM pg_database WHERE datname = 'rasta_notification') AS "targetExists",
+             has_database_privilege(current_user, 'rasta_notification', 'CONNECT') AS "canConnect"`;
+    expect(boundary).toEqual({ role: 'rasta_audit', targetExists: true, canConnect: false });
+
     const client = new PrismaService(foreign.toString());
-    let message = '';
+    let failure: unknown;
     try {
       await client.client.$queryRaw`SELECT 1`;
-      message = 'the query succeeded';
     } catch (error) {
-      message = String((error as Error).message);
+      failure = error;
     } finally {
       await client.onModuleDestroy().catch(() => undefined);
     }
 
-    expect(message).not.toBe('the query succeeded');
-    // PostgreSQL says `permission denied for database`; Prisma reports the same
-    // refusal as P1010, "User ... was denied access on the database". Matched on
-    // the shared word rather than on one driver's phrasing, so this asserts the
-    // refusal and not a message format.
-    expect(message.toLowerCase()).toMatch(/denied|not permitted|no permission/);
+    expect(failure).toBeInstanceOf(DatabaseConnectionError);
+    expect(failure).toMatchObject({ setting: 'DATABASE_URL_AUDIT' });
+    expect((failure as Error).message).toMatch(
+      /^DATABASE_URL_AUDIT: database connection failed \(code (?:P1010|unknown)\); driver diagnostics withheld$/,
+    );
+    expect((failure as Error).cause).toBeUndefined();
+    expect((failure as Error).message).not.toContain('rasta_audit');
   });
 
   // -------------------------------------------------------------------------

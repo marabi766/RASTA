@@ -92,6 +92,24 @@ describe('the authorization url', () => {
     expect(url.toString()).not.toContain('code_verifier');
     expect(url.searchParams.get('client_secret')).toBeNull();
   });
+
+  it('asks for no prompt unless told; `login` is the one it passes (another account, PR 405 review 2, F3)', () => {
+    expect(url.searchParams.has('prompt')).toBe(false);
+    const again = new URL(
+      authorizationUrl({
+        endpoints,
+        clientId: CLIENT,
+        redirectUri: 'http://localhost:3200/auth/callback',
+        state: 'state-value',
+        nonce: 'nonce-value',
+        challenge: 'challenge-value',
+        prompt: 'login',
+      }),
+    );
+    expect(again.searchParams.get('prompt')).toBe('login');
+    expect(again.searchParams.get('state')).toBe('state-value');
+    expect(again.searchParams.get('code_challenge_method')).toBe('S256');
+  });
 });
 
 describe('exchanging the code', () => {
@@ -294,7 +312,7 @@ describe('verifying the id token', () => {
         { issuer: ISSUER, clientId: CLIENT, jwksUri: endpoints.jwks, nonce },
         KEY,
       ),
-    ).resolves.toEqual({ subject: 'USR_1', username: 'dehyar', organizationId: null });
+    ).resolves.toEqual({ subject: 'USR_1', username: 'dehyar' });
   });
 
   it('refuses a token that answers a different login attempt', async () => {

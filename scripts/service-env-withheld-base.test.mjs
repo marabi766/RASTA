@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 // The base CI compares the withheld-settings list with
 // (scripts/service-env-withheld-base.mjs), against real git histories: a
 // remote, and a shallow CI-like checkout of it. Codex r1 on #316: a push of
@@ -9,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 import {
   BASELINE_FILE,
   listedAt,
@@ -18,18 +20,14 @@ import {
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'service-env-withheld-base.mjs');
 
-const GIT_ENV = {
-  ...process.env,
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_AUTHOR_NAME: 'fixture',
-  GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
-  GIT_COMMITTER_NAME: 'fixture',
-  GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
-};
+const GIT_ENV = fixtureGitEnv();
 
 function git(cwd, ...args) {
-  const run = spawnSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
+  const run = spawnSync(
+    'git',
+    ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', ...args],
+    { cwd, encoding: 'utf8', env: fixtureGitEnv() },
+  );
   assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
   return run.stdout.trim();
 }
@@ -65,10 +63,11 @@ function multiCommitPush() {
   git(dir, 'init', '-q', '--bare', '-b', 'main', origin);
   git(dir, 'init', '-q', '-b', 'main', work);
   const a = commitList(work, { svc: { X: ['dev'] } }, 'A');
-  git(work, 'push', '-q', origin, 'main');
+  // Populate only this disposable local bare remote; no push to main is needed.
+  git(origin, 'fetch', '-q', work, 'main:main');
   const b = commitList(work, { svc: { X: ['dev'], Y: ['dev'] } }, 'B: list Y');
   const c = commitOther(work, 'C: unrelated');
-  git(work, 'push', '-q', origin, 'main');
+  git(origin, 'fetch', '-q', work, 'main:main');
   git(dir, 'clone', '-q', '--depth=2', '--branch', 'main', pathToFileURL(origin).href, ci);
   return { dir, origin, work, ci, a, b, c };
 }
@@ -159,4 +158,33 @@ test('the command prints the base, and exits 2 when there is none', (t) => {
   assert.equal(zero.status, 2);
   assert.equal(zero.stdout, '');
   assert.match(zero.stderr, /names no previous main/);
+});
+
+// #385 r4: an event name or a "before" that is not a commit id is any text; the
+// command refuses it with a fixed line, from its real entry point.
+test('the command repeats neither an unknown event nor a before that is not a commit', (t) => {
+  const repo = multiCommitPush();
+  t.after(() => rmSync(repo.dir, { recursive: true, force: true }));
+  const run = (env) =>
+    spawnSync(process.execPath, [SCRIPT], {
+      cwd: repo.ci,
+      encoding: 'utf8',
+      env: { ...GIT_ENV, ...env },
+    });
+  for (const sentinel of SENTINELS) {
+    const event = run({ GITHUB_EVENT_NAME: sentinel, SERVICE_ENV_WITHHELD_PUSH_BEFORE: repo.a });
+    assert.equal(event.status, 2);
+    assert.equal(
+      event.stderr,
+      'service-env-withheld-base: no withheld-list base for this event: GITHUB_EVENT_NAME is ' +
+        'pull_request or push only\n',
+    );
+    const before = run({ GITHUB_EVENT_NAME: 'push', SERVICE_ENV_WITHHELD_PUSH_BEFORE: sentinel });
+    assert.equal(before.status, 2);
+    assert.equal(
+      before.stderr,
+      'service-env-withheld-base: github.event.before is not a commit id\n',
+    );
+    for (const output of [event, before]) assertNoSentinel(output.stdout + output.stderr, sentinel);
+  }
 });

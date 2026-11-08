@@ -1,4 +1,5 @@
-import { loadMaxHierarchyDepth, loadOrganizationEnv } from './env';
+import { envEnumProbes, envRefusalOf } from '@rasta/config';
+import { loadMaxHierarchyDepth, loadOrganizationEnv, organizationEnvSchema } from './env';
 import { organizationOperationBudgets } from './operation-budgets';
 
 /**
@@ -90,5 +91,70 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
       /DATABASE_STATEMENT_TIMEOUT_MS: \(12500 ms\) is not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/,
     );
     expect(at('12501')).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    organizationEnvSchema,
+    (source) => loadOrganizationEnv(source),
+    base,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining([
+        'NODE_ENV',
+        'LOG_LEVEL',
+        'KAFKA_SASL_MECHANISM',
+        'GOVERNANCE_POLICY_SETTER_ROLES',
+      ]),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
+  });
+});
+
+describe('the second formatter, loadMaxHierarchyDepth, is the same one (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+
+  it('refuses through loadEnv: the fixed text for the code, never the value', () => {
+    const [a, b] = SENTINELS.map((value) =>
+      envRefusalOf(() => loadMaxHierarchyDepth({ MAX_HIERARCHY_DEPTH: value })),
+    );
+    expect(a).toEqual(b);
+    // Zod's own text here was `Expected number, received nan`: the formatter's has no `received`.
+    expect(a?.issues).toEqual([{ path: 'MAX_HIERARCHY_DEPTH', message: 'Expected number' }]);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+  });
+
+  it('a setter role list entry names the declared roles, not the one written', () => {
+    const [a, b] = SENTINELS.map((value) =>
+      envRefusalOf(() =>
+        loadOrganizationEnv({ ...base, GOVERNANCE_POLICY_SETTER_ROLES: `SYSTEM_ADMIN,${value}` }),
+      ),
+    );
+    expect(a).toEqual(b);
+    expect(a?.issues).toEqual([
+      {
+        path: 'GOVERNANCE_POLICY_SETTER_ROLES.1',
+        message: expect.stringMatching(/^Invalid enum value\. Expected 'SYSTEM_ADMIN' \| /),
+      },
+    ]);
   });
 });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
@@ -39,13 +40,13 @@ const productSchema = z.object({
   id: z.string(),
   sku: z.string(),
   name: z.string(),
-  description: z.string().nullable().default(null),
+  description: z.string().nullable().prefault(null),
   category: z.string(),
   kind: z.string(),
   unit: z.string(),
   // Sorted by the same `sort` the search query carried, so the first entry is
   // "the price this row leads with" without a second request.
-  offers: z.array(offerSchema).default([]),
+  offers: z.array(offerSchema).prefault([]),
 });
 
 export type Product = z.infer<typeof productSchema>;
@@ -75,7 +76,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);

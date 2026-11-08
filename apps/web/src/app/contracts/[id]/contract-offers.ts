@@ -31,6 +31,7 @@ import type { WebSession } from '@/server/session';
 import { submissionBinding } from '@/server/submission';
 
 import type { ContractFormContext, OfferedContractCommand } from './ContractCommands';
+import { setOwn } from '@/lib/own-key';
 
 /**
  * Which contract command forms `/contracts/[id]` draws, and for what — each
@@ -161,9 +162,11 @@ export async function contractCommandOffers(
   const amendmentOffers: Record<string, OfferedContractCommand[]> = {};
   for (const amendment of amendments?.kind === 'OK' ? amendments.data.items : []) {
     const signing = amendmentSignableSide(caller, contract, amendment, authority);
-    amendmentOffers[amendment.id] = signing
-      ? [offer('SIGN_AMENDMENT', amendment.id, amendment.version, signing)]
-      : [];
+    setOwn(
+      amendmentOffers,
+      amendment.id,
+      signing ? [offer('SIGN_AMENDMENT', amendment.id, amendment.version, signing)] : [],
+    );
   }
 
   // A new milestone has no version to bind: the DTO takes none.
@@ -173,18 +176,22 @@ export async function contractCommandOffers(
 
   const milestoneOffers: Record<string, OfferedContractCommand[]> = {};
   for (const milestone of milestones?.kind === 'OK' ? milestones.data.items : []) {
-    milestoneOffers[milestone.id] = canChangeMilestone(caller, contract, milestone, env)
-      ? [
-          offer('CHANGE_MILESTONE', milestone.id, milestone.version, null, {
-            defaults: {
-              title: milestone.title,
-              plannedDate: milestone.plannedDate.slice(0, 10),
-              plannedShareBp:
-                milestone.plannedShareBp === null ? '' : shareText(milestone.plannedShareBp),
-            },
-          }),
-        ]
-      : [];
+    setOwn(
+      milestoneOffers,
+      milestone.id,
+      canChangeMilestone(caller, contract, milestone, env)
+        ? [
+            offer('CHANGE_MILESTONE', milestone.id, milestone.version, null, {
+              defaults: {
+                title: milestone.title,
+                plannedDate: milestone.plannedDate.slice(0, 10),
+                plannedShareBp:
+                  milestone.plannedShareBp === null ? '' : shareText(milestone.plannedShareBp),
+              },
+            }),
+          ]
+        : [],
+    );
   }
 
   return {

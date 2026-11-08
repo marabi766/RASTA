@@ -6,15 +6,25 @@ import {
   NoAccessState,
   PageHeader,
   Section,
+  StatusBadge,
+  TableScroll,
 } from '@/ui';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
-import { qualificationStateLabel } from '@/lib/supplier-fields';
+import {
+  OFFER_SUPPLIER_NAME_UNKNOWN,
+  offerSupplierStanding,
+  offerSupplierStateLabel,
+  type OfferSupplierState,
+} from '@/lib/offer-supplier-standing';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
+import type { SupplierSummary } from '@/server/suppliers';
 
 import { PlaceOrderForm } from './PlaceOrderForm';
+import type { Binding } from '@/lib/unresolved-tenancy';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * `/marketplace/[productId]` — مقایسه پیشنهادها (docs/16 § ۱۶٫۶, role
@@ -25,23 +35,29 @@ import { PlaceOrderForm } from './PlaceOrderForm';
  * supplier offers this right now" instead of a bare 404 for a link that used
  * to work.
  *
- * `supplierQualification` is rendered exactly as `marketplace-service` sends
- * it: always `'UNAVAILABLE'` today, because supplier-service does not exist
- * to check it. A checkmark here would claim a verification nobody performed
- * (`docs/16 § ۱۶٫۱۱`, ADR-041).
+ * The supplier column names the supplier and the qualification column says
+ * whether it is qualified, both from the supplier directory (task 305,
+ * `lib/offer-supplier-standing.ts`). `marketplace-service`'s own
+ * `supplierQualification` is always `'UNAVAILABLE'` — nothing was checked — so
+ * it is not shown; a supplier the directory did not answer for is «نامشخص»,
+ * never qualified by default (`docs/16 § ۱۶٫۱۱`, ADR-041).
  */
 
-/**
- * The marketplace's existing wording for an approved supplier, kept as it was
- * on main: the supplier screens spell the shared label without a hamza (PR 366
- * r5/r6), and which spelling the product uses is still an open owner question,
- * so this screen does not follow that change.
- */
-const APPROVED_OFFER_LABEL = 'تأییدشده';
+/** The badge keys `StatusBadge` already gives a tone to: green, red, amber, grey. */
+const STANDING_BADGE: Readonly<Record<OfferSupplierState, string>> = {
+  QUALIFIED: 'APPROVED',
+  NOT_QUALIFIED: 'REJECTED',
+  SUSPENDED: 'SUSPENDED',
+  UNKNOWN: 'PENDING',
+};
 
 export interface OffersScreenProps {
+  /** The organization tag this page's URLs carry (`server/page-context.ts`). */
+  readonly context: string;
   readonly product: ReadResult<Product>;
   readonly offers: ReadResult<OffersPage>;
+  /** The directory entries by organization id; absent or missing means unknown. */
+  readonly suppliers?: ReadonlyMap<string, SupplierSummary>;
   readonly productId: string;
   readonly sort?: string;
   /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
@@ -57,7 +73,7 @@ export interface OffersScreenProps {
     readonly mintSubmissionId: () => string;
     readonly organizationId: string | null;
     /** One-way tags of this login, so a form can recognise its own remembered order (`submissionBinding`). */
-    readonly binding: { readonly owner: string; readonly session: string };
+    readonly binding: Binding;
     /** The session's lifetime: a remembered unresolved order is not kept longer than that. */
     readonly sessionMaxAgeSeconds: number;
   };
@@ -68,7 +84,15 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function SortControl({ productId, sort }: { productId: string; sort?: string }) {
+function SortControl({
+  productId,
+  sort,
+  context,
+}: {
+  productId: string;
+  sort?: string;
+  context: string;
+}) {
   return (
     <form
       method="get"
@@ -76,6 +100,7 @@ function SortControl({ productId, sort }: { productId: string; sort?: string }) 
       className="flex flex-wrap items-end gap-4"
       aria-label="ترتیب پیشنهادها"
     >
+      <ContextField context={context} />
       <label htmlFor="filter-sort" className="flex flex-col gap-1 text-sm text-content-muted">
         ترتیب
         <select id="filter-sort" name="sort" defaultValue={sort ?? ''} className={CONTROL}>
@@ -90,7 +115,13 @@ function SortControl({ productId, sort }: { productId: string; sort?: string }) 
   );
 }
 
-function OfferRows({ offers }: { offers: OffersPage }) {
+function OfferRows({
+  offers,
+  suppliers,
+}: {
+  offers: OffersPage;
+  suppliers: ReadonlyMap<string, SupplierSummary>;
+}) {
   if (offers.items.length === 0) {
     return (
       <EmptyState
@@ -101,57 +132,67 @@ function OfferRows({ offers }: { offers: OffersPage }) {
   }
 
   return (
-    <table className="w-full border-collapse text-sm">
-      <caption className="sr-only">فهرست پیشنهادهای تأمین‌کنندگان</caption>
-      <thead>
-        <tr className="border-b border-border text-start text-content-muted">
-          <th scope="col" className="p-3 text-start font-medium">
-            تأمین‌کننده
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            قیمت واحد
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            موجودی
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            حداقل سفارش
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            زمان تحویل
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            احراز صلاحیت
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {offers.items.map((offer) => (
-          <tr key={offer.id} className="border-b border-border">
-            <td className="p-3">
-              <Identifier>{offer.supplierOrganizationId}</Identifier>
-            </td>
-            <td className="p-3">{formatMoney(offer.unitPriceMinor)}</td>
-            <td className="p-3 text-content-muted">
-              {toPersianDigits(String(offer.availableQuantity))}
-            </td>
-            <td className="p-3 text-content-muted">
-              {toPersianDigits(String(offer.minimumQuantity))}
-            </td>
-            <td className="p-3 text-content-muted">
-              {toPersianDigits(String(offer.leadTimeDays))} روز
-            </td>
-            <td className="p-3 text-content-muted">
-              {offer.supplierQualification === 'UNAVAILABLE'
-                ? 'هنوز فعال نیست'
-                : offer.supplierQualification === 'APPROVED'
-                  ? APPROVED_OFFER_LABEL
-                  : qualificationStateLabel(offer.supplierQualification)}
-            </td>
+    <TableScroll label="فهرست پیشنهادهای تأمین‌کنندگان">
+      <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">فهرست پیشنهادهای تأمین‌کنندگان</caption>
+        <thead>
+          <tr className="border-b border-border text-start text-content-muted">
+            <th scope="col" className="p-3 text-start font-medium">
+              تأمین‌کننده
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              قیمت واحد
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              موجودی
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              حداقل سفارش
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              زمان تحویل
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              احراز صلاحیت
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {offers.items.map((offer) => {
+            const standing = offerSupplierStanding(
+              offer.supplierOrganizationId,
+              suppliers.get(offer.supplierOrganizationId),
+            );
+            return (
+              <tr key={offer.id} className="border-b border-border">
+                <td className="p-3">
+                  <div>{standing.name ?? OFFER_SUPPLIER_NAME_UNKNOWN}</div>
+                  <div className="text-xs text-content-muted">
+                    <Identifier>{offer.supplierOrganizationId}</Identifier>
+                  </div>
+                </td>
+                <td className="p-3">{formatMoney(offer.unitPriceMinor)}</td>
+                <td className="p-3 text-content-muted">
+                  {toPersianDigits(String(offer.availableQuantity))}
+                </td>
+                <td className="p-3 text-content-muted">
+                  {toPersianDigits(String(offer.minimumQuantity))}
+                </td>
+                <td className="p-3 text-content-muted">
+                  {toPersianDigits(String(offer.leadTimeDays))} روز
+                </td>
+                <td className="p-3">
+                  <StatusBadge
+                    status={STANDING_BADGE[standing.state]}
+                    label={offerSupplierStateLabel(standing.state)}
+                  />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 
@@ -199,9 +240,13 @@ function OrderSection({
   );
 }
 
+const NO_SUPPLIERS: ReadonlyMap<string, SupplierSummary> = new Map();
+
 export function OffersScreen({
+  context,
   product,
   offers,
+  suppliers = NO_SUPPLIERS,
   productId,
   sort,
   ordering,
@@ -246,7 +291,7 @@ export function OffersScreen({
 
       {product.kind === 'OK' ? (
         <Section headingId="offers" title="پیشنهادهای تأمین‌کنندگان">
-          <SortControl productId={productId} sort={sort} />
+          <SortControl productId={productId} sort={sort} context={context} />
 
           {offers.kind === 'FORBIDDEN' ? <NoAccessState /> : null}
           {offers.kind === 'UNAVAILABLE' ? (
@@ -258,7 +303,7 @@ export function OffersScreen({
           {offers.kind === 'NOT_FOUND' ? (
             <EmptyState title="پیشنهادی یافت نشد" description="این مسیر در بازار پاسخی نداشت." />
           ) : null}
-          {offers.kind === 'OK' ? <OfferRows offers={offers.data} /> : null}
+          {offers.kind === 'OK' ? <OfferRows offers={offers.data} suppliers={suppliers} /> : null}
         </Section>
       ) : null}
 

@@ -24,6 +24,8 @@ import {
 } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
 import type { SupplierFormState } from './supplier-form-state';
+import { pinnedOrganizationFor } from '@/server/session-organization';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The supplier write screens with the real `useActionState`: only the server
@@ -106,13 +108,13 @@ const FORMS = [
   },
   {
     name: 'approve',
-    render: () => render(<ApproveQualificationForm {...BOUND} capabilityLabel="تامین کالا" />),
+    render: () => render(<ApproveQualificationForm {...BOUND} capabilityLabel="تأمین کالا" />),
     named: true,
     values: { note: '' },
   },
   {
     name: 'reject',
-    render: () => render(<RejectQualificationForm {...BOUND} capabilityLabel="تامین کالا" />),
+    render: () => render(<RejectQualificationForm {...BOUND} capabilityLabel="تأمین کالا" />),
     named: true,
     values: { reason: '', note: '' },
   },
@@ -369,7 +371,8 @@ function tokenFor(organizationId: string | null, roles: string[], memberships?: 
 const sessionFor = (token: string): WebSession => ({
   subject: 'user-1',
   username: 'u',
-  organizationId: 'ORG-X',
+  // The copy every stored session carries: the token's own organization.
+  organizationId: pinnedOrganizationFor(token),
   accessToken: token,
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
@@ -403,7 +406,7 @@ const DETAIL: SupplierDetail = {
       id: 'QUA_OPEN',
       capability: 'GOODS_SUPPLY',
       state: 'SUBMITTED',
-      statement: 'تامین لوازم یدکی',
+      statement: 'تأمین لوازم یدکی',
       submittedAt: '2026-09-02T08:00:00.000Z',
       decidedAt: null,
       decisionNote: null,
@@ -459,7 +462,7 @@ describe('who is drawn which form on a supplier', () => {
         .map((o) => o.textContent),
     ).toEqual(['انتخاب کنید…', 'پیمانکاری']);
     expect(buttons()).toContain('ارسال درخواست صلاحیت');
-    expect(buttons().join()).not.toMatch(/تایید صلاحیت|رد صلاحیت|تعلیق/);
+    expect(buttons().join()).not.toMatch(/تأیید صلاحیت|رد صلاحیت|تعلیق/);
   });
 
   it('offers no request when every capability is awaiting a decision or approved', () => {
@@ -479,30 +482,33 @@ describe('who is drawn which form on a supplier', () => {
 
   it('a platform operator may decide a request awaiting a decision and suspend — and cannot submit', () => {
     drawn(DETAIL, 'ORG-UNION', ['UNION_ADMIN']);
-    expect(screen.getByText('تایید صلاحیت…')).toBeInTheDocument();
+    expect(screen.getByText('تأیید صلاحیت…')).toBeInTheDocument();
     expect(screen.getByText('رد صلاحیت…')).toBeInTheDocument();
-    expect(screen.getByText('تعلیق این تامین‌کننده…')).toBeInTheDocument();
+    expect(screen.getByText('تعلیق این تأمین‌کننده…')).toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: /دسته/ })).toBeNull();
     // Only the one request awaiting a decision has the decision forms.
-    expect(screen.getAllByText('تایید صلاحیت…')).toHaveLength(1);
+    expect(screen.getAllByText('تأیید صلاحیت…')).toHaveLength(1);
   });
 
   it('draws a reinstatement, and no suspension, for a suspended supplier', () => {
     drawn(SUSPENDED, 'ORG-UNION', ['UNION_ADMIN']);
     expect(buttons()).toContain('رفع تعلیق');
-    expect(screen.queryByText('تعلیق این تامین‌کننده…')).toBeNull();
+    expect(screen.queryByText('تعلیق این تأمین‌کننده…')).toBeNull();
   });
 
   it('a platform operator who belongs to the supplier’s organization is offered no decision and is told why', () => {
     drawn(DETAIL, 'ORG-UNION', ['UNION_ADMIN'], ['ORG-UNION', SUPPLIER_ORG]);
-    expect(screen.queryByText('تایید صلاحیت…')).toBeNull();
-    expect(screen.queryByText('تعلیق این تامین‌کننده…')).toBeNull();
+    expect(screen.queryByText('تأیید صلاحیت…')).toBeNull();
+    expect(screen.queryByText('تعلیق این تأمین‌کننده…')).toBeNull();
     expect(screen.getByText(/سازمان شما صاحب این پرونده است/)).toBeInTheDocument();
   });
 
-  it('a platform administrator with no organization decides too: no decision names a tenant', () => {
-    drawn(DETAIL, null, ['SYSTEM_ADMIN']);
-    expect(screen.getByText('تایید صلاحیت…')).toBeInTheDocument();
+  it('a platform administrator whose session acts for no organization is drawn no form at all (task 118)', () => {
+    // Such a session never reaches this page (`tenant-gate.ts` sends it to
+    // `/account/no-organization`), and every form here is bound to an
+    // organization: none is minted for it, so nothing could be sent
+    // header-less and answered for the token's active organization.
+    expect(() => drawn(DETAIL, null, ['SYSTEM_ADMIN'])).toThrow(/no known organization/);
   });
 
   it.each([
@@ -738,7 +744,13 @@ describe('the directory page', () => {
   };
 
   it('marks the row of the organization the session acts for — the API has no “my supplier”', () => {
-    render(<SuppliersScreen result={PAGE} query={{}} ownOrganizationId={SUPPLIER_ORG} />);
+    render(
+      <SuppliersScreen
+        result={PAGE}
+        query={{ context: TEST_CONTEXT }}
+        ownOrganizationId={SUPPLIER_ORG}
+      />,
+    );
     expect(screen.getAllByText('سازمان شما')).toHaveLength(1);
     expect(screen.getByText('سازمان شما').closest('li')).toHaveTextContent('تعمیرگاه ما');
   });
@@ -747,18 +759,18 @@ describe('the directory page', () => {
     const { container } = render(
       <SuppliersScreen
         result={PAGE}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         register={<RegisterSupplierForm csrfToken={CSRF} submissionId={SUBMISSION} />}
       />,
     );
     expect(
-      screen.getByRole('heading', { name: 'ثبت پرونده تامین‌کننده برای سازمان شما' }),
+      screen.getByRole('heading', { name: 'ثبت پرونده تأمین‌کننده برای سازمان شما' }),
     ).toBeInTheDocument();
     expect(await axe(container)).toHaveNoViolations();
   });
 
   it('draws no registration and no mark by default', () => {
-    render(<SuppliersScreen result={PAGE} query={{}} />);
+    render(<SuppliersScreen result={PAGE} query={{ context: TEST_CONTEXT }} />);
     expect(screen.queryByText('سازمان شما')).toBeNull();
     expect(screen.queryByRole('heading', { name: /ثبت پرونده/ })).toBeNull();
   });

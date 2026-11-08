@@ -8,6 +8,21 @@ matters for what they may assume.
 `login`, the visitor blocks of `maintenance`, and similar. They start the portal
 and nothing else, so they run anywhere and any number of times at once.
 
+## The ports the suite owns (3200, 3201, 3291)
+
+Locally the suite builds the portal, starts it on :3200 and starts its own layout fixtures on
+:3201 and :3291. **It never reuses a server, and a server counts as ready only while it is the
+only holder of its port.** Each is started through `e2e/own-server.mjs` (`e2e/server-reuse.ts`,
+TASK 323 and 325): before the command runs, any listener on the port — IPv4 or IPv6, any
+address — is refused by name; while the server lives, every listening socket of the port must
+belong to the process tree the launcher started, or the launcher kills the server and fails.
+Playwright waits for the launcher's `RASTA_E2E_OWNED <port>` line instead of polling a URL. A
+hand-run `pnpm dev`, another worktree's portal or a leftover from an earlier run therefore stops
+the run with the port and the process named; stop it and run again. Nothing is inspected while
+the config loads, so workers and UI mode's loader load it freely. It needs Linux `ss` and `ps`;
+without them nothing can be proved and the launcher refuses. CI starts its servers on a fresh
+machine with the URL poll, as before.
+
 ## Live-stack scenarios — need the whole stack, and **one run per stack**
 
 Anything that signs in (`installLiveSession`) and writes or reads real records
@@ -92,6 +107,23 @@ progress). An authorized request offers no withdrawal in the portal at all.
   request open, so the order allows three runs per database (a retry within one
   run included: the scenario reads what the line still allows rather than
   assuming 10); a CI database is fresh every run.
+
+**`inventory-commands.spec.ts`** (EXP-004 criterion 1 and 2): inventory's operator
+commands, every one issued **in the browser** through the portal's own forms, at
+desktop and at phone size (it is in `MOBILE_SPECS`: each run creates its own
+warehouse, so a phone is a second viewport and not a second writer). The owner
+creates a warehouse, receives stock, adjusts it down (one adjustment that would
+leave less than zero is refused in fixed words), creates a two-leg shipment to
+ORG-DEH-0002, dispatches and delivers it; the consignee reads and tracks it and is
+offered no move; ORG-DEH-0001, a third organization, finds it exactly as it finds
+an id that does not exist. No fixture: nothing is seeded, and the API is touched
+only to prove a service refusal the portal never draws a form for. The owner is
+**provisioned per run** into its own organization, so nothing is written to the
+realm organizations whose whole pages `tenant-isolation.spec.ts` compares.
+
+- It needs `WEB_LIVE_STACK_E2E=true` and `WEB_LIVE_STACK_E2E_EXP004=true`
+  (inventory-service started), and under `CI` a skip fails the job.
+- Like returns, it **provisions one person per run**, here the owner, into `ORG-E2E-INV-<run>`.
 
 ## Settlements (`settlements.spec.ts`) — the one scenario that settles
 

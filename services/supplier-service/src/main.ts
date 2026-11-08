@@ -44,7 +44,7 @@ import {
 } from '@rasta/nest-common';
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
-import { enrichOpenApiDocument } from './openapi/document';
+import { enrichOpenApiDocument, publishOperationSecurity } from './openapi/document';
 
 async function bootstrap(): Promise<void> {
   // D-045: refuse to start as anything but the runtime role before Nest builds a
@@ -90,9 +90,10 @@ async function bootstrap(): Promise<void> {
         'x-correlation-id',
         'x-organization-id',
         'idempotency-key',
+        'idempotency-replay-deadline',
         'if-match',
       ],
-      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag'],
+      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag', 'retry-after'],
       maxAge: 600,
     });
   }
@@ -123,7 +124,11 @@ async function bootstrap(): Promise<void> {
         .addBearerAuth()
         .build(),
     );
-    SwaggerModule.setup('docs', app, enrichOpenApiDocument(document));
+    SwaggerModule.setup(
+      'docs',
+      app,
+      publishOperationSecurity(enrichOpenApiDocument(document), app),
+    );
   }
 
   // The one shutdown path (`installGracefulShutdown`, @rasta/nest-common): close

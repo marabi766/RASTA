@@ -19,6 +19,8 @@ import type { WriteResult } from '@/server/write';
 
 import type { DeclareFormState, RevokeFormState } from './availability-form-state';
 import type { RecordFormState } from './record-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path both availability commands on `/assets/[id]` take.
@@ -41,8 +43,11 @@ import type { RecordFormState } from './record-form-state';
  * No field of either form names a machine or a window.
  */
 
-const assetPath = (assetId: string, flash: string): string =>
-  `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${flash}`;
+const assetPath = (session: WebSession, assetId: string, flash: string): string =>
+  withContext(
+    pageContext(session),
+    `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${flash}`,
+  );
 
 /** Everything before the form is read; `null` plus the refusal to return when it fails. */
 async function authorize(
@@ -129,7 +134,7 @@ export async function runDeclare(
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads availability again, so it shows what was declared.
     const notice: AvailabilityNotice = 'availabilityDeclared';
-    redirect(assetPath(assetId, mintFlash(gate.session, assetId, notice)));
+    redirect(assetPath(gate.session, assetId, mintFlash(gate.session, assetId, notice)));
   }
   if (result.kind === 'INVALID') {
     return {
@@ -156,7 +161,7 @@ export async function runRevoke(
 
   if (result.kind === 'CREATED') {
     const notice: AvailabilityNotice = 'availabilityRevoked';
-    redirect(assetPath(assetId, mintFlash(gate.session, assetId, notice)));
+    redirect(assetPath(gate.session, assetId, mintFlash(gate.session, assetId, notice)));
   }
   if (result.kind === 'INVALID') {
     // No field: the one thing fleet-service refuses a revoke for is that the

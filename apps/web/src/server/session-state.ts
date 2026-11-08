@@ -28,6 +28,16 @@
 export const SESSION_STATE_HEADER = 'x-rasta-session-state';
 export const REFRESH_UNAVAILABLE = 'refresh-unavailable';
 
+/**
+ * The route was hidden from a session that acts for no organization
+ * (`tenant-gate.ts`): it has one, but nothing tenant-bound may run for it.
+ */
+export const NO_ORGANIZATION = 'no-organization';
+
+export function isNoOrganization(headers: Pick<Headers, 'get'>): boolean {
+  return headers.get(SESSION_STATE_HEADER) === NO_ORGANIZATION;
+}
+
 /** True when middleware marked this request's missing session as possibly temporary. */
 export function isRefreshUnavailable(headers: Pick<Headers, 'get'>): boolean {
   return headers.get(SESSION_STATE_HEADER) === REFRESH_UNAVAILABLE;

@@ -55,12 +55,14 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   marked=0
   for svc in "${RASTA_SERVICES[@]}"; do
     db="rasta_${svc}"
-    if [[ "$(psql -X -tA --username "$POSTGRES_USER" --dbname postgres \
-      -c "SELECT 1 FROM pg_database WHERE datname = '${db}'")" != "1" ]]; then
+    # A failed probe is a failure, never "not present" (#540 r2 R2-1).
+    present="$(psql -X -tA -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
+      -c "SELECT 1 FROM pg_database WHERE datname = '${db}'")" || exit 1
+    if [[ "${present}" != "1" ]]; then
       echo "    - ${db}: not present, skipped"
       continue
     fi
-    mark_disposable_database "$db"
+    mark_disposable_database "$db" || exit 1
     echo "    - ${db}: marked disposable"
     marked=$((marked + 1))
   done

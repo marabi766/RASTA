@@ -81,8 +81,8 @@ pnpm infra:up          # بالا آوردن
 pnpm infra:down        # خاموش کردن
 pnpm infra:reset       # ⚠️ حذف حجم‌ها و راه‌اندازی از صفر
 pnpm infra:logs        # دنبال کردن Log
-docker compose --profile tools up -d           # Kafka UI, Temporal UI, Mailpit
-docker compose --profile observability up -d   # OTel, Prometheus, Grafana
+COMPOSE_PROFILES=tools pnpm infra:up           # Kafka UI, Temporal UI, Mailpit
+COMPOSE_PROFILES=observability pnpm infra:up   # OTel, Prometheus, Grafana
 ```
 
 ### پایگاه داده
@@ -116,6 +116,33 @@ pnpm verify     # format:check → lint → typecheck → test → build
 ```
 
 ---
+
+The pre-push gate is being built in stages. `pnpm run prepush:scope --base origin/main`
+prints a selection plan only; it does not run quality checks. Until
+repository-reading tests have enforced input coverage, any changed path
+selects every workspace. Contracts tests hash repository inputs as well. The planner
+invokes only an installed native Turbo binary and refuses missing binaries or
+incomplete dependent closures. Run from the worktree root after
+`pnpm install --frozen-lockfile`; an invalid base or Turbo result refuses selection.
+`pnpm run prepush:parity --base origin/main` recomputes selection and runs the
+scope and parity suites serially in a controlled environment, then verifies the
+selection and execution inputs again. `scripts/prepush-parity.json` explicitly
+pins the entire workflow context, quality-job settings and repository pnpm inputs,
+and accounts for every quality-job step, including exclusions with reasons. Root
+`package.json` is pinned per entry of a projection (FU-093): every top-level key except
+`scripts`, plus the root scripts the quality jobs can reach: the `pnpm run` closure of the
+tokenized step and script commands, every root script named as a literal by a launcher those
+commands run (node entries and the code files they name, bash files, tool configs, turbo
+`//#` tasks), hooks and the install lifecycle. A command form it does not model (expanded
+command word, wrapper, `sh -c`, control flow, unknown program or pnpm form) refuses; an
+unrelated script does not move the pin. After review, repin with
+`node scripts/prepush-parity-repin.mjs` (same projection code as the check). Executed
+steps allow only `name` and `run`; their pre/post hooks are refused. Command,
+environment, condition or failure-handling drift refuses until reviewed. This is
+an incomplete parity slice, not the full pre-push gate: package checks, static
+checks, prerequisites and measured cold/warm timings remain slice C. No old
+selection file is accepted; executed root test scripts are checked against their
+manifest and launched directly with Node, without package-manager hooks or .env.
 
 ## Coding Standards
 

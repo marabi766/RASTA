@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from './iso-datetime';
 
 /**
  * Platform-wide error model.
@@ -81,6 +82,21 @@ export const ERROR_CODES = {
    * one, identified by their verified caller (docs/24 Q-130).
    */
   BUSINESS_LINE_REQUIRED: 'BUSINESS_LINE_REQUIRED',
+  /**
+   * The caller fixed, at its first send, the instant after which this hold may no longer
+   * be placed (`holdNotAfter`), and economic-service's own clock is past it. Nothing was
+   * recorded or held, and the key answers this for good: no request carrying that deadline
+   * can hold from now on, whatever its retention. Unlike `REPLAY_WINDOW_CLOSED`, it
+   * also says this of every request under the key (PM decision D-132).
+   */
+  HOLD_DEADLINE_PASSED: 'HOLD_DEADLINE_PASSED',
+  /**
+   * An order's hold arrived without the deadline its order's fence gives every request
+   * (`holdNotAfter`): only a marketplace-service build that does not count its sends on
+   * the order sends one so. Refused before anything is held, recorded under nothing, so
+   * the key stays free; a stored answer under it is still replayed (PM decision D-150).
+   */
+  HOLD_DEADLINE_REQUIRED: 'HOLD_DEADLINE_REQUIRED',
 
   // 429
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
@@ -88,6 +104,26 @@ export const ERROR_CODES = {
   // 5xx
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
+  /**
+   * A change that takes access away — a role removed, a membership revoked
+   * or lapsed — was refused because the identity provider could not be
+   * written first (ADR-060, write-ahead addendum, D-064). Nothing was
+   * committed: the roles or the membership are exactly as they were, and no
+   * event was emitted. The same request may be sent again; once it succeeds
+   * it is idempotent. Never says what the provider answered.
+   */
+  KEYCLOAK_UNAVAILABLE: 'KEYCLOAK_UNAVAILABLE',
+  /**
+   * A change that takes access away from one user was refused, before
+   * anything was sent, because an earlier identity-provider write of that
+   * same user may still land and could overtake it (D-069). The provider may
+   * be healthy: this concerns one user, for at most the `Retry-After` it
+   * carries. Nothing was committed and no event was emitted; the same request
+   * may be sent again after that. Only ever answered to a caller already
+   * authorized for the change. Not a service outage: the gateway does not
+   * count it towards identity's circuit (ADR-060, D-069).
+   */
+  KEYCLOAK_WRITE_SETTLING: 'KEYCLOAK_WRITE_SETTLING',
   UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
   NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
 } as const;
@@ -116,7 +152,7 @@ export const apiErrorSchema = z.object({
   correlationId: z.string(),
   /** W3C trace id, for jumping straight to the trace. */
   traceId: z.string().optional(),
-  timestamp: z.string().datetime(),
+  timestamp: z.string().check(isoDateTime()),
   path: z.string().optional(),
 });
 
@@ -149,9 +185,13 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   LEDGER_UNBALANCED: 422,
   NO_ACTIVE_RULE: 422,
   BUSINESS_LINE_REQUIRED: 422,
+  HOLD_DEADLINE_PASSED: 422,
+  HOLD_DEADLINE_REQUIRED: 422,
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,
+  KEYCLOAK_UNAVAILABLE: 503,
+  KEYCLOAK_WRITE_SETTLING: 503,
   UPSTREAM_TIMEOUT: 504,
   NOT_IMPLEMENTED: 501,
 };

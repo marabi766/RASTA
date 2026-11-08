@@ -2,7 +2,7 @@
 
 import { useActionState, type ReactNode } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import {
@@ -200,7 +200,7 @@ export function RecordPolicyForm(identity: RecordIdentity) {
           <div className="hidden sm:block" aria-hidden="true" />
           <Field label="تاریخ شروع" required error={errors.validFrom} hint="از آغاز همین روز.">
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="validFrom"
                 type="date"
@@ -216,7 +216,7 @@ export function RecordPolicyForm(identity: RecordIdentity) {
             hint="بیمه‌نامه از آغاز این روز دیگر معتبر شمرده نمی‌شود."
           >
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="validTo"
                 type="date"
@@ -338,7 +338,7 @@ export function RecordInspectionForm(identity: RecordIdentity) {
           <div className="hidden sm:block" aria-hidden="true" />
           <Field label="تاریخ معاینه" required error={errors.inspectedAt}>
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="inspectedAt"
                 type="date"
@@ -354,7 +354,7 @@ export function RecordInspectionForm(identity: RecordIdentity) {
             hint="موعد معاینهٔ بعدی؛ گواهی از آغاز این روز دیگر معتبر شمرده نمی‌شود."
           >
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="validTo"
                 type="date"

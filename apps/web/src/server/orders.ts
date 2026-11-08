@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isWithin, legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
@@ -16,11 +17,13 @@ import {
 } from '@/lib/order-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 export type { ReadResult };
 
@@ -55,7 +58,7 @@ const orderLineSchema = z.object({
    * The order line a return request names (RUN-005). A service that does not
    * send it leaves the line out of every return form rather than guessed.
    */
-  id: z.string().min(1).nullable().default(null),
+  id: z.string().min(1).nullable().prefault(null),
   offerId: z.string(),
   productId: z.string(),
   productName: z.string(),
@@ -72,15 +75,21 @@ const orderSchema = z.object({
   supplierOrganizationId: z.string(),
   totalAmountMinor: minorUnits,
   currency: z.string(),
-  lines: z.array(orderLineSchema).default([]),
-  confirmedAt: z.string().nullable().default(null),
-  fulfilledAt: z.string().nullable().default(null),
-  receiptConfirmedAt: z.string().nullable().default(null),
-  completedAt: z.string().nullable().default(null),
-  cancelledAt: z.string().nullable().default(null),
-  cancellationReason: z.string().nullable().default(null),
-  failureReason: z.string().nullable().default(null),
+  lines: z.array(orderLineSchema).prefault([]),
+  confirmedAt: z.string().nullable().prefault(null),
+  fulfilledAt: z.string().nullable().prefault(null),
+  receiptConfirmedAt: z.string().nullable().prefault(null),
+  completedAt: z.string().nullable().prefault(null),
+  cancelledAt: z.string().nullable().prefault(null),
+  cancellationReason: z.string().nullable().prefault(null),
+  failureReason: z.string().nullable().prefault(null),
   createdAt: renderableDate,
+  /**
+   * The dispute the order holds now (D-083) — what an operator's decision
+   * form names. Null when there is none, or from a service that does not send
+   * it, and then the decision form refuses before sending.
+   */
+  openDisputeId: z.string().nullable().prefault(null),
   /**
    * The commands *this viewer* may issue now, computed by marketplace-service
    * (`order-actions.ts`). Anything the portal does not recognise is dropped
@@ -90,7 +99,7 @@ const orderSchema = z.object({
    */
   availableActions: z
     .array(z.string())
-    .default([])
+    .prefault([])
     .transform((actions) => actions.filter(isOrderCommand)),
 });
 
@@ -104,7 +113,7 @@ export type OrderLine = z.infer<typeof orderLineSchema>;
 
 const orderPageSchema = z.object({
   items: z.array(orderSchema),
-  nextCursor: z.string().nullable().default(null),
+  nextCursor: z.string().nullable().prefault(null),
 });
 
 export type OrderPage = z.infer<typeof orderPageSchema>;
@@ -127,7 +136,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);
@@ -180,16 +189,26 @@ export function orderCommandFormValues(form: FormData): OrderCommandFormValues {
     responsibility: text('responsibility'),
     rating: toLatinDigits(text('rating')),
     comment: text('comment'),
+    disputeId: text('disputeId'),
     acknowledge: text('acknowledge'),
   };
 }
 
 /**
+ * What an operator reads when the decision form names no dispute the page
+ * knew of. Plain words: nothing was sent, and the page must be reloaded.
+ */
+export const DISPUTE_FORM_STALE = formMessage(
+  'این فرم به اختلاف مشخصی وصل نیست، پس چیزی ارسال نشد. صفحه را تازه کنید و دوباره تصمیم بگیرید.',
+);
+
+/**
  * What the buyer reads when a receipt confirmation arrives with a note. Plain
  * words: the note is not kept, nothing was confirmed, and what to do next.
  */
-export const RECEIPT_NOTE_REFUSAL =
-  'یادداشت هنگام تایید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تایید کنید.';
+export const RECEIPT_NOTE_REFUSAL = formMessage(
+  'یادداشت هنگام تأیید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تأیید کنید.',
+);
 
 /** An optional free-text field: blank means "not given", so it is left out. */
 const optionalText = (max: number, message: string) =>
@@ -214,11 +233,11 @@ const COMMAND_SCHEMAS = {
   FULFILL: z.object({
     trackingReference: optionalText(
       LIMITS.trackingReference.max,
-      `کد رهگیری نباید بیش از ${digits(LIMITS.trackingReference.max)} نویسه باشد`,
+      formMessage(`کد رهگیری نباید بیش از ${digits(LIMITS.trackingReference.max)} نویسه باشد`),
     ),
     note: optionalText(
       LIMITS.note.max,
-      `یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`,
+      formMessage(`یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`),
     ),
   }),
 
@@ -243,50 +262,75 @@ const COMMAND_SCHEMAS = {
       .trim()
       .min(
         LIMITS.disputeReason.min,
-        `دلیل اختلاف را دست‌کم در ${digits(LIMITS.disputeReason.min)} نویسه بنویسید — کسی که رسیدگی می‌کند باید بداند موضوع چیست`,
+        formMessage(
+          `دلیل اختلاف را دست‌کم در ${digits(LIMITS.disputeReason.min)} نویسه بنویسید — کسی که رسیدگی می‌کند باید بداند موضوع چیست`,
+        ),
       )
       .max(
         LIMITS.disputeReason.max,
-        `دلیل نباید بیش از ${digits(LIMITS.disputeReason.max)} نویسه باشد`,
+        formMessage(`دلیل نباید بیش از ${digits(LIMITS.disputeReason.max)} نویسه باشد`),
       ),
   }),
 
-  RESOLVE_DISPUTE: z.object({
-    outcome: z.enum(DISPUTE_OUTCOMES, { errorMap: () => ({ message: 'نتیجه را انتخاب کنید' }) }),
-    resolution: z
-      .string()
-      .trim()
-      .min(
-        LIMITS.resolution.min,
-        `شرح تصمیم را دست‌کم در ${digits(LIMITS.resolution.min)} نویسه بنویسید`,
-      )
-      .max(LIMITS.resolution.max, `شرح نباید بیش از ${digits(LIMITS.resolution.max)} نویسه باشد`),
-    // Required, never defaulted: ADR-052 rule 14 forbids reading
-    // responsibility out of the outcome or out of free text.
-    responsibility: z.enum(RESPONSIBILITIES, {
-      errorMap: () => ({ message: 'مسئول را صریحاً مشخص کنید' }),
+  RESOLVE_DISPUTE: z
+    .object({
+      // The dispute the page showed (`openDisputeId`), never looked up at submit
+      // time: a decision drawn for one dispute must not decide another raised
+      // since. Missing — a page drawn from a service that did not send it — is
+      // refused here rather than posted unnamed.
+      disputeId: z.string().regex(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/, DISPUTE_FORM_STALE),
+      outcome: z.enum(DISPUTE_OUTCOMES, { error: formMessage('نتیجه را انتخاب کنید') }),
+      resolution: z
+        .string()
+        .trim()
+        .min(
+          LIMITS.resolution.min,
+          formMessage(`شرح تصمیم را دست‌کم در ${digits(LIMITS.resolution.min)} نویسه بنویسید`),
+        )
+        .max(
+          LIMITS.resolution.max,
+          formMessage(`شرح نباید بیش از ${digits(LIMITS.resolution.max)} نویسه باشد`),
+        ),
+      // Required, never defaulted: ADR-052 rule 14 forbids reading
+      // responsibility out of the outcome or out of free text.
+      responsibility: z.enum(RESPONSIBILITIES, {
+        error: formMessage('مسئول را صریحاً مشخص کنید'),
+      }),
+    })
+    // A REFUND resolution is also the refund's reason, which is shorter
+    // (`REFUND_RESOLUTION_BOUNDS`, FU-134): said here, before the post.
+    .superRefine((values, context) => {
+      if (values.outcome !== 'REFUND' || isWithin(values.resolution, LIMITS.refundResolution)) {
+        return;
+      }
+      context.addIssue({
+        code: 'custom',
+        path: ['resolution'],
+        message: formMessage(
+          `شرح تصمیم بازگشت وجه نباید بیش از ${digits(LIMITS.refundResolution.max)} نویسه باشد`,
+        ),
+      });
     }),
-  }),
 
   CANCEL: z.object({
     reason: z
       .string()
       .trim()
-      .min(LIMITS.cancelReason.min, 'دلیل لغو را بنویسید')
+      .min(LIMITS.cancelReason.min, formMessage('دلیل لغو را بنویسید'))
       .max(
         LIMITS.cancelReason.max,
-        `دلیل نباید بیش از ${digits(LIMITS.cancelReason.max)} نویسه باشد`,
+        formMessage(`دلیل نباید بیش از ${digits(LIMITS.cancelReason.max)} نویسه باشد`),
       ),
   }),
 
   REVIEW: z.object({
     rating: z
       .string()
-      .regex(/^[1-5]$/, 'امتیازی از ۱ تا ۵ انتخاب کنید')
+      .regex(/^[1-5]$/, formMessage('امتیازی از ۱ تا ۵ انتخاب کنید'))
       .transform((value) => Number(value)),
     comment: optionalText(
       LIMITS.reviewComment.max,
-      `نظر نباید بیش از ${digits(LIMITS.reviewComment.max)} نویسه باشد`,
+      formMessage(`نظر نباید بیش از ${digits(LIMITS.reviewComment.max)} نویسه باشد`),
     ),
   }),
 } satisfies Record<OrderCommand, z.ZodTypeAny>;
@@ -330,7 +374,7 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
   }
 
   const command = values.command;
-  const parsed = COMMAND_SCHEMAS[command].safeParse(values);
+  const parsed = legacyParse(COMMAND_SCHEMAS[command], values);
 
   // Checked here, on the server, not only by the checkbox's `required`: a
   // browser attribute is a convenience a crafted post does not have to honour,
@@ -350,7 +394,10 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
 
   const fieldErrors: Partial<Record<OrderCommandField, string>> = parsed.success
     ? {}
-    : firstIssuePerField(parsed.error, (field): field is OrderCommandField => field !== 'command');
+    : firstIssuePerField(
+        parsed.refusal,
+        (field): field is OrderCommandField => field !== 'command',
+      );
   if (!acknowledged) {
     fieldErrors.acknowledge = 'برای ادامه تأیید کنید که این اقدام بازگشت‌پذیر نیست';
   }
@@ -370,8 +417,16 @@ export const ORDER_COMMAND_FIELD_MAPPING: FieldMapping<OrderCommandField> = {
     responsibility: 'responsibility',
     rating: 'rating',
     comment: 'comment',
+    disputeId: 'disputeId',
   },
   messages: {
+    // D-083: the operator's decision names the dispute the page showed.
+    'This decision is about a dispute the order no longer holds; reload the order':
+      'این تصمیم دربارهٔ اختلافی است که دیگر روی سفارش باز نیست؛ چیزی تغییر نکرد. صفحه را تازه کنید.',
+    'Where this dispute found the order is not recorded; it can be refunded, not settled':
+      'مرحله‌ای که اختلاف در آن ثبت شد معلوم نیست؛ این اختلاف را فقط با بازگشت وجه می‌توان بست.',
+    'The order holds no confirmed receipt to return to; it can be refunded, not settled':
+      'تأیید دریافتی برای این سفارش ثبت نشده است؛ این اختلاف را فقط با بازگشت وجه می‌توان بست.',
     // Q-110: the service's refusal of a receipt note, if a post ever got past
     // the portal's own check above. The ticket number is the service's, not
     // the reader's.

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   ATTACH_DOCUMENT_TEXT_FIELDS,
@@ -17,9 +18,11 @@ import { firstIssuePerField, readFields } from './asset-commands';
 import { localDateToIso } from './drivers';
 import { webServerEnv } from './env';
 import { signPayload, verifyPayload } from './signed-payload';
+import { putToSignedUrl } from './signed-url-upload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * A machine's documents, through the gateway (EXP-002, slice 7; ADR-058 § 3,
@@ -276,7 +279,7 @@ export function attachDocumentFormValues(form: FormData): AttachDocumentFormValu
 export const attachDocumentFormSchema = z
   .object({
     kind: z.enum(DOCUMENT_KINDS, {
-      errorMap: () => ({ message: 'نوع مدرک را از فهرست انتخاب کنید' }),
+      error: formMessage('نوع مدرک را از فهرست انتخاب کنید'),
     }),
     title: displayText('عنوان', DOCUMENT_BOUNDS.title.min, DOCUMENT_BOUNDS.title.max).refine(
       (value) => !BIDI_CONTROL.test(value),
@@ -304,11 +307,11 @@ export type ParsedAttachForm =
     };
 
 export function parseAttachDocumentForm(values: AttachDocumentFormValues): ParsedAttachForm {
-  const parsed = attachDocumentFormSchema.safeParse(values);
+  const parsed = legacyParse(attachDocumentFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is AttachDocumentTextField =>
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is AttachDocumentTextField =>
       (ATTACH_DOCUMENT_TEXT_FIELDS as readonly string[]).includes(value),
     ),
   };
@@ -548,16 +551,19 @@ export async function uploadDocument(
     sha256: createHash('sha256').update(bytes).digest('hex'),
   };
   try {
-    const stored = await (call.storageFetchImpl ?? fetch)(url, {
-      method: 'PUT',
-      // The type is bound into the signature, so it is sent exactly as declared.
-      headers: { 'content-type': contentType === '' ? 'application/octet-stream' : contentType },
-      body: bytes,
-      // A redirect would carry the signed request to a host nobody chose.
-      redirect: 'error',
-      cache: 'no-store',
-      signal: AbortSignal.timeout(STORAGE_UPLOAD_TIMEOUT_MS),
-    });
+    // A redirect would carry the signed request to a host nobody chose: the
+    // transport refuses it (redirect: 'error').
+    const stored = await putToSignedUrl(
+      url,
+      {
+        // The type is bound into the signature, so it is sent exactly as declared.
+        headers: { 'content-type': contentType === '' ? 'application/octet-stream' : contentType },
+        body: bytes,
+        cache: 'no-store',
+        signal: AbortSignal.timeout(STORAGE_UPLOAD_TIMEOUT_MS),
+      },
+      call.storageFetchImpl,
+    );
     if (!stored.ok) {
       return { kind: 'FAILED', status: stored.status, correlationId: intent.correlationId };
     }

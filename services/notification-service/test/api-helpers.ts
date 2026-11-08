@@ -9,6 +9,7 @@ import {
   runUnscoped,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
+import { mintTestInternalToken } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { DispatcherConsumer } from '../src/intake/dispatcher.consumer';
@@ -92,7 +93,8 @@ export function internalToken(
   purpose: 'SERVICE' | 'RELAY' = 'SERVICE',
   organizationId?: string,
 ): Promise<string> {
-  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).issue(
+  return mintTestInternalToken(
+    { secret: INTERNAL_SECRET, issuer: 'rasta-internal', ttlSeconds: 300 },
     callerService,
     SERVICE_NAME,
     purpose,

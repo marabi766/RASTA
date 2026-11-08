@@ -1,3 +1,7 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { withdrawDemandSchema } from '../demand/dto';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
+import { refusal, type RefusalArea, type ReasonOf, REFUSAL_REASONS } from '../shared/refusal';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
@@ -27,6 +31,23 @@ describe('the committed OpenAPI document', () => {
   });
 
   const docs = join(__dirname, '..', '..', '..', '..', 'docs', 'api');
+  it('omits transformed body constraints in the served document (FU-120)', () => {
+    const body = JSON.parse(
+      JSON.stringify(
+        buildProcurementOpenApiDocument(app).paths['/v1/demand-requests/{id}/withdraw']!.post!
+          .requestBody,
+      ),
+    );
+    expect(body.content['application/json'].schema.properties.reason).toEqual({
+      type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
+    const field = withdrawDemandSchema.shape.reason;
+    expect(field.safeParse(' ' + 'a'.repeat(500) + ' ').success).toBe(true);
+    expect(field.safeParse('   ').success).toBe(false);
+  });
+
   const committedPath = join(docs, 'procurement-service.openapi.json');
 
   type Operation = {
@@ -42,23 +63,43 @@ describe('the committed OpenAPI document', () => {
       })),
     );
 
+  it('accepts real filter bodies and every listed typed refusal on every published error', () => {
+    expect(
+      errorEnvelopeProblems(buildProcurementOpenApiDocument(app), {
+        refusal: (area, reason) => {
+          const status = (REFUSAL_REASONS[area as RefusalArea] as Record<string, number>)[reason];
+          return refusal(
+            status === 403 ? 'FORBIDDEN' : status === 409 ? 'CONFLICT' : 'BUSINESS_RULE_VIOLATION',
+            'Refused',
+            area as RefusalArea,
+            [reason as ReasonOf<RefusalArea>],
+          );
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('matches the generator byte for byte (run `pnpm openapi:generate` after changing the API)', () => {
     const generated = formatDocument(buildProcurementOpenApiDocument(app), committedPath);
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes exactly the operations the planned contract gives ADR-070 plan PRs 1 to 3 and 6, each closed', () => {
+  it('publishes exactly the operations the planned contract gives ADR-070 plan PRs 1 to 3, 6 and 8, each closed', () => {
     const planned = JSON.parse(
       readFileSync(join(docs, 'procurement-service.planned.openapi.json'), 'utf8'),
     ) as { paths: Record<string, Record<string, { 'x-step'?: string }>> };
+    // Plan PR 8 is built in two parts (D-117): its commands here; the reads of its own receipt
+    // (GET …/quotations/mine) and the buyer's count come with the access log in PR 8B.
+    const laterPart = new Set(['GET /v1/rfqs/{id}/quotations/mine']);
     const built = Object.entries(planned.paths)
       .flatMap(([path, item]) =>
         Object.entries(item)
           .filter(([, operation]) =>
-            ['PR 1', 'PR 2', 'PR 3', 'PR 6'].includes(operation['x-step'] ?? ''),
+            ['PR 1', 'PR 2', 'PR 3', 'PR 6', 'PR 8'].includes(operation['x-step'] ?? ''),
           )
           .map(([method]) => `${method.toUpperCase()} ${path}`),
       )
+      .filter((key) => !laterPart.has(key))
       .sort();
 
     const published = operations();
@@ -76,14 +117,22 @@ describe('the committed OpenAPI document', () => {
     }
   });
 
-  it('requires an Idempotency-Key on both commands and on nothing else', () => {
+  it('requires an Idempotency-Key on every command, offers its replay deadline (FU-156), and nothing else', () => {
     for (const { key, operation } of operations()) {
       const header = (operation.parameters ?? []).filter((p) => p.in === 'header');
       expect({ key, header }).toEqual({
         key,
-        header: key.startsWith('POST ')
-          ? [expect.objectContaining({ name: 'Idempotency-Key', required: true })]
-          : [],
+        header:
+          key.startsWith('POST ') || key.startsWith('PUT ')
+            ? [
+                expect.objectContaining({ name: 'Idempotency-Key', required: true }),
+                expect.objectContaining({
+                  name: 'Idempotency-Replay-Deadline',
+                  required: false,
+                  schema: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' },
+                }),
+              ]
+            : [],
       });
     }
   });
@@ -154,8 +203,20 @@ describe('the committed OpenAPI document', () => {
 
   it('carries the setting snapshot and the total as a bounded integer on an aggregation, and no amount field anywhere', () => {
     const text = readFileSync(committedPath, 'utf8');
-    // No property, parameter or schema named for money: the words may appear in prose only.
-    expect(text).not.toMatch(/"\w*(amount|price|Amount|Price)\w*"\s*:/);
+    // No property, parameter or schema named for money — the words may appear in prose only — but
+    // the one price a supplier states, in the body it seals (plan PR 8): never in a response.
+    const named = [...text.matchAll(/"(\w*(?:amount|price|Amount|Price)\w*)"\s*:/g)].map(
+      (m) => m[1],
+    );
+    expect(named).toEqual(['unitPriceMinor']);
+    const sealedBody = JSON.stringify(
+      (
+        buildProcurementOpenApiDocument(app).paths?.['/v1/rfqs/{id}/quotations/mine'] as {
+          put: { requestBody: unknown };
+        }
+      ).put.requestBody,
+    );
+    expect(sealedBody).toContain('"unitPriceMinor"');
     const document = buildProcurementOpenApiDocument(app) as unknown as {
       paths: Record<
         string,

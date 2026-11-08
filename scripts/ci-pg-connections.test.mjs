@@ -1,0 +1,1359 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import { fileURLToPath } from 'node:url';
+import {
+  alive,
+  captureProcess,
+  checkedSignal,
+  containerMemory,
+  processIdentity,
+  readOwner,
+  writeOwner,
+  parseLimits,
+  parseSample,
+  readSeries,
+  runBounded,
+  SAMPLE_SQL,
+  stopWatcher,
+  watcherTargets,
+  summarize,
+  TIMING,
+  uncoveredMs,
+} from './ci-pg-connections-lib.mjs';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const WATCH = join(ROOT, 'scripts/ci-pg-connections-watch.mjs');
+const REPORT = join(ROOT, 'scripts/ci-pg-connections-report.mjs');
+const LIMITS_100 = { maxConnections: 100, superuserReserved: 3, reserved: 0, sharedMemory: null };
+const LIMITS_300 = { ...LIMITS_100, maxConnections: 300 };
+const delay = (ms) => new Promise((done) => setTimeout(done, ms));
+
+/** A sample at `at` ms with the given [database, role, state, sessions, monitor] groups. */
+const sample = (at, ...groups) => ({
+  at,
+  groups: groups.map(([database, role, state, sessions, monitor = 0]) => ({
+    at,
+    database,
+    role,
+    state,
+    sessions,
+    monitor,
+  })),
+});
+
+/** A complete series: started 1 s before the first sample, stopped 1 s after the last. */
+function series(samples, limits = LIMITS_100, extra = {}) {
+  const times = samples.map((s) => s.at);
+  return {
+    started: Math.min(...times) - 1000,
+    pid: null,
+    pgid: null,
+    limits,
+    limitsRecorded: true,
+    samples,
+    failures: [],
+    stopped: Math.max(...times) + 1000,
+    unreadable: 0,
+    ...extra,
+  };
+}
+
+/** One sample per second from `from` ms, each the suites' `sessions` plus the monitor. */
+const steady = (from, count, sessions) =>
+  Array.from({ length: count }, (_, i) =>
+    sample(from + 1000 * i, ['d', 'r', 'idle', sessions], ['postgres', 'rasta', 'active', 1, 1]),
+  );
+
+const report = (s, now = s.stopped ?? 0) => summarize(s, { cpus: 4, now });
+
+// --- parsing ------------------------------------------------------------------
+
+test('parses the limits row (16: reserved_connections, shared memory) and refuses anything else', () => {
+  assert.deepEqual(parseLimits('300|3|0|143MB\n'), {
+    maxConnections: 300,
+    superuserReserved: 3,
+    reserved: 0,
+    sharedMemory: '143MB',
+  });
+  // Before PostgreSQL 15 there is no shared_memory_size: the field is empty.
+  assert.equal(parseLimits('100|3|0|').sharedMemory, null);
+  for (const row of ['', '100', '100|3', '100|3|0', 'max|3|0|', '100|3|0|143 MB']) {
+    assert.equal(parseLimits(row), null, row);
+  }
+});
+
+test('the sample query stamps the statement once, not every row', () => {
+  assert.match(SAMPLE_SQL, /statement_timestamp\(\)/);
+  assert.doesNotMatch(SAMPLE_SQL, /clock_timestamp|now\(\)/);
+});
+
+test('one psql answer is ONE sample, even when its rows carry different milliseconds', () => {
+  // The shape task 241's local sampler produced (clock_timestamp() per row):
+  // an analysis keyed on the timestamp split it; the watcher must not.
+  const { sample: parsed } = parseSample(
+    [
+      '1792941475354|rasta_economic|rasta_economic|idle|10|0',
+      '1792941475354|postgres|rasta|active|1|1',
+      '1792941475355|rasta_procurement|rasta_procurement|idle|30|0',
+      '1792941475356|rasta_audit|rasta_audit|active|11|0',
+    ].join('\n'),
+  );
+  assert.equal(parsed.groups.length, 4);
+  assert.equal(parsed.at, 1792941475356);
+  const result = report(series([parsed], LIMITS_300));
+  assert.match(result.lines.join('\n'), /WORKLOAD PEAK 51 client sessions/);
+  assert.match(result.lines.join('\n'), /OCCUPIED PEAK 52 client backends/);
+});
+
+test('an answer that is not one whole answer is refused, with its reason', () => {
+  assert.deepEqual(parseSample('1|d|r|idle|4|0\n1|postgres|rasta|active|1|1\nnoise\n'), {
+    reason: '1 malformed row(s)',
+  });
+  assert.deepEqual(parseSample(''), { reason: 'no rows' });
+  assert.deepEqual(parseSample('1|d|r|idle|4|0'), { reason: 'monitor sessions 0, not 1' });
+  assert.deepEqual(parseSample('1|postgres|rasta|active|2|2'), {
+    reason: 'monitor sessions 2, not 1',
+  });
+});
+
+test('reading the file counts every line that is not a record, and goes on', () => {
+  const lines = [
+    JSON.stringify({ started: 1000, pid: 4242, pgid: 4242 }),
+    JSON.stringify({ limits: LIMITS_100 }),
+    JSON.stringify(sample(2000, ['d', 'r', 'idle', 5], ['postgres', 'rasta', 'active', 1, 1])),
+    '{"at": 3000, "groups": [{"database": "d", "rol', // truncated mid-write
+    JSON.stringify({ at: 3500, groups: [{ database: 'd', sessions: -1 }] }), // malformed
+    JSON.stringify({ failed: 4000, reason: 'timeout' }),
+    JSON.stringify(sample(5000, ['d', 'r', 'idle', 7], ['postgres', 'rasta', 'active', 1, 1])),
+    'null',
+    JSON.stringify({ stopped: 6000 }),
+  ];
+  const s = readSeries(lines.join('\n'));
+  assert.equal(s.started, 1000);
+  assert.equal(s.pid, undefined);
+  assert.equal(s.pgid, undefined);
+  assert.deepEqual(s.limits, LIMITS_100);
+  assert.deepEqual(
+    s.samples.map((x) => x.at),
+    [2000, 5000],
+  );
+  assert.deepEqual(s.failures, [{ at: 4000, reason: 'timeout' }]);
+  assert.equal(s.unreadable, 3);
+  assert.equal(s.stopped, 6000);
+});
+
+// --- workload and occupied capacity (r1 F2) ------------------------------------
+
+test('workload leaves the monitor out; occupied counts it; each has its own peak', () => {
+  const s = series([
+    sample(1000, ['rasta_a', 'rasta_a', 'idle', 20], ['postgres', 'rasta', 'active', 1, 1]),
+    sample(
+      2000,
+      ['rasta_a', 'rasta_a', 'idle', 30],
+      ['rasta_b', 'rasta_b', 'active', 40],
+      ['postgres', 'rasta', 'active', 1, 1],
+    ),
+    // More backends occupied, fewer of them the suites': three monitor sessions.
+    sample(3000, ['rasta_a', 'rasta_a', 'idle', 69], ['postgres', 'rasta', 'active', 3, 3]),
+  ]);
+  const text = report(s).lines.join('\n');
+  assert.match(
+    text,
+    /WORKLOAD PEAK 70 client sessions of the suites \(monitor excluded\) at 1970-01-01T00:00:02\.000Z/,
+  );
+  assert.match(
+    text,
+    /OCCUPIED PEAK 72 client backends \(monitor included\) at 1970-01-01T00:00:03\.000Z: admission headroom 25 of 97 usable slots \(26%\)/,
+  );
+  assert.match(text, /by database: rasta_b=40 rasta_a=30/);
+  assert.match(
+    text,
+    /per-database peak over the run: rasta_a=69 rasta_b=40 \(sum of all 2: 109; a sizing heuristic, not a bound\)/,
+  );
+});
+
+test('admission headroom at 296 suite sessions + the monitor is 0, and warns', () => {
+  const result = report(series(steady(1000, 3, 296), LIMITS_300));
+  const text = result.lines.join('\n');
+  assert.match(text, /usable_by_ordinary_roles=297/);
+  assert.match(text, /WORKLOAD PEAK 296 /);
+  assert.match(
+    text,
+    /OCCUPIED PEAK 297 client backends .* admission headroom 0 of 297 usable slots \(0%\)/,
+  );
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /admission headroom 0 of 297/);
+});
+
+test('the 20 % edge is taken on occupied capacity: 236 + monitor is fine, 237 + monitor warns', () => {
+  // ceil(0.2 * 297) = 60 slots must stay free for an ordinary role.
+  const at = (sessions) => report(series(steady(1000, 3, sessions), LIMITS_300));
+  assert.match(at(236).lines.join('\n'), /admission headroom 60 of 297/);
+  assert.deepEqual(at(236).warnings, []);
+  assert.match(at(237).lines.join('\n'), /admission headroom 59 of 297/);
+  assert.equal(at(237).warnings.length, 1);
+  assert.match(at(400).lines.join('\n'), /admission headroom -104 of 297/); // shown, not clamped
+});
+
+test('slots reserved for pg_use_reserved_connections are not usable by the suites', () => {
+  const text = report(series(steady(1000, 3, 10), { ...LIMITS_300, reserved: 7 })).lines.join('\n');
+  assert.match(text, /reserved_connections=7 usable_by_ordinary_roles=290/);
+  assert.match(text, /admission headroom 279 of 290/);
+});
+
+// --- incomplete telemetry is unknown, never healthy (addendum E) ---------------
+
+test('a complete series says so and does not warn', () => {
+  const result = report(series(steady(1000, 30, 10), LIMITS_300));
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.warnings, []);
+  assert.match(result.lines.join('\n'), /telemetry complete/);
+  assert.doesNotMatch(result.lines.join('\n'), /sampled time only/);
+});
+
+test('a stretch without samples makes the margin unknown for that long, with a warning', () => {
+  const samples = [...steady(1000, 5, 10), ...steady(16_000, 5, 10)]; // nothing for 11 s
+  const result = report(series(samples, LIMITS_300));
+  const text = result.lines.join('\n');
+  assert.equal(result.complete, false);
+  assert.equal(result.unknownS, 10); // 5 s .. 16 s, less the 1.5 s the 5 s sample covers
+  assert.match(
+    text,
+    /admission headroom 286 of 297 usable slots \(96%\) over the sampled time only/,
+  );
+  assert.match(text, /telemetry INCOMPLETE: 10 s without a sample: margin unknown for 10 s/);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /margin unknown for 10 s/);
+});
+
+test('failed samples, unreadable lines and a missing stop are each counted and printed', () => {
+  const s = series(steady(1000, 10, 10), LIMITS_300, {
+    failures: [
+      { at: 3500, reason: 'timeout' },
+      { at: 4500, reason: 'timeout' },
+      { at: 5500, reason: 'exit 2' },
+    ],
+    unreadable: 2,
+    stopped: null,
+  });
+  const result = summarize(s, { cpus: 4, now: 30_000 });
+  const text = result.lines.join('\n');
+  assert.match(
+    text,
+    /telemetry INCOMPLETE: 3 failed sample\(s\) \(timeout x2, exit 2 x1\); 2 unreadable line\(s\); the watcher recorded no stop; 19 s without a sample: margin unknown for 19 s/,
+  );
+  assert.ok(result.warnings.some((w) => /margin unknown for 19 s/.test(w)));
+});
+
+test('a problem that leaves no stretch without a sample still makes the margin unknown', () => {
+  const result = report(series(steady(1000, 10, 10), LIMITS_300, { unreadable: 1 }));
+  assert.equal(result.unknownS, 0);
+  assert.match(
+    result.lines.join('\n'),
+    /telemetry INCOMPLETE: 1 unreadable line\(s\): margin unknown for 1 s/,
+  );
+  assert.equal(result.warnings.length, 1);
+});
+
+test('no readable max_connections, or no sample: unknown for the whole run, warned', () => {
+  const noLimits = report(series(steady(1000, 5, 10), null));
+  assert.match(
+    noLimits.lines.join('\n'),
+    /no readable max_connections .* no margin can be computed/,
+  );
+  assert.match(
+    noLimits.lines.join('\n'),
+    /max_connections unreadable: margin unknown for the whole run/,
+  );
+  assert.ok(noLimits.warnings.length > 0);
+  const none = summarize(readSeries(''), { cpus: 4, now: 5000 });
+  assert.match(
+    none.lines.join('\n'),
+    /no sample was taken \(no samples; no start record; no limits record; the watcher recorded no stop\): margin unknown for the whole run/,
+  );
+  assert.ok(none.warnings.length > 0);
+});
+
+test('the uncovered time counts the start, the gaps and the end', () => {
+  assert.equal(uncoveredMs(0, 3000, [1000, 2000, 3000]), 0);
+  assert.equal(uncoveredMs(0, 10_000, []), 8500);
+  assert.equal(uncoveredMs(0, 10_000, [1000]), 7500);
+  assert.equal(uncoveredMs(0, 5000, [4000, 5000]), 2500);
+});
+
+test('the report never prints a role password or query: only names and counts', () => {
+  const text = report(series(steady(1000, 3, 3))).lines.join('\n');
+  assert.doesNotMatch(text, /postgres(ql)?:\/\/|password|SELECT/i);
+});
+
+// --- the container's memory: measured from its cgroup, or "unmeasured" ---------
+
+test('container memory comes from cgroup v2 files of either docker driver, never estimated', () => {
+  const id = 'a'.repeat(64);
+  const files = (dir) => ({
+    [`${dir}/memory.peak`]: '734003200',
+    [`${dir}/memory.current`]: '524288000',
+    [`${dir}/memory.stat`]: 'anon 104857600\nfile 314572800\nshmem 209715200\nkernel 1',
+  });
+  const reader = (map) => (path) => {
+    if (!(path in map)) throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+    return map[path];
+  };
+  for (const dir of [
+    `/sys/fs/cgroup/system.slice/docker-${id}.scope`,
+    `/sys/fs/cgroup/docker/${id}`,
+  ]) {
+    assert.deepEqual(containerMemory(id, reader(files(dir)), 17179869184), {
+      peak: 734003200,
+      current: 524288000,
+      anon: 104857600,
+      file: 314572800,
+      shmem: 209715200,
+      runnerTotal: 17179869184,
+    });
+  }
+  assert.deepEqual(containerMemory('', reader({})), { unmeasured: 'no container id' });
+  assert.deepEqual(containerMemory('../../etc', reader({})), { unmeasured: 'no container id' });
+  assert.deepEqual(containerMemory(id, reader({})), {
+    unmeasured: 'no cgroup v2 memory.peak for the container',
+  });
+  const broken = files(`/sys/fs/cgroup/docker/${id}`);
+  broken[`/sys/fs/cgroup/docker/${id}/memory.current`] = 'max';
+  assert.match(containerMemory(id, reader(broken)).unmeasured, /unreadable values/);
+  const text = summarize(series(steady(1000, 3, 3)), {
+    cpus: 4,
+    now: 0,
+    memory: containerMemory(id, reader(files(`/sys/fs/cgroup/docker/${id}`)), 17179869184),
+  }).lines.join('\n');
+  assert.match(
+    text,
+    /postgres container memory \(cgroup v2\): peak 700 MiB over its life, now 500 MiB \(anon 100 MiB, file 300 MiB of which shmem 200 MiB\); runner memory 16384 MiB/,
+  );
+  const unmeasured = summarize(series(steady(1000, 3, 3)), {
+    cpus: 4,
+    now: 0,
+    memory: { unmeasured: 'no container id' },
+  }).lines.join('\n');
+  assert.match(unmeasured, /postgres container memory: unmeasured \(no container id\)/);
+});
+
+// --- real processes: every child is bounded, and nothing survives a stop --------
+
+/** A stub psql: answers the limits and sample queries, or stalls (optionally ignoring TERM). */
+function stubPsql(dir, { stallOn = null, ignoreTerm = false } = {}) {
+  const bin = join(dir, 'psql');
+  const stall = [
+    `echo $$ > '${join(dir, 'stalled.pid')}'`,
+    ...(ignoreTerm ? ["trap '' TERM"] : []),
+    'exec sleep 6',
+  ].join('; ');
+  writeFileSync(
+    bin,
+    [
+      '#!/usr/bin/env bash',
+      `echo query >> '${join(dir, 'queries')}'`,
+      'case "$*" in',
+      `  *max_connections*) ${stallOn === 'limits' ? stall : 'echo "300|3|0|143MB"'} ;;`,
+      `  *pg_stat_activity*) ${
+        stallOn === 'sample'
+          ? stall
+          : 'now=$(date +%s%3N); printf "%s\\n" "$now|rasta_a|rasta_a|idle|12|0" "$now|postgres|rasta|active|1|1"'
+      } ;;`,
+      '  *) exit 3 ;;',
+      'esac',
+    ].join('\n'),
+  );
+  chmodSync(bin, 0o755);
+}
+
+function watcherEnv(dir, extra = {}) {
+  return {
+    ...process.env,
+    PATH: `${dir}:${process.env.PATH}`,
+    PG_CONNECTIONS_SAMPLES: join(dir, 'samples.jsonl'),
+    PG_CONNECTIONS_OWNER: join(dir, 'owner.json'),
+    PG_CONNECTIONS_RUN: 'fixture-run',
+    ...extra,
+  };
+}
+
+/** Starts the watcher leading its own process group, as `setsid` does in the workflow. */
+function startWatcher(t, env) {
+  const child = spawn(process.execPath, [WATCH], { env, stdio: 'ignore', detached: true });
+  const owner = ownChild(t, child, true);
+  const exited = once(child, 'exit');
+  return { child, exited, owner };
+}
+
+function ownBounded(t, run) {
+  t.after(async () => {
+    // Direct child shares the runner group: stop only the child, never -pgid.
+    await Promise.race([run.stop(), delay(2500)]);
+    if (run.pid && alive(run.pid)) checkedSignal(run.owner, 'SIGKILL');
+    if (run.pid) await waitFor(() => !alive(run.pid), 1000, 'bounded child exit', false);
+  });
+  if (process.env.CI_PG_FAULT_PID && run.pid)
+    writeFileSync(process.env.CI_PG_FAULT_PID, JSON.stringify(run.owner));
+}
+
+async function cleanGroup(owner) {
+  if (alive(owner.pid, true)) checkedSignal(owner, 'SIGKILL', { group: true });
+  await waitFor(() => !alive(owner.pid, true), 6500, 'fixture process group to exit', false);
+}
+
+function ownChild(t, child, group) {
+  const owner = captureProcess(child.pid);
+  t.after(async () => {
+    if (group) await cleanGroup(owner);
+    else checkedSignal(owner, 'SIGKILL');
+  });
+  child.unref();
+  if (process.env.CI_PG_FAULT_PID)
+    writeFileSync(process.env.CI_PG_FAULT_PID, JSON.stringify(owner));
+  return owner;
+}
+
+const stepOwner = (dir) => readOwner(join(dir, 'pg-connections-fixture-1.owner.json'), 'fixture-1');
+
+async function waitFor(predicate, ms, what, inject = true) {
+  if (inject && process.env.CI_PG_FIXTURE_FAULT === 'setup') {
+    predicate = () => false;
+    ms = 100;
+  }
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await delay(25);
+  }
+  if (inject && process.env.CI_PG_FIXTURE_FAULT === 'assertion')
+    assert.fail('injected assertion failure');
+}
+
+const records = (dir, name = 'samples.jsonl') =>
+  readSeries(existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : '');
+/** The workflow's own file name for the samples (`${{ runner.temp }}/pg-connections.jsonl`). */
+const STEP_FILE = 'pg-connections.jsonl';
+
+/** TERM to the watcher; it must exit 0 within `boundMs` and leave no process of its group. */
+async function termAndCheck(watcher, boundMs) {
+  const sent = Date.now();
+  checkedSignal(watcher.owner, 'SIGTERM');
+  const timer = delay(boundMs).then(() => 'late');
+  const outcome = await Promise.race([watcher.exited, timer]);
+  if (outcome === 'late') {
+    checkedSignal(watcher.owner, 'SIGKILL', { group: true });
+    assert.fail(`watcher still running ${boundMs} ms after TERM`);
+  }
+  assert.deepEqual(outcome, [0, null]);
+  assert.equal(alive(watcher.child.pid, true), false, 'a process of the watcher group survived');
+  return Date.now() - sent;
+}
+
+/** A TCP server that accepts and never answers: a real psql connecting to it stalls. */
+async function silentServer(port = 0) {
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    socket.resume(); // read, so the client's close is seen
+  });
+  server.listen(port, '127.0.0.1');
+  await once(server, 'listening');
+  return {
+    server,
+    port: server.address().port,
+    sockets,
+    close: () => {
+      for (const socket of sockets) socket.destroy();
+      server.close();
+    },
+  };
+}
+
+const realPsqlEnv = (dir, port) =>
+  watcherEnv(dir, {
+    PATH: process.env.PATH,
+    PGHOST: '127.0.0.1',
+    PGPORT: String(port),
+    PGUSER: 'monitor_test',
+    PGPASSWORD: 'not-a-secret',
+    PGDATABASE: 'postgres',
+  });
+
+test('real psql stalled in the start-up limits query: TERM ends it, the watcher exits 0, nothing survives', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-connections-'));
+  const silent = await silentServer();
+  try {
+    const watcher = startWatcher(t, realPsqlEnv(dir, silent.port));
+    await waitFor(() => silent.sockets.size > 0, 5000, 'psql to connect');
+    const took = await termAndCheck(watcher, TIMING.termGraceMs + TIMING.killWaitMs + 1000);
+    assert.ok(took < 2000, `psql honours TERM: no KILL needed (took ${took} ms)`);
+    await waitFor(() => silent.sockets.size === 0, 2000, 'the stalled connection to close');
+    const s = records(dir);
+    const owner = readOwner(join(dir, 'owner.json'), 'fixture-run');
+    assert.equal(owner.pid, watcher.child.pid);
+    assert.equal(owner.pgid, watcher.child.pid);
+    assert.equal(s.limitsRecorded, false); // stopped before the limits came back
+    assert.ok(s.stopped !== null);
+  } finally {
+    silent.close();
+  }
+});
+
+test('real psql stalled in a sample: TERM ends it, the watcher exits 0, nothing survives', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-connections-'));
+  // A port with nothing on it: the limits query and the first samples are refused fast.
+  const probe = await silentServer();
+  const port = probe.port;
+  probe.close();
+  const watcher = startWatcher(t, realPsqlEnv(dir, port));
+  await waitFor(() => records(dir).failures.length >= 1, 5000, 'a refused sample');
+  const silent = await silentServer(port);
+  try {
+    await waitFor(() => silent.sockets.size > 0, 5000, 'a sample to connect');
+    await termAndCheck(watcher, TIMING.termGraceMs + TIMING.killWaitMs + 1000);
+    await waitFor(() => silent.sockets.size === 0, 2000, 'the stalled connection to close');
+    const s = records(dir);
+    assert.equal(s.limits, null);
+    assert.ok(s.failures.every((f) => f.reason === 'exit 2'));
+    assert.ok(s.stopped !== null);
+  } finally {
+    silent.close();
+  }
+});
+
+for (const stallOn of ['limits', 'sample']) {
+  test(`a child that ignores TERM (${stallOn} query) gets KILL after the grace; nothing survives`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-connections-'));
+    stubPsql(dir, { stallOn, ignoreTerm: true });
+    const watcher = startWatcher(t, watcherEnv(dir));
+    await waitFor(() => existsSync(join(dir, 'stalled.pid')), 5000, 'the stalled child');
+    await delay(100); // past the stub's trap, into the exec'd sleep
+    const stalled = Number(readFileSync(join(dir, 'stalled.pid'), 'utf8'));
+    assert.ok(alive(stalled));
+    const took = await termAndCheck(watcher, TIMING.termGraceMs + TIMING.killWaitMs + 1000);
+    assert.ok(took >= TIMING.termGraceMs, `KILL only after the grace (took ${took} ms)`);
+    assert.equal(alive(stalled), false);
+    assert.ok(records(dir).stopped !== null);
+  });
+}
+
+test('a query past its deadline is TERMed, then KILLed, and recorded as a failed sample', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-connections-'));
+  stubPsql(dir, { stallOn: 'sample', ignoreTerm: true });
+  const started = Date.now();
+  const run = runBounded(join(dir, 'psql'), ['-c', 'SELECT 1 FROM pg_stat_activity'], {
+    env: process.env,
+    deadlineMs: 300,
+    termGraceMs: 300,
+    killWaitMs: 1000,
+  });
+  ownBounded(t, run);
+  await waitFor(() => existsSync(join(dir, 'stalled.pid')), 5000, 'the stalled child');
+  const stalled = Number(readFileSync(join(dir, 'stalled.pid'), 'utf8'));
+  const result = await Promise.race([run.done, delay(5000).then(() => 'still running')]);
+  if (result === 'still running') checkedSignal(run.owner, 'SIGKILL'); // our own stub: never left behind
+  assert.deepEqual(result, { ok: false, stdout: '', reason: 'timeout' });
+  assert.ok(Date.now() - started >= 600 && Date.now() - started < 3000);
+  assert.equal(alive(stalled), false);
+  const absent = runBounded(join(dir, 'absent-psql'), [], {
+    env: process.env,
+    deadlineMs: 1000,
+    termGraceMs: 100,
+    killWaitMs: 100,
+  });
+  ownBounded(t, absent);
+  const missing = await absent.done;
+  assert.deepEqual(missing, { ok: false, stdout: '', reason: 'ENOENT' });
+});
+
+test('the report signals only a recorded pid above 1, and its group only when it leads one', () => {
+  for (const pid of [null, undefined, 0, 1, -1, -4242, 1.5, '4242']) {
+    assert.equal(watcherTargets({ pid, pgid: pid }), null, String(pid));
+  }
+  assert.deepEqual(watcherTargets({ pid: 4242, pgid: 4242 }), { pid: 4242, group: true });
+  assert.equal(watcherTargets({ pid: 4242, pgid: 17 }), null);
+  assert.equal(watcherTargets({ pid: 4242, pgid: null }), null);
+  assert.equal(watcherTargets({ pid: process.pid, pgid: process.pid }), null);
+  const pgid = processIdentity().pgid;
+  assert.equal(watcherTargets({ pid: pgid, pgid }), null);
+});
+
+test('stopping a watcher that ignores TERM kills its whole process group, bounded', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-connections-'));
+  // A watcher command that ignores TERM, with a child of its own that does too.
+  const stubborn = join(dir, 'ci-pg-connections-watch.mjs');
+  writeFileSync(
+    stubborn,
+    `
+    import { spawn } from 'node:child_process';
+    process.on('SIGTERM', () => {});
+    spawn('bash', ['-c', "trap '' TERM; echo $$ > '${dir}/child.pid'; exec sleep 6"], { stdio: 'ignore' });
+    setInterval(() => {}, 1000);
+  `,
+  );
+  const leader = spawn(process.execPath, [stubborn], { stdio: 'ignore', detached: true });
+  ownChild(t, leader, true);
+  const exited = once(leader, 'exit');
+  await waitFor(() => existsSync(join(dir, 'child.pid')), 5000, 'the child');
+  await delay(100);
+  const child = Number(readFileSync(join(dir, 'child.pid'), 'utf8'));
+  const started = Date.now();
+  const outcome = await stopWatcher(
+    { pid: leader.pid, ...processIdentity(leader.pid) },
+    { waitMs: 500, killWaitMs: 2000 },
+  );
+  await exited;
+  assert.equal(outcome, 'killed after 500 ms');
+  assert.ok(Date.now() - started < 3000);
+  assert.equal(alive(child), false);
+  assert.equal(alive(leader.pid, true), false);
+  assert.equal(
+    await stopWatcher({ pid: null, pgid: null }, { waitMs: 10, killWaitMs: 10 }),
+    'watcher did not start',
+  );
+});
+
+// --- the workflow's own steps, run as GitHub runs them ---------------------------
+
+const workflow = parseYaml(readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8'));
+/** The jobs whose suites run through turbo's default concurrency against one service PostgreSQL. */
+const PARALLEL_JOBS = {
+  'integration-suites': 'Integration tests',
+  'integration-security': 'Test independence (F-25)',
+};
+const stepOf = (job, name) => workflow.jobs[job].steps.find((step) => step.name === name);
+
+/** Runs a step's `run` as GitHub's default shell does, with its env (expressions replaced). */
+function runStep(t, job, name, dir, extraEnv = {}, script = stepOf(job, name).run) {
+  // Register before the shell can launch any grandchild, including on assertion failure.
+  if (name === 'Watch PostgreSQL connections')
+    t.after(async () => {
+      const owner = stepOwner(dir);
+      if (owner) await cleanGroup(owner);
+    });
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, RUNNER_TEMP: dir, ...extraEnv };
+  for (const [key, value] of Object.entries(stepOf(job, name)?.env ?? {})) {
+    env[key] = String(value)
+      .replace('${{ runner.temp }}', dir)
+      .replace('${{ job.services.postgres.id }}', 'f'.repeat(64))
+      .replaceAll('${{ github.run_id }}', 'fixture')
+      .replaceAll('${{ github.run_attempt }}', '1');
+  }
+  const result = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], {
+    cwd: ROOT,
+    env,
+    encoding: 'utf8',
+    timeout: 20_000,
+  });
+  if (name === 'Watch PostgreSQL connections' && process.env.CI_PG_FAULT_PID && stepOwner(dir)) {
+    writeFileSync(process.env.CI_PG_FAULT_PID, JSON.stringify(stepOwner(dir)));
+  }
+  return result;
+}
+
+for (const job of Object.keys(PARALLEL_JOBS)) {
+  test(`${job}: watch, a failing suite, then the report — exit 0, figures printed, no survivor`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-connections-'));
+    stubPsql(dir);
+    assert.equal(runStep(t, job, 'Watch PostgreSQL connections', dir).status, 0);
+    await waitFor(() => records(dir, STEP_FILE).samples.length >= 3, 10_000, 'three samples');
+    const { pid, pgid } = stepOwner(dir);
+    assert.equal(pgid, pid, 'setsid: the watcher leads its own process group');
+    // The suite step fails; the report runs after it (always()) and still exits 0.
+    assert.equal(runStep(t, job, 'suite', dir, {}, 'exit 1').status, 1);
+    const result = runStep(t, job, 'PostgreSQL connection peak', dir);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\[pg-connections\] watcher: stopped/);
+    assert.match(
+      result.stdout,
+      /max_connections=300 superuser_reserved_connections=3 reserved_connections=0 usable_by_ordinary_roles=297 shared_memory_size=143MB/,
+    );
+    assert.match(result.stdout, /WORKLOAD PEAK 12 client sessions/);
+    assert.match(
+      result.stdout,
+      /OCCUPIED PEAK 13 client backends .* admission headroom 284 of 297/,
+    );
+    assert.match(result.stdout, /telemetry complete/);
+    assert.match(result.stdout, /postgres container memory: unmeasured/);
+    assert.doesNotMatch(result.stdout, /::warning/);
+    assert.equal(alive(pid, true), false);
+  });
+}
+
+test('the report step stops a watcher whose psql ignores TERM, exits 0, and leaves nothing', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-connections-'));
+  stubPsql(dir, { stallOn: 'sample', ignoreTerm: true });
+  const job = 'integration-suites';
+  assert.equal(runStep(t, job, 'Watch PostgreSQL connections', dir).status, 0);
+  await waitFor(() => existsSync(join(dir, 'stalled.pid')), 10_000, 'the stalled child');
+  await delay(100);
+  const stalled = Number(readFileSync(join(dir, 'stalled.pid'), 'utf8'));
+  const { pid } = stepOwner(dir);
+  assert.ok(alive(stalled) && alive(pid));
+  const started = Date.now();
+  const result = runStep(t, job, 'PostgreSQL connection peak', dir);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(Date.now() - started < TIMING.stopWaitMs + TIMING.killWaitMs + 5000);
+  assert.match(result.stdout, /watcher: stopped/);
+  assert.match(result.stdout, /no sample was taken/);
+  assert.match(result.stdout, /::warning title=PostgreSQL connection margin::/);
+  assert.equal(alive(stalled), false);
+  assert.equal(alive(pid, true), false);
+});
+
+test('the report exits 0 and warns when the watcher never wrote anything, or wrote garbage', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-'));
+  for (const content of [null, '{"started":', 'not json\n\n[]\n']) {
+    const file = join(dir, 'samples.jsonl');
+    if (content !== null) writeFileSync(file, content);
+    const result = spawnSync(process.execPath, [REPORT], {
+      env: {
+        ...process.env,
+        PG_CONNECTIONS_SAMPLES: content === null ? join(dir, 'absent') : file,
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /watcher: watcher did not start/);
+    assert.match(result.stdout, /no readable max_connections/);
+    assert.match(result.stdout, /no sample was taken .*margin unknown for the whole run/);
+    assert.match(result.stdout, /::warning title=PostgreSQL connection margin::/);
+  }
+});
+
+// --- the workflow wires it the same way in every job that runs suites in parallel ---------------
+
+for (const [id, firstTest] of Object.entries(PARALLEL_JOBS)) {
+  test(`${id}: a raised ceiling, proven by SHOW, watched, and reported even after a failure`, () => {
+    const job = workflow.jobs[id];
+    const ceilingFlag = /^postgres -c max_connections=(\d+)$/.exec(
+      job.services.postgres.command ?? '',
+    );
+    assert.ok(ceilingFlag, 'the postgres service sets max_connections through its command');
+    const ceiling = Number(ceilingFlag[1]);
+    assert.ok(ceiling > 100, 'above the image default of 100');
+    const names = job.steps.map((step) => step.name);
+    const at = (name) => {
+      assert.ok(names.includes(name), `${id} has "${name}"`);
+      return names.indexOf(name);
+    };
+    const step = (name) => job.steps[at(name)];
+    assert.match(
+      step('PostgreSQL connection ceiling').run,
+      new RegExp(`SHOW max_connections[\\s\\S]*test "\\$\\{ceiling\\}" = ${ceiling}\\b`),
+    );
+    assert.ok(at('Apply migrations') < at('PostgreSQL connection ceiling'));
+    assert.ok(at('PostgreSQL connection ceiling') < at('Watch PostgreSQL connections'));
+    assert.ok(at('Watch PostgreSQL connections') < at(firstTest));
+    assert.ok(at(firstTest) < at('PostgreSQL connection peak'));
+    const report = step('PostgreSQL connection peak');
+    assert.equal(report.if, 'always()');
+    assert.equal(report.run, 'node scripts/ci-pg-connections-report.mjs');
+    assert.equal(report.env.PG_CONTAINER_ID, '${{ job.services.postgres.id }}');
+    assert.equal(
+      step('Watch PostgreSQL connections').run,
+      'node scripts/ci-pg-connections-start.mjs\n',
+    );
+    for (const key of ['PG_CONNECTIONS_OWNER', 'PG_CONNECTIONS_RUN']) {
+      assert.equal(report.env[key], step('Watch PostgreSQL connections').env[key]);
+      assert.match(report.env[key], /github.run_id/);
+      assert.match(report.env[key], /github.run_attempt/);
+    }
+    assert.equal(
+      report.env.PG_CONNECTIONS_SAMPLES,
+      step('Watch PostgreSQL connections').env.PG_CONNECTIONS_SAMPLES,
+    );
+    // psql defaults the database to the user's name; `rasta` has none on the service PostgreSQL.
+    for (const name of ['PostgreSQL connection ceiling', 'Watch PostgreSQL connections']) {
+      assert.equal(step(name).env.PGDATABASE, 'postgres', name);
+    }
+    // The suites themselves keep their pools: nothing here sets a pool parameter.
+    assert.doesNotMatch(JSON.stringify(job), /connection_limit|DATABASE_POOL_SIZE/);
+  });
+}
+
+test('both jobs run the very same monitor steps', () => {
+  const [a, b] = Object.keys(PARALLEL_JOBS);
+  for (const name of [
+    'PostgreSQL connection ceiling',
+    'Watch PostgreSQL connections',
+    'PostgreSQL connection peak',
+  ]) {
+    assert.deepEqual(stepOf(a, name), stepOf(b, name), name);
+  }
+  assert.equal(
+    workflow.jobs[a].services.postgres.command,
+    workflow.jobs[b].services.postgres.command,
+  );
+});
+
+test('zero samples with valid start, limits and stop is incomplete even in a short run', () => {
+  const s = readSeries(
+    [{ started: 1000 }, { limits: LIMITS_300 }, { stopped: 2000 }].map(JSON.stringify).join('\n'),
+  );
+  const result = report(s);
+  assert.equal(result.complete, false);
+  assert.match(result.lines.join('\n'), /margin unknown for the whole run/);
+  assert.doesNotMatch(result.lines.join('\n'), /telemetry complete/);
+  assert.ok(result.warnings.length > 0);
+});
+
+test('every report line agrees with the single completeness verdict', () => {
+  for (const samples of [[], steady(1000, 1, 1), steady(1000, 5, 1)]) {
+    for (const limits of [null, LIMITS_300]) {
+      for (const extra of [{}, { unreadable: 1 }, { stopped: null }]) {
+        const result = report(
+          series(samples, limits, { started: 0, stopped: 2000, ...extra }),
+          3000,
+        );
+        const text = result.lines.join('\n');
+        assert.equal(/telemetry complete/.test(text), result.complete);
+        assert.equal(/margin unknown/.test(text), !result.complete);
+        assert.ok(!(/telemetry complete/.test(text) && /margin unknown/.test(text)));
+      }
+    }
+  }
+});
+
+// Faults live in subprocesses: each must fail AND exit before an outer deadline.
+// The outer harness also owns the recorded group, so a failing cleanup mutant
+// cannot leave fixtures behind or strand the quality job.
+for (const fixture of [
+  'real psql stalled in the start-up limits',
+  'real psql stalled in a sample',
+  'a child that ignores TERM \\(limits query\\)',
+  'a child that ignores TERM \\(sample query\\)',
+  'a query past its deadline',
+  'stopping a watcher that ignores TERM',
+  'integration-suites: watch,',
+  'integration-security: watch,',
+  'the report step stops a watcher',
+]) {
+  for (const fault of ['setup', 'assertion']) {
+    test(`fixture failure exits without survivors: ${fixture} / ${fault}`, async (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ci-pg-fault-'));
+      const pidfile = join(dir, 'pid');
+      // Ownership is registered before the synchronous subprocess can create children.
+      t.after(async () => {
+        if (existsSync(pidfile)) {
+          const owner = JSON.parse(readFileSync(pidfile, 'utf8'));
+          const pid = owner.pid;
+          if (fixture === 'a query past its deadline') {
+            if (alive(pid)) checkedSignal(owner, 'SIGKILL');
+          } else await cleanGroup(owner);
+        }
+      });
+      const result = spawnSync(
+        process.execPath,
+        ['--test', `--test-name-pattern=^${fixture}`, fileURLToPath(import.meta.url)],
+        {
+          env: {
+            ...process.env,
+            NODE_TEST_CONTEXT: undefined,
+            CI_PG_FIXTURE_FAULT: fault,
+            CI_PG_FAULT_PID: pidfile,
+          },
+          encoding: 'utf8',
+          timeout: 12_000,
+        },
+      );
+      assert.equal(
+        result.error,
+        undefined,
+        `subprocess missed outer deadline: ${result.error?.code}`,
+      );
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.match(
+        result.stdout,
+        fault === 'setup' ? /timed out waiting/ : /injected assertion failure/,
+      );
+      assert.ok(existsSync(pidfile), 'fault reached a spawned fixture');
+      const { pid } = JSON.parse(readFileSync(pidfile, 'utf8'));
+      assert.equal(
+        alive(pid, fixture !== 'a query past its deadline'),
+        false,
+        'fixture survived its finalizer',
+      );
+    });
+  }
+}
+
+/** Inject filesystem errors only in a spawned watcher; never patch production switches. */
+function filesystemFault(dir, fault) {
+  const preload = join(dir, 'fault.mjs');
+  writeFileSync(
+    preload,
+    `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const append = fs.appendFileSync;
+    const rename = fs.renameSync;
+    fs.renameSync = (...args) => {
+      if (${JSON.stringify(fault)} === 'owner' || (${JSON.stringify(fault)} === 'status' && fs.existsSync(args[1]))) throw Object.assign(new Error('private-path credential payload'), { code: 'EACCES' });
+      return rename(...args);
+    };
+    fs.appendFileSync = (...args) => {
+      const row = JSON.parse(args[1]);
+      const phase = row.started ? 'start' : 'limits' in row ? 'limits' : row.stopped ? 'stop' : 'sample';
+      if (phase === ${JSON.stringify(fault)} || (${JSON.stringify(fault)} === 'status' && phase === 'start')) throw Object.assign(new Error('private-path credential payload'), { code: 'ENOSPC' });
+      return append(...args);
+    };
+    syncBuiltinESMExports();
+  `,
+  );
+  return { NODE_OPTIONS: `--import=${preload}` };
+}
+
+for (const phase of ['owner', 'start', 'limits', 'sample', 'stop']) {
+  test(`filesystem fault ${phase}: bounded exit, no blind query, independent sanitized status`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-fs-'));
+    stubPsql(dir);
+    const env = watcherEnv(dir, filesystemFault(dir, phase));
+    const watcher = startWatcher(t, env);
+    let beforeStop = 0;
+    if (phase === 'stop') {
+      await waitFor(() => records(dir).samples.length >= 1, 5000, 'first sample');
+      beforeStop = readFileSync(join(dir, 'queries'), 'utf8').trim().split('\n').length;
+      checkedSignal(watcher.owner, 'SIGTERM');
+    }
+    const result = await Promise.race([watcher.exited, delay(5000).then(() => 'late')]);
+    assert.notEqual(result, 'late', 'watcher did not stop after filesystem failure');
+    assert.deepEqual(result, [phase === 'owner' ? 2 : 0, null]);
+    assert.equal(alive(watcher.child.pid, true), false);
+    const queries = existsSync(join(dir, 'queries'))
+      ? readFileSync(join(dir, 'queries'), 'utf8').trim().split('\n').length
+      : 0;
+    if (phase === 'stop') assert.ok(queries >= beforeStop && queries <= beforeStop + 1);
+    else assert.equal(queries, { owner: 0, start: 0, limits: 1, sample: 2 }[phase]);
+    const owner = readOwner(env.PG_CONNECTIONS_OWNER, env.PG_CONNECTIONS_RUN);
+    if (phase === 'owner') assert.equal(owner, null);
+    else assert.deepEqual(owner.failure, { phase, code: 'ENOSPC' });
+    // Reporting is WARN-only even when the measurement channel is unavailable.
+    const reported = spawnSync(process.execPath, [REPORT], {
+      env: { ...env, NODE_OPTIONS: '' },
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    assert.equal(reported.status, 0);
+    assert.match(reported.stdout, /::warning/);
+    assert.match(
+      reported.stdout,
+      phase === 'owner'
+        ? /watcher did not start/
+        : new RegExp(`append failed \\(${phase}:ENOSPC\\)`),
+    );
+    assert.doesNotMatch(
+      reported.stdout + reported.stderr,
+      /private-path|credential|payload|telemetry complete/,
+    );
+  });
+}
+
+test('ownership is run-specific, validated, independent of samples, and cannot signal unrelated groups', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-owner-'));
+  const file = join(dir, 'owner.json');
+  const child = spawn('sleep', ['6'], { detached: true, stdio: 'ignore' });
+  ownChild(t, child, true);
+  const owner = { pid: child.pid, ...processIdentity(child.pid), run: 'current' };
+  writeOwner(file, owner);
+  assert.equal(readOwner(file, 'stale'), null);
+  assert.deepEqual(readOwner(file, 'current'), owner);
+  for (const patch of [
+    { pid: 0 },
+    { pgid: -1 },
+    { pid: process.pid },
+    { failure: { phase: 'sample', code: 'private-path' } },
+  ]) {
+    writeOwner(file, { ...owner, ...patch });
+    assert.equal(readOwner(file, 'current'), null);
+  }
+  assert.equal(
+    await stopWatcher(owner, { waitMs: 10, killWaitMs: 10 }),
+    'ownership unverified: not stopped; query self-expires within 6 s; watcher within 30 min + 4 s',
+  );
+  assert.ok(alive(child.pid), 'unrelated command was not signalled');
+});
+
+test('report stops the owned group even when all measurement data is lost', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-lost-'));
+  stubPsql(dir, { stallOn: 'limits' });
+  const env = watcherEnv(dir);
+  const watcher = startWatcher(t, env);
+  await waitFor(() => existsSync(join(dir, 'stalled.pid')), 5000, 'owned query');
+  const owner = readOwner(env.PG_CONNECTIONS_OWNER, env.PG_CONNECTIONS_RUN);
+  assert.equal(
+    await stopWatcher({ ...owner, ticks: '0' }, { waitMs: 10, killWaitMs: 10 }),
+    'ownership unverified: not stopped; query self-expires within 6 s; watcher within 30 min + 4 s',
+  );
+  assert.ok(alive(watcher.child.pid), 'recycled identity was refused');
+  writeFileSync(env.PG_CONNECTIONS_SAMPLES, 'lost measurement data\n');
+  const reportRun = runBounded(process.execPath, [REPORT], {
+    env,
+    deadlineMs: 15_000,
+    termGraceMs: 100,
+    killWaitMs: 1000,
+  });
+  ownBounded(t, reportRun);
+  const output = await reportRun.done;
+  assert.equal(output.ok, true, output.reason);
+  assert.match(output.stdout, /watcher: stopped/);
+  assert.match(output.stdout, /::warning/);
+  assert.equal(alive(watcher.child.pid, true), false);
+});
+
+for (const job of Object.keys(PARALLEL_JOBS)) {
+  test(`${job}: launcher rejects stale ownership, bounds a stalled start, and SHOW still fails`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-launch-'));
+    stubPsql(dir);
+    // A preload stalls before ownership exists; launcher must kill its own group.
+    const preload = join(dir, 'stall.mjs');
+    const pidfile = join(dir, 'launch.pid');
+    writeFileSync(
+      preload,
+      `import { writeFileSync } from 'node:fs';
+      import { captureProcess } from '${join(ROOT, 'scripts/ci-pg-connections-lib.mjs')}';
+      if (process.argv[1].endsWith('ci-pg-connections-watch.mjs')) {
+        writeFileSync(${JSON.stringify(pidfile)}, JSON.stringify(captureProcess(process.pid)));
+        await new Promise(resolve => setTimeout(resolve, 6000));
+      }`,
+    );
+    t.after(async () => {
+      if (existsSync(pidfile)) await cleanGroup(JSON.parse(readFileSync(pidfile, 'utf8')));
+    });
+    // It carries a plausible but stale run; it must be rotated before launch.
+    writeOwner(join(dir, 'pg-connections-fixture-1.owner.json'), {
+      pid: 424242,
+      pgid: 424242,
+      ticks: '1',
+      run: 'stale',
+    });
+    const started = Date.now();
+    const launch = runStep(t, job, 'Watch PostgreSQL connections', dir, {
+      NODE_OPTIONS: `--import=${preload}`,
+    });
+    assert.equal(launch.status, 0, launch.stderr);
+    assert.ok(Date.now() - started < 9000);
+    assert.match(launch.stdout, /::warning.*watcher did not start/);
+    assert.equal(stepOwner(dir), null);
+    assert.equal(alive(JSON.parse(readFileSync(pidfile, 'utf8')).pid, true), false);
+    const output = runStep(t, job, 'PostgreSQL connection peak', dir);
+    assert.equal(output.status, 0);
+    assert.match(output.stdout, /watcher did not start/);
+    assert.equal(existsSync(join(dir, 'queries')), false, 'no query can start after report');
+    assert.equal(
+      runStep(t, job, 'PostgreSQL connection ceiling', dir).status,
+      1,
+      'SHOW mismatch fails',
+    );
+    assert.equal(
+      runStep(t, job, 'suite', dir, {}, 'exit 7').status,
+      7,
+      'suite failure stays a failure',
+    );
+  });
+}
+
+for (const job of Object.keys(PARALLEL_JOBS)) {
+  test(`${job}: immediate append failure survives the launcher handshake, even if status rename fails`, async (t) => {
+    for (const fault of ['start', 'status', 'owner']) {
+      const dir = mkdtempSync(join(tmpdir(), 'ci-pg-status-'));
+      stubPsql(dir);
+      const launch = runStep(
+        t,
+        job,
+        'Watch PostgreSQL connections',
+        dir,
+        filesystemFault(dir, fault),
+      );
+      assert.equal(launch.status, 0, launch.stderr);
+      const output = runStep(t, job, 'PostgreSQL connection peak', dir);
+      assert.equal(output.status, 0);
+      assert.match(output.stdout, /::warning/);
+      assert.match(
+        output.stdout,
+        fault === 'owner' ? /watcher did not start/ : /append failed \(start:ENOSPC\)/,
+      );
+      assert.equal(existsSync(join(dir, 'queries')), false);
+      assert.doesNotMatch(
+        output.stdout + output.stderr,
+        /private-path|credential|payload|telemetry complete/,
+      );
+    }
+  });
+}
+
+// Delayed signals must re-read identity; this models reuse without kernel PID recycling.
+test('identity replaced during the stop wait never receives a signal', () => {
+  const probe = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const realRead = fs.readFileSync;
+    const realKill = process.kill;
+    let ticks = '101';
+    let state = 'S';
+    let pgid = '424242';
+    let ownGroup = false;
+    const signals = [];
+    let identities = 0;
+    fs.readFileSync = (file, ...args) => {
+      if (file === '/proc/424242/stat') {
+        identities++;
+        const fields = Array(20).fill('0');
+        fields[0] = state; fields[2] = pgid; fields[19] = ticks;
+        return '424242 (fixture) ' + fields.join(' ');
+      }
+      if (file === '/proc/424242/cmdline') return 'node\\0ci-pg-connections-watch.mjs\\0';
+      if (ownGroup && file === '/proc/' + process.pid + '/stat') {
+        const stat = realRead(file, ...args);
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        fields[2] = '424242';
+        return stat.slice(0, stat.lastIndexOf(')') + 2) + fields.join(' ');
+      }
+      return realRead(file, ...args);
+    };
+    process.kill = (pid, signal) => {
+      if (Math.abs(pid) !== 424242) return realKill(pid, signal);
+      if (signal === 0) return true;
+      signals.push([pid, signal, ticks]);
+      ticks = '202';
+    };
+    syncBuiltinESMExports();
+    const { stopWatcher, checkedSignal } = await import(${JSON.stringify(join(ROOT, 'scripts/ci-pg-connections-lib.mjs'))});
+    const result = await stopWatcher({ pid:424242, pgid:424242, ticks:'101' }, { waitMs:50, killWaitMs:50 });
+    ticks = '101'; state = 'Z';
+    const zombie = checkedSignal({ pid:424242, ticks:'101' }, 'SIGKILL', { group:true });
+    state = 'S'; pgid = '77';
+    const nonLeader = checkedSignal({ pid:424242, ticks:'101' }, 'SIGKILL', { group:true });
+    pgid = '424242'; ownGroup = true;
+    const runnerGroup = checkedSignal({ pid:424242, ticks:'101' }, 'SIGKILL', { group:true });
+    console.log(JSON.stringify({ signals, identities, result, zombie, nonLeader, runnerGroup }));
+  `,
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(probe.status, 0, probe.stderr);
+  const result = JSON.parse(probe.stdout);
+  assert.deepEqual(result.signals, [[424242, 'SIGTERM', '101']]);
+  assert.ok(result.identities >= 2, 'identity checked again after waiting');
+  assert.equal(result.zombie, false);
+  assert.equal(result.nonLeader, false);
+  assert.equal(result.runnerGroup, false);
+  assert.match(result.result, /ownership unverified.*self-expires/);
+  assert.match(probe.stderr, /signal refused/);
+});
+
+test('checked signals refuse stale, dead, unrelated commands and the runner group', async (t) => {
+  const child = spawn('sleep', ['10'], { stdio: 'ignore' });
+  const owner = ownChild(t, child, false);
+  for (const patch of [{ ticks: '0' }, { command: 'unrelated.mjs' }, { pid: process.pid }]) {
+    assert.equal(checkedSignal({ ...owner, ...patch }, 'SIGTERM'), false);
+    assert.ok(alive(child.pid));
+  }
+  assert.equal(checkedSignal(owner, 'SIGKILL', { group: true }), false);
+  assert.ok(alive(child.pid));
+  assert.equal(checkedSignal({ pid: 2147483647, ticks: '1' }, 'SIGKILL'), false);
+});
+
+test('every signal site and fixture finalizer delegates to the checked helper', () => {
+  for (const suffix of ['.test', '-lib', '-start', '-watch', '-report']) {
+    const text = readFileSync(join(ROOT, `scripts/ci-pg-connections${suffix}.mjs`), 'utf8');
+    // Two primitive sites only: the checked helper and the harmless liveness probe.
+    const primitives = text.match(/\b(?:process|child|leader|watcher\.child)\.kill\s*\(/g) ?? [];
+    assert.equal(primitives.length, suffix === '-lib' ? 2 : 0, suffix);
+  }
+  const self = readFileSync(fileURLToPath(import.meta.url), 'utf8').split('// Delayed signals')[0];
+  for (const code of [
+    'if (group) await cleanGroup(owner);',
+    'if (owner) await cleanGroup(owner);',
+    'else await cleanGroup(owner);',
+    "if (existsSync(pidfile)) await cleanGroup(JSON.parse(readFileSync(pidfile, 'utf8')));",
+  ])
+    assert.ok(self.includes(code), code);
+});
+
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL']) {
+  test(`interrupted handshake ${signal}: stop survives refused signals and no query starts after report`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-interrupt-'));
+    stubPsql(dir);
+    const preload = join(dir, 'delay.mjs');
+    const pidfile = join(dir, 'watcher.json');
+    writeFileSync(
+      preload,
+      `
+      import fs from 'node:fs';
+      import { captureProcess } from '${join(ROOT, 'scripts/ci-pg-connections-lib.mjs')}';
+      if (process.argv[1].endsWith('ci-pg-connections-watch.mjs')) {
+        // Refuse TERM so the persistent stop file is required even if launch cleanup cannot signal.
+        process.on('SIGTERM', () => {});
+        fs.writeFileSync(${JSON.stringify(pidfile)}, JSON.stringify(captureProcess(process.pid)));
+        await new Promise(resolve => setTimeout(resolve, 3200));
+      }
+      // Model ownership becoming unreadable at signal-time in the launcher only.
+      if (process.argv[1].endsWith('ci-pg-connections-start.mjs')) {
+        const read = fs.readFileSync;
+        fs.readFileSync = (path, ...rest) => {
+          if (/^\\/proc\\/\\d+\\/stat$/.test(path) && fs.existsSync(${JSON.stringify(pidfile)})) throw new Error();
+          return read(path, ...rest);
+        };
+        const { syncBuiltinESMExports } = await import('node:module');
+        syncBuiltinESMExports();
+      }
+    `,
+    );
+    const env = watcherEnv(dir, { NODE_OPTIONS: `--import=${preload}` });
+    const launcher = spawn(process.execPath, [join(ROOT, 'scripts/ci-pg-connections-start.mjs')], {
+      env,
+      stdio: 'ignore',
+    });
+    const launcherOwner = ownChild(t, launcher, false);
+    const exited = once(launcher, 'exit');
+    t.after(async () => {
+      if (existsSync(pidfile)) await cleanGroup(JSON.parse(readFileSync(pidfile, 'utf8')));
+    });
+    await waitFor(() => existsSync(pidfile), 5000, 'delayed handshake');
+    assert.equal(checkedSignal(launcherOwner, signal), true);
+    const outcome = await Promise.race([exited, delay(4000).then(() => 'late')]);
+    assert.deepEqual(outcome, signal === 'SIGKILL' ? [null, 'SIGKILL'] : [0, null]);
+    const output = spawnSync(process.execPath, [REPORT], {
+      env: { ...env, NODE_OPTIONS: '' },
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    assert.equal(output.status, 0, output.stderr);
+    assert.match(output.stdout, /watcher did not start/);
+    const watcher = JSON.parse(readFileSync(pidfile, 'utf8'));
+    await waitFor(() => !alive(watcher.pid, true), 5000, 'delayed watcher self-exit');
+    assert.equal(existsSync(join(dir, 'queries')), false, 'no query starts after report');
+  });
+}
+
+test('dead leader with a live real query: report refuses signals, query self-expires within 6 seconds', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-orphan-'));
+  const silent = await silentServer();
+  t.after(() => silent.close());
+  const watcher = startWatcher(t, realPsqlEnv(dir, silent.port));
+  await waitFor(() => silent.sockets.size > 0, 5000, 'real query connected');
+  const childPids = readFileSync(
+    `/proc/${watcher.child.pid}/task/${watcher.child.pid}/children`,
+    'utf8',
+  )
+    .trim()
+    .split(/\s+/)
+    .map(Number);
+  assert.equal(childPids.length, 1);
+  const query = captureProcess(childPids[0]);
+  assert.ok(alive(query.pid));
+  const started = Date.now();
+  assert.equal(checkedSignal(watcher.owner, 'SIGKILL'), true);
+  await watcher.exited;
+  assert.ok(alive(query.pid), 'query outlives its leader');
+  const output = spawnSync(process.execPath, [REPORT], {
+    env: realPsqlEnv(dir, silent.port),
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  assert.equal(output.status, 0, output.stderr);
+  assert.match(output.stdout, /ownership unverified.*self-expires within 6 s/);
+  assert.match(output.stdout, /shutdown unconfirmed/);
+  assert.doesNotMatch(output.stdout, /telemetry complete/);
+  await waitFor(
+    () => !alive(query.pid) && silent.sockets.size === 0,
+    6500,
+    'orphan query self-expiry',
+  );
+  assert.ok(Date.now() - started < 6500);
+});
+
+test('watcher absolute lifetime and stop file expire without any external signal', async (t) => {
+  for (const method of ['deadline', 'stop-file', 'already-stopped', 'expired-before-start']) {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-expiry-'));
+    stubPsql(dir);
+    const env = watcherEnv(dir, {
+      PG_CONNECTIONS_DEADLINE: String(
+        Date.now() +
+          (method === 'expired-before-start' ? -1 : method === 'stop-file' ? 10_000 : 350),
+      ),
+    });
+    if (method === 'already-stopped') writeFileSync(`${env.PG_CONNECTIONS_OWNER}.stop`, 'stop');
+    const watcher = startWatcher(t, env);
+    if (method === 'stop-file') {
+      await waitFor(() => records(dir).samples.length >= 1, 3000, 'sample before stop');
+      writeFileSync(`${env.PG_CONNECTIONS_OWNER}.stop`, 'stop');
+    }
+    assert.deepEqual(await Promise.race([watcher.exited, delay(2000).then(() => 'late')]), [
+      0,
+      null,
+    ]);
+    assert.equal(alive(watcher.child.pid, true), false);
+    if (['already-stopped', 'expired-before-start'].includes(method))
+      assert.equal(existsSync(join(dir, 'queries')), false);
+  }
+});
+
+test('every limits and sample query carries independent expiry despite inherited disabling options', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-budgets-'));
+  stubPsql(dir);
+  const bin = join(dir, 'psql');
+  writeFileSync(
+    bin,
+    readFileSync(bin, 'utf8').replace(
+      'case "$*" in',
+      `printf '%s|%s\\n' "$PGCONNECT_TIMEOUT" "$PGOPTIONS" >> '${dir}/budgets'\ncase "$*" in`,
+    ),
+  );
+  const env = watcherEnv(dir, { PGCONNECT_TIMEOUT: '0', PGOPTIONS: '-c statement_timeout=0' });
+  const watcher = startWatcher(t, env);
+  await waitFor(() => records(dir).samples.length >= 2, 4000, 'limits and two samples');
+  await termAndCheck(watcher, 5000);
+  const budgets = readFileSync(join(dir, 'budgets'), 'utf8').trim().split('\n');
+  assert.ok(budgets.length >= 3);
+  assert.ok(
+    budgets.every((row) => row === '3|-c statement_timeout=3000'),
+    budgets.join('\n'),
+  );
+});
+
+test('default watcher lifetime caps an inherited future deadline at 30 minutes', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-cap-'));
+  stubPsql(dir);
+  const preload = join(dir, 'timer.mjs');
+  writeFileSync(
+    preload,
+    `
+    import { writeFileSync } from 'node:fs';
+    const timer = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, ms, ...args) => {
+      if (ms > 60_000) {
+        writeFileSync('${dir}/lifetime', String(ms));
+        return timer(callback, 350, ...args);
+      }
+      return timer(callback, ms, ...args);
+    };
+  `,
+  );
+  const watcher = startWatcher(
+    t,
+    watcherEnv(dir, {
+      PG_CONNECTIONS_DEADLINE: String(Number.MAX_SAFE_INTEGER),
+      NODE_OPTIONS: `--import=${preload}`,
+    }),
+  );
+  assert.deepEqual(await Promise.race([watcher.exited, delay(2000).then(() => 'late')]), [0, null]);
+  const lifetime = Number(readFileSync(join(dir, 'lifetime'), 'utf8'));
+  assert.ok(lifetime > 1_799_000 && lifetime <= 1_800_000, String(lifetime));
+  assert.equal(alive(watcher.child.pid, true), false);
+});

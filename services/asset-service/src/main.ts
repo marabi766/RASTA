@@ -32,7 +32,8 @@ initTelemetry({
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
+import { buildAssetOpenApiDocument } from './openapi/document';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import {
@@ -89,9 +90,10 @@ async function bootstrap(): Promise<void> {
         'x-correlation-id',
         'x-organization-id',
         'idempotency-key',
+        'idempotency-replay-deadline',
         'if-match',
       ],
-      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag'],
+      exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag', 'retry-after'],
       maxAge: 600,
     });
   }
@@ -100,19 +102,7 @@ async function bootstrap(): Promise<void> {
   app.useBodyParser('json', { limit: '256kb' });
 
   if (allowsDeveloperTooling(env)) {
-    const document = SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — Asset Service')
-        .setDescription(
-          'The asset is the centre of the platform, not the user. Every machine ' +
-            'carries an electronic dossier assembled from the events other services ' +
-            'publish about it — usage, maintenance, insurance, cost and location.',
-        )
-        .setVersion(env.SERVICE_VERSION)
-        .addBearerAuth()
-        .build(),
-    );
+    const document = buildAssetOpenApiDocument(app, env.SERVICE_VERSION);
     SwaggerModule.setup('docs', app, document);
   }
 

@@ -25,6 +25,8 @@ import { mintFlash } from '@/server/flash';
 import { isBoundSubmissionId, mintSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import type { DocumentFormState } from './document-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path the attach-document command on `/assets/[id]` takes.
@@ -194,7 +196,13 @@ export async function runAttachDocument(
           resume: null,
         };
       case 'UNCONFIRMED':
-        return { kind: 'UNCONFIRMED', correlationId: outcome.correlationId, resume: null };
+        return {
+          kind: 'UNCONFIRMED',
+          correlationId: outcome.correlationId,
+          resume: null,
+          submissionId,
+          values,
+        };
     }
   }
 
@@ -222,7 +230,10 @@ export async function runAttachDocument(
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the dossier again, so it lists what was attached.
     redirect(
-      `/assets/${encodeURIComponent(baseline.assetId)}?${FLASH_PARAM}=${mintFlash(session, baseline.assetId, 'documentAttached')}`,
+      withContext(
+        pageContext(session),
+        `/assets/${encodeURIComponent(baseline.assetId)}?${FLASH_PARAM}=${mintFlash(session, baseline.assetId, 'documentAttached')}`,
+      ),
     );
   }
 
@@ -253,6 +264,8 @@ export async function runAttachDocument(
         status: result.status,
         correlationId: result.correlationId,
         resume,
+        submissionId,
+        values,
       };
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
@@ -260,6 +273,12 @@ export async function runAttachDocument(
       // portal does not retry for the person; pressing the button again carries
       // the same submission id and the same document, so if the first landed the
       // second is its replay and attaches nothing more.
-      return { kind: 'UNCONFIRMED', correlationId: result.correlationId, resume };
+      return {
+        kind: 'UNCONFIRMED',
+        correlationId: result.correlationId,
+        resume,
+        submissionId,
+        values,
+      };
   }
 }

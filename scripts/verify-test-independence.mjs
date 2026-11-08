@@ -41,7 +41,7 @@
 // -----------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
@@ -62,7 +62,8 @@ if (!packageDir || !testPathPattern) {
 
 const cwd = path.resolve(process.cwd(), packageDir);
 if (!existsSync(cwd)) {
-  console.error(`no such package directory: ${cwd}`);
+  // Not repeated (#385 r6): only a value that matched a closed list is echoed.
+  console.error('no such package directory (the first argument); it is not repeated');
   process.exit(2);
 }
 
@@ -93,7 +94,7 @@ function toPattern(fullName) {
  * this script exists to catch, so it is worth not having.
  */
 const jestPackageJson = createRequire(path.join(cwd, 'noop.js')).resolve('jest/package.json');
-const jestBin = createRequire(import.meta.url)(jestPackageJson).bin;
+const jestBin = JSON.parse(readFileSync(jestPackageJson, 'utf8')).bin;
 const jestEntry = path.join(
   path.dirname(jestPackageJson),
   typeof jestBin === 'string' ? jestBin : jestBin.jest,
@@ -143,7 +144,7 @@ if (!wholeReport) {
 }
 
 if (wholeReport.numTotalTests === 0) {
-  console.error(`no tests matched ${testPathPattern} in project "${project}"`);
+  console.error('no tests matched the testPathPattern in the --project; neither is repeated');
   process.exit(1);
 }
 

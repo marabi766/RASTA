@@ -8,6 +8,7 @@ import {
   NoAccessState,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import { formatJalaliDateLong, formatJalaliDateTime, toPersianDigits } from '@/lib/format';
 import {
@@ -110,27 +111,29 @@ function Lines({
   productNames: ReadonlyMap<string, string> | null;
 }) {
   return (
-    <table className="w-full text-sm">
-      <caption className="sr-only">ردیف‌های درخواست بازگشت</caption>
-      <thead>
-        <tr className="text-content-muted">
-          <th scope="col" className="py-2 text-start font-normal">
-            کالا یا خدمت
-          </th>
-          <th scope="col" className="py-2 text-start font-normal">
-            تعداد بازگشتی
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {request.lines.map((line) => (
-          <tr key={line.orderLineId} className="border-t border-border">
-            <td className="py-2">{nameOf(productNames, line.orderLineId, line.productId)}</td>
-            <td className="py-2">{toPersianDigits(String(line.quantity))}</td>
+    <TableScroll label="ردیف‌های درخواست بازگشت">
+      <table className="w-full text-sm">
+        <caption className="sr-only">ردیف‌های درخواست بازگشت</caption>
+        <thead>
+          <tr className="text-content-muted">
+            <th scope="col" className="py-2 text-start font-normal">
+              کالا یا خدمت
+            </th>
+            <th scope="col" className="py-2 text-start font-normal">
+              تعداد بازگشتی
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {request.lines.map((line) => (
+            <tr key={line.orderLineId} className="border-t border-border">
+              <td className="py-2">{nameOf(productNames, line.orderLineId, line.productId)}</td>
+              <td className="py-2">{toPersianDigits(String(line.quantity))}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 
@@ -174,35 +177,37 @@ function Shipment({
           ) : null}
         </p>
       ) : null}
-      <table className="w-full text-sm">
-        <caption className="sr-only">ردیف‌های محمولهٔ بازگشت</caption>
-        <thead>
-          <tr className="text-content-muted">
-            <th scope="col" className="py-2 text-start font-normal">
-              کالا یا خدمت
-            </th>
-            <th scope="col" className="py-2 text-start font-normal">
-              فرستاده‌شده
-            </th>
-            <th scope="col" className="py-2 text-start font-normal">
-              دریافت‌شده
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {shipment.lines.map((line) => (
-            <tr key={line.orderLineId} className="border-t border-border">
-              <td className="py-2">{nameOf(productNames, line.orderLineId, line.productId)}</td>
-              <td className="py-2">{toPersianDigits(String(line.expectedQuantity))}</td>
-              <td className="py-2">
-                {line.receivedQuantity === null
-                  ? 'هنوز دریافت نشده'
-                  : toPersianDigits(String(line.receivedQuantity))}
-              </td>
+      <TableScroll label="ردیف‌های محمولهٔ بازگشت">
+        <table className="w-full text-sm">
+          <caption className="sr-only">ردیف‌های محمولهٔ بازگشت</caption>
+          <thead>
+            <tr className="text-content-muted">
+              <th scope="col" className="py-2 text-start font-normal">
+                کالا یا خدمت
+              </th>
+              <th scope="col" className="py-2 text-start font-normal">
+                فرستاده‌شده
+              </th>
+              <th scope="col" className="py-2 text-start font-normal">
+                دریافت‌شده
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {shipment.lines.map((line) => (
+              <tr key={line.orderLineId} className="border-t border-border">
+                <td className="py-2">{nameOf(productNames, line.orderLineId, line.productId)}</td>
+                <td className="py-2">{toPersianDigits(String(line.expectedQuantity))}</td>
+                <td className="py-2">
+                  {line.receivedQuantity === null
+                    ? 'هنوز دریافت نشده'
+                    : toPersianDigits(String(line.receivedQuantity))}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
       {shipment.inspectionNote ? (
         <p className="text-sm">یادداشت بازرسی: {shipment.inspectionNote}</p>
       ) : null}

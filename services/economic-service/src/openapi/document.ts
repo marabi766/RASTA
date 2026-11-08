@@ -1,7 +1,16 @@
+import type { INestApplication } from '@nestjs/common';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import type { z } from 'zod';
+import {
+  applyOperationSecurity,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  routeAccessByOperation,
+  toJsonSchema as sharedToJsonSchema,
+  type JsonSchema,
+  type ServiceRouteUsers,
+} from '@rasta/nest-common';
 import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
   listEntriesQuerySchema,
@@ -58,6 +67,30 @@ import {
  * gets a 400, and the reason it must not be optional — a retried POST charging
  * twice — is the whole point of docs/06 § 6.8.
  */
+
+/**
+ * The shared converter, minus array bounds. This service's own copy of the
+ * converter never published `minItems`/`maxItems`, and replacing that copy with
+ * the shared one keeps every generated document byte-identical. Publishing the
+ * three bounds it hides (recognition-rule `levels` ≤ 50 and `badges` ≤ 100,
+ * participation-rule `contributions` 1–2) is a contract change of its own:
+ * delete this wrapper then.
+ */
+function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
+  return withoutArrayBounds(sharedToJsonSchema(schema)) as JsonSchema;
+}
+
+function withoutArrayBounds(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(withoutArrayBounds);
+  if (typeof node !== 'object' || node === null) return node;
+  const isArray = (node as { type?: unknown }).type === 'array';
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (isArray && (key === 'minItems' || key === 'maxItems')) continue;
+    out[key] = withoutArrayBounds(value);
+  }
+  return out;
+}
 
 /** Request bodies, keyed by `METHOD /path` as Nest emits them. */
 const REQUEST_BODIES: Record<string, JsonSchema> = {
@@ -135,6 +168,9 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/rewards/participation-rules',
   // The same for levels and badges: one version in force for everyone.
   'POST /v1/rewards/recognition-rules',
+  // A retried monetised rule was a second rule paying for the same fact
+  // (economic audit F1). Required by the service, as the two above.
+  'POST /v1/rewards/rules',
 ]);
 
 /**
@@ -228,7 +264,9 @@ const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
       'settlement fails closed without a commission rule (docs/24 Q-29; on outside development ' +
       'and test, `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`), so a new obligation must name ' +
       '`businessLine`. Only marketplace-service recording its own `ORDER` may leave it out ' +
-      '(docs/24 Q-130)',
+      '(docs/24 Q-130) — or HOLD_DEADLINE_PASSED: the `holdNotAfter` the caller fixed has passed ' +
+      "by this service's clock, and this key answers that from now on — or HOLD_DEADLINE_REQUIRED: " +
+      'an `ORDER` sent without `holdNotAfter`; the key stays free',
   },
   'POST /v1/settlements': {
     422:
@@ -242,7 +280,8 @@ const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
 };
 
 /**
- * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4),
+ * The same statuses on the routes that refuse every user (`users-refused` in
+ * `SERVICE_ROUTES`, ADR-061 § 4),
  * which answer one named service and no user at all.
  */
 const INTERNAL_STATUS_TEXT: Record<number, string> = {
@@ -251,22 +290,35 @@ const INTERNAL_STATUS_TEXT: Record<number, string> = {
 };
 
 /**
- * The internal routes' credential: a service's internal token in
- * `X-Internal-Token` and nothing else. `AuthGuard` judges a request that also
- * carries `Authorization` on that bearer token, as a user — so the internal
- * routes cannot be described by the bearer scheme.
+ * Every `@AllowService` route (FU-075) and whether a user token is still
+ * admitted there. Which token a route takes is read from the guard's own
+ * metadata (`applyOperationSecurity`, @rasta/nest-common); this table states
+ * only what no decorator does — `users-refused` is enforced in the service
+ * (`statement-obligation.ts`) — and must match the decorators exactly.
  */
-export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
+  'GET /v1/wallets/me': 'users-accepted',
+  'GET /v1/transactions': 'users-accepted',
+  'GET /v1/transactions/capabilities': 'users-accepted',
+  'GET /v1/transactions/{id}': 'users-accepted',
+  'POST /v1/transactions': 'users-accepted',
+  'POST /v1/transactions/{id}/authorise-settlement': 'users-accepted',
+  'POST /v1/transactions/{id}/dispute': 'users-accepted',
+  'POST /v1/transactions/{id}/resolve-dispute': 'users-accepted',
+  'POST /v1/transactions/{id}/refund': 'users-accepted',
+  'POST /v1/transactions/{id}/cancel': 'users-accepted',
+  'POST /v1/settlements': 'users-accepted',
+  'GET /v1/settlements': 'users-accepted',
+  'GET /v1/internal/obligations/by-source/STATEMENT/{statementId}': 'users-refused',
+};
 
-const INTERNAL_TOKEN_SECURITY_SCHEME = {
-  type: 'apiKey',
-  in: 'header',
-  name: 'X-Internal-Token',
-  description:
-    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
-} as const;
-
-const isInternalPath = (path: string): boolean => path.startsWith('/v1/internal/');
+/** The published `security` of every operation, from the guard's metadata on `app`. */
+export function publishOperationSecurity(
+  document: OpenAPIObject,
+  app: INestApplication,
+): OpenAPIObject {
+  return applyOperationSecurity(document, routeAccessByOperation(app), SERVICE_ROUTES);
+}
 
 /**
  * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
@@ -287,6 +339,27 @@ const RETRY_AFTER_HEADER = {
  * by `api-wallet.int-spec.ts` with `schemaMismatches`, both ways.
  */
 const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
+  TransactionCapabilities: {
+    type: 'object',
+    required: ['heldProven', 'orderHoldDeadlineRequired'],
+    properties: {
+      heldProven: {
+        type: 'boolean',
+        description:
+          'Every transaction view says whether HELD is proven (`heldProven`). The order saga ' +
+          'starts no order until this is true (ADR-040). A release before it answers this ' +
+          'path with 404.',
+      },
+      orderHoldDeadlineRequired: {
+        type: 'boolean',
+        description:
+          'Whether an `ORDER` hold sent without `holdNotAfter` is refused (D-150), as this ' +
+          'release enforces it now. The order saga takes its order row as proof that no ' +
+          'hold can land only while this is true (FU-233). A release before the rule omits ' +
+          'it, which the saga reads as false next to `heldProven: true`.',
+      },
+    },
+  },
   PaymentDisclosure: {
     type: 'object',
     required: ['simulated'],
@@ -303,6 +376,7 @@ const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
 
 const OTHER_RESPONSES: Record<string, string> = {
   'GET /v1/wallets/provider/disclosure': 'PaymentDisclosure',
+  'GET /v1/transactions/capabilities': 'TransactionCapabilities',
 };
 
 const RESPONSES: Record<string, string> = { ...TRANSACTION_RESPONSES, ...OTHER_RESPONSES };
@@ -320,19 +394,15 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   })) {
     document.components.schemas[name] = schema as never;
   }
-  document.components.securitySchemes ??= {};
-  document.components.securitySchemes[INTERNAL_TOKEN_SCHEME] = INTERNAL_TOKEN_SECURITY_SCHEME;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
-      const internal = isInternalPath(path);
-
-      // Only the internal token reaches an internal route; a bearer token there
-      // is a user, and refused.
-      if (internal) operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
+      // A route only a service may call has its own 403/404 text; its security
+      // is `publishOperationSecurity`'s, from the guard's metadata.
+      const internal = SERVICE_ROUTES[key] === 'users-refused';
 
       const body = REQUEST_BODIES[key];
       if (body) {
@@ -442,7 +512,6 @@ function toQueryParameters(schema: JsonSchema): Record<string, unknown>[] {
 }
 
 interface MutableOperation {
-  security?: Record<string, string[]>[];
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;

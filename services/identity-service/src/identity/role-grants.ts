@@ -179,8 +179,9 @@ export function grantableRoles(
 export function assertMayGrantRoles(
   requested: readonly PlatformRole[],
   policy: RoleGrantPolicy,
+  actorRoles?: readonly string[],
 ): void {
-  assertWithinLadder(requested, policy, 'Only a signed-in user may grant roles');
+  assertWithinLadder(requested, policy, 'Only a signed-in user may grant roles', actorRoles);
 }
 
 /**
@@ -205,11 +206,13 @@ export function assertMayGrantRoles(
 export function assertMayManageMembershipRoles(
   current: readonly string[],
   policy: RoleGrantPolicy,
+  actorRoles?: readonly string[],
 ): void {
   assertWithinLadder(
     current as readonly PlatformRole[],
     policy,
     'Only a signed-in user may change a membership',
+    actorRoles,
   );
 }
 
@@ -237,11 +240,19 @@ export function assertRolesMayBeRequested(requested: readonly PlatformRole[]): v
  * audit reader — can tell a refusal from a validation failure. The refused
  * names go to `internalContext`, which the exception filter keeps out of the
  * response body (S-09).
+ *
+ * `actorRoles` is whose ladder is measured: the verified token's roles when
+ * absent — the early refusal before any lock — and the caller's **live**
+ * roles, read under the lock from the database (`live-authority.ts`), when
+ * the decision is the one that commits. A token outlives a demotion by up to
+ * 905 s (ADR-060 § 7); measured on the token alone, a demoted administrator
+ * could grant their old role back inside that window and keep it for good.
  */
 function assertWithinLadder(
   roles: readonly PlatformRole[],
   policy: RoleGrantPolicy,
   serviceTokenMessage: string,
+  actorRoles?: readonly string[],
 ): void {
   const context = getContext();
 
@@ -249,9 +260,10 @@ function assertWithinLadder(
     throw RastaError.forbidden(serviceTokenMessage);
   }
 
-  const allowed = grantableRoles(context.roles, policy);
+  const measured = actorRoles ?? context.roles;
+  const allowed = grantableRoles(measured, policy);
   const refused = roles.filter((role) => !allowed.includes(role));
   if (refused.length === 0) return;
 
-  throw RastaError.insufficientRole(refused, context.roles);
+  throw RastaError.insufficientRole(refused, measured);
 }

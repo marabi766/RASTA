@@ -1,8 +1,11 @@
 import { z } from 'zod';
+import { parsableUrl, legacyParse } from '@rasta/contracts';
 
 import {
   MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
   MAX_REPLAY_MARGIN_SECONDS,
+  MIN_REPLAY_MARGIN_MS,
+  procurementDemandWindowFits,
   projectCreateWindowFits,
   replayMarginCoversClockBudget,
 } from './unresolved-request-policy';
@@ -38,20 +41,41 @@ const MIN_SECRET_LENGTH = 32;
  * fetched, and the failure would surface as a connection error at runtime
  * rather than as a refusal at boot — which is the whole point of validating
  * configuration.
+ *
+ * Nor a username or password in it: the portal calls these with `fetch`, which
+ * refuses such a URL on every call with a TypeError that repeats it whole —
+ * the password in it — into the server log (#385 r5).
  */
 const httpUrl = z
   .string()
-  .url()
+  .check(parsableUrl())
   .refine(
     (value) => value.startsWith('http://') || value.startsWith('https://'),
     'Expected an http(s) URL',
-  );
+  )
+  .refine((value) => {
+    // Not URL.parse: jsdom's URL (the tests' environment) has no static parse.
+    try {
+      const url = new URL(value);
+      return url.username === '' && url.password === '';
+    } catch {
+      // Not a URL: refused by `.url()` above. The error is dropped, not kept.
+      return true;
+    }
+  }, 'Expected a URL without a username or password');
 
 /** The oversight role has aggregate access only; no setting here may grant it a screen. */
 const OVERSIGHT_ROLE = 'AUDITOR';
 
 /** The platform administrator, whom inventory-service refuses too (Q-103). */
 const PLATFORM_ROLE = 'SYSTEM_ADMIN';
+
+/**
+ * The smallest `WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS`. procurement-service refuses a
+ * passed deadline on its own clock (FU-156); this margin is kept as a second guard,
+ * wide enough to absorb a wait inside the service on its own.
+ */
+const PROCUREMENT_MIN_REPLAY_MARGIN_SECONDS = 5 * 60;
 
 /**
  * A comma-separated role list, trimmed, empty elements dropped, never naming the
@@ -61,7 +85,7 @@ function roleList(name: string, fallback: string, alsoRefused: readonly string[]
   const refused = [OVERSIGHT_ROLE, ...alsoRefused];
   return z
     .string()
-    .default(fallback)
+    .prefault(fallback)
     .transform((raw) =>
       raw
         .split(',')
@@ -80,7 +104,7 @@ const REASON_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
 function reasonCodeList(name: string, fallback: string) {
   return z
     .string()
-    .default(fallback)
+    .prefault(fallback)
     .transform((raw) =>
       raw
         .split(',')
@@ -137,7 +161,7 @@ const schema = z.object({
     .int()
     .min(300)
     .max(30 * 24 * 60 * 60)
-    .default(12 * 60 * 60),
+    .prefault(12 * 60 * 60),
 
   /**
    * Whether the session cookie carries `Secure`.
@@ -157,7 +181,7 @@ const schema = z.object({
    */
   WEB_REDIS_URL: z
     .string()
-    .url()
+    .check(parsableUrl())
     .refine(
       (value) => value.startsWith('redis://') || value.startsWith('rediss://'),
       'Expected a redis:// or rediss:// URL',
@@ -215,7 +239,7 @@ const schema = z.object({
    */
   WEB_TENDER_COI_RULES: z
     .string()
-    .default('AWARDER_NOT_EVALUATOR')
+    .prefault('AWARDER_NOT_EVALUATOR')
     .transform((raw) =>
       raw
         .split(',')
@@ -268,7 +292,7 @@ const schema = z.object({
    * (same bounds, 1..168) and must be changed together with it, or set lower.
    * The default is that setting's floor, as for economic-service's below.
    */
-  WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -280,7 +304,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * Who, on the employer's side, is drawn the forms that cancel a draft,
@@ -325,7 +349,7 @@ const schema = z.object({
    */
   WEB_CONTRACT_CANCEL_AFTER_SIGNATURE: z
     .enum(['true', 'false'])
-    .default('false')
+    .prefault('false')
     .transform((value) => value === 'true'),
 
   /**
@@ -340,7 +364,7 @@ const schema = z.object({
    * than the service's only offers the re-send for less time than it could
    * be; a higher one would offer a re-send the service may execute as new.
    */
-  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -354,7 +378,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * How long contract-service keeps an idempotency record, in hours — the
@@ -377,7 +401,7 @@ const schema = z.object({
    * honest client never meets the refusal. With 1 h that means a margin of at
    * least 330 s.
    */
-  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -389,7 +413,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * How long construction-service keeps an idempotency record, in hours — the
@@ -419,7 +443,7 @@ const schema = z.object({
     .int()
     .min(1)
     .max(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS)
-    .default(1),
+    .prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a bid
@@ -433,11 +457,84 @@ const schema = z.object({
     .int()
     .min(60)
     .max(MAX_REPLAY_MARGIN_SECONDS)
-    .default(10 * 60),
+    .prefault(10 * 60),
+
+  /**
+   * How long inventory-service keeps an idempotency record, in hours — the
+   * window in which an inventory command re-sent under its original key is
+   * answered with its stored response rather than run again
+   * (`server/inventory-replay.ts`). A receipt or an adjustment run again under
+   * a fresh record would move stock **twice**, so past this window the portal
+   * never re-sends one.
+   *
+   * This **mirrors** inventory-service's `INVENTORY_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168; the service's default is 24) and must be changed
+   * together with it, or set lower. The default is that setting's floor, as for
+   * the services above.
+   */
+  WEB_INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending an
+   * inventory command, in seconds: room for the request to reach
+   * inventory-service. Same bounds as the dispute margin.
+   */
+  WEB_INVENTORY_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .prefault(10 * 60),
+
+  /**
+   * Which roles are offered the demand screens and the demand form
+   * (`/procurement/demands`, `server/demand-commands.ts`).
+   *
+   * This **mirrors** procurement-service's `PROCUREMENT_DEMAND_ROLES` (default
+   * `PROCUREMENT_USER,ORGANIZATION_ADMIN`) and must be changed together with it.
+   * It decides only what is drawn; the service decides on every request. The
+   * service refuses `AUDITOR` and `SYSTEM_ADMIN` whatever its configuration says
+   * and refuses to start naming either, so the portal does the same.
+   */
+  WEB_PROCUREMENT_DEMAND_ROLES: roleList(
+    'WEB_PROCUREMENT_DEMAND_ROLES',
+    'PROCUREMENT_USER,ORGANIZATION_ADMIN',
+    [PLATFORM_ROLE],
+  ),
+
+  /**
+   * How long, in hours, procurement-service answers a demand command re-sent
+   * under its original key with its stored response instead of running it again
+   * (`server/demand-replay.ts`). A demand submitted again under a fresh record is
+   * a second demand in the window, so past this window the portal never re-sends.
+   *
+   * This **mirrors** procurement-service's `PROCUREMENT_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168; the service's default is 24) and must be changed
+   * together with it, or set lower. The default is that setting's floor.
+   */
+  WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a demand
+   * command, in seconds. Every send carries its deadline as
+   * `Idempotency-Replay-Deadline`, which procurement-service refuses on its own
+   * clock once passed (FU-156): that is the guarantee, and this margin a second
+   * guard — two clock skews and one request (`MIN_REPLAY_MARGIN_MS`) plus a wait
+   * inside the service, so the floor stays five minutes. The window (retention
+   * less this margin, plus the portal's 30 s allowance) may not exceed
+   * `PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s), or the
+   * portal refuses to start (`loadWebServerEnv`).
+   */
+  WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(Math.max(MIN_REPLAY_MARGIN_MS / 1000, PROCUREMENT_MIN_REPLAY_MARGIN_SECONDS))
+    .max(MAX_REPLAY_MARGIN_SECONDS)
+    .prefault(10 * 60),
 
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
-    .default('true')
+    .prefault('true')
     .transform((value) => value === 'true'),
 });
 
@@ -455,8 +552,8 @@ export function loadWebServerEnv(
   // else. `NODE_ENV` is read for one rule only: `WEB_REDIS_URL` in production.
   source: Record<string, string | undefined> = process.env,
 ): WebServerEnv {
-  const parsed = schema.safeParse(source);
-  const missing = parsed.success ? [] : parsed.error.issues.map((issue) => issue.path.join('.'));
+  const parsed = legacyParse(schema, source);
+  const missing = parsed.success ? [] : parsed.refusal.issues.map((issue) => issue.path.join('.'));
 
   // The one rule that depends on where the portal runs. Production is two
   // replicas, and two replicas without shared coordination race for every
@@ -484,6 +581,16 @@ export function loadWebServerEnv(
     )
   ) {
     missing.push('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+  }
+  // The demand window against procurement-service's fence, by the same shared-constant rule (FU-156).
+  if (
+    parsed.success &&
+    !procurementDemandWindowFits(
+      parsed.data.WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS,
+      parsed.data.WEB_PROCUREMENT_REPLAY_MARGIN_SECONDS,
+    )
+  ) {
+    missing.push('WEB_PROCUREMENT_IDEMPOTENCY_TTL_HOURS');
   }
 
   if (!parsed.success || missing.length > 0) {

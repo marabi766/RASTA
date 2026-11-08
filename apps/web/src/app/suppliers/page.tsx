@@ -6,16 +6,18 @@ import { currentSession } from '@/server/current-session';
 import { fetchSuppliers, type SupplierListQuery } from '@/server/suppliers';
 import { mintSubmissionId } from '@/server/submission';
 import { canRegisterSupplier, supplierActor } from '@/server/supplier-commands';
-import { RELEASE_PARAM, supplierWriteScope } from '@/server/supplier-unresolved';
+import { supplierWriteScope } from '@/server/supplier-unresolved';
 import { readUnresolved } from '@/server/unresolved-request';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { RegisterSupplierForm } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 import { SupplierPendingNotices } from './UnresolvedSupplierNotice';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
- * The `/suppliers` route — تامین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
+ * The `/suppliers` route — تأمین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
  * the form that registers this organization's own profile.
  *
  * **No access decision for the directory here**, as on every portal route:
@@ -41,7 +43,7 @@ export default async function SuppliersPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/suppliers');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const status = one(params.status);
   const capability = one(params.capability);
   // A value the service would not accept is dropped, not forwarded to earn a
@@ -57,12 +59,13 @@ export default async function SuppliersPage({
     // A registration whose answer was lost: it keeps its warning until reconciled.
     readUnresolved(session, supplierWriteScope(null)),
   ]);
-  const actor = supplierActor(session.accessToken);
+  const actor = supplierActor(session);
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -74,13 +77,13 @@ export default async function SuppliersPage({
       sidebar={<PortalSidebar session={session} currentHref="/suppliers" />}
     >
       <PageHeader
-        title="تامین‌کنندگان"
-        description="تامین‌کنندگان کالا، تعمیرگاه‌ها و پیمانکارانی که این سازمان می‌تواند ببیند."
+        title="تأمین‌کنندگان"
+        description="تأمین‌کنندگان کالا، تعمیرگاه‌ها و پیمانکارانی که این سازمان می‌تواند ببیند."
       />
       <div className="mt-4">
         <SuppliersScreen
           result={result}
-          query={query}
+          query={{ ...query, context: pageContext(session) }}
           ownOrganizationId={actor?.organizationId ?? null}
           register={
             actor && canRegisterSupplier(actor) ? (
@@ -89,7 +92,7 @@ export default async function SuppliersPage({
                   session={session}
                   pending={unresolved}
                   supplierId={null}
-                  release={one(params[RELEASE_PARAM])}
+                  query={params}
                 />
                 <RegisterSupplierForm
                   key={unresolved.kind === 'NONE' ? 'open' : 'held'}

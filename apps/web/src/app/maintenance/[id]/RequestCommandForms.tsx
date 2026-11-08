@@ -14,6 +14,7 @@ import {
   type CancelRequestField,
   type CancelRequestFormValues,
 } from '@/lib/maintenance-fields';
+import { ORGANIZATION_ID_HINT } from '@/lib/id-hints';
 
 import { submitApproveRequest, submitAssignWorkshop, submitCancelRequest } from './actions';
 import { CommandBanner, Hidden, submissionOf, type Identity } from './command-form-parts';
@@ -58,7 +59,7 @@ export function AssignWorkshopForm(identity: Identity) {
         label="شناسهٔ سازمان تعمیرگاه"
         required
         error={errors.workshopOrganizationId}
-        hint="مانند ORG_01J…"
+        hint={ORGANIZATION_ID_HINT}
       >
         {(control) => (
           <input

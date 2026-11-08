@@ -34,7 +34,6 @@ import {
   type AssetLifecycleCommand,
 } from '@/lib/asset-lifecycle-fields';
 import type { WebSession } from '@/server/session';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { readFlash } from '@/server/flash';
 import { mintSubmissionId } from '@/server/submission';
@@ -48,6 +47,13 @@ import { AssetDocuments } from './AssetDocuments';
 import { AttachDocumentForm } from './AssetDocumentForm';
 import { AssetAvailability } from './AssetAvailability';
 import { DeclareAvailabilityForm, RevokeAvailabilityForm } from './AvailabilityForms';
+import { ownValue } from '@/lib/own-key';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/assets/[id]` route.
@@ -116,14 +122,14 @@ export default async function AssetDossierPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}`)}`);
-  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  const query = await pageParams(session, searchParams);
+  // What the forms are offered on: the token's roles in the pinned organization (`sessionWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
 
   // The server's clock, taken once: every record's "in force" on this page is
   // judged against this instant, here and not in the browser.
@@ -157,7 +163,7 @@ export default async function AssetDossierPage({
   // service holds work on — with the note that says what to do first.
   const holdsOpenWork =
     lifecycleSource !== null &&
-    OPEN_WORK_NOTES[lifecycleSource.asset.status] !== undefined &&
+    ownValue(OPEN_WORK_NOTES, lifecycleSource.asset.status) !== undefined &&
     (canChangeAssetStatus(lifecycleSource.roles) || canDecommissionAsset(lifecycleSource.roles));
   const lifecycle =
     lifecycleSource && (Object.keys(tokens).length > 0 || holdsOpenWork) ? (
@@ -200,8 +206,9 @@ export default async function AssetDossierPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -213,6 +220,7 @@ export default async function AssetDossierPage({
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
       <DossierScreen
+        context={pageContext(session)}
         result={result}
         assetId={id}
         demoMode={demoMode}

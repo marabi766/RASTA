@@ -1,0 +1,249 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`zod-3 golden: the operating area’s positions exact-length positions, ring bounds and the closing rule 1`] = `
+{
+  "closedSquare": {
+    "parsed": {
+      "coordinates": [
+        [
+          [
+            51.3,
+            35.6,
+          ],
+          [
+            51.4,
+            35.6,
+          ],
+          [
+            51.4,
+            35.7,
+          ],
+          [
+            51.3,
+            35.6,
+          ],
+        ],
+      ],
+      "type": "Polygon",
+    },
+  },
+  "emptyPosition": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Array must contain exactly 2 element(s)",
+        "path": "coordinates[0][0]",
+      },
+      {
+        "code": "custom",
+        "message": "A position is [longitude, latitude] within [-180, 180] and [-90, 90]",
+        "path": "coordinates[0][0]",
+      },
+      {
+        "code": "custom",
+        "message": "A ring must end where it starts",
+        "path": "coordinates[0]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "extraKey": {
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "(root)",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "latitudePastNinety": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "A position is [longitude, latitude] within [-180, 180] and [-90, 90]",
+        "path": "coordinates[0][0]",
+      },
+      {
+        "code": "custom",
+        "message": "A position is [longitude, latitude] within [-180, 180] and [-90, 90]",
+        "path": "coordinates[0][3]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "noRings": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Array must contain at least 1 element(s)",
+        "path": "coordinates",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "nonFinite": {
+    "details": [
+      {
+        "code": "not_finite",
+        "message": "Number must be finite",
+        "path": "coordinates[0][0][0]",
+      },
+      {
+        "code": "custom",
+        "message": "A position is [longitude, latitude] within [-180, 180] and [-90, 90]",
+        "path": "coordinates[0][0]",
+      },
+      {
+        "code": "custom",
+        "message": "A ring must end where it starts",
+        "path": "coordinates[0]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "notAPolygon": {
+    "details": [
+      {
+        "code": "invalid_literal",
+        "message": "Invalid literal value, expected "Polygon"",
+        "path": "type",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected array, received number",
+        "path": "coordinates[0]",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected array, received number",
+        "path": "coordinates[1]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "notClosed": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "A ring must end where it starts",
+        "path": "coordinates[0]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "positionAsText": {
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": "coordinates[0][0][0]",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": "coordinates[0][0][1]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "positionOfOne": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Array must contain exactly 2 element(s)",
+        "path": "coordinates[0][0]",
+      },
+      {
+        "code": "custom",
+        "message": "A position is [longitude, latitude] within [-180, 180] and [-90, 90]",
+        "path": "coordinates[0][0]",
+      },
+      {
+        "code": "custom",
+        "message": "A ring must end where it starts",
+        "path": "coordinates[0]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "positionOfThree": {
+    "details": [
+      {
+        "code": "too_big",
+        "message": "Array must contain exactly 2 element(s)",
+        "path": "coordinates[0][0]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "threePositions": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Array must contain at least 4 element(s)",
+        "path": "coordinates[0]",
+      },
+      {
+        "code": "custom",
+        "message": "A ring must end where it starts",
+        "path": "coordinates[0]",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "twentyOneRings": {
+    "details": [
+      {
+        "code": "too_big",
+        "message": "Array must contain at most 20 element(s)",
+        "path": "coordinates",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "withHole": {
+    "parsed": {
+      "coordinates": [
+        [
+          [
+            51.3,
+            35.6,
+          ],
+          [
+            51.4,
+            35.6,
+          ],
+          [
+            51.4,
+            35.7,
+          ],
+          [
+            51.3,
+            35.6,
+          ],
+        ],
+        [
+          [
+            51.3,
+            35.6,
+          ],
+          [
+            51.4,
+            35.6,
+          ],
+          [
+            51.4,
+            35.7,
+          ],
+          [
+            51.3,
+            35.6,
+          ],
+        ],
+      ],
+      "type": "Polygon",
+    },
+  },
+}
+`;

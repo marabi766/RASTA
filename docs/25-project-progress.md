@@ -2,7 +2,7 @@
 
 > Generated from `planning/backlog.json`. Do not edit this report directly.
 
-- As of: **2026-10-23**
+- As of: **2026-11-04**
 - Baseline: **APPROVED** — Approved by **Product Owner**.
 - Earned-points rule: only **ACCEPTED delivery units** earn points; in-progress work earns zero.
 - Decomposition rule: a decomposed Feature contributes its child Stories, never its own points again. An undecomposed Feature remains a legacy delivery unit.
@@ -12,9 +12,9 @@
 
 | Horizon | Earned SP | Committed SP | Remaining SP | Progress | Accepted units | Active units | Features | Stories |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MVP | 385 | 563 | 178 | 68.4% | 32 | 42 | 37 | 7 |
+| MVP | 385 | 589 | 204 | 65.4% | 32 | 44 | 39 | 7 |
 | Post-MVP only | 0 | 223 | 223 | 0% | 0 | 12 | 12 | 0 |
-| Full product | 385 | 786 | 401 | 49% | 32 | 54 | 49 | 7 |
+| Full product | 385 | 812 | 427 | 47.4% | 32 | 56 | 51 | 7 |
 
 ## Progress by epic
 
@@ -25,7 +25,7 @@
 | EP-OPERATIONS | Maintenance and field operations | MVP | 21 | 21 | 100% | 1 | 0 |
 | EP-COMMERCE | Economic, marketplace and supply chain | MVP | 139 | 181 | 76.8% | 12 | 5 |
 | EP-CONSTRUCTION | Construction and contracts | MVP | 42 | 63 | 66.7% | 3 | 0 |
-| EP-EXPERIENCE | Web, mobile and user experience | MVP | 55 | 89 | 61.8% | 5 | 0 |
+| EP-EXPERIENCE | Web, mobile and user experience | MVP | 55 | 115 | 47.8% | 7 | 0 |
 | EP-OPERABILITY | Operability, hardening and pilot | MVP | 16 | 97 | 16.5% | 6 | 2 |
 | EP-INSURANCE | Commercial insurance | POST_MVP | 0 | 42 | 0% | 2 | 0 |
 | EP-ENGAGEMENT | Participation, reward and ranking | POST_MVP | 0 | 34 | 0% | 2 | 0 |
@@ -38,9 +38,9 @@
 | Status | Delivery units | Story Points |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 3 | 42 |
-| IN_PROGRESS | 6 | 126 |
-| BLOCKED | 4 | 52 |
+| READY | 4 | 39 |
+| IN_PROGRESS | 8 | 160 |
+| BLOCKED | 3 | 47 |
 | ACCEPTED | 32 | 385 |
 | CANCELLED | 0 | 0 |
 
@@ -51,8 +51,8 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Features | Baseline SP |
 | --- | --- | --- |
 | PROPOSED | 9 | 181 |
-| READY | 3 | 42 |
-| IN_PROGRESS | 7 | 139 |
+| READY | 3 | 34 |
+| IN_PROGRESS | 9 | 173 |
 | BLOCKED | 3 | 47 |
 | ACCEPTED | 27 | 377 |
 | CANCELLED | 0 | 0 |
@@ -62,9 +62,9 @@ A delivery unit is a User Story under a decomposed Feature, or the Feature itsel
 | Status | Stories | Story Points |
 | --- | --- | --- |
 | PROPOSED | 0 | 0 |
-| READY | 0 | 0 |
+| READY | 1 | 5 |
 | IN_PROGRESS | 0 | 0 |
-| BLOCKED | 1 | 5 |
+| BLOCKED | 0 | 0 |
 | ACCEPTED | 6 | 21 |
 | CANCELLED | 0 | 0 |
 

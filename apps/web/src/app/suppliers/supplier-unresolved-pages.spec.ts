@@ -12,6 +12,8 @@
  */
 
 import { isValidElement, type ReactElement } from 'react';
+import { actingAccessToken } from '@/test/session-token';
+import { boundQuery } from '@/test/page-context';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -72,6 +74,9 @@ const { reserveUnresolved, settleUnresolved, useUnresolvedStore } =
   require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
 const { memoryUnresolvedStore, UnresolvedStoreUnavailable } =
   require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
+const { releaseFeedback } =
+  require('@/server/release-feedback') as typeof import('@/server/release-feedback');
+const { ReleaseFeedback } = require('../ReleaseFeedback') as typeof import('../ReleaseFeedback');
 const { supplierWriteScope } =
   require('@/server/supplier-unresolved') as typeof import('@/server/supplier-unresolved');
 /* eslint-enable @typescript-eslint/no-require-imports */
@@ -115,10 +120,10 @@ const props = (tree: ReactElement, type: unknown) =>
 const detailTree = (searchParams: Record<string, string> = {}) =>
   DetailPage({
     params: Promise.resolve({ id: SUPPLIER_ID }),
-    searchParams: Promise.resolve(searchParams),
+    searchParams: Promise.resolve(boundQuery(mockSession.current, searchParams)),
   });
 const listTree = (searchParams: Record<string, string> = {}) =>
-  ListPage({ searchParams: Promise.resolve(searchParams) });
+  ListPage({ searchParams: Promise.resolve(boundQuery(mockSession.current, searchParams)) });
 
 /**
  * What the page's notices draw: the page hands `SupplierPendingNotices` its
@@ -198,7 +203,11 @@ describe('a supplier page with an unresolved write', () => {
   it('is shown to nobody else: another person, organization, login or supplier', async () => {
     const others = [
       { ...SESSION, subject: 'user-2' },
-      { ...SESSION, organizationId: 'ORG-OTHER' },
+      {
+        ...SESSION,
+        organizationId: 'ORG-OTHER',
+        accessToken: actingAccessToken('ORG-OTHER', ['SUPPLIER']),
+      },
       { ...SESSION, csrfToken: 'a-later-login' },
     ];
     for (const other of others) {
@@ -256,14 +265,38 @@ describe('a store that cannot say', () => {
 });
 
 describe('back from a refused reconciliation', () => {
-  it('says nothing changed, on the supplier page and on /suppliers', async () => {
-    const detail = await detailTree({ release: 'STALE' });
-    expect(props(detail, SupplierPendingNotices)).toEqual([
-      expect.objectContaining({ release: 'STALE' }),
-    ]);
-    const list = await listTree({ release: 'IN_PROGRESS' });
-    expect(props(list, SupplierPendingNotices)).toEqual([
-      expect.objectContaining({ release: 'IN_PROGRESS' }),
+  const feedbackOf = (tree: ReactElement) =>
+    noticesOf(tree)
+      .filter((element) => element.type === ReleaseFeedback)
+      .map((element) => element.props as Record<string, unknown>);
+
+  it('says nothing changed, from the signed token, on the supplier page and on /suppliers', async () => {
+    const detail = await detailTree({
+      release: releaseFeedback(
+        SESSION,
+        { surface: 'supplier-record', target: SUPPLIER_ID },
+        'STALE',
+      ),
+    });
+    expect(feedbackOf(detail)).toEqual([{ surface: 'supplier-record', outcome: 'STALE' }]);
+    const list = await listTree({
+      release: releaseFeedback(SESSION, { surface: 'supplier-write' }, 'IN_PROGRESS'),
+    });
+    expect(feedbackOf(list)).toEqual([{ surface: 'supplier-write', outcome: 'IN_PROGRESS' }]);
+  });
+
+  it('reads no bare word from the URL (FU-254 P1), and no token drawn for the other page', async () => {
+    for (const word of ['STALE', 'IN_PROGRESS', 'UNAVAILABLE', 'RELEASED']) {
+      expect(feedbackOf(await detailTree({ release: word }))).toEqual([
+        { surface: 'supplier-record', outcome: undefined },
+      ]);
+      expect(feedbackOf(await listTree({ release: word }))).toEqual([
+        { surface: 'supplier-write', outcome: undefined },
+      ]);
+    }
+    const forRegistration = releaseFeedback(SESSION, { surface: 'supplier-write' }, 'STALE');
+    expect(feedbackOf(await detailTree({ release: forRegistration }))).toEqual([
+      { surface: 'supplier-record', outcome: undefined },
     ]);
   });
 });

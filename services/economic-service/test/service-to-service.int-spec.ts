@@ -2,7 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id } from './helpers';
+import { cleanup, id, ORDER_HOLD_DEADLINE } from './helpers';
 
 /**
  * Zero Trust between services, with a signed tenant (ADR-020, ADR-035).
@@ -344,6 +344,7 @@ describe('service-to-service access', () => {
         sourceType: 'ORDER',
         sourceReference: reference,
         holdFunds: true,
+        holdNotAfter: ORDER_HOLD_DEADLINE,
       })
       .expect(201);
 
@@ -392,6 +393,7 @@ describe('service-to-service access', () => {
       sourceType: 'ORDER',
       sourceReference: key,
       holdFunds: true,
+      holdNotAfter: ORDER_HOLD_DEADLINE,
     };
 
     const first = await request(http)

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { test, type APIRequestContext, type Page } from './expect';
+import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * `/transactions/[id]` and its dispute through the real stack: a real token,
@@ -27,8 +29,9 @@ import { installLiveSession } from './live-session';
  *
  * The payer's administrator opens the dispute; the payee's administrator sees
  * it and is offered no form (economic-service refuses it 403); the system
- * administrator — the platform operator — resolves it, which puts the
- * transaction back in the settlement queue and settles nothing. Not the
+ * administrator — the platform operator — resolves it, which returns the
+ * transaction to where its settlement authority stands — here the escrow, as
+ * nothing authorised it (D-083) — and settles nothing. Not the
  * union's administrator: it acts for another organization only within its
  * union's subtree (docs/24 Q-136), and the seeded union does not hold the
  * payer.
@@ -118,12 +121,12 @@ test.describe('transaction disputes through the live stack', () => {
   let orderTransactionId = '';
   const ORDER_ID = `ORD_E2E_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
 
-  test.beforeAll(async ({ browser, playwright }) => {
+  test.beforeAll(async ({ browser, newApiContext }) => {
     const context = await browser.newContext();
     const session = await installLiveSession(context, 'orgAdmin');
     await context.close();
 
-    const request = await playwright.request.newContext();
+    const request = await newApiContext();
     try {
       ownId = await hold(request, session.accessToken, OWN_PAYEE);
       thirdId = await hold(request, session.accessToken, THIRD_ORGANIZATION);
@@ -179,7 +182,8 @@ test.describe('transaction disputes through the live stack', () => {
     await page.reload();
     await expect(page.getByText(REASON)).toBeVisible();
     await expect(page.getByText(/اعتراض شما ثبت شد/)).toHaveCount(0);
-    await page.goto(`/transactions/${ownId}?flash=DISPUTE`);
+    // Bound to this session's organization, so it is the flash itself that is refused.
+    await page.goto(withContext(session.context, `/transactions/${ownId}?flash=DISPUTE`));
     await expect(page.getByText(REASON)).toBeVisible();
     await expect(page.getByText(/اعتراض شما ثبت شد/)).toHaveCount(0);
 
@@ -256,7 +260,7 @@ test.describe('transaction disputes through the live stack', () => {
     expect(shownForTheirs).not.toContain(THIRD_ORGANIZATION);
   });
 
-  test('a platform operator resolves it back to the settlement queue, settling nothing', async ({
+  test('a platform operator resolves it back to the escrow it was disputed from, authorising and settling nothing (D-083)', async ({
     context,
     page,
     request,
@@ -271,8 +275,12 @@ test.describe('transaction disputes through the live stack', () => {
 
     await expect(page.getByText(/رسیدگی شما ثبت شد/)).toBeVisible();
     await expect.poll(() => new URL(page.url()).searchParams.has('flash')).toBe(false);
+    // Held, and never authorised: a resolution lifts the dispute and returns
+    // the transaction to where its settlement authority stands — the escrow,
+    // not the settlement queue (D-083).
     const text = await mainText(page);
-    expect(text).toContain('در انتظار تسویه');
+    expect(text).toContain('در وثیقه');
+    expect(text).not.toContain('در انتظار تسویه');
     expect(text).toContain('اعتراض ثبت شده بود');
 
     const read = await call<{ status: string; settlement: unknown }>(
@@ -282,7 +290,7 @@ test.describe('transaction disputes through the live stack', () => {
       `/v1/transactions/${ownId}`,
     );
     expect(read.status).toBe(200);
-    expect(read.body.status).toBe('PENDING_SETTLEMENT');
+    expect(read.body.status).toBe('HELD');
     expect(read.body.settlement).toBeNull();
   });
 

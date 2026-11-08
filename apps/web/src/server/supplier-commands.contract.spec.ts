@@ -58,6 +58,7 @@ import {
   provenUnwritten,
   registerSupplier,
 } from './supplier-commands';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * What the supplier write screens depend on, pinned to supplier-service's
@@ -265,7 +266,7 @@ describe('the request bodies', () => {
       `plainText().min(1).max(${MAX_STATEMENT_LENGTH}).optional()`,
     );
     expect(prop('submitQualificationSchema', 'evidence')).toBe(
-      `z.array(qualificationEvidenceInputSchema).max(${MAX_EVIDENCE_ITEMS}).default([])`,
+      `z.array(qualificationEvidenceInputSchema).max(${MAX_EVIDENCE_ITEMS}).prefault([])`,
     );
     expect(prop('qualificationEvidenceInputSchema', 'documentId')).toBe('identifier');
     expect(prop('qualificationEvidenceInputSchema', 'label')).toBe(
@@ -419,14 +420,47 @@ describe('what the service refuses with a sentence, and how the portal says it',
       .sort();
     expect(documented).toEqual([400, 401, 403, 404, 409, 422, 500]);
 
-    const body = {
-      code: 'X',
-      message: 'service sentence nobody may read',
-      correlationId: 'corr-1',
-      timestamp: '2026-10-23T08:00:00.000Z',
+    // Each status with the platform's own code for it (ERROR_STATUS); an undocumented code is not a
+    // refusal at all (PR-830 r1 F1), below.
+    const CODE_OF: Record<number, string> = {
+      400: 'VALIDATION_FAILED',
+      401: 'UNAUTHENTICATED',
+      403: 'FORBIDDEN',
+      404: 'NOT_FOUND',
+      409: 'CONFLICT',
+      422: 'BUSINESS_RULE_VIOLATION',
+      500: 'INTERNAL_ERROR',
     };
     const kinds: Record<number, string> = {};
+    const unknownCode: Record<number, string> = {};
     for (const status of documented) {
+      const answer = (code: string) => ({
+        code,
+        message: 'service sentence nobody may read',
+        correlationId: 'corr-1',
+        timestamp: '2026-10-23T08:00:00.000Z',
+      });
+      const send = (body: unknown) =>
+        registerSupplier(
+          {
+            subject: 's',
+            username: 'u',
+            organizationId: 'O',
+            accessToken: actingAccessToken('O'),
+            accessTokenExpiresAt: 9e9,
+            refreshToken: 'r',
+            csrfToken: 'c',
+            issuedAt: 1,
+          },
+          { displayName: 'ab', capabilities: ['GOODS_SUPPLY'] },
+          (async () =>
+            new Response(JSON.stringify(body), {
+              status,
+              headers: { 'content-type': 'application/json' },
+            })) as typeof fetch,
+        );
+      unknownCode[status] = (await send(answer('X'))).kind;
+      const body = answer(CODE_OF[status]!);
       const impl = (async () =>
         new Response(JSON.stringify(body), {
           status,
@@ -437,7 +471,7 @@ describe('what the service refuses with a sentence, and how the portal says it',
           subject: 's',
           username: 'u',
           organizationId: 'O',
-          accessToken: 'a',
+          accessToken: actingAccessToken('O'),
           accessTokenExpiresAt: 9e9,
           refreshToken: 'r',
           csrfToken: 'c',
@@ -459,7 +493,17 @@ describe('what the service refuses with a sentence, and how the portal says it',
       404: 'NOT_FOUND',
       409: 'INVALID',
       422: 'INVALID',
-      500: 'UNAVAILABLE',
+      // Every 5xx is unconfirmed at the writer (FU-189): the documented 500 below is one.
+      500: 'UNKNOWN_OUTCOME',
+    });
+    expect(unknownCode).toEqual({
+      400: 'UNKNOWN_OUTCOME',
+      401: 'UNKNOWN_OUTCOME',
+      403: 'UNKNOWN_OUTCOME',
+      404: 'UNKNOWN_OUTCOME',
+      409: 'UNKNOWN_OUTCOME',
+      422: 'UNKNOWN_OUTCOME',
+      500: 'UNKNOWN_OUTCOME',
     });
     expect(supplierFailureText(401)).toMatch(/نشست/);
     expect(supplierFailureText(429)).toMatch(/چیزی تغییر نکرد/);
@@ -500,7 +544,7 @@ describe('what the service refuses with a sentence, and how the portal says it',
         subject: 's',
         username: 'u',
         organizationId: 'O',
-        accessToken: 'a',
+        accessToken: actingAccessToken('O'),
         accessTokenExpiresAt: 9e9,
         refreshToken: 'r',
         csrfToken: 'c',

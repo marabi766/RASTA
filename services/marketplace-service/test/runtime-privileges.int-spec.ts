@@ -50,6 +50,7 @@ describe('the runtime role cannot alter, drop or empty a table (D-045)', () => {
       createDb: false,
       createRole: false,
       bypassRls: false,
+      replication: false,
     });
   });
 

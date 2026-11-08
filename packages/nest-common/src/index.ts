@@ -28,6 +28,7 @@ export {
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
 } from './errors/rasta-error';
+export type { LedgerUnbalancedReason } from './errors/rasta-error';
 export { safeLogText } from './errors/safe-log-text';
 
 // Decorators -----------------------------------------------------------------
@@ -52,8 +53,23 @@ export {
 } from './decorators';
 
 // Authentication -------------------------------------------------------------
-export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
+export { TokenVerifier } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
+export { RedirectRefusedError, internalFetch } from './http/internal-fetch';
+export {
+  ExchangeCancelledError,
+  ExchangeDeadlineError,
+  exchangeWithDeadline,
+  upstreamExchange,
+} from './http/exchange-deadline';
+export type { ExchangeOptions } from './http/exchange-deadline';
+export {
+  MAX_QUERY_SEGMENTS,
+  StrictQueryParserInstaller,
+  strictQueryParser,
+} from './http/strict-query-parser';
+export { InternalHttpClient, InternalTokenService } from './http/internal-http-client';
+export type { InternalGrant, InternalSender } from './http/internal-http-client';
 export {
   currentActor,
   compareActors,
@@ -89,6 +105,12 @@ export type {
 } from './guards/auth.guard';
 
 export { RolesGuard } from './guards/roles.guard';
+export {
+  OVERSIGHT_ROLE,
+  SUPER_ROLE,
+  assertRolesAdmitted,
+  type RoleAdmission,
+} from './guards/role-admission';
 
 // Request pipeline -----------------------------------------------------------
 export {
@@ -123,12 +145,14 @@ export {
   ZodValidationPipe,
   zodPipe,
   toErrorDetails,
+  validateRequestInput,
   formatPath,
 } from './pipes/zod-validation.pipe';
 
 // Tenancy --------------------------------------------------------------------
 export {
   createTenantGuardExtension,
+  runWithNestedTenantWrite,
   runUnscoped,
   isUnscoped,
   currentUnscopedReason,
@@ -210,9 +234,26 @@ export {
   RENEWAL_TRANSACTION_MARGIN_MS,
   outboxRenewalOperationBudget,
   withinDeadline,
+  buildRestoredOutboxRow,
 } from './outbox/outbox';
+// Provenance across a durable queue (PR #483 r3). `restoreOutboxProvenance` and
+// `buildRestoredOutboxRow` are the registration intake's only: the restoration
+// guard (scripts/outbox-provenance-restoration-guard.test.mjs) fails on any
+// other file that names them.
+export {
+  captureOutboxProvenance,
+  isOutboxProvenance,
+  persistedOutboxProvenance,
+  restoreOutboxProvenance,
+} from './outbox/outbox-provenance';
+export type {
+  OutboxActor,
+  OutboxProvenance,
+  PersistedOutboxProvenance,
+} from './outbox/outbox-provenance';
 export type {
   OutboxMessageInput,
+  RestoredOutboxMessageInput,
   OutboxRow,
   OutboxStore,
   EventPublisher,
@@ -238,6 +279,7 @@ export {
   STREAM_SEQUENCE_TABLE,
   purgePublishedSql,
   MANUALLY_SKIPPED_PREFIX,
+  OUTBOX_NOW,
 } from './outbox/outbox-sql';
 export type {
   OutboxSqlClient,
@@ -267,6 +309,8 @@ export {
   DEFAULT_AFTER_CLOSE_TIMEOUT_MS,
   DEFAULT_SHUTDOWN_SIGNALS,
 } from './lifecycle/graceful-shutdown';
+// What a component that cannot recover asks for: the service's own shutdown, or exit(1).
+export { fatalShutdown } from './lifecycle/fatal-shutdown';
 export type {
   GracefulShutdown,
   GracefulShutdownOptions,
@@ -278,6 +322,7 @@ export type {
 export {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  RuntimeRoleUnverifiedError,
   assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,
@@ -289,3 +334,76 @@ export type {
   RuntimeRolePreflightClient,
   RuntimeRoleQueryClient,
 } from './database/runtime-role';
+
+// OpenAPI --------------------------------------------------------------------
+export {
+  toJsonSchema,
+  codePointLength,
+  isOptionalField,
+  objectShapeOf,
+} from './openapi/zod-schema';
+export type { JsonSchema } from './openapi/zod-schema';
+export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
+export { publishApiErrors, healthProbeErrorSchema } from './openapi/error-document';
+export {
+  publishZodRouteInputs,
+  zodRouteInputKey,
+  zodRouteInputProblems,
+  zodRouteInputs,
+} from './openapi/zod-route-inputs';
+export type { RouteDocument, ZodRouteInput } from './openapi/zod-route-inputs';
+export {
+  applyOperationSecurity,
+  documentationModuleFor,
+  routeAccessByOperation,
+  BEARER_SCHEME,
+  INTERNAL_TOKEN_SCHEME,
+} from './openapi/operation-security';
+export type { RouteAccess, ServiceRouteUsers } from './openapi/operation-security';
+// Conformance checks of a published document against the real error bodies; for tests.
+export {
+  errorEnvelopeProblems,
+  probeExceptionProblems,
+  httpErrorBodyProblems,
+  publishedErrorResponses,
+  publishedPathOf,
+  publishedResponseSchemaOf,
+  realFilterResponse,
+  realRoutesOf,
+  routeErrorProblems,
+  unresolvedRefs,
+  validatePublishedBody,
+  PROBE_CONTEXTS,
+  PROBE_TRACEPARENT,
+} from './openapi/published-body';
+export type {
+  EnvelopeOptions,
+  ProbeContext,
+  PublishedDocument,
+  PublishedErrorResponse,
+  PublishedSchema,
+  PublishedProbeException,
+  ProbeExceptionOptions,
+  RealRoute,
+  RouteCheckOptions,
+  RoutedApplication,
+} from './openapi/published-body';
+
+export { clientFailureCode } from './database/client-failure';
+export { DatabaseConnectionError, createSafePrismaClient } from './database/safe-prisma-client';
+export { SessionTimeZoneRefusedError, UTC_SESSION_CHECK_SQL } from './database/utc-session';
+export type { RuntimeDatabaseSetting } from './database/safe-prisma-client';
+export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';
+
+// Human-typed text a uniqueness constraint compares (FU-084) ----------------
+export {
+  canonicalUniqueText,
+  foldUniqueText,
+  isCanonicalUniqueText,
+  uniqueTextKey,
+  uniqueTextSearchKey,
+  foldAsciiCase,
+  uniqueText,
+  NOT_CANONICAL_TEXT,
+} from './text/canonical-unique-text';
+export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';

@@ -21,6 +21,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { EXPECTED, PATHS, collectTargets, parseRuleNames } from './check-grafana-dashboard-lib.mjs';
+import { credentialFetch } from './credential-fetch.mjs';
 import { readProbeEnvironment } from './verify-grafana-dashboard-isolation-lib.mjs';
 
 /** Fixed substitutions for Grafana interval macros, used only to submit queries to Prometheus. */
@@ -47,7 +48,8 @@ async function waitFor(what, fn, timeoutMs = 120_000) {
 }
 
 async function getJson(url, headers = {}) {
-  const response = await fetch(url, { headers });
+  // Every Grafana call carries the admin's Basic credential: none follows a redirect (Q-155).
+  const response = await credentialFetch(url, { headers });
   const text = await response.text();
   let body;
   try {
@@ -70,7 +72,7 @@ async function probe({ prometheus: prom, grafana, password }) {
     Authorization: `Basic ${Buffer.from(`admin:${password}`).toString('base64')}`,
   };
 
-  await waitFor('Prometheus ready', async () => (await fetch(`${prom}/-/ready`)).ok);
+  await waitFor('Prometheus ready', async () => (await credentialFetch(`${prom}/-/ready`)).ok);
   await waitFor(
     'Grafana healthy',
     async () => {
@@ -158,7 +160,7 @@ async function probe({ prometheus: prom, grafana, password }) {
   assert(folder.status === 200 && folder.body.title === EXPECTED.folder, `folder ${folder.status}`);
 
   // disableDeletion: even the admin cannot delete the provisioned dashboard.
-  const deletion = await fetch(`${grafana}/api/dashboards/uid/${EXPECTED.uid}`, {
+  const deletion = await credentialFetch(`${grafana}/api/dashboards/uid/${EXPECTED.uid}`, {
     method: 'DELETE',
     headers: authed,
   });
@@ -181,7 +183,7 @@ async function probe({ prometheus: prom, grafana, password }) {
       direct.status === 200 && direct.body.status === 'success',
       `panel ${panel.id} ${target.refId}: Prometheus rejected query (${direct.status}): ${JSON.stringify(direct.body)}`,
     );
-    const viaGrafana = await fetch(`${grafana}/api/ds/query`, {
+    const viaGrafana = await credentialFetch(`${grafana}/api/ds/query`, {
       method: 'POST',
       headers: { ...authed, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -213,7 +215,7 @@ async function probe({ prometheus: prom, grafana, password }) {
   }
 
   // The dashboard page is served.
-  const page = await fetch(`${grafana}/d/${EXPECTED.uid}`, { headers: authed, redirect: 'manual' });
+  const page = await credentialFetch(`${grafana}/d/${EXPECTED.uid}`, { headers: authed });
   assert(page.status === 200, `dashboard page returned ${page.status}`);
   log(`GET /d/${EXPECTED.uid} -> ${page.status}`);
 

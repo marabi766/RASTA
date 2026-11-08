@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import {
+  bareObligation,
   asActor,
   cleanup,
   newPrisma,
@@ -83,15 +84,16 @@ describe('payment outcomes that must not be guessed (real database)', () => {
 
   /** Takes `amountMinor` out of the wallet's available balance with a hold. */
   async function spend(organizationId: string, walletId: string, amountMinor: bigint) {
+    const reference = await bareObligation(wiring.prisma, organizationId);
     await asActor({ organizationId }, () =>
       wiring.prisma.transaction(async (tx) => {
         const [locked] = await wiring.walletRepository.lock(tx, [walletId]);
         await wiring.wallets.placeHold(tx, {
           wallet: locked!,
           amountMinor,
-          reference: `TXN_${ulid()}`,
+          reference,
           referenceType: 'TRANSACTION',
-          transactionId: `TXN_${ulid()}`,
+          transactionId: reference,
           placedBy: 'unknown-outcome-itest',
         });
       }),
@@ -572,11 +574,15 @@ describe('payment outcomes that must not be guessed (real database)', () => {
       await setWalletStatus(walletId, 'FROZEN');
       const refund = jest.spyOn(provider, 'refund');
 
-      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toMatchObject({
+      const refused = refundBy(organizationId, result.paymentIntentId);
+      await expect(refused).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
         status: 422,
+        message: 'This wallet is not active; a refund cannot take money out of it until it is',
         internalContext: { walletStatus: 'FROZEN' },
       });
+      // Nothing was sent: not the reversal-pending refusal.
+      await expect(refused).rejects.toMatchObject({ details: undefined });
       expect(refund).not.toHaveBeenCalled();
       expect(await holdsOf(walletId)).toHaveLength(0);
       expect((await intentsOf(organizationId))[0]).toMatchObject({
@@ -607,6 +613,7 @@ describe('payment outcomes that must not be guessed (real database)', () => {
 
       await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
+        details: [{ code: 'REFUND_REVERSAL_PENDING' }],
         internalContext: { walletStatus: 'FROZEN' },
       });
       expect((await intentsOf(organizationId))[0]).toMatchObject({
@@ -636,8 +643,12 @@ describe('payment outcomes that must not be guessed (real database)', () => {
         },
       });
 
+      // The provider has refunded: told so, not "insufficient balance", which
+      // is the refusal of a refund never sent (Codex PR-480 r2, N1).
       await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toMatchObject({
-        code: 'INSUFFICIENT_BALANCE',
+        code: 'BUSINESS_RULE_VIOLATION',
+        details: [{ code: 'REFUND_REVERSAL_PENDING' }],
+        internalContext: { outcome: 'INSUFFICIENT_BALANCE' },
       });
       expect((await intentsOf(organizationId))[0]).toMatchObject({
         status: 'CAPTURED',

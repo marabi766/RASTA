@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
   OutboxRelay,
@@ -6,7 +7,7 @@ import {
   type EventConsumer,
   type OutboxRow,
 } from '@rasta/nest-common';
-import { PrismaService } from '../src/prisma/prisma.service';
+import type { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import {
@@ -203,7 +204,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
 
   /** Makes a parked row, and its last attempt, an hour old by the database's clock. */
   const age = (eventId: string) =>
-    prisma.client.$executeRaw`
+    eligibilityClockWrite(prisma.client)`
       UPDATE insurance_pending_verification
          SET first_seen_at = now() - interval '1 hour',
              last_attempt_at = CASE WHEN last_attempt_at IS NULL THEN NULL
@@ -672,7 +673,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
           },
         }),
       ),
-    ).rejects.toThrow(/Cross-tenant writes are never implicit/);
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
     // The transfer's handler marks by machine, whichever tenant parked.
     expect(
       await repository.transaction((tx) => repository.markParkedInsuranceDue(tx, assetOfA)),

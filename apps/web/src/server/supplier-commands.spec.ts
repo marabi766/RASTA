@@ -30,6 +30,7 @@ import {
   type SupplierActor,
 } from './supplier-commands';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * The supplier commands against a fake gateway: the path, the method and the
@@ -62,7 +63,7 @@ function tokenFor(organizationId: string | null, roles: string[], memberships?: 
   });
 }
 
-const session = (accessToken = 'access-token-value'): WebSession => ({
+const session = (accessToken = tokenFor('ORG-A', ['ORGANIZATION_ADMIN'])): WebSession => ({
   subject: 'user-1',
   username: 'u',
   organizationId: 'ORG-A',
@@ -74,7 +75,7 @@ const session = (accessToken = 'access-token-value'): WebSession => ({
 });
 
 const actorOf = (organizationId: string | null, roles: string[], memberships?: string[]) =>
-  supplierActor(tokenFor(organizationId, roles, memberships)) as SupplierActor;
+  supplierActor(pinnedTokens(tokenFor(organizationId, roles, memberships))) as SupplierActor;
 
 describe('who is offered which form', () => {
   const SUPPLIER_ORG = 'ORG-SUP';
@@ -144,8 +145,8 @@ describe('who is offered which form', () => {
   });
 
   it('offers nothing for a token that cannot be read', () => {
-    expect(supplierActor('not-a-jwt')).toBeNull();
-    expect(supplierActor(tokenOf({ org_id: 'ORG-A', org_ids: [] }))).toBeNull();
+    expect(supplierActor(pinnedTokens('not-a-jwt'))).toBeNull();
+    expect(supplierActor(pinnedTokens(tokenOf({ org_id: 'ORG-A', org_ids: [] })))).toBeNull();
   });
 });
 
@@ -376,7 +377,7 @@ describe('what is sent to the gateway', () => {
       expect(seen[0]!.url).toBe(`http://gateway.test:3000${call.path}`);
       expect(seen[0]!.method).toBe('POST');
       expect(seen[0]!.body).toEqual(call.body);
-      expect(seen[0]!.headers.get('authorization')).toBe('Bearer access-token-value');
+      expect(seen[0]!.headers.get('authorization')).toBe(`Bearer ${session().accessToken}`);
       expect(seen[0]!.headers.has('idempotency-key')).toBe(false);
     },
   );
@@ -397,26 +398,20 @@ describe('what is sent to the gateway', () => {
     },
   );
 
-  it.each(CALLS)(
-    '$name: a 504 is unconfirmed; a 503 and a 500 come back with their status and no code',
-    async (call) => {
-      // The transport's answer. A 5xx body is not read, so it carries no code,
-      // and the runner says it as unconfirmed (`provenUnwritten`).
-      expect((await call.run(gateway(504, problem('UPSTREAM_TIMEOUT', 'slow')).impl)).kind).toBe(
-        'UNKNOWN_OUTCOME',
-      );
-      expect(await call.run(gateway(503, problem('UPSTREAM_UNAVAILABLE', 'down')).impl)).toEqual({
-        kind: 'UNAVAILABLE',
-        status: 503,
+  it.each(CALLS)('$name: a 504, a 503 and a 500 are all unconfirmed (FU-189)', async (call) => {
+    // The writer's answer: a 5xx body is not read, carries no proof, and may come
+    // after the commit — so none of them is ever "nothing changed".
+    for (const answer of [
+      gateway(504, problem('UPSTREAM_TIMEOUT', 'slow')),
+      gateway(503, problem('UPSTREAM_UNAVAILABLE', 'down')),
+      gateway(500, problem('INTERNAL_ERROR', 'boom')),
+    ]) {
+      expect(await call.run(answer.impl)).toEqual({
+        kind: 'UNKNOWN_OUTCOME',
         correlationId: expect.any(String),
       });
-      expect(await call.run(gateway(500, problem('INTERNAL_ERROR', 'boom')).impl)).toEqual({
-        kind: 'UNAVAILABLE',
-        status: 500,
-        correlationId: expect.any(String),
-      });
-    },
-  );
+    }
+  });
 
   it.each(CALLS)('$name: a 401 or 429 carries the documented code it came with', async (call) => {
     expect(await call.run(gateway(401, problem('TOKEN_EXPIRED', 'expired')).impl)).toMatchObject({

@@ -280,6 +280,13 @@ export class RfqRepository {
     return after;
   }
 
+  /** The quotations standing on the buyer's RFQ — SUBMITTED, not withdrawn (plan PR 8). */
+  countStandingQuotations(tx: ExtendedPrismaClient, rfq: Rfq): Promise<number> {
+    return tx.quotation.count({
+      where: { organizationId: rfq.organizationId, rfqId: rfq.id, status: 'SUBMITTED' },
+    });
+  }
+
   // ---- the close sweeper's queue --------------------------------------------------------------
 
   /**

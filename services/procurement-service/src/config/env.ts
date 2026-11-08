@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
   DEFAULT_RFQ_CANCELLATION_CODES,
+  PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS,
   RESERVED_RFQ_CANCELLATION_CODES,
   RFQ_CANCELLATION_CODE_PATTERN,
 } from '@rasta/contracts';
@@ -9,12 +10,37 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
-import { procurementOperationBudgets } from './operation-budgets';
+import { procurementOperationBudgets, replayFenceBudgetMs } from './operation-budgets';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-provider';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const KEK_CURRENT_NOT_IN_KEKS = fixed(
+  'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
+    'and be set exactly when PROCUREMENT_RFQ_KEKS is',
+);
+
+const RESERVED_CANCELLATION_CODE = fixed(
+  'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
+    'arrives with evaluation (plan PR 10), which checks it',
+);
+const REPLAY_WINDOW_DOES_NOT_FIT = fixed(
+  'PROCUREMENT_IDEMPOTENCY_TTL_HOURS · 3600 − B − PROCUREMENT_CLOCK_SKEW_SECONDS must be at least ' +
+    `${PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS} s (PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS), with ` +
+    'B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + 7 s: otherwise a portal window its own boot check ' +
+    'accepts could be refused by the replay fence',
+);
+const KEKS_MALFORMED = fixed(
+  'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+);
+const KEK_CURRENT_MALFORMED = fixed('PROCUREMENT_RFQ_KEK_CURRENT must be a KEK id (a-z0-9-)');
 
 export const SERVICE_NAME = 'procurement-service';
 
@@ -74,6 +100,16 @@ export const MAX_LIVE_DEMANDS_LIMIT = DIGEST_DEMANDS_PER_BUDGET / 2;
  */
 export const MAX_INVITEES_LIMIT = 500;
 
+/**
+ * The most links one RFQ's receipt chain holds: what audit-service returns of a chain
+ * (`MAX_CHAIN_LINKS`), and the `seq` bound of `quotation_receipt`. A link past it would leave an RFQ
+ * that can never be opened (the lesson of construction audit F2).
+ */
+export const QUOTATION_RECEIPT_CHAIN_LIMIT = 10_000;
+
+/** The most revisions one quotation may have: the chain's links shared by the most invitees. */
+export const MAX_QUOTATION_REVISIONS_LIMIT = QUOTATION_RECEIPT_CHAIN_LIMIT / MAX_INVITEES_LIMIT;
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -86,15 +122,20 @@ function commaList() {
 
 /** A list of platform roles of the buyer's own organization: never the oversight role or the operator. */
 function roleList(name: string, options: { min: number }) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(options.min, `${name} must name at least ${options.min} role`)
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
+      .min(options.min, fixed(`${name} must name at least ${options.min} role`))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
-        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        message: fixed(
+          `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        ),
       })
       .refine((roles) => !roles.includes(PLATFORM_ROLE), {
-        message: `${name} may not name ${PLATFORM_ROLE}: the platform operator never acts for a buyer`,
+        message: fixed(
+          `${name} may not name ${PLATFORM_ROLE}: the platform operator never acts for a buyer`,
+        ),
       }),
   );
 }
@@ -151,6 +192,12 @@ function roleList(name: string, options: { min: number }) {
  *   PROCUREMENT_RFQ_MAX_INVITEES       Q-121 (1). The most suppliers one RFQ invites: default 200,
  *                                      at most 500 — protection of the service (each is asked of
  *                                      supplier-service before the issue), not a business rule.
+ *   PROCUREMENT_QUOTATION_MAX_REVISIONS
+ *                                      ADR-070 § 4 (plan PR 8). The sealed revisions one quotation
+ *                                      may have, its submission included: default 10, at most 20 —
+ *                                      so the 500 invitees an RFQ may have never fill its receipt
+ *                                      chain past the 10,000 links audit-service returns
+ *                                      (QUOTATION_RECEIPT_CHAIN_LIMIT). Protection, not a rule.
  *   PROCUREMENT_RFQ_KEKS / _KEK_CURRENT
  *                                      ADR-070 § 4. The key-encryption keys that wrap each RFQ's
  *                                      private sealing key — a secret, never construction's.
@@ -167,6 +214,9 @@ function roleList(name: string, options: { min: number }) {
  *                                      How long a completed command's response is replayed, and how
  *                                      long an in-flight claim holds its key before a retry may
  *                                      take it over (docs/06 § 6.8).
+ *   PROCUREMENT_CLOCK_SKEW_SECONDS     The clock-offset bound the replay fence rests on (FU-156):
+ *                                      TTL · 3600 − (2 · skew + 7) − skew must be at least
+ *                                      PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS, or the boot fails.
  *   PROCUREMENT_WINDOW_SWEEP_* / PROCUREMENT_WINDOW_FOLLOW_BATCH_SIZE
  *                                      The sweeper that ends windows on time (ADR-070 § 2, plan
  *                                      PR 2) and the bound on the demands one transaction moves
@@ -185,15 +235,15 @@ export const procurementEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     PROCUREMENT_DEMAND_ROLES: z
       .string()
-      .default('PROCUREMENT_USER,ORGANIZATION_ADMIN')
+      .prefault('PROCUREMENT_USER,ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_DEMAND_ROLES', { min: 1 })),
 
     /** Q-10: seven days. At most a year: a window nobody closes is not a window. */
-    PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+    PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).prefault(168),
 
     /**
      * Q-10: no threshold. A whole quantity of the product's base unit, as a demand's is (Q-105).
@@ -206,27 +256,27 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(0)
       .max(2_147_483_647)
-      .default(0),
+      .prefault(0),
 
     /** Q-10: "carried into the next window". */
-    PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).default('EXTEND'),
+    PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).prefault('EXTEND'),
 
     /** Q-119 (2): who records the organization's aggregation settings (plan PR 3). */
     PROCUREMENT_AGGREGATION_SETTING_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_AGGREGATION_SETTING_ROLES', { min: 1 })),
 
     /** ADR-070 § 3: who cancels a READY aggregation (and, from PR 6, issues its RFQ). */
     PROCUREMENT_RFQ_ISSUER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_RFQ_ISSUER_ROLES', { min: 1 })),
 
     /** ADR-070 § 4: who reads, for an invited supplier's organization, the RFQs it is invited to. */
     PROCUREMENT_SUPPLIER_ROLES: z
       .string()
-      .default('SUPPLIER')
+      .prefault('SUPPLIER')
       .pipe(roleList('PROCUREMENT_SUPPLIER_ROLES', { min: 1 })),
 
     /**
@@ -236,7 +286,7 @@ export const procurementEnvSchema = baseEnvSchema
      */
     PROCUREMENT_RFQ_CANCELLATION_CODES: z
       .string()
-      .default(DEFAULT_RFQ_CANCELLATION_CODES.join(','))
+      .prefault(DEFAULT_RFQ_CANCELLATION_CODES.join(','))
       .pipe(
         commaList().pipe(
           z
@@ -245,12 +295,12 @@ export const procurementEnvSchema = baseEnvSchema
                 .string()
                 .regex(
                   RFQ_CANCELLATION_CODE_PATTERN,
-                  'A cancellation code is upper-case words, 2 to 64 characters',
+                  fixed('A cancellation code is upper-case words, 2 to 64 characters'),
                 ),
             )
-            .min(1, 'PROCUREMENT_RFQ_CANCELLATION_CODES must name at least one code')
+            .min(1, fixed('PROCUREMENT_RFQ_CANCELLATION_CODES must name at least one code'))
             .refine((codes) => new Set(codes).size === codes.length, {
-              message: 'PROCUREMENT_RFQ_CANCELLATION_CODES names a code twice',
+              message: fixed('PROCUREMENT_RFQ_CANCELLATION_CODES names a code twice'),
             })
             .refine(
               (codes) =>
@@ -258,9 +308,7 @@ export const procurementEnvSchema = baseEnvSchema
                   (RESERVED_RFQ_CANCELLATION_CODES as readonly string[]).includes(code),
                 ),
               {
-                message:
-                  'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
-                  'arrives with evaluation (plan PR 10), which checks it',
+                message: RESERVED_CANCELLATION_CODE,
               },
             ),
         ),
@@ -272,7 +320,15 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_INVITEES_LIMIT)
-      .default(200),
+      .prefault(200),
+
+    /** ADR-070 § 4: sealed revisions per quotation (× MAX_INVITEES_LIMIT ≤ the chain's 10,000). */
+    PROCUREMENT_QUOTATION_MAX_REVISIONS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_QUOTATION_REVISIONS_LIMIT)
+      .prefault(10),
 
     /**
      * The key-encryption keys that wrap each RFQ's private sealing key (ADR-070 § 4, ADR-066 § 2):
@@ -294,8 +350,7 @@ export const procurementEnvSchema = baseEnvSchema
           }
         },
         {
-          message:
-            'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+          message: KEKS_MALFORMED,
         },
       ),
     /** The id in `PROCUREMENT_RFQ_KEKS` that wraps new RFQ keys; older ones only unwrap. */
@@ -303,7 +358,7 @@ export const procurementEnvSchema = baseEnvSchema
       .string()
       .optional()
       .refine((value) => value === undefined || value === '' || isKekId(value), {
-        message: 'PROCUREMENT_RFQ_KEK_CURRENT must be a KEK id (a-z0-9-)',
+        message: KEK_CURRENT_MALFORMED,
       }),
 
     /**
@@ -312,13 +367,13 @@ export const procurementEnvSchema = baseEnvSchema
      * with a token signed for no tenant, before the issue's transaction. Unreachable, or anything
      * but a well-formed 200, refuses the issue (503; 504 past the timeout) and writes nothing.
      */
-    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    SUPPLIER_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3108'),
     PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(60_000)
-      .default(5000),
+      .prefault(5000),
 
     /**
      * The sweeper that closes RFQs at their deadline (ADR-070 § 3, plan PR 6; the shape of the
@@ -332,26 +387,26 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(5000),
-    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+      .prefault(5000),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
     PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(3600)
-      .default(60),
+      .prefault(60),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * A technical limit, not a business rule (PR-327 r2 F1, PR-338 r1 F1, Q-119 note of
@@ -369,15 +424,26 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_LIVE_DEMANDS_LIMIT)
-      .default(DEFAULT_MAX_LIVE_DEMANDS),
+      .prefault(DEFAULT_MAX_LIVE_DEMANDS),
 
-    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
     PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(900)
-      .default(120),
+      .prefault(120),
+
+    /**
+     * The largest offset of any replica's clock (and the database's) from true time, in seconds
+     * (FU-156, PM decision D-125 — construction's `CONSTRUCTION_CLOCK_SKEW_SECONDS`). The replay
+     * fence (`shared/idempotency.ts`) compares this replica's clock with a deadline the caller fixed
+     * and keeps the response for another replica to find, so its budget is
+     * `B = 2 · skew + margin`: a deadline must end `B` before the retention, and a completed
+     * response is kept at least `B` past it. Beyond this offset the guarantee is void — alarm on a
+     * clock offset above half of it. At its largest (300) B is 607 s.
+     */
+    PROCUREMENT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
 
     /**
      * The sweeper that ends windows past `closes_at` (ADR-070 § 2, plan PR 2; the shape of
@@ -394,21 +460,21 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(5000),
-    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
+      .prefault(5000),
+    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(60),
     PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * The batch of a window's end (`MAX_FOLLOW_BATCH_SIZE`): the most live demands one transaction
@@ -424,9 +490,21 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_FOLLOW_BATCH_SIZE)
-      .default(2000),
+      .prefault(2000),
   })
   .superRefine((env, ctx) => {
+    // The replay fence refuses a deadline later than claim + TTL − B (shared/idempotency.ts). The
+    // portal's window is capped by the same constant (PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS), so the
+    // service must accept a window of that size on its slowest legal clock:
+    //   TTL − B − skew ≥ K        (B = 2 · skew + margin)
+    // Otherwise an honest client could meet the refusal: fail the boot instead.
+    if (replayWindowRoomSeconds(env) < PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PROCUREMENT_IDEMPOTENCY_TTL_HOURS'],
+        message: REPLAY_WINDOW_DOES_NOT_FIT,
+      });
+    }
     try {
       parseKekEntries(env.PROCUREMENT_RFQ_KEKS);
     } catch {
@@ -438,14 +516,29 @@ export const procurementEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['PROCUREMENT_RFQ_KEK_CURRENT'],
-        message:
-          'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
-          'and be set exactly when PROCUREMENT_RFQ_KEKS is',
+        message: KEK_CURRENT_NOT_IN_KEKS,
       });
     }
   });
 
+export const PROCUREMENT_ENV_MESSAGES = seal();
+
 export type ProcurementEnv = z.infer<typeof procurementEnvSchema>;
+
+/**
+ * The longest replay window (seconds, the portal's skew allowance included) this service can accept
+ * on its slowest legal clock: `TTL − B − skew`. The boot check holds it at or above
+ * `PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS`.
+ */
+export function replayWindowRoomSeconds(
+  env: Pick<ProcurementEnv, 'PROCUREMENT_IDEMPOTENCY_TTL_HOURS' | 'PROCUREMENT_CLOCK_SKEW_SECONDS'>,
+): number {
+  return (
+    env.PROCUREMENT_IDEMPOTENCY_TTL_HOURS * 3600 -
+    replayFenceBudgetMs(env.PROCUREMENT_CLOCK_SKEW_SECONDS) / 1000 -
+    env.PROCUREMENT_CLOCK_SKEW_SECONDS
+  );
+}
 
 /**
  * Loads and validates the environment, once, at startup.
@@ -467,7 +560,7 @@ export function loadProcurementEnv(source: NodeJS.ProcessEnv = process.env): Pro
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: procurementOperationBudgets },
+    { operationBudgets: procurementOperationBudgets, fixedMessages: PROCUREMENT_ENV_MESSAGES },
   );
 }
 

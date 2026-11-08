@@ -10,6 +10,7 @@ import type { WebSession } from '@/server/session';
 import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_AVAILABILITY_FORM } from './availability-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The two availability forms' write path (EXP-002 slice 7): declare, and revoke
@@ -55,7 +56,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -289,11 +290,11 @@ describe.each(CASES)('$name', (testCase) => {
       ],
       [
         { kind: 'UNKNOWN_OUTCOME', correlationId: 'c4' },
-        { kind: 'UNCONFIRMED', correlationId: 'c4' },
+        { kind: 'UNCONFIRMED', correlationId: 'c4', submissionId: expect.any(String) },
       ],
       [
         { kind: 'IN_PROGRESS', retryAfterSeconds: 1, correlationId: 'c5' },
-        { kind: 'UNCONFIRMED', correlationId: 'c5' },
+        { kind: 'UNCONFIRMED', correlationId: 'c5', submissionId: expect.any(String) },
       ],
     ])(
       'says %j as %j — never "nothing was saved" for a send that may have landed',

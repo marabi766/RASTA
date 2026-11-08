@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 
+import { actingAccessToken } from '@/test/session-token';
+
 /**
  * The dispute replay deadline (`dispute-replay.ts`): signed with its issuance,
  * and bound by the window as configured **now** as well as by its own expiry
@@ -26,7 +28,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'operator',
   organizationId: 'ORG-UNION-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-UNION-0001'),
   accessTokenExpiresAt: 1_900_000_600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

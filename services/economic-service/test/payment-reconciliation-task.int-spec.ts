@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import {
@@ -482,7 +483,7 @@ describe('payment reconciliation tasks (real database)', () => {
       const insert = () =>
         runUnscoped('the suite writes a task directly', () =>
           prisma.client.$executeRawUnsafe(
-            `INSERT INTO payment_reconciliation_task
+            eligibilityClockSql`INSERT INTO payment_reconciliation_task
                (id, organization_id, payment_intent_id, kind, next_attempt_at, correlation_id,
                 created_at, updated_at)
              VALUES ($1, $2, $3, 'REFUND', now(), 'COR-PRT', now(), now())`,
@@ -503,7 +504,7 @@ describe('payment reconciliation tasks (real database)', () => {
       const insert = (columns: string, values: string) =>
         runUnscoped('the suite writes a task directly', () =>
           prisma.client.$executeRawUnsafe(
-            `INSERT INTO payment_reconciliation_task
+            eligibilityClockSql`INSERT INTO payment_reconciliation_task
                (id, organization_id, payment_intent_id, kind, next_attempt_at, correlation_id,
                 created_at, updated_at${columns})
              VALUES ($1, $2, $3, 'REFUND', now(), 'COR-PRT', now(), now()${values})`,

@@ -1,5 +1,5 @@
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   invalidPayloadError,
@@ -89,8 +89,8 @@ export class DocumentRemovalConsumer implements OnModuleInit, OnApplicationShutd
   async handle(envelope: EventEnvelope): Promise<void | 'SKIPPED'> {
     if (envelope.eventName !== DOCUMENT_DELETED_EVENT) return 'SKIPPED';
 
-    const parsed = deletedSchema.safeParse(envelope.payload);
-    if (!parsed.success) throw invalidPayloadError(envelope, parsed.error, DELETED_FIELDS);
+    const parsed = legacyParse(deletedSchema, envelope.payload);
+    if (!parsed.success) throw invalidPayloadError(envelope, parsed.refusal, DELETED_FIELDS);
     if (!envelope.tenantId) throw missingTenantError(envelope);
     const { documentId, organizationId } = parsed.data;
     // The tenant the broker delivered it under and the organization it names

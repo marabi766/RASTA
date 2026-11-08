@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 import { REPLAY_FIELD } from '@/lib/form-fields';
+import { feedbackFor } from '@/test/release-query';
+import { RELEASE_FIELD } from '@/lib/release-messages';
 import { CSRF_FIELD } from '@/server/csrf';
 import {
   createReplayWindowSeconds,
@@ -21,6 +23,7 @@ import {
   type UnresolvedStore,
 } from '@/server/unresolved-request-store';
 import { readFlash } from '@/server/flash';
+
 import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
@@ -28,8 +31,8 @@ import {
   CONFIRM_DUPLICATE_FIELD,
   CONFIRM_DUPLICATE_VALUE,
   IDLE_CREATE_PROJECT_FORM,
-  RELEASE_FIELD,
 } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The create form's write path: the order is the assertion (session, CSRF,
@@ -77,7 +80,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'owner',
   organizationId: 'ORG-OWNER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-OWNER'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -337,7 +340,7 @@ describe('what comes back', () => {
       { kind: 'FAILED', status: 404, correlationId: 'c2' },
     ],
     [
-      { kind: 'UNAVAILABLE', status: 429, correlationId: 'c3' },
+      { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c3' },
       { kind: 'FAILED', status: 429, correlationId: 'c3' },
     ],
     // A 5xx may follow the commit: never "nothing was saved".
@@ -447,8 +450,8 @@ describe('the owning service is the guarantee; this portal’s timing is only UX
     // The reserve returned, then the process did not run again until after the deadline.
     stallTo(real + window + 110_000);
     expect(await submit(formData(VALID, { replay: real }))).toMatchObject({ kind: 'EXPIRED' });
-    jest.restoreAllMocks();
     expect(createProject).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
     // A never-ambiguous first attempt that provably did not go out is forgotten.
     expect(await held()).toEqual({ kind: 'NONE' });
   });
@@ -465,8 +468,8 @@ describe('the owning service is the guarantee; this portal’s timing is only UX
 
     stallTo(Date.now() + createReplayWindowSeconds() * 1000 + 110_000);
     expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
-    jest.restoreAllMocks();
     expect(createProject).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
     const after = await held();
     if (after.kind !== 'PENDING') throw new Error(after.kind);
     expect(after.request).toMatchObject({ id: before.request.id, key: before.request.key });
@@ -566,7 +569,10 @@ describe('an unresolved create outlives the form that sent it', () => {
   });
 
   it.each([
-    ['a proven refusal', { kind: 'UNAVAILABLE', status: 429, correlationId: 'c' }],
+    [
+      'a proven refusal',
+      { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'c' },
+    ],
     ['a forbidden', { kind: 'FORBIDDEN', correlationId: 'c' }],
     ['a service refusal', { kind: 'INVALID', fieldErrors: {}, message: 'm', correlationId: 'c' }],
   ])('is not made by %s', async (_name, result) => {
@@ -598,14 +604,32 @@ describe('an unresolved create outlives the form that sent it', () => {
       correlationId: 'refused',
       neverSent: true,
     });
-    await submit(first);
+    // And says so: the earlier attempt may have created the project (PR-830 r1 F1).
+    expect(await submit(first)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'refused' });
     expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
   });
+
+  it.each([
+    ['INVALID', { kind: 'INVALID', fieldErrors: {}, message: 'x', correlationId: 'denied' }],
+    ['NOT_FOUND', { kind: 'NOT_FOUND', correlationId: 'denied' }],
+    [
+      '429 RATE_LIMIT_EXCEEDED',
+      { kind: 'UNAVAILABLE', status: 429, code: 'RATE_LIMIT_EXCEEDED', correlationId: 'denied' },
+    ],
+  ])(
+    'a retry answered %s stays held and is said UNCONFIRMED (PR-830 r1 F1)',
+    async (_n, result) => {
+      const first = await sendAndLose();
+      createProject.mockResolvedValue(result);
+      expect(await submit(first)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'denied' });
+      expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
+    },
+  );
 
   it('keeps an earlier unresolved request when the retry is refused (e.g. by authorization before replay)', async () => {
     const first = await sendAndLose();
     createProject.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'denied' });
-    expect(await submit(first)).toMatchObject({ kind: 'FORBIDDEN' });
+    expect(await submit(first)).toEqual({ kind: 'UNCONFIRMED', correlationId: 'denied' });
     expect((await heldRequest()).key).toBe(first.get(SUBMISSION_FIELD));
     // And the held request is still the only one that may go out.
     createProject.mockClear();
@@ -653,10 +677,10 @@ describe('an unresolved create outlives the form that sent it', () => {
     jest.spyOn(Date, 'now').mockReturnValue(real + 15 * 60_000);
     try {
       expect(await submit(form)).toMatchObject({ kind: 'EXPIRED' });
+      expect(createProject).not.toHaveBeenCalled();
     } finally {
       jest.restoreAllMocks();
     }
-    expect(createProject).not.toHaveBeenCalled();
     expect((await held()).kind).toBe('PENDING');
   });
 
@@ -780,26 +804,43 @@ describe('an unresolved create outlives the form that sent it', () => {
       const form = new FormData();
       if (csrf !== null) form.set(CSRF_FIELD, csrf);
       for (const [name, value] of Object.entries(fields)) form.set(name, value);
-      return releaseUnresolvedCreate(form).catch((error: Error) => error.message);
+      return releaseUnresolvedCreate(form).then(
+        () => 'no redirect',
+        (error: Error) => error.message,
+      );
     };
     const tokenFor = async () => releaseToken(SESSION, scope, await heldRequest());
+    /** What a refused or lost release redirect says happened (signed, for this login); null for a plain redirect. */
+    const outcomeOf = (landing: string): string | null => {
+      expect(landing).toMatch(/^NEXT_REDIRECT:\/projects/);
+      const url = new URL(landing.slice('NEXT_REDIRECT:'.length), 'http://localhost');
+      return (
+        feedbackFor(
+          SESSION,
+          { surface: 'project-creation' },
+          url.searchParams.get('release'),
+          true,
+        ) ?? null
+      );
+    };
 
     it('does nothing without the confirmation that names the duplicate risk', async () => {
       await sendAndLose();
       const token = await tokenFor();
-      expect(await release({ [RELEASE_FIELD]: token })).toBe('NEXT_REDIRECT:/projects');
-      expect(await release({ [RELEASE_FIELD]: token, [CONFIRM_DUPLICATE_FIELD]: 'no' })).toBe(
-        'NEXT_REDIRECT:/projects',
-      );
+      expect(outcomeOf(await release({ [RELEASE_FIELD]: token }))).toBe('CONSENT_MISSING');
+      expect(
+        outcomeOf(await release({ [RELEASE_FIELD]: token, [CONFIRM_DUPLICATE_FIELD]: 'no' })),
+      ).toBe('CONSENT_MISSING');
       expect((await held()).kind).toBe('PENDING');
     });
 
     it('does nothing without the CSRF token', async () => {
       await sendAndLose();
-      await release(
+      const landing = await release(
         { [RELEASE_FIELD]: await tokenFor(), [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE },
         null,
       );
+      expect(outcomeOf(landing)).toBe('CSRF_REFUSED');
       expect((await held()).kind).toBe('PENDING');
     });
 
@@ -827,11 +868,13 @@ describe('an unresolved create outlives the form that sent it', () => {
       const bytes = JSON.stringify(rec);
       mem.records.set(key!, bytes);
       expect(
-        await release({
-          [RELEASE_FIELD]: token,
-          [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
-        }),
-      ).toBe('NEXT_REDIRECT:/projects?release=UNAVAILABLE');
+        outcomeOf(
+          await release({
+            [RELEASE_FIELD]: token,
+            [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
+          }),
+        ),
+      ).toBe('UNAVAILABLE');
       expect(mem.records.get(key!)).toBe(bytes);
       // …and the page cannot be used to send a fresh create either.
       createProject.mockClear();
@@ -847,11 +890,13 @@ describe('an unresolved create outlives the form that sent it', () => {
       await release({ [RELEASE_FIELD]: stale, [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE });
       const second = await sendAndLose({ ...VALID, title: 'عنوان دوم' });
       expect(
-        await release({
-          [RELEASE_FIELD]: stale,
-          [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
-        }),
-      ).toBe('NEXT_REDIRECT:/projects?release=STALE');
+        outcomeOf(
+          await release({
+            [RELEASE_FIELD]: stale,
+            [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
+          }),
+        ),
+      ).toBe('STALE');
       expect((await heldRequest()).key).toBe(second.get(SUBMISSION_FIELD));
     });
 
@@ -859,7 +904,7 @@ describe('an unresolved create outlives the form that sent it', () => {
       await sendAndLose();
       const fields: Record<string, string> = { [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE };
       if (name !== null) fields[RELEASE_FIELD] = name;
-      expect(await release(fields)).toBe('NEXT_REDIRECT:/projects?release=STALE');
+      expect(outcomeOf(await release(fields))).toBe('STALE');
       expect((await held()).kind).toBe('PENDING');
     });
   });
@@ -868,7 +913,10 @@ describe('an unresolved create outlives the form that sent it', () => {
     it.each([
       ['another person', { ...SESSION, subject: 'user-2' }],
       ['the same person after a new login', { ...SESSION, csrfToken: 'a-later-login' }],
-      ['the same person acting for another organization', { ...SESSION, organizationId: 'ORG-2' }],
+      [
+        'the same person acting for another organization',
+        { ...SESSION, organizationId: 'ORG-2', accessToken: actingAccessToken('ORG-2') },
+      ],
     ])('is not seen by %s', async (_name, other) => {
       await sendAndLose();
       expect(await readUnresolved(other, scope)).toEqual({ kind: 'NONE' });

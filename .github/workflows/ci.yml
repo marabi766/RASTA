@@ -1,3 +1,12 @@
+# Where service images are built and scanned (owner decision 2026-10-24):
+# on pushes to main (every image) and on merge-train runs, pull requests from
+# `mq/train-N` (the affected images); NOT on ordinary pull requests, which
+# still run the cheap early checks (scope-rule tests, Dockerfile pins, the
+# narrowing proof). The check "Images built and scanned" reports it. On an
+# ordinary pull request it passes WITHOUT scanning (by design): the merge host
+# must require it on the train pull request, not rely on it elsewhere. See the
+# contract above `container-scope` and docs/14-testing-strategy.md § 14.11.
+
 name: CI
 
 on:
@@ -26,15 +35,22 @@ env:
   # here `mc` is the entrypoint and needs none. Bump the two together.
   MINIO_IMAGE: 'cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1'
   MC_IMAGE: 'cgr.dev/chainguard/minio-client@sha256:b8b144ab34694ecea25aa352c4be9de4c26ee2a02701521dce02ee5593c57338'
+  # The Trivy CLI every scan and the one-per-run DB download use. This is
+  # trivy-action v0.36.0's own default, stated here so the DB schema the
+  # producer downloads and the CLI that reads it cannot drift apart.
+  TRIVY_VERSION: 'v0.70.0'
 
 jobs:
   # ---------------------------------------------------------------------------
   # Fast feedback. Everything here runs without Docker, so it fails in ~2
   # minutes rather than after a container pull.
   # ---------------------------------------------------------------------------
-  quality:
-    name: Lint, types and unit tests
+  quality-guards:
+    name: Static guards and CI wiring (part of Lint, types and unit tests)
     runs-on: ubuntu-latest
+    # 1/5 of the former single `quality` job (FU-111): every static script guard
+    # and workflow-wiring test, which need no build. The required check
+    # "Lint, types and unit tests" is the `quality` aggregate below.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -59,6 +75,12 @@ jobs:
       # Prisma clients are generated artefacts that typecheck depends on.
       - run: pnpm run db:generate
 
+      - name: Prepush affected-package selection
+        run: pnpm run test:prepush-scope
+
+      - name: Prepush CI parity guard
+        run: pnpm run test:prepush-parity
+
       - name: Product backlog and progress gate
         run: |
           pnpm run progress:check
@@ -77,6 +99,20 @@ jobs:
 
       - name: Outbox test eligibility clock guard
         run: pnpm run test:outbox-test-clock
+
+      - name: No database clock reaches a timestamp(3) column in the session's zone (FU-188)
+        run: |
+          pnpm run test:utc-clock-sites
+          pnpm run check:utc-clock-sites
+
+      - name: Disclosure guard reaches every Jest project and Playwright spec (#452)
+        run: pnpm run test:disclosure-guard-wiring
+
+      - name: Every HTTP service installs the strict query parser (FU-072)
+        run: pnpm run test:strict-query-parser-wiring
+
+      - name: Every ingress CORS policy carries every published header (FU-172)
+        run: pnpm run test:cors-published-headers
 
       - name: Local PostgreSQL defaults contract
         # `.env.example` must point host-side PostgreSQL at 127.0.0.1, not
@@ -124,6 +160,8 @@ jobs:
           pnpm run test:replay-dlq-lib
           pnpm run test:kafka-topic-limits-lib
           pnpm run test:disposable-broker-guard
+          pnpm run test:broker-default
+          pnpm run test:kafka-init-gate
           pnpm run check:kafka-topic-limits
 
       - name: Role passwords are distinct and checked before any role changes
@@ -273,6 +311,21 @@ jobs:
         # image that no earlier step of its job pre-pulls.
         run: pnpm run test:ci-pull-image
 
+      - name: Trivy DB download, freshness and scan wiring
+        # The shared Trivy DB (`trivy-db` job): both repositories tried with
+        # bounded retries, a stale, damaged, foreign or missing copy refused,
+        # and every Trivy scan wired to restore it, skip Trivy's own update,
+        # and fail (not skip) when the download did not happen, with the gate's
+        # severity, exit code and ignore files pinned.
+        run: pnpm run test:ci-trivy-db
+
+      - name: PostgreSQL connection monitor
+        # The sampler and report that every parallel-suite job prints its
+        # connection peak with (scripts/ci-pg-connections-lib.mjs), and the
+        # wiring: a raised max_connections proven by SHOW, the watcher started
+        # before the first suite, the report always() after it.
+        run: pnpm run test:ci-pg-connections
+
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
         # datasource UID on every query, every alert in the rules file, the
@@ -299,16 +352,118 @@ jobs:
           pnpm run ci:image-matrix
           pnpm run test:image-matrix
 
+      - name: No native URL parse of configuration (#385 r5)
+        # `new URL(value)` keeps the whole value on `.input`, which an uncaught
+        # throw prints — a database URL's password included. Configuration is
+        # parsed by @rasta/config's reader (packages/config/src/url-reader.js,
+        # fixed refusals); any other `new URL`/`URL.parse`/`URL.canParse`/
+        # `url.parse` of a non-literal in scripts/, packages/, services/, apps/
+        # and tests/ fails unless allow-listed with a reason. Also: no CLI flag
+        # takes a credential or URL, and every service base URL setting uses
+        # serviceUrlSchema (no credentials: fetch repeats them in its error).
+        # Static, the scanner's own form tests first.
+        run: pnpm run test:url-parsing-guard
+
+      - name: Credential transports refuse redirects (Q-155)
+        # The root scripts' credentialFetch over real HTTP: 301/302/303/307/308,
+        # same- and cross-origin, never followed (the target gets nothing) and
+        # nothing disclosed; every other status (304, a 201 Location) answered.
+        # It also pins the portal's copy, the E2E hand guard and nest-common's
+        # internalFetch to the same five statuses. Static, no build needed.
+        run: pnpm run test:credential-fetch
+
+      - name: Queued-event provenance is restored by the registration intake only (PR #483 r3 F2)
+        # An ordinary event's actor and correlation id are the verified
+        # request context's (`buildOutboxRow` takes no provenance). The one
+        # restoration path — restoreOutboxProvenance, buildRestoredOutboxRow,
+        # identity's enqueueRestoredEvent — may be named only by the files the
+        # guard allow-lists. Static.
+        run: pnpm run test:outbox-provenance-restoration-guard
+
+  quality-lint:
+    name: Format check and lint (part of Lint, types and unit tests)
+    runs-on: ubuntu-latest
+    # 2/5 (FU-111). Lint runs on EVERY package: `turbo run lint` carries no
+    # --filter/--affected and its turbo task is cache:false, so a new lint rule
+    # is applied to the whole repository in the pull request that adds it.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Prisma clients are generated artefacts that typecheck depends on.
+      - run: pnpm run db:generate
+
       - name: Format check
         run: pnpm run format:check
 
       - name: Lint
         run: pnpm run lint
 
+  quality-types:
+    name: Type check (part of Lint, types and unit tests)
+    runs-on: ubuntu-latest
+    # 3/5 (FU-111). The one gate the integration, migration, broker, E2E and
+    # browser jobs wait for: a tree that does not type-check cannot pass them,
+    # so they are not started on it. Lint, unit tests and the static guards run
+    # beside them and are demanded by `quality` (and so by the merge), not by
+    # these jobs: waiting for them would only add their minutes to the path.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Prisma clients are generated artefacts that typecheck depends on.
+      - run: pnpm run db:generate
+
       - name: Type check
         run: pnpm run typecheck
 
-      - name: Cache the Temporal time-skipping test server
+  quality-unit:
+    name: Unit tests (part of Lint, types and unit tests)
+    runs-on: ubuntu-latest
+    # 4/5 (FU-111). The step budget rule (JOB_SETUP_MINUTES) adds the unit-step
+    # concurrency step's 10-minute limit to the setup allowance: 15 + 10 = 25.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Prisma clients are generated artefacts that typecheck depends on.
+      - run: pnpm run db:generate
+
+      - &temporal_test_server_cache
+        name: Cache the Temporal time-skipping test server
         # marketplace-service's saga specs run on it, and it is a ~300 MB
         # download. Fetched on every run it made the specs' setup hook exceed
         # its timeout whenever the network was slow (2026-09-25).
@@ -317,10 +472,50 @@ jobs:
           path: ${{ runner.temp }}/temporal-test-server
           key: temporal-test-server-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      - name: Temporal specs share a cached test server
+        run: pnpm run test:ci-temporal-cache
+
+      - name: Unit-step concurrency is bounded
+        # Static tripwire for accidental changes to the root bound or a second
+        # literal unbounded unit run. Workflow code review covers dynamic commands
+        # and shell behavior; this does not prove execution or failure propagation.
+        # Bounded (task 310): main 3fa1beeb hung here for 43 minutes in a step that
+        # takes 74-87 s (418 s with two copies and other work on one host). The
+        # step 10 minutes; the test file 9 (--test-timeout, which the parent
+        # runner enforces on the whole file, spin or not); any one test 60 s,
+        # named on stderr (scripts/test-stall-watchdog.mjs). Every node --test
+        # of this job keeps a --test-timeout: scripts/ci-node-test-timeouts-lib.mjs.
+        timeout-minutes: 10
+        run: pnpm run test:unit-step-concurrency
+
       - name: Unit tests
-        run: pnpm run test:unit
+        # The root CI script limits Turbo package concurrency. Package-time sums
+        # decreased in the measured runs; step wall time was unchanged (~270 s).
+        run: pnpm run test:unit:ci
         env:
           TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
+
+  quality-build:
+    name: Build and built entry points (part of Lint, types and unit tests)
+    runs-on: ubuntu-latest
+    # 5/5 (FU-111). The production build and the checks that load what it built.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Prisma clients are generated artefacts that typecheck depends on.
+      - run: pnpm run db:generate
 
       - name: Build
         run: pnpm run build
@@ -330,6 +525,23 @@ jobs:
         # its environment, must exit naming the variable and never its value
         # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
         run: pnpm run test:boot-guard
+
+      - name: Outbox B2 refusals, run as the CLIs (ADR-051, #385 r4)
+        # The B2 backfill's and vacuum's option and environment refusals: the
+        # production interlock refuses an unrecognised NODE_ENV with a fixed
+        # text, and an owner credential named for no service is counted, never
+        # named — the library and both CLIs as processes, before any database
+        # is opened. After Build: the CLIs load the built packages.
+        run: pnpm run test:outbox-b2
+
+      - name: Database CLIs never print a configured URL (#385 r5)
+        # The migration verifiers, the seed guard, the libpq helpers and the
+        # runtime-preflight proof, run as they run, with a database URL whose
+        # username and password are sentinels and whose port is not one: each
+        # refuses with its fixed text, and neither sentinel appears in stdout,
+        # stderr or the thrown object. After Build: the seed guard and
+        # runtime-preflight load the built packages.
+        run: pnpm run test:config-disclosure
 
       - name: Service dev scripts load TypeScript as CommonJS, telemetry first
         # `pnpm dev` ran the services through swc-node's ES-module loader,
@@ -348,6 +560,43 @@ jobs:
         # kafkajs wrapped by the OpenTelemetry instrumentation: an import that
         # loads kafkajs before initTelemetry() leaves it untraced (audit-service).
         run: pnpm run test:telemetry-order
+
+  # ---------------------------------------------------------------------------
+  # The required check "Lint, types and unit tests": the aggregate of the five
+  # quality jobs above (FU-111; it was one job of that name until then). It
+  # runs always() and decides from every result, because a job skipped after
+  # one it needs failed reports "skipped", which a required check counts as
+  # passing. scripts/ci-quality-split-lib.mjs refuses a quality job it does not
+  # need, a changed name, and a verdict that passes on a failed, cancelled or
+  # skipped job.
+  # ---------------------------------------------------------------------------
+  quality:
+    name: Lint, types and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - quality-guards
+      - quality-lint
+      - quality-types
+      - quality-unit
+      - quality-build
+    if: ${{ always() }}
+    steps:
+      - name: Every quality job passed
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.NEEDS);
+            const names = Object.keys(needs);
+            for (const name of names) console.log(name + ": " + needs[name].result);
+            const failed = names.filter((name) => needs[name].result !== "success");
+            if (names.length === 0 || failed.length > 0) {
+              console.error("not passed: " + (failed.join(", ") || "no jobs at all"));
+              process.exit(1);
+            }
+          '
 
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
@@ -442,8 +691,11 @@ jobs:
   web-browser:
     name: Portal in a browser
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: quality
+    # 37 minutes (headroom measurement, last 20 green CI runs on main and
+    # merge-train branches): the job took up to 1462 s (p50 946 s), 81 % of
+    # 30. 37 is ceil(1462 s x 1.5 / 60).
+    timeout-minutes: 37
+    needs: quality-types
     permissions:
       contents: read
 
@@ -661,6 +913,11 @@ jobs:
           psql -v ON_ERROR_STOP=1 -h localhost -U rasta_marketplace -d rasta_marketplace
           -f apps/web/e2e/fixtures/marketplace-returns.sql
 
+      - name: Remove any earlier web build output
+        # The coverage check below reads the manifest of the build that follows, never an
+        # older `.next` (a fresh checkout has none; this keeps that true for any runner reuse).
+        run: rm -rf apps/web/.next
+
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
         # workspace dependencies. Services run from dist, never watch mode.
@@ -682,6 +939,26 @@ jobs:
           --filter=@rasta/supplier-service...
           --filter=@rasta/audit-service...
 
+      - name: Server-action coverage (compiler manifest)
+        # The compiler is the authority on which modules define server actions: the
+        # build above wrote every one it compiled to
+        # apps/web/.next/server/server-reference-manifest.json, and `pnpm build` wrote
+        # a receipt (build id, manifest SHA-256 and the layout the build itself reported)
+        # after `next build` exited 0, having deleted every earlier receipt and `.next` first.
+        # This fails when one is not covered by the refusal cases of
+        # write-session-refusal.spec.ts, when the receipt, BUILD_ID or manifest is missing
+        # or from different builds, when the build did not report the default `.next`
+        # layout, or on a Node that cannot run the check. apps/web's turbo build is never cached.
+        # Scope: refusal coverage of server actions only.
+        run: pnpm --filter @rasta/web run check:server-actions
+
+      - name: The portal build holds no test-only signer (@rasta/testing)
+        # The portal has no image in this repository; its deployable artifact
+        # is `.next`. Same check as the service images (job `containers`),
+        # on the build output itself; BUILD_ID must exist, so a missing
+        # build fails rather than passes (PR #514 r1 F1).
+        run: node scripts/testing-dev-only.mjs tree apps/web/.next BUILD_ID
+
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
         # document-service for a signed URL and put the bytes in object storage
@@ -697,7 +974,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -711,7 +988,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -772,14 +1049,17 @@ jobs:
           # maintenance-service's usage projection start their consumers in
           # their own onModuleInit, which Nest runs before AppModule's. Started
           # with its owner's URL, each must be gone before a consumer joins, a
-          # USAGE_RECORDED queued for it neither consumed nor committed. Before
-          # either starts, so neither group has run; the positive controls
+          # USAGE_RECORDED queued for it neither consumed nor committed — refused
+          # by the environment guard (the URL's user, #421 r1 F2), and, with its
+          # runtime URL while the migrator lends it CREATE, by the preflight.
+          # Before either starts, so neither group has run; the positive controls
           # follow the start step. scripts/runtime-preflight.e2e.mjs.
           ( asset_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service asset-service)" && \
             fleet_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)" && \
             eval "${asset_credentials}" && eval "${fleet_credentials}" && \
             PORT=3103 PREFLIGHT_STATE_DIR=/tmp/rasta-web-e2e-logs \
             PREFLIGHT_OWNER_URL=postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public \
+            DATABASE_URL_ASSET=postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public \
             node scripts/runtime-preflight.e2e.mjs refused asset-service )
           ( maintenance_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service maintenance-service)" && \
             fleet_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)" && \
@@ -1188,35 +1468,18 @@ jobs:
             -c 'promtool test rules /etc/prometheus/tests/*.test.yml'
 
   # ---------------------------------------------------------------------------
-  # Integration and the security tests that need a real database, in four
-  # parallel jobs, then one check under the old name.
-  #
-  # Until #273 this was one job, and it had grown to 33–34 minutes on main:
-  # run 38571702875 was cancelled at its 35-minute limit twice, and #271's
-  # first attempt failed when the construction coverage step took 481.5 s of
-  # its 480. The four jobs below run the same steps with the same commands,
-  # environments and per-step limits; each provisions its own throwaway
-  # PostgreSQL, broker and (where its suites read a bucket or scan a file)
-  # MinIO and ClamAV, the way the single job did. Measured on main run
-  # 38600385830, the single job's 1911 s split into about 11.5, 9.5, 11.5 and
-  # 10.5 minutes, setup (~4 minutes) included.
-  #
-  #   integration-suites             every package's integration suites, then
-  #                                  the PostgreSQL-only guards that ran last
-  #   integration-security           test independence, tenant isolation and
-  #                                  authorization, retry replay
-  #   integration-coverage-critical  coverage gates of the 85% band
-  #   integration-coverage           the other coverage gates
-  #
-  # `integration` itself keeps the name branch protection and the merge queue
-  # know, "Integration and security tests", and passes only when all four
-  # passed. `scripts/ci-integration-split.test.mjs` fails if a job named
-  # `integration-*` is left out of it, and holds every test and guard step to
-  # the inventory in `scripts/ci-integration-split-lib.mjs`: its exact
-  # command, the env it was declared with, and a limit of its own (the
-  # PostgreSQL guards and retry replay 5 minutes, test independence 8; they
-  # took 2–60 s on run 38676719548). No step here, and no job, may carry
-  # `if:` or `continue-on-error`.
+  # Eight explicit integration jobs feed the required aggregate below. Four
+  # suite jobs own disjoint package partitions (scripts/integration-partitions.mjs):
+  # identity plus small packages, construction, economic/procurement, and
+  # contract/inventory/marketplace/audit. Identity retains database guards.
+  # Security, both coverage jobs and backup drill retain their existing steps.
+  # New suite caps use baseline package measurements pending two-run validation;
+  # docs/ci-integration-shards.md records the baseline, budgets and evidence gaps.
+  # Every suite job provisions its own complete infrastructure using the same
+  # services and setup steps. YAML aliases share definitions, never runtime state.
+  # The aggregate keeps "Integration and security tests" and refuses any result
+  # other than success from every dependency. The split validator enforces exact
+  # commands, complete environments, effective filters and prerequisite services.
   #
   # Service containers rather than Testcontainers here: GitHub provisions them
   # before the job starts, which is faster and avoids docker-in-docker.
@@ -1224,16 +1487,27 @@ jobs:
   integration-suites:
     name: Integration tests and database guards
     runs-on: ubuntu-latest
-    # About 11.5 minutes on main run 38600385830 (setup ~4m, the suites 428 s,
-    # the guards 28 s). 25 is twice that, and the suites carry their own 12.
-    # History of the single job's limit: 60 (#197), 35 once reversibility
-    # moved out (#198), 50 as #273's stopgap until this split.
-    timeout-minutes: 25
-    needs: quality
+    # 13 suite + 54 guard/measurement limits + 8 setup allowance.
+    timeout-minutes: 75
+    needs: quality-types
 
-    services:
+    services: &integration_services
       postgres:
         image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        # `command` replaces the image's default CMD (GitHub documents
+        # `services.<id>.command`; actionlint 1.7.12 does not know the key yet).
+        # PostgreSQL's default `max_connections` is 100, 3 of them reserved for
+        # superusers. Up to ten packages' suites run at once here, each Prisma
+        # client with a pool of its own and many specs opening several, so
+        # that ceiling was one new pool away from "remaining connection slots
+        # are reserved for roles with the SUPERUSER attribute" in whichever
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
+        # The pools themselves are NOT changed: tests that depend on a pool's
+        # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
+        command: postgres -c max_connections=300
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -1273,20 +1547,25 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - &integration_setup_0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - &integration_setup_1
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: ${{ env.PNPM_VERSION }}
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - &integration_setup_2
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - &integration_setup_3
+        run: pnpm install --frozen-lockfile
 
-      - name: Provision databases, roles and extensions
+      - &integration_setup_4
+        name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
           # A throwaway cluster, bootstrapped as compose bootstraps its own:
@@ -1302,9 +1581,11 @@ jobs:
           psql -U rasta -d postgres -c "SELECT 1" >/dev/null
           bash infrastructure/docker/postgres/00-init-databases.sh
 
-      - run: pnpm run db:generate
+      - &integration_setup_5
+        run: pnpm run db:generate
 
-      - name: Start the authenticated Kafka broker
+      - &integration_setup_6
+        name: Start the authenticated Kafka broker
         # RUN-006, ADR-061 § 3: SASL_SSL with one SCRAM principal per service
         # and per-topic ACLs generated from the event contracts, started the
         # way compose starts it (infrastructure/docker/kafka/ci-up.sh), so a
@@ -1319,13 +1600,15 @@ jobs:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
 
-      - name: Pre-pull MinIO and ClamAV (retries transient registry errors)
+      - &integration_setup_7
+        name: Pre-pull MinIO and ClamAV (retries transient registry errors)
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
-      - name: Start MinIO and create the document bucket
+      - &integration_setup_8
+        name: Start MinIO and create the document bucket
         # `docker run` rather than a `services:` container, and not by
         # preference: a service container cannot override the image's command,
         # and `minio/minio` needs `server /data` to start at all. The e2e job
@@ -1346,7 +1629,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -1363,12 +1646,13 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
 
-      - name: Start ClamAV on a Unix socket
+      - &integration_setup_9
+        name: Start ClamAV on a Unix socket
         # The production transport, proven here rather than only described.
         #
         # ADR-049 makes a Unix domain socket on a volume shared inside one Pod
@@ -1415,7 +1699,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1466,7 +1750,8 @@ jobs:
             setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
           '
 
-      - name: Apply migrations
+      - &integration_setup_10
+        name: Apply migrations
         # `notification` and `audit` are registered in the three steps that
         # iterate **every** workspace service — this one, `Integration tests`
         # and `Tenant isolation` — so the branch that adds either service's
@@ -1534,22 +1819,54 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: PostgreSQL connection ceiling
+        # Proves the service's `command` took effect: a default 100 here would
+        # mean the override was ignored, and the suites below would run on the
+        # ceiling this job was changed to leave.
+        timeout-minutes: 2
+        run: |
+          ceiling="$(psql -X -At -c 'SHOW max_connections')"
+          echo "[pg-connections] SHOW max_connections = ${ceiling}"
+          test "${ceiling}" = 300
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+
+      - name: Watch PostgreSQL connections
+        # Samples pg_stat_activity once a second in the background until the
+        # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
+        timeout-minutes: 2
+        run: |
+          node scripts/ci-pg-connections-start.mjs
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Build the shared packages
+        run: pnpm exec turbo run build --filter='./packages/*'
+
       - name: Integration tests
-        # Two phases (`scripts/run-test-phases.mjs`): every package's
-        # integration suites in parallel, then identity-service's aggregation
-        # stress spec alone, once the rest have exited. Its 500-write proofs
-        # serialize on one hot row; beside the other suites on this one
-        # PostgreSQL they measured shared WAL load, not the upsert (docs/14
-        # § 14.3). Never `turbo run test:integration` directly — that runs
-        # the workspace phase only; `check:test-phases` enforces it.
-        # 16 is a STOPGAP (owner decision 2026-10-24): main measured 7m26s to
-        # 11m29s against the old 12. The sharding PR returns it to 12.
-        timeout-minutes: 16
+        # Identity stress runs after this shard's workspace tasks even on failure.
+        # Separate job PostgreSQL instances isolate every other shard's WAL.
+        timeout-minutes: 13
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
-          pnpm run test:integration
-        env:
+          pnpm run test:integration --shard=identity -- --verbose
+        env: &integration_suite_env
+          TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -1608,6 +1925,21 @@ jobs:
           # proven by the `clamav-signatures` job.
           DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
           REDIS_URL: redis://localhost:6379
+
+      - name: PostgreSQL connection peak
+        # Always, so a run that failed on the ceiling still shows how far over
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
+        if: always()
+        timeout-minutes: 2
+        run: node scripts/ci-pg-connections-report.mjs
+        env:
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
       - name: Analytics database privilege integration tests
         timeout-minutes: 5
@@ -1671,7 +2003,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -1689,7 +2021,14 @@ jobs:
         # unsplit service is — owned by its runtime role — must be reported in
         # full; after lib/service-privilege-split.bash it must be reported
         # clean, its rows intact and its trigger out of the runtime role's reach.
-        timeout-minutes: 5
+        # And #540 r1's exploits, each planted, reported, revoked and refused
+        # (check-db-runtime-privileges-boundary.pg.test.mjs).
+        # 18 = ceil(710 s x 1.5 / 60), an estimate (#540 r3): 709012e7's three
+        # files took 640 s here (CI run 41381414879); the R3-1 fixtures add
+        # ~125 s locally to the end-state file, and every split two psql
+        # calls (~0.6 s of ~8 s locally): ~70 s here at the x 2.6 ratio
+        # measured before (64e1b76e: 772 s locally against 296 s here).
+        timeout-minutes: 18
         run: pnpm run test:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1728,18 +2067,116 @@ jobs:
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
 
+  integration-construction:
+    name: Integration Construction
+    runs-on: ubuntu-latest
+    needs: quality-types
+    # Suite cap + the existing full-provisioning setup allowance (8 minutes).
+    timeout-minutes: 25
+    services: *integration_services
+    steps:
+      - *integration_setup_0
+      - *integration_setup_1
+      - *integration_setup_2
+      - *integration_setup_3
+      - *integration_setup_4
+      - *integration_setup_5
+      - *integration_setup_6
+      - *integration_setup_7
+      - *integration_setup_8
+      - *integration_setup_9
+      - *integration_setup_10
+      - name: Integration construction
+        timeout-minutes: 17
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm run test:integration --shard=construction -- --verbose
+        env: *integration_suite_env
+
+  integration-economic:
+    name: Integration Economic and procurement
+    runs-on: ubuntu-latest
+    needs: quality-types
+    # Suite cap + the existing full-provisioning setup allowance (8 minutes).
+    timeout-minutes: 24
+    services: *integration_services
+    steps:
+      - *integration_setup_0
+      - *integration_setup_1
+      - *integration_setup_2
+      - *integration_setup_3
+      - *integration_setup_4
+      - *integration_setup_5
+      - *integration_setup_6
+      - *integration_setup_7
+      - *integration_setup_8
+      - *integration_setup_9
+      - *integration_setup_10
+      - name: Integration economic
+        timeout-minutes: 16
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm run test:integration --shard=economic -- --verbose
+        env: *integration_suite_env
+
+  integration-contract:
+    name: Integration Contract and supply chain
+    runs-on: ubuntu-latest
+    needs: quality-types
+    # Suite cap + the existing full-provisioning setup allowance (8 minutes).
+    timeout-minutes: 23
+    services: *integration_services
+    steps:
+      - *integration_setup_0
+      - *temporal_test_server_cache
+      - *integration_setup_1
+      - *integration_setup_2
+      - *integration_setup_3
+      - *integration_setup_4
+      - *integration_setup_5
+      - *integration_setup_6
+      - *integration_setup_7
+      - *integration_setup_8
+      - *integration_setup_9
+      - *integration_setup_10
+      - name: Integration contract
+        timeout-minutes: 15
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm run test:integration --shard=contract -- --verbose
+        env: *integration_suite_env
+
   integration-security:
     name: Tenant isolation, test independence and retry replay
     runs-on: ubuntu-latest
-    # About 9.5 minutes on main run 38600385830 (setup ~4m, independence 57 s,
-    # tenant isolation 253 s, retry replay 22 s). Tenant isolation keeps its
-    # own 10.
-    timeout-minutes: 25
-    needs: quality
+    # FU-185: 20 successful main runs, 42091919570..42295730635 (Nov 5-6).
+    # Integration-only p95/max 349/352 s; 8 min gives >= 30% headroom.
+    # Setup plus job bookkeeping p95/max 324/328 s: ceil(1.3 * 328 / 60) = 8 min.
+    # Full run IDs, exclusions and command timings: docs/ci-tenant-isolation-fu185.md.
+    # 35 = independence 8 + isolation 8 + retry 5 + PostgreSQL 3 x 2 + setup 8.
+    timeout-minutes: 35
+    needs: quality-types
 
     services:
       postgres:
         image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        # `command` replaces the image's default CMD (GitHub documents
+        # `services.<id>.command`; actionlint 1.7.12 does not know the key yet).
+        # PostgreSQL's default `max_connections` is 100, 3 of them reserved for
+        # superusers. Up to ten packages' suites run at once here, each Prisma
+        # client with a pool of its own and many specs opening several, so
+        # that ceiling was one new pool away from "remaining connection slots
+        # are reserved for roles with the SUPERUSER attribute" in whichever
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
+        # The pools themselves are NOT changed: tests that depend on a pool's
+        # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
+        command: postgres -c max_connections=300
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -1754,6 +2191,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - *temporal_test_server_cache
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
@@ -1811,7 +2249,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
       - name: Start MinIO and create the document bucket
         # document-service's suites are in the tenant isolation step's
@@ -1823,7 +2261,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -1840,7 +2278,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -1865,7 +2303,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1955,6 +2393,41 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: PostgreSQL connection ceiling
+        # Proves the service's `command` took effect: a default 100 here would
+        # mean the override was ignored, and the suites below would run on the
+        # ceiling this job was changed to leave.
+        timeout-minutes: 2
+        run: |
+          ceiling="$(psql -X -At -c 'SHOW max_connections')"
+          echo "[pg-connections] SHOW max_connections = ${ceiling}"
+          test "${ceiling}" = 300
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+
+      - name: Watch PostgreSQL connections
+        # Samples pg_stat_activity once a second in the background until the
+        # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
+        timeout-minutes: 2
+        run: |
+          node scripts/ci-pg-connections-start.mjs
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
@@ -1988,14 +2461,11 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
 
-      - name: Tenant isolation and authorization tests
-        # Called out separately from the rest of the suite so a failure names
-        # itself in the job list. A tenant-isolation failure is a data leak,
-        # not a flaky test, and must never be waved through (AGENTS.md § 5).
-        #
-        # Both projects, because the strongest isolation evidence now lives in
-        # the integration suites — they prove the guard against a real database
-        # rather than a mock that would assume the behaviour.
+      - name: Tenant isolation and financial invariant tests
+        # One integration command proves isolation and financial invariants
+        # against real infrastructure. Unit-level tenant and authorization
+        # failures surface in quality-unit's unfiltered "Unit tests" step;
+        # both required aggregates block merge on failure (AGENTS.md § 5).
         #
         # The integration pattern names the invariants the product document
         # makes mandatory, one word each: `exclusivity` is fleet's one-driver
@@ -2013,19 +2483,20 @@ jobs:
         # happen, and `cap` is the anti-fraud reward ceiling. A failure in any
         # of them is a financial defect, not a flaky test.
         #
-        # Both commands go through the orchestrator, but only
-        # `test:integration` has the exclusive phase — the aggregation stress
-        # spec needs a real PostgreSQL, and `pnpm test` (so `pnpm verify`) must
+        # The orchestrator runs the aggregation stress spec in an exclusive
+        # phase: it needs real PostgreSQL, and `pnpm test` (so `pnpm verify`) must
         # run without one. So the stress spec is filtered and run alone by the
-        # second command, where `concurren` selects its two 500-write proofs
-        # (`check:test-phases`). The first command is unit suites only.
-        timeout-minutes: 10
+        # command, where `concurren` selects its two 500-write proofs
+        # (`check:test-phases`). Unit tests run unfiltered in quality-unit's
+        # "Unit tests" step; the required quality aggregate fails on its failure.
+        # ci-integration-split validates every test:unit and refuses passWithNoTests.
+        timeout-minutes: 8
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
-          pnpm run test -- --testNamePattern="(tenant|isolation|authorization|subtree visibility)"
-          pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)"
+          pnpm run test:integration -- --testNamePattern="(tenant|isolation|exclusivity|duplicate|provenance|immutab|balance|concurren|idempot|atomic|dispute|overspend|cap)" --verbose
         env:
+          TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -2104,13 +2575,32 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: PostgreSQL connection peak
+        # Always, so a run that failed on the ceiling still shows how far over
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
+        if: always()
+        timeout-minutes: 2
+        run: node scripts/ci-pg-connections-report.mjs
+        env:
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
+
   integration-coverage-critical:
     name: Coverage gates (construction, contract, inventory)
     runs-on: ubuntu-latest
     # About 11.5 minutes on main run 38600385830 (setup ~3.5m, construction
-    # 325 s, contract 105 s, inventory 54 s). Each gate keeps its own 8.
-    timeout-minutes: 25
-    needs: quality
+    # 325 s, contract 105 s, inventory 54 s). Each gate keeps its own limit
+    # (construction 11, the others 8).
+    # 35 minutes: the gates' limits sum to 27 and the steps without a limit
+    # took up to 281 s over the last 20 green runs (8 minutes at x 1.5); the
+    # job itself took up to 1041 s.
+    timeout-minutes: 35
+    needs: quality-types
 
     services:
       postgres:
@@ -2228,7 +2718,10 @@ jobs:
         # that serialises need and project commands, the tenant-bound foreign
         # key, the PostGIS validity check, the outbox coupling and the HTTP
         # surface exist only against a real database and broker.
-        timeout-minutes: 8
+        # 11 minutes: the slowest of the last 20 green CI runs took 429 s (p50
+        # 412 s), 89 % of the 8 it had, and run 40890559589 attempt 1 timed
+        # out. The limit is ceil(429 s x 1.5 / 60).
+        timeout-minutes: 11
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -2283,9 +2776,15 @@ jobs:
     name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement, analytics)
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
-    # 399 s together, economic the longest at 115 s). Each keeps its own 8.
-    timeout-minutes: 25
-    needs: quality
+    # 399 s together, economic the longest at 115 s). Each keeps its own 8, but
+    # marketplace 14: it measures the workflow bundle (FU-157).
+    # 86 minutes: nine gates at 8 minutes each is 72, plus 6 for marketplace's 14,
+    # and the steps without a limit took up to 310 s over the last 20 green runs
+    # (8 minutes at x 1.5). The job itself took up to 1326 s (p50 1224 s) and the
+    # slowest gate, economic, 285 s, so 86 is a ceiling that no healthy run comes
+    # near; the gates' own limits are what catch a hang.
+    timeout-minutes: 86
+    needs: quality-types
 
     services:
       postgres:
@@ -2320,6 +2819,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - *temporal_test_server_cache
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
@@ -2377,7 +2877,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
       - name: Start MinIO and create the document bucket
         # For the document coverage gate. Same images, bucket and private
@@ -2388,7 +2888,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -2405,7 +2905,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -2429,7 +2929,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -2556,12 +3056,13 @@ jobs:
         # number far below the truth and fail a gate that should pass. In band
         # for the same reason every other integration step here is: the suites
         # share one database.
-        timeout-minutes: 8
+        timeout-minutes: 14
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
           pnpm --filter @rasta/marketplace-service run test:coverage
         env:
+          TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
@@ -2740,7 +3241,7 @@ jobs:
   integration-backup-drill:
     name: Backup restore PostgreSQL drill
     runs-on: ubuntu-latest
-    needs: quality
+    needs: quality-types
     timeout-minutes: 10
     services:
       postgres:
@@ -2796,6 +3297,9 @@ jobs:
     timeout-minutes: 5
     needs:
       - integration-suites
+      - integration-construction
+      - integration-economic
+      - integration-contract
       - integration-security
       - integration-coverage-critical
       - integration-coverage
@@ -2850,7 +3354,7 @@ jobs:
     # Setup about 2 minutes; the heaviest shard's chain about 6.2 minutes on
     # that run's per-service times. The step has its own, tighter bound.
     timeout-minutes: 20
-    needs: quality
+    needs: quality-types
     strategy:
       # Every shard reports, so one red service does not hide another.
       fail-fast: false
@@ -3034,7 +3538,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -3052,7 +3556,7 @@ jobs:
     # Setup about 2.5 minutes, the by-name verifiers about 5.3 minutes, the
     # guards about 1.2 minutes on main run 40006639729.
     timeout-minutes: 20
-    needs: quality
+    needs: quality-types
     services:
       postgres:
         image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
@@ -3261,7 +3765,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -3309,7 +3813,7 @@ jobs:
   #
   # RUN-006's broker tests and the DLQ replay tool's, apart from every other
   # suite: a fresh broker, which nothing but these tests writes, declared
-  # throwaway (REPLAY_TEST_DISPOSABLE_BROKER), so the replay test may delete
+  # throwaway (RASTA_DISPOSABLE_BROKER), so the replay test may delete
   # the records retention would — only records it wrote itself, which it
   # checks before deleting any (round 2 on #144). Their allowed writes are
   # marker records on real topics; no other suite runs here to read them.
@@ -3318,7 +3822,7 @@ jobs:
     name: Broker authorisation
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: quality
+    needs: quality-types
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -3366,7 +3870,7 @@ jobs:
         # default message.max.bytes and puts back what was there — and the
         # known escape (i) pinned: a GZIP level-9 record whose dead letter
         # does not fit leaves the consumer crashed with its offset uncommitted
-        # (it leaves that record on rasta.organization.v1). Those two refuse
+        # (it leaves that record on rasta.organization.v1). All four refuse
         # to start without RASTA_DISPOSABLE_BROKER=1, declared here only: this
         # job's broker is its own (ci-up.sh), thrown away with the runner.
         # All refuse to run without the bootstrap's environment rather than
@@ -3375,10 +3879,11 @@ jobs:
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh admin)"
           eval "${kafka_credentials}"
           pnpm exec turbo run build --filter=@rasta/nest-common
-          REPLAY_TEST_DISPOSABLE_BROKER=1 pnpm run test:replay-dlq-broker
+          pnpm run test:replay-dlq-broker
           pnpm run test:kafka-acl-broker
-          RASTA_DISPOSABLE_BROKER=1 pnpm run test:kafka-limits-broker
+          pnpm run test:kafka-limits-broker
         env:
+          RASTA_DISPOSABLE_BROKER: '1'
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
 
@@ -3397,7 +3902,7 @@ jobs:
     name: End-to-end (economic critical path)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: quality
+    needs: quality-types
 
     services:
       postgres:
@@ -3457,7 +3962,7 @@ jobs:
             quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
             temporalio/admin-tools:1.26.2@sha256:37e2e33dbd7b86a12fa1daecf48f5b42544956ae503a83bd45460587f25591f2 \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
       - name: Start Keycloak with the platform realm
         # A `docker run` rather than a service container, because the realm
@@ -3666,7 +4171,7 @@ jobs:
             --tmpfs /data:uid=65532,gid=65532 \
             -e MINIO_ROOT_USER=rasta_minio_admin \
             -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
-            "$MINIO_IMAGE" server /data --address ':9000'
+            "${{ env.MINIO_IMAGE }}" server /data --address ':9000'
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then break; fi
@@ -3677,7 +4182,7 @@ jobs:
           mc() {
             docker run --rm --network host \
               -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
-              "$MC_IMAGE" -C /tmp/.mc "$@"
+              "${{ env.MC_IMAGE }}" -C /tmp/.mc "$@"
           }
           mc mb --ignore-existing rasta/rasta-documents
           mc anonymous set none rasta/rasta-documents
@@ -3703,7 +4208,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
 
           for attempt in $(seq 1 60); do
             if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
@@ -3827,7 +4332,9 @@ jobs:
           unset KAFKA_SECRETS_DIR
           mkdir -p /tmp/rasta-logs
 
-          # D-045 (Codex on #178): started with its owner's URL, a service is gone
+          # D-045 (Codex on #178): started with its owner's URL — refused by the
+          # environment guard (#421 r1 F2) — or with its runtime URL while the
+          # migrator lends it CREATE — refused by the preflight — a service is gone
           # before Nest builds a single provider. audit-service: a Kafka event
           # queued for its domain projector is neither consumed nor committed.
           # identity-service: its Keycloak re-projection consumer, which starts
@@ -3845,6 +4352,7 @@ jobs:
             eval "${identity_credentials}" && \
             PORT=3101 \
             PREFLIGHT_OWNER_URL=postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public \
+            DATABASE_URL_IDENTITY=postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public \
             node scripts/runtime-preflight.e2e.mjs refused identity-service )
 
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \
@@ -4081,6 +4589,183 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # The vulnerability DB for every Trivy scan of this run, downloaded once.
+  #
+  # Evidence (main run 40163416703 at 61a13bbc, #380): 10 of 17 image scans
+  # failed, and the rerun failed again on api-gateway, with
+  #   FATAL ... failed to download artifact from mirror.gcr.io/aquasec/trivy-db:2:
+  #   oci download error: failed to fetch the layer: GET
+  #   https://mirror.gcr.io/artifacts-downloads/...: unexpected status code 404
+  # Trivy falls back to ghcr.io only for errors it recognises as transient or
+  # BLOB_UNKNOWN; a 404 on the layer is neither, so ghcr.io was never tried.
+  # trivy-action's daily cache did not prevent it: every job restored
+  # `cache-trivy-<date>` and still logged "Need to update DB" and downloaded
+  # 129 MB itself, seventeen times plus the ClamAV scan's.
+  #
+  # Here the download is `trivy image --download-db-only` against
+  # mirror.gcr.io and then ghcr.io, retrying on ANY failure (3 attempts per
+  # repository, 5 s and 15 s apart), and the copy is published as an
+  # artifact named by a key of this run. The scans download exactly that
+  # artifact (`.github/actions/restore-trivy-db`), set TRIVY_SKIP_DB_UPDATE,
+  # and fail, rather than scan
+  # or skip, unless the copy is the one this producer validated. Skip mode
+  # checks the schema only, never the age or the content, so
+  # scripts/ci-trivy-db-lib.mjs does, at one boundary used by this job before
+  # it publishes and by every scan before it scans (PR #435 rounds 2 and 3):
+  #  - metadata: Version 2, strict RFC 3339 UpdatedAt / NextUpdate /
+  #    DownloadedAt, UpdatedAt at most 24 h old and not in the future;
+  #  - trivy.db: a real bbolt file, walked completely (both meta pages, then
+  #    every reachable branch, leaf, nested and inline bucket, every page
+  #    owned exactly once, within fixed limits and a deadline), holding
+  #    non-empty `vulnerability`, `data-source` and the advisory buckets of
+  #    each ecosystem the images contain: `alpine 3.24` (every image's base),
+  #    npm and cargo, with no empty package bucket and one known advisory per
+  #    ecosystem rated HIGH or CRITICAL (a hollow DB makes Trivy exit 0 with
+  #    no findings);
+  #  - here only, Trivy itself scans a canary root like an image (apk
+  #    zlib 1.2.12-r0, node_modules lodash 4.17.20, Cargo.lock tokio 1.8.0
+  #    on Alpine 3.24) and must report CVE-2022-37434, CVE-2021-23337 and
+  #    CVE-2021-45710, each HIGH or CRITICAL;
+  #  - provenance: this key, run and attempt, an allowed repository, and the
+  #    sha256 of both files, so a scan accepts exactly the validated bytes.
+  # A copy that fails any of this, or whose inspection errs or overruns its
+  # deadline, is a failed attempt: the next attempt or repository gets its
+  # turn. The scan gate is unchanged: same images, severity CRITICAL,HIGH,
+  # exit-code 1, ignore-unfixed and ignore files.
+  #
+  # Time: each repository owns a 180 s window the other cannot spend, every
+  # child is killed at its deadline (SIGTERM to its process group, SIGKILL
+  # 5 s later even if the leader already exited; Trivy also gets a matching
+  # --timeout), and one copy's in-process checks stop at 90 s, so a stalled
+  # mirror cannot keep ghcr.io from its turn. fetch <= 2 x (180 s + 90 s) =
+  # 540 s <= the step's 10 min; with checkout 2 + setup-trivy 3 + pack 2 +
+  # upload 3 min that is this job's 20 min, and each step has its own limit
+  # (measured on the real 1.64 GB DB: one copy's validation 22.4 s, a
+  # consumer's check 10 s, pack 3 s, unpack 5 s; see BUDGET in the script).
+  #
+  # Transport: an artifact, not actions/cache. Run 40191748744 saved the DB
+  # to the cache at 12:07, the ClamAV scan restored it at 12:08, and by 12:40,
+  # when the image scans asked for it, it had been evicted: the repository's
+  # caches stood at 10.43 GB against GitHub's 10 GB limit after another
+  # PR's image builds wrote ~10 GB of buildkit layers (`cache-to: type=gha,
+  # mode=max`) at 12:18-12:20, and eviction takes the least recently used
+  # entry. Artifacts are stored apart from that limit and are immutable;
+  # the download is by exact name, and the provenance check still binds the
+  # copy to this key. The archive (ustar + zstd, ~100 MB instead of 1.6 GB)
+  # is written by `ci-trivy-db.mjs pack` and admitted by `unpack`, the one
+  # admission every scan shares (round 2's shell checks failed open when
+  # `grep -q` closed its pipe early, PR #435 r2 R2-1).
+  #
+  # The DB lives in runner.temp, outside the checkout: in the workspace it
+  # would be part of every image's build context (`COPY . .`), as it was in
+  # round 1 (context 33.84 MB -> 1.67 GB).
+  #
+  # No `needs`: it starts with the fastest jobs, so the scans that wait for
+  # it (the ClamAV scan now; the image scans only after quality, integration
+  # and e2e) never wait on it for long.
+  #
+  # Reruns: the key carries the run attempt, because artifact names are
+  # unique within a run. "Re-run failed jobs" keeps this job's earlier output
+  # and so its earlier key; a scan on a later attempt downloads that
+  # artifact of the same run and accepts the copy the key names (expected run
+  # and attempt are read from the key, never from the scan's own attempt).
+  # Once that copy is older than 24 h (the artifact is kept one day) the
+  # scans fail and the run must be re-run in full, which makes this job
+  # publish a new key.
+  #
+  # The Java DB is not fetched: no scan log of main run 40163416703 contains
+  # a Java DB line (no .jar in any image), Trivy would fetch it on demand
+  # exactly as before, and TRIVY_SKIP_JAVA_DB_UPDATE is deliberately not set,
+  # so analyzer coverage is identical.
+  # ---------------------------------------------------------------------------
+  trivy-db:
+    name: Trivy vulnerability DB (downloaded once)
+    runs-on: ubuntu-latest
+    # 21: the seven steps' limits sum to 20 and the runner's own set-up and
+    # completion took up to 5 s (1 minute at x 1.5).
+    timeout-minutes: 21
+    # Every run downloads the DB, ordinary pull requests included: the required
+    # ClamAV image scan (`clamav-signatures`) reads it too, so skipping this job
+    # on a PR that builds no service image broke that check. No `if`, and no
+    # `needs`: it starts with the fastest jobs.
+    outputs:
+      key: ${{ steps.fetch.outputs.key }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 1
+        with:
+          # Everything the fetch imports (node built-ins only besides these):
+          # pinned by a test that follows the imports.
+          sparse-checkout: |
+            scripts/ci-trivy-db.mjs
+            scripts/ci-trivy-db-lib.mjs
+            scripts/trivy-db-check/go.mod
+            scripts/trivy-db-check/go.sum
+            scripts/trivy-db-check/main.go
+            scripts/trivy-db-check/main_test.go
+            scripts/fixtures/trivy-db/real.db
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Go for the official bbolt checker
+        timeout-minutes: 1
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.24.9'
+          cache: false
+
+      - name: Build and test the official bbolt checker
+        timeout-minutes: 2
+        working-directory: scripts/trivy-db-check
+        env:
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: |
+          set -euo pipefail
+          go mod download
+          go mod verify
+          go vet ./...
+          go test -v ./...
+          go build -o "$RUNNER_TEMP/trivy-db-check-bin/trivy-db-check" .
+          echo "$RUNNER_TEMP/trivy-db-check-bin" >> "$GITHUB_PATH"
+
+      - name: Install Trivy
+        timeout-minutes: 2
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Download and validate the DB (mirror.gcr.io, then ghcr.io)
+        # Writes `key=trivy-db-<run id>-<run attempt>` to GITHUB_OUTPUT only
+        # after the copy passed every check.
+        id: fetch
+        timeout-minutes: 10
+        env:
+          TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
+        run: node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"
+
+      - name: Pack the DB
+        # The validated directory exactly as it is, provenance included, as
+        # the archive the scans' `unpack` admits; the scans then run the same
+        # check.
+        timeout-minutes: 2
+        env:
+          TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
+          TRIVY_DB_ARCHIVE: ${{ runner.temp }}/trivy-db.tar.zst
+        run: node scripts/ci-trivy-db.mjs pack "$TRIVY_DB_DIR" "$TRIVY_DB_ARCHIVE"
+
+      - name: Publish the DB as this run's artifact
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.fetch.outputs.key }}
+          path: ${{ runner.temp }}/trivy-db.tar.zst
+          if-no-files-found: error
+          # Already zstd-compressed.
+          compression-level: 0
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
   # The malware scanner's own supply chain (ADR-049).
   #
   # Separate from `integration` on purpose, and the separation is the point.
@@ -4101,8 +4786,20 @@ jobs:
     name: ClamAV image scan and signature freshness
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Waits for the one DB download, and only for that. `!cancelled()` rather
+    # than the default success(): if the download failed this job still runs
+    # and fails at its restore step, red, never skipped (a required check
+    # counts "skipped" as passing).
+    needs: [trivy-db]
+    if: ${{ !cancelled() }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Restore the shared Trivy DB
+        id: trivy-db
+        uses: ./.github/actions/restore-trivy-db
+        with:
+          key: ${{ needs.trivy-db.outputs.key }}
 
       - name: Pull the pinned image
         # By digest, so this job scans exactly what the integration job, the
@@ -4113,9 +4810,23 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci-pull-image.sh \
-            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
-          docker tag clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6 \
+            clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
+          docker tag clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d \
             rasta/clamav-pinned:ci
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Check the Trivy DB is still fresh
+        # Skip mode below validates the DB's schema and never its age or
+        # content; the same check as at restore.
+        env:
+          TRIVY_DB_DIR: ${{ steps.trivy-db.outputs.dir }}
+          TRIVY_DB_KEY: ${{ needs.trivy-db.outputs.key }}
+        run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"
 
       - name: Scan the image
         # The same severity and the same `exit-code: 1` as every Rasta image
@@ -4123,15 +4834,21 @@ jobs:
         # else's. When it fires, the fix is to bump the pinned digest, which is
         # a reviewable edit rather than a silent drift. Like that gate, it
         # rejects fixable HIGH/CRITICAL only (`ignore-unfixed`).
+        #
+        # Only the DB's origin changed (the `trivy-db` job, see there): the
+        # action neither installs Trivy nor restores its own daily DB cache,
+        # and Trivy is told not to download one.
+        env:
+          TRIVY_SKIP_DB_UPDATE: 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: 'true'
+          cache: 'false'
+          cache-dir: ${{ steps.trivy-db.outputs.dir }}
           image-ref: rasta/clamav-pinned:ci
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
-          # One time-boxed exception, expiring 2026-10-31 (see the file and
-          # ADR-049). This input appears on this step only.
-          trivyignores: .trivyignore.clamav
 
       - name: Record the engine and signature versions the pin carries
         # Evidence rather than decoration: ADR-049 requires the image source
@@ -4169,7 +4886,40 @@ jobs:
           grep -Eq 'is up-to-date|updated \(version' /tmp/freshclam.log
 
   # ---------------------------------------------------------------------------
-  # Container build and image scan: affected images on PRs, every image on main.
+  # Container build and image scan. Owner decision 2026-10-24: service images
+  # are built and Trivy-scanned where the merge is decided, not on every pull
+  # request run.
+  #
+  #   run                                   images built and scanned
+  #   ------------------------------------  -------------------------------------
+  #   push to main                          every image (container-scope --all)
+  #   pull request from mq/train-N          the affected images, as a PR used to
+  #     (the PM merge train)                  (ALL on any classification error;
+  #                                           none only for docs/ and tests/)
+  #   any other pull request                none: "Images built and scanned"
+  #                                           reports success and says so
+  #   anything unrecognised (event, branch, missing or malformed metadata,
+  #   a fork or malformed name under mq/)   every image
+  #
+  # The train is detected from the pull request's head ref in this repository,
+  # never from a label (scripts/container-scope-lib.mjs `classifyRun`). Cheap
+  # early checks stay on every pull request: the quality job's scope-rule
+  # tests (with their BuildKit .dockerignore proof on a scratch fixture), the
+  # Dockerfile pin checks, and the filtered-install narrowing proof below.
+  #
+  # Contract of the check named "Images built and scanned" (job `images`):
+  #   - On an ordinary pull request it PASSES WITHOUT scanning, by design.
+  #     A green aggregate there is not scan evidence.
+  #   - The scan evidence is the aggregate on the mq/train-N pull request (the
+  #     tested prefix) and the push run on main. On those it is success only
+  #     when every selected image was built and scanned (a skipped, cancelled
+  #     or failed image job fails it), or when a train selected none for
+  #     docs/tests only.
+  #   - So the merge host must require the aggregate to PASS (present, not
+  #     skipped) on the train pull request, and must not merge ordinary pull
+  #     requests outside the train. This file cannot enforce that: it is host
+  #     configuration outside the repository, and nothing here states what the
+  #     host does today. Docs/14 § 14.11 has the table.
   # ---------------------------------------------------------------------------
   container-scope:
     name: Images to build and scan
@@ -4177,14 +4927,15 @@ jobs:
     timeout-minutes: 5
     outputs:
       services: ${{ steps.scope.outputs.services }}
+      mode: ${{ steps.scope.outputs.mode }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The pull request's base must be present to diff against.
           fetch-depth: 0
 
-      # Reuse the existing root YAML parser only for PR analysis. --all on a
-      # main push still runs directly, without installing dependencies.
+      # Reuse the existing root YAML parser only for PR analysis. A push to
+      # main (--all) still runs directly, without installing dependencies.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         if: github.event_name == 'pull_request'
         with:
@@ -4204,38 +4955,57 @@ jobs:
         if: github.event_name == 'pull_request'
         run: node scripts/container-scope-proof.mjs
 
-      - name: Decide which images this change affects
+      - name: Decide which images this run builds and scans
         id: scope
-        # L7-35: images were built and scanned only after merge, so a broken
-        # or vulnerable image was found on main. A pull request now builds the
-        # images it can affect (scripts/container-scope-lib.mjs explains the
-        # rule); a push to main still builds all of them.
+        # L7-35 and the 2026-10-24 decision (see the header above). The event
+        # reaches the script only through env: a branch name is untrusted text
+        # and is never interpolated into the shell. Any failure here fails the
+        # job, so the aggregate check cannot be satisfied by a missing answer.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            services="$(node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
-          else
-            services="$(node scripts/container-scope.mjs --all)"
-          fi
-          echo "Images to build: ${services}"
-          echo "services=${services}" >> "$GITHUB_OUTPUT"
+          node scripts/container-scope.mjs --run
 
   containers:
     name: Build and scan images
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # E2E joins the list: main must stay deployable, and an image built from a
-    # commit whose critical financial path was never exercised is not something
-    # to publish (AGENTS.md § 6, § 7). The same gates hold on a pull request,
-    # which now builds and scans the images it touches before merge (L7-35).
-    needs: [container-scope, quality, security, integration, migration-reversibility, e2e]
-    if: needs.container-scope.outputs.services != '[]'
+    # Building and scanning an image needs the image selection and the shared
+    # Trivy DB, and nothing a test produces, so it runs beside the tests and
+    # not after them (FU-111: it was the last 10 minutes of a 62-minute train
+    # run). No test gate sits here any more: the `images` job below demands
+    # every job this one used to wait for (quality, security, integration,
+    # migration-reversibility, e2e), so a train cannot pass on images alone, and
+    # a failed test still turns the required "Images built and scanned" red. The
+    # images are built with push: false, so an image built beside a failing test
+    # is discarded with the run; nothing is published from here.
+    # `trivy-db` is needed for its output, not as a gate: a failed download
+    # must fail the scans, not skip them (a required check counts "skipped"
+    # as passing), so the condition leaves the download's result to the
+    # restore step. An ordinary pull request selects none, so this job is
+    # skipped there and the "Images built and scanned" check below says why.
+    needs: [container-scope, trivy-db]
+    if: >-
+      ${{ !cancelled()
+      && needs.container-scope.outputs.services != '[]'
+      && needs.container-scope.result == 'success' }}
 
     strategy:
       fail-fast: false
+      # Off the critical path now, so capped: 17 images at once would put 17
+      # runners beside the ~20 test jobs of the same run against the plan's 40
+      # concurrent jobs, which merge-train and pull-request runs share.
+      max-parallel: 6
       matrix:
-        # Every service with a Dockerfile on a push to main; on a pull request,
-        # the ones the change can affect. Derived from the repository rather
+        # Every service with a Dockerfile on a push to main; on a merge-train
+        # run, the ones the change can affect; on an ordinary pull request,
+        # none (the job is skipped). Derived from the repository rather
         # than listed here: asset-service, fleet-service and document-service
         # were each absent from a hand-kept list for one or more releases, so
         # their images went unbuilt and unscanned (PROJECT_MEMORY § 22).
@@ -4243,6 +5013,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Restore the shared Trivy DB
+        # First, so a missing or stale DB fails the job in seconds rather than
+        # after the build.
+        id: trivy-db
+        uses: ./.github/actions/restore-trivy-db
+        with:
+          key: ${{ needs.trivy-db.outputs.key }}
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -4259,6 +5037,34 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
+      - name: The image holds no test-only signer (@rasta/testing)
+        # PR #514 r1 F1: checked on what the image holds, not on how its
+        # Dockerfile is written. The final filesystem is exported and any
+        # @rasta/testing manifest or store entry, the minter's refusal text or
+        # its name outside TypeScript source fails the job; so does a docker
+        # or tar failure, or an export without the image's entry point. This
+        # job runs wherever an image is built (every image on main, the
+        # affected ones on a merge-train run), so the check holds for every
+        # image before it can be deployed. Node built-ins only: no install.
+        env:
+          IMAGE: rasta/${{ matrix.service }}:${{ github.sha }}
+        run: node scripts/testing-dev-only.mjs image "$IMAGE"
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Check the Trivy DB is still fresh
+        # Skip mode below validates the DB's schema and never its age or
+        # content, and the build above took minutes; the same check as at
+        # restore.
+        env:
+          TRIVY_DB_DIR: ${{ steps.trivy-db.outputs.dir }}
+          TRIVY_DB_KEY: ${{ needs.trivy-db.outputs.key }}
+        run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"
+
       - name: Scan image
         # Tags on this action carry a `v` prefix; the unprefixed `0.28.0` this
         # once pinned does not resolve, so the job died at "Set up job" before
@@ -4274,13 +5080,61 @@ jobs:
         # .trivyignore entry per CVE with an owner and an expiry date, and the
         # gate run without ignore-unfixed) is the recorded follow-up (L7-35
         # review).
+        #
+        # Only the DB's origin changed (main run 40163416703: 10 of 17 scans
+        # died on a mirror.gcr.io 404 while downloading their own copy): the
+        # `trivy-db` job downloads it once, the action neither installs Trivy
+        # nor restores its own daily DB cache, and Trivy is told not to
+        # download one. Severity, exit code, ignore-unfixed, ignore file and
+        # image are as before.
+        env:
+          TRIVY_SKIP_DB_UPDATE: 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: 'true'
+          cache: 'false'
+          cache-dir: ${{ steps.trivy-db.outputs.dir }}
           image-ref: rasta/${{ matrix.service }}:${{ github.sha }}
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
-          # One time-boxed exception, expiring 2026-10-30: the zod advisory
-          # the dependency audit already ignores until the zod 4 migration
-          # (see the file and pnpm-workspace.yaml auditConfig).
-          trivyignores: .trivyignore.services
+
+  # The check the merge train and branch protection can require by this name.
+  # always(): a job skipped because a job it needs failed reports "skipped",
+  # which a required check counts as passing, so this decides itself from the
+  # results (scripts/container-scope-lib.mjs `imagesGateVerdict`):
+  #   - ordinary pull request: success, "images are built on the train";
+  #   - main or a train run: success only when `containers` succeeded for
+  #     every selected image, so a skipped, cancelled or failed image job (or
+  #     a missing one) is red, AND quality, security, integration,
+  #     migration-reversibility and e2e all succeeded (the gates `containers`
+  #     itself waited for before FU-111; they are needs of this job now, so the
+  #     images are built beside the tests while this verdict still demands
+  #     them); a train that selected none (docs/tests only) is the single
+  #     skipped case allowed.
+  images:
+    name: Images built and scanned
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - container-scope
+      - containers
+      - quality
+      - security
+      - integration
+      - migration-reversibility
+      - e2e
+    if: ${{ always() }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            scripts/container-scope-gate.mjs
+            scripts/container-scope-lib.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Every selected image was built and scanned
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/container-scope-gate.mjs

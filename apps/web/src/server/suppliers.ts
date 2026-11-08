@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
 import type { WebSession } from './session';
@@ -152,7 +153,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);
@@ -176,15 +177,23 @@ export interface SupplierListQuery {
   readonly status?: string;
   readonly capability?: string;
   readonly cursor?: string;
+  /** A page size other than the screens' own; the service caps it at 200. */
+  readonly limit?: number;
+  /**
+   * Only these organizations' entries (FU-019), sent as repeated
+   * `organizationId`; the service refuses more than 200 or a malformed id.
+   */
+  readonly organizationIds?: readonly string[];
 }
 
 export function fetchSuppliers(
   session: WebSession,
   query: SupplierListQuery = {},
 ): Promise<ReadResult<SupplierPage>> {
-  const search = new URLSearchParams({ limit: String(SUPPLIERS_PER_PAGE) });
+  const search = new URLSearchParams({ limit: String(query.limit ?? SUPPLIERS_PER_PAGE) });
   if (query.status) search.set('status', query.status);
   if (query.capability) search.set('capability', query.capability);
+  for (const id of query.organizationIds ?? []) search.append('organizationId', id);
   if (query.cursor) search.set('cursor', query.cursor);
   return read(session, `/v1/suppliers?${search.toString()}`, supplierPageSchema);
 }

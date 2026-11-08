@@ -19,6 +19,8 @@ import {
   type CapturedOccurrence,
 } from './refusal-aggregation';
 
+// TIMESTAMP(3) rounds to nearest. Floor the UTC clock and the full deadline
+// so even fractional intervals cannot extend the duration from that clock.
 /**
  * `security_event_outbox` persistence — the capture write and the ADR-050 claim
  * protocol over this service's own table (ADR-053 § 4, AUD-004 Phases C1–C2).
@@ -234,6 +236,12 @@ export class SecurityEventOutboxStore implements OutboxStore {
    * interactive captures past a five-second `statement_timeout`
    * (`test/security-event-aggregation.int-spec.ts`).
    *
+   * The one transaction not opened through `PrismaService.transaction`
+   * (`transaction-boundary.spec.ts`), and needing no post-callback check: a
+   * batch has no callback, so no code of this service runs between its last
+   * statement and its COMMIT, which the engine sends in the same request.
+   * Each statement still passes the cancellation boundary before it is sent.
+   *
    * `statement_timeout` bounds the database work, including any lock it waits
    * on — a concurrent claim of the same row, for instance. The recorder's hard
    * deadline bounds the HTTP response whatever the driver does, including a
@@ -295,8 +303,8 @@ export class SecurityEventOutboxStore implements OutboxStore {
           WHERE published_at IS NULL
             -- An open window is still counting. Never publish it (Phase C2).
             AND window_ends_at <= ${DATABASE_NOW_UTC}
-            AND (claim_expires_at IS NULL OR claim_expires_at <= now())
-            AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())
+            AND (claim_expires_at IS NULL OR claim_expires_at <= (now() AT TIME ZONE 'UTC'))
+            AND (next_attempt_at  IS NULL OR next_attempt_at  <= (now() AT TIME ZONE 'UTC'))
           ORDER BY window_ends_at, id
           LIMIT $4
             FOR UPDATE SKIP LOCKED
@@ -304,7 +312,8 @@ export class SecurityEventOutboxStore implements OutboxStore {
        UPDATE security_event_outbox AS o
           SET claim_token      = $1,
               claim_owner      = $2,
-              claim_expires_at = now() + make_interval(secs => $3::double precision),
+              claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', now() AT TIME ZONE 'UTC')
+                + make_interval(secs => $3::double precision)),
               claim_count      = o.claim_count + 1
          FROM due
         WHERE o.id = due.id
@@ -344,7 +353,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
     if (ids.length === 0) return 0;
     return this.prisma.client.$executeRawUnsafe(
       `UPDATE security_event_outbox
-          SET published_at     = now(),
+          SET published_at     = date_trunc('milliseconds', now() AT TIME ZONE 'UTC'),
               claim_token      = NULL,
               claim_owner      = NULL,
               claim_expires_at = NULL,
@@ -372,10 +381,10 @@ export class SecurityEventOutboxStore implements OutboxStore {
       `UPDATE security_event_outbox
           SET attempts         = attempts + 1,
               last_error       = $3,
-              next_attempt_at  = now() + make_interval(secs => least(
+              next_attempt_at  = date_trunc('milliseconds', date_trunc('milliseconds', now() AT TIME ZONE 'UTC') + make_interval(secs => least(
                 power(2, least(attempts, 10)) * $4::double precision,
                 $5::double precision
-              )),
+              ))),
               claim_token      = NULL,
               claim_owner      = NULL,
               claim_expires_at = NULL
@@ -398,8 +407,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
   async release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number> {
     if (ids.length === 0) return 0;
     return boundedReleaseSql(
-      (fn, timeoutMs) =>
-        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      (fn, timeoutMs) => this.prisma.transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
       bound,
       (tx) =>
         tx.$executeRawUnsafe(
@@ -424,12 +432,12 @@ export class SecurityEventOutboxStore implements OutboxStore {
   ): Promise<string[]> {
     if (ids.length === 0) return [];
     const bound = statementTimeoutOf(deadlineMs);
-    return this.prisma.client.$transaction(
+    return this.prisma.transaction(
       async (tx) => {
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
         const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
           `UPDATE security_event_outbox
-              SET claim_expires_at = now() + make_interval(secs => $3::double precision)
+              SET claim_expires_at = date_trunc('milliseconds', date_trunc('milliseconds', now() AT TIME ZONE 'UTC')
+                + make_interval(secs => $3::double precision))
             WHERE id = ANY($1::text[])
               AND claim_token = $2
               AND published_at IS NULL
@@ -440,13 +448,14 @@ export class SecurityEventOutboxStore implements OutboxStore {
         );
         return rows.map((row) => row.id);
       },
-      { maxWait: bound, timeout: bound + TRANSACTION_MARGIN_MS },
+      // `SET LOCAL statement_timeout` first, as the transaction's own statement.
+      { maxWait: bound, timeout: bound + TRANSACTION_MARGIN_MS, statementTimeoutMs: bound },
     );
   }
 
   async oldestPendingAgeSeconds(): Promise<number> {
     const result = await this.prisma.client.$queryRawUnsafe<{ age: number | null }[]>(
-      `SELECT EXTRACT(EPOCH FROM (now() - MIN(created_at)))::float8 AS age
+      `SELECT EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - MIN(created_at)))::float8 AS age
          FROM security_event_outbox
         WHERE published_at IS NULL`,
     );
@@ -463,7 +472,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
          FROM security_event_outbox
         WHERE published_at IS NULL
           AND claim_expires_at IS NOT NULL
-          AND claim_expires_at > now()`,
+          AND claim_expires_at > (now() AT TIME ZONE 'UTC')`,
     );
     return Number(result[0]?.count ?? 0);
   }

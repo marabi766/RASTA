@@ -7,9 +7,10 @@ import { z } from 'zod';
  * Why before: a record parses every entry and collects one issue per failing
  * one, so the cost of a refusal grows with what the caller sent
  * (GHSA-mrhx-c7xc-m3w5 is the same flaw for arrays). zod has no key-count
- * check of its own, and a `.refine` runs only after every entry was parsed.
- * A preprocess step runs first; its issue is `fatal`, which makes zod abort
- * there and never reach the record.
+ * check of its own (zod 4.6.6+ caps arrays, sets and maps, not records), and a
+ * `.refine` runs only after every entry was parsed. A preprocess step runs
+ * first, and a zod 4 pipe stops at any issue from its input side, so the
+ * record is never reached.
  *
  * Only the keys are counted — no value is read. Anything that is not a plain
  * object passes through untouched, so the record's own `invalid_type` refusal
@@ -21,14 +22,14 @@ import { z } from 'zod';
 export function withMaxKeys<T extends z.ZodTypeAny>(
   schema: T,
   max: number,
-): z.ZodEffects<T, z.output<T>, unknown> {
+): z.ZodPreprocess<T, unknown> {
   return z.preprocess((value, ctx) => {
     if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
       if (Object.keys(value).length > max) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `Expected at most ${max} keys`,
-          fatal: true,
+          continue: false,
         });
       }
     }

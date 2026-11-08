@@ -22,3 +22,36 @@
  * at its shortest legal retention, 1 h with the default skew: 3 600 − 67 − 30 = 3 503 s, slack 203 s).
  */
 export const PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS = 3_300;
+
+/**
+ * The same bound for procurement-service's keyed commands (FU-156, PM decision D-125): the portal sends
+ * `Idempotency-Replay-Deadline` on every demand command it re-sends, and procurement-service refuses a
+ * deadline later than `claim time + TTL − B` (its `shared/idempotency.ts`). Both sides are tied to this
+ * constant exactly as above, with B = 2 · PROCUREMENT_CLOCK_SKEW_SECONDS + 7 s:
+ *
+ *   portal   (`apps/web/src/server/env.ts`)       window + portal skew allowance           ≤ K
+ *   service  (procurement `config/env.ts`)        TTL − B − service skew                   ≥ K
+ *
+ * 3 300 s, the same number: the portal's default (1 h − 600 s + 30 s = 3 030 s) and the service's
+ * shortest legal retention (1 h with the default skew: 3 600 − 67 − 30 = 3 503 s) both fit.
+ */
+export const PROCUREMENT_MAX_REPLAY_WINDOW_SECONDS = 3_300;
+
+/**
+ * The same bound for inventory-service's keyed commands (FU-171, PM decision D-133): inventory-service
+ * refuses a deadline later than `claim time + TTL − B` (its `shared/idempotency.ts`), with
+ * B = 2 · INVENTORY_CLOCK_SKEW_SECONDS + 7 s, and refuses to boot unless TTL − B − service skew ≥ K
+ * (`config/env.ts`). 3 300 s, the same number: its shortest legal retention, 1 h with the default skew,
+ * leaves 3 503 s. The portal's side of the bound arrives with the portal sending the header.
+ */
+export const INVENTORY_MAX_REPLAY_WINDOW_SECONDS = 3_300;
+
+/**
+ * The same bound for maintenance-service's keyed commands (FU-171, PM decision D-133):
+ * maintenance-service refuses a deadline later than `claim time + TTL − B` (its
+ * `maintenance/idempotency.ts`), with B = 2 · MAINTENANCE_CLOCK_SKEW_SECONDS + 7 s, and refuses to
+ * boot unless TTL − B − service skew ≥ K (`config/env.ts`). 3 300 s, the same number: its shortest
+ * legal retention, 1 h with the default skew, leaves 3 503 s. The portal's side of the bound arrives
+ * with the portal sending the header.
+ */
+export const MAINTENANCE_MAX_REPLAY_WINDOW_SECONDS = 3_300;

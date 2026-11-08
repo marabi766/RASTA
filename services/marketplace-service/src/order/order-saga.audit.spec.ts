@@ -31,6 +31,7 @@ function order(overrides: Partial<LockedOrderRow> = {}): LockedOrderRow {
     economicTransactionId: null,
     correlationId: 'COR_1',
     cancellationCause: null,
+    receiptConfirmed: false,
     ...overrides,
   };
 }

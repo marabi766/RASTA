@@ -3,7 +3,11 @@ import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { commandKeyHash } from '../shared/command';
 import type { CursorPage } from '../shared/dto';
-import { IdempotencyStore, requiredIdempotencyKey } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type IdempotencyHeaders,
+} from '../shared/idempotency';
 import { COMMAND_NOTE, READ_NOTE, STOCK_COMMAND_NOTE } from '../shared/notes';
 import {
   endReservationSchema,
@@ -84,13 +88,13 @@ export class ReservationController {
   })
   async reserve(
     @Body(zodPipe(reserveStockSchema)) dto: ReserveStockDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ReservationBatchView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(RESERVE_STOCK_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(RESERVE_STOCK_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ReservationBatchView>(
       RESERVE_STOCK_ENDPOINT,
-      key,
+      request,
       dto,
       201,
       (fence) => this.reservations.reserve(dto, { fence, keyHash }),
@@ -125,13 +129,13 @@ export class ReservationController {
   async release(
     @Param('id') id: string,
     @Body(zodPipe(endReservationSchema)) dto: EndReservationDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ReservationView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(RELEASE_RESERVATION_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(RELEASE_RESERVATION_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ReservationView>(
       RELEASE_RESERVATION_ENDPOINT,
-      key,
+      request,
       { id, ...dto },
       200,
       (fence) => this.reservations.release(id, dto, { fence, keyHash }),
@@ -163,13 +167,13 @@ export class ReservationController {
   async issue(
     @Param('id') id: string,
     @Body(zodPipe(endReservationSchema)) dto: EndReservationDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ): Promise<ReservationView> {
-    const key = requiredIdempotencyKey(idempotencyKey);
-    const keyHash = commandKeyHash(ISSUE_RESERVATION_ENDPOINT, key);
+    const request = idempotentRequest(headers);
+    const keyHash = commandKeyHash(ISSUE_RESERVATION_ENDPOINT, request.key);
     const { result } = await this.idempotency.execute<ReservationView>(
       ISSUE_RESERVATION_ENDPOINT,
-      key,
+      request,
       { id, ...dto },
       200,
       (fence) => this.reservations.issue(id, dto, { fence, keyHash }),

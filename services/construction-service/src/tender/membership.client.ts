@@ -1,6 +1,8 @@
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
+import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { readCapped } from '../organization/organization-directory';
@@ -21,7 +23,7 @@ const liveSchema = z
         z.object({ organizationId, roles: z.array(z.string().min(1).max(64)).max(100) }).strict(),
       )
       .max(1000),
-    asOf: z.string().datetime(),
+    asOf: z.string().check(isoDateTime()),
   })
   .strict();
 
@@ -29,7 +31,7 @@ const sinceSchema = z
   .object({
     userId: z.string().min(1).max(64),
     organizationIds: z.array(organizationId).max(1000),
-    asOf: z.string().datetime(),
+    asOf: z.string().check(isoDateTime()),
   })
   .strict();
 
@@ -102,50 +104,50 @@ export class MembershipClient implements MembershipSource {
     query: string,
     schema: z.ZodType<T>,
   ): Promise<T> {
-    const token = await this.tokens.issue(SERVICE_NAME, IDENTITY_SERVICE, 'SERVICE');
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: IDENTITY_SERVICE,
+      purpose: 'SERVICE',
+    });
     const url =
       `${this.env.IDENTITY_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/users/${encodeURIComponent(userId)}/organizations${query}`;
 
     const timeoutMs = this.env.CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': safeCorrelationId(),
-        },
-        signal: controller.signal,
-      });
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        this.logger.warn(`identity-service answered ${response.status} to the membership read`);
-        throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
-      }
-      const text = await readCapped(response, MAX_MEMBERSHIP_BYTES);
-      if (text === null) throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = undefined;
-      }
-      const parsed = schema.safeParse(body);
-      if (!parsed.success || parsed.data.userId !== userId) {
-        this.logger.warn('identity-service answered memberships that are not the contract');
-        throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
-      }
-      return parsed.data;
-    } catch (error) {
-      if (error instanceof RastaError) throw error;
-      if (controller.signal.aborted) throw RastaError.upstreamTimeout(IDENTITY_SERVICE, timeoutMs);
-      throw RastaError.upstreamUnavailable(IDENTITY_SERVICE, error);
-    } finally {
-      clearTimeout(timer);
-    }
+    return upstreamExchange(
+      IDENTITY_SERVICE,
+      timeoutMs,
+      (signal) =>
+        sender.send(url, {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-correlation-id': safeCorrelationId(),
+          },
+          signal,
+        }),
+      async (response) => {
+        if (response.status !== 200) {
+          await response.body?.cancel().catch(() => undefined);
+          this.logger.warn(`identity-service answered ${response.status} to the membership read`);
+          throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
+        }
+        const text = await readCapped(response, MAX_MEMBERSHIP_BYTES);
+        if (text === null) throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = undefined;
+        }
+        const parsed = schema.safeParse(body);
+        if (!parsed.success || parsed.data.userId !== userId) {
+          this.logger.warn('identity-service answered memberships that are not the contract');
+          throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
+        }
+        return parsed.data;
+      },
+    );
   }
 }
 

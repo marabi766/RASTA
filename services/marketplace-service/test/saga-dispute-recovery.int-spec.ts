@@ -83,6 +83,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
       counterpartyOrganizationId: org.supplier,
       transactionType: 'MARKETPLACE_ORDER',
       status: 'HELD',
+      heldProven: true,
       grossAmountMinor: '500000',
       commissionAmountMinor: '0',
       netAmountMinor: '500000',
@@ -106,6 +107,10 @@ describe('a dispute resolution retried after economic-service let its answer exp
       let raw = '';
       req.on('data', (chunk: Buffer) => (raw += chunk.toString()));
       req.on('end', () => {
+        // The capability question, of no organization: the D-150 release's answer (FU-233).
+        if (req.method === 'GET' && req.url === '/v1/transactions/capabilities') {
+          return answer(res, 200, { heldProven: true, orderHoldDeadlineRequired: true });
+        }
         // The saga's service token, for the buyer and nobody else.
         if (req.headers['x-internal-token'] !== `token-for-${org.buyer}`) {
           problems.push(`${req.method} ${req.url}: not the buyer's service token`);
@@ -127,7 +132,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
             if (obligation.status !== 'DISPUTED') {
               return answer(res, refusedRetry.status, {
                 code: refusedRetry.code,
-                message: `Transaction cannot move from ${String(obligation.status)} to PENDING_SETTLEMENT`,
+                message: `A ${String(obligation.status)} transaction cannot have a dispute resolved`,
               });
             }
             if (JSON.stringify(body) !== JSON.stringify({ resolution })) {
@@ -228,7 +233,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
     await expect(
       run(6, 1, (a) => a.resolveObligationDispute(orderId, transactionId, disputeId, resolution)),
     ).rejects.toMatchObject({ type: 'UPSTREAM_UNAVAILABLE', nonRetryable: false });
-    expect(service.obligation.status).toBe('PENDING_SETTLEMENT');
+    expect(service.obligation.status).toBe(after.status);
     expect(await recordsOf(orderId)).not.toContainEqual({ activity: 'resolveObligationDispute' });
 
     const resolveKey = `POST /v1/transactions/{id}/resolve-dispute ${idempotencyKeyFor.resolveDispute(orderId, disputeId)}`;
@@ -255,7 +260,7 @@ describe('a dispute resolution retried after economic-service let its answer exp
       const { orderId, service, resolveKey, retry } = await resolutionLost(after);
       const before = service.requests.length;
 
-      // Refused PENDING_SETTLEMENT -> PENDING_SETTLEMENT, then read back: this
+      // Refused for the state its first attempt left, then read back: this
       // resolution's effect. It used to stay a refusal until the attempts ran
       // out, and the workflow failed with the funds held.
       await expect(retry(2)).resolves.toBeUndefined();
@@ -276,6 +281,10 @@ describe('a dispute resolution retried after economic-service let its answer exp
     [
       'no resolution kept apart and the objection still in place',
       { status: 'PENDING_SETTLEMENT', disputeReason: reason, disputeResolution: null },
+    ],
+    [
+      'HELD with another resolution’s words (D-083: HELD is a resolution’s exit too)',
+      { status: 'HELD', disputeReason: reason, disputeResolution: 'Refunded.' },
     ],
   ])('a transaction carrying %s proves nothing: the refusal stands', async (_, after) => {
     const { orderId, service, retry } = await resolutionLost(after);

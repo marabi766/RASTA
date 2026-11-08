@@ -152,7 +152,7 @@ describe('the bodies the portal sends', () => {
 
   it('pages the list at most fifty at a time', () => {
     expect(squash(topLevelConst(dto, 'listStatementsQuerySchema').getText())).toContain(
-      'limit:numberInput(z.number().int().min(1).max(50)).default(20)',
+      'limit:numberInput(z.number().int().min(1).max(50)).prefault(20)',
     );
     expect(STATEMENTS_PER_PAGE).toBeLessThanOrEqual(50);
   });
@@ -305,10 +305,10 @@ describe('the refusals the portal says in its own words', () => {
 describe('the replay window', () => {
   it('mirrors contract-service’s idempotency retention bounds', () => {
     expect(contractEnv).toContain(
-      'CONTRACT_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).default(24)',
+      'CONTRACT_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).prefault(24)',
     );
     expect(squash(readSource('apps', 'web', 'src', 'server', 'env.ts'))).toContain(
-      'WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).default(1)',
+      'WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).prefault(1)',
     );
   });
 });

@@ -1,4 +1,6 @@
+import { InternalHttpClient, exchangeWithDeadline, type InternalSender } from '@rasta/nest-common';
 import { z } from 'zod';
+import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
 import { IDENTITY_SERVICE, SERVICE_NAME } from '../config/env';
 import { RESOLUTION_FAILURE_REASONS } from '../observability/metrics';
@@ -56,7 +58,7 @@ const userPageSchema = z.object({
     z.object({
       id: z.string().min(1),
       status: z.string(),
-      roles: z.array(z.string()).default([]),
+      roles: z.array(z.string()).prefault([]),
       // Optional rather than required: an identity deployment that stops
       // returning addresses has to degrade to "nobody is emailable", not to a
       // malformed-response failure that stops the in-app half working too.
@@ -64,7 +66,7 @@ const userPageSchema = z.object({
     }),
   ),
   nextCursor: z.string().nullable().optional(),
-  hasMore: z.boolean().default(false),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** identity caps a page at `MAX_PAGE_SIZE` (200); asking for more is a 400. */
@@ -82,7 +84,8 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
   constructor(
     private readonly options: IdentityHttpOptions,
     private readonly tokens: InternalTokenService,
-    private readonly fetchImpl: typeof fetch = fetch,
+    // Absent: internalFetch's own fetch, the only raw one (Q-155 boundary).
+    private readonly fetchImpl?: typeof fetch,
   ) {}
 
   async resolve(query: RecipientQuery): Promise<RecipientResolution> {
@@ -90,18 +93,19 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
     let truncated = false;
 
     // Minted once per resolution and reused across roles and pages: the same
-    // target, the same organization, and a TTL far longer than the call.
-    const token = await this.tokens.issue(
-      SERVICE_NAME,
-      IDENTITY_SERVICE,
-      'SERVICE',
-      query.organizationId,
-    );
+    // target, the same organization, and a TTL far longer than the call. The
+    // sender holds it; this adapter never sees the token itself.
+    const sender = await new InternalHttpClient(this.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: IDENTITY_SERVICE,
+      purpose: 'SERVICE',
+      organizationId: query.organizationId,
+    });
 
     for (const role of query.roles) {
       let cursor: string | undefined;
       for (let page = 0; page < MAX_PAGES_PER_ROLE; page += 1) {
-        const result = await this.fetchPage(token, role, cursor, query.correlationId);
+        const result = await this.fetchPage(sender, role, cursor, query.correlationId);
 
         for (const user of result.items) {
           // `status=ACTIVE` is the query; re-checking costs nothing and means
@@ -126,31 +130,46 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
   }
 
   private async fetchPage(
-    token: string,
+    sender: InternalSender,
     role: string,
     cursor: string | undefined,
     correlationId: string,
   ): Promise<z.infer<typeof userPageSchema>> {
-    const url = new URL('/v1/users', this.options.baseUrl);
+    // Against a base read by the shared reader: `new URL`'s own error keeps the
+    // base on `.base`, and an uncaught throw prints it (#385 r5).
+    const url = readUrl('/v1/users', {
+      base: this.options.baseUrl,
+      refusal: 'IDENTITY_SERVICE_URL cannot be read as a URL; its value is not repeated',
+    });
     url.searchParams.set('role', role);
     url.searchParams.set('status', 'ACTIVE');
     url.searchParams.set('limit', String(PAGE_SIZE));
     if (cursor) url.searchParams.set('cursor', cursor);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-
-    let response: Response;
+    // One deadline for the whole exchange, body included: identity answering
+    // `200` and then stalling would otherwise hold this batch — and, with it,
+    // every later tick of the worker, which skips while a batch is in flight.
+    let answer: { ok: boolean; status: number; text: string | undefined };
     try {
-      response = await this.fetchImpl(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': correlationId,
-        },
-        signal: controller.signal,
-      });
+      answer = await exchangeWithDeadline(
+        this.options.timeoutMs,
+        (signal) =>
+          sender.send(url, {
+            method: 'GET',
+            headers: {
+              accept: 'application/json',
+              'x-correlation-id': correlationId,
+            },
+            signal,
+          }),
+        // A refusal's body is not read: the status is the only detail kept, and
+        // the boundary cancels the body it finds unread.
+        async (response) => ({
+          ok: response.ok,
+          status: response.status,
+          text: response.ok ? await response.text() : undefined,
+        }),
+      );
     } catch (error) {
       // The error object is not forwarded: depending on the runtime it can
       // carry the request URL and headers, and the header is the token.
@@ -159,23 +178,21 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
           ? RESOLUTION_FAILURE_REASONS.TIMEOUT
           : RESOLUTION_FAILURE_REASONS.UNREACHABLE;
       throw new RecipientResolutionError(reason, `identity-service GET /v1/users did not complete`);
-    } finally {
-      clearTimeout(timer);
     }
 
-    if (!response.ok) {
+    if (!answer.ok) {
       // 401/403 (the token or the allowlist), 404 (a route that moved), 5xx
       // — all retryable from this side, all the same class: identity refused
       // to answer. The status is the only detail kept; the body is not read.
       throw new RecipientResolutionError(
         RESOLUTION_FAILURE_REASONS.REFUSED,
-        `identity-service answered ${response.status}`,
+        `identity-service answered ${answer.status}`,
       );
     }
 
     let parsed: unknown;
     try {
-      parsed = await response.json();
+      parsed = JSON.parse(answer.text ?? '');
     } catch {
       throw new RecipientResolutionError(
         RESOLUTION_FAILURE_REASONS.MALFORMED_RESPONSE,

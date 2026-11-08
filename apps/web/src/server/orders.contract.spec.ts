@@ -1,7 +1,10 @@
 /**
  * @jest-environment node
  */
-import { readSource } from '@/test/service-source';
+import { readSource, squash } from '@/test/service-source';
+
+import { TRANSACTION_TEXT_BOUNDS, boundsForAll } from '@rasta/contracts';
+import { ORDER_FIELD_LIMITS as LIMITS } from '@/lib/order-fields';
 
 import { ORDER_COMMAND_FIELD_MAPPING, RECEIPT_NOTE_REFUSAL } from './orders';
 
@@ -43,5 +46,37 @@ describe('the order-command sentences the portal translates', () => {
     expect(pattern.test('Order ORD_1 cannot move from DISPUTED to CONFIRMED')).toBe(true);
     expect(pattern.test('Order ORD_1 is already COMPLETED and cannot change further')).toBe(true);
     expect(pattern.test('Order ORD_1 is on fire')).toBe(false);
+  });
+});
+
+describe('the order-command text limits (FU-134)', () => {
+  const dto = squash(readSource(...SERVICE, 'dto.ts')) ?? '';
+
+  it('the REFUND bound is the one the service computes: resolution and refund reason, both', () => {
+    // The portal's `refundResolution` repeats this expression from the shared
+    // table; a destination added on the service fails here until it follows.
+    expect(dto).toContain(
+      'exportconstREFUND_RESOLUTION_BOUNDS=boundsForAll(TRANSACTION_TEXT_BOUNDS.disputeResolution,TRANSACTION_TEXT_BOUNDS.closingReason,);',
+    );
+    expect(LIMITS.refundResolution).toEqual(
+      boundsForAll(
+        TRANSACTION_TEXT_BOUNDS.disputeResolution,
+        TRANSACTION_TEXT_BOUNDS.closingReason,
+      ),
+    );
+  });
+
+  it.each([
+    ['disputeReason', 'reason:textWithin(plainText(),TRANSACTION_TEXT_BOUNDS.disputeReason)'],
+    ['resolution', 'resolution:textWithin(plainText(),TRANSACTION_TEXT_BOUNDS.disputeResolution)'],
+    ['cancelReason', 'reason:textWithin(plainText(),TRANSACTION_TEXT_BOUNDS.closingReason)'],
+  ] as const)('%s reads the table entry the service declares', (_limit, declaration) => {
+    expect(dto).toContain(declaration);
+  });
+
+  it('the portal limits are those table entries', () => {
+    expect(LIMITS.disputeReason).toEqual(TRANSACTION_TEXT_BOUNDS.disputeReason);
+    expect(LIMITS.resolution).toEqual(TRANSACTION_TEXT_BOUNDS.disputeResolution);
+    expect(LIMITS.cancelReason).toEqual(TRANSACTION_TEXT_BOUNDS.closingReason);
   });
 });

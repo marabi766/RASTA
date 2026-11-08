@@ -522,10 +522,10 @@ describe('refusing a message', () => {
     expect(text).not.toContain('SENTINEL');
   });
 
-  it('counts and sanitises a throw that is not a rejection', async () => {
-    // The mapper refuses everything it can recognise with a typed rejection;
-    // this is the path for anything else. Forced with an envelope whose
-    // `occurredAt` getter throws while the schema reads it.
+  it('refuses an envelope that throws while it is parsed, as a typed rejection (PR #444 r5, addendum C)', async () => {
+    // A first parse that throws is the generic refusal legacyParse gives
+    // (never an acceptance, never the error's text): the mapper's own typed
+    // rejection, not the fallback below.
     const calls: unknown[][] = [];
     let ingested = 0;
     const source = envelope();
@@ -536,7 +536,7 @@ describe('refusing a message', () => {
       },
     });
     const before = await valueOf(counter(auditIngestionFailuresTotal), {
-      reason: 'unmappable_envelope',
+      reason: 'trail_invalid_envelope',
     });
 
     const failure = await trailWith(calls, async () => {
@@ -544,6 +544,47 @@ describe('refusing a message', () => {
       return 'WRITTEN';
     })
       .handle(source, delivery())
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(failure).toBeInstanceOf(AuditTrailRejectedError);
+    expect((failure as Error).message).toBe(
+      'audit trail message rejected: trail_invalid_envelope ((root) custom)',
+    );
+    expect(ingested).toBe(0);
+    expect(
+      await valueOf(counter(auditIngestionFailuresTotal), { reason: 'trail_invalid_envelope' }),
+    ).toBe(before + 1);
+    expect(loggedText(calls)).not.toContain('SENTINEL');
+  });
+
+  it('counts and sanitises a throw that is not a rejection', async () => {
+    // The mapper refuses everything it can recognise with a typed rejection;
+    // this is the path for anything else. Forced past both parses: the
+    // provenance's read of the delivery's topic (its second) throws.
+    const calls: unknown[][] = [];
+    let ingested = 0;
+    let reads = 0;
+    const throwing = { ...delivery() };
+    Object.defineProperty(throwing, 'topic', {
+      enumerable: true,
+      get() {
+        reads += 1;
+        if (reads === 2) throw new TypeError('SENTINEL-mapper');
+        return AUDIT_TRAIL_TOPIC;
+      },
+    });
+    const before = await valueOf(counter(auditIngestionFailuresTotal), {
+      reason: 'unmappable_envelope',
+    });
+
+    const failure = await trailWith(calls, async () => {
+      ingested += 1;
+      return 'WRITTEN';
+    })
+      .handle(envelope(), throwing)
       .then(
         () => undefined,
         (error: unknown) => error,
@@ -557,6 +598,7 @@ describe('refusing a message', () => {
       await valueOf(counter(auditIngestionFailuresTotal), { reason: 'unmappable_envelope' }),
     ).toBe(before + 1);
     expect(loggedText(calls)).not.toContain('SENTINEL');
+    expect(reads).toBe(3);
   });
 });
 

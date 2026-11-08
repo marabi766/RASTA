@@ -105,7 +105,7 @@ export const auditTrailActorSchema = z
     type: actorTypeSchema,
     id: z.string().min(1).max(ACTOR_ID_MAX_LENGTH),
     /** Empty when the actor genuinely has none; never omitted (ADR-053 § 5). */
-    roles: z.array(z.string().min(1)).max(ACTOR_ROLES_MAX).default([]),
+    roles: z.array(z.string().min(1)).max(ACTOR_ROLES_MAX).prefault([]),
   })
   .strict();
 export type AuditTrailActor = z.infer<typeof auditTrailActorSchema>;
@@ -253,7 +253,7 @@ export const auditTrailPayloadSchemaV1 = z
     reason: z.string().min(1).max(REASON_MAX_LENGTH).optional(),
     changes: auditChangesSchema.optional(),
     /** `> 1` only for a windowed aggregation of identical refusals (ADR-053 § 4). */
-    occurrenceCount: z.number().int().positive().default(1),
+    occurrenceCount: z.number().int().positive().prefault(1),
     source: auditTrailSourceSchema.optional(),
     /**
      * The `AuditEvent.id` (ULID) being corrected — never the source event id.

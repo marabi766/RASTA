@@ -125,7 +125,7 @@ describe('tenant isolation', () => {
       asUser(a, userA, () =>
         w.prisma.client.inAppNotification.findMany({ where: { organizationId: b } }),
       ),
-    ).rejects.toThrow(/acts for/);
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
     await expect(
       asUser(a, userA, () =>
         w.prisma.client.notificationIntent.create({
@@ -149,7 +149,7 @@ describe('tenant isolation', () => {
           },
         }),
       ),
-    ).rejects.toThrow(/Cross-tenant writes are never implicit/);
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
   });
 
   it('a query with no tenant context fails loudly instead of running unscoped', async () => {

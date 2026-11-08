@@ -1,5 +1,7 @@
 import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { ENV } from '../tokens';
+import { PrismaService } from '../prisma/prisma.service';
+import { SamplingLoop, type SamplingSignal } from './sampling-loop';
 import type { AuditEnv } from '../config/env';
 import {
   auditIngestionFailuresTotal,
@@ -26,29 +28,33 @@ export class TenderGapMonitor implements OnModuleInit, OnModuleDestroy {
   /** Held receipts already counted, so a sample every minute does not count one forever. */
   private readonly alerted = new Set<string>();
 
+  private readonly loop = new SamplingLoop((signal) => this.sample(signal));
+
   constructor(
     private readonly repository: TenderEvidenceRepository,
     @Inject(ENV) private readonly env: AuditEnv,
-  ) {}
-
-  private timer?: NodeJS.Timeout;
+    prisma: PrismaService,
+  ) {
+    // Ordered before the client's disconnect (Nest destroys providers concurrently, so
+    // this monitor's own hook is not enough): `PrismaService.onModuleDestroy` awaits it.
+    prisma.beforeDisconnect(() => this.loop.stop());
+  }
 
   onModuleInit(): void {
-    const tick = (): void => {
-      // Upkeep never takes the service down; the ingestion counter covers real faults.
-      void this.sample().catch(() => undefined);
-    };
-    tick();
-    this.timer = setInterval(tick, 60_000);
-    this.timer.unref?.();
+    this.loop.start();
   }
 
-  onModuleDestroy(): void {
-    if (this.timer) clearInterval(this.timer);
+  async onModuleDestroy(): Promise<void> {
+    await this.loop.stop();
   }
 
-  async sample(): Promise<void> {
-    const summary = await this.repository.pendingSummary(this.env.AUDIT_TENDER_GAP_ALERT_SECONDS);
+  async sample(signal: SamplingSignal): Promise<void> {
+    const summary = await this.repository.pendingSummary(
+      this.env.AUDIT_TENDER_GAP_ALERT_SECONDS,
+      signal,
+    );
+    // Abandoned at the shutdown deadline (the client may be gone): write nothing.
+    signal.throwIfAbandoned();
     auditTenderPendingLinks.set(summary.held);
     auditTenderPendingOldestAgeSeconds.set(summary.oldestAgeSeconds);
     auditTenderOverdueLinks.set(summary.overdueCount);

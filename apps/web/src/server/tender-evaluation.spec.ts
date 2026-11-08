@@ -50,6 +50,11 @@ import {
   type OwnerBids,
   type OwnerBinding,
 } from './tender-owner';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * The evaluation and award module: what it reads, who it offers each form to —
@@ -66,7 +71,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const SETTINGS = {
   WEB_PROJECT_ROLES: ['ORGANIZATION_ADMIN'],
@@ -81,13 +86,15 @@ const SETTINGS = {
 
 function person(roles: string[], uid: string | null = 'USR-OTHER', org = OWNER) {
   return ownerCallerOf(
-    jwt({
-      sub: 'kc-subject',
-      org_id: org,
-      org_ids: [org],
-      org_roles: roles.map((role) => `${org}:${role}`),
-      ...(uid ? { rasta_uid: uid } : {}),
-    }),
+    pinnedTokens(
+      jwt({
+        sub: 'kc-subject',
+        org_id: org,
+        org_ids: [org],
+        org_roles: roles.map((role) => `${org}:${role}`),
+        ...(uid ? { rasta_uid: uid } : {}),
+      }),
+    ),
   );
 }
 

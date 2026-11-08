@@ -3,6 +3,7 @@ import { inspect } from 'node:util';
 import { Logger } from '@nestjs/common';
 import request from 'supertest';
 import { ulid } from 'ulid';
+import { REDIRECT_CASES, recordCalls, withRedirectProbe } from '@rasta/testing';
 import { DLQ_HEADERS, DLQ_REASONS, MAX_AMOUNT_MINOR, type EventEnvelope } from '@rasta/contracts';
 import {
   EventConsumer,
@@ -51,11 +52,20 @@ import {
 
 const SECRET = 'itest_internal_secret_at_least_32_characters';
 const REQUEST_TIMEOUT_MS = 400;
+/**
+ * The owner read for the specs that race many deliveries at once. 400 ms is
+ * right for the specs that need a silent owner to be given up on quickly, but
+ * under a busy runner it also fails an ordinary read now and then — and a
+ * delivery that fails before it writes its marker is a legitimate retry, not
+ * the marker race those specs are about.
+ */
+const PATIENT_REQUEST_TIMEOUT_MS = 10_000;
 
 describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () => {
   let prisma: PrismaService;
   let wiring: Wiring;
   let consumer: StatementSettlementConsumer;
+  let patient: StatementSettlementConsumer;
   const org = tenants();
   const employer = org.a;
   const contractor = org.b;
@@ -66,7 +76,12 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
   const noBroker = (): EventConsumer =>
     ({ start: async () => undefined, stop: async () => undefined }) as unknown as EventConsumer;
 
-  const consumerWith = (businessLine: BusinessLine | null, w: Wiring = wiring, p = prisma) =>
+  const consumerWith = (
+    businessLine: BusinessLine | null,
+    w: Wiring = wiring,
+    p = prisma,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ) =>
     new StatementSettlementConsumer(
       noBroker,
       p,
@@ -75,7 +90,7 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
         maintenanceBaseUrl: 'http://127.0.0.1:9',
         fleetBaseUrl: 'http://127.0.0.1:9',
         contractBaseUrl: contract.url,
-        timeoutMs: REQUEST_TIMEOUT_MS,
+        timeoutMs,
         tokens,
       }),
       businessLine,
@@ -87,10 +102,12 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
     wiring = wire(prisma);
     await contract.start();
     consumer = consumerWith(null);
+    patient = consumerWith(null, wiring, prisma, PATIENT_REQUEST_TIMEOUT_MS);
   });
 
   afterEach(() => {
     contract.mode = 'up';
+    contract.failNext(0);
   });
 
   afterAll(async () => {
@@ -305,20 +322,60 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
       const same = envelope(payload);
       const deliveries = [...Array.from({ length: 5 }, () => envelope(payload)), same, same, same];
 
-      const outcomes = await Promise.allSettled(deliveries.map((e) => consumer.handle(e)));
+      // One delivery's read of the owner fails, as a slow runner makes one do
+      // at random: it throws before it has written anything. Which delivery it
+      // is, is the scheduler's business; that one is certain.
+      contract.failNext(1);
+      const outcomes = await Promise.allSettled(deliveries.map((e) => patient.handle(e)));
 
-      // A loser of the same-id race fails on the processed marker and is retried;
-      // it is never a verdict, and its retry has no effect.
-      for (const [index, outcome] of outcomes.entries()) {
-        if (outcome.status === 'rejected') {
-          expect(outcome.reason).not.toBeInstanceOf(UnprocessableEventError);
-          await expect(consumer.handle(deliveries[index]!)).resolves.toBe('SKIPPED');
+      const refused = outcomes.flatMap((outcome, index) =>
+        outcome.status === 'rejected'
+          ? [{ delivery: deliveries[index]!, reason: outcome.reason }]
+          : [],
+      );
+      expect(
+        refused.some(({ reason }) => (reason as RastaError).code === 'UPSTREAM_UNAVAILABLE'),
+      ).toBe(true);
+      for (const { delivery, reason } of refused) {
+        // Neither is ever a verdict: both are retried.
+        expect(reason).not.toBeInstanceOf(UnprocessableEventError);
+        const lostTheMarkerRace = (reason as { code?: string }).code === 'P2002';
+        const retried = await patient.handle(delivery);
+        if (lostTheMarkerRace) {
+          // The winner of the same-id race committed its marker, so the retry
+          // is a replay with no effect.
+          expect(retried).toBe('SKIPPED');
+        } else {
+          // It failed before its marker: its retry is its first processing —
+          // it writes the marker and finds the obligation already there, which
+          // is not a replay (undefined), unless its twin got in first.
+          expect([undefined, 'SKIPPED']).toContain(retried);
         }
+        // Whichever it was, delivered once more it has no effect.
+        await expect(patient.handle(delivery)).resolves.toBe('SKIPPED');
       }
       expect(await obligationsOf(fact.statementId)).toHaveLength(1);
       for (const delivery of new Set(deliveries)) {
         expect(await processedCount(delivery.eventId)).toBe(1);
       }
+    });
+
+    it('a delivery that failed before its marker is processed, not skipped, when retried — and has no second effect', async () => {
+      const { fact, payload } = approved();
+      const first = envelope(payload);
+      const again = envelope(payload);
+      await consumer.handle(first);
+
+      contract.failNext(1);
+      await expect(consumer.handle(again)).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      expect(await processedCount(again.eventId)).toBe(0);
+
+      // Its first processing: the marker is written, the obligation is found.
+      await expect(consumer.handle(again)).resolves.toBeUndefined();
+      expect(await processedCount(again.eventId)).toBe(1);
+      expect(await obligationsOf(fact.statementId)).toHaveLength(1);
+      await expect(consumer.handle(again)).resolves.toBe('SKIPPED');
+      expect(await obligationsOf(fact.statementId)).toHaveLength(1);
     });
 
     it('lets the unique key decide a race the fast path cannot see', async () => {
@@ -450,6 +507,75 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
     });
   });
 
+  it.each(REDIRECT_CASES)(
+    'owner $status sameOrigin=$sameOrigin leaves financial/outbox/processed state unchanged, then recovery and replay create one effect',
+    async ({ status, sameOrigin }) => {
+      const { fact, payload } = approved();
+      const event = envelope(payload);
+      const { walletId } = await fundWallet(wiring, employer, 1_000_000n);
+      const financialState = async () => ({
+        balances: await readBalances(prisma, walletId),
+        journals: await journalsOf(employer),
+        holds: await runUnscoped('test snapshots the employer wallet holds', () =>
+          prisma.client.walletHold.count({ where: { walletId } }),
+        ),
+        outbox: await runUnscoped('test snapshots the employer outbox', () =>
+          prisma.client.outboxMessage.count({ where: { organizationId: employer } }),
+        ),
+      });
+      const before = await financialState();
+      await withRedirectProbe({ status, sameOrigin, body: fact }, async (probe) => {
+        const guarded = new StatementSettlementConsumer(
+          noBroker,
+          prisma,
+          wiring.transactions,
+          new SourceFactsClient({
+            maintenanceBaseUrl: probe.baseUrl,
+            fleetBaseUrl: probe.baseUrl,
+            contractBaseUrl: probe.baseUrl,
+            timeoutMs: 2000,
+            tokens,
+            fetch: probe.fetch,
+          }),
+          null,
+        );
+        await expect(guarded.handle(event)).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+        expect(await financialState()).toEqual(before);
+        expect(await obligationsOf(fact.statementId)).toEqual([]);
+        expect(await processedCount(event.eventId)).toBe(0);
+        expect(probe.sent).toHaveLength(1);
+        expect(probe.target).toEqual([]);
+        const claims = await tokens.verify(
+          String(probe.sent[0]!.headers['x-internal-token']),
+          'contract-service',
+        );
+        expect(claims).toMatchObject({
+          callerService: 'economic-service',
+          purpose: 'SERVICE',
+          organizationId: employer,
+        });
+        probe.recover();
+        await expect(guarded.handle(event)).resolves.toBeUndefined();
+        const after = await financialState();
+        expect(after).toEqual({ ...before, outbox: before.outbox + 1 });
+        const [row, ...others] = await obligationsOf(fact.statementId);
+        expect(others).toEqual([]);
+        expect(row).toMatchObject({
+          status: 'PENDING_SETTLEMENT',
+          grossAmountMinor: BigInt(fact.netMinor),
+        });
+        expect(row!.legs).toHaveLength(2);
+        expect(await processedCount(event.eventId)).toBe(1);
+        await expect(guarded.handle(event)).resolves.toBe('SKIPPED');
+        expect(await obligationsOf(fact.statementId)).toEqual([row]);
+        expect(await financialState()).toEqual(after);
+        expect(await processedCount(event.eventId)).toBe(1);
+        expect(probe.sent).toHaveLength(2);
+        expect(probe.target).toEqual([]);
+      });
+    },
+  );
+
   describe('contract-service unavailable: retried, then dead-lettered, funds untouched', () => {
     it('throws a retryable UPSTREAM_UNAVAILABLE when the owner answers 5xx, and records nothing', async () => {
       contract.mode = 'down';
@@ -523,6 +649,22 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
      */
     describe('an owner whose net is malformed', () => {
       const SENTINEL = 'private-invoice-reference-123';
+
+      /**
+       * Positive control for `captureNestLogs`: a line the Nest logger writes while it is active
+       * is in `lines()` — before the restore and after it. A capture that records nothing fails
+       * here instead of letting "the text is nowhere" pass on an empty record.
+       */
+      it('the log capture holds a line a consumer logs, before and after the restore', () => {
+        const nest = captureNestLogs();
+        new Logger('capture-control').warn(`line naming ${SENTINEL}`);
+        expect(nest.lines().join('\n')).toContain(SENTINEL);
+        nest.restore();
+        expect(nest.lines().join('\n')).toContain(SENTINEL);
+        const untouched = captureNestLogs();
+        untouched.restore();
+        expect(untouched.lines()).toEqual([]);
+      });
 
       it.each([
         ['a fractional net', '12.5'],
@@ -787,12 +929,12 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
         statements.flatMap(({ payload }) => {
           const original = envelope(payload);
           return [original, original, envelope(payload), envelope(payload)].map((e) =>
-            consumer.handle(e),
+            patient.handle(e),
           );
         }),
       );
       // Whatever lost a race is redelivered, as the consumer would.
-      for (const { payload } of statements) await consumer.handle(envelope(payload));
+      for (const { payload } of statements) await patient.handle(envelope(payload));
 
       const ids = statements.map(({ fact }) => fact.statementId);
       const groups = await runUnscoped('the suite counts obligations per statement', () =>
@@ -1253,6 +1395,8 @@ async function brokerOver(
   );
   (consumer as unknown as { kafka: unknown }).kafka = {
     consumer: () => ({
+      events: { CRASH: 'consumer.crash' },
+      on: () => () => undefined,
       connect: async () => undefined,
       subscribe: async () => undefined,
       disconnect: async () => undefined,
@@ -1288,13 +1432,19 @@ async function brokerOver(
   };
 }
 
-/** What Nest's `Logger` writes while a test runs — the consumers' own log lines. */
+/**
+ * What Nest's `Logger` writes while a test runs — the consumers' own log lines. `lines()` answers
+ * from a snapshot once `restore()` has run: a restored spy has an empty history, and "the text is
+ * nowhere" would pass on it.
+ */
 function captureNestLogs(): { lines: () => string[]; restore: () => void } {
-  const spies = (['log', 'warn', 'error', 'debug', 'verbose'] as const).map((level) =>
-    jest.spyOn(Logger.prototype, level),
+  const record = recordCalls(
+    (['log', 'warn', 'error', 'debug', 'verbose'] as const).map((level) =>
+      jest.spyOn(Logger.prototype, level),
+    ),
   );
   return {
-    lines: () => spies.flatMap((spy) => spy.mock.calls.map((call) => inspect(call))),
-    restore: () => spies.forEach((spy) => spy.mockRestore()),
+    lines: () => record.calls().map((call) => inspect(call)),
+    restore: () => record.restore(),
   };
 }
