@@ -228,7 +228,7 @@ export default {
         spelling = from.split('/').pop();
       }
       return verifiedCallbackHelper(ROOT, path, name, {
-        importer: def?.type === 'ImportBinding' ? context.filename : undefined,
+        importer: resolve(context.filename),
         spelling,
         definition: def?.type,
       });

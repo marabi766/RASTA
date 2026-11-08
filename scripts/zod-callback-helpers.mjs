@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
-import { dirname, extname, relative, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 
 import ts from 'typescript';
 
@@ -82,9 +82,9 @@ const helpers = [
 ];
 // Published-parent and reviewed fixed-message formatter versions.
 const pins = {
-  // Entry metadata unchanged; main's FU-185 (#897) only dropped --passWithNoTests from test:unit.
+  // Projection (`pinnedBytes`): every field except the inert metadata listed there.
   'packages/contracts/package.json':
-    '4cb5cae0a1f586d46938c2dcbeb345c0e64fd0e4181e43a70746090d7283ee14',
+    '6a64745a05b6c90cf0286bd6cafe8bad9c2fd2c7e83da4374337907a2057b603',
   'services/asset-service/src/asset/identifier.ts':
     '58f1d8ee057dabf0cd0eae309aece7226d87a59cbf0e7efedae501d66b9f5dcb',
   'packages/nest-common/src/text/canonical-unique-text.ts':
@@ -154,6 +154,40 @@ const pins = {
     '61320e503117b4535f008253df76539e8ec2d29159cb9d5fdcb59e56753b814b',
 };
 export const CALLBACK_HELPER_SOURCES = Object.freeze(Object.keys(pins));
+// A manifest is pinned without the fields no resolver or runtime reads, so a test script or
+// devDependency edit keeps the proof. Every other field, known or new, stays in the hash
+// (fail closed): name, type, main, module, browser, types, typesVersions, exports, imports,
+// dependencies, the build/lifecycle/unknown scripts and anything a toolchain may add. Key
+// order is kept: `exports` conditions are ordered. Other sources are pinned as whole files.
+const INERT_MANIFEST_FIELDS = new Set([
+  'version',
+  'private',
+  'description',
+  'files',
+  'devDependencies',
+  'license',
+  'author',
+  'keywords',
+  'repository',
+  'homepage',
+  'bugs',
+]);
+const INERT_SCRIPT = /^(test|lint|typecheck|clean)(:|$)/;
+const pinnedBytes = (root, path) => {
+  const bytes = readFileSync(resolve(root, path));
+  if (!path.endsWith('/package.json')) return bytes;
+  const manifest = JSON.parse(bytes.toString('utf8'));
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return bytes;
+  return JSON.stringify(
+    Object.entries(manifest).flatMap(([key, value]) =>
+      INERT_MANIFEST_FIELDS.has(key)
+        ? []
+        : key === 'scripts' && value && typeof value === 'object' && !Array.isArray(value)
+          ? [[key, Object.entries(value).filter(([name]) => !INERT_SCRIPT.test(name))]]
+          : [[key, value]],
+    ),
+  );
+};
 // Resolve the import spelling before granting a capability. Ambiguous file /
 // directory or extension siblings are refused instead of guessing a toolchain's
 // precedence. JS specifiers may name TS sources, as in the repository imports.
@@ -192,22 +226,29 @@ const resolvedImport = (root, specifier, importer, configImporter = importer) =>
   ).resolvedModule;
   return result && relative(root, result.resolvedFileName).replaceAll('\\', '/');
 };
-// `binding` describes how the call site names the helper: `importer` is the absolute path of the
-// importing file (an import is resolved through its compiler configuration, never by spelling),
-// `spelling` the final segment of the import specifier (or of the declaring file's own path) and
-// `definition` the scope definition type. An `exact` entry additionally accepts only the bare or
-// `.ts` module name, and only an import or a function declaration, never a variable; omitting
-// `binding` refuses it.
-export function verifiedCallbackHelper(root, modulePath, name, binding = {}) {
-  const { importer } = binding;
+// `binding` describes how the call site names the helper, and every field is required:
+// `importer` is the absolute path of the file that uses the helper (an import is resolved
+// through its compiler configuration, never by spelling; the dependencies of every grant are
+// resolved through it too), `spelling` the final segment of the import specifier (or of the
+// declaring file's own path) and `definition` the scope definition type. Without an import the
+// helper must be declared (`FunctionName`/`Variable`) in the importer itself, named by
+// `modulePath`. An `exact` entry additionally accepts only the bare or `.ts` module name, and
+// only an import or a function declaration, never a variable.
+export function verifiedCallbackHelper(root, modulePath, name, binding) {
+  const { importer, definition } = binding ?? {};
   try {
-    if (
-      importer &&
-      modulePath === '@rasta/contracts' &&
-      resolvedImport(root, modulePath, importer) !== 'packages/contracts/dist/index.d.ts'
-    )
-      return undefined;
-    if (importer && modulePath !== '@rasta/contracts') {
+    if (typeof importer !== 'string' || !isAbsolute(importer)) return undefined;
+    if (definition !== 'ImportBinding') {
+      if (
+        !['FunctionName', 'Variable'].includes(definition) ||
+        resolve(root, modulePath) !== resolve(importer)
+      )
+        return undefined;
+      modulePath = relative(root, importer).replaceAll('\\', '/');
+    } else if (modulePath === '@rasta/contracts') {
+      if (resolvedImport(root, modulePath, importer) !== 'packages/contracts/dist/index.d.ts')
+        return undefined;
+    } else {
       const exact = resolvedImport(root, modulePath, importer);
       if (
         /\.[cm]?[jt]sx?$/.test(modulePath) &&
@@ -218,7 +259,8 @@ export function verifiedCallbackHelper(root, modulePath, name, binding = {}) {
       if (!exact || resolvedSource(root, exact) !== exact) return undefined;
       modulePath = exact;
     }
-    const exact = modulePath === '@rasta/contracts' ? modulePath : resolvedSource(root, modulePath);
+    const contracts = definition === 'ImportBinding' && modulePath === '@rasta/contracts';
+    const exact = contracts ? modulePath : resolvedSource(root, modulePath);
     const helper = helpers.find(
       ([path, file, names]) =>
         (path === '@rasta/contracts' ? path === exact : file === exact) && names.includes(name),
@@ -258,46 +300,40 @@ export function verifiedCallbackHelper(root, modulePath, name, binding = {}) {
       files.push('apps/web/src/lib/form-issues.ts');
     // A pinned dependency must also be the dependency the compiler selects.
     // Its source bytes alone cannot authenticate a moduleSuffixes/paths shadow.
-    if (importer)
-      for (const file of files) {
-        const ast = ts.createSourceFile(
-          file,
-          readFileSync(resolve(root, file), 'utf8'),
-          ts.ScriptTarget.Latest,
+    for (const file of files.filter((path) => !path.endsWith('.json'))) {
+      const ast = ts.createSourceFile(
+        file,
+        readFileSync(resolve(root, file), 'utf8'),
+        ts.ScriptTarget.Latest,
+      );
+      for (const statement of ast.statements) {
+        const specifier = statement.moduleSpecifier?.text;
+        if (typeof specifier !== 'string') continue;
+        const logical = specifier.startsWith('.')
+          ? relative(root, resolve(dirname(resolve(root, file)), specifier))
+          : specifier.startsWith('@/')
+            ? 'apps/web/src/' + specifier.slice(2)
+            : undefined;
+        const expected = files.find((path) =>
+          [
+            path,
+            path.replace(/\.ts$/, '.js'),
+            path.replace(/\.ts$/, ''),
+            path.replace(/\/index\.ts$/, ''),
+          ].includes(logical),
         );
-        for (const statement of ast.statements) {
-          const specifier = statement.moduleSpecifier?.text;
-          if (typeof specifier !== 'string') continue;
-          const logical = specifier.startsWith('.')
-            ? relative(root, resolve(dirname(resolve(root, file)), specifier))
-            : specifier.startsWith('@/')
-              ? 'apps/web/src/' + specifier.slice(2)
-              : undefined;
-          const expected = files.find((path) =>
-            [
-              path,
-              path.replace(/\.ts$/, '.js'),
-              path.replace(/\.ts$/, ''),
-              path.replace(/\/index\.ts$/, ''),
-            ].includes(logical),
-          );
-          if (
-            expected &&
-            resolvedImport(root, specifier, resolve(root, file), importer) !== expected
-          )
-            return undefined;
-        }
+        if (expected && resolvedImport(root, specifier, resolve(root, file), importer) !== expected)
+          return undefined;
       }
+    }
     if (
       files.some(
         (path) =>
           (!path.endsWith('.json') &&
             resolvedSource(root, path.replace(/\.[cm]?[jt]sx?$/, '')) !== path) ||
-          ![pins[path]].flat().includes(
-            createHash('sha256')
-              .update(readFileSync(resolve(root, path)))
-              .digest('hex'),
-          ),
+          ![pins[path]]
+            .flat()
+            .includes(createHash('sha256').update(pinnedBytes(root, path)).digest('hex')),
       )
     )
       return undefined;
