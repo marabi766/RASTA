@@ -1,6 +1,8 @@
 import {
   CredentialEnvironmentRefusedError,
+  disownRefusal,
   refuseAlteredEnvironment,
+  refusedBeforeSending,
 } from './credential-environment';
 
 /**
@@ -90,5 +92,31 @@ describe('refuseAlteredEnvironment', () => {
       else delete (globalThis as Record<symbol, unknown>)[SLOT];
     }
     expect(reasonOf(() => refuseAlteredEnvironment(local))).toBe('sent');
+  });
+});
+
+describe('refusedBeforeSending (#967 r1: a refused send is never an unknown outcome)', () => {
+  /** What the check threw while this realm's Object.prototype carried a stray key. */
+  const thrown = (): unknown => {
+    try {
+      withKey(Object.prototype, 'fu249Probe', () => refuseAlteredEnvironment(local));
+    } catch (error) {
+      return error;
+    }
+    throw new Error('not refused');
+  };
+
+  it('is true only for what the check itself threw', () => {
+    expect(refusedBeforeSending(thrown())).toBe(true);
+    expect(refusedBeforeSending(new CredentialEnvironmentRefusedError('prototype'))).toBe(false);
+    for (const value of [undefined, null, 'prototype', 0, {}])
+      expect(refusedBeforeSending(value)).toBe(false);
+  });
+
+  it('is false once a transport disowned it, which hands back the same value', () => {
+    const refusal = thrown();
+    expect(disownRefusal(refusal)).toBe(refusal);
+    expect(refusedBeforeSending(refusal)).toBe(false);
+    for (const value of [undefined, null, 'x', 1]) expect(disownRefusal(value)).toBe(value);
   });
 });

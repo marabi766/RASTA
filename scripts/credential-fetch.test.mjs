@@ -4,7 +4,10 @@ import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { CredentialRedirectRefusedError, credentialFetch } from './credential-fetch.mjs';
-import { CredentialEnvironmentRefusedError } from '../packages/config/src/credential-environment.js';
+import {
+  CredentialEnvironmentRefusedError,
+  refusedBeforeSending,
+} from '../packages/config/src/credential-environment.js';
 import { AUDITED_TRANSPORTS } from './raw-http-boundary-rule.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -269,6 +272,37 @@ test('an unaltered runtime still sends the credential (FU-249)', async () => {
   assert.deepEqual(received, [`POST ${AUTH} `]);
 });
 
+test('its own refusal is known unsent; one escaping from its transport is not (FU-249)', async () => {
+  /** A fresh refusal of this transport's own check: marked, nothing sent. */
+  const ownRefusal = async () => {
+    Object.defineProperty(Object.prototype, 'fu249Probe', { value: 1, configurable: true });
+    try {
+      const own = await credentialFetch('http://127.0.0.1:9/', {}).catch((error) => error);
+      assert.ok(own instanceof CredentialEnvironmentRefusedError, String(own));
+      assert.equal(refusedBeforeSending(own), true);
+      return own;
+    } finally {
+      delete Object.prototype.fu249Probe;
+    }
+  };
+  // Thrown by the transport, or by the answer it returned: either way after the check.
+  for (const route of [
+    (own) => async () => {
+      throw own;
+    },
+    (own) => async () => ({
+      get status() {
+        throw own;
+      },
+    }),
+  ]) {
+    const own = await ownRefusal();
+    const escaped = await credentialFetch('http://127.0.0.1:9/', {}, route(own)).catch((e) => e);
+    assert.equal(escaped, own);
+    assert.equal(refusedBeforeSending(escaped), false);
+  }
+});
+
 test('every audited transport runs the environment check before it sends, or says why not', () => {
   const CHECKED = {
     'packages/nest-common/src/http/internal-fetch.ts': 'fetchImpl(input, { ...init, redirect',
@@ -296,6 +330,10 @@ test('every audited transport runs the environment check before it sends, or say
     const check = text.indexOf('  refuseAlteredEnvironment(fetchImpl);\n');
     assert.ok(check > 0 && text.indexOf(send) > check, `${file}: the check precedes the send`);
     assert.equal(text.split(send).length, 2, `${file}: one send`);
+    // Whatever the send throws is disowned: it may have sent (refusedBeforeSending).
+    const disowned = text.indexOf('    throw disownRefusal(error);\n');
+    assert.ok(disowned > text.indexOf(send), `${file}: the send's failure is disowned`);
+    assert.equal(text.split('disownRefusal(').length, 2, `${file}: one disown`);
     assert.match(
       text,
       /from '(?:@rasta\/config|\.\.\/packages\/config\/src\/credential-environment\.js)';/,

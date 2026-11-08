@@ -1,4 +1,4 @@
-import { refuseAlteredEnvironment } from '@rasta/config';
+import { disownRefusal, refuseAlteredEnvironment } from '@rasta/config';
 
 /**
  * The bytes of an upload, from this server to object storage, over the signed
@@ -15,6 +15,11 @@ export async function putToSignedUrl(
   fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {
   refuseAlteredEnvironment(fetchImpl);
-  // Set after init so even an untyped caller cannot override either.
-  return fetchImpl(url, { ...init, method: 'PUT', redirect: 'error' });
+  try {
+    // Set after init so even an untyped caller cannot override either.
+    return await fetchImpl(url, { ...init, method: 'PUT', redirect: 'error' });
+  } catch (error) {
+    // From the transport, which may have sent: never this call's own refusal.
+    throw disownRefusal(error);
+  }
 }

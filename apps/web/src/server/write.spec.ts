@@ -3,6 +3,7 @@
  */
 import type { z } from 'zod';
 
+import { refuseAlteredEnvironment } from '@rasta/config';
 import { ERROR_STATUS } from '@rasta/contracts';
 
 import {
@@ -624,9 +625,37 @@ describe('sent, but not confirmed', () => {
       throw error;
     }) as unknown as typeof fetch;
   const socket = (code: string) => new TypeError('fetch failed', { cause: { code } });
+  /** Runs `work` while this realm's Object.prototype carries a key ECMAScript does not define. */
+  const whileAltered = <T>(work: () => T): T => {
+    Object.defineProperty(Object.prototype, 'fu249Probe', { value: 1, configurable: true });
+    try {
+      return work();
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).fu249Probe;
+    }
+  };
+  const whileAlteredAsync = async <T>(work: () => Promise<T>): Promise<T> => {
+    Object.defineProperty(Object.prototype, 'fu249Probe', { value: 1, configurable: true });
+    try {
+      return await work();
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).fu249Probe;
+    }
+  };
+  /** A refusal the FU-249 check really threw — here for some other, nested send. */
+  const nestedRefusal = (): unknown =>
+    whileAltered(() => {
+      try {
+        refuseAlteredEnvironment(fetch);
+      } catch (error) {
+        return error;
+      }
+      throw new Error('the environment check did not refuse');
+    });
 
   it.each([
     ['a connection reset after the request went out', socket('ECONNRESET')],
+    ['a refusal of a nested send, escaping from inside the transport (FU-249)', nestedRefusal()],
     ['the socket closing mid-response', socket('UND_ERR_SOCKET')],
     ['this portal’s own deadline', new DOMException('The operation was aborted.', 'TimeoutError')],
     ['a rejection with no cause at all', new TypeError('fetch failed')],
@@ -642,6 +671,13 @@ describe('sent, but not confirmed', () => {
   ])('is still UNAVAILABLE for %s: nothing was sent', async (_label, code) => {
     const result = await call(rejecting(socket(code)));
     expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503, neverSent: true });
+  });
+
+  it('is UNAVAILABLE for a write its transport refused in an altered runtime: nothing was sent (FU-249)', async () => {
+    const transport = jest.fn(async () => jsonResponse(201, { id: 'x' }));
+    const result = await whileAlteredAsync(() => call(transport as unknown as typeof fetch));
+    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503, neverSent: true });
+    expect(transport).not.toHaveBeenCalled();
   });
 
   it('is UNKNOWN_OUTCOME for a 503 the platform answered: it may follow a commit (FU-189)', async () => {

@@ -1,4 +1,4 @@
-import { refuseAlteredEnvironment } from '@rasta/config';
+import { disownRefusal, refuseAlteredEnvironment } from '@rasta/config';
 
 /**
  * What {@link internalFetch} throws for a redirect: a transport failure, never
@@ -30,16 +30,21 @@ export async function internalFetch(
 ): Promise<Response> {
   // Before anything is sent: no credential through an altered runtime (FU-249).
   refuseAlteredEnvironment(fetchImpl);
-  // Set after init so even untyped callers cannot override this policy.
-  const response = await fetchImpl(input, { ...init, redirect: 'manual' });
-  // Fetch redirects only these five statuses. 300 offers choices and 305 is
-  // deprecated; neither navigates with manual fetch. Preserve their existing
-  // caller-defined semantics, like 304 (cache revalidation) and unknown 3xx.
-  if ([301, 302, 303, 307, 308].includes(response.status)) {
-    // Cleanup must not delay the unavailable verdict past the caller's deadline.
-    void response.body?.cancel().catch(() => undefined);
-    // No URL, Location, body, token or upstream message in the error.
-    throw new RedirectRefusedError();
+  try {
+    // Set after init so even untyped callers cannot override this policy.
+    const response = await fetchImpl(input, { ...init, redirect: 'manual' });
+    // Fetch redirects only these five statuses. 300 offers choices and 305 is
+    // deprecated; neither navigates with manual fetch. Preserve their existing
+    // caller-defined semantics, like 304 (cache revalidation) and unknown 3xx.
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      // Cleanup must not delay the unavailable verdict past the caller's deadline.
+      void response.body?.cancel().catch(() => undefined);
+      // No URL, Location, body, token or upstream message in the error.
+      throw new RedirectRefusedError();
+    }
+    return response;
+  } catch (error) {
+    // Thrown after the check, so the request may have left: never this call's own refusal.
+    throw disownRefusal(error);
   }
-  return response;
 }

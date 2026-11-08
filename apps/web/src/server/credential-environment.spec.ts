@@ -3,7 +3,7 @@
  */
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { CredentialEnvironmentRefusedError } from '@rasta/config';
+import { CredentialEnvironmentRefusedError, refusedBeforeSending } from '@rasta/config';
 
 import { credentialFetch } from './credential-fetch';
 import { putToSignedUrl } from './signed-url-upload';
@@ -56,9 +56,14 @@ beforeEach(() => {
 
 /** Each transport, sending its credential with the caller's own body (or none). */
 const TRANSPORTS = {
-  credentialFetch: (body?: string) =>
-    credentialFetch(`${origin}/api`, { method: 'POST', headers: { authorization: BEARER }, body }),
-  putToSignedUrl: (body?: string) => putToSignedUrl(`${origin}/bucket/key?${SIGNATURE}`, { body }),
+  credentialFetch: (body?: string, fetchImpl?: typeof fetch) =>
+    credentialFetch(
+      `${origin}/api`,
+      { method: 'POST', headers: { authorization: BEARER }, body },
+      fetchImpl,
+    ),
+  putToSignedUrl: (body?: string, fetchImpl?: typeof fetch) =>
+    putToSignedUrl(`${origin}/bucket/key?${SIGNATURE}`, { body }, fetchImpl),
 };
 const NAMES = Object.keys(TRANSPORTS) as (keyof typeof TRANSPORTS)[];
 
@@ -85,6 +90,35 @@ describe.each(NAMES)('%s in an altered runtime (FU-249)', (name) => {
     const outcome = await whilePolluted(key, value, () => send());
     expect(outcome).toBeInstanceOf(CredentialEnvironmentRefusedError);
     expect(captured).toEqual([]);
+    expect(received).toEqual([]);
+  });
+
+  it('marks only its own refusal as unsent, never one escaping from its transport', async () => {
+    /** A fresh refusal of this transport's own check: marked, nothing sent. */
+    const ownRefusal = async () => {
+      const own = await whilePolluted('fu249Probe', 1, () => send());
+      expect(own).toBeInstanceOf(CredentialEnvironmentRefusedError);
+      expect(refusedBeforeSending(own)).toBe(true);
+      return own;
+    };
+    // Thrown by the transport, or by the answer it returned: either way after the check.
+    const routes: ((own: unknown) => typeof fetch)[] = [
+      (own) => async () => {
+        throw own;
+      },
+      (own) => async () =>
+        ({
+          get status(): number {
+            throw own;
+          },
+        }) as Response,
+    ];
+    for (const route of name === 'credentialFetch' ? routes : routes.slice(0, 1)) {
+      const own = await ownRefusal();
+      const escaped = await send(undefined, route(own)).catch((error: unknown) => error);
+      expect(escaped).toBe(own);
+      expect(refusedBeforeSending(escaped)).toBe(false);
+    }
     expect(received).toEqual([]);
   });
 

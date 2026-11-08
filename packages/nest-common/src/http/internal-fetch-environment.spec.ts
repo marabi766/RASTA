@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { CredentialEnvironmentRefusedError } from '@rasta/config';
+import { CredentialEnvironmentRefusedError, refusedBeforeSending } from '@rasta/config';
 import { internalFetch } from './internal-fetch';
 
 /**
@@ -70,6 +70,39 @@ describe('internalFetch in an altered runtime (FU-249)', () => {
     );
     expect(outcome).toBeInstanceOf(CredentialEnvironmentRefusedError);
     expect(captured).toEqual([]);
+    expect(received).toEqual([]);
+  });
+
+  it('marks only its own refusal as unsent, never one escaping from its transport', async () => {
+    /** A fresh refusal of internalFetch's own check: marked, nothing sent. */
+    const ownRefusal = async () => {
+      const own = await whilePolluted('fu249Probe', 1, () =>
+        internalFetch(origin, { method: 'GET' }),
+      );
+      expect(own).toBeInstanceOf(CredentialEnvironmentRefusedError);
+      expect(refusedBeforeSending(own)).toBe(true);
+      return own;
+    };
+    // Thrown by the transport, or by the answer it returned: either way after the check.
+    const routes: ((own: unknown) => typeof fetch)[] = [
+      (own) => async () => {
+        throw own;
+      },
+      (own) => async () =>
+        ({
+          get status(): number {
+            throw own;
+          },
+        }) as Response,
+    ];
+    for (const route of routes) {
+      const own = await ownRefusal();
+      const escaped = await internalFetch(origin, { method: 'GET' }, route(own)).catch(
+        (error: unknown) => error,
+      );
+      expect(escaped).toBe(own);
+      expect(refusedBeforeSending(escaped)).toBe(false);
+    }
     expect(received).toEqual([]);
   });
 

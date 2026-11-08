@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { refusedBeforeSending } from '@rasta/config';
 import { z } from 'zod';
 
 import { credentialFetch } from './credential-fetch';
@@ -93,7 +94,8 @@ export class GatewayOutcomeUnknownError extends GatewayRequestError {
 
 /**
  * The request provably never left this portal (connection refused, DNS failure
- * …, see `neverSent`): nothing reached the platform, so nothing happened. A
+ * …, see `neverSent`; or the transport refused an altered runtime before
+ * sending, `refusedBeforeSending`): nothing reached the platform, so nothing happened. A
  * `GatewayRequestError` with status 503 as before — every reader treats it so —
  * but a write can tell it from a 503 that came back from the platform, which
  * may follow a commit (`write.ts` carries it as `neverSent`).
@@ -341,7 +343,11 @@ async function exchangeGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>
     // platform acted is unknown. A refused redirect is one of those: the
     // request was sent and answered with a 3xx that says nothing about whether
     // it was applied, so a write it answered is unconfirmed, never `neverSent`.
-    if (neverSent(error)) throw new GatewayNeverSentError(correlationId);
+    // The transport's own refusal of an altered runtime (FU-249) is thrown
+    // before it sends, so it is never-sent too — never an unknown outcome that
+    // would hold a write nobody sent.
+    if (refusedBeforeSending(error) || neverSent(error))
+      throw new GatewayNeverSentError(correlationId);
     throw new GatewayOutcomeUnknownError(503, correlationId, 'TRANSPORT');
   }
 

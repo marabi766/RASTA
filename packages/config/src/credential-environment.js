@@ -59,6 +59,40 @@ class CredentialEnvironmentRefusedError extends Error {
 }
 
 /**
+ * The refusals {@link refuseAlteredEnvironment} threw, each before its
+ * transport sent anything. Weak, module-private: nothing else can add one.
+ * @type {WeakSet<object>}
+ */
+const refusedBeforeSend = new WeakSet();
+
+/**
+ * Whether `error` is a refusal this check threw before its transport sent
+ * anything: the one transport failure whose outcome is known, nothing was
+ * sent (checklist A1). False for anything else, including a refusal that
+ * escaped from inside a transport after its own request may have left
+ * ({@link disownRefusal}), so a caller that cannot tell reads it as unknown.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function refusedBeforeSending(error) {
+  return typeof error === 'object' && error !== null && refusedBeforeSend.has(error);
+}
+
+/**
+ * What a transport rethrows for anything its `fetchImpl` threw: the same
+ * value, no longer {@link refusedBeforeSending} — a refusal of some nested
+ * send says nothing about whether this transport's request left.
+ *
+ * @param {unknown} error
+ * @returns {unknown}
+ */
+function disownRefusal(error) {
+  if (typeof error === 'object' && error !== null) refusedBeforeSend.delete(error);
+  return error;
+}
+
+/**
  * The `Object.prototype` of the realm `transport` was created in: this
  * module's own in production, the host's when a test runner sandboxes the
  * module but hands it the host's fetch. `null` when it cannot be told.
@@ -86,12 +120,24 @@ function realmObjectPrototype(transport) {
  * sent through `transport` now: Node's global dispatcher is the one present at
  * load, and `Object.prototype` — this realm's and the one `transport` comes
  * from — has only its ECMAScript keys. A key scan and two identity checks: no
- * I/O, nothing read from the request.
+ * I/O, nothing read from the request. What it throws is
+ * {@link refusedBeforeSending}.
  *
  * @param {unknown} transport the fetch the caller is about to send through
  * @returns {void}
  */
 function refuseAlteredEnvironment(transport) {
+  try {
+    checkEnvironment(transport);
+  } catch (error) {
+    // Whatever the check throws, it threw before anything was sent.
+    if (typeof error === 'object' && error !== null) refusedBeforeSend.add(error);
+    throw error;
+  }
+}
+
+/** @param {unknown} transport */
+function checkEnvironment(transport) {
   const dispatcher = dispatcherInForce();
   if (
     dispatcher?.value !== DISPATCHER_AT_LOAD?.value ||
@@ -114,4 +160,6 @@ function refuseAlteredEnvironment(transport) {
 }
 
 exports.CredentialEnvironmentRefusedError = CredentialEnvironmentRefusedError;
+exports.disownRefusal = disownRefusal;
 exports.refuseAlteredEnvironment = refuseAlteredEnvironment;
+exports.refusedBeforeSending = refusedBeforeSending;

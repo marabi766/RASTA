@@ -117,5 +117,7 @@ export {
 
 export {
   CredentialEnvironmentRefusedError,
+  disownRefusal,
   refuseAlteredEnvironment,
+  refusedBeforeSending,
 } from './credential-environment';

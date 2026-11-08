@@ -523,6 +523,8 @@ describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
   const held: ServerResponse[] = [];
   /** Called once the server has the next PUT's whole body: it was dispatched. */
   let onPutReceived: (() => void) | undefined;
+  /** Called as the GET before a write is answered: its own check has already passed. */
+  let onGetAnswered: (() => void) | undefined;
 
   beforeAll(async () => {
     server = createServer((request, response) => {
@@ -536,6 +538,7 @@ describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
           response.writeHead(onGet).end();
           return;
         }
+        onGetAnswered?.();
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ id: 'kc-1', email: 'a@example.test', attributes: {} }));
         return;
@@ -613,6 +616,22 @@ describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
     const error = await write(url).catch((caught: unknown) => caught);
     expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
     expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+  });
+
+  it('a write internalFetch refuses in an altered runtime is confirmed: nothing was sent (FU-249)', async () => {
+    // Altered while the read before the write is answered: only the write meets the check.
+    const answered = onGetAnswered;
+    onGetAnswered = () =>
+      Object.defineProperty(Object.prototype, 'fu249Probe', { value: 1, configurable: true });
+    try {
+      const error = await write().catch((caught: unknown) => caught);
+      expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+      expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      expect(puts).toHaveLength(0);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).fu249Probe;
+      onGetAnswered = answered;
+    }
   });
 
   it('a read that fails before the write is confirmed: nothing was sent', async () => {
