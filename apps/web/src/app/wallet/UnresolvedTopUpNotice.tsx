@@ -1,5 +1,4 @@
 import type { JSX } from 'react';
-import { ownText } from '@/lib/own-key';
 import { Alert, Button } from '@/ui';
 import { CSRF_FIELD } from '@/lib/form-fields';
 import { releaseUnresolvedTopUp } from './actions';
@@ -40,18 +39,4 @@ export function UnresolvedTopUpNotice({ walletId, csrfToken, releaseToken }: Pro
       </form>
     </Alert>
   );
-}
-
-const RELEASE_MESSAGES: Readonly<Record<string, string>> = {
-  IN_PROGRESS:
-    'درخواست هنوز در حال بررسی است و رها نشد. تراکنش‌ها را بررسی کنید؛ پس از پایان اجرا، رها کردن به تأیید دوباره نیاز دارد.',
-  STALE: 'این فرم رهاسازی قدیمی یا نامعتبر است. درخواست فعلی را دوباره بررسی کنید.',
-  UNAVAILABLE:
-    'امکان رها کردن درخواست اکنون نیست. درخواست همچنان نگهداری می‌شود؛ بعداً دوباره بررسی کنید.',
-  RELEASED: 'درخواست پیشین با تأیید شما رها شد. اکنون می‌توانید درخواست تازه ثبت کنید.',
-  GONE: 'درخواست پیشین دیگر در نگهداری نیست. پیش از درخواست تازه، تراکنش‌ها را بررسی کنید.',
-};
-export function TopUpReleaseFeedback({ outcome }: { outcome?: string }): JSX.Element | null {
-  const message = ownText(RELEASE_MESSAGES, outcome);
-  return message ? <Alert tone="warning">{message}</Alert> : null;
 }

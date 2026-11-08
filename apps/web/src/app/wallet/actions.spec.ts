@@ -23,7 +23,7 @@ import {
   UnresolvedStoreUnavailable,
 } from '@/server/unresolved-request-store';
 import { pageContext } from '@/server/page-context';
-import { readWalletReleaseFeedback, walletReleaseFeedback } from '@/server/wallet-release-feedback';
+import { readReleaseFeedback, releaseFeedback } from '@/server/release-feedback';
 import { actingAccessToken } from '@/test/session-token';
 
 /**
@@ -564,11 +564,49 @@ describe('FU-217 release feedback', () => {
         ),
       ).rejects.toThrow('NEXT_REDIRECT:/wallet');
       const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
-      expect(
-        readWalletReleaseFeedback(SESSION, WALLET_ID, url.searchParams.get('release'), true),
-      ).toBe(outcome);
+      expect(readReleaseFeedback(SESSION, WALLET_ID, url.searchParams.get('release'), true)).toBe(
+        outcome,
+      );
     },
   );
+});
+
+describe('FU-222 wallet release refusals before the store', () => {
+  it.each([
+    ['CSRF_REFUSED', { [CSRF_FIELD]: 'wrong', confirmDuplicate: 'yes' }],
+    ['CONSENT_MISSING', {}],
+  ] as const)('says %s and asks the store nothing', async (outcome, extra) => {
+    const store = memoryUnresolvedStore();
+    useUnresolvedStore(store);
+    const spy = jest.spyOn(store, 'release');
+    const form = formData({ release: 'token' });
+    for (const [key, value] of Object.entries(extra)) form.set(key, value);
+    await expect(releaseUnresolvedTopUp(WALLET_ID, form)).rejects.toThrow('NEXT_REDIRECT:/wallet');
+    const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
+    expect(readReleaseFeedback(SESSION, WALLET_ID, url.searchParams.get('release'), true)).toBe(
+      outcome,
+    );
+    expect(spy).not.toHaveBeenCalled();
+  });
+  it('shows an answer it does not know as not done', async () => {
+    const store = memoryUnresolvedStore();
+    useUnresolvedStore(store);
+    jest.spyOn(store, 'release').mockResolvedValue('SOMETHING_NEW' as never);
+    topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
+    await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
+    const held = await restoreTopUp(SESSION, WALLET_ID);
+    if (!('releaseToken' in held)) throw new Error('missing hold');
+    await expect(
+      releaseUnresolvedTopUp(
+        WALLET_ID,
+        formData({ release: held.releaseToken!, confirmDuplicate: 'yes' }),
+      ),
+    ).rejects.toThrow('NEXT_REDIRECT:/wallet');
+    const url = new URL(redirect.mock.calls.at(-1)![0], 'http://localhost');
+    expect(readReleaseFeedback(SESSION, WALLET_ID, url.searchParams.get('release'), true)).toBe(
+      'NOT_DONE',
+    );
+  });
 });
 
 describe('FU-210 top-up pre-dispatch refusals', () => {
@@ -591,26 +629,26 @@ describe('F4 server-derived wallet release feedback', () => {
     expect((await page('RELEASED')).props.children.props.releaseOutcome).toBeUndefined();
   });
   it('accepts a signed outcome only for this login, organization, wallet and TTL', async () => {
-    const token = walletReleaseFeedback(SESSION, WALLET_ID, 'RELEASED');
+    const token = releaseFeedback(SESSION, WALLET_ID, 'RELEASED');
     expect((await page(token)).props.children.props.releaseOutcome).toBe('RELEASED');
     for (const other of [
       { ...SESSION, csrfToken: 'other' },
       { ...SESSION, subject: 'other' },
       { ...SESSION, organizationId: 'other', accessToken: actingAccessToken('other') },
     ]) {
-      expect(readWalletReleaseFeedback(other, WALLET_ID, token, true)).toBeUndefined();
+      expect(readReleaseFeedback(other, WALLET_ID, token, true)).toBeUndefined();
     }
-    expect(readWalletReleaseFeedback(SESSION, 'WLT_OTHER', token, true)).toBeUndefined();
-    expect(readWalletReleaseFeedback(SESSION, WALLET_ID, token + 'x', true)).toBeUndefined();
+    expect(readReleaseFeedback(SESSION, 'WLT_OTHER', token, true)).toBeUndefined();
+    expect(readReleaseFeedback(SESSION, WALLET_ID, token + 'x', true)).toBeUndefined();
     const time = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 31_000);
     try {
-      expect(readWalletReleaseFeedback(SESSION, WALLET_ID, token, true)).toBeUndefined();
+      expect(readReleaseFeedback(SESSION, WALLET_ID, token, true)).toBeUndefined();
     } finally {
       time.mockRestore();
     }
   });
   it('suppresses a signed success when a newer hold exists or the store is unavailable', async () => {
-    const token = walletReleaseFeedback(SESSION, WALLET_ID, 'RELEASED');
+    const token = releaseFeedback(SESSION, WALLET_ID, 'RELEASED');
     topUpWallet.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'lost' });
     await submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000' }));
     expect((await page(token)).props.children.props.releaseOutcome).toBeUndefined();

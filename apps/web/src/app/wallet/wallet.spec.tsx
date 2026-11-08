@@ -13,6 +13,7 @@ import type {
 } from '@/server/wallet';
 import { TEST_CONTEXT } from '@/test/page-context';
 import { withContext } from '@/lib/page-context';
+import { RELEASE_MESSAGES } from '@/lib/release-messages';
 
 /**
  * `WalletScreen`, composing four independent reads. Mirrors
@@ -94,6 +95,7 @@ function render_(
     transactions?: ReadResult<TransactionPage>;
     provider?: ReadResult<PaymentProviderDisclosure>;
     query?: { context?: string; status?: string; transactionType?: string; cursor?: string };
+    releaseOutcome?: string;
   } = {},
 ) {
   return render(
@@ -105,6 +107,7 @@ function render_(
       query={{ context: TEST_CONTEXT, ...overrides.query }}
       csrfToken="csrf-token-for-this-session"
       submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
+      releaseOutcome={overrides.releaseOutcome}
     />,
   );
 }
@@ -165,6 +168,16 @@ describe('the top-up section', () => {
     expect(container.querySelector('[name="amountMinor"]')).toBeNull();
     expect(getByText('افزایش موجودی اکنون در دسترس نیست')).toBeInTheDocument();
   });
+});
+
+describe('FU-217 the release result', () => {
+  it.each(Object.keys(RELEASE_MESSAGES) as (keyof typeof RELEASE_MESSAGES)[])(
+    'shows %s in the top-up section',
+    (releaseOutcome) => {
+      const { getByRole } = render_({ releaseOutcome });
+      expect(getByRole('alert')).toHaveTextContent(RELEASE_MESSAGES[releaseOutcome]);
+    },
+  );
 });
 
 describe('the whole screen: «حالت نمایشی» (Q-14)', () => {
