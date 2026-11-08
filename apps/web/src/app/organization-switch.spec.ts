@@ -179,6 +179,7 @@ const offer = (id: string, supplier: string) => ({
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 1,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 });
 const PRODUCT = {

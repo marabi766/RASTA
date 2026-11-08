@@ -140,7 +140,7 @@ describe('the idempotency store keeps tenants apart (real database)', () => {
       const k = key(`proto-${name}`);
       // JSON.parse makes `name` an own key, as the request body parser does.
       const body = (x: number): unknown => ({
-        lines: [{ offerId: 'OFR-ITEST', quantity: 1 }],
+        lines: [{ offerId: 'OFR-ITEST', offerVersion: 1, quantity: 1 }],
         extra: JSON.parse(`{"${name}":{"x":${x}}}`) as unknown,
       });
       const claim = await as(org.buyer, () => store().claim(ENDPOINT, k, body(1)));

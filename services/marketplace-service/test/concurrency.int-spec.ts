@@ -8,6 +8,7 @@ import {
   publishOffer,
   sagaStep,
   tenants,
+  waitFor,
   wire,
   type Wiring,
 } from './helpers';
@@ -56,7 +57,10 @@ describe('concurrency (real database)', () => {
 
     const attempts = Array.from({ length: 10 }, (_, i) =>
       asBuyer(() =>
-        wiring.orders.place({ lines: [{ offerId, quantity: 3 }] }, key(`race-${i}`)),
+        wiring.orders.place(
+          { lines: [{ offerId, offerVersion: 1, quantity: 3 }] },
+          key(`race-${i}`),
+        ),
       ).then(
         (order) => ({ ok: true as const, order }),
         (error: unknown) => ({ ok: false as const, error }),
@@ -99,10 +103,16 @@ describe('concurrency (real database)', () => {
 
     const [a, b] = await Promise.all([
       asBuyer(() =>
-        wiring.orders.place({ lines: [{ offerId: first.offerId, quantity: 2 }] }, key('par-a')),
+        wiring.orders.place(
+          { lines: [{ offerId: first.offerId, offerVersion: 1, quantity: 2 }] },
+          key('par-a'),
+        ),
       ),
       asBuyer(() =>
-        wiring.orders.place({ lines: [{ offerId: second.offerId, quantity: 2 }] }, key('par-b')),
+        wiring.orders.place(
+          { lines: [{ offerId: second.offerId, offerVersion: 1, quantity: 2 }] },
+          key('par-b'),
+        ),
       ),
     ]);
 
@@ -123,8 +133,8 @@ describe('concurrency (real database)', () => {
         wiring.orders.place(
           {
             lines: [
-              { offerId: first.offerId, quantity: 1 },
-              { offerId: second.offerId, quantity: 1 },
+              { offerId: first.offerId, offerVersion: 1, quantity: 1 },
+              { offerId: second.offerId, offerVersion: 1, quantity: 1 },
             ],
           },
           key('dl-a'),
@@ -134,8 +144,8 @@ describe('concurrency (real database)', () => {
         wiring.orders.place(
           {
             lines: [
-              { offerId: second.offerId, quantity: 1 },
-              { offerId: first.offerId, quantity: 1 },
+              { offerId: second.offerId, offerVersion: 1, quantity: 1 },
+              { offerId: first.offerId, offerVersion: 1, quantity: 1 },
             ],
           },
           key('dl-b'),
@@ -147,40 +157,192 @@ describe('concurrency (real database)', () => {
     expect(new Set(results.map((r) => r.id)).size).toBe(2);
   });
 
-  it('prices at the offer’s current price, not the one the buyer last saw', async () => {
-    // A stale price is not honoured. The buyer's client may have been showing
-    // the old figure; the order is created at what the catalogue holds now,
-    // and the line records which version that was.
-    const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '100000' });
+  // -------------------------------------------------------------------------
+  // D-156: an order is placed only at the offer version the buyer read.
+  // -------------------------------------------------------------------------
 
-    await asActor({ organizationId: org.supplier, roles: ['SUPPLIER'] }, () =>
-      wiring.catalogue.updateOffer(offerId, { unitPriceMinor: '175000' }),
+  const asSupplier = <T>(fn: () => Promise<T>) =>
+    asActor({ organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-SUP' }, fn);
+
+  /** What an order could have written: the offer's availability, its lines, the buyer's events. */
+  async function footprint(offerId: string) {
+    return runUnscoped('the suite reads what a refused order must not have written', async () => {
+      const offer = await prisma.client.offer.findUniqueOrThrow({ where: { id: offerId } });
+      const lines = await prisma.client.orderLine.count({ where: { offerId } });
+      const events = await prisma.client.outboxMessage.count({
+        where: { organizationId: org.buyer },
+      });
+      return { available: offer.availableQuantity, version: offer.version, lines, events };
+    });
+  }
+
+  /**
+   * Resolves once another backend of this database is waiting on a row lock —
+   * the barrier that makes the interleaving below real rather than hoped for.
+   */
+  function lockWaiter(): Promise<true> {
+    return waitFor(
+      'a transaction waiting on the offer row lock',
+      async () => {
+        const [row] = await prisma.client.$queryRaw<{ waiting: bigint }[]>`
+          SELECT count(*) AS waiting FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock'
+             AND query LIKE '%FOR UPDATE%'`;
+        return (row?.waiting ?? 0n) > 0n ? (true as const) : null;
+      },
+      10_000,
+      20,
     );
+  }
 
+  /** Every committed line's (offer, version, price, currency) is a published history row. */
+  async function unprovenLines(offerId: string): Promise<number> {
+    const [row] = await runUnscoped(
+      'the suite joins lines to the price history',
+      () =>
+        prisma.client.$queryRaw<{ unproven: bigint }[]>`
+        SELECT count(*) AS unproven FROM order_line l
+         WHERE l.offer_id = ${offerId}
+           AND NOT EXISTS (
+             SELECT 1 FROM offer_price_history h
+              WHERE h.offer_id = l.offer_id AND h.version = l.offer_version
+                AND h.unit_price_minor = l.unit_price_minor AND h.currency = l.currency)`,
+    );
+    return Number(row?.unproven ?? -1n);
+  }
+
+  it('refuses an order at the version the buyer read once a reprice has committed, and writes nothing', async () => {
+    const { offerId } = await publishOffer(wiring, org.supplier, {
+      unitPriceMinor: '100000',
+      availableQuantity: 5,
+    });
+    // The buyer reads v1, then the supplier reprices before the order arrives.
+    await asSupplier(() => wiring.catalogue.updateOffer(offerId, { unitPriceMinor: '175000' }));
+    const before = await footprint(offerId);
+    expect(before.version).toBe(2);
+
+    await expect(
+      asBuyer(() =>
+        wiring.orders.place(
+          { lines: [{ offerId, offerVersion: 1, quantity: 2 }] },
+          key('stale-read'),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'OPTIMISTIC_LOCK_FAILED',
+      details: [{ path: 'lines[0].offerVersion', code: 'OFFER_VERSION_CHANGED' }],
+    });
+    // No order, no availability consumed, no event.
+    expect(await footprint(offerId)).toEqual(before);
+
+    // The version the offer is at now is accepted, at its price.
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, key('stale')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 2, quantity: 2 }] }, key('fresh')),
     );
-
-    expect(order.lines[0]?.unitPriceMinor).toBe('175000');
+    expect(order.lines[0]).toMatchObject({ offerVersion: 2, unitPriceMinor: '175000' });
     expect(order.totalAmountMinor).toBe('350000');
-    // Version 2, so an auditor can find the exact repricing this order bought
-    // under in `offer_price_history`.
-    expect(order.lines[0]?.offerVersion).toBe(2);
+  });
 
-    const history = await runUnscoped('the suite reads the price history it produced', () =>
-      prisma.client.offerPriceHistory.findMany({
-        where: { offerId },
-        orderBy: { version: 'asc' },
+  it('refuses an order that waited on a reprice holding the offer lock (reprice first)', async () => {
+    const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '100000' });
+    const before = await footprint(offerId);
+
+    let placing: Promise<unknown> | undefined;
+    // The reprice's last statement runs under its offer lock: the order starts
+    // there, blocks on the same row, and is let through only by the commit.
+    await asSupplier(() =>
+      wiring.catalogue.updateOffer(offerId, { unitPriceMinor: '120000' }, async () => {
+        placing = asBuyer(() =>
+          wiring.orders.place(
+            { lines: [{ offerId, offerVersion: 1, quantity: 1 }] },
+            key('behind-reprice'),
+          ),
+        ).catch((error: unknown) => error);
+        await lockWaiter();
       }),
     );
-    expect(history.map((row) => row.unitPriceMinor)).toEqual([100_000n, 175_000n]);
+
+    expect(await placing).toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+    expect(await footprint(offerId)).toEqual({ ...before, version: 2 });
+  });
+
+  it('commits an order holding the offer lock at its price; the waiting reprice then makes v+1 (order first)', async () => {
+    const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '100000' });
+
+    let repricing: Promise<unknown> | undefined;
+    const order = await asBuyer(() =>
+      wiring.orders.place(
+        { lines: [{ offerId, offerVersion: 1, quantity: 1 }] },
+        key('ahead-of-reprice'),
+        async () => {
+          // The order's last statement, under its offer lock: the reprice
+          // blocks on `updateOffer`'s own FOR UPDATE of the same row.
+          repricing = asSupplier(() =>
+            wiring.catalogue.updateOffer(offerId, { unitPriceMinor: '130000' }),
+          );
+          await lockWaiter();
+        },
+      ),
+    );
+    expect(await repricing).toMatchObject({ version: 2, unitPriceMinor: '130000' });
+
+    // The line keeps v1 and its price; the offer moved on to v2 after it.
+    const after = await asBuyer(() => wiring.orders.get(order.id));
+    expect(after.lines[0]).toMatchObject({ offerVersion: 1, unitPriceMinor: '100000' });
+    expect(after.totalAmountMinor).toBe('100000');
+    expect((await footprint(offerId)).version).toBe(2);
+    expect(await unprovenLines(offerId)).toBe(0);
+  });
+
+  it('two buyers and a reprice racing, repeatedly: every committed line is a published (version, price)', async () => {
+    const { offerId } = await publishOffer(wiring, org.supplier, {
+      unitPriceMinor: '100000',
+      availableQuantity: 1_000,
+    });
+    let committed = 0;
+
+    for (let round = 0; round < 12; round += 1) {
+      const read = (await footprint(offerId)).version;
+      const order = (buyer: string, label: string) =>
+        asBuyer(
+          () =>
+            wiring.orders.place(
+              { lines: [{ offerId, offerVersion: read, quantity: 1 }] },
+              key(`race-${label}-${round}`),
+            ),
+          buyer,
+        ).then(
+          (placed) => ({ ok: true as const, version: placed.lines[0]?.offerVersion }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+
+      const [a, b] = await Promise.all([
+        order(org.buyer, 'a'),
+        order(org.other, 'b'),
+        asSupplier(() =>
+          wiring.catalogue.updateOffer(offerId, { unitPriceMinor: String(100_000 + round + 1) }),
+        ),
+      ]);
+      for (const result of [a, b]) {
+        if (result.ok) {
+          committed += 1;
+          // Only ever the version the buyer read.
+          expect(result.version).toBe(read);
+        } else {
+          expect(result.error).toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+        }
+      }
+    }
+
+    expect(committed).toBeGreaterThan(0);
+    expect(await unprovenLines(offerId)).toBe(0);
   });
 
   it('leaves an order already placed at the price it agreed to', async () => {
     // A supplier cannot reprice work already sold.
     const { offerId } = await publishOffer(wiring, org.supplier, { unitPriceMinor: '100000' });
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('frozen')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('frozen')),
     );
 
     await asActor({ organizationId: org.supplier, roles: ['SUPPLIER'] }, () =>
@@ -198,7 +360,7 @@ describe('concurrency (real database)', () => {
     // a second history row.
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asBuyer(() =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('trans')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('trans')),
     );
 
     const saga = <T>(fn: () => Promise<T>) =>

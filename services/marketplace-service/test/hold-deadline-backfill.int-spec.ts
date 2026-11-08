@@ -86,7 +86,7 @@ describe('the legacy hold-deadline backfill (PostgreSQL)', () => {
   async function place() {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const placed = await asActor({ organizationId: org.buyer }, () =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('backfill')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('backfill')),
     );
     return { id: placed.id, organizationId: org.buyer };
   }

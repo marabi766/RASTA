@@ -108,12 +108,14 @@ describe('PlaceOrderForm: K1 set aside, K2 sent, then K1 answers', () => {
     availableQuantity: 15,
     leadTimeDays: 5,
     minimumQuantity: 2,
+    version: 1,
     supplierQualification: 'UNAVAILABLE',
   };
   const SLOT = keyFor('rasta.unresolved-order.', BINDING, 'PRD_1');
   const page = (submissionId: string) => (
     <PlaceOrderForm
       offers={[OFFER]}
+      offerStamps={Object.fromEntries([OFFER].map((o) => [o.id, `stamp-${o.id}`]))}
       csrfToken="csrf"
       submissionId={submissionId}
       newOrderHref="/marketplace/PRD_1"
@@ -126,7 +128,11 @@ describe('PlaceOrderForm: K1 set aside, K2 sent, then K1 answers', () => {
     kind: 'UNCONFIRMED',
     correlationId,
     submissionId: String(form.get('submission')),
-    values: { offerId: String(form.get('offerId')), quantity: String(form.get('quantity')) },
+    values: {
+      offerId: String(form.get('offerId')),
+      quantity: String(form.get('quantity')),
+      offerStamp: String(form.get(`offerStamp:${String(form.get('offerId'))}`)),
+    },
   });
   async function fillAndSend(container: HTMLElement, quantity: string) {
     fireEvent.change(container.querySelector('select[name="offerId"]')!, {
@@ -160,7 +166,7 @@ describe('PlaceOrderForm: K1 set aside, K2 sent, then K1 answers', () => {
     const k2 = window.sessionStorage.getItem(SLOT)!;
     expect(JSON.parse(k2)).toMatchObject({
       submissionId: K2,
-      values: { offerId: 'OFR_1', quantity: '7' },
+      values: { offerId: 'OFR_1', quantity: '7', offerStamp: 'stamp-OFR_1' },
       correlationId: 'COR_K2',
     });
 
@@ -231,7 +237,11 @@ describe('PlaceOrderForm: K1 set aside, K2 sent, then K1 answers', () => {
     clearUnresolvedOrder('PRD_1', K1, BINDING);
     saveUnresolvedOrder(
       'PRD_1',
-      { submissionId: K2, values: { offerId: 'OFR_1', quantity: '7' }, correlationId: null },
+      {
+        submissionId: K2,
+        values: { offerId: 'OFR_1', quantity: '7', offerStamp: 'stamp-OFR_1' },
+        correlationId: null,
+      },
       BINDING,
     );
     const k2 = window.sessionStorage.getItem(SLOT);

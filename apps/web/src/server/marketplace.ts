@@ -31,6 +31,8 @@ const offerSchema = z.object({
   availableQuantity: z.number().int(),
   leadTimeDays: z.number().int(),
   minimumQuantity: z.number().int(),
+  /** Which repricing this is (D-156): an order names it and is placed only at it. */
+  version: z.number().int().min(1),
   supplierQualification: z.string(),
 });
 

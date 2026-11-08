@@ -408,6 +408,10 @@ export const EXEMPTIONS = {
       index: 'offer_price_history (offer_id, version)',
       reason: `one row per (offer, version) — an invariant of one offer's price history; ${perParentUnique('offer_id')}`,
     },
+    uq_offer_price_history_price: {
+      index: 'offer_price_history (offer_id, version, unit_price_minor, currency)',
+      reason: `the key fk_order_line_price_history references (D-156): a buyer-owned line names the supplier-owned price its offer published, so the two rows never share an organization_id; ${perParentUnique('offer_id')}`,
+    },
     uq_order_line_offer: {
       index: 'order_line (order_id, offer_id)',
       reason: `one line per (order, offer) — an invariant of one order; ${perParentUnique('order_id')}; ${PARENT_LOAD}`,

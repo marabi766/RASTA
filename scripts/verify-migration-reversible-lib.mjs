@@ -3247,6 +3247,8 @@ export const EXPECTED = {
       'ck_order_hold_deadline_revocation_actor',
       'fk_order_hold_deadline_backfill_tenant',
       'fk_order_hold_deadline_revocation_assignment',
+      // 20261108120100_order_line_price_history_fk (D-156): a line's price is a published one.
+      'fk_order_line_price_history',
     ],
     // Added by 20260929120100_order_idempotency_key_unique (review of #141):
     // one Idempotency-Key places at most one order per organization, even
@@ -3262,6 +3264,7 @@ export const EXPECTED = {
       'ux_return_dispatch_release_reservation',
       'ux_return_dispatch_release_command',
       'ix_return_dispatch_release_request',
+      'uq_offer_price_history_price',
     ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,

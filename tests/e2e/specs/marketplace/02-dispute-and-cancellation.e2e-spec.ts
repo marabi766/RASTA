@@ -64,6 +64,9 @@ async function untilTransaction(
   }
 }
 
+/** A just-created offer is at version 1 (`createOffer`); an order names the version it read (D-156). */
+const FRESH_OFFER_VERSION = 1;
+
 async function publishedOffer(tenantB: Actor, unitPriceMinor = '300000'): Promise<string> {
   const product = await tenantB.post('/v1/products', {
     idempotencyKey: idempotencyKey('e2e-catalogue'),
@@ -101,7 +104,7 @@ test.describe.serial('a dispute stops settlement completely', () => {
 
     const placed = await tenantA.post('/v1/orders', {
       idempotencyKey: idempotencyKey('e2e-disputed'),
-      body: { lines: [{ offerId, quantity: 1 }] },
+      body: { lines: [{ offerId, offerVersion: FRESH_OFFER_VERSION, quantity: 1 }] },
     });
     expect(placed.status).toBe(201);
     const order = placed.body as { id: string };
@@ -191,7 +194,7 @@ test.describe.serial('cancellation returns the money before the order closes', (
 
     const placed = await tenantA.post('/v1/orders', {
       idempotencyKey: idempotencyKey('e2e-cancel'),
-      body: { lines: [{ offerId, quantity: 2 }] },
+      body: { lines: [{ offerId, offerVersion: FRESH_OFFER_VERSION, quantity: 2 }] },
     });
     expect(placed.status).toBe(201);
     const order = placed.body as { id: string };
@@ -240,7 +243,7 @@ test.describe.serial('cancellation returns the money before the order closes', (
 
     const placed = await tenantA.post('/v1/orders', {
       idempotencyKey: idempotencyKey('e2e-restore'),
-      body: { lines: [{ offerId, quantity: 4 }] },
+      body: { lines: [{ offerId, offerVersion: FRESH_OFFER_VERSION, quantity: 4 }] },
     });
     const order = placed.body as { id: string };
     await until(tenantA, order.id, ['FUNDS_HELD']);

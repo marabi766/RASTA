@@ -22,11 +22,11 @@ import { createOfferSchema, searchProductsQuerySchema, updateOfferSchema } from 
  */
 
 describe('an order request cannot carry a price', () => {
-  const valid = { lines: [{ offerId: 'OFR_1', quantity: 2 }] };
+  const valid = { lines: [{ offerId: 'OFR_1', offerVersion: 1, quantity: 2 }] };
 
-  it('accepts an offer id and a quantity', () => {
+  it('accepts an offer id, the offer version the buyer read, and a quantity', () => {
     const parsed = createOrderSchema.parse(valid);
-    expect(parsed.lines[0]).toEqual({ offerId: 'OFR_1', quantity: 2 });
+    expect(parsed.lines[0]).toEqual({ offerId: 'OFR_1', offerVersion: 1, quantity: 2 });
   });
 
   it.each([
@@ -37,7 +37,7 @@ describe('an order request cannot carry a price', () => {
     // Refused, not stripped. Stripping is quiet, and a client that believes it
     // sets the price would go on believing it.
     const result = createOrderSchema.safeParse({
-      lines: [{ offerId: 'OFR_1', quantity: 1, ...extra }],
+      lines: [{ offerId: 'OFR_1', offerVersion: 1, quantity: 1, ...extra }],
     });
     expect(result.success).toBe(false);
   });
@@ -60,7 +60,7 @@ describe('an order request cannot carry a price', () => {
 });
 
 describe('an order note (Q-110, temporary decision)', () => {
-  const valid = { lines: [{ offerId: 'OFR_1', quantity: 2 }] };
+  const valid = { lines: [{ offerId: 'OFR_1', offerVersion: 1, quantity: 2 }] };
 
   it('refuses a non-empty note with a message that names the gap, never the text', () => {
     // An order has nowhere to keep a note. Accepted, the buyer's text was
@@ -83,12 +83,45 @@ describe('an order note (Q-110, temporary decision)', () => {
   });
 });
 
+describe('the offer version a line agreed to (D-156)', () => {
+  it('refuses a line that names no version: there is no default to "current"', () => {
+    const result = createOrderSchema.safeParse({ lines: [{ offerId: 'OFR_1', quantity: 1 }] });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ path: ['lines', 0, 'offerVersion'] }),
+    ]);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['past the INT column', 2_147_483_648],
+    ['a string', '1'],
+    ['null', null],
+  ])('refuses a %s version', (_name, offerVersion) => {
+    expect(
+      createOrderSchema.safeParse({ lines: [{ offerId: 'OFR_1', offerVersion, quantity: 1 }] })
+        .success,
+    ).toBe(false);
+  });
+
+  it('accepts the largest version the column holds', () => {
+    expect(
+      createOrderSchema.safeParse({
+        lines: [{ offerId: 'OFR_1', offerVersion: 2_147_483_647, quantity: 1 }],
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe('order quantities', () => {
   it('refuses zero, a negative, and a fraction', () => {
     for (const quantity of [0, -1, 1.5]) {
-      expect(createOrderSchema.safeParse({ lines: [{ offerId: 'OFR_1', quantity }] }).success).toBe(
-        false,
-      );
+      expect(
+        createOrderSchema.safeParse({ lines: [{ offerId: 'OFR_1', offerVersion: 1, quantity }] })
+          .success,
+      ).toBe(false);
     }
   });
 
@@ -97,7 +130,11 @@ describe('order quantities', () => {
   });
 
   it('caps the number of lines, so one request cannot lock a thousand offers', () => {
-    const lines = Array.from({ length: 51 }, (_, i) => ({ offerId: `OFR_${i}`, quantity: 1 }));
+    const lines = Array.from({ length: 51 }, (_, i) => ({
+      offerId: `OFR_${i}`,
+      offerVersion: 1,
+      quantity: 1,
+    }));
     expect(createOrderSchema.safeParse({ lines }).success).toBe(false);
   });
 });

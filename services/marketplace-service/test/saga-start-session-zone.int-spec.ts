@@ -20,7 +20,7 @@ describe('order saga_start deadlines in any session zone (PostgreSQL)', () => {
   const place = async () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     return asActor({ organizationId: org.buyer }, () =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, key('zone')),
+      wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 2 }] }, key('zone')),
     );
   };
 

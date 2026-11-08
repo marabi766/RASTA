@@ -59,7 +59,7 @@ describe('idempotency and outbox (real database)', () => {
     it('returns the original order on a retry with the same key and body', async () => {
       const { offerId } = await publishOffer(wiring, org.supplier, { availableQuantity: 10 });
       const idempotencyKey = key('same');
-      const body = { lines: [{ offerId, quantity: 2 }] };
+      const body = { lines: [{ offerId, offerVersion: 1, quantity: 2 }] };
 
       const first = await asBuyer(() =>
         wiring.idempotency.run<OrderView>(
@@ -106,11 +106,11 @@ describe('idempotency and outbox (real database)', () => {
         wiring.idempotency.run<OrderView>(
           'POST /v1/orders',
           idempotencyKey,
-          { lines: [{ offerId: first.offerId, quantity: 1 }] },
+          { lines: [{ offerId: first.offerId, offerVersion: 1, quantity: 1 }] },
           201,
           (record) =>
             wiring.orders.place(
-              { lines: [{ offerId: first.offerId, quantity: 1 }] },
+              { lines: [{ offerId: first.offerId, offerVersion: 1, quantity: 1 }] },
               idempotencyKey,
               record,
             ),
@@ -123,11 +123,11 @@ describe('idempotency and outbox (real database)', () => {
           wiring.idempotency.run<OrderView>(
             'POST /v1/orders',
             idempotencyKey,
-            { lines: [{ offerId: second.offerId, quantity: 1 }] },
+            { lines: [{ offerId: second.offerId, offerVersion: 1, quantity: 1 }] },
             201,
             (record) =>
               wiring.orders.place(
-                { lines: [{ offerId: second.offerId, quantity: 1 }] },
+                { lines: [{ offerId: second.offerId, offerVersion: 1, quantity: 1 }] },
                 idempotencyKey,
                 record,
               ),
@@ -146,11 +146,11 @@ describe('idempotency and outbox (real database)', () => {
         wiring.idempotency.run<OrderView>(
           'POST /v1/orders',
           shared,
-          { lines: [{ offerId: mine.offerId, quantity: 1 }] },
+          { lines: [{ offerId: mine.offerId, offerVersion: 1, quantity: 1 }] },
           201,
           (record) =>
             wiring.orders.place(
-              { lines: [{ offerId: mine.offerId, quantity: 1 }] },
+              { lines: [{ offerId: mine.offerId, offerVersion: 1, quantity: 1 }] },
               shared,
               record,
             ),
@@ -166,11 +166,11 @@ describe('idempotency and outbox (real database)', () => {
           wiring.idempotency.run<OrderView>(
             'POST /v1/orders',
             shared,
-            { lines: [{ offerId: theirs.offerId, quantity: 1 }] },
+            { lines: [{ offerId: theirs.offerId, offerVersion: 1, quantity: 1 }] },
             201,
             (record) =>
               wiring.orders.place(
-                { lines: [{ offerId: theirs.offerId, quantity: 1 }] },
+                { lines: [{ offerId: theirs.offerId, offerVersion: 1, quantity: 1 }] },
                 shared,
                 record,
               ),
@@ -188,7 +188,7 @@ describe('idempotency and outbox (real database)', () => {
       // restocks, with the same key.
       const { offerId } = await publishOffer(wiring, org.supplier, { availableQuantity: 1 });
       const idempotencyKey = key('recover');
-      const body = { lines: [{ offerId, quantity: 5 }] };
+      const body = { lines: [{ offerId, offerVersion: 1, quantity: 5 }] };
 
       await expect(
         asBuyer(() =>
@@ -235,7 +235,7 @@ describe('idempotency and outbox (real database)', () => {
       // the client was simply early.
       const { offerId } = await publishOffer(wiring, org.supplier);
       const idempotencyKey = key('inflight');
-      const body = { lines: [{ offerId, quantity: 1 }] };
+      const body = { lines: [{ offerId, offerVersion: 1, quantity: 1 }] };
 
       // Claim without ever completing, which is exactly the state a request
       // that is still in flight leaves behind.
@@ -257,7 +257,7 @@ describe('idempotency and outbox (real database)', () => {
       // before the index, this test expected a second order here.
       const { offerId } = await publishOffer(wiring, org.supplier);
       const idempotencyKey = key('expired');
-      const body = { lines: [{ offerId, quantity: 1 }] };
+      const body = { lines: [{ offerId, offerVersion: 1, quantity: 1 }] };
 
       const first = await asBuyer(() =>
         wiring.idempotency.run<OrderView>(
@@ -319,7 +319,7 @@ describe('idempotency and outbox (real database)', () => {
     it('replays with the status the first call returned', async () => {
       const { offerId } = await publishOffer(wiring, org.supplier);
       const idempotencyKey = key('status');
-      const body = { lines: [{ offerId, quantity: 1 }] };
+      const body = { lines: [{ offerId, offerVersion: 1, quantity: 1 }] };
 
       await asBuyer(() =>
         wiring.idempotency.run<OrderView>(
@@ -345,7 +345,7 @@ describe('idempotency and outbox (real database)', () => {
       // call that is known to have succeeded.
       const { offerId } = await publishOffer(wiring, org.supplier);
       const idempotencyKey = key('nostatus');
-      const body = { lines: [{ offerId, quantity: 1 }] };
+      const body = { lines: [{ offerId, offerVersion: 1, quantity: 1 }] };
 
       await asBuyer(() =>
         wiring.idempotency.run<OrderView>(
@@ -376,7 +376,7 @@ describe('idempotency and outbox (real database)', () => {
     it('writes the order and its event in one transaction', async () => {
       const { offerId } = await publishOffer(wiring, org.supplier);
       const order = await asBuyer(() =>
-        wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('outbox')),
+        wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('outbox')),
       );
 
       const rows = await outboxFor(prisma, org.buyer);
@@ -395,7 +395,7 @@ describe('idempotency and outbox (real database)', () => {
     it('carries the envelope headers a consumer filters on', async () => {
       const { offerId } = await publishOffer(wiring, org.supplier);
       const order = await asBuyer(() =>
-        wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('headers')),
+        wiring.orders.place({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] }, key('headers')),
       );
 
       const rows = await outboxFor(prisma, org.buyer);
@@ -416,7 +416,12 @@ describe('idempotency and outbox (real database)', () => {
       const before = (await outboxFor(prisma, org.buyer)).length;
 
       await expect(
-        asBuyer(() => wiring.orders.place({ lines: [{ offerId, quantity: 99 }] }, key('rollback'))),
+        asBuyer(() =>
+          wiring.orders.place(
+            { lines: [{ offerId, offerVersion: 1, quantity: 99 }] },
+            key('rollback'),
+          ),
+        ),
       ).rejects.toThrow();
 
       const after = await outboxFor(prisma, org.buyer);

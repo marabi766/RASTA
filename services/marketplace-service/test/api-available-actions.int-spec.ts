@@ -90,7 +90,7 @@ describe('available actions, along a real order lifecycle', () => {
       .post('/v1/orders')
       .set('authorization', asBuyer())
       .set('idempotency-key', apiKey('ava-place'))
-      .send({ lines: [{ offerId, quantity: 1 }] })
+      .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
       .expect(201);
     return order.body.id as string;
   }

@@ -165,7 +165,7 @@ describe('a union administrator decides a dispute only within its union (docs/24
       .post('/v1/orders')
       .set('authorization', asBuyer())
       .set('idempotency-key', apiKey('dda-order'))
-      .send({ lines: [{ offerId: offer.body.id, quantity: 1 }] })
+      .send({ lines: [{ offerId: offer.body.id, offerVersion: 1, quantity: 1 }] })
       .expect(201);
     const orderId = order.body.id as string;
 

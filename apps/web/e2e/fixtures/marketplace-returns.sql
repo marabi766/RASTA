@@ -47,6 +47,14 @@ VALUES
    3, 1, 'DRAFT', 1, NULL, 'USR-SEED-DEHYARI2-ADMIN', now() - interval '500 days')
 ON CONFLICT ("id") DO NOTHING;
 
+-- The price v1 published (D-156): an order line names a (version, price) of this table.
+INSERT INTO "offer_price_history"
+  ("id", "organization_id", "offer_id", "version", "unit_price_minor", "currency", "changed_by")
+VALUES
+  ('OPH_E2E_RETURNS_GRAVEL_V1', 'ORG-DEH-0002', 'OFR_E2E_RETURNS_GRAVEL', 1, 5000000, 'IRR',
+   'USR-SEED-DEHYARI2-ADMIN')
+ON CONFLICT DO NOTHING;
+
 INSERT INTO "order"
   ("id", "organization_id", "supplier_organization_id", "placed_by", "status",
    "total_amount_minor", "currency", "economic_transaction_id", "economic_settlement_id",

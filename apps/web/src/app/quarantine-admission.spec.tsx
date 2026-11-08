@@ -143,7 +143,11 @@ it('memory holds (storage refusing the set-aside) follow the same lifecycle', as
   const late = (id: string) =>
     answerUnresolvedOrder(
       'PRD_ELSEWHERE',
-      { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId: 'COR' },
+      {
+        submissionId: id,
+        values: { offerId: 'OFR_1', quantity: '3', offerStamp: 'stamp-OFR_1' },
+        correlationId: 'COR',
+      },
       ACCOUNT,
       null,
     );

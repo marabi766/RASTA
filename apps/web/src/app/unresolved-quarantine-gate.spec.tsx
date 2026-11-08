@@ -35,6 +35,7 @@ const OFFER: Offer = {
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 2,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 };
 
@@ -46,7 +47,7 @@ const SOMEONE_ELSE = bindingOf('owner-9', 'login-9', OTHER_PERSON, ['legacy-tag-
 const OLD = JSON.stringify({
   v: 1,
   submissionId: 'sub_OLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDO',
-  values: { offerId: 'OFR_SECRET_OFFER', quantity: '77' },
+  values: { offerId: 'OFR_SECRET_OFFER', quantity: '77', offerStamp: 'stamp-OFR_SECRET_OFFER' },
   correlationId: 'COR_OLD',
   savedAt: Date.now(),
   owner: 'legacy-tag-of-a-membership-that-ended',
@@ -57,6 +58,7 @@ const OLD_KEY = legacyKey('rasta.unresolved-order.', 'PRD_OTHER');
 function props(binding = NOW): PlaceOrderFormProps {
   return {
     offers: [OFFER],
+    offerStamps: { [OFFER.id]: `stamp-${OFFER.id}` },
     csrfToken: 'csrf',
     submissionId: 'sub_PAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPA',
     newOrderHref: '/marketplace/PRD_1',

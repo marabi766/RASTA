@@ -256,7 +256,7 @@ describe('idempotent replays: caller-bound, re-authorized; claims lapse (real da
         .post('/v1/orders')
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('rpl-order'))
-        .send({ lines: [{ offerId: offer.body.id as string, quantity: 1 }] })
+        .send({ lines: [{ offerId: offer.body.id as string, offerVersion: 1, quantity: 1 }] })
         .expect(201);
       const orderId = placed.body.id as string;
 
@@ -335,7 +335,7 @@ describe('idempotent replays: caller-bound, re-authorized; claims lapse (real da
           .post('/v1/orders')
           .set('authorization', `Bearer ${buyer(buyerOrg)}`)
           .set('idempotency-key', key)
-          .send({ lines: [{ offerId, quantity: 3 }] });
+          .send({ lines: [{ offerId, offerVersion: 1, quantity: 3 }] });
       const ordersUnder = () =>
         runUnscoped('the suite counts the orders one key produced', () =>
           harness.prisma.client.order.count({

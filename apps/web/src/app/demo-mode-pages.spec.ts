@@ -354,6 +354,7 @@ describe('/marketplace/[productId] while the provider is unknown (finding 1)', (
     availableQuantity: 15,
     leadTimeDays: 5,
     minimumQuantity: 1,
+    version: 1,
     supplierQualification: 'UNAVAILABLE',
   };
   const read = (disclosure: Answer) => {

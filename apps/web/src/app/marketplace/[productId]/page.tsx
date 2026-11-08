@@ -5,6 +5,7 @@ import { fetchDemoMode } from '@/server/demo-mode';
 import { canPlaceOrder } from '@/server/place-order';
 import { webServerEnv } from '@/server/env';
 import { mintSubmissionId, submissionBinding } from '@/server/submission';
+import { stampOffer } from '@/server/offer-stamp';
 import { fetchOfferSuppliers } from '@/server/offer-suppliers';
 import { fetchOffers, fetchProduct, OFFER_SORTS } from '@/server/marketplace';
 import { PortalSidebar } from '@/app/PortalSidebar';
@@ -99,6 +100,7 @@ export default async function ProductOffersPage({
             ? {
                 csrfToken: session.csrfToken,
                 mintSubmissionId: () => mintSubmissionId(session),
+                stampOffer: (offer) => stampOffer(session, offer),
                 organizationId: actingOrganizationId(session),
                 binding: submissionBinding(session),
                 sessionMaxAgeSeconds: webServerEnv().WEB_SESSION_MAX_AGE_SECONDS,

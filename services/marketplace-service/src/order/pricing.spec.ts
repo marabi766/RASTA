@@ -1,5 +1,5 @@
 import { isRastaError } from '@rasta/nest-common';
-import { priceOrder, totalOf, type PriceableOffer } from './pricing';
+import { priceOrder, totalOf, type PriceableOffer, type RequestedLine } from './pricing';
 
 /**
  * Server-side pricing (ADR-037 § 5).
@@ -35,7 +35,10 @@ function catalogue(...offers: PriceableOffer[]) {
 
 describe('the price comes from the offer', () => {
   it('multiplies the catalogue price by the requested quantity', () => {
-    const priced = priceOrder([{ offerId: 'OFR_1', quantity: 4 }], catalogue(offer()));
+    const priced = priceOrder(
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 4 }],
+      catalogue(offer()),
+    );
 
     expect(priced.totalAmountMinor).toBe(1_000_000n);
     expect(priced.lines[0]?.unitPriceMinor).toBe(250_000n);
@@ -46,7 +49,7 @@ describe('the price comes from the offer', () => {
     // What makes "which price did this order actually agree to" answerable
     // years later, after the offer has been repriced repeatedly.
     const priced = priceOrder(
-      [{ offerId: 'OFR_1', quantity: 1 }],
+      [{ offerId: 'OFR_1', offerVersion: 7, quantity: 1 }],
       catalogue(offer({ version: 7 })),
     );
     expect(priced.lines[0]?.offerVersion).toBe(7);
@@ -57,7 +60,7 @@ describe('the price comes from the offer', () => {
     // (ADR-022); the arithmetic here is bigint end to end.
     const huge = 9_007_199_254_740_993n;
     const priced = priceOrder(
-      [{ offerId: 'OFR_1', quantity: 3 }],
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 3 }],
       catalogue(offer({ unitPriceMinor: huge })),
     );
 
@@ -68,8 +71,8 @@ describe('the price comes from the offer', () => {
   it('sums several lines into one total', () => {
     const priced = priceOrder(
       [
-        { offerId: 'OFR_1', quantity: 2 },
-        { offerId: 'OFR_2', quantity: 1 },
+        { offerId: 'OFR_1', offerVersion: 3, quantity: 2 },
+        { offerId: 'OFR_2', offerVersion: 3, quantity: 1 },
       ],
       catalogue(offer(), offer({ id: 'OFR_2', unitPriceMinor: 40_000n, productId: 'PRD_2' })),
     );
@@ -84,7 +87,10 @@ describe('an offer that is not for sale does not exist', () => {
     // 404 rather than 422: to this buyer an unpublished offer is not a refused
     // purchase, it is an offer they were never shown.
     try {
-      priceOrder([{ offerId: 'OFR_1', quantity: 1 }], catalogue(offer({ status })));
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: 3, quantity: 1 }],
+        catalogue(offer({ status })),
+      );
       throw new Error('expected a refusal');
     } catch (error) {
       expect(isRastaError(error)).toBe(true);
@@ -93,24 +99,24 @@ describe('an offer that is not for sale does not exist', () => {
   });
 
   it('reports 404 for an offer that was never loaded', () => {
-    expect(() => priceOrder([{ offerId: 'OFR_MISSING', quantity: 1 }], catalogue())).toThrow(
-      expect.objectContaining({ code: 'NOT_FOUND' }),
-    );
+    expect(() =>
+      priceOrder([{ offerId: 'OFR_MISSING', offerVersion: 3, quantity: 1 }], catalogue()),
+    ).toThrow(expect.objectContaining({ code: 'NOT_FOUND' }));
   });
 
   it.each([
-    ['never loaded', catalogue(), [{ offerId: 'token=secret123', quantity: 1 }]],
+    ['never loaded', catalogue(), [{ offerId: 'token=secret123', offerVersion: 3, quantity: 1 }]],
     [
       'not published',
       catalogue(offer({ id: 'token=secret123', status: 'DRAFT' })),
-      [{ offerId: 'token=secret123', quantity: 1 }],
+      [{ offerId: 'token=secret123', offerVersion: 3, quantity: 1 }],
     ],
     [
       'repeated',
       catalogue(),
       [
-        { offerId: 'token=secret123', quantity: 1 },
-        { offerId: 'token=secret123', quantity: 1 },
+        { offerId: 'token=secret123', offerVersion: 3, quantity: 1 },
+        { offerId: 'token=secret123', offerVersion: 3, quantity: 1 },
       ],
     ],
   ])(
@@ -134,13 +140,16 @@ describe('the request has to match what the catalogue offers', () => {
     // Quietly shipping fewer would mean the buyer committed to something they
     // did not get, and found out after the money moved.
     expect(() =>
-      priceOrder([{ offerId: 'OFR_1', quantity: 11 }], catalogue(offer({ availableQuantity: 10 }))),
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: 3, quantity: 11 }],
+        catalogue(offer({ availableQuantity: 10 })),
+      ),
     ).toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
   });
 
   it('allows exactly the available quantity', () => {
     const priced = priceOrder(
-      [{ offerId: 'OFR_1', quantity: 10 }],
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 10 }],
       catalogue(offer({ availableQuantity: 10 })),
     );
     expect(priced.lines[0]?.quantity).toBe(10);
@@ -148,7 +157,10 @@ describe('the request has to match what the catalogue offers', () => {
 
   it('refuses less than the minimum', () => {
     expect(() =>
-      priceOrder([{ offerId: 'OFR_1', quantity: 2 }], catalogue(offer({ minimumQuantity: 5 }))),
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: 3, quantity: 2 }],
+        catalogue(offer({ minimumQuantity: 5 })),
+      ),
     ).toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
   });
 
@@ -158,8 +170,8 @@ describe('the request has to match what the catalogue offers', () => {
     expect(() =>
       priceOrder(
         [
-          { offerId: 'OFR_1', quantity: 1 },
-          { offerId: 'OFR_1', quantity: 2 },
+          { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+          { offerId: 'OFR_1', offerVersion: 3, quantity: 2 },
         ],
         catalogue(offer()),
       ),
@@ -178,8 +190,8 @@ describe('one order, one supplier and one currency', () => {
     expect(() =>
       priceOrder(
         [
-          { offerId: 'OFR_1', quantity: 1 },
-          { offerId: 'OFR_2', quantity: 1 },
+          { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+          { offerId: 'OFR_2', offerVersion: 3, quantity: 1 },
         ],
         catalogue(offer(), offer({ id: 'OFR_2', organizationId: 'ORG-OTHER' })),
       ),
@@ -190,8 +202,8 @@ describe('one order, one supplier and one currency', () => {
     expect(() =>
       priceOrder(
         [
-          { offerId: 'OFR_1', quantity: 1 },
-          { offerId: 'OFR_2', quantity: 1 },
+          { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+          { offerId: 'OFR_2', offerVersion: 3, quantity: 1 },
         ],
         catalogue(offer(), offer({ id: 'OFR_2', currency: 'USD' })),
       ),
@@ -199,7 +211,10 @@ describe('one order, one supplier and one currency', () => {
   });
 
   it('reports the supplier the order belongs to', () => {
-    const priced = priceOrder([{ offerId: 'OFR_1', quantity: 1 }], catalogue(offer()));
+    const priced = priceOrder(
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 1 }],
+      catalogue(offer()),
+    );
     expect(priced.supplierOrganizationId).toBe(SUPPLIER);
     expect(priced.currency).toBe('IRR');
   });
@@ -208,15 +223,23 @@ describe('one order, one supplier and one currency', () => {
 describe('there is no price the client can influence', () => {
   it('takes nothing but an offer id and a quantity', () => {
     // A structural assertion rather than a behavioural one: the input type has
-    // two fields, so there is no channel through which a price could arrive.
-    // If a third ever appears, this fails and somebody has to justify it.
-    const request = { offerId: 'OFR_1', quantity: 1 };
-    expect(Object.keys(request).sort()).toEqual(['offerId', 'quantity']);
+    // three fields, none of them a price, so there is no channel through which
+    // a price could arrive. The version names which price, and is only ever
+    // compared (D-156). If a fourth ever appears, this fails and somebody has
+    // to justify it.
+    const request: Required<RequestedLine> = { offerId: 'OFR_1', offerVersion: 3, quantity: 1 };
+    expect(Object.keys(request).sort()).toEqual(['offerId', 'offerVersion', 'quantity']);
   });
 
   it('prices from the catalogue even when the caller asks for an unusual quantity', () => {
-    const cheap = priceOrder([{ offerId: 'OFR_1', quantity: 1 }], catalogue(offer()));
-    const many = priceOrder([{ offerId: 'OFR_1', quantity: 4 }], catalogue(offer()));
+    const cheap = priceOrder(
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 1 }],
+      catalogue(offer()),
+    );
+    const many = priceOrder(
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 4 }],
+      catalogue(offer()),
+    );
 
     // No volume discount is invented. A discount is a business rule the
     // product document does not state, and inventing one would be inventing a
@@ -228,7 +251,7 @@ describe('there is no price the client can influence', () => {
 describe('the promised delivery date takes the slowest line (ADR-052 § 1-a)', () => {
   it('reports a single line’s lead time', () => {
     const priced = priceOrder(
-      [{ offerId: 'OFR_1', quantity: 1 }],
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 1 }],
       catalogue(offer({ leadTimeDays: 5 })),
     );
     expect(priced.maxLeadTimeDays).toBe(5);
@@ -239,8 +262,8 @@ describe('the promised delivery date takes the slowest line (ADR-052 § 1-a)', (
     // slow one arriving. Averaging would understate the promise.
     const priced = priceOrder(
       [
-        { offerId: 'OFR_1', quantity: 1 },
-        { offerId: 'OFR_2', quantity: 1 },
+        { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+        { offerId: 'OFR_2', offerVersion: 3, quantity: 1 },
       ],
       catalogue(
         offer({ leadTimeDays: 2 }),
@@ -252,7 +275,7 @@ describe('the promised delivery date takes the slowest line (ADR-052 § 1-a)', (
 
   it('is zero for a same-day offer', () => {
     const priced = priceOrder(
-      [{ offerId: 'OFR_1', quantity: 1 }],
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 1 }],
       catalogue(offer({ leadTimeDays: 0 })),
     );
     expect(priced.maxLeadTimeDays).toBe(0);
@@ -264,7 +287,10 @@ describe('a zero-value order is refused', () => {
     // economic-service refuses a journal with no amount, so an order like this
     // would fail later in the saga with an error nobody could explain.
     expect(() =>
-      priceOrder([{ offerId: 'OFR_1', quantity: 1 }], catalogue(offer({ unitPriceMinor: 0n }))),
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: 3, quantity: 1 }],
+        catalogue(offer({ unitPriceMinor: 0n })),
+      ),
     ).toThrow(/positive total/);
   });
 });
@@ -290,7 +316,7 @@ describe('derived totals stay within what can be stored (marketplace audit F4)',
 
   it('prices a line whose total is exactly the largest storable amount', () => {
     const priced = priceOrder(
-      [{ offerId: 'OFR_1', quantity: 1 }],
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 1 }],
       catalogue(offer({ unitPriceMinor: MAX })),
     );
     expect(priced.lines[0]?.lineTotalMinor).toBe(MAX);
@@ -300,8 +326,8 @@ describe('derived totals stay within what can be stored (marketplace audit F4)',
   it('prices two lines that add up to exactly the largest storable amount', () => {
     const priced = priceOrder(
       [
-        { offerId: 'OFR_1', quantity: 1 },
-        { offerId: 'OFR_2', quantity: 1 },
+        { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+        { offerId: 'OFR_2', offerVersion: 3, quantity: 1 },
       ],
       catalogue(
         offer({ id: 'OFR_1', unitPriceMinor: MAX - 1n }),
@@ -315,7 +341,10 @@ describe('derived totals stay within what can be stored (marketplace audit F4)',
     // MAX + 1 = 2^63 is even: two units of half of it are exactly one past.
     const unit = (MAX + 1n) / 2n;
     const found = refusal(() =>
-      priceOrder([{ offerId: 'OFR_1', quantity: 2 }], catalogue(offer({ unitPriceMinor: unit }))),
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: 3, quantity: 2 }],
+        catalogue(offer({ unitPriceMinor: unit })),
+      ),
     );
     expect(unit * 2n).toBe(MAX + 1n);
     expect(found).toEqual({
@@ -335,7 +364,10 @@ describe('derived totals stay within what can be stored (marketplace audit F4)',
 
   it('refuses the audit trigger: the largest price times two', () => {
     const found = refusal(() =>
-      priceOrder([{ offerId: 'OFR_1', quantity: 2 }], catalogue(offer({ unitPriceMinor: MAX }))),
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: 3, quantity: 2 }],
+        catalogue(offer({ unitPriceMinor: MAX })),
+      ),
     );
     expect(found.details?.[0]).toMatchObject({
       path: 'lines[0].quantity',
@@ -347,8 +379,8 @@ describe('derived totals stay within what can be stored (marketplace audit F4)',
     const found = refusal(() =>
       priceOrder(
         [
-          { offerId: 'OFR_1', quantity: 1 },
-          { offerId: 'OFR_2', quantity: 1 },
+          { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+          { offerId: 'OFR_2', offerVersion: 3, quantity: 1 },
         ],
         catalogue(
           offer({ id: 'OFR_1', unitPriceMinor: MAX }),
@@ -368,9 +400,9 @@ describe('derived totals stay within what can be stored (marketplace audit F4)',
     const found = refusal(() =>
       priceOrder(
         [
-          { offerId: 'OFR_1', quantity: 1 },
-          { offerId: 'OFR_2', quantity: 1 },
-          { offerId: 'OFR_3', quantity: 1 },
+          { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+          { offerId: 'OFR_2', offerVersion: 3, quantity: 1 },
+          { offerId: 'OFR_3', offerVersion: 3, quantity: 1 },
         ],
         catalogue(
           offer({ id: 'OFR_1', unitPriceMinor: third }),
@@ -380,5 +412,83 @@ describe('derived totals stay within what can be stored (marketplace audit F4)',
       ),
     );
     expect(found.details?.[0]?.path).toBe('lines');
+  });
+});
+
+describe('only at the offer version the buyer read (D-156)', () => {
+  function refusal(run: () => unknown) {
+    try {
+      run();
+    } catch (error) {
+      if (!isRastaError(error)) throw error;
+      return {
+        code: error.code,
+        status: error.status,
+        message: error.message,
+        details: error.details,
+      };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it('prices a line that names the version the offer is at', () => {
+    const priced = priceOrder(
+      [{ offerId: 'OFR_1', offerVersion: 3, quantity: 2 }],
+      catalogue(offer({ version: 3 })),
+    );
+    expect(priced.lines[0]).toMatchObject({ offerVersion: 3, unitPriceMinor: 250_000n });
+  });
+
+  it.each([
+    ['older: the offer was repriced after the buyer read it', 2],
+    ['newer: a version the offer has not reached', 4],
+    ['far older', 1],
+  ])('refuses a line naming a %s, with 409 and no figure', (_label, stale) => {
+    const found = refusal(() =>
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: stale, quantity: 2 }],
+        catalogue(offer({ version: 3, unitPriceMinor: 987_654_321n })),
+      ),
+    );
+    expect(found.code).toBe('OPTIMISTIC_LOCK_FAILED');
+    expect(found.status).toBe(409);
+    expect(found.details).toEqual([
+      {
+        path: 'lines[0].offerVersion',
+        code: 'OFFER_VERSION_CHANGED',
+        message: 'The offer has changed since it was read; read it again before ordering',
+      },
+    ]);
+    // Neither the price nor the version the offer is at now, anywhere (S-09).
+    // The path is the caller's own index; every sentence is digit-free.
+    expect(JSON.stringify(found)).not.toMatch(/987654321|987_654_321/);
+    for (const text of [found.message, ...(found.details ?? []).map((d) => d.message)]) {
+      expect(text).not.toMatch(/\d/);
+    }
+  });
+
+  it('names the stale line by its index, and refuses even when only one line is stale', () => {
+    const found = refusal(() =>
+      priceOrder(
+        [
+          { offerId: 'OFR_1', offerVersion: 3, quantity: 1 },
+          { offerId: 'OFR_2', offerVersion: 1, quantity: 1 },
+        ],
+        catalogue(offer(), offer({ id: 'OFR_2', productId: 'PRD_2', version: 2 })),
+      ),
+    );
+    expect(found.details?.[0]?.path).toBe('lines[1].offerVersion');
+  });
+
+  it('answers 404 before the version for an offer the buyer may not read', () => {
+    // The version check runs only on a published offer: a draft's or a
+    // withdrawn offer's version is not the caller's to learn by probing.
+    const found = refusal(() =>
+      priceOrder(
+        [{ offerId: 'OFR_1', offerVersion: 1, quantity: 1 }],
+        catalogue(offer({ status: 'DRAFT', version: 5 })),
+      ),
+    );
+    expect(found.code).toBe('NOT_FOUND');
   });
 });

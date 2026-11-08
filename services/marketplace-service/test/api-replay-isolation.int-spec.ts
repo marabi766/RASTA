@@ -114,7 +114,7 @@ describe('order API — idempotent replay across orders and tenants', () => {
       .post('/v1/orders')
       .set('authorization', `Bearer ${buyer(buyerOrg)}`)
       .set('idempotency-key', apiKey('rpl-place'))
-      .send({ lines: [{ offerId, quantity: 1 }] })
+      .send({ lines: [{ offerId, offerVersion: 1, quantity: 1 }] })
       .expect(201);
     const id = placed.body.id as string;
 

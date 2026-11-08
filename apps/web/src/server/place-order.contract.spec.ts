@@ -8,8 +8,13 @@ import {
   canPlaceOrder,
   parsePlaceOrderForm,
   placeOrderFormValues,
+  placeOrderRequest,
 } from './place-order';
-import { PLACE_ORDER_FIELDS, PLACE_ORDER_LIMITS } from '@/lib/place-order-fields';
+import {
+  OFFER_CHANGED_MESSAGE,
+  PLACE_ORDER_FIELDS,
+  PLACE_ORDER_LIMITS,
+} from '@/lib/place-order-fields';
 import {
   collect,
   decoratorOf,
@@ -78,8 +83,10 @@ describe('the body', () => {
     expect(schema).not.toMatch(/price|amount|total|currency/i);
   });
 
-  it('takes lines of exactly an offerId and a quantity', () => {
+  it('takes lines of exactly an offerId, the offerVersion read, and a quantity', () => {
     expect(schema).toContain('offerId:z.string().trim().min(1).max(64)');
+    // Required (D-156): no `.optional()`, no `.default(` — the portal must always send it.
+    expect(schema).toContain('offerVersion:z.number().int().min(1).max(2_147_483_647),');
     expect(schema).toContain('quantity:z.number().int().positive()');
   });
 
@@ -89,7 +96,8 @@ describe('the body', () => {
   });
 
   it('is what the portal sends: lines only — the note the schema accepts is not persisted, so not sent', () => {
-    expect([...PLACE_ORDER_FIELDS].sort()).toEqual(['offerId', 'quantity']);
+    // The stamp is the form's, not the body's: the version comes out of it.
+    expect([...PLACE_ORDER_FIELDS].sort()).toEqual(['offerId', 'offerStamp', 'quantity']);
     const parsed = parsePlaceOrderForm(
       placeOrderFormValues(
         (() => {
@@ -101,11 +109,10 @@ describe('the body', () => {
         })(),
       ),
     );
-    expect(parsed.ok && Object.keys(parsed.request).sort()).toEqual(['lines']);
-    expect(parsed.ok && Object.keys(parsed.request.lines[0]!).sort()).toEqual([
-      'offerId',
-      'quantity',
-    ]);
+    if (!parsed.ok) throw new Error('expected a parsed form');
+    const request = placeOrderRequest(parsed.line, 2);
+    expect(Object.keys(request).sort()).toEqual(['lines']);
+    expect(Object.keys(request.lines[0]!).sort()).toEqual(['offerId', 'offerVersion', 'quantity']);
   });
 });
 
@@ -129,6 +136,24 @@ describe('the sentences the portal translates', () => {
     );
     expect(pricing).toContain('`Offer ${offer.id} has ${offer.availableQuantity} available`');
     expect(PLACE_ORDER_FIELD_MAPPING.byCode?.BUSINESS_RULE_VIOLATION).toEqual(expect.any(String));
+  });
+
+  it('say "the offer changed" for the closed code a stale version is refused with (D-156)', () => {
+    // The code, its path and its status, as pricing.ts throws them.
+    expect(pricing).toContain("export const OFFER_VERSION_CHANGED = 'OFFER_VERSION_CHANGED';");
+    expect(pricing).toContain('path: `lines[${index}].offerVersion`');
+    expect(pricing).toContain('ERROR_CODES.OPTIMISTIC_LOCK_FAILED, OFFER_VERSION_CHANGED_MESSAGE');
+    expect(pricing).toContain(
+      'if (offer.version !== line.offerVersion) throw offerVersionChanged(index);',
+    );
+    expect(PLACE_ORDER_FIELD_MAPPING.byDetailCode?.OFFER_VERSION_CHANGED).toBe(
+      OFFER_CHANGED_MESSAGE,
+    );
+    expect(PLACE_ORDER_FIELD_MAPPING.paths['lines[0].offerVersion']).toBe('offerStamp');
+    // The version check comes after the visibility 404: a stranger learns nothing from it.
+    expect(pricing.indexOf("offer.status !== 'PUBLISHED'")).toBeLessThan(
+      pricing.indexOf('offer.version !== line.offerVersion'),
+    );
   });
 
   it('keep every business rule on one code, which is why the fallback is by code', () => {

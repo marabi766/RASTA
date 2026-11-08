@@ -48,7 +48,10 @@ it('a cancelled order recovered after missed start completes once without creati
   try {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await asActor({ organizationId: org.buyer }, () =>
-      wiring.orders.place({ lines: [{ offerId, quantity: 2 }] }, key('missed-start')),
+      wiring.orders.place(
+        { lines: [{ offerId, offerVersion: 1, quantity: 2 }] },
+        key('missed-start'),
+      ),
     );
     await asActor({ organizationId: org.buyer }, () =>
       wiring.orders.cancel(order.id, { reason: 'cancel before start' }),

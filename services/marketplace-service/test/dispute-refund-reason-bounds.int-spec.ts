@@ -79,7 +79,7 @@ describe('a REFUND decision is bounded by the refund it causes (FU-134, HTTP)', 
       .post('/v1/orders')
       .set('authorization', `Bearer ${buyer(buyerOrg)}`)
       .set('idempotency-key', apiKey('rrb-order'))
-      .send({ lines: [{ offerId: offer.body.id, quantity: 1 }] })
+      .send({ lines: [{ offerId: offer.body.id, offerVersion: 1, quantity: 1 }] })
       .expect(201);
     const orderId = order.body.id as string;
     await runUnscoped('the suite advances the order the saga would', () =>

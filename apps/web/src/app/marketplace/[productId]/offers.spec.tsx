@@ -23,6 +23,7 @@ const OFFER: Offer = {
   availableQuantity: 15,
   leadTimeDays: 5,
   minimumQuantity: 1,
+  version: 1,
   supplierQualification: 'UNAVAILABLE',
 };
 
