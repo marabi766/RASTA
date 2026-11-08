@@ -271,8 +271,9 @@ function scheduledNow(): Date {
 }
 
 /**
- * Removes the return requests the named organizations wrote (RUN-005). The service never deletes
- * one — each table's trigger refuses it — so the suite's own removal goes through the **owner**
+ * Removes the return requests the named organizations wrote (RUN-005), and the record of the
+ * hold-deadline backfill (FU-234). The service never deletes one — each table's trigger refuses
+ * it — so the suite's own removal goes through the **owner**
  * connection and lifts each guard for one transaction, never through the runtime client under
  * test, or the suites would teach the code to do it. Without the owner URL there is nothing it can
  * do, and a suite that wrote a return fails at the order delete that follows, saying why.
@@ -284,6 +285,9 @@ async function purgeReturns(orgs: readonly string[]): Promise<void> {
   try {
     await owner.$transaction(async (tx) => {
       for (const [table, trigger] of [
+        // FU-234: the hold-deadline backfill's record, append-only, restricting its orders.
+        ['order_hold_deadline_revocation', 'tg_order_hold_deadline_revocation_guard'],
+        ['order_hold_deadline_backfill', 'tg_order_hold_deadline_backfill_guard'],
         ['return_dispatch_release', 'tg_return_dispatch_release_guard'],
         ['return_status_history', 'tg_return_status_history_guard'],
         ['return_line', 'tg_return_line_guard'],
