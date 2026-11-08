@@ -4,7 +4,7 @@ import { ulid } from 'ulid';
 import { createSystemContext, runUnscoped, runWithContext } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
 import { admin, apiTenant, internalToken, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, id, ownerDatabaseUrl } from './helpers';
+import { cleanup, coverByHand, id, ownerDatabaseUrl } from './helpers';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { TransactionService } from '../src/transaction/transaction.service';
 import { WalletRepository } from '../src/wallet/wallet.repository';
@@ -1020,6 +1020,8 @@ describe('an unresolved hold decision proves nothing (FU-138, #762 r3 F2; real d
         await account(creditOrganization, credit, currency),
         await account(payer, debit, currency),
       ];
+      // A wallet or escrow it debits holds the money first (FU-228).
+      await coverByHand(debitAccount, amount);
       await owner.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(
           `INSERT INTO journal (id, organization_id, transaction_id, journal_type, description, posted_at, posted_by, correlation_id)

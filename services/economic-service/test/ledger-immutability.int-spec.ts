@@ -1,5 +1,5 @@
 import { runUnscoped } from '@rasta/nest-common';
-import { asActor, cleanup, newPrisma, tenants, wire, type Wiring } from './helpers';
+import { asActor, cleanup, coverByHand, newPrisma, tenants, wire, type Wiring } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -82,6 +82,8 @@ describe('ledger immutability (real database)', () => {
   ): Promise<{ journalId: string; entryId: string }> {
     const journalId = rawJournalId('RAW');
     const entryId = `${journalId}_E1`;
+    // The wallet account it debits never sums below zero at commit (FU-228).
+    await coverByHand(accountA, amountMinor);
 
     await runUnscoped('the immutability suite writes raw rows on purpose', () =>
       prisma.client.$transaction(async (tx) => {
