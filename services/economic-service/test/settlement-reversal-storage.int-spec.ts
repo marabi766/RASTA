@@ -6,6 +6,7 @@ import type { PrismaService } from '../src/prisma/prisma.service';
 import {
   asActor,
   cleanup,
+  coverByHand,
   databaseUrl,
   fundWallet,
   newPrisma,
@@ -1771,6 +1772,10 @@ describe('settlement reversal storage (real database, runtime role)', () => {
           );
         }
         const fixture = await settled();
+        // The wallet it debits holds the money first (FU-228).
+        const terms: NonNullable<Parameters<typeof forgedJournal>[1]> = forged;
+        const from = await account(runtime, terms.from ?? payer, 'WALLET', terms.currency);
+        await coverByHand(from, terms.gross ?? GROSS);
         const journalId = await forgedJournal(fixture, forged);
         await forgeSettlement(fixture.settlementId, { journal_id: journalId, ...row });
         await expect(propose(await open(fixture), noCommission(50n))).rejects.toThrow(bearsOut);
