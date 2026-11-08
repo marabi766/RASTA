@@ -9,10 +9,12 @@ import {
   getContext,
   readBoundedText,
   httpStatusToCode,
+  internalFetch,
   requestPath,
   type InternalTokenService,
+  type RequestContext,
 } from '@rasta/nest-common';
-import { apiErrorSchema, type ApiError } from '@rasta/contracts';
+import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
 import type { GatewayEnv } from '../config/env';
 import {
   TENDER_OPENING_ROUTES,
@@ -128,6 +130,8 @@ export interface ProxyOptions {
   timeoutMs: number;
   failureThreshold: number;
   resetAfterMs: number;
+  /** Distinct organizations a failure run needs to open a circuit; the breaker's default if unset. */
+  organizationsToOpen?: number;
   /**
    * Requests whose owning service may legitimately work longer than `timeoutMs`, each with its
    * own deadline (Codex r2 on #250, G1). The first match wins; anything else gets `timeoutMs`.
@@ -157,6 +161,7 @@ export function proxyOptionsOf(env: GatewayEnv): ProxyOptions {
     timeoutMs: env.GATEWAY_UPSTREAM_TIMEOUT_MS,
     failureThreshold: env.GATEWAY_CIRCUIT_FAILURE_THRESHOLD,
     resetAfterMs: env.GATEWAY_CIRCUIT_RESET_MS,
+    organizationsToOpen: env.GATEWAY_CIRCUIT_ORGANIZATIONS_TO_OPEN,
     routeDeadlines: TENDER_OPENING_ROUTES.map((route) => ({
       ...route,
       timeoutMs: env.GATEWAY_TENDER_OPEN_TIMEOUT_MS,
@@ -178,6 +183,10 @@ export class ProxyService {
       failureThreshold: options.failureThreshold,
       resetAfterMs: options.resetAfterMs,
       now: options.now ?? (() => performance.now()),
+      checkReady: (service) => this.ready(service),
+      ...(options.organizationsToOpen !== undefined
+        ? { organizationsToOpen: options.organizationsToOpen }
+        : {}),
     });
   }
 
@@ -202,7 +211,15 @@ export class ProxyService {
     // HALF_OPEN probe is taken. Otherwise this request holds a permit, and the
     // `finally` below settles it on every exit — the probe slot is never
     // left taken.
-    const permit = this.circuits.admit(request.service);
+    // The organization is the verified context's, a membership of the signed
+    // token (AuthGuard): a header can only choose among the token's own, and the
+    // person behind it is one vote however many it holds.
+    const context = getContext();
+    const permit = this.circuits.admit(
+      request.service,
+      context.organizationId,
+      circuitPerson(context),
+    );
     // What this request proved about the service, decided exactly once. Until
     // an answer is complete it proved nothing: a gateway-local fault (token
     // issuance, a transport refusal of the request) or a caller gone away before
@@ -223,7 +240,31 @@ export class ProxyService {
       }
       throw error;
     } finally {
-      this.circuits.settle(permit, outcome);
+      // Never rejects; waits only for a readiness check this outcome sent or found.
+      await this.circuits.settle(permit, outcome);
+    }
+  }
+
+  /**
+   * The gateway's own readiness check of `service` (FU-113): its `GET
+   * /health/ready`, with no caller's headers, identity, input or deadline. Ready
+   * only on a complete 2xx within the default deadline; anything else — another
+   * status, a redirect, a timeout, a network error — is not ready.
+   */
+  private async ready(service: ServiceName): Promise<boolean> {
+    const target = `${serviceUrl(this.urls, service)}${READINESS_PATH}`;
+    try {
+      return await exchangeWithDeadline(
+        this.options.timeoutMs,
+        // Never follows a redirect: one is refused, and so not ready.
+        (signal) => internalFetch(target, { method: 'GET', signal }),
+        async (response) => {
+          await response.text();
+          return response.ok;
+        },
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -334,9 +375,10 @@ export class ProxyService {
           const text = await readBoundedText(response, MAX_PROXIED_BODY_BYTES);
 
           if (response.status >= 500) {
-            // A 5xx counts toward the circuit, once. (#381's expected identity
-            // refusals would be the one exception: `release`, never `success` —
-            // and only with the body complete; see the caller-gone branch below.)
+            // A 5xx counts toward the circuit, once, unless it is one of
+            // identity's exempt refusals (`answerOutcome`): with its body
+            // complete and valid, a `release`, never `success`; a caller gone
+            // before then is a failure (see the caller-gone branch below).
             //
             // Parsed once, and only the parsed, allow-listed fields travel. The
             // schema accepting a body says nothing about what else the body held:
@@ -345,7 +387,7 @@ export class ProxyService {
             const envelope = platformErrorEnvelope(response.status, text, request);
             if (envelope) {
               return {
-                outcome: 'failure',
+                outcome: answerOutcome(request.service, response.status, envelope),
                 response: {
                   status: response.status,
                   headers: this.responseHeaders(response),
@@ -370,11 +412,10 @@ export class ProxyService {
             );
           }
 
-          // 4xx does not count against the circuit: a client sending bad requests
-          // is not evidence that the downstream is unhealthy — it answered.
+          // A 4xx refused this one request: no evidence either way (FU-109).
           if (response.status >= 400) {
             return {
-              outcome: 'success',
+              outcome: answerOutcome(request.service, response.status, null),
               response: {
                 status: response.status,
                 headers: this.responseHeaders(response),
@@ -384,7 +425,7 @@ export class ProxyService {
           }
 
           return {
-            outcome: 'success',
+            outcome: answerOutcome(request.service, response.status, null),
             response: {
               status: response.status,
               headers: this.responseHeaders(response),
@@ -563,6 +604,44 @@ export class ProxyService {
   }
 }
 
+/** Where every service answers whether it can serve traffic (each `HealthController`). */
+export const READINESS_PATH = '/health/ready';
+
+/**
+ * Identity's refusals that are not the service failing (docs/06, #381 r4 F2):
+ * 503 `KEYCLOAK_WRITE_SETTLING` (one user's earlier write may still land, D-069)
+ * and 503 `KEYCLOAK_UNAVAILABLE` (a narrowing change refused, nothing changed,
+ * D-064).
+ */
+const IDENTITY_EXEMPT_CODES: ReadonlySet<string> = new Set([
+  ERROR_CODES.KEYCLOAK_WRITE_SETTLING,
+  ERROR_CODES.KEYCLOAK_UNAVAILABLE,
+]);
+
+/**
+ * What one complete answer proves about its service, decided in one place
+ * (FU-109, FU-110). Only a 2xx or 3xx is affirmative evidence that the service
+ * works (`success`: it may clear failures and close the circuit). A 4xx refused
+ * this one request — its input, its rights, its state — and says nothing either
+ * way: `release`. So is identity's exempt 503, but only as a complete platform
+ * envelope (`envelope`, already parsed and validated) from identity itself.
+ * Every other 5xx is a `failure`.
+ */
+export function answerOutcome(
+  service: ServiceName,
+  status: number,
+  envelope: ApiError | null,
+): CircuitOutcome {
+  if (status < 400) return 'success';
+  if (status < 500) return 'release';
+  const exempt =
+    service === 'identity' &&
+    status === HttpStatus.SERVICE_UNAVAILABLE &&
+    envelope !== null &&
+    IDENTITY_EXEMPT_CODES.has(envelope.code);
+  return exempt ? 'release' : 'failure';
+}
+
 /** Raised inside `exchange` for a failure of the service, carrying what the caller is told. */
 class UpstreamFailure extends Error {
   constructor(readonly reported: RastaError) {
@@ -597,6 +676,18 @@ function unstorableText(): RastaError {
   return new RastaError('MALFORMED_REQUEST', 'The request holds characters it cannot carry');
 }
 
+/**
+ * Who is behind a request, for the breaker: the identity provider's subject (one
+ * per person, unlike `userId`, #188), the calling service, or nobody (anonymous).
+ * A verified caller whose subject is unknown is one shared unknown person: it can
+ * never be several votes.
+ */
+export function circuitPerson(context: RequestContext): string | undefined {
+  if (context.authType === 'USER') return `user:${context.subject ?? '?'}`;
+  if (context.authType === 'SERVICE') return `service:${context.callerService ?? '?'}`;
+  return undefined;
+}
+
 /** A NUL in a request target. Once decoded it is what {@link assertStorableText} refuses. */
 const ENCODED_NUL = '%00';
 
@@ -606,8 +697,8 @@ const LONE_SURROGATE = /\p{Cs}/u;
 /**
  * Text no service can hold. PostgreSQL refuses NUL (22021) and Prisma a lone
  * surrogate, whichever the field, and a schema's bare `z.string()` lets both
- * through: to a service they are a 500, and five of those open the breaker for
- * every tenant.
+ * through: to a service they are a 500, and each one counts against the
+ * breaker every tenant shares.
  */
 function assertStorableText(text: string): void {
   if (text.includes('\u0000') || LONE_SURROGATE.test(text)) throw unstorableText();

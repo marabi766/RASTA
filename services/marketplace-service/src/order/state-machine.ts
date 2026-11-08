@@ -13,6 +13,10 @@ import type { OrderStatus } from '../generated/prisma';
  *
  * - `DISPUTED` has no edge to `SETTLING`. A dispute stopping settlement is an
  *   absent edge, not a check somebody has to remember to write.
+ * - `DISPUTED` returns to `RECEIPT_CONFIRMED` only for a dispute raised from
+ *   there. A dispute raised before the buyer confirmed receipt resumes the
+ *   order where it found it (D-083), so a SETTLE never stands in for the
+ *   buyer's confirmation (`ck_order_receipt_confirmed_has_evidence`).
  * - `COMPLETED`, `CANCELLED` and `FAILED` have no outgoing edges at all, so a
  *   replayed command on a finished order cannot produce a second financial
  *   effect.
@@ -27,8 +31,18 @@ export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatu
   RECEIPT_CONFIRMED: ['SETTLING', 'DISPUTED'],
   SETTLING: ['COMPLETED', 'RECEIPT_CONFIRMED'],
   // A dispute is resolved by a platform operator, and its outcome re-enters
-  // the normal path rather than jumping to an end state.
-  DISPUTED: ['RECEIPT_CONFIRMED', 'CANCELLING'],
+  // the normal path rather than jumping to an end state: SETTLE resumes the
+  // order where the dispute found it (D-083) — one of the four statuses a
+  // dispute is raised from — and REFUND cancels it. Only `resolveDispute`
+  // travels these edges: every command names the states it may be issued
+  // from, and none but that one names DISPUTED.
+  DISPUTED: [
+    'FUNDS_HELD',
+    'CONFIRMED',
+    'AWAITING_RECEIPT_CONFIRMATION',
+    'RECEIPT_CONFIRMED',
+    'CANCELLING',
+  ],
   CANCELLING: ['CANCELLED'],
   COMPLETED: [],
   CANCELLED: [],
@@ -73,3 +87,40 @@ export function assertTransition(orderId: string, from: OrderStatus, to: OrderSt
 export function canReachSettlement(status: OrderStatus): boolean {
   return canTransition(status, 'SETTLING');
 }
+
+/** The statuses a dispute may be raised from — and so the ones SETTLE may resume. */
+export const DISPUTE_ORIGINS = (Object.keys(ORDER_TRANSITIONS) as OrderStatus[]).filter((status) =>
+  canTransition(status, 'DISPUTED'),
+);
+
+/**
+ * Who the order waits on, per status (#770 r2 F3). A `Record`, so a new status
+ * does not compile until somebody decides this for it.
+ *
+ * - `SAGA`: nothing but the saga moves the order on, and its next step is a
+ *   call to economic-service or the record of one — the hold (PENDING), the
+ *   authorisation and settlement (RECEIPT_CONFIRMED, SETTLING) or the refund
+ *   (CANCELLING). An order left here, by an outage, a saga that stopped
+ *   (settlement exhausted, an obligation it would not adopt) or a dead worker,
+ *   is money whose outcome nobody has confirmed.
+ * - `PARTY`: a supplier, buyer or operator decides next; waiting is the design
+ *   (ADR-043), and `rasta_marketplace_orders_overdue` is its signal.
+ * - `TERMINAL`: no edge out.
+ */
+export const SAGA_CUSTODY: Readonly<Record<OrderStatus, 'SAGA' | 'PARTY' | 'TERMINAL'>> = {
+  PENDING: 'SAGA',
+  FUNDS_HELD: 'PARTY',
+  CONFIRMED: 'PARTY',
+  AWAITING_RECEIPT_CONFIRMATION: 'PARTY',
+  RECEIPT_CONFIRMED: 'SAGA',
+  SETTLING: 'SAGA',
+  DISPUTED: 'PARTY',
+  CANCELLING: 'SAGA',
+  COMPLETED: 'TERMINAL',
+  CANCELLED: 'TERMINAL',
+  FAILED: 'TERMINAL',
+};
+
+export const SAGA_CUSTODY_STATUSES = (Object.keys(SAGA_CUSTODY) as OrderStatus[]).filter(
+  (status) => SAGA_CUSTODY[status] === 'SAGA',
+);

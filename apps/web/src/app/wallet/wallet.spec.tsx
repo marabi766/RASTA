@@ -13,6 +13,7 @@ import type {
 } from '@/server/wallet';
 import { TEST_CONTEXT } from '@/test/page-context';
 import { withContext } from '@/lib/page-context';
+import { RELEASE_MESSAGES } from '@/lib/release-messages';
 
 /**
  * `WalletScreen`, composing four independent reads. Mirrors
@@ -94,6 +95,7 @@ function render_(
     transactions?: ReadResult<TransactionPage>;
     provider?: ReadResult<PaymentProviderDisclosure>;
     query?: { context?: string; status?: string; transactionType?: string; cursor?: string };
+    releaseOutcome?: string;
   } = {},
 ) {
   return render(
@@ -105,6 +107,7 @@ function render_(
       query={{ context: TEST_CONTEXT, ...overrides.query }}
       csrfToken="csrf-token-for-this-session"
       submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
+      releaseOutcome={overrides.releaseOutcome}
     />,
   );
 }
@@ -165,6 +168,16 @@ describe('the top-up section', () => {
     expect(container.querySelector('[name="amountMinor"]')).toBeNull();
     expect(getByText('افزایش موجودی اکنون در دسترس نیست')).toBeInTheDocument();
   });
+});
+
+describe('FU-217 the release result', () => {
+  it.each(Object.keys(RELEASE_MESSAGES) as (keyof typeof RELEASE_MESSAGES)[])(
+    'shows %s in the top-up section',
+    (releaseOutcome) => {
+      const { getByRole } = render_({ releaseOutcome });
+      expect(getByRole('alert')).toHaveTextContent(RELEASE_MESSAGES[releaseOutcome]);
+    },
+  );
 });
 
 describe('the whole screen: «حالت نمایشی» (Q-14)', () => {
@@ -259,6 +272,17 @@ describe('transaction history', () => {
         name: /سفارش بازار/,
       });
 
+    // #824 r1, F2: the row carries economic-service's proof to the one wording of a status.
+    it.each([
+      ['false', { heldProven: false }, /وثیقه اثبات‌نشده/],
+      ['missing', {}, /وثیقه اثبات‌نشده/],
+      ['true', { heldProven: true }, /در وثیقه/],
+    ])('HELD with its proof %s reads as such', (proof, fields, wording) => {
+      const row = heldRow({ ...HELD, items: [{ ...HELD.items[0]!, ...fields }] });
+      expect(row).toHaveTextContent(wording);
+      if (proof !== 'true') expect(row.textContent).not.toContain('در وثیقه');
+    });
+
     it('keeps the net at zero and shows the gross, labelled as the gross', () => {
       const row = heldRow();
       expect(row).toHaveTextContent(`${formatMoney('0')}`);
@@ -334,4 +358,25 @@ describe('accessibility', () => {
     const { container } = render_();
     expect(await axe(container)).toHaveNoViolations();
   });
+});
+
+// prettier-ignore
+it('F1: remounts for a server-held record and after its release', () => {
+  const screen = (submissionId: string, held: boolean, providerOk = true) => <WalletScreen
+    wallet={{ kind: 'OK', data: WALLET }} holds={{ kind: 'OK', data: HOLDS }}
+    transactions={{ kind: 'OK', data: TRANSACTIONS }}
+    provider={providerOk ? { kind: 'OK', data: PROVIDER } : { kind: 'UNAVAILABLE', status: 503, correlationId: 'down' }}
+    query={{ context: TEST_CONTEXT }} csrfToken="csrf" submissionId={submissionId}
+    topUpState={held ? { kind: 'HELD', submissionId, values: { amountMinor: '1000' }, releaseToken: 'signed-record' } : { kind: 'IDLE' }}
+  />;
+  const view = render(screen('held-key', false));
+  view.rerender(screen('held-key', true));
+  expect(view.getByRole('button', { name: /افزایش موجودی نمایشی/ })).toBeDisabled();
+  expect(view.getByRole('checkbox', { name: /دوباره افزایش دهد/ })).toBeRequired();
+  expect(view.container.querySelector('form form')).toBeNull();
+  view.rerender(screen('held-key', true, false));
+  expect(view.getByRole('checkbox', { name: /دوباره افزایش دهد/ })).toBeRequired();
+  expect(view.container.querySelector('[name="amountMinor"]')).toBeNull();
+  view.rerender(screen('fresh-key', false));
+  expect(view.getByRole('button', { name: /افزایش موجودی نمایشی/ })).toBeEnabled();
 });

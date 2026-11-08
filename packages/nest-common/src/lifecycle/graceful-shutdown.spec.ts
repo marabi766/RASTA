@@ -239,6 +239,55 @@ describe('installGracefulShutdown', () => {
     ).toThrow(/already installed/);
   });
 
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'refuses duplicate default sources (explicit undefined: %s then %s)',
+    async (first, second) => {
+      const listeners = new Map<string | symbol, () => void>();
+      // `on` returns the emitter it was called on: `this` is process here, so no bare `process` escapes.
+      const on = jest.spyOn(process, 'on').mockImplementation(function (
+        this: NodeJS.Process,
+        signal,
+        listener,
+      ) {
+        listeners.set(signal, listener);
+        return this;
+      });
+      const close = jest.fn(async () => undefined);
+      const exit = jest.fn();
+      const logger = { warn: jest.fn(), error: jest.fn() };
+      try {
+        jest.isolateModules(() => {
+          const { installGracefulShutdown: install } =
+            jest.requireActual<typeof import('./graceful-shutdown')>('./graceful-shutdown');
+          install(
+            { close },
+            { serviceName: 'svc', exit, logger, ...(first ? { signalSource: undefined } : {}) },
+          );
+          expect(() =>
+            install(
+              { close },
+              { serviceName: 'svc', exit, logger, ...(second ? { signalSource: undefined } : {}) },
+            ),
+          ).toThrow(/already installed/);
+        });
+        expect(on).toHaveBeenCalledTimes(2); // one listener per default signal
+        listeners.get('SIGTERM')?.();
+        listeners.get('SIGINT')?.();
+        await jest.advanceTimersByTimeAsync(0);
+        expect(close).toHaveBeenCalledTimes(1);
+        expect(exit).toHaveBeenCalledTimes(1);
+        expect(exit).toHaveBeenCalledWith(0);
+      } finally {
+        on.mockRestore();
+      }
+    },
+  );
+
   it.each([0, -5, 1.5, Number.NaN])('rejects a timeout of %p', (timeoutMs) => {
     const app: ShutdownTarget = { close: () => Promise.resolve() };
 

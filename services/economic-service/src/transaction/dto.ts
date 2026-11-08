@@ -6,8 +6,11 @@ import {
   isoDateTime,
   numberInput,
   organizationIdSchema,
+  TRANSACTION_TEXT_BOUNDS,
+  keptTextWithin,
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
+import { identifier } from '../shared/canonical';
 import { cursorQueryParameter } from '../shared/cursor';
 import { isEconomicRecordedSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
 
@@ -92,8 +95,8 @@ export const createTransactionSchema = z
      * The owning service's identifier space — an order id, a statement id.
      * Reserved types are refused below (`recorded-sources.ts`).
      */
-    sourceType: z.string().trim().min(1).max(64).optional(),
-    sourceReference: z.string().trim().min(1).max(128).optional(),
+    sourceType: identifier(z.string().trim().min(1).max(64)).optional(),
+    sourceReference: identifier(z.string().trim().min(1).max(128)).optional(),
     /**
      * Reserve the funds immediately.
      *
@@ -102,8 +105,17 @@ export const createTransactionSchema = z
      * (docs/10 § 10.5).
      */
     holdFunds: z.boolean().prefault(false),
+    /**
+     * The instant after which this hold may no longer be placed, fixed by the caller at
+     * its first send and the same on every retry: past it by this service's clock, 422
+     * `HOLD_DEADLINE_PASSED` with nothing recorded (`IdempotencyStore`, D-132). In the
+     * request's hash, so one key never answers two deadlines. Required for an `ORDER`:
+     * without it, 422 `HOLD_DEADLINE_REQUIRED` with nothing recorded (D-150,
+     * `TransactionService.create`); any other source may hold without one.
+     */
+    holdNotAfter: z.string().check(isoDateTime()).optional(),
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */
-    idempotencyKey: z.string().trim().min(8).max(128).optional(),
+    idempotencyKey: identifier(z.string().trim().min(8).max(128)).optional(),
   })
   .strict()
   // No caller — person or service — may record under a source type
@@ -114,6 +126,13 @@ export const createTransactionSchema = z
         code: z.ZodIssueCode.custom,
         path: ['sourceType'],
         message: RECORDED_SOURCE_REFUSAL,
+      });
+    }
+    if (dto.holdNotAfter !== undefined && !dto.holdFunds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['holdNotAfter'],
+        message: 'A hold deadline needs holdFunds',
       });
     }
   });
@@ -164,8 +183,11 @@ export const disputeTransactionSchema = z
      * A dispute stops settlement completely and indefinitely (docs/10 § 10.5).
      * Whoever has to resolve it needs to know what it is about, and a
      * one-word reason is how a dispute becomes permanent by neglect.
+     *
+     * Bounds from `TRANSACTION_TEXT_BOUNDS`: marketplace-service validates the
+     * buyer's dispute reason, which its saga forwards here, with the same ones.
      */
-    reason: z.string().trim().min(10).max(1000),
+    reason: keptTextWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.disputeReason),
   })
   .strict();
 
@@ -173,7 +195,8 @@ export type DisputeTransactionDto = z.infer<typeof disputeTransactionSchema>;
 
 export const resolveDisputeSchema = z
   .object({
-    resolution: z.string().trim().min(10).max(1000),
+    /** Bounds from `TRANSACTION_TEXT_BOUNDS`, which marketplace's decision is held to. */
+    resolution: keptTextWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.disputeResolution),
     /**
      * The dispute this resolution decides, as `GET /v1/transactions/{id}`
      * names it (`disputeId`). Optional; when sent, the transaction must still
@@ -181,7 +204,7 @@ export const resolveDisputeSchema = z
      * `INVALID_STATE_TRANSITION`. Without it, a decision about one dispute
      * could resolve another raised since (docs/23 D-053).
      */
-    disputeId: z.string().trim().min(1).max(64).optional(),
+    disputeId: identifier(z.string().trim().min(1).max(64)).optional(),
   })
   .strict();
 
@@ -189,7 +212,13 @@ export type ResolveDisputeDto = z.infer<typeof resolveDisputeSchema>;
 
 export const cancelTransactionSchema = z
   .object({
-    reason: z.string().trim().min(3).max(500),
+    /**
+     * Bounds from `TRANSACTION_TEXT_BOUNDS.closingReason`. marketplace-service's
+     * saga sends an order's cancellation reason here — the buyer's, or an
+     * operator's REFUND resolution — and refuses either at the command when it
+     * would not fit, never discovering it here with the funds held (FU-134).
+     */
+    reason: keptTextWithin(z.string().trim(), TRANSACTION_TEXT_BOUNDS.closingReason),
   })
   .strict();
 
@@ -200,7 +229,7 @@ export type RefundTransactionDto = z.infer<typeof refundTransactionSchema>;
 
 export const settleTransactionSchema = z
   .object({
-    transactionId: z.string().trim().min(1).max(64),
+    transactionId: identifier(z.string().trim().min(1).max(64)),
   })
   .strict();
 
@@ -241,6 +270,13 @@ export interface TransactionView {
   failureReason: string | null;
   createdAt: string;
   createdBy: string;
+  /**
+   * What `HELD` says, proven: HELD, the payer's own ACTIVE hold for exactly its
+   * amount and currency, and no unresolved hold decision (migration
+   * 20261106120000). False in every other status. As of when it was written, in
+   * a command's stored answer: a decision is made on a fresh read.
+   */
+  heldProven: boolean;
 }
 
 export interface TransactionDetailView extends TransactionView {

@@ -182,11 +182,55 @@ const reviewedClockTemplates: readonly {
   template: string;
   expressions: string | null;
 }[] = [
+  // FU-170: isolated deadline probes; table choice and fixed expired instant are bound.
+  {
+    file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',
+    template: '839883e807959e56cdcc4ee570f559e0835dd07d09ff903d3f5cf74c73f15ab0',
+    expressions: '532a533aa4069a91216782695f0b14d52859438f1d924ff10eefa68cd9d973f6',
+  },
+  {
+    file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',
+    template: '9194d4843602b1832a93f4858d85f0dffb15dd86f496204dcfff261b0cc64e9f',
+    expressions: '532a533aa4069a91216782695f0b14d52859438f1d924ff10eefa68cd9d973f6',
+  },
+  {
+    file: 'services/identity-service/test/timestamp-deadlines.int-spec.ts',
+    template: 'de8c0d38026744a9384a318239c46db089f76337aad9de353212df23c301299f',
+    expressions: '1705fbd3ce99d0a823cf817491d6672115ff9de37793aa8bcff93d8d82cd7cde',
+  },
+  // D-144: the hold's fence moved by hand, refused by its trigger or set for down.sql to judge.
+  {
+    file: 'services/marketplace-service/test/order-hold-fence.int-spec.ts',
+    template: 'c9755ab2a1b6065d995787cd217004e53be9660288f1ce69b5173ff254b74a48',
+    expressions: 'af6644e7b1667a7d6b95db092f8116b3fc4cab04accf121aec934c65d9edcdd2',
+  },
+  {
+    file: 'services/marketplace-service/test/order-hold-fence.int-spec.ts',
+    template: 'ea81fbc59f1d44e2a6d1b4535650b59ce66464f40d72742f512b9eab7a8c214c',
+    expressions: 'af6644e7b1667a7d6b95db092f8116b3fc4cab04accf121aec934c65d9edcdd2',
+  },
+  {
+    file: 'services/marketplace-service/test/order-hold-fence.int-spec.ts',
+    template: 'f807093198ca4f62e5d65d0f8893b77a76aa05f84085bf343ba39d46b8950dce',
+    expressions: null,
+  },
+  {
+    file: 'services/marketplace-service/test/order-hold-fence.int-spec.ts',
+    template: '13964702b749f3282739bc874ff67223949b53cd87647b535a34c04a7cd6e52f',
+    expressions: 'cb0e23ca9bb63ce260b933d5a200e9ccee729087d54f5bfc7b4a413db8fb3011',
+  },
   // FK-only parent copies: explicit tenant/id source, database-clock retry parked 24 hours.
   {
     file: 'services/marketplace-service/test/scalar-fk.int-spec.ts',
     template: '079e569561e460718d41c3022ec1dcf8f3ccef64f83b4bdc2ea743a127ba96e4',
     expressions: 'f7d12489c58c3e92cecd39bd9a969cd282160cb7e34c476dd0724522acb6293f',
+  },
+  // FU-234: an order row no writer makes (a send count below zero), copied from a placed
+  // order, database-clock retry parked 24 hours, for the backfill to refuse.
+  {
+    file: 'services/marketplace-service/test/hold-deadline-backfill.int-spec.ts',
+    template: 'ced52d1ec7cff69af545b47adb6fa1e3567cf9168658ea979c520b84fde1df22',
+    expressions: 'eb179d1906c5586a28111bd5b55854ecd24c901df010638c0e59dba598ac8de8',
   },
   // Task 1201: legacy occurrence evidence, and fixed data in an isolated migration schema.
   // Fact-time boundaries intentionally use owner timestamps, not a live eligibility clock.

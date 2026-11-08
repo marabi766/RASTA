@@ -65,8 +65,17 @@ export function reversePatch(dir: string, patch: string): void {
     if (!file) throw new Error('patch section without a target file');
     const path = join(dir, file);
     let text = readFileSync(path, 'utf8');
-    for (const hunk of section.split(/^@@ [^\n]*@@[^\n]*\n/m).slice(1)) {
+    // Reverse from the end so unified-diff line positions remain valid. Repeated
+    // builtin construction tails are legitimate; require the exact bytes at
+    // the declared location rather than searching for a unique occurrence.
+    for (const hunk of section
+      .split(/^(?=@@ )/m)
+      .slice(1)
+      .reverse()) {
       const lines = hunk.split('\n');
+      const header = lines.shift() ?? '';
+      const line = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(header)?.[1];
+      if (line === undefined) throw new Error('patch hunk without a line position');
       if (lines.at(-1) === '') lines.pop();
       const before: string[] = [];
       const after: string[] = [];
@@ -81,9 +90,13 @@ export function reversePatch(dir: string, patch: string): void {
         }
       }
       const patched = `${after.join('\n')}\n`;
-      const at = text.indexOf(patched);
-      if (at < 0 || text.indexOf(patched, at + 1) >= 0) {
-        throw new Error(`patch hunk is not found exactly once in ${file}`);
+      const prefix = text
+        .split('\n')
+        .slice(0, Number(line) - 1)
+        .join('\n');
+      const at = prefix.length + (Number(line) > 1 ? 1 : 0);
+      if (text.slice(at, at + patched.length) !== patched) {
+        throw new Error(`patch hunk does not match its declared location in ${file}`);
       }
       text = text.slice(0, at) + `${before.join('\n')}\n` + text.slice(at + patched.length);
     }

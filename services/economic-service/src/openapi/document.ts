@@ -264,7 +264,9 @@ const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
       'settlement fails closed without a commission rule (docs/24 Q-29; on outside development ' +
       'and test, `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`), so a new obligation must name ' +
       '`businessLine`. Only marketplace-service recording its own `ORDER` may leave it out ' +
-      '(docs/24 Q-130)',
+      '(docs/24 Q-130) — or HOLD_DEADLINE_PASSED: the `holdNotAfter` the caller fixed has passed ' +
+      "by this service's clock, and this key answers that from now on — or HOLD_DEADLINE_REQUIRED: " +
+      'an `ORDER` sent without `holdNotAfter`; the key stays free',
   },
   'POST /v1/settlements': {
     422:
@@ -297,6 +299,7 @@ const INTERNAL_STATUS_TEXT: Record<number, string> = {
 export const SERVICE_ROUTES: Readonly<Record<string, ServiceRouteUsers>> = {
   'GET /v1/wallets/me': 'users-accepted',
   'GET /v1/transactions': 'users-accepted',
+  'GET /v1/transactions/capabilities': 'users-accepted',
   'GET /v1/transactions/{id}': 'users-accepted',
   'POST /v1/transactions': 'users-accepted',
   'POST /v1/transactions/{id}/authorise-settlement': 'users-accepted',
@@ -336,6 +339,27 @@ const RETRY_AFTER_HEADER = {
  * by `api-wallet.int-spec.ts` with `schemaMismatches`, both ways.
  */
 const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
+  TransactionCapabilities: {
+    type: 'object',
+    required: ['heldProven', 'orderHoldDeadlineRequired'],
+    properties: {
+      heldProven: {
+        type: 'boolean',
+        description:
+          'Every transaction view says whether HELD is proven (`heldProven`). The order saga ' +
+          'starts no order until this is true (ADR-040). A release before it answers this ' +
+          'path with 404.',
+      },
+      orderHoldDeadlineRequired: {
+        type: 'boolean',
+        description:
+          'Whether an `ORDER` hold sent without `holdNotAfter` is refused (D-150), as this ' +
+          'release enforces it now. The order saga takes its order row as proof that no ' +
+          'hold can land only while this is true (FU-233). A release before the rule omits ' +
+          'it, which the saga reads as false next to `heldProven: true`.',
+      },
+    },
+  },
   PaymentDisclosure: {
     type: 'object',
     required: ['simulated'],
@@ -352,6 +376,7 @@ const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
 
 const OTHER_RESPONSES: Record<string, string> = {
   'GET /v1/wallets/provider/disclosure': 'PaymentDisclosure',
+  'GET /v1/transactions/capabilities': 'TransactionCapabilities',
 };
 
 const RESPONSES: Record<string, string> = { ...TRANSACTION_RESPONSES, ...OTHER_RESPONSES };

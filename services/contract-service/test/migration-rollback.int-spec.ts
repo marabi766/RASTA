@@ -130,6 +130,7 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const RULE_LOCK_ORDER = '20261104200000_deduction_rule_lock_order';
   const RULE_CHANGES = '20261104100000_deduction_rule_changes';
   const SETTLEMENT = '20261017160000_statement_settlement';
   const DECISIONS = '20261016180000_statement_decisions';
@@ -1151,6 +1152,25 @@ describe('each down.sql, run whole with psql --file', () => {
         ]),
       ).toBe('SETTLED:10:10');
     });
+  });
+
+  it('statement_deduction_rule_lock (FU-089) down restores the previous shape and functions', () => {
+    const migration = '20261105160000_statement_deduction_rule_lock';
+    const schema = scratch(migration);
+    expect(psql(schema, ['--file', down(migration)])).toEqual({ ok: true, out: '' });
+    const previous = scratch(RULE_LOCK_ORDER);
+    expect(shape(schema)).toBe(shape(previous));
+    expect(functions(schema)).toBe(functions(previous));
+  });
+
+  it('deduction_rule_lock_order (FU-060) changes only trigger bodies: down restores them exactly', () => {
+    const schema = scratch(RULE_LOCK_ORDER);
+    const result = psql(schema, ['--file', down(RULE_LOCK_ORDER)]);
+    expect(result.out).toBe('');
+    expect(result.ok).toBe(true);
+    const previous = scratch(RULE_CHANGES);
+    expect(shape(schema)).toBe(shape(previous));
+    expect(functions(schema)).toBe(functions(previous));
   });
 
   describe('deduction_rule_changes (CON-003-1)', () => {

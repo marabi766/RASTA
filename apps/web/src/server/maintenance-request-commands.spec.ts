@@ -19,7 +19,6 @@ import {
   parseCancelRequestForm,
 } from './maintenance-commands';
 import { EMPTY_ASSIGN_WORKSHOP_FORM, EMPTY_CANCEL_REQUEST_FORM } from '@/lib/maintenance-fields';
-import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 import { actingAccessToken } from '@/test/session-token';
 
@@ -481,16 +480,14 @@ describe('writing', () => {
       });
     });
 
-    it('shows the generic Persian sentence under a code with no fallback, never the English', async () => {
+    it('an undocumented code is unconfirmed, never the English (PR-830 r1 F1)', async () => {
       const { impl } = recording(409, {
         code: 'SOME_NEW_CODE',
         message: 'A completed request cannot be referred to a workshop',
       });
       const result = await assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 's', impl);
-      expect(result).toMatchObject({
-        kind: 'INVALID',
-        message: GENERIC_REFUSAL_MESSAGE,
-      });
+      expect(result.kind).toBe('UNKNOWN_OUTCOME');
+      expect(JSON.stringify(result)).not.toContain('workshop');
     });
   });
 

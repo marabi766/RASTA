@@ -26,6 +26,8 @@ import { sealRepairOrderBaseline } from '@/server/repair-order-commands';
 import type { WebSession } from '@/server/session';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import { actingAccessToken } from '@/test/session-token';
+import { useUnresolvedStore } from '@/server/unresolved-request';
+import { memoryUnresolvedStore } from '@/server/unresolved-request-store';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -87,6 +89,7 @@ let asked: { method: string; path: string }[] = [];
 const originalFetch = globalThis.fetch;
 
 beforeEach(() => {
+  useUnresolvedStore(memoryUnresolvedStore());
   answers = {};
   asked = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -103,6 +106,7 @@ beforeEach(() => {
 });
 
 afterAll(() => {
+  useUnresolvedStore();
   globalThis.fetch = originalFetch;
 });
 
@@ -152,6 +156,8 @@ const resolveDispute = (outcome: 'SETTLE' | 'REFUND'): GatedAction => ({
   draw: () =>
     drawnForm({
       command: 'RESOLVE_DISPUTE',
+      // The dispute the page showed (D-083).
+      disputeId: 'DSP_01JC0000000000000000000000',
       outcome,
       resolution: 'کالا تحویل نشده بود و فروشنده پاسخ نداد.',
       responsibility: 'SUPPLIER',

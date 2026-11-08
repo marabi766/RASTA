@@ -8,6 +8,7 @@ import {
   getContext,
   RastaError,
   runUnscoped,
+  uniqueTextSearchKey,
   type OutboxMessageInput,
   type OutboxProvenance,
   type RestoredOutboxMessageInput,
@@ -426,13 +427,14 @@ export class IdentityRepository {
    * {@link deferLapse}, so no attempt count overflows the arithmetic.
    */
   async deferRegistrationIntake(id: string, intervalSeconds: number, maxIntervals: number) {
+    // TIMESTAMP(3) rounds to nearest: truncate so the stored value is exact and cannot exceed the cap.
     await this.client.$executeRaw`
       UPDATE registration_intake
          SET attempts = LEAST(attempts, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-             next_attempt_at = (clock_timestamp() AT TIME ZONE 'UTC')
+             next_attempt_at = date_trunc('milliseconds', date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                + make_interval(secs => ${intervalSeconds}
                    * LEAST(POWER(2, LEAST(attempts, ${BACKOFF_EXPONENT_CAP})),
-                           ${maxIntervals}))
+                           ${maxIntervals})))
        WHERE id = ${id}`;
   }
 
@@ -541,13 +543,36 @@ export class IdentityRepository {
     );
   }
 
-  async findUserByUsernameOrEmail(username: string, email: string, tx?: ExtendedPrismaClient) {
+  /**
+   * Whether the username or the email is held, compared as the unique indexes
+   * compare them (FU-084 r2): `user_login_key` on both sides, deleted holders
+   * included, since `ux_user_username_login_key` and `ux_user_email_login_key`
+   * include them. A legacy `Ali` is the `ali` a request now asks for.
+   */
+  async findUserByUsernameOrEmail(
+    username: string,
+    email: string,
+    tx?: ExtendedPrismaClient,
+  ): Promise<{ id: string } | null> {
     const db = tx ?? this.client;
-    return runUnscoped('uniqueness check spans the whole platform, not one tenant', () =>
-      db.user.findFirst({
-        where: { deletedAt: null, OR: [{ username }, { email }] },
-      }),
-    );
+    const rows = await db.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "user"
+       WHERE user_login_key(username) = user_login_key(${username}::text)
+          OR user_login_key(email) = user_login_key(${email}::text)
+       LIMIT 1`;
+    return rows[0] ?? null;
+  }
+
+  /**
+   * The one user whose username has this login key, deleted or not — at most
+   * one, by `ux_user_username_login_key` (FU-084 r2). Only the id leaves this
+   * method; a caller filters its own, scoped read by it.
+   */
+  async findUserIdByUsername(username: string): Promise<string | null> {
+    const rows = await this.client.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "user"
+       WHERE user_login_key(username) = user_login_key(${username}::text)`;
+    return rows[0]?.id ?? null;
   }
 
   async findUserWithMemberships(id: string) {
@@ -591,16 +616,7 @@ export class IdentityRepository {
           is: {
             deletedAt: null,
             ...(query.status ? { status: query.status } : {}),
-            ...(query.q
-              ? {
-                  OR: [
-                    { firstName: { contains: query.q, mode: 'insensitive' as const } },
-                    { lastName: { contains: query.q, mode: 'insensitive' as const } },
-                    { username: { contains: query.q, mode: 'insensitive' as const } },
-                    { email: { contains: query.q, mode: 'insensitive' as const } },
-                  ],
-                }
-              : {}),
+            ...(query.q ? { OR: userSearchArms(query.q) } : {}),
           },
         },
       },
@@ -816,16 +832,17 @@ export class IdentityRepository {
    * `BACKOFF_EXPONENT_CAP`), so no failure count can overflow it.
    */
   async deferLapse(membershipId: string, intervalSeconds: number, maxIntervals: number) {
+    // TIMESTAMP(3) rounds to nearest: truncate so the stored value is exact and cannot exceed the cap.
     await runUnscoped(
       'the membership expiry sweep covers every organization',
       () =>
         this.client.$executeRaw`
         UPDATE membership
            SET lapse_failures = LEAST(lapse_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
-               lapse_retry_at = (clock_timestamp() AT TIME ZONE 'UTC')
+               lapse_retry_at = date_trunc('milliseconds', date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
                  + make_interval(secs => ${intervalSeconds}
                      * LEAST(POWER(2, LEAST(lapse_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
-                             ${maxIntervals}))
+                             ${maxIntervals})))
          WHERE id = ${membershipId} AND lapse_handled_at IS NULL`,
     );
   }
@@ -948,6 +965,37 @@ export class IdentityRepository {
       throw error;
     }
   }
+}
+
+/**
+ * The free-text arms of the user search (FU-084 r2). The names are display text and are matched as
+ * typed. The username and the email are login keys: the term is folded as the write folded them
+ * (`uniqueTextSearchKey`, case-folded), so `ali۱` finds `ali1`, and is matched case-insensitively,
+ * so a legacy `Ali` is found too. Both columns are printable ASCII (`ck_user_login_printable_ascii`),
+ * so only a printable-ASCII term searches them, and over printable ASCII that match is
+ * `user_login_key`'s A–Z fold; `test/canonical-login-key.int-spec.ts` holds the database to it.
+ * Prisma's `contains` is a LIKE and passes `%` and `_` through, so every arm is escaped to a literal
+ * (`_` is a username character; NFKC makes `％` a `%`).
+ */
+export function userSearchArms(q: string) {
+  const loginKey = uniqueTextSearchKey(q, { caseFold: true });
+  const name = likeLiteral(q);
+  const login = likeLiteral(loginKey);
+  return [
+    { firstName: { contains: name, mode: 'insensitive' as const } },
+    { lastName: { contains: name, mode: 'insensitive' as const } },
+    ...(/^[!-~]+$/.test(loginKey)
+      ? [
+          { username: { contains: login, mode: 'insensitive' as const } },
+          { email: { contains: login, mode: 'insensitive' as const } },
+        ]
+      : []),
+  ];
+}
+
+/** `\`, `%` and `_` escaped, so a LIKE (Prisma's `contains`) matches the term literally. */
+function likeLiteral(term: string): string {
+  return term.replace(/[\\%_]/g, (character) => `\\${character}`);
 }
 
 /** Prisma's unique-constraint error, without importing its error classes. */

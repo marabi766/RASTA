@@ -71,6 +71,11 @@ export {
   upstreamExchange,
 } from './http/exchange-deadline';
 export type { ExchangeOptions } from './http/exchange-deadline';
+export {
+  MAX_QUERY_SEGMENTS,
+  StrictQueryParserInstaller,
+  strictQueryParser,
+} from './http/strict-query-parser';
 export { InternalHttpClient, InternalTokenService } from './http/internal-http-client';
 export type { InternalGrant, InternalSender } from './http/internal-http-client';
 export {
@@ -282,6 +287,7 @@ export {
   STREAM_SEQUENCE_TABLE,
   purgePublishedSql,
   MANUALLY_SKIPPED_PREFIX,
+  OUTBOX_NOW,
 } from './outbox/outbox-sql';
 export type {
   OutboxSqlClient,
@@ -311,6 +317,8 @@ export {
   DEFAULT_AFTER_CLOSE_TIMEOUT_MS,
   DEFAULT_SHUTDOWN_SIGNALS,
 } from './lifecycle/graceful-shutdown';
+// What a component that cannot recover asks for: the service's own shutdown, or exit(1).
+export { fatalShutdown } from './lifecycle/fatal-shutdown';
 export type {
   GracefulShutdown,
   GracefulShutdownOptions,
@@ -345,6 +353,13 @@ export {
 export type { JsonSchema } from './openapi/zod-schema';
 export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
 export { publishApiErrors, healthProbeErrorSchema } from './openapi/error-document';
+export {
+  publishZodRouteInputs,
+  zodRouteInputKey,
+  zodRouteInputProblems,
+  zodRouteInputs,
+} from './openapi/zod-route-inputs';
+export type { RouteDocument, ZodRouteInput } from './openapi/zod-route-inputs';
 export {
   applyOperationSecurity,
   documentationModuleFor,
@@ -384,5 +399,19 @@ export type {
 
 export { clientFailureCode } from './database/client-failure';
 export { DatabaseConnectionError, createSafePrismaClient } from './database/safe-prisma-client';
+export { SessionTimeZoneRefusedError, UTC_SESSION_CHECK_SQL } from './database/utc-session';
 export type { RuntimeDatabaseSetting } from './database/safe-prisma-client';
 export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';
+
+// Human-typed text a uniqueness constraint compares (FU-084) ----------------
+export {
+  canonicalUniqueText,
+  foldUniqueText,
+  isCanonicalUniqueText,
+  uniqueTextKey,
+  uniqueTextSearchKey,
+  foldAsciiCase,
+  uniqueText,
+  NOT_CANONICAL_TEXT,
+} from './text/canonical-unique-text';
+export type { CanonicalUniqueTextOptions } from './text/canonical-unique-text';

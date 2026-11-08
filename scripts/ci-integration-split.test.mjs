@@ -1,8 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -11,6 +22,7 @@ import {
   QUALITY_GATE_JOB,
   QUALITY_JOBS,
   qualitySplitProblems,
+  unitCoverageProblems,
   JOB_FLOOR_MINUTES,
   JOB_SETUP_MINUTES,
   INTEGRATION_PARTITIONS,
@@ -23,13 +35,14 @@ import {
   integrationPartitionProblems,
   integrationPartitionStepProblems,
 } from './ci-integration-split-lib.mjs';
+import { workspaceDirectories, workspaceManifestFiles } from './workspace-roots-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TEXT = readFileSync(resolve(ROOT, '.github/workflows/ci.yml'), 'utf8');
 const PARSED = parseYaml(TEXT);
 const real = () => structuredClone(PARSED);
-const fails = (workflow, pattern) => {
-  const problems = checkIntegrationSplit(workflow);
+const fails = (workflow, pattern, root = ROOT) => {
+  const problems = checkIntegrationSplit(workflow, root);
   assert.ok(
     problems.some((problem) => pattern.test(problem)),
     `expected a problem matching ${pattern}, got: ${JSON.stringify(problems)}`,
@@ -55,14 +68,58 @@ test('disk discovery covers the live partition, including the empty gateway proj
   assert.deepEqual(integrationPartitionProblems(), []);
 });
 
-test('the workflow validator refuses a newly added, unassigned workspace on disk', (t) => {
-  const dir = mkdtempSync(resolve(ROOT, 'packages/ci-integration-discovery-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(
-    resolve(dir, 'package.json'),
-    JSON.stringify({ name: '@rasta/new-workspace', scripts: { 'test:integration': 'jest' } }),
-  );
-  fails(real(), /@rasta\/new-workspace: expected exactly one integration partition, found 0/);
+/** What git sees changed or untracked under the repository (the fixture must add nothing). */
+const repositoryChanges = () => {
+  const run = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(run.status, 0, `git status failed: ${run.stderr}`);
+  return run.stdout;
+};
+
+/**
+ * A copy of the live workspace layout (manifests only) in the OS temp directory,
+ * outside the repository: other guards walking the repository never see it and a
+ * killed test leaves nothing in it. Removed in `finally`.
+ */
+const withLiveWorkspaceCopy = (use) => {
+  const copy = mkdtempSync(resolve(tmpdir(), 'integration-split-live-'));
+  try {
+    assert.ok(relative(ROOT, copy).startsWith('..'), `${copy} must be outside ${ROOT}`);
+    for (const file of ['pnpm-workspace.yaml', 'package.json', ...workspaceManifestFiles(ROOT)]) {
+      mkdirSync(dirname(resolve(copy, file)), { recursive: true });
+      copyFileSync(resolve(ROOT, file), resolve(copy, file));
+    }
+    return use(copy);
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
+  }
+};
+
+test('the workflow validator refuses a newly added, unassigned workspace on disk', () => {
+  const before = repositoryChanges();
+  withLiveWorkspaceCopy((copy) => {
+    assert.deepEqual(checkIntegrationSplit(real(), copy), [], 'the copy mirrors the live layout');
+    mkdirSync(resolve(copy, 'packages/ci-integration-discovery'));
+    writeFileSync(
+      resolve(copy, 'packages/ci-integration-discovery/package.json'),
+      JSON.stringify({ name: '@rasta/new-workspace', scripts: { 'test:integration': 'jest' } }),
+    );
+    fails(
+      real(),
+      /@rasta\/new-workspace: expected exactly one integration partition, found 0/,
+      copy,
+    );
+    assert.match(
+      checkIntegrationSplitText(TEXT, copy).join('\n'),
+      /@rasta\/new-workspace: expected exactly one integration partition, found 0/,
+    );
+  });
+  // Nothing was created under the repository, so no concurrent guard can see it
+  // and a SIGKILL cannot leave it behind.
+  assert.equal(repositoryChanges(), before);
+  assert.equal(existsSync(resolve(ROOT, 'packages/ci-integration-discovery')), false);
 });
 
 test('partition mutants: drop, duplicate within/across partitions, and unknown package fail', () => {
@@ -130,7 +187,7 @@ test('FU-027: workflow suite steps cannot be renamed, added or removed independe
   }
   const outside = real();
   outside.jobs.quality.steps.push({
-    name: 'Tenant isolation and authorization tests',
+    name: 'Tenant isolation and financial invariant tests',
     run: 'pnpm run test:integration',
   });
   fails(outside, /integration execution must run in an integration-\* job/);
@@ -150,13 +207,12 @@ const workspaceFixture = (t) => {
   };
   put('pnpm-workspace.yaml', {
     packages: [
-      '.',
       'apps/*',
       'services/*',
       'packages/*',
       'tests/*',
-      'extensions/**',
-      '!extensions/excluded',
+      'extensions/*/*',
+      '!extensions/nested/excluded',
     ],
   });
   put('package.json', {
@@ -166,7 +222,7 @@ const workspaceFixture = (t) => {
   for (const group of ['apps', 'services', 'packages', 'tests', 'extensions/nested']) {
     put(`${group}/member/package.json`, { name: group, scripts: { 'test:integration': 'jest' } });
   }
-  put('extensions/excluded/package.json', {
+  put('extensions/nested/excluded/package.json', {
     name: 'excluded',
     scripts: { 'test:integration': 'jest' },
   });
@@ -183,7 +239,7 @@ test('discovery follows configured roots, exclusions and new manifests independe
   const packages = ['apps', 'services', 'packages', 'tests', 'extensions/nested'].sort();
   assert.deepEqual(discoverIntegrationPackages(root), packages);
   assert.deepEqual(integrationPartitionProblems({ suites: packages }, root), []);
-  put('extensions/added/package.json', {
+  put('extensions/nested/added/package.json', {
     name: 'new-workspace',
     scripts: { 'test:integration': 'jest' },
   });
@@ -210,6 +266,239 @@ test('unreadable/malformed discovery inputs and duplicate package names fail clo
   }
   rmSync(resolve(root, 'pnpm-workspace.yaml'));
   assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed/);
+});
+
+// The shared reader (scripts/workspace-roots-lib.mjs) every workspace-visiting guard
+// uses; it has no test file of its own so that it cannot fall out of the CI chain.
+test('workspace reader: live membership equals the manifests under the declared roots', () => {
+  const declared = parseYaml(readFileSync(resolve(ROOT, 'pnpm-workspace.yaml'), 'utf8')).packages;
+  const onDisk = declared.flatMap((pattern) => {
+    const group = pattern.replace(/\/\*$/, '');
+    return readdirSync(resolve(ROOT, group), { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isDirectory() && existsSync(resolve(ROOT, group, entry.name, 'package.json')),
+      )
+      .map((entry) => `${group}/${entry.name}`);
+  });
+  assert.deepEqual(workspaceDirectories(ROOT), onDisk.sort());
+  assert.ok(workspaceDirectories(ROOT).length >= 20);
+  assert.ok(workspaceManifestFiles(ROOT).every((file) => file.endsWith('/package.json')));
+});
+
+test('workspace reader fails closed on a missing, malformed or empty workspace file', (t) => {
+  const { root } = workspaceFixture(t);
+  assert.deepEqual(workspaceDirectories(root), [
+    'apps/member',
+    'apps/no-integration',
+    'extensions/nested/member',
+    'packages/member',
+    'services/member',
+    'tests/member',
+  ]);
+  for (const text of [
+    '',
+    '- a\n',
+    'packages: x\n',
+    'packages: []\n',
+    'packages: [\n',
+    'other: 1\n',
+  ]) {
+    writeFileSync(resolve(root, 'pnpm-workspace.yaml'), text);
+    assert.throws(() => workspaceDirectories(root), undefined, JSON.stringify(text));
+  }
+  for (const patterns of [
+    ['../outside/*'],
+    ['/tmp/*'],
+    [null],
+    [''],
+    ['!'],
+    ['a\\b/*'],
+    ['nothing/*'],
+  ]) {
+    writeFileSync(resolve(root, 'pnpm-workspace.yaml'), JSON.stringify({ packages: patterns }));
+    assert.throws(() => workspaceDirectories(root), undefined, JSON.stringify(patterns));
+  }
+  rmSync(resolve(root, 'pnpm-workspace.yaml'));
+  assert.throws(() => workspaceDirectories(root));
+});
+
+/** pnpm's own answer: the members it would run `-r` over, relative to `root` (root excluded). */
+const pnpmMembers = (root) => {
+  const run = spawnSync('pnpm', ['ls', '-r', '--depth=-1', '--json'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert.equal(run.status, 0, `pnpm ls failed: ${run.stderr}`);
+  return JSON.parse(run.stdout)
+    .map((project) => relative(root, project.path).split('\\').join('/'))
+    .filter((directory) => directory !== '')
+    .sort();
+};
+
+const declare = (root, patterns) =>
+  writeFileSync(resolve(root, 'pnpm-workspace.yaml'), JSON.stringify({ packages: patterns }));
+
+const manifest = (root, directory, file = 'package.json', text) => {
+  mkdirSync(resolve(root, directory), { recursive: true });
+  writeFileSync(resolve(root, directory, file), text ?? JSON.stringify({ name: directory }));
+};
+
+test('workspace reader equals the locally installed pnpm on the real repository', () => {
+  assert.deepEqual(workspaceDirectories(ROOT), pnpmMembers(ROOT));
+});
+
+test('workspace reader equals pnpm on every supported form (names, *, !exclusions, dot, node_modules)', (t) => {
+  const { root } = workspaceFixture(t);
+  manifest(root, 'apps/.hidden');
+  manifest(root, 'apps/node_modules/dependency');
+  mkdirSync(resolve(root, 'apps/no-manifest'));
+  manifest(root, 'literal/one/deep');
+  declare(root, [
+    'apps/*',
+    'literal/one/deep',
+    'extensions/*/*',
+    '!extensions/nested/excluded',
+    '!apps/no-integration',
+  ]);
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
+  assert.ok(workspaceDirectories(root).includes('literal/one/deep'));
+  assert.ok(!workspaceDirectories(root).includes('apps/no-integration'));
+  declare(root, ['apps/*', 'services/*', 'packages/*', 'tests/*', 'extensions/*/*']);
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
+});
+
+// FU-076: pnpm drops any path with a node_modules/bower_components SEGMENT
+// (workspace/find-packages ignore list), whichever form reached it and wherever it sits.
+test('workspace reader drops pnpm-ignored segments at the start, middle and end of every form', (t) => {
+  const { root } = workspaceFixture(t);
+  const ignoredDirectories = [];
+  for (const ignored of ['node_modules', 'bower_components']) {
+    for (const directory of [
+      `${ignored}/member`, // start
+      `apps/${ignored}/inner`, // middle
+      `apps/${ignored}`, // end
+    ]) {
+      manifest(root, directory);
+      ignoredDirectories.push(directory);
+    }
+  }
+  const forms = {
+    literal: ['node_modules/member', 'apps/bower_components/inner', 'apps/node_modules'],
+    literalBower: ['bower_components/member', 'apps/node_modules/inner', 'apps/bower_components'],
+    star: ['*/member', 'apps/*/inner', 'apps/*'],
+  };
+  for (const [form, patterns] of Object.entries(forms)) {
+    for (const pattern of patterns) {
+      declare(root, ['services/*', pattern]);
+      const members = workspaceDirectories(root);
+      assert.deepEqual(members, pnpmMembers(root), `${form}: ${pattern}`);
+      for (const directory of ignoredDirectories) {
+        assert.ok(!members.includes(directory), `${form}: ${pattern} selected ${directory}`);
+      }
+    }
+  }
+  // Negation of an ignored path excludes nothing extra and is not refused.
+  for (const pattern of ['!node_modules/member', '!apps/bower_components/inner', '!apps/*']) {
+    declare(root, ['services/*', 'apps/*', pattern]);
+    assert.deepEqual(workspaceDirectories(root), pnpmMembers(root), pattern);
+  }
+  // Literal patterns that pnpm resolves to nothing still leave an empty answer an error.
+  declare(root, ['node_modules/member', 'apps/bower_components']);
+  assert.deepEqual(pnpmMembers(root), []);
+  assert.throws(() => workspaceDirectories(root), /matched no workspace member/);
+  // `**` stays unimplemented: refused, ignored segment or not.
+  for (const pattern of ['**/node_modules', 'apps/**/bower_components/*', 'node_modules/**']) {
+    declare(root, ['services/*', pattern]);
+    assert.throws(() => workspaceDirectories(root), /unsupported workspace package pattern/);
+  }
+});
+
+test('workspace reader refuses every pattern form it does not implement, alone or mixed with supported ones', (t) => {
+  const { root } = workspaceFixture(t);
+  const unsupported = [
+    '!(apps)/*', // leading extglob: a positive pattern in pnpm, not an exclusion
+    '!!apps/*',
+    '@(apps|tests)/*',
+    '+(apps)/*',
+    '?(apps)/*',
+    '*(apps)/*',
+    'apps/**',
+    '**',
+    '**/member',
+    '{apps,tests}/*',
+    'apps/{member,other}',
+    'apps/[a]*',
+    'a?ps/*',
+    'ap*/*',
+    '*s/*',
+    '.',
+    './apps/*',
+    'apps/.',
+    'apps//member',
+    'apps/*/',
+    'apps/.hidden',
+    '!apps/**',
+    '!{apps,tests}/*',
+  ];
+  const supported = ['apps/*', 'services/*', 'packages/*', 'tests/*'];
+  for (const pattern of unsupported) {
+    for (const list of [[pattern], [...supported, pattern], [pattern, ...supported]]) {
+      declare(root, list);
+      assert.throws(
+        () => workspaceDirectories(root),
+        /unsupported workspace package pattern/,
+        JSON.stringify(list),
+      );
+    }
+  }
+  // The incomplete answer the old reader returned for the first form.
+  declare(root, ['apps/*', '!(apps)/*']);
+  assert.throws(() => workspaceManifestFiles(root), /unsupported workspace package pattern/);
+});
+
+test('workspace reader refuses a symbolic-link candidate pnpm would follow', (t) => {
+  const { root } = workspaceFixture(t);
+  declare(root, ['apps/*', 'packages/*']);
+  manifest(root, 'elsewhere/linked');
+  symlinkSync('../elsewhere/linked', resolve(root, 'packages/linked'), 'dir');
+  assert.ok(pnpmMembers(root).includes('packages/linked'), 'pnpm follows the link');
+  assert.throws(() => workspaceDirectories(root), /packages\/linked is a symbolic link/);
+  rmSync(resolve(root, 'packages/linked'));
+  // A dangling link, a link to a file, and a link used as a literal path segment.
+  symlinkSync('../nowhere', resolve(root, 'packages/dangling'));
+  assert.throws(() => workspaceDirectories(root), /packages\/dangling is a symbolic link/);
+  rmSync(resolve(root, 'packages/dangling'));
+  symlinkSync('../package.json', resolve(root, 'packages/file-link'));
+  assert.throws(() => workspaceDirectories(root), /packages\/file-link is a symbolic link/);
+  rmSync(resolve(root, 'packages/file-link'));
+  symlinkSync('elsewhere', resolve(root, 'group'), 'dir');
+  declare(root, ['apps/*', 'group/linked']);
+  assert.throws(() => workspaceDirectories(root), /group is a symbolic link/);
+  // Exclusions walk the same way.
+  declare(root, ['apps/*', '!group/linked']);
+  assert.throws(() => workspaceDirectories(root), /group is a symbolic link/);
+  rmSync(resolve(root, 'group'));
+  declare(root, ['apps/*', 'packages/*']);
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
+});
+
+test('workspace reader refuses a candidate whose manifest is not package.json', (t) => {
+  const { root } = workspaceFixture(t);
+  declare(root, ['apps/*', 'packages/*']);
+  manifest(root, 'packages/yaml', 'package.yaml', 'name: yaml\n');
+  assert.ok(pnpmMembers(root).includes('packages/yaml'), 'pnpm reads package.yaml');
+  assert.throws(() => workspaceDirectories(root), /packages\/yaml has package\.yaml/);
+  rmSync(resolve(root, 'packages/yaml'), { recursive: true });
+  manifest(root, 'packages/json5', 'package.json5', '{name: "json5"}');
+  assert.ok(pnpmMembers(root).includes('packages/json5'), 'pnpm reads package.json5');
+  assert.throws(() => workspaceDirectories(root), /packages\/json5 has package\.json5/);
+  // Next to a package.json it is still a second, unread manifest.
+  manifest(root, 'packages/json5', 'package.json');
+  assert.throws(() => workspaceDirectories(root), /packages\/json5 has package\.json5/);
+  rmSync(resolve(root, 'packages/json5'), { recursive: true });
+  assert.deepEqual(workspaceDirectories(root), pnpmMembers(root));
 });
 
 test('the committed workflow passes', () => {
@@ -529,9 +818,9 @@ test('a test command made to pass regardless is refused', () => {
     fails(workflow, /"Integration tests" must run exactly/);
   }
   const lastLine = real();
-  const isolation = stepNamed(lastLine, 'Tenant isolation and authorization tests');
-  isolation.run = isolation.run.split('\n').slice(0, 3).join('\n');
-  fails(lastLine, /"Tenant isolation and authorization tests" must run exactly/);
+  const isolation = stepNamed(lastLine, 'Tenant isolation and financial invariant tests');
+  isolation.run = isolation.run.trimEnd().split('\n').slice(0, -1).join('\n');
+  fails(lastLine, /"Tenant isolation and financial invariant tests" must run exactly/);
 });
 
 test('comments and blank lines in a run are not commands', () => {
@@ -650,9 +939,9 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'integration-construction': 25,
       'integration-economic': 24,
       'integration-contract': 23,
-      'integration-security': 37,
+      'integration-security': 35,
       'integration-coverage-critical': 35,
-      'integration-coverage': 80,
+      'integration-coverage': 86,
       'integration-backup-drill': 8,
       'migration-reversibility-chain': 17,
       'migration-guards': 18,
@@ -1155,4 +1444,116 @@ test('every suite shard refuses no-op commands, changed filters, missing aggrega
       fails(changed, /must set/);
     }
   }
+});
+
+test('FU-185: every workspace unit selection survives removal of the filtered rerun', () => {
+  assert.deepEqual(unitCoverageProblems(), []);
+  withLiveWorkspaceCopy((root) => {
+    const file = resolve(root, 'services/identity-service/package.json');
+    const original = JSON.parse(readFileSync(file, 'utf8'));
+    for (const command of [
+      undefined,
+      'jest --selectProjects integration',
+      'jest --selectProjects unit --testNamePattern=tenant',
+      'true',
+    ]) {
+      const manifest = structuredClone(original);
+      manifest.scripts['test:unit'] = command;
+      writeFileSync(file, JSON.stringify(manifest));
+      assert.match(unitCoverageProblems(root).join('\n'), /identity-service.*unit coverage/);
+    }
+  });
+  for (const change of [
+    (w) => dropStep(w.jobs['quality-unit'], 'Unit tests'),
+    (w) => {
+      w.jobs['quality-unit'].steps.find((s) => s.name === 'Unit tests').run +=
+        ' -- --testNamePattern=tenant';
+    },
+  ]) {
+    const workflow = real();
+    change(workflow);
+    assert.match(qualitySplitProblems(workflow).join('\n'), /unfiltered Unit tests/);
+  }
+});
+
+test('FU-185 F1a: deleting test cannot hide a narrowed or missing unit selection', () => {
+  withLiveWorkspaceCopy((root) => {
+    const file = resolve(root, 'services/identity-service/package.json');
+    const manifest = JSON.parse(readFileSync(file, 'utf8'));
+    delete manifest.scripts.test;
+    for (const command of ['jest --selectProjects unit --testNamePattern=x', undefined]) {
+      manifest.scripts['test:unit'] = command;
+      writeFileSync(file, JSON.stringify(manifest));
+      assert.match(unitCoverageProblems(root).join('\n'), /identity-service.*unit coverage/);
+    }
+  });
+});
+
+test('FU-185 F1a: the Node unit workspace refuses a no-op or missing test:unit', () => {
+  withLiveWorkspaceCopy((root) => {
+    const file = resolve(root, 'tests/e2e/package.json');
+    const manifest = JSON.parse(readFileSync(file, 'utf8'));
+    for (const command of ['true', undefined]) {
+      manifest.scripts['test:unit'] = command;
+      writeFileSync(file, JSON.stringify(manifest));
+      assert.match(unitCoverageProblems(root).join('\n'), /tests\/e2e.*unit coverage/);
+    }
+  });
+});
+
+test('FU-185 F1b: every Jest unit entry refuses passWithNoTests even when test has it', () => {
+  for (const file of workspaceManifestFiles(ROOT)) {
+    const original = JSON.parse(readFileSync(resolve(ROOT, file), 'utf8'));
+    if (!original.scripts?.['test:unit']?.startsWith('jest')) continue;
+    withLiveWorkspaceCopy((root) => {
+      for (const hasTest of [true, false]) {
+        const manifest = structuredClone(original);
+        manifest.scripts['test:unit'] =
+          manifest.scripts['test:unit'].replace(' --passWithNoTests', '') + ' --passWithNoTests';
+        if (hasTest) manifest.scripts.test = manifest.scripts['test:unit'];
+        else delete manifest.scripts.test;
+        writeFileSync(resolve(root, file), JSON.stringify(manifest));
+        const problems = unitCoverageProblems(root);
+        assert.ok(
+          problems.some((p) => p.startsWith(`${file}: unit coverage`)),
+          `${file}: ${problems}`,
+        );
+      }
+    });
+  }
+});
+
+test('FU-185 F1b: asset unit command fails when its Jest config matches zero spec files', () => {
+  withLiveWorkspaceCopy((root) => {
+    const config = resolve(root, 'services/asset-service/jest.config.cjs');
+    const asset = resolve(ROOT, 'services/asset-service');
+    writeFileSync(
+      config,
+      `
+      const config = require(${JSON.stringify(resolve(asset, 'jest.config.js'))});
+      for (const project of config.projects) {
+        project.rootDir = require('node:path').resolve(${JSON.stringify(asset)}, project.rootDir);
+        if (project.displayName === 'unit') project.testRegex = 'FU185_NEVER_MATCHES_A_SPEC$';
+      }
+      module.exports = config;
+    `,
+    );
+    const manifest = JSON.parse(
+      readFileSync(resolve(root, 'services/asset-service/package.json'), 'utf8'),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        resolve(asset, 'node_modules/jest/bin/jest.js'),
+        ...manifest.scripts['test:unit'].split(' ').slice(1),
+        '--config',
+        config,
+        '--runInBand',
+      ],
+      { cwd: asset, encoding: 'utf8', timeout: 30000 },
+    );
+    assert.equal(result.error, undefined);
+    assert.match(result.stdout + result.stderr, /No tests found/);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+  });
 });

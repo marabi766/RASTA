@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { authoredFiles } from './authored-source-inventory.cjs';
 
 /**
  * AGENTS.md A-02 as an executable check: a file inside one
@@ -39,22 +40,6 @@ import { fileURLToPath } from 'node:url';
 
 /** Files that can carry an import. Declarations included: a type import couples too. */
 export const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
-
-/**
- * Directories never scanned. Each is either third-party, a build output of the
- * service's own source (checked at the source), or a generated client whose
- * internal requires are relative to itself.
- */
-export const SKIPPED_DIRECTORIES = new Set([
-  'node_modules',
-  'dist',
-  'build',
-  'coverage',
-  '.turbo',
-  'generated',
-  'test-results',
-  'playwright-report',
-]);
 
 /**
  * Replaces every comment with spaces, keeping newlines and string contents, so
@@ -304,37 +289,38 @@ export function checkSource({ repoRoot, file, source, packageToService }) {
   return violations;
 }
 
+/**
+ * Every authored file of every `services/<name>/` directory, per service name. Git-ignored output
+ * (installs, build output, generated clients) is never listed, and so never opened (FU-102).
+ */
+function serviceFiles(repoRoot) {
+  const servicesDir = join(repoRoot, 'services');
+  const byService = new Map();
+  if (!existsSync(servicesDir) || !statSync(servicesDir).isDirectory()) return byService;
+  for (const file of authoredFiles(servicesDir, { base: repoRoot })) {
+    const [service, ...rest] = relative(servicesDir, file).split(sep);
+    if (rest.length === 0) continue; // a file directly in services/ is no service
+    byService.set(service, [...(byService.get(service) ?? []), file]);
+  }
+  return byService;
+}
+
 /** `@rasta/<name>` → service directory, read from each service's own package.json. */
 export function servicePackages(repoRoot) {
   const map = new Map();
   const servicesDir = join(repoRoot, 'services');
-  if (!existsSync(servicesDir)) return map;
-  for (const entry of readdirSync(servicesDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const manifest = join(servicesDir, entry.name, 'package.json');
-    if (!existsSync(manifest)) continue;
+  for (const [service, files] of serviceFiles(repoRoot)) {
+    const manifest = join(servicesDir, service, 'package.json');
+    if (!files.includes(manifest)) continue;
     try {
       const { name } = JSON.parse(readFileSync(manifest, 'utf8'));
-      if (typeof name === 'string' && name.length > 0) map.set(name, entry.name);
+      if (typeof name === 'string' && name.length > 0) map.set(name, service);
     } catch {
       // A malformed manifest is somebody else's failure to report; it cannot
       // widen what this check allows.
     }
   }
   return map;
-}
-
-function* walk(directory) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isSymbolicLink()) continue;
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (SKIPPED_DIRECTORIES.has(entry.name)) continue;
-      yield* walk(path);
-    } else if (entry.isFile() && SOURCE_EXTENSIONS.some((ext) => entry.name.endsWith(ext))) {
-      yield path;
-    }
-  }
 }
 
 /**
@@ -345,19 +331,16 @@ function* walk(directory) {
 export function scanRepository(repoRoot) {
   const root = resolve(repoRoot);
   const packageToService = servicePackages(root);
-  const servicesDir = join(root, 'services');
   const violations = [];
   let scanned = 0;
   let services = 0;
 
-  if (!existsSync(servicesDir) || !statSync(servicesDir).isDirectory()) {
-    return { scanned, services, violations };
-  }
-
-  for (const entry of readdirSync(servicesDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+  for (const files of serviceFiles(root).values()) {
     services += 1;
-    for (const file of walk(join(servicesDir, entry.name))) {
+    for (const file of files) {
+      // a link is not followed; only source files are read
+      if (!SOURCE_EXTENSIONS.some((ext) => file.endsWith(ext)) || !lstatSync(file).isFile())
+        continue;
       scanned += 1;
       const source = readFileSync(file, 'utf8');
       violations.push(...checkSource({ repoRoot: root, file, source, packageToService }));

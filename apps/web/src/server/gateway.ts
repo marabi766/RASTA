@@ -208,6 +208,66 @@ export interface GatewayResponse<T> {
   readonly correlationId: string;
 }
 
+const REQUEST_PROPERTIES = new Set([
+  'baseUrl',
+  'path',
+  'credential',
+  'method',
+  'body',
+  'correlationId',
+  'idempotencyKey',
+  'replayDeadline',
+  'fetchImpl',
+  'timeoutMs',
+]);
+const WRITE_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const FIELD_TYPES = [
+  ['correlationId', 'string'],
+  ['idempotencyKey', 'string'],
+  ['replayDeadline', 'number'],
+  ['timeoutMs', 'number'],
+  ['fetchImpl', 'function'],
+] as const;
+/** What only a write may carry, even as `undefined`. */
+const WRITE_PROPERTIES = ['body', 'idempotencyKey', 'replayDeadline'] as const;
+
+/**
+ * The request as one snapshot of its own data properties, taken before anything reads it
+ * (FU-219): a getter, a proxy trap that runs later, an inherited or unknown property is refused, so
+ * nothing the caller's object does can change the method after this decides it. A read is GET with
+ * no body, idempotency key or replay deadline (not even `undefined`); a write names its method.
+ */
+function snapshotRequest(input: GatewayCall, write: boolean): GatewayCall {
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  if (Object.getOwnPropertySymbols(descriptors).length > 0)
+    throw new Error('unclassified gateway request property');
+  for (const key of Object.getOwnPropertyNames(descriptors)) {
+    if (!REQUEST_PROPERTIES.has(key)) throw new Error('unclassified gateway request property');
+    const descriptor = descriptors[key]!;
+    if (!Object.hasOwn(descriptor, 'value'))
+      throw new Error('gateway request needs own data properties');
+    snapshot[key] = descriptor.value;
+  }
+  if (
+    typeof snapshot.baseUrl !== 'string' ||
+    typeof snapshot.path !== 'string' ||
+    !Object.hasOwn(snapshot, 'credential')
+  )
+    throw new Error('gateway request needs own data properties');
+  // What reaches a header or the deadline is a primitive of its type, so no caller code runs later.
+  for (const [key, type] of FIELD_TYPES)
+    if (snapshot[key] !== undefined && typeof snapshot[key] !== type)
+      throw new Error(`gateway request ${key} must be a ${type}`);
+  const method = snapshot.method ?? 'GET';
+  if (write ? !WRITE_METHODS.has(method as string) : method !== 'GET')
+    throw new Error(write ? 'gateway write needs a write method' : 'gateway read sends only GET');
+  if (!write && WRITE_PROPERTIES.some((key) => Object.hasOwn(snapshot, key)))
+    throw new Error('gateway read refuses write properties');
+  snapshot.method = method;
+  return Object.freeze(snapshot) as unknown as GatewayCall;
+}
+
 /**
  * One authenticated call, with the correlation id the platform follows.
  *
@@ -215,7 +275,26 @@ export interface GatewayResponse<T> {
  * two people's requests is the worst bug this file could have, and opting out
  * once here is cheaper than remembering it at every call site.
  */
-export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
+export async function callGateway<T>(
+  input: Omit<GatewayCall, 'method' | 'body' | 'idempotencyKey' | 'replayDeadline'> & {
+    readonly method?: 'GET';
+  },
+): Promise<GatewayResponse<T>> {
+  return exchangeGateway<T>(snapshotRequest(input, false));
+}
+
+/**
+ * Only write.ts may import this entry, enforced by the write-classifier guard (named import,
+ * called, never handed on). The limit is static on purpose: a module gives a function no
+ * identity for its importer, so a run-time check could prove only that one module holds it.
+ */
+export async function callGatewayWrite<T>(input: GatewayCall): Promise<GatewayResponse<T>> {
+  return exchangeGateway<T>(snapshotRequest(input, true));
+}
+
+async function exchangeGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
+  // Decide from the snapshot before URL coercion, credential checks or body serialization.
+  const method = call.method;
   const url = gatewayUrl(call.baseUrl, call.path);
   // Before anything else: a credential this portal did not mint is refused
   // here, not sent.
@@ -243,7 +322,7 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     response = await credentialFetch(
       url,
       {
-        method: call.method ?? 'GET',
+        method,
         headers: {
           accept: 'application/json',
           ...identity,

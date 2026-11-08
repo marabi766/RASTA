@@ -105,7 +105,6 @@ export const directCostCategorySchema = z.enum(DIRECT_COST_CATEGORIES);
 const quantity = (maxIntegerDigits: number) =>
   z
     .string()
-    .trim()
     .regex(/^\d+(\.\d{1,2})?$/, 'Expected a non-negative number with at most two decimals')
     .refine((value) => (value.split('.')[0] ?? '').length <= maxIntegerDigits, {
       message: `At most ${maxIntegerDigits} digits before the decimal point`,
@@ -115,7 +114,6 @@ const quantity = (maxIntegerDigits: number) =>
  *  0.125 of a metre of hose is a real entry. */
 const partQuantity = z
   .string()
-  .trim()
   .regex(/^\d+(\.\d{1,3})?$/, 'Expected a non-negative number with at most three decimals')
   .refine((value) => value !== '0' && Number.parseFloat(value) > 0, {
     message: 'Quantity must be greater than zero',

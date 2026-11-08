@@ -2,7 +2,12 @@ import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@n
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { RepairOrderService } from './repair-order.service';
-import { IdempotencyStore, requiredIdempotencyKey, type ClaimFence } from './idempotency';
+import {
+  IdempotencyStore,
+  idempotentRequest,
+  type ClaimFence,
+  type IdempotencyHeaders,
+} from './idempotency';
 import {
   cancelRepairSchema,
   completeRepairSchema,
@@ -77,8 +82,9 @@ export class RepairOrderController {
   /**
    * Runs a write under its `Idempotency-Key`, which it must have (docs/06 § 6.8).
    *
-   * A missing or malformed key is refused before anything else, and nothing is
-   * written: unlike creating a request, these writes add money to a bill or
+   * A missing or malformed key — or replay deadline — is refused before anything
+   * else, and nothing is written; so is a deadline the replay fence refuses
+   * (`idempotency.ts`, FU-171), before the order is even read: unlike creating a request, these writes add money to a bill or
    * close one, and a retried post that was not the same post is the failure the
    * key exists to prevent. The caller's right to the order is established next,
    * so a stored response is only ever replayed to somebody who could have caused
@@ -89,15 +95,16 @@ export class RepairOrderController {
     endpoint: string,
     orderId: string,
     dto: object,
-    rawKey: string | undefined,
+    headers: IdempotencyHeaders,
     successStatus: number,
     work: (fence: ClaimFence<T>) => Promise<T>,
   ): Promise<T> {
-    const key = requiredIdempotencyKey(rawKey);
+    const request = idempotentRequest(headers);
+    this.idempotency.assertAdmissible(endpoint, request);
     await this.repairOrders.assertAccessible(orderId);
     const { result } = await this.idempotency.execute<T>(
       endpoint,
-      key,
+      request,
       { repairOrderId: orderId, ...dto },
       successStatus,
       work,
@@ -145,13 +152,13 @@ export class RepairOrderController {
   start(
     @Param('id') id: string,
     @Body(zodPipe(startRepairSchema)) dto: StartRepairDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ) {
     return this.idempotently<RepairOrderView>(
       REPAIR_ORDER_ENDPOINTS.start,
       id,
       dto,
-      idempotencyKey,
+      headers,
       200,
       (fence) => this.repairOrders.start(id, dto, fence),
     );
@@ -174,13 +181,13 @@ export class RepairOrderController {
   complete(
     @Param('id') id: string,
     @Body(zodPipe(completeRepairSchema)) dto: CompleteRepairDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ) {
     return this.idempotently<RepairOrderView>(
       REPAIR_ORDER_ENDPOINTS.complete,
       id,
       dto,
-      idempotencyKey,
+      headers,
       200,
       (fence) => this.repairOrders.complete(id, dto, fence),
     );
@@ -199,13 +206,13 @@ export class RepairOrderController {
   cancel(
     @Param('id') id: string,
     @Body(zodPipe(cancelRepairSchema)) dto: CancelRepairDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ) {
     return this.idempotently<RepairOrderView>(
       REPAIR_ORDER_ENDPOINTS.cancel,
       id,
       dto,
-      idempotencyKey,
+      headers,
       200,
       (fence) => this.repairOrders.cancel(id, dto, fence),
     );
@@ -229,13 +236,13 @@ export class RepairOrderController {
   recordPart(
     @Param('id') id: string,
     @Body(zodPipe(recordPartSchema)) dto: RecordPartDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ) {
     return this.idempotently<PartUsageView>(
       REPAIR_ORDER_ENDPOINTS.parts,
       id,
       dto,
-      idempotencyKey,
+      headers,
       201,
       (fence) => this.repairOrders.recordPart(id, dto, fence),
     );
@@ -254,13 +261,13 @@ export class RepairOrderController {
   recordLabour(
     @Param('id') id: string,
     @Body(zodPipe(recordLabourSchema)) dto: RecordLabourDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ) {
     return this.idempotently<LabourEntryView>(
       REPAIR_ORDER_ENDPOINTS.labour,
       id,
       dto,
-      idempotencyKey,
+      headers,
       201,
       (fence) => this.repairOrders.recordLabour(id, dto, fence),
     );
@@ -280,13 +287,13 @@ export class RepairOrderController {
   recordCost(
     @Param('id') id: string,
     @Body(zodPipe(recordCostSchema)) dto: RecordCostDto,
-    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: IdempotencyHeaders,
   ) {
     return this.idempotently<MaintenanceCostView>(
       REPAIR_ORDER_ENDPOINTS.costs,
       id,
       dto,
-      idempotencyKey,
+      headers,
       201,
       (fence) => this.repairOrders.recordCost(id, dto, fence),
     );

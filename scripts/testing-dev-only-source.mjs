@@ -111,6 +111,7 @@
  * - a link target outside the repository is a leaf; `child_process` (unchanged
  *   from #514).
  */
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
@@ -1222,13 +1223,17 @@ function workspaces(root, onBroken) {
   return found;
 }
 
+/** `readdirSync`, replaceable by a test only through sourceProblems' `readdir` seam. */
+let readdir = readdirSync;
+const listDirectory = (dir) => readdir(dir, { withFileTypes: true });
+
 /**
  * Every file under `dir`, through symbolic links to files and directories:
  * the compiler and Node both follow them. A linked directory whose real path
  * is already open above it (a cycle) is not entered again.
  */
 function walk(dir, skip, onFile, onBroken, open = new Set([realpath(dir)])) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of listDirectory(dir)) {
     const path = join(dir, entry.name);
     const kind = entryKind(dir, entry);
     if (kind === 'dir') {
@@ -1329,7 +1334,45 @@ function verifiedPrismaRuntime(file, workspace, state) {
  * The sweep (see the header). Returns the problems, one string each, and how
  * many production files were checked.
  */
-export function sourceProblems(root = REPO_ROOT) {
+/**
+ * Git-ignored generated output (Prisma clients under `generated/`) is rewritten
+ * by `db:generate` while other checks run: a directory or file listed a moment
+ * ago can be gone. The sweep covers it on purpose, so it is not skipped; a file
+ * that vanished under an ignored `generated/` directory is re-swept once.
+ * Anything else fails at once: a tracked path that is missing, a path outside
+ * `generated/`, an unreadable Git answer (unknown is not "ignored"), and a
+ * second vanishing in the re-sweep.
+ */
+function vanishedGeneratedPath(root, error) {
+  if (error?.code !== 'ENOENT' || typeof error.path !== 'string') return undefined;
+  const path = toPosix(relative(root, resolve(error.path)));
+  if (path.startsWith('..') || !path.split('/').includes('generated')) return undefined;
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  const tracked = git('ls-files', '--', path);
+  // --no-index: by pattern alone, so a tracked file is told apart by `tracked`, not by luck.
+  const ignored = git('check-ignore', '-q', '--no-index', '--', path);
+  return tracked.status === 0 && tracked.stdout.trim() === '' && ignored.status === 0
+    ? path
+    : undefined;
+}
+
+export function sourceProblems(root = REPO_ROOT, seams = {}) {
+  const before = readdir;
+  readdir = seams.readdir ?? readdirSync;
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return sweep(root);
+      } catch (error) {
+        if (attempt > 0 || !vanishedGeneratedPath(root, error)) throw error;
+      }
+    }
+  } finally {
+    readdir = before;
+  }
+}
+
+function sweep(root) {
   const testingDir =
     realpath(join(root, 'packages', 'testing')) ?? join(root, 'packages', 'testing');
   const configs = new Map();
@@ -1550,7 +1593,7 @@ export function sourceProblems(root = REPO_ROOT) {
     }
     if (kind !== 'types') {
       try {
-        const viaNode = requireFrom(file).resolve(spec);
+        const viaNode = resolveFrom(file, spec);
         if (isAbsolute(viaNode)) targets.add(viaNode);
       } catch {
         // Not loadable by require from here; the other resolutions decide.
@@ -1592,11 +1635,7 @@ export function sourceProblems(root = REPO_ROOT) {
   };
 
   const nodeCache = ts.createModuleResolutionCache(root, (f) => f, NODE_OPTIONS);
-  let requireMemo = [];
-  const requireFrom = (file) => {
-    if (requireMemo[0] !== file) requireMemo = [file, createRequire(file)];
-    return requireMemo[1];
-  };
+  const resolveFrom = (file, spec) => createRequire(file).resolve(spec);
   const pathLike = (spec) => spec.startsWith('.') || isAbsolute(spec) || /^file:/i.test(spec);
   const parent = new Map();
   const chain = (file) => {

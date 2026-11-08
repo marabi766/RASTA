@@ -330,7 +330,7 @@ describe('what every answer becomes', () => {
     }
   });
 
-  it('a second bid, a stale form and an unknown refusal each have their fixed sentence', async () => {
+  it('a second bid and a stale form have their fixed sentence; an undocumented code is unconfirmed', async () => {
     const second = await send(
       submit,
       jest.fn(async () => problem(409, 'ALREADY_EXISTS')),
@@ -345,7 +345,14 @@ describe('what every answer becomes', () => {
       submit,
       jest.fn(async () => problem(422, 'SOMETHING_NEW')),
     );
-    expect(odd).toMatchObject({ kind: 'INVALID', message: BID_REFUSAL_FALLBACK });
+    // Not a documented refusal: nothing proves the bid was not written (PR-830 r1 F1).
+    expect(odd.kind).toBe('UNKNOWN_OUTCOME');
+    // A documented refusal whose reason this portal has no sentence for: the fixed fallback.
+    const unnamed = await send(
+      submit,
+      jest.fn(async () => problem(409, 'INVALID_STATE_TRANSITION')),
+    );
+    expect(unnamed).toMatchObject({ kind: 'INVALID', message: BID_REFUSAL_FALLBACK });
   });
 
   it('places a field error on the form row it came from', async () => {

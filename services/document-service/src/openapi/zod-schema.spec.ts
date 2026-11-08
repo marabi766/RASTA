@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { isoDateTime, parsableUrl, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import { toJsonSchema } from '@rasta/nest-common';
 import {
   deleteDocumentSchema,
@@ -161,12 +161,16 @@ describe('the real document DTOs', () => {
     expect(properties).not.toHaveProperty('objectKey');
   });
 
-  it('publishes the deletion reason as required, with its minimum length', () => {
+  it('publishes the deletion reason as required, with an explicit post-trim omission (FU-120)', () => {
     // A tombstone with no reason is not an audit record, and a client should
     // be able to see the minimum before it sends "x".
     const schema = toJsonSchema(deleteDocumentSchema);
     expect(schema.required).toEqual(['reason']);
-    expect((schema.properties as Record<string, { minLength: number }>).reason.minLength).toBe(8);
+    expect((schema.properties as Record<string, unknown>).reason).toEqual({
+      type: 'string',
+      pattern: WITHOUT_BIDI_CONTROL.source,
+      description: expect.stringContaining('Constraints after a value-changing step are omitted'),
+    });
   });
 
   it('publishes the listing filters with their defaults', () => {
@@ -175,7 +179,12 @@ describe('the real document DTOs', () => {
       Record<string, unknown>
     >;
 
-    expect(properties.limit).toMatchObject({ type: 'integer', default: 25, maximum: 100 });
+    expect(properties.limit).toEqual({
+      type: 'integer',
+      minimum: 1,
+      maximum: 100,
+      default: 25,
+    });
 
     // A logical boolean, not the `boolean | string` union the parser accepts.
     // This once asserted only the default, which let the union through: a

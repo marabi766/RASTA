@@ -53,6 +53,8 @@ function valuesOf(state: ReportRequestFormState, initialAssetId: string): Report
   ) {
     return state.values;
   }
+  // An unconfirmed send is resent as it was sent (PR-880 r1 F1).
+  if (state.kind === 'UNCONFIRMED' && state.values) return state.values;
   return { ...EMPTY_REPORT_REQUEST_FORM, assetId: initialAssetId };
 }
 
@@ -85,13 +87,17 @@ export function ReportRequestForm({
 
   const values = valuesOf(state, initialAssetId);
   const errors = errorsOf(state);
+  // The key of the request this form is about — after "edit and send as new" not
+  // the page's: an unconfirmed send is resent under its own key (PR-880 r1 F1).
   const currentSubmissionId =
     state.kind === 'INVALID' ||
     state.kind === 'NOT_FOUND' ||
     state.kind === 'IN_PROGRESS' ||
     state.kind === 'EDITING'
       ? state.submissionId
-      : submissionId;
+      : state.kind === 'UNCONFIRMED' && state.submissionId
+        ? state.submissionId
+        : submissionId;
   const waiting = useRetryAfter(state);
   // While a submission is in flight its retry must send exactly what was sent
   // (round 2 on PR 171): a changed body under the same id is refused as

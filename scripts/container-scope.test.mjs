@@ -1,3 +1,4 @@
+import { fixtureGitEnv } from './fixture-git-env.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -113,6 +114,7 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
     execFileSync('git', ['-C', dir, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: fixtureGitEnv(),
     }).trim();
   mkdirSync(join(dir, 'scripts'));
   for (const name of ['container-scope.mjs', 'container-scope-lib.mjs']) {
@@ -159,7 +161,7 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
       const result = spawnSync(
         process.execPath,
         [join(dir, 'scripts', 'container-scope.mjs'), ...args],
-        { encoding: 'utf8', env: { ...process.env, ...env } },
+        { encoding: 'utf8', env: { ...fixtureGitEnv(), ...env } },
       );
       assert.equal(result.status, 0, result.stderr);
       // stdout is always exactly one JSON line, even on warning paths.
@@ -176,7 +178,7 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
       const result = spawnSync(
         process.execPath,
         [join(dir, 'scripts', 'container-scope.mjs'), ...args],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', env: fixtureGitEnv() },
       );
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, `${JSON.stringify(JSON.parse(result.stdout))}\n`);
@@ -184,6 +186,32 @@ function fixture(t, head = WORKFLOW, base = WORKFLOW) {
     },
   };
 }
+
+test('temporary Git histories ignore inherited repository, index and config redirects', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'container-git-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Model a Git hook without pointing at any shared repository or index.
+  const redirects = {
+    GIT_DIR: join(root, 'redirect', '.git'),
+    GIT_WORK_TREE: join(root, 'redirect'),
+    GIT_INDEX_FILE: join(root, 'redirect', 'index'),
+    GIT_OBJECT_DIRECTORY: join(root, 'redirect', 'objects'),
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.bare',
+    GIT_CONFIG_VALUE_0: 'true',
+  };
+  const previous = Object.fromEntries(Object.keys(redirects).map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, redirects);
+  const f = fixture(t);
+  assert.deepEqual(f.run(), []);
+  assert.deepEqual(JSON.parse(f.raw().stdout), []);
+});
 
 test('CLI: identical base/HEAD workflow contributes no images', (t) => {
   assert.deepEqual(fixture(t).run(), []);
@@ -673,6 +701,7 @@ function proofGuard(t, edit, { deleteTests = false } = {}) {
   const f = fixture(t);
   for (const name of [
     'container-scope.test.mjs',
+    'fixture-git-env.mjs',
     'container-scope-proof.mjs',
     'container-scope-buildx.mjs',
   ]) {
@@ -1216,7 +1245,11 @@ test('maySkipBuildKitProof: only a missing tool outside CI may skip', () => {
 // Run the real BuildKit test of this suite under a docker of our choosing.
 function buildKitProofUnder(t, dockerDir, ci) {
   const f = fixture(t);
-  for (const name of ['container-scope.test.mjs', 'container-scope-buildx.mjs']) {
+  for (const name of [
+    'container-scope.test.mjs',
+    'container-scope-buildx.mjs',
+    'fixture-git-env.mjs',
+  ]) {
     copyFileSync(join(root, 'scripts', name), join(f.dir, 'scripts', name));
   }
   copyFileSync(join(root, '.dockerignore'), join(f.dir, '.dockerignore'));

@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import ts from 'typescript';
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 
 import {
   AMOUNT_FIELD,
@@ -65,6 +66,7 @@ const stockController = parseSource(readSource(...SERVICE, 'stock', 'stock.contr
 const shipmentController = parseSource(
   readSource(...SERVICE, 'shipment', 'shipment.controller.ts'),
 );
+const warehouseDto = parseSource(readSource(...SERVICE, 'warehouse', 'dto.ts'));
 const shipmentDto = parseSource(readSource(...SERVICE, 'shipment', 'dto.ts'));
 const sharedDto = parseSource(readSource(...SERVICE, 'shared', 'dto.ts'));
 const refusal = parseSource(readSource(...SERVICE, 'shared', 'refusal.ts'));
@@ -78,6 +80,7 @@ const openapi = JSON.parse(readSource('docs', 'api', 'inventory-service.openapi.
 
 interface Schema {
   type?: string;
+  description?: string;
   properties?: Record<string, Schema>;
   required?: string[];
   additionalProperties?: boolean;
@@ -210,7 +213,7 @@ describe('the six commands exist, as the portal posts them', () => {
     for (const [controller, method] of handlers) {
       expect(decoratorOf(controller, method, 'RequirePlatformUserId')).toBeDefined();
       const body = handlerOf(controller, method).getText();
-      expect(body).toContain('requiredIdempotencyKey(idempotencyKey)');
+      expect(body).toContain('idempotentRequest(headers)');
       expect(body).toContain('this.idempotency.execute');
     }
   });
@@ -261,18 +264,46 @@ describe('the bodies', () => {
   });
 
   it('the limits are the service’s', () => {
-    expect(MAX_WAREHOUSE_NAME_LENGTH).toBe(
+    const warehouseName =
       operationOf('/v1/warehouses').requestBody!.content['application/json'].schema.properties!
-        .name!.maxLength,
-    );
+        .name!;
     const shipment =
       operationOf('/v1/shipments').requestBody!.content['application/json'].schema.properties!;
     expect(shipment.legs!.maxItems).toBe(MAX_SHIPMENT_LEGS);
     expect(shipment.legs!.minItems).toBe(1);
-    expect(shipment.legs!.items!.properties!.carrierName!.maxLength).toBe(MAX_CARRIER_NAME_LENGTH);
-    expect(shipment.legs!.items!.properties!.carrierReference!.maxLength).toBe(
-      MAX_CARRIER_REFERENCE_LENGTH,
-    );
+    // FU-120: these limits apply after trimming. Pin the portal to the actual
+    // DTO check, while the raw-input document explicitly omits that check.
+    for (const [dto, field, constant, limit, published] of [
+      [warehouseDto, 'name', 'MAX_WAREHOUSE_NAME_LENGTH', MAX_WAREHOUSE_NAME_LENGTH, warehouseName],
+      [
+        shipmentDto,
+        'carrierName',
+        'MAX_CARRIER_NAME_LENGTH',
+        MAX_CARRIER_NAME_LENGTH,
+        shipment.legs!.items!.properties!.carrierName!,
+      ],
+      [
+        shipmentDto,
+        'carrierReference',
+        'MAX_CARRIER_REFERENCE_LENGTH',
+        MAX_CARRIER_REFERENCE_LENGTH,
+        shipment.legs!.items!.properties!.carrierReference!,
+      ],
+    ] as const) {
+      expect(squash(topLevelConst(dto, constant).getText())).toBe(String(limit));
+      const property = collect(dto, ts.isPropertyAssignment).find(
+        (node) => node.name.getText() === field,
+      );
+      expect(squash(property!.initializer.getText())).toContain(`.max(${constant})`);
+      expect(published.description).toContain(
+        'Constraints after a value-changing step are omitted',
+      );
+      for (const key of ['minLength', 'maxLength']) expect(published).not.toHaveProperty(key);
+      // plainText checks bidi controls on raw text; referenceId's pattern follows trim.
+      expect(published.pattern).toBe(
+        field === 'carrierReference' ? undefined : WITHOUT_BIDI_CONTROL.source,
+      );
+    }
     expect(squash(topLevelConst(shipmentDto, 'MAX_SHIPMENT_LEGS').getText())).toBe(
       String(MAX_SHIPMENT_LEGS),
     );
@@ -431,6 +462,9 @@ describe('the refusals', () => {
               'INVENTORY_LOCK_TIMEOUT_MS',
               'OPTIMISTIC_LOCK_FAILED',
               'BUSINESS_RULE_VIOLATION',
+              // FU-171: answers only a request carrying a deadline, which this portal does not send
+              // yet; `write.ts` reads it as a proven refusal for any command.
+              'REPLAY_WINDOW_CLOSED',
             ].includes(token);
           expect([operationPath, status, token, known]).toEqual([
             operationPath,

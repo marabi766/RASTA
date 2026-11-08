@@ -360,8 +360,10 @@ model WalletHold {
   referenceType String @map("reference_type")
 
   /// The journal that moved the funds into escrow, and the one that resolved
-  /// them. Both are the audit trail for "where did this money go".
-  placedJournalId   String? @map("placed_journal_id")
+  /// them. Both are the audit trail for "where did this money go". A journal
+  /// funds one hold, for good; amount, currency and this pointer never change
+  /// (`trg_wallet_hold_terms_fixed`).
+  placedJournalId   String? @unique @map("placed_journal_id")
   resolvedJournalId String? @map("resolved_journal_id")
 
   placedAt DateTime @map("placed_at")
@@ -491,6 +493,11 @@ model Transaction {
   /// before migration `20260926120000_transaction_state_actors`.
   settlementAuthorisedAt DateTime? @map("settlement_authorised_at")
   settlementAuthorisedBy String?   @map("settlement_authorised_by")
+  /// The first time this row said HELD, whoever wrote it, and never cleared: it claimed
+  /// escrow, so it pays only from a funded hold of its own. Stamped by
+  /// `trg_transaction_held_at`, read by `transaction_settlement_barred` (migration
+  /// `20261106130000_transaction_funded_hold`). The service never writes it.
+  heldAt                 DateTime? @map("held_at")
   cancelledAt            DateTime? @map("cancelled_at")
   cancelledBy            String?   @map("cancelled_by")
   refundedAt             DateTime? @map("refunded_at")
@@ -554,8 +561,11 @@ model Transaction {
   /// `20261103121000_transaction_settlement_authority`), what that migration
   /// found and did about an escrowed, settlement-ready row with no recorded
   /// authorisation — AUTHORISED_UNRECORDED (counts as authorised) or
-  /// RETURNED_TO_HELD. Filled there and frozen; read only by raw SQL
-  /// (`TransactionRepository.lockForUpdate`) and the settlement triggers.
+  /// RETURNED_TO_HELD. Filled there and frozen; read only by
+  /// `transaction_settlement_authorised` (migration
+  /// `20261106120000_transaction_hold_decision`), which the service's lock read
+  /// and the settlement triggers ask. Not modelled either, and read the same way:
+  /// `transaction_hold_reconciliation` and `transaction_hold_decision`.
   @@map("transaction")
 }
 
@@ -573,7 +583,7 @@ model TransactionSourceQuarantine {
   sourceReference String?  @map("source_reference")
   decision        String
   quarantinedBy   String   @map("quarantined_by")
-  quarantinedAt   DateTime @default(now()) @map("quarantined_at")
+  quarantinedAt   DateTime @default(dbgenerated("timezone('UTC'::text, now())")) @map("quarantined_at")
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
@@ -1069,7 +1079,9 @@ model Commission {
   amountMinor      BigInt @map("amount_minor")
   currency         String
 
-  /// The journal leg that recognised the revenue.
+  /// The journal leg that recognised the revenue: its settlement's journal, by a
+  /// foreign key and at commit (`trg_commission_creation_proven`). Proven with the
+  /// settlement, migration `20261105120000_settlement_creation_proof`.
   journalId String? @map("journal_id")
 
   appliedAt DateTime @map("applied_at")
@@ -1470,6 +1482,12 @@ model SettlementReversal {
 /// its journal is not expressible, and a journal cannot back two settlements.
 model Settlement {
   // Append-only: no row is ever updated or deleted (`trg_settlement_append_only`).
+  // Proven when written, at commit, with its commission, journal and transaction
+  // (`trg_settlement_creation_proven`, migration 20261105120000_settlement_creation_proof).
+  // `journalId` has a foreign key there; what it found on older rows is
+  // `settlement_creation_quarantine`, not modelled: filled there, frozen, read by triggers.
+  // So is `transaction_hold_reconciliation`, there too: read by `down.sql` and
+  // `transaction_hold_decision_unresolved`; and `transaction_hold_decision`, the decisions on it.
   /// `STL_<ULID>`.
   id String @id
 
@@ -1525,6 +1543,13 @@ model IdempotencyKey {
   /// body is `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong
   /// response.
   requestHash String @map("request_hash")
+
+  /// SHA-256 of the body in canonical form (`canonicalBodyPipe`), when the
+  /// release that wrote the record knew it. `requestHash` stays the hash the
+  /// previous release computes — the body as sent — so a retry reaching it
+  /// during a rolling update or a rollback still replays (Codex PR-747 r2,
+  /// F3). Null on records written before it existed.
+  canonicalHash String? @map("canonical_hash")
 
   /// SHA-256 of the actor who reserved the key. The same key from another
   /// actor is `409 IDEMPOTENCY_KEY_REUSED`, never a replay. Null on records
