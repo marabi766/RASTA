@@ -805,7 +805,7 @@ test('the scan refuses what the replay could not model', () => {
   assert.match(scanOf('x-service', `CREATE DOMAIN d AS int;`).join(), /not modelled/);
   assert.match(
     scanOf('x-service', `DO $$BEGIN EXECUTE 'CREATE TABLE t (id int)'; END$$;`).join(),
-    /DDL in a DO block/,
+    /DDL or SQL in a DO block/,
   );
 });
 
@@ -844,7 +844,7 @@ test('a DO block exemption holds in its own migration only', () => {
   const copy = /DO \$canonicalise\$[\s\S]*?\$canonicalise\$;/.exec(text)[0];
   assert.match(
     scanOf(entry.service, [...migrations, ['99999999999999_copy', copy]]).join(),
-    /DDL in a DO block/,
+    /DDL or SQL in a DO block/,
   );
 });
 
@@ -869,7 +869,7 @@ test('a reviewed DO block covers its reviewed content only', () => {
   const [entry] = REVIEWED_DO_BLOCKS;
   assert.match(
     scanOf(entry.service, `DO $$BEGIN EXECUTE 'CREATE VIEW v AS SELECT 1'; END$$;`).join(),
-    /DDL in a DO block/,
+    /DDL or SQL in a DO block/,
   );
 });
 
@@ -1040,7 +1040,7 @@ test('F4: a DEFAULT is read to its end, past CASE … NULL … END and IS [NOT] 
   assert.equal(added.tables.get('task').get('at').sessionDefault, true);
 });
 
-test('F4: the clauses main uses are read, and a U& name is its decoded name', () => {
+test('F4: the clauses main uses are read', () => {
   const { tables: t, unmodelled } = replayMigrations([
     `CREATE TABLE s (id text PRIMARY KEY);
      CREATE TABLE t (
@@ -1050,12 +1050,176 @@ test('F4: the clauses main uses are read, and a U& name is its decoded name', ()
        s_id TEXT NULL REFERENCES s(id) ON DELETE SET NULL ON UPDATE CASCADE,
        due TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP REFERENCES s (id) ON DELETE NO ACTION
      );`,
-    String.raw`ALTER TABLE t ADD COLUMN U&"held\005Fat" timestamp(3) DEFAULT now();`,
   ]);
   assert.deepEqual(unmodelled, []);
   assert.deepEqual(t.get('t').get('at'), { type: 'ts', sessionDefault: false });
   assert.deepEqual(t.get('t').get('due'), { type: 'ts', sessionDefault: true });
-  assert.deepEqual(t.get('t').get('held_at'), { type: 'ts', sessionDefault: true });
+});
+
+// PR #979 r2: each probe the reviewer ran, then the siblings of its class.
+const R2 = replayMigrations([
+  `CREATE TABLE task (id text, lease_until timestamp(3), due_at timestamp(3) DEFAULT CURRENT_TIMESTAMP);
+   CREATE TABLE "Task2" (id text, lease_until timestamp(3));
+   CREATE TABLE aware (id text, seen_at timestamptz(3));`,
+]).tables;
+const r2Scope = new Map([...R2].map(([table, columns]) => [table, [columns]]));
+for (const [name, sql] of [
+  // r2 F1.1: SQL that does not start at the string's first token.
+  [
+    'F1 BEGIN; INSERT',
+    `SELECT dblink_exec('c', 'BEGIN; INSERT INTO task (id) VALUES (1); COMMIT')`,
+  ],
+  [
+    'F1 BEGIN; UPDATE … DEFAULT',
+    `SELECT dblink_exec('c', 'BEGIN; UPDATE task SET lease_until = DEFAULT; COMMIT')`,
+  ],
+  ['F1 after a semicolon', `SELECT dblink_exec('c', ';INSERT INTO task (id) VALUES (1)')`],
+  ['F1 concatenated', `SELECT dblink_exec('c', 'INS' || 'ERT INTO task (id) VALUES (1)')`],
+  ['F1 START TRANSACTION', `SELECT dblink_exec('c', 'START TRANSACTION; DELETE FROM task')`],
+  ['F1 EXPLAIN ANALYZE', `SELECT dblink_exec('c', 'EXPLAIN ANALYZE UPDATE task SET id = id')`],
+  // r2 F1.3: the forms the prefilter dropped, read by problemsIn too.
+  ['F1 SET ROLE', `SET ROLE shadow_owner`],
+  ['F1 SET SCHEMA', `SET SCHEMA 'shadow'`],
+  ['F1 SET SESSION AUTHORIZATION', `SET SESSION AUTHORIZATION shadow`],
+  ['F1 SET LOCAL SESSION AUTHORIZATION', `SET LOCAL SESSION AUTHORIZATION shadow`],
+  ['F1 RESET ALL', `RESET ALL`],
+  ['F1 RESET ROLE', `RESET ROLE`],
+  ['F1 a spliced setting', `SET LOCAL \uE0000\uE001 = 'x'`],
+  ['F1 a setting FROM CURRENT', `SET search_path FROM CURRENT`],
+  // r2 F2: a table named outside FROM, qualified, quoted or in another schema.
+  [
+    'F2 NULL::public.task',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(NULL::public.task, $1)).lease_until < now()`,
+  ],
+  [
+    'F2 NULL::"Task2"',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(NULL::"Task2", $1)).lease_until < now()`,
+  ],
+  [
+    'F2 NULL::pg_temp.task',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(NULL::pg_temp.task, $1)).lease_until < now()`,
+  ],
+  [
+    'F2 NULL::"public".task',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(NULL::"public".task, $1)).lease_until < now()`,
+  ],
+  [
+    'F2 CAST AS a type of another schema',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(CAST(NULL AS shadow.row_of), $1)).lease_until < now()`,
+  ],
+  [
+    'F2 a type of another schema',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(NULL::shadow.row_of, $1)).lease_until < now()`,
+  ],
+]) {
+  test(`unreadable is refused (PR #979 r2): ${name}`, () => {
+    assert.notEqual(problemsIn(sql, r2Scope).length, 0, sql);
+  });
+}
+
+for (const [name, sql] of [
+  ['prose that starts with Set', `Set to 1 for each audit producer configured as traffic-expected`],
+  ['prose that starts with reset', `reset the development database or move it through the API`],
+  ['a word alone', `set`],
+  ['prose after a semicolon', `unset; set it with DATABASE_STATEMENT_TIMEOUT_MS instead`],
+  ['SET TRANSACTION', `SET TRANSACTION READ ONLY`],
+  ['SET SESSION CHARACTERISTICS', `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`],
+  ['RESET of a listed setting', `RESET statement_timeout`],
+  [
+    'a table of public in a cast, beside its timestamptz column',
+    `SELECT 1 FROM aware WHERE (jsonb_populate_record(NULL::public.aware, $1)).seen_at < now()`,
+  ],
+  ['a pg_catalog type', `SELECT now()::pg_catalog.timestamptz FROM aware`],
+  [
+    'a non-ASCII string or quoted name',
+    `SELECT 1 FROM aware WHERE id = 'tâche' AND seen_at < now()`,
+  ],
+]) {
+  test(`readable is read (PR #979 r2): ${name}`, () => {
+    assert.deepEqual(problemsIn(sql, r2Scope), []);
+  });
+}
+
+const BASE_R2 = `CREATE TABLE task (id text, at timestamp(3) DEFAULT now(), lease_until timestamp(3));
+  CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';
+  CREATE VIEW v AS SELECT 1;`;
+for (const [name, sql] of [
+  // r2 F1.1, F1.2: a scheduled job, at any position of its string or one level down in a DO body.
+  [
+    'F1 a job after BEGIN',
+    `SELECT cron.schedule('j', '* * * * *', 'BEGIN; INSERT INTO task (id) VALUES (1); END');`,
+  ],
+  // r2 F4: a name the `\w+` patterns would cut.
+  ['F4 DROP COLUMN at$x', `ALTER TABLE task DROP COLUMN at$x;`],
+  ['F4 DROP COLUMN até', `ALTER TABLE task DROP COLUMN até;`],
+  ['F4 RENAME TO held$until', `ALTER TABLE task RENAME COLUMN lease_until TO held$until;`],
+  ['F4 RENAME TO U&"held"', `ALTER TABLE task RENAME COLUMN lease_until TO U&"held";`],
+  ['F4 DROP FUNCTION f$x()', `DROP FUNCTION f$x();`],
+  ['F4 DROP VIEW v$x', `DROP VIEW v$x;`],
+  // The class: every other pattern reads names the same way.
+  ['F4 a U& ADD COLUMN', String.raw`ALTER TABLE task ADD COLUMN U&"held\005Fat" timestamp(3);`],
+  [
+    'F4 a trigger on task$x',
+    `CREATE TRIGGER t BEFORE INSERT ON task$x FOR EACH ROW EXECUTE FUNCTION f();`,
+  ],
+  ['F4 SET TYPE of até', `ALTER TABLE task ALTER COLUMN até TYPE timestamptz(3);`],
+  ['F4 DROP TABLE task$x', `DROP TABLE task$x;`],
+  ['F4 RENAME TABLE to a non-ASCII name', `ALTER TABLE task RENAME TO tâche;`],
+  ['F4 a no-break space in a name', `ALTER TABLE task DROP COLUMN IF EXISTS at\u00A0x;`],
+]) {
+  test(`a migration the replay cannot read is refused (PR #979 r2): ${name}`, () => {
+    const replay = replayMigrations([BASE_R2, sql]);
+    assert.notEqual(replay.unmodelled.length, 0, sql);
+    assert.ok(replay.tables.get('task').has('at'), 'the at column is still modelled');
+  });
+}
+
+test('r2 F4: a non-ASCII character in a string is read, and is no name', () => {
+  const { unmodelled } = replayMigrations([
+    BASE_R2,
+    `COMMENT ON TABLE task IS 'tâche — l''état'; COMMENT ON COLUMN task.at IS $$à\u00A0b$$;`,
+  ]);
+  assert.deepEqual(unmodelled, []);
+});
+
+test('r2 F1.2: SQL in a string of a DO block goes to review', () => {
+  for (const sql of [
+    `DO $d$ BEGIN PERFORM cron.schedule('j', '* * * * *', 'UPDATE task SET lease_until = now()'); END $d$;`,
+    `DO $d$ BEGIN PERFORM cron.schedule('j', '* * * * *', $q$INSERT INTO task (id) VALUES (1)$q$); END $d$;`,
+    `DO $d$ BEGIN PERFORM dblink_exec('c', 'BEGIN; INSERT INTO task (id) VALUES (1); COMMIT'); END $d$;`,
+  ]) {
+    const { doBlocks, unmodelled } = replayMigrations([BASE_R2, sql]);
+    assert.deepEqual([doBlocks.length, unmodelled], [1, []], sql);
+  }
+  // A message is prose, and no DO block to review.
+  assert.equal(
+    replayMigrations([BASE_R2, `DO $$BEGIN RAISE NOTICE 'the job ran'; END$$;`]).doBlocks.length,
+    0,
+  );
+});
+
+test('r2 F1.3: the scan reads every literal, a SET ROLE with no clock word included', () => {
+  const migration = `CREATE TABLE task (id text, at timestamp(3));`;
+  for (const sql of [
+    `SET ROLE shadow_owner`,
+    `SET SCHEMA 'shadow'`,
+    `SET SESSION AUTHORIZATION shadow`,
+    `RESET ALL`,
+  ]) {
+    const source = `export const sql = \`${sql}\`;`;
+    assert.match(
+      scanOf('x-service', migration, source).join(),
+      /R0 what the guard cannot read/,
+      sql,
+    );
+  }
+  const concatenated =
+    "export const sql = `SELECT dblink_exec('c', 'INS' || 'ERT INTO task (id) VALUES (1)')`;";
+  assert.match(scanOf('x-service', migration, concatenated).join(), /R0/);
+  assert.deepEqual(
+    scanOf('x-service', migration, "export const help = 'Set to 1 for each producer';"),
+    [],
+  );
 });
 
 test('the repository passes', () => {

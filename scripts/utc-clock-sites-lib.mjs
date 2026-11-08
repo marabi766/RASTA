@@ -19,10 +19,13 @@
 //   - relations: FROM lists (every comma), JOIN, DELETE … USING, INSERT/MERGE INTO and UPDATE
 //     targets (`UPDATE ONLY (t)`); a name resolves to a replayed public table, a listed
 //     catalogue relation or a CTE in its WITH's scope, else it is unresolved (`other.t`,
-//     `pg_missing`, `"PUBLIC".t`); a table named anywhere else (`NULL::t`) counts for R1;
+//     `pg_missing`, `"PUBLIC".t`); a table named anywhere else (`NULL::t`, `NULL::public.t`,
+//     `NULL::"T"`) counts for R1, in another schema (`pg_temp.t`, `::other.x`) it is unresolved;
 //   - strings by their decoded value (dollar quotes, E'…' and U&'…' escapes), U&"…" names;
-//   - R0 (PR #979 r1): SQL in a string, a DO or EXECUTE statement, a UESCAPE, a session
-//     setting that may move names (search_path, SET ROLE, set_config() of an unlisted one);
+//   - R0 (PR #979 r1, r2): SQL anywhere in a string or a `||` chain of strings, a DO or EXECUTE
+//     statement, a UESCAPE, a session setting that may move names (search_path, SET ROLE,
+//     set_config() of an unlisted one; SET/RESET read by its grammar). Every literal is read;
+//     SQL in a string of a migration's DO block goes to review;
 //   - types as PostgreSQL reads them (`pg_catalog.timestamp`, `"timestamp"`);
 //   - a pin: grouping, `AT TIME ZONE 'UTC'` or timezone('UTC', …), then date_trunc() or a cast
 //     to plain timestamp, used where nothing converts it back (no coalesce(), CASE branch,
@@ -32,7 +35,8 @@
 //     partition's own defaults or column ALTERs, DDL or EXECUTE in a routine; conditional DDL
 //     (IF [NOT] EXISTS) as PostgreSQL runs it. DDL or EXECUTE in a DO block goes to review.
 //     A column definition is read from its tokens; a session setting, CREATE SCHEMA, a second
-//     CREATE of a known name, a quoted name its patterns would cut or fold: refused.
+//     CREATE of a known name, a name its patterns would cut or fold (a quoted name they do not
+//     read, `$` in a word, U&"…", a character outside ASCII outside strings): refused.
 // A reviewed exemption is bound to what its review relied on: a routine to its signature,
 // body, trigger bindings and the column types of the tables it fires on or names; a DO block
 // to its body and migration; a literal to its text and the column types it `assumes`.
@@ -628,6 +632,18 @@ function readRoutine({ tokens, text }) {
   };
 }
 
+/** A statement's text with its strings and quoted names blanked: what is read as SQL words. */
+function unquotedText({ tokens, text }) {
+  let plain = text;
+  for (const t of tokens) {
+    if (t.type !== 'string' && (t.type !== 'quoted' || t.unicode)) continue;
+    const length = t.type === 'string' ? t.value.length : t.value.replaceAll('"', '""').length + 2;
+    const at = t.start - tokens[0].start;
+    plain = plain.slice(0, at) + ' '.repeat(length) + plain.slice(at + length);
+  }
+  return plain;
+}
+
 /** A CREATE TABLE's columns into `columns`; answers what is not modelled, or undefined. */
 function readCreateTable({ tokens, text }, columns) {
   const open = tokens.findIndex((t) => isOp(t, '('));
@@ -683,19 +699,29 @@ export function replayMigrations(texts) {
       }
       // Read as PostgreSQL reads it, or refused (PR #979 r1 F3, F4): a session setting (a
       // routine's body is read where it runs), a quoted name the patterns below would cut
-      // (`"lease until"`) or fold (`"PUBLIC".task` is no public table).
+      // (`"lease until"`) or fold (`"PUBLIC".task` is no public table). Their `\w+` reads a name
+      // whole only if it is ASCII word characters (r2 F4): a word with `$` (`at$x`), a character
+      // outside ASCII (`até`, which the lexer splits) or a U&"…" name is refused, whatever it is.
       const misread = statement.tokens.find(
         (t, i) =>
-          t.type === 'quoted' &&
-          (!/^\w+$/.test(t.value) ||
-            (isOp(statement.tokens[i + 1], '.') && t.value !== t.value.toLowerCase())),
+          (t.type === 'quoted' &&
+            (t.unicode ||
+              !/^\w+$/.test(t.value) ||
+              (isOp(statement.tokens[i + 1], '.') && t.value !== t.value.toLowerCase()))) ||
+          (t.type === 'word' && t.value.includes('$')),
       );
+      // Outside its strings and quoted names (blanked), PostgreSQL reads a non-ASCII character
+      // (U+00A0 too, which the lexer and `\s` take for a space) as part of a name.
       if (sessionChange(statement.tokens)) {
         refuse(`a session setting that may move names: ${firstLine(text)}`);
         continue;
       }
       if (misread) {
-        refuse(`a quoted name the replay cannot read: "${misread.value}"`);
+        refuse(`a name the replay cannot read whole: ${misread.value}`);
+        continue;
+      }
+      if ([...unquotedText(statement)].some((c) => c.codePointAt(0) > 0x7f)) {
+        refuse(`a name the replay cannot read whole (not ASCII): ${firstLine(text)}`);
         continue;
       }
       const routine = readRoutine(statement);
@@ -783,7 +809,8 @@ export function replayMigrations(texts) {
           if (problem) refuse(`${table}: ${problem}`);
         }
       } else if (isWord(statement.tokens[0], 'do')) {
-        // Its body read from its tokens: DDL or EXECUTE (format() included) goes to review.
+        // Its body read from its tokens: DDL, EXECUTE (format() included) or SQL in one of its
+        // strings (a job it schedules, PR #979 r2 F1) goes to review.
         const at = statement.tokens.findIndex((t) => t.type === 'string');
         const language = statement.tokens.findIndex((t) => isWord(t, 'language'));
         const bodies = at < 0 ? null : stringValues(statement.tokens, at)?.map((v) => lex(v));
@@ -795,7 +822,12 @@ export function replayMigrations(texts) {
           refuse(`a DO block not read: ${firstLine(text)}`);
         } else if (bodies.some(sessionChange)) {
           refuse(`a session setting that may move names: ${firstLine(text)}`);
-        } else if (bodies.some(ddlIn)) {
+        } else if (
+          bodies.some(
+            (tokens) =>
+              ddlIn(tokens) || tokens.some((t, i) => t.type === 'string' && holdsSql(tokens, i)),
+          )
+        ) {
           doBlocks.push({ head: firstLine(text), body: statement.tokens[at].value, migration });
         }
       } else if (INERT_HEADS.test(text)) {
@@ -1029,11 +1061,36 @@ function lexAll(text) {
 // Settings that move no name to another schema; any other may (search_path, SCHEMA, ROLE and
 // SESSION AUTHORIZATION through "$user", RESET ALL). A custom `a.b` setting moves none.
 const KEEPS_NAMES = new Set(
-  'lock_timeout statement_timeout idle_in_transaction_session_timeout enable_sort constraints time timezone'.split(
+  'lock_timeout statement_timeout idle_in_transaction_session_timeout enable_sort constraints time timezone transaction names seed xml'.split(
     ' ',
   ),
 );
 const keepsNames = (tokens, k) => KEEPS_NAMES.has(nameOf(tokens[k])) || isOp(tokens[k + 1], '.');
+const spliced = (t) => t?.type === 'placeholder' || t?.type === 'param';
+
+/**
+ * Whether the SET or RESET at tokens[i] may move names, read by PostgreSQL's grammar (PR #979 r2
+ * F1): SET ROLE, SCHEMA, [LOCAL] SESSION AUTHORIZATION, RESET ALL, `name {TO|=|FROM}` / `RESET
+ * name` of a setting not listed, or a spliced name. A text PostgreSQL would reject as a statement
+ * (prose: `Set to 1 for each …`, `reset the database`) moves nothing.
+ */
+function setMovesNames(tokens, i) {
+  const reset = isWord(tokens[i], 'reset');
+  let k = i + 1;
+  const scoped =
+    isWord(tokens[k], 'local') ||
+    (isWord(tokens[k], 'session') && !isWord(tokens[k + 1], 'authorization', 'characteristics'));
+  if (scoped) k += 1;
+  if (isWord(tokens[k], 'session') && isWord(tokens[k + 1], 'authorization')) return true;
+  if (isWord(tokens[k], 'role', 'schema', 'catalog', ...(reset ? ['all'] : []))) return true;
+  if (spliced(tokens[k]) || (isOp(tokens[k + 1], '.') && spliced(tokens[k + 2]))) return true;
+  if (nameOf(tokens[k]) === null) return false; // `SET;`, `set-criteria`: no statement
+  const after = tokens[isOp(tokens[k + 1], '.') ? k + 3 : k + 1];
+  const statement = reset
+    ? after === undefined || isOp(after, ';')
+    : isWord(after, 'to', 'from') || isOp(after, '=') || spliced(after);
+  return statement && !keepsNames(tokens, k);
+}
 
 /**
  * A session setting the guard cannot prove moves no name (PR #979 r1 F3): a SET or RESET at a
@@ -1045,8 +1102,7 @@ function sessionChange(tokens) {
   return tokens.some((t, i) => {
     const head =
       i === 0 || isOp(tokens[i - 1], ';') || isWord(tokens[i - 1], 'begin', 'then', 'else', 'loop');
-    if (head && isWord(t, 'set', 'reset'))
-      return !keepsNames(tokens, isWord(tokens[i + 1], 'local', 'session') ? i + 2 : i + 1);
+    if (head && isWord(t, 'set', 'reset')) return setMovesNames(tokens, i);
     if (nameOf(t) === 'set_config' && isOp(tokens[i + 1], '(')) {
       const setting =
         tokens[i + 2]?.type === 'string' && isOp(tokens[i + 3], ',') && stringValues(tokens, i + 2);
@@ -1060,7 +1116,7 @@ function sessionChange(tokens) {
 
 // A statement begins with one of these, at the start of a text or after a semicolon.
 const STATEMENT_HEADS = new Set(
-  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare'.split(
+  'select insert update delete merge with values table create alter drop truncate do execute call set reset copy prepare begin start explain'.split(
     ' ',
   ),
 );
@@ -1070,12 +1126,33 @@ const headsStatement = (tokens, i) =>
   STATEMENT_HEADS.has(tokens[i]?.type === 'word' && tokens[i].lower) &&
   i + 1 < tokens.length;
 
-/** Whether the string at tokens[i] holds SQL: it starts as a statement or holds a clock call. */
+/**
+ * The values the string at tokens[i] may hold, joined with the literals it is concatenated with
+ * (PR #979 r2 F1: `'INS' || 'ERT INTO …'`): each `||` chain read as one value. Null: unreadable.
+ */
+function chainValues(tokens, i) {
+  let [from, to] = [i, i];
+  while (isOp(tokens[from - 1], '||') && tokens[from - 2]?.type === 'string') from -= 2;
+  while (isOp(tokens[to + 1], '||') && tokens[to + 2]?.type === 'string') to += 2;
+  let joined = [''];
+  for (let k = from; k <= to; k += 2) {
+    const values = stringValues(tokens, k);
+    if (!values) return null;
+    joined = [...new Set(joined.flatMap((head) => values.map((value) => head + value)))];
+  }
+  return joined;
+}
+
+/**
+ * Whether the string at tokens[i] holds SQL (PR #979 r2 F1): a statement starts anywhere in its
+ * value (first, or after a `;`), or it holds a clock call. Prose heads no statement.
+ */
 function holdsSql(tokens, i) {
-  return (stringValues(tokens, i) ?? []).some((value) => {
+  return (chainValues(tokens, i) ?? []).some((value) => {
     const inner = lex(value); // prose is no SQL: `the signer's` lexes, but heads no statement
     return (
-      headsStatement(inner, 0) || clocksIn(inner).some((c) => inner[c.index].type !== 'string')
+      inner.some((_, k) => headsStatement(inner, k)) ||
+      clocksIn(inner).some((c) => inner[c.index].type !== 'string')
     );
   });
 }
@@ -1094,6 +1171,34 @@ function unreadableIn(tokens) {
     if (holdsSql(tokens, i)) return `SQL in a string: ${t.value.slice(0, 60)}`;
   }
   return sessionChange(tokens) ? 'a session setting that may move names' : null;
+}
+
+/**
+ * Tables named anywhere, not only in FROM (PR #979 r1, r2 F2: `NULL::public.task`,
+ * `NULL::"Task2"`): each `[schema.]name` read as relationAt reads it, folded and with a quoted
+ * name's case, so both spellings count. A known table in another schema (`pg_temp.task`, or an
+ * alias's column named like a table), or a type of another schema (`::`, CAST … AS), is `elsewhere`:
+ * unresolved, so refused.
+ */
+function namesOutsideFrom(tokens, tables) {
+  const [mentioned, elsewhere] = [[], []];
+  const spellings = (t) => [...new Set([nameOf(t), t.type === 'quoted' ? t.value : null])];
+  const known = (t) => (nameOf(t) === null ? [] : spellings(t).filter((n) => tables.has(n)));
+  // A type position: after `::`, or after AS in CAST(… AS type).
+  const typed = (i) =>
+    isOp(tokens[i - 1], '::') ||
+    (isWord(tokens[i - 1], 'as') && nameOf(tokens[enclosing(tokens, i) - 1]) === 'cast');
+  tokens.forEach((t, i) => {
+    if (isOp(tokens[i - 1], '.') || nameOf(t) === null) return;
+    for (const table of known(t)) mentioned.push({ table });
+    const name = isOp(tokens[i + 1], '.') ? tokens[i + 2] : null;
+    if (!name || nameOf(name) === null) return;
+    const schema = t.type === 'quoted' ? t.value : nameOf(t);
+    if (schema === 'public') for (const table of known(name)) mentioned.push({ table });
+    else if (known(name).length > 0 || (typed(i) && schema !== 'pg_catalog'))
+      elsewhere.push({ schema, table: name.value });
+  });
+  return { mentioned, elsewhere };
 }
 
 /**
@@ -1134,11 +1239,8 @@ export function problemsIn(text, tables) {
           .join(''),
       );
     const positional = writes.some((write) => write.kind === 'insert' && !write.listed);
-    // A table is named wherever its name stands unqualified, not only in FROM (F2:
-    // `jsonb_populate_record(NULL::task, $1)`): each such name counts for R1.
-    const mentioned = tokens
-      .filter((t, i) => tables.has(nameOf(t)) && !isOp(tokens[i - 1], '.'))
-      .map((t) => ({ table: nameOf(t) }));
+    const { mentioned, elsewhere } = namesOutsideFrom(tokens, tables);
+    unresolved.push(...elsewhere);
     const columns = [...named, ...mentioned].flatMap((ref) =>
       (tables.get(ref.table) ?? []).flatMap((columnsOfTable) =>
         [...columnsOfTable]
@@ -1278,6 +1380,12 @@ export const REVIEWED_FUNCTIONS = [
     sha256: 'e6ff44532499976df88f04c51186e429c548c50c3c5410bfaa1bbad7a2fdb05e',
     why: "set_config(setting, …) of setting := 'rasta.commission_rule_scope_' || to_hex(…), never search_path; its clock is pinned",
   },
+  {
+    service: 'supplier-service',
+    name: 'performance_formula_version_guard',
+    sha256: '67a8e42e41b700e26a8771f83ca3203e5c83eb8ba46d7bf2b1d0826e24a37b79',
+    why: 'the "SQL" is a RAISE message ("… never edited; create a new version"), never run; no clock, no EXECUTE',
+  },
 ];
 
 /** One-shot DO blocks with DDL or EXECUTE that define nothing live: bound to body and migration. */
@@ -1305,6 +1413,37 @@ export const REVIEWED_DO_BLOCKS = [
     migration: '20261004100000_membership_live_duplicates_guard',
     sha256: 'cb7e36a67c4ba94658ab183c903c548164c6a78dfeb096df30c73446c46d8157',
     why: 'DROP INDEX of an invalid index: no column, default or routine changes',
+  },
+  // Preflight checks: SQL only in a RAISE hint (PR #979 r2 F1 sends SQL in a DO string to review).
+  {
+    service: 'asset-service',
+    migration: '20261005120000_insurance_money_non_negative',
+    sha256: 'a52525cb25e0d98fe0b735abf5e869a5e7a5cfde635cbdf81d8623f169b00583',
+    why: "RAISE … USING HINT = 'SELECT …' is a message, never run; read-only counts, no clock",
+  },
+  {
+    service: 'asset-service',
+    migration: '20261005120100_insurance_money_non_negative_validate',
+    sha256: '9f9b3aa304778f81b37a0076bd736f8ea1495dd74a442e0a08f7657704ae672c',
+    why: "RAISE … USING HINT = 'SELECT …' is a message, never run; read-only counts, no clock",
+  },
+  {
+    service: 'economic-service',
+    migration: '20261106130000_transaction_funded_hold',
+    sha256: '51ce92bdfadc99ff2a562164a50250a8a73287aea3f8960946148f83564d0111',
+    why: "RAISE … USING HINT = 'SELECT …' is a message, never run; read-only counts, no clock",
+  },
+  {
+    service: 'economic-service',
+    migration: '20261107120000_hold_funded_at_commit',
+    sha256: '2df231ec37010a450f039c188e8f90e1432ede1686bdbe9a1c51113b2e13978a',
+    why: "RAISE … USING HINT = 'SELECT …' is a message, never run; read-only counts, no clock",
+  },
+  {
+    service: 'fleet-service',
+    migration: '20261005130000_availability_window_one_live',
+    sha256: 'acadad481cb2a082072e9272253e6a5803d2918f6a225323ee93565cae480e28',
+    why: "RAISE … USING HINT = 'SELECT …' is a message, never run; read-only counts, no clock",
   },
 ];
 
@@ -1388,11 +1527,6 @@ export function definitionProblems({ body, header }, tables, firesOn = []) {
   ];
 }
 
-/** Everything `problemsIn` can answer on has one of these; the rest skips the lexer. */
-// An escape (`E'\x6eow'`, `U&'\006e…'`) or a dollar quote can spell a clock without its letters.
-const RELEVANT_TEXT =
-  /now|clock_timestamp|statement_timestamp|transaction_timestamp|current_timestamp|localtime|current_time|current_date|timeofday|today|tomorrow|yesterday|insert|merge|default|update|execute|\bdo\b|search_path|set_config|uescape|\\|&'|&"|\$\w*\$/i;
-
 /** The text of `new SomethingError('...')`, never SQL. */
 function isErrorMessage(node) {
   const parent = node.parent;
@@ -1458,7 +1592,6 @@ export function utcClockProblems(repository) {
     const source = readFileSync(path, 'utf8');
     const ast = ts.createSourceFile(local, source, ts.ScriptTarget.Latest, true);
     for (const literal of sqlLiterals(ast)) {
-      if (!RELEVANT_TEXT.test(literal.text)) continue;
       if (isErrorMessage(literal.node)) continue;
       const found = problemsIn(literal.text, tables);
       if (found.length === 0) continue;
@@ -1500,7 +1633,7 @@ export function utcClockProblems(repository) {
           entry.sha256 === contentHash(body),
       );
       if (reviewed) reviewedUsed.add(reviewed);
-      else problems.push(`services/${service} migrations: DDL in a DO block: ${head}`);
+      else problems.push(`services/${service} migrations: DDL or SQL in a DO block: ${head}`);
     }
     const scoped = new Map([...tables].map(([table, columns]) => [table, [columns]]));
     for (const definition of [...functions.values(), ...views.values()]) {
