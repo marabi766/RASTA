@@ -82,8 +82,9 @@ const helpers = [
 ];
 // Published-parent and reviewed fixed-message formatter versions.
 const pins = {
+  // Entry metadata unchanged; main's FU-185 (#897) only dropped --passWithNoTests from test:unit.
   'packages/contracts/package.json':
-    'c41dcef0f00effd6c0ab3790d31f2ac1d4f4941d4e61df358b537f3ce8269e59',
+    '4cb5cae0a1f586d46938c2dcbeb345c0e64fd0e4181e43a70746090d7283ee14',
   'services/asset-service/src/asset/identifier.ts':
     '58f1d8ee057dabf0cd0eae309aece7226d87a59cbf0e7efedae501d66b9f5dcb',
   'packages/nest-common/src/text/canonical-unique-text.ts':
